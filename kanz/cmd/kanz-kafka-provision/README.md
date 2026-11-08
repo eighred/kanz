@@ -142,7 +142,11 @@ not be interpreted as no effects. A plan receipt is not completed application.
 After resolving the failure and independently confirming estate/input custody,
 an explicitly authorized repeat invocation reads existing resources and creates
 only what is missing. Successful completion requires full topic and ACL readback.
-There is no automatic destructive rollback, deletion, or retry policy. Existing
+Newly acknowledged topic creates receive up to ten seconds of read-only readiness
+observation within the original 240-second total deadline. Only missing topics or
+incomplete leader/ISR readiness are observed again; configuration and structural
+conflicts still refuse. No write request is retried. There is no automatic
+destructive rollback or deletion. Existing
 mismatches require separate operator handling; do not weaken the expected values
 to make the check pass. Retained Jobs/ConfigMaps have no automatic cleanup here.
 

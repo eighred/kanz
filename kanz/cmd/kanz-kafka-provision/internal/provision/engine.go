@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/protocol"
@@ -27,6 +28,9 @@ func (e brokerCause) Unwrap() []error { return []error{ErrBroker, e.cause} }
 
 // FailureCode projects only a bounded protocol code or fixed transport class.
 func FailureCode(err error) string {
+	if errors.Is(err, errTopicNotReady) {
+		return "topic-not-ready"
+	}
 	var conflict conflictCause
 	if errors.As(err, &conflict) {
 		return conflict.code
@@ -81,9 +85,10 @@ func FailureCode(err error) string {
 }
 
 var (
-	ErrBroker   = errors.New("broker observation unavailable")
-	ErrConflict = errors.New("existing resource differs")
-	ErrMissing  = errors.New("required resource absent")
+	ErrBroker        = errors.New("broker observation unavailable")
+	ErrConflict      = errors.New("existing resource differs")
+	ErrMissing       = errors.New("required resource absent")
+	errTopicNotReady = errors.New("topic readiness not yet observed")
 )
 
 type Admin interface {
@@ -142,6 +147,7 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	if mode == "verify" && (len(missing) != 0 || len(acls) != 0) {
 		return r, ErrMissing
 	}
+	created := make(map[string]bool)
 	for _, t := range missing {
 		if ctx.Err() != nil {
 			return r, brokerCause{ctx.Err()}
@@ -169,12 +175,22 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 		if !ok {
 			return r, ErrBroker
 		}
+		created[t.Name] = true
 	}
-	// CreateTopics acknowledgement is not readiness. A missing or mismatched
-	// readback refuses grants; a later explicit invocation can retry safely.
+	// A create acknowledgement is not readiness. Only topics acknowledged in
+	// this invocation receive bounded read-only readiness observation. Existing
+	// conflicts and configuration mismatches still refuse immediately; no write
+	// is retried and the original total context deadline always bounds the wait.
 	r.VerifiedTopics = 0
 	for _, t := range p.Topics {
-		exists, err := checkTopic(ctx, api, t, p.ClusterID, p.DurabilityProfile)
+		var exists bool
+		var err error
+		if created[t.Name] {
+			err = waitCreatedTopic(ctx, api, t, p.ClusterID, p.DurabilityProfile)
+			exists = err == nil
+		} else {
+			exists, err = checkTopic(ctx, api, t, p.ClusterID, p.DurabilityProfile)
+		}
 		if err != nil {
 			return r, err
 		}
@@ -214,6 +230,27 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	return r, nil
 }
 
+func waitCreatedTopic(ctx context.Context, api Admin, want Topic, clusterID, profile string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		exists, err := checkTopic(ctx, api, want, clusterID, profile)
+		if err == nil && exists {
+			return nil
+		}
+		if err != nil && !errors.Is(err, errTopicNotReady) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return brokerCause{ctx.Err()}
+		case <-tick.C:
+		}
+	}
+}
+
 func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile string) (bool, error) {
 	m, err := api.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{want.Name}})
 	if err != nil {
@@ -245,6 +282,9 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile s
 	if errors.Is(t.Error, kafka.UnknownTopicOrPartition) {
 		return false, nil
 	}
+	if errors.Is(t.Error, kafka.LeaderNotAvailable) {
+		return false, errors.Join(ErrConflict, errTopicNotReady)
+	}
 	if t.Error != nil {
 		return false, brokerCause{t.Error}
 	}
@@ -253,7 +293,10 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile s
 	}
 	seen := make(map[int]bool)
 	for _, p := range t.Partitions {
-		if p.Error != nil || p.ID < 0 || p.ID >= want.Partitions || seen[p.ID] || len(p.Replicas) != 3 || len(p.Isr) < 2 || len(p.Isr) > 3 {
+		if p.Error != nil && !errors.Is(p.Error, kafka.LeaderNotAvailable) {
+			return false, brokerCause{p.Error}
+		}
+		if p.ID < 0 || p.ID >= want.Partitions || seen[p.ID] || len(p.Replicas) != 3 || len(p.Isr) > 3 {
 			return false, conflictCause{"partition-shape"}
 		}
 		replicas, isr := make(map[int]bool), make(map[int]bool)
@@ -272,8 +315,14 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile s
 			isr[broker.ID] = true
 		}
 		leader, exists := brokers[p.Leader.ID]
-		if !exists || leader != p.Leader || !replicas[p.Leader.ID] || !isr[p.Leader.ID] {
+		if p.Error != nil || len(isr) < 2 || p.Leader.Host == "" {
+			return false, errors.Join(ErrConflict, errTopicNotReady)
+		}
+		if !exists || leader != p.Leader || !replicas[p.Leader.ID] {
 			return false, conflictCause{"leader-shape"}
+		}
+		if !isr[p.Leader.ID] {
+			return false, errors.Join(ErrConflict, errTopicNotReady)
 		}
 		seen[p.ID] = true
 	}

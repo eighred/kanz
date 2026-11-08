@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/protocol"
@@ -146,6 +147,58 @@ func TestApplyReadsAllBeforeGrantsAndRerunsWithoutWrites(t *testing.T) {
 	r, e = Run(context.Background(), a, p, "apply")
 	if e != nil || !r.Complete || a.creates != creates || a.grants != 1 {
 		t.Fatal("rerun repeated mutation")
+	}
+}
+
+func TestNewTopicReadinessObservesWithoutRepeatingWrites(t *testing.T) {
+	p := testPlan(t)
+	a := &fakeAdmin{clusterID: "cluster-a", topics: map[string]Topic{}}
+	unready := 0
+	a.mutateMetadata = func(m *kafka.MetadataResponse) {
+		if len(m.Topics[0].Partitions) > 0 && unready < 2 {
+			unready++
+			m.Topics[0].Partitions[0].Isr = m.Topics[0].Partitions[0].Isr[:1]
+			if a.grants != 0 {
+				t.Fatal("granted before readiness")
+			}
+		}
+	}
+	r, err := Run(context.Background(), a, p, "apply")
+	if err != nil || !r.Complete || unready != 2 || a.creates != len(p.Topics) || a.grants != 1 {
+		t.Fatalf("readiness did not preserve one-shot writes: %+v %v", r, err)
+	}
+}
+
+func TestExistingUnreadyTopicRefusesImmediately(t *testing.T) {
+	p := testPlan(t)
+	a := &fakeAdmin{clusterID: "cluster-a", topics: map[string]Topic{p.Topics[0].Name: p.Topics[0]}}
+	a.mutateMetadata = func(m *kafka.MetadataResponse) { m.Topics[0].Partitions[0].Isr = m.Topics[0].Partitions[0].Isr[:1] }
+	_, err := Run(context.Background(), a, p, "apply")
+	if !errors.Is(err, ErrConflict) || FailureCode(err) != "topic-not-ready" || a.metadataCalls != 1 || a.creates != 0 || a.grants != 0 {
+		t.Fatal("existing state received readiness retry or writes")
+	}
+}
+
+func TestNewTopicReadinessHonorsCallerDeadline(t *testing.T) {
+	p := testPlan(t)
+	a := &fakeAdmin{clusterID: "cluster-a", topics: map[string]Topic{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := waitCreatedTopic(ctx, a, p.Topics[0], p.ClusterID, p.DurabilityProfile)
+	if !errors.Is(err, context.DeadlineExceeded) || a.metadataCalls != 1 || a.creates != 0 || a.grants != 0 {
+		t.Fatal("read-only wait exceeded caller deadline or wrote")
+	}
+}
+
+func TestNewTopicReadinessDoesNotRetryConfigurationConflict(t *testing.T) {
+	p := testPlan(t)
+	want := p.Topics[0]
+	actual := want
+	actual.Retention++
+	a := &fakeAdmin{clusterID: "cluster-a", topics: map[string]Topic{actual.Name: actual}}
+	err := waitCreatedTopic(context.Background(), a, want, p.ClusterID, p.DurabilityProfile)
+	if !errors.Is(err, ErrConflict) || FailureCode(err) != "config-retention" || a.metadataCalls != 1 || a.creates != 0 || a.grants != 0 {
+		t.Fatal("configuration conflict retried or wrote")
 	}
 }
 

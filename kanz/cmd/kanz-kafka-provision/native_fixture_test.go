@@ -462,7 +462,15 @@ func nativePartial(ctx context.Context, c *kafka.Client, cluster string) error {
 			return provision.ErrConflict
 		}
 		if e == nil && m != nil && m.ClusterID == cluster && len(m.Topics) == 1 && m.Topics[0].Error == nil && len(m.Topics[0].Partitions) == p.Topics[0].Partitions {
-			break
+			ready := true
+			for _, partition := range m.Topics[0].Partitions {
+				if partition.Error != nil || partition.Leader.Host == "" || len(partition.Isr) < 2 {
+					ready = false
+				}
+			}
+			if ready {
+				break
+			}
 		}
 		select {
 		case <-ctx.Done():
