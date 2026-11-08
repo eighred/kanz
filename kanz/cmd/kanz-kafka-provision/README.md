@@ -63,6 +63,16 @@ and disables unsafe fsync bypass. A refused produce remains unknown effects,
 not proof of rollback or absence. This is disposable qualification, not backup,
 power-loss or production disaster-recovery acceptance.
 
+Before each fault-case write, bounded read-only metadata observation must match
+the intended live-broker view: brokers 0/1 for the majority and 1/2 as advertised
+by isolated broker 0 for the minority. Healthy and restored cases require all
+three. Foreign/duplicate broker addresses or a changed ClusterID refuse; a
+healthy view cannot stand in for isolation. Redpanda's
+[metadata handler](https://github.com/redpanda-data/redpanda/blob/dev/src/v/kafka/server/handlers/metadata.cc)
+deliberately advertises live brokers and excludes an isolated node itself.
+The tenant probe also waits read-only for group-coordinator readiness before its
+single positive offset commit; coordinator errors never count as ACL denials.
+
 Sources: [Redpanda's no-op Kafka properties](https://github.com/redpanda-data/redpanda/blob/dev/src/v/kafka/server/handlers/topics/types.h),
 [producer acknowledgment semantics](https://docs.redpanda.com/streaming/current/develop/produce-data/configure-producers/),
 and [write caching](https://docs.redpanda.com/streaming/current/reference/properties/topic-properties/#writecaching).

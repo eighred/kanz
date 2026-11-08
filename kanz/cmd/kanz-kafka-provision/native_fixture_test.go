@@ -156,8 +156,16 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	defer tr.CloseIdleConnections()
 	client := &kafka.Client{Addr: kafka.TCP(nativeAddress), Transport: tr}
 	diagnostic.Phase = "metadata"
-	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
-	if err != nil || meta == nil || !provision.ValidClusterID(meta.ClusterID) || len(meta.Brokers) != 3 {
+	var meta *kafka.MetadataResponse
+	if strings.HasPrefix(mode, "quorum-") {
+		meta, err = nativeQuorumMetadata(ctx, client, mode, os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER"))
+	} else {
+		meta, err = client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
+	}
+	if err != nil {
+		return out, err
+	}
+	if meta == nil || !provision.ValidClusterID(meta.ClusterID) || (!strings.HasPrefix(mode, "quorum-") && len(meta.Brokers) != 3) {
 		return out, provision.ErrBroker
 	}
 	out.ClusterID = meta.ClusterID
@@ -331,6 +339,64 @@ func nativeQuorum(ctx context.Context, c *kafka.Client, mode string) error {
 		return err
 	}
 	return nativeReadContains(ctx, c, topic, mode)
+}
+
+type nativeMetadataReader interface {
+	Metadata(context.Context, *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
+}
+
+// Redpanda advertises alive brokers, excluding itself when isolated. Observe
+// the expected fault view before writes; all three brokers remain mandatory
+// for healthy/restored cases. No unknown broker or changed estate is accepted.
+func nativeQuorumMetadata(ctx context.Context, c nativeMetadataReader, mode, cluster string) (*kafka.MetadataResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		m, err := c.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
+		if err != nil {
+			return nil, err
+		}
+		if m == nil {
+			return nil, provision.ErrBroker
+		}
+		if !provision.ValidClusterID(m.ClusterID) || m.ClusterID != cluster {
+			return nil, provision.ErrConflict
+		}
+		ready, err := nativeBrokerView(m.Brokers, mode)
+		if err != nil {
+			return nil, err
+		}
+		if ready {
+			return m, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+func nativeBrokerView(brokers []kafka.Broker, mode string) (bool, error) {
+	seen := map[int]bool{}
+	for _, b := range brokers {
+		if b.ID < 0 || b.ID > 2 || seen[b.ID] || b.Host != fmt.Sprintf("native-redpanda-%d.kanz-messaging.svc", b.ID) || b.Port != 9094 {
+			return false, provision.ErrConflict
+		}
+		seen[b.ID] = true
+	}
+	switch mode {
+	case "quorum-healthy", "quorum-restored":
+		return len(seen) == 3, nil
+	case "quorum-majority":
+		return len(seen) == 2 && seen[0] && seen[1], nil
+	case "quorum-minority":
+		return len(seen) == 2 && seen[1] && seen[2], nil
+	default:
+		return false, provision.ErrInput
+	}
 }
 
 func nativeProduce(ctx context.Context, c *kafka.Client, topic, value string) error {
