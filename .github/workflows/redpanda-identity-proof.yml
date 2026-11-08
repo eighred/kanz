@@ -2,6 +2,10 @@ name: redpanda-identity-proof
 on:
   pull_request:
     paths:
+      - 'tools/native-kafka-provision/**'
+      - 'kanz/cmd/kanz-kafka-provision/**'
+      - 'kanz/infra/kafka/topics-job.yaml'
+      - 'kanz/infra/tenancy/tenantctl.sh'
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
       - 'kanz/tools/redpandaidentity/**'
@@ -15,6 +19,10 @@ on:
   push:
     branches: [main]
     paths:
+      - 'tools/native-kafka-provision/**'
+      - 'kanz/cmd/kanz-kafka-provision/**'
+      - 'kanz/infra/kafka/topics-job.yaml'
+      - 'kanz/infra/tenancy/tenantctl.sh'
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
       - 'kanz/tools/redpandaidentity/**'
@@ -26,11 +34,18 @@ on:
       - 'kanz/infra/security/spire/**'
       - '.github/workflows/redpanda-identity-proof.yml'
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        default: full
+        options: [full, image-diagnostics]
+        description: Full qualification or non-main inert image diagnosis
 permissions:
   contents: read
   packages: read
 jobs:
   developmental-redpanda-identity:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mode == 'image-diagnostics' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -96,4 +111,114 @@ jobs:
         with:
           name: redpanda-identity-proof
           path: ${{ runner.temp }}/redpanda-identity.json
+          if-no-files-found: error
+
+  native-topic-provisioning:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mode == 'image-diagnostics' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: '1.69.0'
+      - name: Generate existing canonical SDK
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Verify native owner boundaries
+        working-directory: kanz
+        run: |
+          go test -race -p 1 ./cmd/kanz-kafka-provision/... -count=1
+          go vet ./cmd/kanz-kafka-provision/...
+      - name: Lint native owner with repository policy
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          install-mode: goinstall
+          version: v2.12.2
+          working-directory: kanz
+          args: --timeout=5m ./cmd/kanz-kafka-provision/...
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/native-kafka-provision -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Authenticate private mirrored builder reads
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Qualify real three-broker native ownership
+        run: python3 -B tools/native-kafka-provision/qualify.py
+      - name: Reconcile exact owned native cluster after interruption
+        if: always()
+        run: python3 -B tools/native-kafka-provision/owned_cleanup.py
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
+      - name: Preserve closed source-bound native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-kafka-provision-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-kafka-provision.json
+          if-no-files-found: error
+
+  native-image-diagnostics:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'image-diagnostics' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: '1.69.0'
+      - name: Generate existing canonical SDK
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/native-kafka-provision -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Authenticate private mirrored builder reads
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Diagnose only source-built inert image custody
+        run: python3 -B tools/native-kafka-provision/image_diagnostic.py
+      - name: Reconcile exact owned diagnostic cluster after interruption
+        if: always()
+        run: python3 -B tools/native-kafka-provision/owned_cleanup.py
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
+      - name: Preserve diagnostic-only closed evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-image-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-image-diagnostic.json
           if-no-files-found: error

@@ -86,7 +86,8 @@ func lakeHybridCI(raw string) error {
 	scripts := map[string][]string{
 		"Verify complete source-bound owner evidence":                     {"check_lake_snapshot_owner_evidence.py --seal"},
 		"Bind actual hybrid image identity":                               {"image=$(docker image inspect", "echo \"image=$image\" >> \"$GITHUB_OUTPUT\""},
-		"Prove joint synthetic source and VERSION dependency cache reuse": {"set -euo pipefail", "test_lake_cache_probe.py", "lake_cache_probe.py --source", `--image "$LAKE_IMAGE" --builder "$LAKE_BUILDER" --output snapshot-owner-proof`},
+		"Verify synthetic cache probe controls":                           {"test_lake_cache_probe.py"},
+		"Prove joint synthetic source and VERSION dependency cache reuse": {"const env = {};", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL", "env.ACTIONS_CACHE_MODE !== 'read'", "'.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE", "'--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER", "'--output', 'snapshot-owner-proof'], {stdio: 'inherit', env}"},
 		"Install reviewed hybrid audit tools":                             {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
 		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
 		"Actual finite owner on both broker versions without skips":       {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
@@ -125,7 +126,14 @@ func lakeHybridCI(raw string) error {
 			}
 		}
 		for _, marker := range markers {
-			if !strings.Contains(step.Run, marker) {
+			body := step.Run
+			if step.Name == "Prove joint synthetic source and VERSION dependency cache reuse" {
+				if step.Uses != "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3" || step.Run != "" || step.Env["PROBE_SOURCE"] != "${{ github.sha }}" || step.Env["PROBE_RUN"] != "${{ github.run_id }}" || step.Env["PROBE_ATTEMPT"] != "${{ github.run_attempt }}" {
+					return fmt.Errorf("read-only cache probe invocation differs")
+				}
+				body = step.With["script"]
+			}
+			if !strings.Contains(body, marker) {
 				return fmt.Errorf("hybrid script binding missing")
 			}
 		}
@@ -140,6 +148,7 @@ func lakeHybridCI(raw string) error {
 		"Require hybrid binary provenance and fresh Rust and Go audits",
 		"Actual finite owner on both broker versions without skips",
 		"Stop owned snapshot fixture dependencies and prove absence",
+		"Verify synthetic cache probe controls",
 		"Prove joint synthetic source and VERSION dependency cache reuse",
 		"Verify complete source-bound owner evidence",
 	}
@@ -192,6 +201,9 @@ func TestLakeHybridCIWiring(t *testing.T) {
 		}
 	}
 	for _, m := range [][2]string{
+		{"env.ACTIONS_CACHE_MODE !== 'read'", "env.ACTIONS_CACHE_MODE !== 'write'"},
+		{"const env = {};", "const env = process.env;"},
+		{"name: Verify synthetic cache probe controls", "name: Missing synthetic controls"},
 		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Missing synthetic cache probe"},
 		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Prove joint synthetic source and VERSION dependency cache reuse\n        if: false"},
 		{"id: lake-builder", "id: unrelated-builder"},

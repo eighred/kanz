@@ -23,7 +23,7 @@ POLICY = {
     "feed-identity-proof.yml": {"developmental-identity"},
     "testnet-cni-proof.yml": {"disposable-cni"},
     "k3s-cni-migration.yml": {"disposable-transition"},
-    "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
+    "redpanda-identity-proof.yml": {"developmental-redpanda-identity", "native-topic-provisioning"},
     "valkey-migration.yml": {"retained-state"},
     "tokyo-messaging-proof.yml": {"messaging-isolation"},
     "envoy-edge.yml": {"actual-edge"},
