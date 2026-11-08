@@ -138,7 +138,7 @@ def admin_diagnostic(text, source):
     result={'category':category}
     if 'failure_code' in value:
         code=value['failure_code']
-        if not isinstance(code,str) or (code not in ('deadline','cancelled','eof','timeout','network','unknown',
+        if not isinstance(code,str) or (code not in ('deadline','cancelled','eof','timeout','network','unknown','unexpected-eof','tls-expired','tls-invalid','tls-authority','tls-certificate','protocol',
                 'estate','broker-count','broker-shape','broker-duplicate','topic-shape','partition-shape',
                 'replica-shape','isr-shape','leader-shape','config-count','config-key','config-cleanup','config-retention','config-min-isr','config-write-caching') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',code) is None):
             raise ValueError('admin failure code refused')
@@ -351,6 +351,35 @@ def validate_report(value, source, tree, run, attempt, manifest):
         raise ValueError('resource custody absent')
 
 
+def broker_health(broker, items):
+    """Advisory failure projection; no broker logs, messages or credentials."""
+    if broker not in topology.BROKERS or not isinstance(items,list) or len(items)!=1:
+        raise ValueError('broker inventory unknown')
+    pod=items[0]
+    if pod.get('metadata',{}).get('labels',{}).get('native-broker')!=broker:
+        raise ValueError('broker selector differs')
+    containers=pod.get('spec',{}).get('containers',[])
+    if len(containers)!=2 or {c.get('name') for c in containers}!={'redpanda','svid'} or next(c for c in containers if c['name']=='redpanda').get('image')!=topology.retained.REDPANDA:
+        raise ValueError('broker image or container differs')
+    statuses=pod.get('status',{}).get('containerStatuses',[])
+    if not isinstance(statuses,list) or len(statuses)>2 or len({s.get('name') for s in statuses})!=len(statuses) or any(s.get('name') not in ('redpanda','svid') for s in statuses):
+        raise ValueError('broker status shape')
+    result={'broker':broker,'collection':'complete','containers':[]}
+    reasons=('Completed','Error','OOMKilled','ContainerCannotRun','CrashLoopBackOff','ImagePullBackOff','ErrImagePull','ContainerCreating')
+    for status in statuses:
+        count=status.get('restartCount')
+        if type(count) is not int or not 0<=count<=100000: raise ValueError('restart bound')
+        state=status.get('state',{})
+        kind=next(iter(state)) if isinstance(state,dict) and len(state)==1 else 'UNKNOWN'
+        if kind not in ('running','waiting','terminated'): kind='UNKNOWN'
+        reason=state.get(kind,{}).get('reason') if kind!='UNKNOWN' else None
+        last=status.get('lastState',{}).get('terminated',{}).get('reason')
+        result['containers'].append({'name':status['name'],'restarts':count,'state':kind,
+            'ready':status['ready'] if type(status.get('ready')) is bool else 'UNKNOWN',
+            'reason':reason if reason in reasons else 'UNKNOWN','lastReason':last if last in reasons else 'UNKNOWN'})
+    return result
+
+
 def main():
     source=command(['git','rev-parse','HEAD']); tree=command(['git','rev-parse','HEAD^{tree}'])
     run=os.environ['GITHUB_RUN_ID']; attempt=os.environ['GITHUB_RUN_ATTEMPT']
@@ -503,6 +532,14 @@ def main():
             evidence['passed']=True
         except Exception as error:
             evidence['errorCategory']=type(error).__name__ if isinstance(error,(ValueError,RuntimeError,TimeoutError)) else 'unexpected'
+            if owned:
+                evidence['brokerHealth']=[]
+                for broker in topology.BROKERS:
+                    try:
+                        pods=json.loads(k('-n','kanz-messaging','get','pods','-l','native-broker='+broker,'-o','json',timeout=5))
+                        evidence['brokerHealth'].append(broker_health(broker,pods.get('items')))
+                    except Exception:
+                        evidence['brokerHealth'].append({'broker':broker,'collection':'unavailable'})
             raise RuntimeError('native qualification failed') from None
         finally:
             if owned:

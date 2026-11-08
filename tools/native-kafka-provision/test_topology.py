@@ -9,6 +9,22 @@ import json
 
 
 class TopologyTest(unittest.TestCase):
+    def test_broker_failure_health_never_retains_messages(self):
+        broker=topology.BROKERS[0]
+        pod={'metadata':{'labels':{'native-broker':broker}},'spec':{'containers':[
+            {'name':'redpanda','image':topology.retained.REDPANDA},{'name':'svid','image':'unused'}]},
+            'status':{'containerStatuses':[{'name':'redpanda','ready':False,'restartCount':1,
+                'state':{'waiting':{'reason':'SECRET','message':'SECRET'}},'lastState':{'terminated':{'reason':'OOMKilled','message':'SECRET'}}}]}}
+        result=qualify.broker_health(broker,[pod])
+        self.assertEqual(result['containers'][0]['lastReason'],'OOMKilled')
+        self.assertEqual(result['containers'][0]['reason'],'UNKNOWN')
+        self.assertNotIn('SECRET',json.dumps(result))
+        for mutate in (lambda x:x['metadata']['labels'].update({'native-broker':'foreign'}),
+                       lambda x:x['spec']['containers'][0].update(image='foreign'),
+                       lambda x:x['status']['containerStatuses'][0].update(restartCount=True)):
+            bad=copy.deepcopy(pod);mutate(bad)
+            with self.assertRaises(ValueError):qualify.broker_health(broker,[bad])
+
     def test_quorum_control_keeps_kafka_reachable_and_revokes_only_replication(self):
         for connected in (topology.BROKERS,topology.BROKERS[:2],()):
             client,replication=topology.policies(connected)

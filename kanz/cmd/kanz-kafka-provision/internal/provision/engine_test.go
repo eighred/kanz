@@ -2,11 +2,14 @@ package provision
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
+	"io"
 	"strconv"
 	"testing"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
 )
 
 // This fake proves ordering and refusal, never actual broker acceptance.
@@ -114,6 +117,9 @@ func TestBrokerFailureCodeNeverCopiesErrorText(t *testing.T) {
 	}{
 		{kafka.ClusterAuthorizationFailed, "kafka-31"}, {context.DeadlineExceeded, "deadline"},
 		{errors.New("secret-error-sentinel"), "unknown"},
+		{io.ErrUnexpectedEOF, "unexpected-eof"},
+		{x509.CertificateInvalidError{Cert: &x509.Certificate{}, Reason: x509.Expired, Detail: "SECRET"}, "tls-expired"},
+		{protocol.Errorf("SECRET"), "protocol"},
 	} {
 		err := brokerCause{tc.err}
 		if FailureCode(err) != tc.code || err.Error() != ErrBroker.Error() || !errors.Is(err, ErrBroker) {

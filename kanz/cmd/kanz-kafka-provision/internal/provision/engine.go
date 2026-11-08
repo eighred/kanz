@@ -2,12 +2,15 @@ package provision
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
 	"strconv"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
 )
 
 // Keep the underlying observation available for closed classification without
@@ -44,6 +47,28 @@ func FailureCode(err error) string {
 	}
 	if errors.Is(cause.cause, io.EOF) {
 		return "eof"
+	}
+	if errors.Is(cause.cause, io.ErrUnexpectedEOF) {
+		return "unexpected-eof"
+	}
+	var invalid x509.CertificateInvalidError
+	if errors.As(cause.cause, &invalid) {
+		if invalid.Reason == x509.Expired {
+			return "tls-expired"
+		}
+		return "tls-invalid"
+	}
+	var authority x509.UnknownAuthorityError
+	if errors.As(cause.cause, &authority) {
+		return "tls-authority"
+	}
+	var verification *tls.CertificateVerificationError
+	if errors.As(cause.cause, &verification) {
+		return "tls-certificate"
+	}
+	var protocolError protocol.Error
+	if errors.As(cause.cause, &protocolError) {
+		return "protocol"
 	}
 	var network net.Error
 	if errors.As(cause.cause, &network) {
