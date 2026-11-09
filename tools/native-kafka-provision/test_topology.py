@@ -189,7 +189,7 @@ class TopologyTest(unittest.TestCase):
                'cases':[{'case':case,'passed':True} for case in qualify.CASES],
                'adminImage':'sha256:'+'c'*64,'probeImage':'sha256:'+'d'*64,'manifestSHA':digest,'clusterID':'real-cluster','brokerImage':topology.retained.REDPANDA,
                'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30,'segmentAllocationBytes':topology.FALLOC_BYTES} for b in topology.BROKERS]}
-        value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2])
+        value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2], qualify.canonical_inventory(manifest, True)[2])
         value['lifecycle']=lifecycle_evidence()
         value['brokerPodsBefore']={b:str(i)+'2345678-1234-1234-1234-123456789abc' for i,b in enumerate(topology.BROKERS)}
         value['brokerPodsAfter']=dict(value['brokerPodsBefore'])
@@ -203,12 +203,21 @@ class TopologyTest(unittest.TestCase):
                 item['receipt']={'expected_cluster_id':'deliberately-wrong' if wrong else 'real-cluster','mode':'verify' if case.endswith('verify') else 'apply','durability_profile':'redpanda-raft',
                                  'manifest_sha256':digest,'verified_topics':0 if wrong else count,'missing_topics':0,'verified_acls':0 if wrong else 6,
                                  'topic_attempts':count if case in ('acme-apply','bravo-apply') else 0,'acl_attempts':6 if case in ('acme-apply','bravo-apply','compute-apply') else 0,'partial_or_unknown':False,'complete':not wrong}
+        for item in value['cases']:
+            case=item['case']
+            if case in qualify.SYSTEM_CASES:
+                raw=qualify.mismatched_system_manifest(manifest) if case=='system-mismatch' else manifest
+                sha,system_count,_=qualify.canonical_inventory(raw,True)
+                item['receipt'].update(manifest_sha256=sha, verified_acls=0, acl_attempts=0,
+                    verified_topics=0 if case=='system-mismatch' else system_count,
+                    topic_attempts=system_count if case=='system-create' else 0,
+                    complete=case!='system-mismatch')
         value['diagnostics']=[]
         for case in qualify.CASES:
             probe=case in qualify.PROBES
             observation=next(x['observation'] for x in value['cases'] if x['case']==case) if probe else None
-            value['diagnostics'].append({'case':case,'jobState':'Failed' if case=='wrong-cluster' else 'Complete','custody':True,'collection':'complete','imageVerified':True,
-                'container':{'state':'terminated','exitCode':1 if case=='wrong-cluster' else 0,'reason':'Error' if case=='wrong-cluster' else 'Completed','imageBound':True},
+            value['diagnostics'].append({'case':case,'jobState':'Failed' if case in qualify.REFUSAL_CASES else 'Complete','custody':True,'collection':'complete','imageVerified':True,
+                'container':{'state':'terminated','exitCode':1 if case in qualify.REFUSAL_CASES else 0,'reason':'Error' if case in qualify.REFUSAL_CASES else 'Completed','imageBound':True},
                 'probe':{'version':'a'*40,'mode':case,'expected_identity':observation['identity'],'phase':'complete','category':'ok'} if probe else {'state':'UNKNOWN'},
                 'image':{'verified':True,'dockerIdentityType':'index','podIdentityType':'manifest','dockerIdentity':value['probeImage' if probe else 'adminImage'],'podIdentity':'sha256:'+'e'*64,'config':'sha256:'+'f'*64,'platformManifest':'sha256:'+'e'*64,'contentCount':3}})
         qualify.validate_report(value,'a'*40,'b'*40,'1','1',manifest)

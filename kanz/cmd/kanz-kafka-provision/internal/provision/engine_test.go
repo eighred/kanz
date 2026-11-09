@@ -299,3 +299,19 @@ func TestMalformedTopologyCannotClaimReplicationOrISR(t *testing.T) {
 		})
 	}
 }
+
+func TestSystemBootstrapRefusesDriftBeforeCreatingMissingTopics(t *testing.T) {
+	p, err := NewSystemPlan([]byte(testManifest), manifestDigest(testManifest), "cluster-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAdmin{clusterID: "cluster-a", topics: make(map[string]Topic)}
+	drifted := p.Topics[len(p.Topics)-1]
+	drifted.Retention = 1
+	api.topics[drifted.Name] = drifted
+	r, err := Run(context.Background(), api, p, "apply")
+	if !errors.Is(err, ErrConflict) || FailureCode(err) != "config-retention" || r.Complete ||
+		api.creates != 0 || api.grants != 0 || api.filteredPrincipal != "" {
+		t.Fatalf("unexpected system bootstrap result: receipt=%+v error=%v", r, err)
+	}
+}

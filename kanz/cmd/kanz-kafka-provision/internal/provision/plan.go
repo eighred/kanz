@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/eighred/kanz/internal/tenantgen"
+	"github.com/eighred/kanz/internal/topic"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/segmentio/kafka-go"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -34,9 +35,19 @@ type Plan struct {
 	ACLs              []kafka.ACLEntry
 }
 
-// NewPlan accepts the existing two tenant principal shapes. System topics can
-// be parsed for inventory parity, but this tenant-onboarding slice cannot grant
-// a prefix for the unprefixed system namespace.
+// NewSystemPlan selects unprefixed topics and no target ACL principal.
+func NewSystemPlan(raw []byte, digest, clusterID string) (Plan, error) {
+	if !ValidClusterID(clusterID) {
+		return Plan{}, ErrInput
+	}
+	topics, err := ParseTable(raw, digest, topic.SystemTenant)
+	if err != nil {
+		return Plan{}, err
+	}
+	return Plan{ClusterID: clusterID, Tenant: topic.SystemTenant, DurabilityProfile: "kafka-min-isr", ManifestSHA: digest, Topics: topics}, nil
+}
+
+// NewPlan accepts the existing two tenant principal shapes.
 func NewPlan(raw []byte, digest, tenant, principal, clusterID string) (Plan, error) {
 	if !ValidClusterID(clusterID) || !tenantName.MatchString(tenant) || !strings.HasPrefix(principal, "User:") {
 		return Plan{}, ErrInput

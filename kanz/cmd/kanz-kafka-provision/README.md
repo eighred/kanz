@@ -239,3 +239,34 @@ owned cleanup observations are retained. Such receipts always carry
 17-case inventory or the two required release jobs. PR, main and default manual
 runs retain both full qualifications. No failed diagnostic authorizes a retry,
 provisioning, or a change to the image identity predicates.
+
+## Opt-in GitOps system topic bootstrap
+
+Render the native PostSync Job for the target estate using the existing
+`tools/native-kafka-provision/system_bootstrap.py` renderer with Python and
+PyYAML. Supply `--image` (published provisioner digest), `--broker` (TLS
+host:port), `--peer` (exact broker SPIFFE ID), `--cluster` (exact observed
+cluster ID), and `--profile` (matching durability profile). The renderer
+uses the tracked system topic table and emits a digest-named immutable
+ConfigMap, the existing provisioner service account, and a named PostSync Job.
+
+In the estate's reviewed GitOps source, replace the legacy topics Job with
+the rendered resources in the same application. Exclude the legacy
+`topics-job.yaml` from that application's sync while retaining its tracked
+table as the renderer's input. Review the rendered application for a single
+system topic owner before syncing. The hook requires a ready SPIRE CSI
+installation, a provisioner SVID and a broker policy granting that identity
+system topic administration over the pinned TLS listener.
+
+The hook creates missing system topics and verifies exact configuration,
+partitions and durability. Existing mismatches fail before writes. Resolve
+the drift under a separate reviewed operation, then sync again. Argo's
+BeforeHookCreation policy replaces the Job on the next sync. The next run
+checks existing topics and reports zero writes. A failed or lost write
+acknowledgement requires readback before the next explicit sync.
+
+The disposable Redpanda fixture executes the rendered Job, recreates it using
+the same name to exercise the hook lifecycle, changes a retention expectation
+to exercise refusal, and verifies the original configuration afterward.
+This checks the real broker and Job behavior. Argo controller reconciliation
+and estate activation require separate verification.
