@@ -114,12 +114,31 @@ def install(k, apply, command, scratch, variants):
 
 def sync(k, case, revision, hook_name):
     token = [{"name": "fixture-case", "value": case}]
-    patch = {"spec": {"source": {"targetRevision": revision}},
-             "operation": {"info": token, "sync": {"revision": revision}}}
-    k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps(patch))
+    # Let the controller compare the new target before requesting the sync.
+    # This separates a target change from the operation and lets us distinguish
+    # Git comparison failures from a PostSync refusal.
+    def get_app():
+        return json.loads(k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=10))
+
+    def patch(value):
+        k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps(value))
+
+    patch({"metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}},
+           "spec": {"source": {"targetRevision": revision}}})
+    comparison_deadline = time.monotonic() + 90
+    while time.monotonic() < comparison_deadline:
+        app = get_app()
+        sync_status = app.get("status", {}).get("sync", {})
+        if (sync_status.get("revision") == revision and sync_status.get("status") in ("Synced", "OutOfSync")
+                and not app.get("operation") and not app["metadata"].get("annotations", {}).get("argocd.argoproj.io/refresh")):
+            break
+        time.sleep(1)
+    else:
+        raise TimeoutError("Argo target comparison did not converge")
+    patch({"operation": {"info": token, "sync": {"revision": revision}}})
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
-        app = json.loads(k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=10))
+        app = get_app()
         state = app.get("status", {}).get("operationState", {})
         if state.get("operation", {}).get("info") == token and state.get("finishedAt") and not app.get("operation"):
             result = state.get("syncResult", {})
@@ -128,6 +147,12 @@ def sync(k, case, revision, hook_name):
             if (state.get("phase") != expected or result.get("revision") != revision or len(hooks) != 1 or
                     hooks[0].get("namespace") != "kanz-messaging" or hooks[0].get("syncPhase") != "PostSync" or
                     hooks[0].get("hookPhase") != expected):
+                phases = {"Succeeded", "Failed", "Error", "Running", "Terminating"}
+                phase = state.get("phase")
+                hook_phases = [h.get("hookPhase") if h.get("hookPhase") in phases else "UNKNOWN" for h in hooks[:4]]
+                print(json.dumps({"case": case, "phase": phase if phase in phases else "UNKNOWN",
+                                  "revisionMatches": result.get("revision") == revision,
+                                  "hookCount": len(hooks), "hookPhases": hook_phases}), flush=True)
                 raise ValueError("Argo PostSync result differs")
             return {"case": case, "revision": revision, "phase": expected, "hookPhase": expected}
         time.sleep(1)
