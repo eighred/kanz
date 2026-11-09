@@ -64,3 +64,52 @@ func TestNativeQuorumObservationRefusesChangedEstateAndHonorsDeadline(t *testing
 		t.Fatal("unchanged healthy view conferred fault proof")
 	}
 }
+
+type nativeQuorumLeaderFake struct {
+	calls int
+}
+
+func (f *nativeQuorumLeaderFake) Metadata(_ context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+	f.calls++
+	brokers := fixtureBrokers(0, 1)
+	partition := kafka.Partition{ID: 0}
+	if f.calls > 1 {
+		partition.Leader = brokers[0]
+	}
+	return &kafka.MetadataResponse{
+		ClusterID: "cluster-a", Brokers: brokers,
+		Topics: []kafka.Topic{{Name: req.Topics[0], Partitions: []kafka.Partition{{ID: 1}, partition}}},
+	}, nil
+}
+
+func TestNativeQuorumLeaderRequiresPresentBrokerAndPartitionZero(t *testing.T) {
+	f := &nativeQuorumLeaderFake{}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := nativeWaitForQuorumLeader(ctx, f, "quorum-majority", "acme.order.order", "cluster-a"); err != nil || f.calls != 2 {
+		t.Fatalf("expected actual broker zero on second observation, got %d calls: %v", f.calls, err)
+	}
+}
+
+func TestNativeQuorumObservationRetriesReadTransitionsOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	results := []error{kafka.NotLeaderForPartition, provision.ErrMissing, nil}
+	calls := 0
+	err := nativeWaitForObservation(ctx, func() error {
+		result := results[calls]
+		calls++
+		return result
+	})
+	if err != nil || calls != len(results) {
+		t.Fatalf("expected marker after a leader transition, got %d calls: %v", calls, err)
+	}
+	calls = 0
+	err = nativeWaitForObservation(ctx, func() error {
+		calls++
+		return kafka.TopicAuthorizationFailed
+	})
+	if !errors.Is(err, kafka.TopicAuthorizationFailed) || calls != 1 {
+		t.Fatalf("authorization failure retried, got %d calls: %v", calls, err)
+	}
+}
