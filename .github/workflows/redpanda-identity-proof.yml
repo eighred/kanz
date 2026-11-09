@@ -6,6 +6,7 @@ on:
       - 'tools/tenant-quota/**'
       - 'kanz/cmd/kanz-kafka-provision/**'
       - 'kanz/infra/kafka/topics-job.yaml'
+      - 'kanz/infra/kafka/kafka.yaml'
       - 'kanz/infra/tenancy/**'
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
@@ -24,6 +25,7 @@ on:
       - 'tools/tenant-quota/**'
       - 'kanz/cmd/kanz-kafka-provision/**'
       - 'kanz/infra/kafka/topics-job.yaml'
+      - 'kanz/infra/kafka/kafka.yaml'
       - 'kanz/infra/tenancy/**'
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
@@ -183,6 +185,55 @@ jobs:
         with:
           name: native-kafka-provision-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-kafka-provision.json
+          if-no-files-found: error
+
+  legacy-topic-handoff:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.mode == 'image-diagnostics' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: '1.69.0'
+      - name: Generate existing canonical SDK
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/native-kafka-provision -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Authenticate private mirrored builder reads
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Qualify legacy JVM handoff and pinned fallback
+        run: python3 -B tools/native-kafka-provision/legacy_handoff.py
+      - name: Reconcile exact owned Kafka cluster after interruption
+        if: always()
+        run: python3 -B tools/native-kafka-provision/owned_cleanup.py
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
+      - name: Preserve source-bound legacy handoff evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: legacy-kafka-handoff-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/legacy-kafka-handoff.json
           if-no-files-found: error
 
   native-image-diagnostics:
