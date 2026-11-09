@@ -16,7 +16,8 @@ IMAGES = {
 BUSYBOX = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 REPO = "http://fixture-git.argocd.svc:8080/source.git"
 APP = "system-topics"
-CASES = ("system-create", "system-repeat", "system-mismatch", "system-verify")
+CASES = ("system-create", "system-repeat", "system-mismatch", "system-verify",
+         "system-activate", "system-rollback")
 
 
 def git_source(command, scratch, variants):
@@ -29,9 +30,12 @@ def git_source(command, scratch, variants):
     git("init", "--initial-branch=fixture")
     revisions = {}
     for case, objects in variants.items():
-        if case == "system-repeat":
+        if case in ("system-repeat", "system-rollback"):
             revisions[case] = revisions["system-create"]
             continue
+        jobs = [obj for obj in objects if obj["kind"] == "Job"]
+        if len(jobs) != 1 or jobs[0]["metadata"]["name"] != "kafka-system-bootstrap":
+            raise ValueError("Git revision must contain exactly one system hook")
         (work / "bootstrap.yaml").write_text(yaml.safe_dump_all(objects), encoding="utf-8")
         git("add", "bootstrap.yaml")
         git("-c", "commit.gpgsign=false", "commit", "-m", case)
@@ -159,16 +163,37 @@ def sync(k, case, revision, hook_name):
     raise TimeoutError("Argo sync observation expired")
 
 
+def observe_owner(k, hook_name):
+    apps = json.loads(k("get", "applications.argoproj.io", "-A", "-o", "json", timeout=10))["items"]
+    owners = [app["metadata"]["name"] for app in apps
+              if app["spec"]["destination"].get("namespace") == "kanz-messaging"]
+    jobs = json.loads(k("-n", "kanz-messaging", "get", "jobs", "-o", "json", timeout=10))["items"]
+    hooks = []
+    for job in jobs:
+        name = job["metadata"]["name"]
+        containers = job["spec"]["template"]["spec"]["containers"]
+        if name in (hook_name, "kafka-topics") or any(
+            "-system-bootstrap" in c.get("args", []) or "/scripts/topics.sh" in c.get("command", [])
+            for c in containers
+        ):
+            hooks.append(name)
+    if owners != [APP] or hooks != [hook_name]:
+        raise ValueError("system topic owner inventory differs")
+    return {"application": APP, "hook": hook_name}
+
+
 def validate(observations):
     if not isinstance(observations, list) or tuple(x.get("case") for x in observations) != CASES:
         raise ValueError("Argo sync inventory differs")
     for row in observations:
         expected = "Failed" if row["case"] == "system-mismatch" else "Succeeded"
-        if (set(row) != {"case", "revision", "phase", "hookPhase", "jobUID"} or
+        if (set(row) != {"case", "revision", "phase", "hookPhase", "jobUID", "owner"} or
                 not re.fullmatch("[0-9a-f]{40}", row["revision"]) or
                 not re.fullmatch("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", row["jobUID"]) or
-                row["phase"] != expected or row["hookPhase"] != expected):
+                row["phase"] != expected or row["hookPhase"] != expected or
+                row["owner"] != {"application": APP, "hook": "kafka-system-bootstrap"}):
             raise ValueError("Argo sync evidence differs")
     revisions = [x["revision"] for x in observations]
-    if revisions[0] != revisions[1] or len(set(revisions)) != 3 or len({x["jobUID"] for x in observations}) != 4:
+    if (revisions[0] != revisions[1] or revisions[0] != revisions[-1] or len(set(revisions)) != 4
+            or len({x["jobUID"] for x in observations}) != len(CASES)):
         raise ValueError("Argo revision or Job continuity differs")

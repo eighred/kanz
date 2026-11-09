@@ -22,11 +22,14 @@ import bounded_process
 
 ROOT = topology.ROOT
 SYSTEM_CASES = argo_bootstrap.CASES
+HISTORY_CASES = ('history-before', 'history-active', 'history-rollback')
+ACTIVATION_CASES = SYSTEM_CASES[:4] + ('history-before', 'system-activate', 'history-active',
+                                       'system-rollback', 'history-rollback')
 REFUSAL_CASES = ('wrong-cluster', 'system-mismatch')
 CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-apply',
          'wrong-cluster', 'tenant-a', 'tenant-b', 'compute-a', 'ungranted', 'partial',
-         'acme-verify', 'bravo-verify', 'quorum-healthy', 'quorum-majority', 'quorum-minority', 'quorum-restored') + SYSTEM_CASES
-ADMIN_PROBES = ('discover','partial','quorum-healthy','quorum-majority','quorum-minority','quorum-restored')
+         'acme-verify', 'bravo-verify', 'quorum-healthy', 'quorum-majority', 'quorum-minority', 'quorum-restored') + ACTIVATION_CASES
+ADMIN_PROBES = ('discover','partial','quorum-healthy','quorum-majority','quorum-minority','quorum-restored') + HISTORY_CASES
 PROBES = ADMIN_PROBES + tuple(topology.CLIENTS)
 
 
@@ -300,7 +303,7 @@ def validate_receipt(receipt, case, cluster, digest, count):
     else:
         if not receipt['complete'] or receipt['partial_or_unknown'] or receipt['missing_topics']!=0 or receipt['verified_topics']!=count or receipt['verified_acls']!=(0 if case in SYSTEM_CASES else 6):
             raise ValueError('incomplete CLI readback')
-        if case.endswith(('idempotent','verify')) or case in ('compute-apply','system-repeat'):
+        if case.endswith(('idempotent','verify')) or case in ('compute-apply','system-repeat','system-activate','system-rollback'):
             if receipt['topic_attempts']!=0: raise ValueError('existing topic rewritten')
         if case.endswith(('idempotent','verify')) and receipt['acl_attempts']!=0:
             raise ValueError('existing ACL rewritten')
@@ -614,15 +617,27 @@ def main():
                 container.update(image=images['admin'], imagePullPolicy='IfNotPresent')
                 if case == 'system-verify':
                     container['args'][1] = '-mode=verify'
+                if case == 'system-activate':
+                    # Model an estate revision that changes the hook execution
+                    # budget while retaining the canonical topic settings.
+                    hook['spec']['activeDeadlineSeconds'] = 230
+                    container['args'][-1] = '-timeout=200s'
                 variants[case] = [account, config, hook]
+            variants['system-rollback'] = variants['system-create']
             revisions = argo_bootstrap.install(k, apply, command, scratch, variants)
             evidence['argoSyncs'] = []
-            for case in SYSTEM_CASES:
+            for case in ACTIVATION_CASES:
                 evidence['stage'] = case
+                if case in HISTORY_CASES:
+                    probe = job(case, 'kanz-messaging', 'kafka-provisioner', images['probe'], mode=case, cluster=cluster)
+                    observation = parse_probe(execute(probe), case, source, cluster)
+                    evidence['cases'].append({'case':case,'passed':True,'observation':observation})
+                    continue
                 conflict = case == 'system-mismatch'
                 hook = variants[case][2]
                 sync = argo_bootstrap.sync(k, case, revisions[case], system_bootstrap.JOB_NAME)
                 result = json.loads(execute(hook, failed=conflict, case=case, observe_only=True))
+                sync['owner'] = argo_bootstrap.observe_owner(k, system_bootstrap.JOB_NAME)
                 sync['jobUID'] = k('-n','kanz-messaging','get','job',system_bootstrap.JOB_NAME,'-o','jsonpath={.metadata.uid}')
                 if result.get('version') != source or (conflict and
                     (result.get('error') != 'resource-conflict' or result.get('failure_code') != 'config-retention')) or (not conflict and result.get('error')):

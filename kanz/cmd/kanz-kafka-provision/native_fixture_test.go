@@ -111,12 +111,15 @@ func TestNativeDiagnosticCategories(t *testing.T) {
 func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDiagnostic) (nativeObservation, error) {
 	out := nativeObservation{Version: version.String(), Mode: mode}
 	identities := map[string]string{
-		"discover":  "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
-		"partial":   "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
-		"tenant-a":  "spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine",
-		"tenant-b":  "spiffe://kanz.internal/ns/tenant-bravo/sa/risk-engine",
-		"compute-a": "spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme",
-		"ungranted": "spiffe://kanz.internal/ns/tenant-acme/sa/ungranted",
+		"discover":         "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
+		"partial":          "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
+		"history-before":   "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
+		"history-active":   "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
+		"history-rollback": "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
+		"tenant-a":         "spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine",
+		"tenant-b":         "spiffe://kanz.internal/ns/tenant-bravo/sa/risk-engine",
+		"compute-a":        "spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme",
+		"ungranted":        "spiffe://kanz.internal/ns/tenant-acme/sa/ungranted",
 	}
 	for _, name := range []string{"quorum-healthy", "quorum-majority", "quorum-minority", "quorum-restored"} {
 		identities[name] = "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner"
@@ -181,6 +184,15 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	if strings.HasPrefix(mode, "quorum-") {
 		diagnostic.Phase = "quorum"
 		if err = nativeQuorum(ctx, client, mode); err != nil {
+			return out, err
+		}
+		out.Passed = true
+		diagnostic.Phase = "complete"
+		return out, nil
+	}
+	if strings.HasPrefix(mode, "history-") {
+		diagnostic.Phase = "quorum"
+		if err = nativeSystemHistory(ctx, client, mode, meta.ClusterID, out.Version); err != nil {
 			return out, err
 		}
 		out.Passed = true
@@ -278,6 +290,36 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	out.Renewed, out.Passed = true, true
 	diagnostic.Phase = "complete"
 	return out, nil
+}
+
+// The fixture writes only synthetic markers. Rollback must read both
+// acknowledged records without producing a replacement.
+func nativeSystemHistory(ctx context.Context, c *kafka.Client, mode, cluster, source string) error {
+	const topic = "order.order"
+	wait, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	if err := nativeWaitForQuorumLeader(wait, c, "quorum-healthy", topic, cluster); err != nil {
+		return err
+	}
+	before := "native-history-before:" + source
+	active := "native-history-active:" + source
+	if mode == "history-before" {
+		if err := nativeProduce(ctx, c, topic, before); err != nil {
+			return err
+		}
+	}
+	if err := nativeQuorumReadContains(ctx, c, topic, before); err != nil {
+		return err
+	}
+	if mode == "history-before" {
+		return nil
+	}
+	if mode == "history-active" {
+		if err := nativeProduce(ctx, c, topic, active); err != nil {
+			return err
+		}
+	}
+	return nativeQuorumReadContains(ctx, c, topic, active)
 }
 
 func nativeQuorum(ctx context.Context, c *kafka.Client, mode string) error {
