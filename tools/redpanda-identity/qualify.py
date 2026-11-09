@@ -294,7 +294,7 @@ def main():
             evidence['stage']='build probe'
             sha=shared.command(['git','rev-parse','HEAD']); evidence['sourceSHA']=sha
             image='kanz-redpanda-proof:'+sha
-            shared.command(['docker','build','--build-arg','VERSION='+sha,'-f','tools/redpanda-identity/Dockerfile','-t',image,'.'],timeout=1200)
+            shared.build_image('tools/redpanda-identity/Dockerfile', sha, image)
             evidence['probeImageID']=shared.command(['docker','image','inspect','--format','{{.Id}}',image])
             evidence['stage']='create enforcing kind/Cilium cluster'
             shared.create_enforcing_cluster(name, scratch)

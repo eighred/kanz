@@ -528,7 +528,7 @@ def main():
             images={}
             for label,path in (('admin','kanz/cmd/kanz-kafka-provision/Dockerfile'),('probe','tools/native-kafka-provision/Dockerfile')):
                 image='kanz-native-'+label+':'+source
-                command(['docker','build','--build-arg','VERSION='+source,'-f',path,'-t',image,'.'],timeout=1200)
+                topology.retained.shared.build_image(path, source, image)
                 images[label]=image; evidence[label+'Image']=command(['docker','image','inspect','--format','{{.Id}}',image])
             evidence['stage']='cluster'
             # Absence before ownership; a random name never authorizes deleting a collision.
