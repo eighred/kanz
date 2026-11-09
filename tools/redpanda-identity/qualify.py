@@ -13,12 +13,48 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'feed-identity'))
 import proof as shared
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gateway-policy-proof'))
+import bounded_process
+
 ROOT = shared.ROOT
 REDPANDA = 'docker.redpanda.com/redpandadata/redpanda:v26.2.6@sha256:8b1076e0d61bfceb66594dc01536427ce0b529f8ead35fdab9763ab6085891ce'
 SAS = ('proof-bootstrap', 'proof-a', 'proof-b', 'proof-ungranted')
 CASES = (('bootstrap','proof-bootstrap','bootstrap'), ('client-a','proof-a','publish'),
          ('client-b','proof-b','publish'), ('ungranted','proof-ungranted','ungranted'),
          ('verify','proof-bootstrap','verify'))
+
+
+# Export only these fixed strings. Build output itself can contain repository
+# details and must not be persisted in workflow logs or proof artifacts.
+BUILD_SIGNALS = (
+    "toomanyrequests", "429 too many requests", "no space left on device",
+    "401 unauthorized", "403 forbidden", "failed to fetch anonymous token",
+    "failed to fetch oauth token", "not found", "failed to load cache key",
+    "no match for platform", "failed to resolve source metadata",
+    "docker[.]io/docker/dockerfile", "ghcr[.]io/eighred/base/golang",
+    "ghcr[.]io/eighred/base/distroless", "tls handshake timeout",
+    "unexpected eof", "i/o timeout", "checksum mismatch",
+)
+BUILD_COMMAND = """
+signals=$1
+shift
+docker build --progress=plain "$@" 2>&1 | grep -Eio -- "$signals" | sort -fu
+statuses=("${PIPESTATUS[@]}")
+printf 'docker_exit=%s\n' "${statuses[0]}"
+[[ ${statuses[1]} -le 1 && ${statuses[2]} -eq 0 ]]
+"""
+
+
+def build_image(path, source, image):
+    lines = bounded_process.run(
+        ["bash", "-c", BUILD_COMMAND, "fixture-build", "|".join(BUILD_SIGNALS),
+         "--build-arg", "VERSION="+source, "-f", path, "-t", image, "."],
+        cwd=ROOT, env=dict(os.environ), timeout=1200, stdout_limit=4096).splitlines()
+    if not lines or lines[-1] != "docker_exit=0":
+        allowed = {signal.replace("[.]", ".") for signal in BUILD_SIGNALS}
+        categories = sorted({line.lower() for line in lines[:-1]} & allowed)
+        detail = ", ".join(categories) if categories else "unclassified build failure"
+        raise RuntimeError(f"Fixture build {path}: {detail}")
 
 
 def identity(sa):
@@ -294,7 +330,7 @@ def main():
             evidence['stage']='build probe'
             sha=shared.command(['git','rev-parse','HEAD']); evidence['sourceSHA']=sha
             image='kanz-redpanda-proof:'+sha
-            shared.command(['docker','build','--build-arg','VERSION='+sha,'-f','tools/redpanda-identity/Dockerfile','-t',image,'.'],timeout=1200)
+            build_image('tools/redpanda-identity/Dockerfile', sha, image)
             evidence['probeImageID']=shared.command(['docker','image','inspect','--format','{{.Id}}',image])
             evidence['stage']='create enforcing kind/Cilium cluster'
             shared.create_enforcing_cluster(name, scratch)

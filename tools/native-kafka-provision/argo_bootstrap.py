@@ -22,7 +22,7 @@ CASES = ("system-create", "system-repeat", "system-mismatch", "system-verify",
          "system-activate", "system-rollback")
 
 
-def git_source(command, scratch, variants):
+def git_source(command, scratch, variants, *, legacy=False):
     work = scratch / "argo-source"
     bare = scratch / "source.git"
     work.mkdir()
@@ -32,11 +32,16 @@ def git_source(command, scratch, variants):
     git("init", "--initial-branch=fixture")
     revisions = {}
     for case, objects in variants.items():
+        if legacy and case == "legacy-fallback":
+            revisions[case] = revisions["legacy-bootstrap"]
+            continue
         if case in ("system-repeat", "system-rollback"):
             revisions[case] = revisions["system-create"]
             continue
         jobs = [obj for obj in objects if obj["kind"] == "Job"]
-        if len(jobs) != 1 or jobs[0]["metadata"].get("generateName") != system_bootstrap.JOB_NAME + "-" or jobs[0]["metadata"].get("name"):
+        named_legacy = (legacy and case == "legacy-bootstrap" and len(jobs) == 1
+                        and jobs[0]["metadata"].get("name") == "kafka-topics")
+        if not named_legacy and (len(jobs) != 1 or jobs[0]["metadata"].get("generateName") != system_bootstrap.JOB_NAME + "-" or jobs[0]["metadata"].get("name")):
             raise ValueError("Git revision must contain exactly one system hook")
         (work / "bootstrap.yaml").write_text(yaml.safe_dump_all(objects), encoding="utf-8")
         git("add", "bootstrap.yaml")
@@ -58,8 +63,8 @@ def git_source(command, scratch, variants):
     return revisions, files, items
 
 
-def install(k, apply, command, scratch, variants):
-    revisions, files, items = git_source(command, scratch, variants)
+def install(k, apply, command, scratch, variants, *, legacy=False):
+    revisions, files, items = git_source(command, scratch, variants, legacy=legacy)
     path = scratch / "argo-core.yaml"
     command(["curl", "--fail", "--silent", "--show-error", "--location", "--max-time", "90",
              "-o", str(path), f"https://raw.githubusercontent.com/argoproj/argo-cd/{VERSION}/manifests/core-install.yaml"], timeout=95)
@@ -111,7 +116,7 @@ def install(k, apply, command, scratch, variants):
                                                  {"group": "batch", "kind": "Job"}]}},
         {"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
          "metadata": {"name": APP, "namespace": "argocd"},
-         "spec": {"project": APP, "source": {"repoURL": REPO, "targetRevision": revisions["system-create"], "path": "."},
+         "spec": {"project": APP, "source": {"repoURL": REPO, "targetRevision": next(iter(revisions.values())), "path": "."},
                   "destination": {"server": "https://kubernetes.default.svc", "namespace": "kanz-messaging"},
                   "syncPolicy": {"syncOptions": ["ApplyOutOfSyncOnly=true"]}}},
     ])
@@ -122,7 +127,7 @@ def hook_name_matches(name, revision):
     return bool(re.fullmatch(system_bootstrap.JOB_NAME + "-" + revision[:7] + r"-postsync-[0-9]+", name))
 
 
-def sync(k, case, revision, observed):
+def sync(k, case, revision, observed, *, legacy=False):
     token = [{"name": "fixture-case", "value": case}]
     # Let the controller compare the new target before requesting the sync.
     # This separates a target change from the operation and lets us distinguish
@@ -146,14 +151,14 @@ def sync(k, case, revision, observed):
     else:
         raise TimeoutError("Argo target comparison did not converge")
     patch({"operation": {"info": token, "sync": {"revision": revision}}})
-    deadline = time.monotonic() + 300
+    deadline = time.monotonic() + (720 if legacy else 300)
     while time.monotonic() < deadline:
         app = get_app()
         state = app.get("status", {}).get("operationState", {})
         if state.get("operation", {}).get("info") == token and state.get("finishedAt") and not app.get("operation"):
             result = state.get("syncResult", {})
             expected = "Failed" if case == "system-mismatch" else "Succeeded"
-            hooks = [x for x in result.get("resources", []) if x.get("kind") == "Job" and hook_name_matches(x.get("name", ""), revision)]
+            hooks = [x for x in result.get("resources", []) if x.get("kind") == "Job" and (x.get("name") == "kafka-topics" if legacy else hook_name_matches(x.get("name", ""), revision))]
             phases = {"Succeeded", "Failed", "Error", "Running", "Terminating"}
             phase = state.get("phase")
             hook_phases = [h.get("hookPhase") if h.get("hookPhase") in phases else "UNKNOWN" for h in hooks[:4]]
