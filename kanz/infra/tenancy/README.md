@@ -65,6 +65,52 @@ kubectl -n kanz-tenancy wait --for=condition=complete job/tenant-onboard-acme
 
 ## Dependencies / current edges
 
+### Quota concurrency and recovery (#1549)
+
+The quota step reads the complete ConfigMap with a ten-second request timeout.
+Only confirmed absence permits creation; authorization, transport and malformed
+document errors refuse the update. An existing ConfigMap must contain an object
+in `data["quotas.json"]`. An absent map during offboarding is a no-op.
+
+Updates retain the observed `resourceVersion` and UID, unrelated tenants, other
+data keys and metadata. Kubernetes rejects stale replacements. A definitive
+Conflict (or AlreadyExists during creation) causes a fresh read and recomputation,
+up to five write attempts. Other write failures, including an ambiguous timeout,
+stop for operator reconciliation: inspect the current map before rerunning.
+Offboarding removes only the selected tenant entry; this does not certify the
+separate credential-revocation workflow in #108.
+
+All concurrent lifecycle runners must use this version before relying on lost
+update protection. An older runner using `apply` can still overwrite a new
+runner's successful write. Drain old runners during a separately authorized
+rollout. Rolling back the script reintroduces that risk and does not repair data.
+
+The disposable acceptance harness requires Linux, Python 3 with PyYAML, bash, jq, kubectl,
+kind and Docker. In an approved isolated test environment, from the repo root:
+
+```sh
+python3 -B tools/tenant-quota/qualify.py
+cd kanz
+go test -p 1 ./test/arch/ -count=1
+```
+
+The harness creates its own kind cluster and kubeconfig, runs eleven cases
+against its API server and deletes only that generated cluster in `finally`.
+It invokes the actual quota functions extracted unchanged from `tenantctl.sh`;
+it does not claim full NATS, broker, identity or offboarding acceptance. Cases
+cover denied/unavailable reads, malformed/missing data, competing creates and
+replacements, conflict exhaustion, lost write acknowledgement and scoped removal.
+Success prints the exact script SHA-256, case count and completed owned cleanup.
+No production context is used. Keep this proof distinct from source review or
+shell syntax checks, and keep #1549 open until runtime acceptance is recorded.
+
+The `native-topic-provisioning` CI job runs this harness and the full architecture
+suite before its broker proof. The harness reuses the pinned kind node image from
+the feed-identity fixture. The architecture gate rejects removal or conditional
+skipping of the quota proof.
+
+### Other lifecycle dependencies
+
 - **NATS** account onboarding is dynamic (no reload) only with the JWT
   account-resolver + an operator (`NATS_OPERATOR`); otherwise `tenantctl` prints
   the static `nats/tenancy.yaml` append + reload step (the MT-01c static

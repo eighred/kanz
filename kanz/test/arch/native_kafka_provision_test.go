@@ -213,8 +213,14 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 	if diagnosticRuns != 1 {
 		return false
 	}
-	seen, cleanup := 0, 0
+	seen, cleanup, quota := 0, 0, 0
 	for _, step := range job.Steps {
+		if strings.TrimSpace(step.Run) == "bash -n kanz/infra/tenancy/tenantctl.sh\npython3 -B tools/tenant-quota/qualify.py" {
+			if step.If != nil || step.Continue != nil {
+				return false
+			}
+			quota++
+		}
 		if step.Run == "python3 -B tools/native-kafka-provision/qualify.py" {
 			if step.If != nil || step.Continue != nil {
 				return false
@@ -228,7 +234,7 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 			cleanup++
 		}
 	}
-	return seen == 1 && cleanup == 1
+	return seen == 1 && cleanup == 1 && quota == 1
 }
 
 func TestNativeKafkaQualificationCannotBeOptional(t *testing.T) {
@@ -251,6 +257,7 @@ func TestNativeKafkaQualificationCannotBeOptional(t *testing.T) {
 		{"run: python3 -B tools/native-kafka-provision/qualify.py", "if: false\n        run: python3 -B tools/native-kafka-provision/qualify.py"},
 		{"run: python3 -B tools/native-kafka-provision/qualify.py", "run: echo skipped"},
 		{"run: python3 -B tools/native-kafka-provision/owned_cleanup.py", "run: echo skipped"},
+		{"python3 -B tools/tenant-quota/qualify.py", "echo skipped quota proof"},
 	} {
 		if !strings.Contains(source, mutation.old) {
 			t.Fatal("mutation anchor missing")
