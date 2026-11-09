@@ -41,7 +41,14 @@ def broker_objects():
         "umask 077\ncat /etc/kafka-certs/svid.pem /etc/kafka-certs/svid_key.pem > /tmp/keystore.pem\n"
         "exec /etc/kafka/docker/run",
     )
-    next(e for e in broker["env"] if e["name"] == "KAFKA_SSL_KEYSTORE_LOCATION")["value"] = "/tmp/keystore.pem"
+    # The stock image's SSL-named listener path insists on password files.
+    # A named SSL protocol listener keeps the same wire TLS with SPIFFE PEM.
+    broker["args"][0] = broker["args"][0].replace("SSL://", "SPIFFE://")
+    for env in broker["env"]:
+        if env["name"] in ("KAFKA_LISTENERS", "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP"):
+            env["value"] = env["value"].replace("SSL:", "SPIFFE:")
+        elif env["name"] == "KAFKA_SSL_KEYSTORE_LOCATION":
+            env["value"] = "/tmp/keystore.pem"
     spec["volumes"].append({"name": "keystore", "emptyDir": {"medium": "Memory"}})
     broker["volumeMounts"].append({"name": "keystore", "mountPath": "/tmp"})
     # The upstream image lacks the estate's custom principal builder. Isolate
@@ -66,6 +73,44 @@ def listener_policy(owner):
             "metadata": {"name": "handoff-listeners", "namespace": NS},
             "spec": {"podSelector": {"matchLabels": {"app": "kafka"}},
                      "policyTypes": ["Ingress"], "ingress": rules}}
+
+
+def set_listener(k, apply, owner):
+    desired = listener_policy(owner)
+    apply([desired])
+    policies = json.loads(k("-n", NS, "get", "networkpolicy", "-o", "json"))["items"]
+    if len(policies) != 1 or policies[0]["spec"] != desired["spec"]:
+        raise ValueError("listener ownership differs")
+
+
+def broker_diagnostic(k):
+    pods = json.loads(k("-n", NS, "get", "pods", "-l", "app=kafka", "-o", "json", timeout=10))["items"]
+    signals = {
+        "pem": ("Invalid PEM", "No matching PRIVATE KEY", "Failed to load SSL keystore",
+                "Failed to load SSL truststore", "No supported key format"),
+        "entrypoint": ("environment variable not set", "file not writable", "Permission denied"),
+        "identity": ("no identity issued", "PermissionDenied", "error fetching", "connection refused"),
+        "quorum": ("Unable to register", "RaftManager", "timed out waiting"),
+        "configuration": ("ConfigException", "IllegalArgumentException", "InconsistentClusterIdException"),
+    }
+    result = []
+    for pod in pods:
+        status = pod["status"]
+        for container in status.get("initContainerStatuses", []) + status.get("containerStatuses", []):
+            state = container.get("state", {})
+            current = state.get("terminated") or container.get("lastState", {}).get("terminated") or state.get("waiting", {})
+            details = {"container": container["name"], "exitCode": current.get("exitCode"),
+                       "reason": current.get("reason"), "restarts": container["restartCount"], "signals": []}
+            try:
+                previous = ["--previous"] if container["restartCount"] and "terminated" not in state else []
+                logs = k("-n", NS, "logs", pod["metadata"]["name"], "-c", container["name"],
+                         "--limit-bytes=16384", *previous, timeout=10)
+                details["signals"] = [label for label, markers in signals.items()
+                                      if any(marker.lower() in logs.lower() for marker in markers)]
+            except RuntimeError:
+                pass
+            result.append(details)
+    return result
 
 
 def variants(raw, admin_image, built, cluster):
@@ -117,7 +162,7 @@ def terminal_job(k, desired, owner, prior_uids):
 
 
 def drain(k, apply, job):
-    apply([listener_policy(None)])
+    set_listener(k, apply, None)
     k("-n", NS, "delete", "job", job["metadata"]["name"], "--cascade=foreground", "--wait=true", "--timeout=60s")
     require_empty(k)
 
@@ -213,7 +258,7 @@ def main():
             evidence["stage"] = "brokers"
             apply(topology.retained.shared.manifests("kanz/infra/nats/namespace.yaml"))
             docs, cluster = broker_objects()
-            apply([listener_policy(None)])
+            set_listener(k, apply, None)
             apply(docs)
             k("-n", NS, "rollout", "status", "statefulset/kafka", "--timeout=240s")
             evidence["brokersBefore"] = broker_uids(k)
@@ -226,7 +271,7 @@ def main():
                 evidence["stage"] = phase
                 owner = "native" if phase == "native-activate" else "legacy"
                 require_empty(k)
-                apply([listener_policy(owner)])
+                set_listener(k, apply, owner)
                 diagnostic = {}
                 evidence["syncDiagnostic"] = diagnostic
                 sync = argo_bootstrap.sync(k, phase, revisions[phase], diagnostic, legacy=owner == "legacy")
@@ -234,6 +279,7 @@ def main():
                 expected["metadata"]["name"] = sync["jobName"]
                 if not diagnostic["resultMatches"]:
                     raise ValueError("Argo handoff sync differs")
+                argo_bootstrap.observe_owner(k, sync["jobName"])
                 job, pod = terminal_job(k, expected, owner, uids)
                 uid = job["metadata"]["uid"]
                 uids.add(uid)
@@ -266,7 +312,8 @@ def main():
             verify["metadata"]["name"] = "handoff-verify"
             verify["metadata"].pop("annotations", None)
             verify["spec"]["template"]["spec"]["containers"][0]["args"][1] = "-mode=verify"
-            apply([listener_policy("native"), verify])
+            set_listener(k, apply, "native")
+            apply([verify])
             k("-n", NS, "wait", "--for=condition=complete", "job/handoff-verify", "--timeout=250s")
             job, pod = terminal_job(k, verify, "native", uids)
             evidence["fallbackReadback"] = native_receipt(k, verify, pod, built, name, source, cluster, raw, "verify")
@@ -277,6 +324,11 @@ def main():
             evidence["passed"] = True
         except Exception as error:
             evidence["errorCategory"] = type(error).__name__
+            if evidence["stage"] == "brokers":
+                try:
+                    evidence["brokerDiagnostic"] = broker_diagnostic(k)
+                except RuntimeError:
+                    pass
             print(json.dumps({"stage": evidence["stage"], "errorCategory": evidence["errorCategory"]}), flush=True)
             raise RuntimeError("legacy handoff qualification failed") from None
         finally:
