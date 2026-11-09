@@ -14,14 +14,17 @@ import topology
 import image_custody
 import runtime_diagnostic
 import lifecycle
+import system_bootstrap
 
 sys.path.insert(0, str(topology.ROOT / 'tools/gateway-policy-proof'))
 import bounded_process
 
 ROOT = topology.ROOT
+SYSTEM_CASES = ('system-create', 'system-repeat', 'system-mismatch', 'system-verify')
+REFUSAL_CASES = ('wrong-cluster', 'system-mismatch')
 CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-apply',
          'wrong-cluster', 'tenant-a', 'tenant-b', 'compute-a', 'ungranted', 'partial',
-         'acme-verify', 'bravo-verify', 'quorum-healthy', 'quorum-majority', 'quorum-minority', 'quorum-restored')
+         'acme-verify', 'bravo-verify', 'quorum-healthy', 'quorum-majority', 'quorum-minority', 'quorum-restored') + SYSTEM_CASES
 ADMIN_PROBES = ('discover','partial','quorum-healthy','quorum-majority','quorum-minority','quorum-restored')
 PROBES = ADMIN_PROBES + tuple(topology.CLIENTS)
 
@@ -220,7 +223,7 @@ def parse_probe(text, mode, source, cluster=None):
     return value
 
 
-def canonical_inventory(raw):
+def canonical_inventory(raw, system=False):
     # Independent fixture expectation from the existing data table, never a
     # copied topic inventory or execution of its surrounding shell program.
     if not isinstance(raw,bytes) or not 0<len(raw)<=128<<10: raise ValueError('manifest bound')
@@ -237,7 +240,7 @@ def canonical_inventory(raw):
         if not re.fullmatch(r'[a-z][a-z0-9_]*(?:[.][a-z0-9_]+)+',name) or name in rows or not partitions.isdecimal() or not 1<=int(partitions)<=128 or cleanup not in ('delete','compact') or not re.fullmatch(r'-1|[1-9][0-9]*',retention) or dlq not in ('yes','no'):
             raise ValueError('table shape')
         rows.add(name)
-        if name=='dlq.archiver': continue # existing sole system-only exemption
+        if name=='dlq.archiver' and not system: continue # existing sole system-only exemption
         for topic in [name]+(['dlq.'+name] if dlq=='yes' else []):
             if topic in expanded: raise ValueError('duplicate expanded topic')
             expanded[topic]=int(partitions) if topic==name else 3
@@ -249,13 +252,28 @@ def canonical_count(raw):
     return canonical_inventory(raw)[:2]
 
 
-def fixture_capacity(partitions):
+def fixture_capacity(partitions, system_partitions=0):
     if type(partitions) is not int or partitions<=0: raise ValueError('partition capacity shape')
-    replicas=3*partitions # acme, bravo and partial; compute reuses acme.
+    replicas=3*partitions+system_partitions # acme, bravo, partial and system; compute reuses acme.
     if replicas*(2<<20)>topology.BROKER_MEMORY_BYTES or replicas*topology.FALLOC_BYTES+(256<<20)>=topology.DATA_VOLUME_BYTES:
         raise ValueError('full fixture exceeds broker memory or volume budget')
     return {'replicasPerBroker':replicas,'brokerMemoryBytes':topology.BROKER_MEMORY_BYTES,
             'volumeBytes':topology.DATA_VOLUME_BYTES,'segmentAllocationBytes':topology.FALLOC_BYTES}
+
+
+def mismatched_system_manifest(raw):
+    pattern = rb"(?m)^(    order\.order +[0-9]+ +delete +)([0-9]+)( +(?:yes|no)\r?$)"
+    changed, count = re.subn(pattern, lambda m: m[1]+str(int(m[2])+1).encode()+m[3], raw)
+    if count != 1:
+        raise ValueError("order topic mismatch probe anchor absent")
+    return changed
+
+
+def validate_case_receipt(receipt, case, cluster, manifest):
+    system = case in SYSTEM_CASES
+    raw = mismatched_system_manifest(manifest) if case == 'system-mismatch' else manifest
+    digest, count, _ = canonical_inventory(raw, system)
+    validate_receipt(receipt, case, cluster, digest, count)
 
 
 def validate_receipt(receipt, case, cluster, digest, count):
@@ -272,17 +290,22 @@ def validate_receipt(receipt, case, cluster, digest, count):
             raise ValueError('receipt count')
     if type(receipt['complete']) is not bool or type(receipt['partial_or_unknown']) is not bool:
         raise ValueError('receipt truth')
-    if case=='wrong-cluster':
+    if case=='system-mismatch':
+        if receipt['complete'] or receipt['partial_or_unknown'] or receipt['topic_attempts'] or receipt['acl_attempts'] or receipt['verified_acls']:
+            raise ValueError('system mismatch accepted or mutated')
+    elif case=='wrong-cluster':
         if receipt['complete'] or receipt['partial_or_unknown'] or any(receipt[k] for k in ('verified_topics','missing_topics','verified_acls','topic_attempts','acl_attempts')):
             raise ValueError('wrong estate effected or accepted')
     else:
-        if not receipt['complete'] or receipt['partial_or_unknown'] or receipt['missing_topics']!=0 or receipt['verified_topics']!=count or receipt['verified_acls']!=6:
+        if not receipt['complete'] or receipt['partial_or_unknown'] or receipt['missing_topics']!=0 or receipt['verified_topics']!=count or receipt['verified_acls']!=(0 if case in SYSTEM_CASES else 6):
             raise ValueError('incomplete CLI readback')
-        if case.endswith(('idempotent','verify')) or case=='compute-apply':
+        if case.endswith(('idempotent','verify')) or case in ('compute-apply','system-repeat'):
             if receipt['topic_attempts']!=0: raise ValueError('existing topic rewritten')
         if case.endswith(('idempotent','verify')) and receipt['acl_attempts']!=0:
             raise ValueError('existing ACL rewritten')
-        if case in ('acme-apply','bravo-apply') and receipt['topic_attempts']!=count:
+        if case in SYSTEM_CASES and receipt['acl_attempts']:
+            raise ValueError('system scope attempted ACL writes')
+        if case in ('acme-apply','bravo-apply','system-create') and receipt['topic_attempts']!=count:
             raise ValueError('initial creation inventory differs')
         if case in ('acme-apply','bravo-apply','compute-apply') and receipt['acl_attempts']!=6:
             raise ValueError('initial grant inventory differs')
@@ -295,14 +318,14 @@ def validate_diagnostics(value, source):
     for case,item in zip(CASES,diagnostics):
         if not isinstance(item,dict) or set(item)!={'case','jobState','custody','collection','probe','container','imageVerified','image'}:
             raise ValueError('diagnostic shape differs')
-        if (item['case']!=case or item['jobState']!=('Failed' if case=='wrong-cluster' else 'Complete') or
+        if (item['case']!=case or item['jobState']!=('Failed' if case in REFUSAL_CASES else 'Complete') or
                 item['custody'] is not True or item['collection']!='complete' or item['imageVerified'] is not True):
             raise ValueError('diagnostic custody incomplete')
         state=item['container']
         if (not isinstance(state,dict) or set(state)!={'state','exitCode','reason','imageBound'} or
                 state['state']!='terminated' or state['imageBound'] is not True or
                 type(state['exitCode']) is not int or not 0<=state['exitCode']<=255 or
-                (state['exitCode']!=0)!=(case=='wrong-cluster') or state['reason'] not in ('Completed','Error','UNKNOWN')):
+                (state['exitCode']!=0)!=(case in REFUSAL_CASES) or state['reason'] not in ('Completed','Error','UNKNOWN')):
             raise ValueError('container outcome differs')
         graph=item['image']
         if not isinstance(graph,dict) or set(graph)!={'verified','dockerIdentityType','podIdentityType','dockerIdentity','podIdentity','config','platformManifest','contentCount'}:
@@ -335,7 +358,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
     digest,count,partitions=canonical_inventory(manifest)
     lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'), count)
-    if value.get('fixtureCapacity')!=fixture_capacity(partitions): raise ValueError('fixture capacity differs')
+    if value.get('fixtureCapacity')!=fixture_capacity(partitions, canonical_inventory(manifest, True)[2]): raise ValueError('fixture capacity differs')
     before,after=value.get('brokerPodsBefore'),value.get('brokerPodsAfter')
     if not isinstance(before,dict) or set(before)!=set(topology.BROKERS) or after!=before or len(set(before.values()))!=3:
         raise ValueError('broker continuity missing')
@@ -366,7 +389,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
             parse_probe('NATIVE_PROOF:'+json.dumps(item['observation']),case,source,value.get('clusterID'))
         else:
             if set(item)!={'case','passed','receipt'}: raise ValueError('receipt missing')
-            validate_receipt(item['receipt'],case,value.get('clusterID'),digest,count)
+            validate_case_receipt(item['receipt'],case,value.get('clusterID'),manifest)
 
     for name in ('adminImage','probeImage'):
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',value.get(name,'')):
@@ -422,7 +445,7 @@ def main():
     raw=(ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
     digest,count,partitions=canonical_inventory(raw)
     evidence['manifestSHA']=digest
-    evidence['fixtureCapacity']=fixture_capacity(partitions)
+    evidence['fixtureCapacity']=fixture_capacity(partitions, canonical_inventory(raw, True)[2])
     artifact=Path(os.environ['RUNNER_TEMP'])/'native-kafka-provision.json'
     name='redpanda-proof-'+uuid.uuid4().hex[:12]
     with tempfile.TemporaryDirectory(prefix='native-kafka-proof-') as directory:
@@ -431,9 +454,9 @@ def main():
             return command(['kubectl','--kubeconfig',str(scratch/'kubeconfig'),'--context','kind-'+name,*args],data,timeout)
         def apply(docs):
             return k('apply','-f','-',data=yaml.safe_dump_all(docs))
-        def execute(d, failed=False):
+        def execute(d, failed=False, case=None):
             ns=d['metadata']['namespace']; jobname=d['metadata']['name']
-            diagnostic={'case':jobname,'jobState':'UNKNOWN','custody':False,'collection':'job','probe':{'state':'UNKNOWN'}}
+            diagnostic={'case':case or jobname,'jobState':'UNKNOWN','custody':False,'collection':'job','probe':{'state':'UNKNOWN'}}
             evidence['diagnostics'].append(diagnostic)
             deadline=time.monotonic()+250
             def observe(*args,data=None):
@@ -460,7 +483,7 @@ def main():
                         diagnostic['imageVerified']=False
                         diagnostic['collection']='closed-probe'
                         selected=pods['items'][0]['metadata']
-                        logs=observe('-n',ns,'logs',selected['name'],'-c','probe','--limit-bytes=65536')
+                        logs=observe('-n',ns,'logs',selected['name'],'-c',d['spec']['template']['spec']['containers'][0]['name'],'--limit-bytes=65536')
                         after=json.loads(observe('-n',ns,'get','pod',selected['name'],'-o','json'))
                         pod_custody([after],d,uid,selected['uid'])
                         if label=='probe': diagnostic['probe']=probe_diagnostic(logs,jobname,source)
@@ -577,6 +600,33 @@ def main():
                 apply(topology.policies(connected))
                 observation=parse_probe(execute(job(case,'kanz-messaging','kafka-provisioner',images['probe'],mode=case,cluster=cluster)),case,source,cluster)
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
+            prior_uid = None
+            for case in SYSTEM_CASES:
+                evidence['stage'] = case
+                conflict = case == 'system-mismatch'
+                manifest = mismatched_system_manifest(raw) if conflict else raw
+                account, config, hook = system_bootstrap.render(
+                    manifest, 'ghcr.io/eighred/kanz-kafka-provision@'+evidence['adminImage'],
+                    'native-redpanda-0.kanz-messaging.svc:9094', topology.BROKER_ID, cluster, 'redpanda-raft')
+                apply([account, config])
+                container = hook['spec']['template']['spec']['containers'][0]
+                container.update(image=images['admin'], imagePullPolicy='IfNotPresent')
+                if case == 'system-verify':
+                    container['args'][1] = '-mode=verify'
+                # Reproduce the named Argo hook's BeforeHookCreation lifecycle
+                # on the owned cluster; broker state and immutable table stay.
+                if prior_uid is not None:
+                    k('-n','kanz-messaging','delete','job',system_bootstrap.JOB_NAME,'--wait=true','--timeout=30s')
+                result = json.loads(execute(hook, failed=conflict, case=case))
+                uid = k('-n','kanz-messaging','get','job',system_bootstrap.JOB_NAME,'-o','jsonpath={.metadata.uid}')
+                if not uid or uid == prior_uid:
+                    raise ValueError('repeat hook did not create a fresh job')
+                prior_uid = uid
+                if result.get('version') != source or (conflict and
+                    (result.get('error') != 'resource-conflict' or result.get('failure_code') != 'config-retention')) or (not conflict and result.get('error')):
+                    raise ValueError('system hook outcome differs')
+                validate_case_receipt(result['receipt'], case, cluster, raw)
+                evidence['cases'].append({'case':case,'passed':True,'receipt':result['receipt']})
             evidence['brokerPodsAfter']={}
             for broker in topology.BROKERS:
                 pods=json.loads(k('-n','kanz-messaging','get','pods','-l','native-broker='+broker,'-o','json'))

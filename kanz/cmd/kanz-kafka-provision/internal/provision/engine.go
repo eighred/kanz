@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/eighred/kanz/internal/topic"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/protocol"
 )
@@ -118,7 +119,10 @@ type Receipt struct {
 
 func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	r := Receipt{Mode: mode, ManifestSHA: p.ManifestSHA, ClusterID: p.ClusterID, DurabilityProfile: p.DurabilityProfile}
-	if (mode != "plan" && mode != "apply" && mode != "verify") || (p.DurabilityProfile != "kafka-min-isr" && p.DurabilityProfile != "redpanda-raft") || !ValidClusterID(p.ClusterID) || p.BrokerPrincipal == "" || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
+	system := p.Tenant == topic.SystemTenant
+	validScope := (system && p.Principal == "" && p.BrokerPrincipal == "" && len(p.ACLs) == 0) ||
+		(!system && p.BrokerPrincipal != "" && len(p.ACLs) == 6)
+	if (mode != "plan" && mode != "apply" && mode != "verify") || (p.DurabilityProfile != "kafka-min-isr" && p.DurabilityProfile != "redpanda-raft") || !ValidClusterID(p.ClusterID) || !validScope || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 {
 		return r, ErrInput
 	}
 	var missing []Topic
@@ -373,6 +377,9 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile s
 }
 
 func missingACLs(ctx context.Context, api Admin, p Plan) ([]kafka.ACLEntry, error) {
+	if p.Tenant == topic.SystemTenant {
+		return nil, nil
+	}
 	r, err := api.DescribeACLs(ctx, &kafka.DescribeACLsRequest{Filter: kafka.ACLFilter{ResourceTypeFilter: kafka.ResourceTypeAny, ResourcePatternTypeFilter: kafka.PatternTypeAny, PrincipalFilter: p.BrokerPrincipal, Operation: kafka.ACLOperationTypeAny, PermissionType: kafka.ACLPermissionTypeAny}})
 	if err != nil {
 		return nil, brokerCause{err}

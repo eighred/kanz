@@ -81,6 +81,7 @@ func run(parent context.Context, args []string) (provision.Receipt, error) {
 	mode := fs.String("mode", "plan", "plan, verify or apply")
 	manifest := fs.String("manifest", "", "pinned read-only topic manifest")
 	digest := fs.String("manifest-sha256", "", "exact manifest SHA256")
+	system := fs.Bool("system-bootstrap", false, "provision only canonical system topics")
 	tenant := fs.String("tenant", "", "one non-system tenant")
 	principal := fs.String("principal", "", "existing tenant workload principal")
 	encoding := fs.String("principal-encoding", "spiffe-uri", "explicit broker principal encoding")
@@ -109,11 +110,18 @@ func run(parent context.Context, args []string) (provision.Receipt, error) {
 	if err != nil {
 		return empty, err
 	}
-	p, err := provision.NewPlan(raw, *digest, *tenant, *principal, *clusterID)
-	if err != nil {
-		return empty, err
+	var p provision.Plan
+	if *system {
+		if *tenant != "" || *principal != "" || *encoding != "spiffe-uri" {
+			return empty, provision.ErrInput
+		}
+		p, err = provision.NewSystemPlan(raw, *digest, *clusterID)
+	} else {
+		p, err = provision.NewPlan(raw, *digest, *tenant, *principal, *clusterID)
+		if err == nil {
+			p, err = provision.WithPrincipalEncoding(p, *encoding, *peer)
+		}
 	}
-	p, err = provision.WithPrincipalEncoding(p, *encoding, *peer)
 	if err != nil {
 		return empty, err
 	}
