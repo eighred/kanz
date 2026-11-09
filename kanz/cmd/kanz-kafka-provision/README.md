@@ -283,3 +283,21 @@ A separate commit presents a conflicting retention expectation and must
 fail the sync with a zero-write receipt. A final verification commit checks
 the original topic settings. This qualifies the controller path in a
 disposable estate and records revision, phase and Job UID for each sync.
+
+### Pinned activation and rollback qualification
+
+After the initial hook proof, the fixture writes an acknowledged synthetic
+record into the unprefixed order topic. It activates a distinct Git revision
+with a changed hook execution budget, verifies all system topic settings,
+and writes a second acknowledged record. It then syncs back to the exact
+initial Git commit. Both revisions use the same source-bound native image
+and topic manifest. The rollback must verify all topic settings with zero
+topic and ACL writes and read both retained records from the same broker
+cluster. At each completed sync the fixture inventories the Application and
+system writer Jobs and requires exactly one owner. Each operation must use
+a fresh Job UID.
+
+This rehearses a Git revision rollback between compatible native hook
+configurations in a disposable estate. Retiring the legacy JVM caller still
+requires qualification of the transition from the legacy owner and the
+estate-specific fallback.
