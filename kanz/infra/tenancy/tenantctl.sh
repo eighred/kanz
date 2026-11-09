@@ -614,17 +614,77 @@ offboard_db() {
 # (api-gateway loads it via API_GATEWAY_QUOTAS_FILE).
 QUOTA_CM=${QUOTA_CM:-api-gateway-quotas}
 SVC_NS=${SVC_NS:-kanz-services}
-read_quotas() { kubectl -n "${SVC_NS}" get cm "${QUOTA_CM}" -o jsonpath='{.data.quotas\.json}' 2>/dev/null || echo '{}'; }
-write_quotas() { kubectl -n "${SVC_NS}" create cm "${QUOTA_CM}" --from-file=quotas.json=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -; }
+read_quotas() {
+  # Only a successful --ignore-not-found read may represent absence. Keep the
+  # complete object: resourceVersion fences replacement and unrelated data and
+  # metadata must survive. An existing but malformed map is never an empty map.
+  local snapshot
+  snapshot="$(kubectl --request-timeout=10s -n "${SVC_NS}" get cm "${QUOTA_CM}" --ignore-not-found -o json)" || return 1
+  if [ -z "${snapshot}" ]; then
+    printf 'null\n'
+    return 0
+  fi
+  jq -cse --arg name "${QUOTA_CM}" --arg ns "${SVC_NS}" '
+    if length == 1 and (.[0] |
+      .apiVersion == "v1" and .kind == "ConfigMap" and
+      .metadata.name == $name and .metadata.namespace == $ns and
+      (.metadata.uid | type == "string" and length > 0) and
+      (.metadata.resourceVersion | type == "string" and length > 0) and
+      (.data["quotas.json"] | fromjson | type == "object"))
+    then .[0] else error("invalid quota ConfigMap") end
+  ' <<<"${snapshot}"
+}
+
+write_quotas() {
+  local verb="$1" result
+  # Never apply or force-replace: both can overwrite an unseen tenant update.
+  # Only a definitive conflict permits a fresh read/recompute. A timeout may
+  # have committed, so return failure for explicit operator reconciliation.
+  if result="$(kubectl --request-timeout=10s -n "${SVC_NS}" "${verb}" -f - 2>&1)"; then
+    return 0
+  fi
+  case "${verb}:${result}" in
+    replace:*'Error from server (Conflict):'*|create:*'Error from server (AlreadyExists):'*) return 75 ;;
+  esac
+  echo 'FAILED: quota write not confirmed; inspect the ConfigMap before rerunning' >&2
+  return 1
+}
+
+update_quota() {
+  local operation="$1" budget="${2:-null}" attempt snapshot updated verb status
+  for attempt in 1 2 3 4 5; do
+    snapshot="$(read_quotas)" || { echo 'FAILED: quota read or document validation; update refused' >&2; return 1; }
+    verb=replace
+    if [ "${snapshot}" = null ]; then
+      # Offboarding an absent quota map has nothing to delete.
+      [ "${operation}" != remove ] || return 0
+      verb=create
+      snapshot="$(jq -cn --arg name "${QUOTA_CM}" --arg ns "${SVC_NS}" \
+        '{apiVersion:"v1",kind:"ConfigMap",metadata:{name:$name,namespace:$ns},data:{"quotas.json":"{}"}}')" || return 1
+    fi
+    updated="$(jq -ce --arg operation "${operation}" --arg t "${TENANT}" --argjson budget "${budget}" '
+      .data["quotas.json"] |= (fromjson |
+        if $operation == "remove" then del(.[$t])
+        else .[$t] = $budget end | tojson)
+    ' <<<"${snapshot}")" || return 1
+    if write_quotas "${verb}" <<<"${updated}"; then return 0; else status=$?; fi
+    [ "${status}" -eq 75 ] || return "${status}"
+    # Recompute from the winning version; never resubmit the stale snapshot.
+    if [ "${attempt}" -lt 5 ]; then sleep 0.1; fi
+  done
+  echo 'FAILED: quota update exhausted 5 concurrent-write conflicts' >&2
+  return 1
+}
 onboard_quota() {
+  local budget
   log quota "budget ${TENANT}: ${RATE_PER_SEC}/s burst ${BURST} maxInFlight ${MAX_IN_FLIGHT}"
-  read_quotas | jq --arg t "${TENANT}" \
-    --argjson r "${RATE_PER_SEC}" --argjson b "${BURST}" --argjson m "${MAX_IN_FLIGHT}" \
-    '.[$t] = {rate_per_sec:$r, burst:$b, max_in_flight:$m}' | write_quotas
+  budget="$(jq -cn --argjson r "${RATE_PER_SEC}" --argjson b "${BURST}" --argjson m "${MAX_IN_FLIGHT}" \
+    '{rate_per_sec:$r, burst:$b, max_in_flight:$m}')" || return 1
+  update_quota upsert "${budget}"
 }
 offboard_quota() {
   log quota "removing budget ${TENANT}"
-  read_quotas | jq --arg t "${TENANT}" 'del(.[$t])' | write_quotas
+  update_quota remove
 }
 
 case "${1:-}" in
