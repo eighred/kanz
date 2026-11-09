@@ -459,7 +459,7 @@ def main():
             return command(['kubectl','--kubeconfig',str(scratch/'kubeconfig'),'--context','kind-'+name,*args],data,timeout)
         def apply(docs):
             return k('apply','-f','-',data=yaml.safe_dump_all(docs))
-        def execute(d, failed=False, case=None, *, observe_only=False):
+        def execute(d, failed=False, case=None, *, observe_only=False, expected_uid=None):
             ns=d['metadata']['namespace']; jobname=d['metadata']['name']
             diagnostic={'case':case or jobname,'jobState':'UNKNOWN','custody':False,'collection':'job','probe':{'state':'UNKNOWN'}}
             evidence['diagnostics'].append(diagnostic)
@@ -468,7 +468,7 @@ def main():
                 remaining=deadline-time.monotonic()
                 if remaining<=0: raise TimeoutError('job observation expired')
                 return k(*args,data=data,timeout=min(300,remaining))
-            uid=None
+            uid=expected_uid
             try:
                 if not observe_only:
                     observe('apply','-f','-',data=yaml.safe_dump_all([d]))
@@ -626,6 +626,8 @@ def main():
             variants['system-rollback'] = variants['system-create']
             revisions = argo_bootstrap.install(k, apply, command, scratch, variants)
             evidence['argoSyncs'] = []
+            evidence['argoHookDiagnostics'] = []
+            prior_uid = None
             for case in ACTIVATION_CASES:
                 evidence['stage'] = case
                 if case in HISTORY_CASES:
@@ -635,10 +637,16 @@ def main():
                     continue
                 conflict = case == 'system-mismatch'
                 hook = variants[case][2]
-                sync = argo_bootstrap.sync(k, case, revisions[case], system_bootstrap.JOB_NAME)
-                result = json.loads(execute(hook, failed=conflict, case=case, observe_only=True))
+                diagnostic = {'case': case}
+                evidence['argoHookDiagnostics'].append(diagnostic)
+                sync = argo_bootstrap.sync(k, case, revisions[case], system_bootstrap.JOB_NAME, diagnostic)
+                uid = argo_bootstrap.observe_hook(k, hook, prior_uid, diagnostic)
+                if not diagnostic['resultMatches']:
+                    raise ValueError('Argo PostSync result differs')
+                prior_uid = uid
+                result = json.loads(execute(hook, failed=conflict, case=case, observe_only=True, expected_uid=uid))
                 sync['owner'] = argo_bootstrap.observe_owner(k, system_bootstrap.JOB_NAME)
-                sync['jobUID'] = k('-n','kanz-messaging','get','job',system_bootstrap.JOB_NAME,'-o','jsonpath={.metadata.uid}')
+                sync['jobUID'] = uid
                 if result.get('version') != source or (conflict and
                     (result.get('error') != 'resource-conflict' or result.get('failure_code') != 'config-retention')) or (not conflict and result.get('error')):
                     raise ValueError('system hook outcome differs')

@@ -116,7 +116,7 @@ def install(k, apply, command, scratch, variants):
     return revisions
 
 
-def sync(k, case, revision, hook_name):
+def sync(k, case, revision, hook_name, observed):
     token = [{"name": "fixture-case", "value": case}]
     # Let the controller compare the new target before requesting the sync.
     # This separates a target change from the operation and lets us distinguish
@@ -148,19 +148,46 @@ def sync(k, case, revision, hook_name):
             result = state.get("syncResult", {})
             expected = "Failed" if case == "system-mismatch" else "Succeeded"
             hooks = [x for x in result.get("resources", []) if x.get("kind") == "Job" and x.get("name") == hook_name]
-            if (state.get("phase") != expected or result.get("revision") != revision or len(hooks) != 1 or
-                    hooks[0].get("namespace") != "kanz-messaging" or hooks[0].get("syncPhase") != "PostSync" or
-                    hooks[0].get("hookPhase") != expected):
-                phases = {"Succeeded", "Failed", "Error", "Running", "Terminating"}
-                phase = state.get("phase")
-                hook_phases = [h.get("hookPhase") if h.get("hookPhase") in phases else "UNKNOWN" for h in hooks[:4]]
-                print(json.dumps({"case": case, "phase": phase if phase in phases else "UNKNOWN",
-                                  "revisionMatches": result.get("revision") == revision,
-                                  "hookCount": len(hooks), "hookPhases": hook_phases}), flush=True)
-                raise ValueError("Argo PostSync result differs")
+            phases = {"Succeeded", "Failed", "Error", "Running", "Terminating"}
+            phase = state.get("phase")
+            hook_phases = [h.get("hookPhase") if h.get("hookPhase") in phases else "UNKNOWN" for h in hooks[:4]]
+            matches = (state.get("phase") == expected and result.get("revision") == revision and len(hooks) == 1 and
+                       hooks[0].get("namespace") == "kanz-messaging" and hooks[0].get("syncPhase") == "PostSync" and
+                       hooks[0].get("hookPhase") == expected)
+            observed.update(phase=phase if phase in phases else "UNKNOWN", hookPhases=hook_phases,
+                            revisionMatches=result.get("revision") == revision, resultMatches=matches)
             return {"case": case, "revision": revision, "phase": expected, "hookPhase": expected}
         time.sleep(1)
     raise TimeoutError("Argo sync observation expired")
+
+
+def observe_hook(k, desired, prior_uid, diagnostic):
+    namespace = desired["metadata"]["namespace"]
+    name = desired["metadata"]["name"]
+    job = json.loads(k("-n", namespace, "get", "job", name, "-o", "json", timeout=10))
+    uid = job["metadata"]["uid"]
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", uid):
+        raise ValueError("invalid live hook UID")
+    live = job["spec"]["template"]["spec"]
+    target = desired["spec"]["template"]["spec"]
+    actual_args = live["containers"][0].get("args", [])
+    expected_args = target["containers"][0]["args"]
+    diagnostic.update(jobUID=uid, freshJob=uid != prior_uid, argsMatch=actual_args == expected_args)
+    prefix = "-manifest-sha256="
+    digests = [a.removeprefix(prefix) for a in actual_args if a.startswith(prefix)]
+    diagnostic["jobDigest"] = digests[0] if len(digests) == 1 and re.fullmatch("[0-9a-f]{64}", digests[0]) else "UNKNOWN"
+    diagnostic["expectedDigest"] = next(a.removeprefix(prefix) for a in expected_args if a.startswith(prefix))
+    configs = [v.get("configMap", {}).get("name", "") for v in live["volumes"] if v["name"] == "table"]
+    if len(configs) != 1 or not re.fullmatch("kafka-system-topics-[0-9a-f]{64}", configs[0]):
+        raise ValueError("live hook table source differs")
+    config = json.loads(k("-n", namespace, "get", "configmap", configs[0], "-o", "json", timeout=10))
+    digest = hashlib.sha256(config["data"]["topics-job.yaml"].encode("utf-8")).hexdigest()
+    diagnostic.update(configDigest=digest, immutableTable=config.get("immutable") is True)
+    if (not diagnostic["freshJob"] or not diagnostic["argsMatch"] or not diagnostic["immutableTable"]
+            or digest != diagnostic["jobDigest"] or digest != diagnostic["expectedDigest"]
+            or configs[0] != "kafka-system-topics-" + digest):
+        raise ValueError("live hook identity or manifest differs")
+    return uid
 
 
 def observe_owner(k, hook_name):
