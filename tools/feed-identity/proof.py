@@ -6,14 +6,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tempfile
 import uuid
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'tools/gateway-policy-proof'))
-import bounded_process
 NODE = 'kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed'
 PINS = {
  'busybox:1.36': 'busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662',
@@ -29,40 +26,6 @@ def command(args, data=None, timeout=300):
     if result.returncode:
         raise RuntimeError(f'fixture command failed: {args[0]} {args[1]} exit={result.returncode}')
     return result.stdout.strip()
-
-
-BUILD_FAILURE_SIGNALS = (
-    (b"toomanyrequests", "registry rate limit"),
-    (b"429 too many requests", "registry rate limit"),
-    (b"no space left on device", "runner disk exhausted"),
-    (b"401 unauthorized", "registry authentication refused"),
-    (b"403 forbidden", "registry access refused"),
-    (b"failed to fetch anonymous token", "anonymous registry token failed"),
-    (b"failed to fetch oauth token", "registry token failed"),
-    (b"not found", "missing build input"),
-    (b"failed to load cache key", "build input resolution failed"),
-    (b"no match for platform", "missing platform"),
-    (b"failed to resolve source metadata", "image metadata resolution failed"),
-    (b"docker.io/docker/dockerfile", "Docker Hub frontend"),
-    (b"ghcr.io/eighred/base/golang", "mirrored Go base"),
-    (b"ghcr.io/eighred/base/distroless", "mirrored runtime base"),
-    (b"tls handshake timeout", "TLS handshake timeout"),
-    (b"unexpected eof", "transport EOF"),
-    (b"i/o timeout", "network timeout"),
-    (b"checksum mismatch", "checksum mismatch"),
-)
-
-
-def build_image(path, source, image):
-    try:
-        bounded_process.run(
-            ['docker', 'build', '--progress=plain', '--build-arg', 'VERSION='+source, '-f', path, '-t', image, '.'],
-            cwd=ROOT, env=dict(os.environ), timeout=1200, stderr_limit=4 << 20,
-            failure_signals=BUILD_FAILURE_SIGNALS)
-    except RuntimeError as error:
-        # The bounded runner emits only fixed categories, never build output.
-        print(f"Fixture build {path}: {error}", flush=True)
-        raise
 
 
 def manifests(relative):

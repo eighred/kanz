@@ -1,11 +1,11 @@
-"""Byte-bounded CLI capture with optional fixed failure categories."""
+"""Byte-bounded CLI capture; stderr is counted but never retained or emitted."""
 import subprocess
 import threading
 import os
 import signal
 
 
-def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_limit=65536, strip=True, failure_signals=()):
+def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_limit=65536, strip=True):
     input_bytes = None if data is None else data.encode()
     if input_bytes is not None and len(input_bytes) > 4 << 20:
         raise ValueError("command input exceeds bound")
@@ -14,8 +14,6 @@ def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_
                                start_new_session=os.name == "posix")
     failed = threading.Event()
     output = bytearray()
-    signals = set()
-    overlap = max((len(marker) - 1 for marker, _ in failure_signals), default=0)
 
     def stop():
         failed.set()
@@ -29,17 +27,12 @@ def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_
 
     def read(pipe, limit, retain):
         size = 0
-        tail = b""
         try:
             while chunk := pipe.read(65536):
                 size += len(chunk)
                 if size > limit:
                     stop()
                     return
-                if failure_signals:
-                    window = tail + chunk.lower()
-                    signals.update(category for marker, category in failure_signals if marker in window)
-                    tail = window[-overlap:] if overlap else b""
                 if retain:
                     output.extend(chunk)
         except OSError:
@@ -74,8 +67,7 @@ def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_
         for thread in readers:
             thread.join(timeout=5)
         if failed.is_set() or any(thread.is_alive() for thread in readers) or status:
-            detail = " (" + ", ".join(sorted(signals)) + ")" if signals else ""
-            raise RuntimeError("bounded command failed or exceeded output limits" + detail)
+            raise RuntimeError("bounded command failed or exceeded output limits")
         decoded = output.decode("utf-8")
         return decoded.strip() if strip else decoded
     finally:
