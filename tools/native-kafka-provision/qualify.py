@@ -15,12 +15,13 @@ import image_custody
 import runtime_diagnostic
 import lifecycle
 import system_bootstrap
+import argo_bootstrap
 
 sys.path.insert(0, str(topology.ROOT / 'tools/gateway-policy-proof'))
 import bounded_process
 
 ROOT = topology.ROOT
-SYSTEM_CASES = ('system-create', 'system-repeat', 'system-mismatch', 'system-verify')
+SYSTEM_CASES = argo_bootstrap.CASES
 REFUSAL_CASES = ('wrong-cluster', 'system-mismatch')
 CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-apply',
          'wrong-cluster', 'tenant-a', 'tenant-b', 'compute-a', 'ungranted', 'partial',
@@ -358,6 +359,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
     digest,count,partitions=canonical_inventory(manifest)
     lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'), count)
+    argo_bootstrap.validate(value.get('argoSyncs'))
     if value.get('fixtureCapacity')!=fixture_capacity(partitions, canonical_inventory(manifest, True)[2]): raise ValueError('fixture capacity differs')
     before,after=value.get('brokerPodsBefore'),value.get('brokerPodsAfter')
     if not isinstance(before,dict) or set(before)!=set(topology.BROKERS) or after!=before or len(set(before.values()))!=3:
@@ -454,7 +456,7 @@ def main():
             return command(['kubectl','--kubeconfig',str(scratch/'kubeconfig'),'--context','kind-'+name,*args],data,timeout)
         def apply(docs):
             return k('apply','-f','-',data=yaml.safe_dump_all(docs))
-        def execute(d, failed=False, case=None):
+        def execute(d, failed=False, case=None, *, observe_only=False):
             ns=d['metadata']['namespace']; jobname=d['metadata']['name']
             diagnostic={'case':case or jobname,'jobState':'UNKNOWN','custody':False,'collection':'job','probe':{'state':'UNKNOWN'}}
             evidence['diagnostics'].append(diagnostic)
@@ -465,7 +467,8 @@ def main():
                 return k(*args,data=data,timeout=min(300,remaining))
             uid=None
             try:
-                observe('apply','-f','-',data=yaml.safe_dump_all([d]))
+                if not observe_only:
+                    observe('apply','-f','-',data=yaml.safe_dump_all([d]))
                 while time.monotonic()<deadline:
                     state=json.loads(observe('-n',ns,'get','job',jobname,'-o','json'))
                     uid=job_custody(state,d,uid); diagnostic['custody']=True
@@ -600,32 +603,32 @@ def main():
                 apply(topology.policies(connected))
                 observation=parse_probe(execute(job(case,'kanz-messaging','kafka-provisioner',images['probe'],mode=case,cluster=cluster)),case,source,cluster)
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
-            prior_uid = None
+            evidence['stage'] = 'argo-install'
+            variants = {}
             for case in SYSTEM_CASES:
-                evidence['stage'] = case
-                conflict = case == 'system-mismatch'
-                manifest = mismatched_system_manifest(raw) if conflict else raw
+                manifest = mismatched_system_manifest(raw) if case == 'system-mismatch' else raw
                 account, config, hook = system_bootstrap.render(
                     manifest, 'ghcr.io/eighred/kanz-kafka-provision@'+evidence['adminImage'],
                     'native-redpanda-0.kanz-messaging.svc:9094', topology.BROKER_ID, cluster, 'redpanda-raft')
-                apply([account, config])
                 container = hook['spec']['template']['spec']['containers'][0]
                 container.update(image=images['admin'], imagePullPolicy='IfNotPresent')
                 if case == 'system-verify':
                     container['args'][1] = '-mode=verify'
-                # Reproduce the named Argo hook's BeforeHookCreation lifecycle
-                # on the owned cluster; broker state and immutable table stay.
-                if prior_uid is not None:
-                    k('-n','kanz-messaging','delete','job',system_bootstrap.JOB_NAME,'--wait=true','--timeout=30s')
-                result = json.loads(execute(hook, failed=conflict, case=case))
-                uid = k('-n','kanz-messaging','get','job',system_bootstrap.JOB_NAME,'-o','jsonpath={.metadata.uid}')
-                if not uid or uid == prior_uid:
-                    raise ValueError('repeat hook did not create a fresh job')
-                prior_uid = uid
+                variants[case] = [account, config, hook]
+            revisions = argo_bootstrap.install(k, apply, command, scratch, variants)
+            evidence['argoSyncs'] = []
+            for case in SYSTEM_CASES:
+                evidence['stage'] = case
+                conflict = case == 'system-mismatch'
+                hook = variants[case][2]
+                sync = argo_bootstrap.sync(k, case, revisions[case], system_bootstrap.JOB_NAME)
+                result = json.loads(execute(hook, failed=conflict, case=case, observe_only=True))
+                sync['jobUID'] = k('-n','kanz-messaging','get','job',system_bootstrap.JOB_NAME,'-o','jsonpath={.metadata.uid}')
                 if result.get('version') != source or (conflict and
                     (result.get('error') != 'resource-conflict' or result.get('failure_code') != 'config-retention')) or (not conflict and result.get('error')):
                     raise ValueError('system hook outcome differs')
                 validate_case_receipt(result['receipt'], case, cluster, raw)
+                evidence['argoSyncs'].append(sync)
                 evidence['cases'].append({'case':case,'passed':True,'receipt':result['receipt']})
             evidence['brokerPodsAfter']={}
             for broker in topology.BROKERS:

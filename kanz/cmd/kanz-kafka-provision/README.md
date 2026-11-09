@@ -270,3 +270,16 @@ the same name to exercise the hook lifecycle, changes a retention expectation
 to exercise refusal, and verifies the original configuration afterward.
 This checks the real broker and Job behavior. Argo controller reconciliation
 and estate activation require separate verification.
+
+### Argo controller qualification
+
+The disposable native broker workflow installs digest-pinned Argo CD Core
+in the same owned kind estate as the three Redpanda brokers and SPIRE. A
+cluster-local, read-only Git server serves fixture commits containing the
+rendered PostSync hook. The harness submits full Application sync operations
+through Kubernetes and waits for the controller's operation result and
+PostSync phase. The same commit is synced twice and the Job UID must change.
+A separate commit presents a conflicting retention expectation and must
+fail the sync with a zero-write receipt. A final verification commit checks
+the original topic settings. This qualifies the controller path in a
+disposable estate and records revision, phase and Job UID for each sync.

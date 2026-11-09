@@ -191,6 +191,12 @@ class TopologyTest(unittest.TestCase):
                'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30,'segmentAllocationBytes':topology.FALLOC_BYTES} for b in topology.BROKERS]}
         value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2], qualify.canonical_inventory(manifest, True)[2])
         value['lifecycle']=lifecycle_evidence()
+        value['argoSyncs'] = [
+            {'case': case, 'revision': digit*40, 'phase': phase, 'hookPhase': phase,
+             'jobUID': str(i)+'2345678-1234-1234-1234-123456789abc'}
+            for i,(case,digit,phase) in enumerate(zip(qualify.SYSTEM_CASES, '1123',
+                ('Succeeded','Succeeded','Failed','Succeeded')))
+        ]
         value['brokerPodsBefore']={b:str(i)+'2345678-1234-1234-1234-123456789abc' for i,b in enumerate(topology.BROKERS)}
         value['brokerPodsAfter']=dict(value['brokerPodsBefore'])
         for item in value['cases']:
@@ -221,10 +227,12 @@ class TopologyTest(unittest.TestCase):
                 'probe':{'version':'a'*40,'mode':case,'expected_identity':observation['identity'],'phase':'complete','category':'ok'} if probe else {'state':'UNKNOWN'},
                 'image':{'verified':True,'dockerIdentityType':'index','podIdentityType':'manifest','dockerIdentity':value['probeImage' if probe else 'adminImage'],'podIdentity':'sha256:'+'e'*64,'config':'sha256:'+'f'*64,'platformManifest':'sha256:'+'e'*64,'contentCount':3}})
         qualify.validate_report(value,'a'*40,'b'*40,'1','1',manifest)
-        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle'):
+        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle','argoSyncs'):
             bad=copy.deepcopy(value);bad.pop(key)
             with self.assertRaises(ValueError):qualify.validate_report(bad,'a'*40,'b'*40,'1','1',manifest)
-        for mutate in (lambda x:x.pop('diagnostics'),lambda x:x['diagnostics'].pop(),lambda x:x['diagnostics'].reverse(),
+        for mutate in (lambda x:x['argoSyncs'][1].update(jobUID=x['argoSyncs'][0]['jobUID']),
+                       lambda x:x['argoSyncs'][2].update(hookPhase='Succeeded'),
+                       lambda x:x.pop('diagnostics'),lambda x:x['diagnostics'].pop(),lambda x:x['diagnostics'].reverse(),
                        lambda x:x['diagnostics'][0].update(imageVerified=False),lambda x:x['diagnostics'][0].update(collection='image'),
                        lambda x:x['diagnostics'][0]['container'].update(imageBound=False),lambda x:x['diagnostics'][0]['container'].update(exitCode=1),
                        lambda x:x['diagnostics'][0]['image'].update(dockerIdentity='sha256:'+'1'*64),lambda x:x['diagnostics'][0]['image'].update(contentCount=7),
