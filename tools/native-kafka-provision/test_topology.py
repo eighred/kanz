@@ -194,10 +194,18 @@ class TopologyTest(unittest.TestCase):
         value['argoSyncs'] = [
             {'case': case, 'revision': digit*40, 'phase': phase, 'hookPhase': phase,
              'jobUID': str(i)+'2345678-1234-1234-1234-123456789abc',
+             'jobName': 'kafka-system-bootstrap-'+digit*7+'-postsync-'+str(i),
              'owner': {'application': 'system-topics', 'hook': 'kafka-system-bootstrap'}}
             for i,(case,digit,phase) in enumerate(zip(qualify.SYSTEM_CASES, '112341',
                 ('Succeeded','Succeeded','Failed','Succeeded','Succeeded','Succeeded')))
         ]
+        value['argoHookDiagnostics'] = []
+        for sync in value['argoSyncs']:
+            raw = qualify.mismatched_system_manifest(manifest) if sync['case'] == 'system-mismatch' else manifest
+            sha = qualify.canonical_count(raw)[0]
+            value['argoHookDiagnostics'].append(dict(case=sync['case'], jobUID=sync['jobUID'],
+                freshJob=True, argsMatch=True, mountMatches=True, immutableTable=True,
+                revisionMatches=True, resultMatches=True, expectedDigest=sha, jobDigest=sha, configDigest=sha))
         value['brokerPodsBefore']={b:str(i)+'2345678-1234-1234-1234-123456789abc' for i,b in enumerate(topology.BROKERS)}
         value['brokerPodsAfter']=dict(value['brokerPodsBefore'])
         for item in value['cases']:
@@ -231,7 +239,9 @@ class TopologyTest(unittest.TestCase):
         for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle','argoSyncs'):
             bad=copy.deepcopy(value);bad.pop(key)
             with self.assertRaises(ValueError):qualify.validate_report(bad,'a'*40,'b'*40,'1','1',manifest)
-        for mutate in (lambda x:x['argoSyncs'][1].update(jobUID=x['argoSyncs'][0]['jobUID']),
+        for mutate in (lambda x:x['argoHookDiagnostics'][2].update(configDigest='0'*64),
+                       lambda x:x['argoHookDiagnostics'][2].update(freshJob=False),
+                       lambda x:x['argoSyncs'][1].update(jobUID=x['argoSyncs'][0]['jobUID']),
                        lambda x:x['argoSyncs'][2].update(hookPhase='Succeeded'),
                        lambda x:x['argoSyncs'][-1].update(revision='9'*40),
                        lambda x:x['argoSyncs'][-1]['owner'].update(hook='kafka-topics'),

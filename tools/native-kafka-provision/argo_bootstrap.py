@@ -7,6 +7,8 @@ import time
 
 import yaml
 
+import system_bootstrap
+
 VERSION = "v3.6.1"
 CORE_SHA = "0b38189d6e1fd76ef5c3db10355026c48a02020d82bf21a1a1b5ab16dffe4f3c"
 IMAGES = {
@@ -34,7 +36,7 @@ def git_source(command, scratch, variants):
             revisions[case] = revisions["system-create"]
             continue
         jobs = [obj for obj in objects if obj["kind"] == "Job"]
-        if len(jobs) != 1 or jobs[0]["metadata"]["name"] != "kafka-system-bootstrap":
+        if len(jobs) != 1 or jobs[0]["metadata"].get("generateName") != system_bootstrap.JOB_NAME + "-" or jobs[0]["metadata"].get("name"):
             raise ValueError("Git revision must contain exactly one system hook")
         (work / "bootstrap.yaml").write_text(yaml.safe_dump_all(objects), encoding="utf-8")
         git("add", "bootstrap.yaml")
@@ -116,7 +118,11 @@ def install(k, apply, command, scratch, variants):
     return revisions
 
 
-def sync(k, case, revision, hook_name, observed):
+def hook_name_matches(name, revision):
+    return bool(re.fullmatch(system_bootstrap.JOB_NAME + "-" + revision[:7] + r"-postsync-[0-9]+", name))
+
+
+def sync(k, case, revision, observed):
     token = [{"name": "fixture-case", "value": case}]
     # Let the controller compare the new target before requesting the sync.
     # This separates a target change from the operation and lets us distinguish
@@ -147,7 +153,7 @@ def sync(k, case, revision, hook_name, observed):
         if state.get("operation", {}).get("info") == token and state.get("finishedAt") and not app.get("operation"):
             result = state.get("syncResult", {})
             expected = "Failed" if case == "system-mismatch" else "Succeeded"
-            hooks = [x for x in result.get("resources", []) if x.get("kind") == "Job" and x.get("name") == hook_name]
+            hooks = [x for x in result.get("resources", []) if x.get("kind") == "Job" and hook_name_matches(x.get("name", ""), revision)]
             phases = {"Succeeded", "Failed", "Error", "Running", "Terminating"}
             phase = state.get("phase")
             hook_phases = [h.get("hookPhase") if h.get("hookPhase") in phases else "UNKNOWN" for h in hooks[:4]]
@@ -156,7 +162,10 @@ def sync(k, case, revision, hook_name, observed):
                        hooks[0].get("hookPhase") == expected)
             observed.update(phase=phase if phase in phases else "UNKNOWN", hookPhases=hook_phases,
                             revisionMatches=result.get("revision") == revision, resultMatches=matches)
-            return {"case": case, "revision": revision, "phase": expected, "hookPhase": expected}
+            if len(hooks) != 1:
+                raise ValueError("Argo did not report one revision-bound system Job")
+            return {"case": case, "revision": revision, "phase": expected, "hookPhase": expected,
+                    "jobName": hooks[0]["name"]}
         time.sleep(1)
     raise TimeoutError("Argo sync observation expired")
 
@@ -172,7 +181,8 @@ def observe_hook(k, desired, prior_uid, diagnostic):
     target = desired["spec"]["template"]["spec"]
     actual_args = live["containers"][0].get("args", [])
     expected_args = target["containers"][0]["args"]
-    diagnostic.update(jobUID=uid, freshJob=uid != prior_uid, argsMatch=actual_args == expected_args)
+    diagnostic.update(jobUID=uid, freshJob=uid != prior_uid, argsMatch=actual_args == expected_args,
+                      mountMatches=live["containers"][0].get("volumeMounts", []) == target["containers"][0]["volumeMounts"])
     prefix = "-manifest-sha256="
     digests = [a.removeprefix(prefix) for a in actual_args if a.startswith(prefix)]
     diagnostic["jobDigest"] = digests[0] if len(digests) == 1 and re.fullmatch("[0-9a-f]{64}", digests[0]) else "UNKNOWN"
@@ -183,7 +193,7 @@ def observe_hook(k, desired, prior_uid, diagnostic):
     config = json.loads(k("-n", namespace, "get", "configmap", configs[0], "-o", "json", timeout=10))
     digest = hashlib.sha256(config["data"]["topics-job.yaml"].encode("utf-8")).hexdigest()
     diagnostic.update(configDigest=digest, immutableTable=config.get("immutable") is True)
-    if (not diagnostic["freshJob"] or not diagnostic["argsMatch"] or not diagnostic["immutableTable"]
+    if (not diagnostic["freshJob"] or not diagnostic["argsMatch"] or not diagnostic["mountMatches"] or not diagnostic["immutableTable"]
             or digest != diagnostic["jobDigest"] or digest != diagnostic["expectedDigest"]
             or configs[0] != "kafka-system-topics-" + digest):
         raise ValueError("live hook identity or manifest differs")
@@ -195,18 +205,26 @@ def observe_owner(k, hook_name):
     owners = [app["metadata"]["name"] for app in apps
               if app["spec"]["destination"].get("namespace") == "kanz-messaging"]
     jobs = json.loads(k("-n", "kanz-messaging", "get", "jobs", "-o", "json", timeout=10))["items"]
-    hooks = []
+    found = False
     for job in jobs:
         name = job["metadata"]["name"]
         containers = job["spec"]["template"]["spec"]["containers"]
-        if name in (hook_name, "kafka-topics") or any(
-            "-system-bootstrap" in c.get("args", []) or "/scripts/topics.sh" in c.get("command", [])
-            for c in containers
-        ):
-            hooks.append(name)
-    if owners != [APP] or hooks != [hook_name]:
+        if name == hook_name:
+            found = True
+            continue
+        system_writer = (name in ("kafka-topics", system_bootstrap.JOB_NAME)
+                         or name.startswith(system_bootstrap.JOB_NAME + "-")
+                         or any("-system-bootstrap" in c.get("args", []) or "/scripts/topics.sh" in c.get("command", [])
+                                for c in containers))
+        if not system_writer:
+            continue
+        terminal = any(c.get("status") == "True" and c.get("type") in ("Complete", "Failed")
+                       for c in job.get("status", {}).get("conditions", []))
+        if not name.startswith(system_bootstrap.JOB_NAME + "-") or not terminal or job.get("status", {}).get("active", 0):
+            raise ValueError("competing system topic writer")
+    if owners != [APP] or not found:
         raise ValueError("system topic owner inventory differs")
-    return {"application": APP, "hook": hook_name}
+    return {"application": APP, "hook": system_bootstrap.JOB_NAME}
 
 
 def validate(observations):
@@ -214,7 +232,7 @@ def validate(observations):
         raise ValueError("Argo sync inventory differs")
     for row in observations:
         expected = "Failed" if row["case"] == "system-mismatch" else "Succeeded"
-        if (set(row) != {"case", "revision", "phase", "hookPhase", "jobUID", "owner"} or
+        if (set(row) != {"case", "revision", "phase", "hookPhase", "jobUID", "jobName", "owner"} or
                 not re.fullmatch("[0-9a-f]{40}", row["revision"]) or
                 not re.fullmatch("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", row["jobUID"]) or
                 row["phase"] != expected or row["hookPhase"] != expected or
@@ -222,5 +240,6 @@ def validate(observations):
             raise ValueError("Argo sync evidence differs")
     revisions = [x["revision"] for x in observations]
     if (revisions[0] != revisions[1] or revisions[0] != revisions[-1] or len(set(revisions)) != 4
-            or len({x["jobUID"] for x in observations}) != len(CASES)):
+            or len({x["jobUID"] for x in observations}) != len(CASES)
+            or len({x["jobName"] for x in observations}) != len(CASES)):
         raise ValueError("Argo revision or Job continuity differs")

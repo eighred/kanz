@@ -37,12 +37,12 @@ def render(raw, image, broker, peer, cluster, profile):
     job = {
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {
-            "name": JOB_NAME, "namespace": NAMESPACE,
+            "generateName": JOB_NAME + "-", "namespace": NAMESPACE,
             "annotations": {"argocd.argoproj.io/hook": "PostSync",
                             "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation"},
         },
         "spec": {
-            "backoffLimit": 0, "activeDeadlineSeconds": 240,
+            "backoffLimit": 0, "activeDeadlineSeconds": 240, "ttlSecondsAfterFinished": 900,
             "template": {"spec": {
                 "serviceAccountName": "kafka-provisioner", "restartPolicy": "Never",
                 "automountServiceAccountToken": False,

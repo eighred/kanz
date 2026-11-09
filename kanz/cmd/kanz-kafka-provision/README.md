@@ -248,7 +248,7 @@ PyYAML. Supply `--image` (published provisioner digest), `--broker` (TLS
 host:port), `--peer` (exact broker SPIFFE ID), `--cluster` (exact observed
 cluster ID), and `--profile` (matching durability profile). The renderer
 uses the tracked system topic table and emits a digest-named immutable
-ConfigMap, the existing provisioner service account, and a named PostSync Job.
+ConfigMap, the existing provisioner service account, and a generated-name PostSync Job.
 
 In the estate's reviewed GitOps source, replace the legacy topics Job with
 the rendered resources in the same application. Exclude the legacy
@@ -260,13 +260,13 @@ system topic administration over the pinned TLS listener.
 
 The hook creates missing system topics and verifies exact configuration,
 partitions and durability. Existing mismatches fail before writes. Resolve
-the drift under a separate reviewed operation, then sync again. Argo's
-BeforeHookCreation policy replaces the Job on the next sync. The next run
+the drift under a separate reviewed operation, then sync again. Argo derives a fresh Job name from the revision and sync operation. Finished
+Jobs expire after 15 minutes. The next run
 checks existing topics and reports zero writes. A failed or lost write
 acknowledgement requires readback before the next explicit sync.
 
-The disposable Redpanda fixture executes the rendered Job, recreates it using
-the same name to exercise the hook lifecycle, changes a retention expectation
+The disposable Redpanda fixture executes the rendered Job, observes the new
+Job on repeat sync, changes a retention expectation
 to exercise refusal, and verifies the original configuration afterward.
 This checks the real broker and Job behavior. Argo controller reconciliation
 and estate activation require separate verification.
@@ -294,8 +294,9 @@ initial Git commit. Both revisions use the same source-bound native image
 and topic manifest. The rollback must verify all topic settings with zero
 topic and ACL writes and read both retained records from the same broker
 cluster. At each completed sync the fixture inventories the Application and
-system writer Jobs and requires exactly one owner. Each operation must use
-a fresh Job UID.
+system writer Jobs and requires exactly one owner. Each operation must use a fresh Job name and UID. The fixture checks
+its arguments, mounted table, and exact immutable ConfigMap digest before
+accepting the Argo outcome. Earlier terminal Jobs are evidence and cannot write.
 
 This rehearses a Git revision rollback between compatible native hook
 configurations in a disposable estate. Retiring the legacy JVM caller still
