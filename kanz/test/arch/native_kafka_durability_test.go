@@ -10,7 +10,7 @@ import (
 func nativeDurabilityBoundary(files map[string]string) bool {
 	for key, anchors := range map[string][]string{
 		"plan":      {`ConfigName: "write.caching", ConfigValue: "false"`, `ConfigName: "min.insync.replicas", ConfigValue: "2"`},
-		"fixture":   {"RequiredAcks: kafka.RequireAll", "nativeQuorum(ctx, client, mode)", `nativeReadContains(ctx, c, topic, "quorum-majority")`, `nativeQuorumMetadata(ctx, client, mode, os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER"))`, "len(seen) == 2 && seen[0] && seen[1]", "len(seen) == 2 && seen[1] && seen[2]"},
+		"fixture":   {"RequiredAcks: kafka.RequireAll", "nativeQuorum(ctx, client, mode)", `nativeQuorumReadContains(ctx, c, topic, "quorum-majority")`, `nativeQuorumMetadata(ctx, client, mode, os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER"))`, "len(seen) == 2 && seen[0] && seen[1]", "len(seen) == 2 && seen[1] && seen[2]"},
 		"qualifier": {"('quorum-minority',())", "('quorum-majority',topology.BROKERS[:2])", "apply(topology.policies(connected))", "-durability-profile=redpanda-raft", "stable_broker(broker,pods.get('items'),evidence['brokerPodsBefore'][broker])", "allocation!=str(topology.FALLOC_BYTES)"},
 		"topology":  {"--unsafe-bypass-fsync=false", "'write_caching_default': 'false'"},
 	} {
@@ -45,7 +45,7 @@ func TestNativeDurabilityQualificationAndMutations(t *testing.T) {
 		{"fixture", "RequiredAcks: kafka.RequireAll", "RequiredAcks: kafka.RequireOne"},
 		{"fixture", "len(seen) == 2 && seen[0] && seen[1]", "len(seen) == 3"},
 		{"fixture", "len(seen) == 2 && seen[1] && seen[2]", "len(seen) >= 1"},
-		{"fixture", `nativeReadContains(ctx, c, topic, "quorum-majority")`, `nativeReadContains(ctx, c, topic, "unrelated")`},
+		{"fixture", `nativeQuorumReadContains(ctx, c, topic, "quorum-majority")`, `nativeQuorumReadContains(ctx, c, topic, "unrelated")`},
 		{"qualifier", "('quorum-minority',())", "('quorum-minority',topology.BROKERS)"},
 		{"qualifier", "apply(topology.policies(connected))", "apply(topology.policies())"},
 		{"qualifier", "stable_broker(broker,pods.get('items'),evidence['brokerPodsBefore'][broker])", "stable_broker(broker,pods.get('items'))"},

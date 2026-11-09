@@ -282,31 +282,11 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 
 func nativeQuorum(ctx context.Context, c *kafka.Client, mode string) error {
 	const topic = "acme.order.order"
-	if mode == "quorum-majority" {
-		// Only metadata is retried while the two connected brokers elect a
-		// leader. No failed/unknown produce is reissued or called absent.
+	if mode != "quorum-minority" {
 		wait, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
-		tick := time.NewTicker(250 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			m, err := c.Metadata(wait, &kafka.MetadataRequest{Topics: []string{topic}})
-			if err == nil && m != nil {
-				if m.ClusterID != os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER") {
-					return provision.ErrConflict
-				}
-				if len(m.Topics) == 1 && m.Topics[0].Error == nil && len(m.Topics[0].Partitions) > 0 {
-					p := m.Topics[0].Partitions[0]
-					if p.ID == 0 && p.Error == nil && (p.Leader.ID == 0 || p.Leader.ID == 1) {
-						break
-					}
-				}
-			}
-			select {
-			case <-wait.Done():
-				return wait.Err()
-			case <-tick.C:
-			}
+		if err := nativeWaitForQuorumLeader(wait, c, mode, topic, os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER")); err != nil {
+			return err
 		}
 	}
 	if mode == "quorum-minority" {
@@ -326,19 +306,85 @@ func nativeQuorum(ctx context.Context, c *kafka.Client, mode string) error {
 		return provision.ErrConflict
 	}
 	if mode != "quorum-healthy" {
-		if err := nativeReadContains(ctx, c, topic, "quorum-healthy"); err != nil {
+		if err := nativeQuorumReadContains(ctx, c, topic, "quorum-healthy"); err != nil {
 			return err
 		}
 	}
 	if mode == "quorum-restored" {
-		if err := nativeReadContains(ctx, c, topic, "quorum-majority"); err != nil {
+		if err := nativeQuorumReadContains(ctx, c, topic, "quorum-majority"); err != nil {
 			return err
 		}
 	}
 	if err := nativeProduce(ctx, c, topic, mode); err != nil {
 		return err
 	}
-	return nativeReadContains(ctx, c, topic, mode)
+	return nativeQuorumReadContains(ctx, c, topic, mode)
+}
+
+// Broker membership can converge before partition leadership. Validate both
+// in the same observation and refuse to treat kafka-go's zero Broker as ID 0.
+func nativeWaitForQuorumLeader(ctx context.Context, c nativeMetadataReader, mode, topic, cluster string) error {
+	return nativeWaitForObservation(ctx, func() error {
+		m, err := c.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{topic}})
+		if err != nil {
+			return err
+		}
+		if m == nil {
+			return provision.ErrBroker
+		}
+		if !provision.ValidClusterID(m.ClusterID) || m.ClusterID != cluster {
+			return provision.ErrConflict
+		}
+		ready, err := nativeBrokerView(m.Brokers, mode)
+		if err != nil {
+			return err
+		}
+		if ready && len(m.Topics) == 1 && m.Topics[0].Name == topic && m.Topics[0].Error == nil {
+			for _, p := range m.Topics[0].Partitions {
+				if p.ID != 0 || p.Error != nil || p.Leader.Host == "" {
+					continue
+				}
+				for _, broker := range m.Brokers {
+					if broker == p.Leader {
+						return nil
+					}
+				}
+			}
+		}
+		return kafka.LeaderNotAvailable
+	})
+}
+
+func nativeQuorumReadContains(ctx context.Context, c *kafka.Client, topic, value string) error {
+	wait, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	return nativeWaitForObservation(wait, func() error {
+		return nativeReadContains(wait, c, topic, value)
+	})
+}
+
+// Reobserve reads and metadata only. A missing marker must actually become
+// visible, and an ambiguous produce is never replayed by this helper.
+func nativeWaitForObservation(ctx context.Context, observe func() error) error {
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		err := observe()
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, kafka.LeaderNotAvailable), errors.Is(err, kafka.NotLeaderForPartition),
+			errors.Is(err, kafka.BrokerNotAvailable), errors.Is(err, kafka.RequestTimedOut),
+			errors.Is(err, kafka.OffsetNotAvailable), errors.Is(err, provision.ErrMissing):
+		default:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("quorum observation did not converge: %w (last result: %w)", ctx.Err(), err)
+		case <-tick.C:
+		}
+	}
 }
 
 type nativeMetadataReader interface {
@@ -414,8 +460,11 @@ func nativeReadContains(ctx context.Context, c *kafka.Client, topic, value strin
 	if e != nil {
 		return e
 	}
-	if r == nil || r.Error != nil {
+	if r == nil {
 		return provision.ErrBroker
+	}
+	if r.Error != nil {
+		return r.Error
 	}
 	if closer, ok := r.Records.(io.Closer); ok {
 		defer closer.Close()
