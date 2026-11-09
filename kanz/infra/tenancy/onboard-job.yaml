@@ -6,7 +6,7 @@
 #
 # Create the script ConfigMap from the repo file (keeps tenantctl.sh the single
 # reviewable source, mirroring how the kafka README runs smoke-test.sh):
-#   kubectl -n kanz-tenancy create configmap tenantctl --from-file=tenantctl.sh
+#   kubectl -n kanz-tenancy create configmap tenantctl --from-file=tenantctl.sh --from-file=native-receipt.jq
 # Then onboard a tenant by applying this Job with TENANT (+ the tenant.env vars)
 # set; rename the Job per run.
 apiVersion: v1
@@ -55,6 +55,35 @@ subjects:
     name: tenant-provisioner
     namespace: kanz-tenancy
 ---
+# Native receipt observation is restricted to broker Jobs' namespace. The
+# caller needs no pod mutation or log access in other tenant namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-native-observer
+  namespace: kanz-messaging
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-native-observer
+  namespace: kanz-messaging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant-native-observer
+subjects:
+  - kind: ServiceAccount
+    name: tenant-provisioner
+    namespace: kanz-tenancy
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -82,7 +111,14 @@ spec:
             - { name: MAX_IN_FLIGHT, value: "64" }
           volumeMounts:
             - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: native-topics, mountPath: /kafka, readOnly: true }
       volumes:
         - name: scripts
           configMap:
             name: tenantctl
+        # Optional for the unchanged legacy default. Native preflight requires
+        # these bytes and their independently selected manifest digest.
+        - name: native-topics
+          configMap:
+            name: tenantctl-native-topics
+            optional: true

@@ -72,7 +72,7 @@ def reference_digest(value):
     return value.rsplit('@',1)[1]
 
 
-def verify(inspection, requested, observed, docker_id, read, progress=None):
+def verify(inspection, requested, observed, docker_id, read, progress=None, *, source_tag=None):
     """read returns raw bounded node content. Digest types come from its graph.
 
     Docker's reported ID can be a config, manifest or index. It is never assumed
@@ -82,12 +82,18 @@ def verify(inspection, requested, observed, docker_id, read, progress=None):
     progress = progress if progress is not None else {}
     progress.update(phase='cri', contentCount=0, mediaType='UNKNOWN')
     if not DIGEST.fullmatch(docker_id): raise CustodyError('docker_identity_missing')
-    if not re.fullmatch(r'kanz-native-(?:admin|probe):[0-9a-f]{40}',requested):
+    tag=source_tag or requested
+    if not re.fullmatch(r'kanz-native-(?:admin|probe):[0-9a-f]{40}',tag):
+        raise CustodyError('unowned_image_tag')
+    if source_tag is not None and (not re.fullmatch(r'kanz-native-admin:[0-9a-f]{40}',source_tag) or
+            not re.fullmatch(r'ghcr\.io/eighred/kanz-kafka-provision@sha256:[0-9a-f]{64}',requested)):
         raise CustodyError('unowned_image_tag')
     status=inspection.get('status',{})
     tags=status.get('repoTags'); digests=status.get('repoDigests')
-    if (not isinstance(tags,list) or not 1<=len(tags)<=16 or 'docker.io/library/'+requested not in tags or
+    if (not isinstance(tags,list) or not 1<=len(tags)<=16 or 'docker.io/library/'+tag not in tags or
             not isinstance(digests,list) or not 1<=len(digests)<=16 or not DIGEST.fullmatch(status.get('id',''))):
+        raise CustodyError('cri_tag_config_custody_absent')
+    if source_tag is not None and requested not in digests:
         raise CustodyError('cri_tag_config_custody_absent')
     pod_digest=reference_digest(observed)
     if observed != status['id'] and observed not in digests:
@@ -178,6 +184,11 @@ def verify(inspection, requested, observed, docker_id, read, progress=None):
         raise CustodyError('execution_configuration_differs')
     if node['manifest'] and host['manifest'] and node['manifest']!=host['manifest']:
         raise CustodyError('platform_manifest_differs')
+    if source_tag is not None:
+        pinned=chain(reference_digest(requested))
+        if pinned['type']=='config': raise CustodyError('repository_digest_cannot_name_a_configuration')
+        if pinned['config']!=node['config']: raise CustodyError('execution_configuration_differs')
+        if pinned['manifest']!=(node['manifest'] or host['manifest']): raise CustodyError('platform_manifest_differs')
     progress['phase']='complete'
     return {'verified':True,'dockerIdentityType':host['type'],'podIdentityType':node['type'],
             'dockerIdentity':docker_id,'podIdentity':pod_digest,

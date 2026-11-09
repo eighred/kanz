@@ -44,9 +44,17 @@ In-cluster (no local tooling):
 
 ```sh
 kubectl apply -f onboard-job.yaml          # ns + RBAC + the example Job
-kubectl -n kanz-tenancy create configmap tenantctl --from-file=tenantctl.sh
+kubectl -n kanz-tenancy create configmap tenantctl --from-file=tenantctl.sh --from-file=native-receipt.jq
 kubectl -n kanz-tenancy wait --for=condition=complete job/tenant-onboard-acme
 ```
+
+Legacy Kafka remains the default. To opt into the qualified native path, supply
+the exact image, manifest digest, broker identity and cluster inputs described in
+[the native tool runbook](../../cmd/kanz-kafka-provision/README.md). For the
+in-cluster runner, also create `tenantctl-native-topics` in `kanz-tenancy` with
+`--from-file=topics-job.yaml=../kafka/topics-job.yaml`; the optional volume mounts
+it at `/kafka`, preserving the caller's relative input layout. Native preflight
+refuses missing inputs. Native offboard always refuses before lifecycle effects.
 
 ## Idempotency & offboarding
 

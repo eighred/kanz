@@ -80,6 +80,21 @@ class ImageCustodyTest(unittest.TestCase):
         for ref in ('https://host/path','containerd://'+self.cfg,'sha256:bad'):
             with self.assertRaises(ValueError):image.reference_digest(ref)
 
+    def test_pinned_caller_reference_requires_same_owned_source_and_graph(self):
+        tag='kanz-native-admin:'+'a'*40
+        pinned='ghcr.io/eighred/kanz-kafka-provision@'+self.idx
+        observed='docker.io/library/import-fixed@'+self.man
+        inspection={'status':{'id':self.cfg,'repoTags':['docker.io/library/'+tag],'repoDigests':[pinned,observed]}}
+        result=image.verify(inspection,pinned,observed,self.idx,self.blobs.__getitem__,source_tag=tag)
+        self.assertTrue(result['verified'])
+        for request,source in ((pinned,None),(pinned,self.tag),(pinned.replace('eighred','foreign'),tag)):
+            with self.assertRaises(ValueError): image.verify(inspection,request,observed,self.idx,self.blobs.__getitem__,source_tag=source)
+        bad=copy.deepcopy(inspection);bad['status']['repoDigests']=[observed]
+        with self.assertRaises(ValueError):image.verify(bad,pinned,observed,self.idx,self.blobs.__getitem__,source_tag=tag)
+        config_pin='ghcr.io/eighred/kanz-kafka-provision@'+self.cfg
+        bad=copy.deepcopy(inspection);bad['status']['repoDigests'].append(config_pin)
+        with self.assertRaises(ValueError):image.verify(bad,config_pin,observed,self.idx,self.blobs.__getitem__,source_tag=tag)
+
     def test_closed_predicate_codes_and_progress_do_not_export_content(self):
         progress={}
         ref='docker.io/library/import-fixed@'+self.idx

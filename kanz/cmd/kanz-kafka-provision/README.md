@@ -127,9 +127,35 @@ kanz-kafka-provision -mode=verify "${args[@]}"
 `tenantctl onboard` performs the same native apply for each existing tenant and
 compute principal. Its Jobs have no retries (`backoffLimit: 0`), a 270-second
 active deadline, and one tool work deadline of at most 240 seconds. The existing
-Job wait is bounded separately. Nonroot, read-only root filesystem, dropped
+Job observation is bounded separately (1..300 seconds, with finite API request
+timeouts). It pins the returned Job UID, verifies its executable and the sole
+successful pod, and accepts exactly one complete JSON receipt matching the
+manifest, cluster and durability profile. A terminal Job alone is insufficient.
+Native failures do not dump arbitrary container logs. Nonroot, read-only root filesystem, dropped
 capabilities, SPIFFE CSI, and finite CPU/memory settings remain explicit in the
 Job. These are configured bounds, not a hard OS termination guarantee.
+
+Keep `infra/tenancy/native-receipt.jq` beside `tenantctl.sh`, and preserve the
+relative `../kafka/topics-job.yaml` layout when packaging the caller. The
+in-cluster example mounts the optional `tenantctl-native-topics` ConfigMap at
+`/kafka`; include the validator in its script ConfigMap and supply all native
+inputs explicitly. Without these files native preflight refuses. The runner identity additionally
+uses `tenant-native-observer` in `kanz-messaging` for pod and log readback; no
+pod mutation or access to other tenant namespaces is added. Legacy remains the
+default and native offboard refuses before any lifecycle step.
+
+Native preflight also rejects oversized namespace/compute identities, noncanonical
+compute principals and invalid observation deadlines before identity or NATS effects.
+Each explicit recovery invocation creates fresh Jobs and retains earlier attempts;
+it never automatically retries a lost create response. Use the logged Job name/UID
+and its closed receipt to investigate before rerunning the same approved inputs.
+
+The mandatory native qualification invokes the actual script with the tracked
+runner RBAC against its owned cluster. It proves both principal shapes, reruns,
+manifest conflict refusal, lost Job-create ACK and explicit recovery, wrong-cluster
+refusal, unchanged neighboring quotas and early offboard refusal. NATS is explicitly
+manual in this fixture: successful native work must exit PARTIAL (3), never claim
+full tenant onboarding. Existing NATS production acceptance is not supplied by it.
 
 ## Mismatch, partial effects, and recovery
 

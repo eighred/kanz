@@ -13,6 +13,7 @@ import yaml
 import topology
 import image_custody
 import runtime_diagnostic
+import lifecycle
 
 sys.path.insert(0, str(topology.ROOT / 'tools/gateway-policy-proof'))
 import bounded_process
@@ -161,7 +162,7 @@ def command(argv, data=None, timeout=300, *, strip=True, stdout_limit=4 << 20):
 
 
 
-def observe_image(pod, desired, built, name, deadline, diagnostic):
+def observe_image(pod, desired, built, name, deadline, diagnostic, *, source_tag=None):
     """Single bounded image observer for full proof and inert diagnostics."""
     progress={'phase':'pod_reference','contentCount':0,'mediaType':'UNKNOWN'}
     try:
@@ -177,7 +178,7 @@ def observe_image(pod, desired, built, name, deadline, diagnostic):
         progress['phase']='cri_lookup'
         inspection=json.loads(node('crictl','inspecti',requested))
         return image_custody.verify(inspection,requested,observed,built,
-            lambda digest:node('ctr','--namespace=k8s.io','content','get',digest,raw=True).encode('utf-8'),progress)
+            lambda digest:node('ctr','--namespace=k8s.io','content','get',digest,raw=True).encode('utf-8'),progress,source_tag=source_tag)
     except Exception as error:
         diagnostic['imageFailure']={'code':image_custody.failure(error),**progress}
         raise
@@ -333,6 +334,7 @@ def validate_diagnostics(value, source):
 def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
     digest,count,partitions=canonical_inventory(manifest)
+    lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'), count)
     if value.get('fixtureCapacity')!=fixture_capacity(partitions): raise ValueError('fixture capacity differs')
     before,after=value.get('brokerPodsBefore'),value.get('brokerPodsAfter')
     if not isinstance(before,dict) or set(before)!=set(topology.BROKERS) or after!=before or len(set(before.values()))!=3:
@@ -564,6 +566,9 @@ def main():
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
             cli('acme-verify','acme',principals['acme'],'verify')
             cli('bravo-verify','bravo',principals['bravo'],'verify')
+            evidence['stage']='tenantctl-lifecycle'
+            evidence['lifecycleDiagnostic']={}
+            evidence['lifecycle']=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count)
             # Revoke only the owned inter-broker replication policy; Kafka TLS
             # remains reachable. Pods and their retained volumes never restart.
             for case,connected in (('quorum-healthy',topology.BROKERS),('quorum-majority',topology.BROKERS[:2]),

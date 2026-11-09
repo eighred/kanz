@@ -113,6 +113,11 @@ func checkNativeKafkaOwner(files map[string]string) bool {
 			return false
 		}
 	}
+	for _, s := range []string{"native_kafka_observe \"${job}\" \"${uid}\" \"${created}\"", "--arg phase receipt", "--arg phase pod", "--limit-bytes=16384", ".metadata.uid==$uid", "native-receipt.jq", "retained for explicit recovery"} {
+		if !strings.Contains(shell, s) {
+			return false
+		}
+	}
 	start := strings.Index(shell, "native_kafka_tenant_job()")
 	end := strings.Index(shell, "# Both principal shapes")
 	if start < 0 || end <= start || strings.Contains(shell[start:end], "kubectl apply") || strings.Contains(shell[start:end], "kubectl delete") {
@@ -147,6 +152,9 @@ func TestNativeKafkaSourceBoundaryAndMutations(t *testing.T) {
 		{"shell", ".immutable==true", ".immutable!=null"},
 		{"shell", "-manifest-sha256=${NATIVE_KAFKA_MANIFEST_SHA256}", "-manifest-sha256=ignored"},
 		{"shell", "generateName: kafka-native-", "name: shared-job"},
+		{"shell", "--arg phase receipt", "--arg phase ignored"},
+		{"shell", "--arg phase pod", "--arg phase ignored"},
+		{"shell", "native_kafka_observe \"${job}\" \"${uid}\" \"${created}\"", "true"},
 		{"shell", "native Kafka offboard is unsupported; no automatic legacy fallback", "offboard fallback accepted"},
 	} {
 		copy := map[string]string{}
