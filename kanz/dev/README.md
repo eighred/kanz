@@ -14,6 +14,11 @@ equivalent to repository CI. `make help` lists the available targets.
   different buf version. `make bootstrap` installs the pinned Go protobuf plugins;
   put `$(go env GOPATH)/bin` on PATH. For lint, use the golangci-lint version in
   `.github/workflows/kanz-ci.yml`.
+- Read access to the existing `ghcr.io/eighred/base/golang` and
+  `ghcr.io/eighred/base/distroless-static` mirrors. Authenticate Docker to GHCR
+  using your approved package-read credential mechanism before building;
+  anonymous pulls can return 401. Do not replace the reviewed bases to work
+  around missing registry access. CI uses its read-only package token.
 - The repo expects `kanz/` and `kanz-schemas/` as **sibling** directories — the
   Go module `replace`s the schema SDK to `../kanz-schemas/gen/go` (EVT-15a).
 - **On Windows, read AGENTS.md's "Windows environment" section first.** A

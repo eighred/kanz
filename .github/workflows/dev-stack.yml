@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   smoke:
@@ -28,6 +29,13 @@ jobs:
       - uses: ./.github/actions/setup-buf
         with:
           version: 1.69.0
+      # The existing Go/distroless mirrors require authenticated pulls even on
+      # PR builds. This token cannot publish images or modify the repository.
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Fresh checkout bootstrap and real Make entrypoint
         run: |
           make -C kanz bootstrap
