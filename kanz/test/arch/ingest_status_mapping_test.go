@@ -61,8 +61,8 @@ var ingestStatusDeciders = map[string]string{
 	"services/webhook-ingest/internal/ingest/pipeline.go": "mapTranslateErr",
 }
 
-// ingestStatusExempt maps a sentinel to the reason it needs no status, and the
-// issue that retires the entry.
+// ingestStatusExempt maps a startup-only sentinel to the reason it cannot
+// reach the HTTP response path.
 //
 // KEEP THIS SHORT AND ARGUED. Every entry is a refusal a caller can provoke and
 // receive no considered answer to. "It never happens" is not a reason — that is
@@ -127,9 +127,8 @@ func TestEveryIngestSentinelHasAStatusDecided(t *testing.T) {
 			"the argument.", name)
 	}
 
-	// DEAD-ENTRY ARM: an exemption for a sentinel that no longer exists has
-	// outlived its repair, and would wave through a future sentinel that reused the
-	// name.
+	// An exemption is stale once the sentinel disappears or the status
+	// deciders explicitly handle it.
 	have := map[string]bool{}
 	for _, n := range sentinels {
 		have[n] = true
@@ -138,6 +137,8 @@ func TestEveryIngestSentinelHasAStatusDecided(t *testing.T) {
 		if !have[name] {
 			t.Errorf("exemption for %q (%s) matches no exported Err* in %s — delete it",
 				name, reason, ingestStatusSentinelPkg)
+		} else if where, ok := decided[name]; ok {
+			t.Errorf("exemption for %q is stale: status decided in %s — delete it", name, where)
 		}
 	}
 }
