@@ -55,6 +55,11 @@ func TestEveryNATSUserCarriesPermissions(t *testing.T) {
 	// own commentary.
 	body := stripYAMLComments(readFile(t, filepath.Join(root, "infra", "nats", "tenancy.yaml")))
 
+	systemAccounts := natsSystemAccountRe.FindAllStringSubmatch(body, -1)
+	if len(systemAccounts) != 1 {
+		t.Fatalf("found %d system_account declarations in tenancy.yaml, want exactly one", len(systemAccounts))
+	}
+	systemAccount := systemAccounts[0][1]
 	users := natsUserEntries(t, body)
 	// NON-VACUITY: there are 29 of these. A parser that found none would pass
 	// however unrestricted the estate had become.
@@ -64,13 +69,22 @@ func TestEveryNATSUserCarriesPermissions(t *testing.T) {
 	}
 
 	var problems []string
-	seen := map[string]bool{}
+	identityEntries := map[string]int{}
+	accountUsers := map[string]int{}
 	for _, u := range users {
-		seen[u.svid] = true
+		identityEntries[u.svid]++
+		accountUsers[u.account]++
+	}
+	for _, u := range users {
 		reason, exempt := unrestrictedNATSUserExempt[u.svid]
 
 		if !u.hasPermissions {
 			if exempt {
+				if u.account != systemAccount || accountUsers[systemAccount] != 1 || identityEntries[u.svid] != 1 {
+					problems = append(problems, fmt.Sprintf("the exemption for %s requires a single identity entry as "+
+						"the sole user in system account %q; found account %q, %d system-account user(s), and %d identity entry/entries",
+						u.svid, systemAccount, u.account, accountUsers[systemAccount], identityEntries[u.svid]))
+				}
 				continue
 			}
 			problems = append(problems, fmt.Sprintf("%s (account %q) has NO permissions block, so it is "+
@@ -98,7 +112,7 @@ func TestEveryNATSUserCarriesPermissions(t *testing.T) {
 	}
 
 	for svid := range unrestrictedNATSUserExempt {
-		if !seen[svid] {
+		if identityEntries[svid] == 0 {
 			problems = append(problems, "the exemption for "+svid+" is DEAD: no such user exists in "+
 				"tenancy.yaml any more")
 		}
@@ -112,8 +126,8 @@ func TestEveryNATSUserCarriesPermissions(t *testing.T) {
 }
 
 // unrestrictedNATSUserExempt names users that deliberately carry no permissions
-// block, with the reason. DEFAULT-DENY: an entry is permission, and the
-// dead-entry arms above remove it the moment it stops being needed.
+// block as the unique user in the broker's system account. DEFAULT-DENY:
+// the dead-entry arms above remove it the moment it stops being needed.
 var unrestrictedNATSUserExempt = map[string]string{
 	"spiffe://kanz.internal/ns/kanz-messaging/sa/nats": "THE BROKER'S OWN IDENTITY, in the SYS account. " +
 		"SYS is NATS's system account: its whole function is $SYS.> — monitoring, JetStream cluster RPC " +
@@ -131,9 +145,10 @@ type natsUserEntry struct {
 }
 
 var (
-	natsAccountRe    = regexp.MustCompile(`^\s{6}([A-Za-z_][\w-]*)\s*\{`)
-	natsUserRe       = regexp.MustCompile(`user:\s*"([^"]+)"`)
-	natsEmptyAllowRe = regexp.MustCompile(`(publish|subscribe):\s*\{\s*allow:\s*\[\s*\]`)
+	natsSystemAccountRe = regexp.MustCompile(`(?m)^[ \t]+system_account:[ \t]+([A-Za-z_][\w-]*)[ \t]*\r?$`)
+	natsAccountRe       = regexp.MustCompile(`^\s{6}([A-Za-z_][\w-]*)\s*\{`)
+	natsUserRe          = regexp.MustCompile(`user:\s*"([^"]+)"`)
+	natsEmptyAllowRe    = regexp.MustCompile(`(publish|subscribe):\s*\{\s*allow:\s*\[\s*\]`)
 )
 
 // natsUserEntries walks the comment-stripped tenancy.yaml and returns every
@@ -159,7 +174,12 @@ func natsUserEntries(t *testing.T, body string) []natsUserEntry {
 			account = m[1]
 			accountDepth = depth
 		}
-		if m := natsUserRe.FindStringSubmatch(line); m != nil {
+		matches := natsUserRe.FindAllStringSubmatch(line, 2)
+		if len(matches) > 1 {
+			t.Fatal("multiple NATS users on one line; the permissions scan needs one user per line")
+		}
+		if len(matches) == 1 {
+			m := matches[0]
 			// close any entry still open (a one-line `{ user: "x" }` form)
 			if cur != nil {
 				out = append(out, *cur)
