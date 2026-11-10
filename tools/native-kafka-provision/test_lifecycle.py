@@ -10,17 +10,21 @@ import lifecycle
 import topology
 
 
-def evidence():
+def evidence(topic_count=60):
     rows=[]
     n=0
-    for case,count,code in zip(lifecycle.CASES,(2,2,0,1,2,1,0),(3,3,1,1,3,1,2)):
+    accounts={}
+    for case,tenant,code,count in lifecycle.CASES:
+        accounts[tenant]='A'+('B' if tenant=='bravo' else 'C')*55
         jobs=[]
         for i in range(count):
             n+=1
+            topics=topic_count if case in ('onboard-bravo','lost-create-ack') and i==0 else 0
+            acls=6 if case in ('onboard-bravo','lost-create-ack') or (case=='recover' and i==1) else 0
             jobs.append({'uid':f'{n:08x}-1234-1234-1234-123456789abc','version':'a'*40,
-                         'image':'sha256:'+'c'*64,'complete':case!='wrong-cluster','topicAttempts':0,'aclAttempts':0,
-                         'principal':lifecycle.PRINCIPALS[i],'verifiedTopics':0 if case=='wrong-cluster' else 60,'verifiedACLs':0 if case=='wrong-cluster' else 6})
-        rows.append({'case':case,'passed':True,'exit':code,'jobs':jobs,'quotaUnchanged':True})
+                         'image':'sha256:'+'c'*64,'complete':case!='wrong-cluster','topicAttempts':topics,'aclAttempts':acls,
+                         'principal':lifecycle.principals(tenant)[i],'verifiedTopics':0 if case=='wrong-cluster' else topic_count,'verifiedACLs':0 if case=='wrong-cluster' else 6})
+        rows.append({'case':case,'passed':True,'exit':code,'jobs':jobs,'quotaVerified':True,'natsAccounts':dict(accounts)})
     return rows
 
 
@@ -43,13 +47,18 @@ class LifecycleTest(unittest.TestCase):
     def test_evidence_requires_every_case_and_distinct_attempt(self):
         value=evidence()
         lifecycle.validate(value,'a'*40,'sha256:'+'c'*64,60)
-        for mutation in (lambda v:v.pop(),lambda v:v.reverse(),lambda v:v[0].update(exit=0),
-                         lambda v:v[0].update(quotaUnchanged=False),lambda v:v[3].update(jobs=[]),
-                         lambda v:v[4]['jobs'][0].update(uid=v[0]['jobs'][0]['uid']),
-                         lambda v:v[4]['jobs'][0].update(topicAttempts=1),
-                         lambda v:v[0]['jobs'][0].update(principal=lifecycle.PRINCIPALS[1]),
+        for mutation in (lambda v:v.pop(),lambda v:v.reverse(),lambda v:v[0].update(exit=3),
+                         lambda v:v[0].update(quotaVerified=False),lambda v:v[1].update(jobs=[]),
+                         lambda v:v[2]['jobs'][0].update(uid=v[0]['jobs'][0]['uid']),
+                         lambda v:v[3]['jobs'][0].update(topicAttempts=1),
+                         lambda v:v[1]['jobs'][0].update(topicAttempts=0),
+                         lambda v:v[2]['jobs'][1].update(aclAttempts=0),
+                         lambda v:v[0]['jobs'][0].update(principal=lifecycle.principals('acme')[1]),
                          lambda v:v[0]['jobs'][0].update(verifiedTopics=59),
-                         lambda v:v[5]['jobs'][0].update(complete=True)):
+                         lambda v:v[6]['jobs'][0].update(complete=True),
+                         lambda v:v[1]['natsAccounts'].update(acme=v[0]['natsAccounts']['bravo']),
+                         lambda v:v[3]['natsAccounts'].update(bravo='A'+'D'*55),
+                         lambda v:v[2]['natsAccounts'].pop('bravo')):
             bad=copy.deepcopy(value);mutation(bad)
             with self.assertRaises(ValueError): lifecycle.validate(bad,'a'*40,'sha256:'+'c'*64,60)
 

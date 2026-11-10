@@ -190,7 +190,8 @@ class TopologyTest(unittest.TestCase):
                'adminImage':'sha256:'+'c'*64,'probeImage':'sha256:'+'d'*64,'manifestSHA':digest,'clusterID':'real-cluster','brokerImage':topology.retained.REDPANDA,
                'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30,'segmentAllocationBytes':topology.FALLOC_BYTES} for b in topology.BROKERS]}
         value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2], qualify.canonical_inventory(manifest, True)[2])
-        value['lifecycle']=lifecycle_evidence()
+        value['lifecycle']=lifecycle_evidence(count)
+        value['natsVersions']={'nsc':'v2.15.0','nats-server':'v2.14.5'}
         value['argoSyncs'] = [
             {'case': case, 'revision': digit*40, 'phase': phase, 'hookPhase': phase,
              'jobUID': str(i)+'2345678-1234-1234-1234-123456789abc',
@@ -217,7 +218,7 @@ class TopologyTest(unittest.TestCase):
                 wrong=case=='wrong-cluster'
                 item['receipt']={'expected_cluster_id':'deliberately-wrong' if wrong else 'real-cluster','mode':'verify' if case.endswith('verify') else 'apply','durability_profile':'redpanda-raft',
                                  'manifest_sha256':digest,'verified_topics':0 if wrong else count,'missing_topics':0,'verified_acls':0 if wrong else 6,
-                                 'topic_attempts':count if case in ('acme-apply','bravo-apply') else 0,'acl_attempts':6 if case in ('acme-apply','bravo-apply','compute-apply') else 0,'partial_or_unknown':False,'complete':not wrong}
+                                 'topic_attempts':0,'acl_attempts':0,'partial_or_unknown':False,'complete':not wrong}
         for item in value['cases']:
             case=item['case']
             if case in qualify.SYSTEM_CASES:
@@ -236,7 +237,7 @@ class TopologyTest(unittest.TestCase):
                 'probe':{'version':'a'*40,'mode':case,'expected_identity':observation['identity'],'phase':'complete','category':'ok'} if probe else {'state':'UNKNOWN'},
                 'image':{'verified':True,'dockerIdentityType':'index','podIdentityType':'manifest','dockerIdentity':value['probeImage' if probe else 'adminImage'],'podIdentity':'sha256:'+'e'*64,'config':'sha256:'+'f'*64,'platformManifest':'sha256:'+'e'*64,'contentCount':3}})
         qualify.validate_report(value,'a'*40,'b'*40,'1','1',manifest)
-        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle','argoSyncs'):
+        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle','natsVersions','argoSyncs'):
             bad=copy.deepcopy(value);bad.pop(key)
             with self.assertRaises(ValueError):qualify.validate_report(bad,'a'*40,'b'*40,'1','1',manifest)
         for mutate in (lambda x:x['argoHookDiagnostics'][2].update(configDigest='0'*64),

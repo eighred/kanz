@@ -1,8 +1,4 @@
-"""Exercise the tracked tenantctl caller against the owned cluster and real Jobs.
-
-NATS is explicitly manual: successful Kafka work must still exit PARTIAL (3),
-never claim whole-tenant onboarding. No fake broker or fake Kubernetes success.
-"""
+"""Qualify the golden-path infrastructure caller against both owned brokers."""
 import json
 import os
 from pathlib import Path
@@ -10,10 +6,23 @@ import re
 import shutil
 import time
 
-CASES = ('onboard-partial', 'rerun', 'manifest-conflict', 'lost-create-ack',
-         'recover', 'wrong-cluster', 'offboard')
-PRINCIPALS = ('User:spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine',
-              'User:spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme')
+# Case, tenant, exit, observed Job count. Acme's first attempt loses the
+# acknowledgement before quota or its second principal can be reconciled.
+CASES = (
+    ('onboard-bravo', 'bravo', 0, 2),
+    ('lost-create-ack', 'acme', 1, 1),
+    ('recover', 'acme', 0, 2),
+    ('rerun', 'acme', 0, 2),
+    ('onboard-partial', 'acme', 3, 2),
+    ('manifest-conflict', 'acme', 1, 0),
+    ('wrong-cluster', 'acme', 1, 1),
+    ('offboard', 'acme', 2, 0),
+)
+
+
+def principals(tenant):
+    return (f'User:spiffe://kanz.internal/ns/tenant-{tenant}/sa/risk-engine',
+            f'User:spiffe://kanz.internal/ns/kanz-services/sa/archiver-{tenant}')
 
 
 def runner_contract(docs):
@@ -39,32 +48,42 @@ def runner_contract(docs):
 
 
 def validate(value, source, image, topic_count):
-    if not isinstance(value, list) or tuple(x.get('case') for x in value) != CASES:
+    if not isinstance(value, list) or tuple(x.get('case') for x in value) != tuple(row[0] for row in CASES):
         raise ValueError('lifecycle inventory missing')
-    counts = (2, 2, 0, 1, 2, 1, 0)
-    codes = (3, 3, 1, 1, 3, 1, 2)
-    for item, count, code in zip(value, counts, codes):
-        if (set(item) != {'case', 'passed', 'exit', 'jobs', 'quotaUnchanged'} or
+    accounts = {}
+    for item, (case, tenant, code, count) in zip(value, CASES):
+        if (set(item) != {'case', 'passed', 'exit', 'jobs', 'quotaVerified', 'natsAccounts'} or
                 item['passed'] is not True or item['exit'] != code or
-                len(item['jobs']) != count or item['quotaUnchanged'] is not True):
+                len(item['jobs']) != count or item['quotaVerified'] is not True):
             raise ValueError('lifecycle result missing')
+        observed = item['natsAccounts']
+        if (not isinstance(observed, dict) or set(observed) != (set(accounts) | {tenant}) or
+                any(not re.fullmatch(r'A[A-Z2-7]{55}', key) for key in observed.values()) or
+                len(set(observed.values())) != len(observed) or
+                any(observed[t] != key for t, key in accounts.items())):
+            raise ValueError('NATS account identity or readback differs')
+        accounts = observed
+        workload, compute = principals(tenant)
         for job in item['jobs']:
+            first_topics = case in ('onboard-bravo', 'lost-create-ack') and job['principal'] == workload
+            first_acls = case in ('onboard-bravo', 'lost-create-ack') or (case == 'recover' and job['principal'] == compute)
             if (set(job) != {'uid', 'version', 'image', 'complete', 'topicAttempts', 'aclAttempts', 'principal', 'verifiedTopics', 'verifiedACLs'} or
                     not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', job['uid']) or
                     job['version'] != source or job['image'] != image or
                     job['complete'] is not (item['case'] != 'wrong-cluster') or
                     job['verifiedTopics'] != (0 if item['case']=='wrong-cluster' else topic_count) or
                     job['verifiedACLs'] != (0 if item['case']=='wrong-cluster' else 6) or
-                    job['topicAttempts'] != 0 or job['aclAttempts'] != 0):
+                    job['topicAttempts'] != (topic_count if first_topics else 0) or
+                    job['aclAttempts'] != (6 if first_acls else 0)):
                 raise ValueError('lifecycle Job evidence differs')
-        if sorted(j['principal'] for j in item['jobs']) != sorted(PRINCIPALS[:count]):
+        if sorted(j['principal'] for j in item['jobs']) != sorted((workload, compute)[:count]):
             raise ValueError('lifecycle principal inventory differs')
     ids = [j['uid'] for item in value for j in item['jobs']]
     if len(ids) != len(set(ids)):
         raise ValueError('lifecycle reused a Job')
 
 
-def qualify(api, scratch, name, images, source, digest, cluster, built, command, observe_image, diagnostic, topic_count):
+def qualify(api, scratch, name, images, source, digest, cluster, built, command, observe_image, diagnostic, topic_count, nats):
     import topology
     import bounded_process
     root = topology.ROOT
@@ -111,16 +130,16 @@ if os.environ.get('LIFECYCLE_FAULT')=='lost-create-ack' and not mark.exists() an
 os.execv(cmd[0],cmd)
 ''', encoding='utf-8')
     shim.chmod(0o700)
-    env = {'PATH':str(wrapper)+os.pathsep+os.environ['PATH'], 'HOME':str(scratch),
-           'KUBECONFIG':str(scratch/'kubeconfig'), 'TENANT':'acme', 'TENANT_SAS':'risk-engine',
+    env = dict(nats.env, PATH=str(wrapper)+os.pathsep+os.environ['PATH'])
+    env.update({'KUBECONFIG':str(scratch/'kubeconfig'), 'TENANT_SAS':'risk-engine',
            'COMPUTE_KAFKA_SAS':'archiver', 'TENANTCTL_KAFKA_MODE':'native',
-           'TENANTCTL_MANUAL_NATS':'true', 'NATIVE_KAFKA_IMAGE':pinned,
+           'NATIVE_KAFKA_IMAGE':pinned,
            'NATIVE_KAFKA_MANIFEST_SHA256':digest, 'NATIVE_KAFKA_CLUSTER_ID':cluster,
            'NATIVE_KAFKA_BROKER':'native-redpanda-0.kanz-messaging.svc:9094',
            'NATIVE_KAFKA_BROKER_SPIFFE_ID':topology.BROKER_ID,
            'NATIVE_KAFKA_PRINCIPAL_ENCODING':'redpanda-rule-escaped-uri',
            'NATIVE_KAFKA_DURABILITY_PROFILE':'redpanda-raft',
-           'LIFECYCLE_KUBECTL':real,'LIFECYCLE_LOST_ACK':str(scratch/'lost-ack')}
+           'LIFECYCLE_KUBECTL':real,'LIFECYCLE_LOST_ACK':str(scratch/'lost-ack')})
     def jobs():
         return {j['metadata']['uid']:j for j in json.loads(api('-n','kanz-messaging','get','jobs','-l',
                 'app.kubernetes.io/managed-by=kanz-tenantctl-native','-o','json'))['items']}
@@ -128,28 +147,32 @@ os.execv(cmd[0],cmd)
         raw=api('-n','kanz-services','get','cm','api-gateway-quotas','--ignore-not-found','-o','json')
         return json.loads(raw).get('data') if raw else None
     # Preserve another tenant's quota through actual onboarding and reruns.
-    initial={'quotas.json':json.dumps({'bravo':{'rate_per_sec':7,'burst':9,'max_in_flight':3},
-                                     'acme':{'rate_per_sec':50,'burst':100,'max_in_flight':64}})}
+    initial={'quotas.json':json.dumps({'neighbor':{'rate_per_sec':7,'burst':9,'max_in_flight':3}})}
     api('create','-f','-',data=json.dumps({'apiVersion':'v1','kind':'ConfigMap','metadata':{
         'name':'api-gateway-quotas','namespace':'kanz-services'},'data':initial}))
     result=[]
-    for case, code in zip(CASES,(3,3,1,1,3,1,2)):
+    accounts = {}
+    for case, tenant, code, _ in CASES:
         diagnostic.update(case=case,phase='snapshot',exit=None)
         before=jobs(); before_quota=json.loads(quota()['quotas.json'])
-        attempt=dict(env, LIFECYCLE_FAULT=case)
+        attempt=dict(env, TENANT=tenant, LIFECYCLE_FAULT=case, STEP='infra')
+        if case=='onboard-partial':
+            del attempt['NATS_OPERATOR']
+            attempt['TENANTCTL_MANUAL_NATS']='true'
         cm='kafka-native-'+digest[:40]
         if case=='manifest-conflict':
             api('-n','kanz-messaging','annotate','cm',cm,'kanz.internal/native-topic-manifest-sha256='+'0'*64,'--overwrite')
         if case=='wrong-cluster': attempt['NATIVE_KAFKA_CLUSTER_ID']='deliberately-wrong'
         diagnostic['phase']='caller'
+        onboarding = root/'kanz/infra/onboarding'
+        caller = ['bash', '../tenancy/tenantctl.sh', 'offboard'] if case=='offboard' else ['sh', './provision-tenant.sh']
         output=bounded_process.run(['bash','-c',
-            'bash "$1" "$2"; status=$?; printf "\\nCALLER_EXIT:%s\\n" "$status"',
-            'lifecycle',str(root/'kanz/infra/tenancy/tenantctl.sh'), 'offboard' if case=='offboard' else 'onboard'],
-            cwd=str(root),env=attempt,timeout=680,stdout_limit=32768,stderr_limit=32768)
+            '"$@"; status=$?; printf "\\nCALLER_EXIT:%s\\n" "$status"',
+            'lifecycle', *caller], cwd=str(onboarding),env=attempt,timeout=680,stdout_limit=32768,stderr_limit=32768)
         last=output.splitlines()[-1] if output.splitlines() else ''
         match=re.fullmatch(r'CALLER_EXIT:([0-9]{1,3})',last)
         diagnostic['exit']=int(match[1]) if match and int(match[1])<=255 else None
-        if output.splitlines()[-1:] != ['CALLER_EXIT:'+str(code)] or '>> [done]' in output:
+        if output.splitlines()[-1:] != ['CALLER_EXIT:'+str(code)] or ('>> [done]' in output) != (code==0):
             raise ValueError('caller exit or completion claim differs: '+case)
         if case=='offboard' and '>> [' in output:
             raise ValueError('offboard reached a lifecycle effect')
@@ -180,8 +203,18 @@ os.execv(cmd[0],cmd)
                                  'topicAttempts':r['topic_attempts'],'aclAttempts':r['acl_attempts'],
                                  'verifiedTopics':r['verified_topics'],'verifiedACLs':r['verified_acls'],
                                  'principal':next(a.removeprefix('-principal=') for a in job['spec']['template']['spec']['containers'][0]['args'] if a.startswith('-principal='))})
+        diagnostic['phase']='nats-readback'
+        if tenant not in accounts:
+            accounts[tenant] = nats.account(tenant, create_probe=True)
+        observed = {t: nats.account(t) for t in accounts}
+        if observed != accounts:
+            raise ValueError('NATS account identity changed')
+        if case in ('onboard-bravo', 'recover'):
+            if tenant in before_quota:
+                raise ValueError('first successful onboarding already had a quota')
+            before_quota[tenant] = {'rate_per_sec':50,'burst':100,'max_in_flight':64}
         result.append({'case':case,'passed':True,'exit':code,'jobs':observations,
-                       'quotaUnchanged':json.loads(quota()['quotas.json'])==before_quota})
+                       'quotaVerified':json.loads(quota()['quotas.json'])==before_quota,'natsAccounts':observed})
     diagnostic['phase']='validation'
     validate(result,source,built,topic_count)
     diagnostic['phase']='complete'

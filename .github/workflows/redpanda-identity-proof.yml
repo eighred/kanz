@@ -8,6 +8,7 @@ on:
       - 'kanz/infra/kafka/topics-job.yaml'
       - 'kanz/infra/kafka/kafka.yaml'
       - 'kanz/infra/tenancy/**'
+      - 'kanz/infra/onboarding/provision-tenant.sh'
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
       - 'kanz/tools/redpandaidentity/**'
@@ -27,6 +28,7 @@ on:
       - 'kanz/infra/kafka/topics-job.yaml'
       - 'kanz/infra/kafka/kafka.yaml'
       - 'kanz/infra/tenancy/**'
+      - 'kanz/infra/onboarding/provision-tenant.sh'
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
       - 'kanz/tools/redpandaidentity/**'
@@ -171,6 +173,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned NATS resolver fixture tools
+        run: |
+          export GOBIN="$RUNNER_TEMP/native-onboarding-bin"
+          go install github.com/nats-io/nsc/v2@v2.15.0
+          go install github.com/nats-io/nats-server/v2@v2.14.5
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          sh -n kanz/infra/onboarding/provision-tenant.sh
       - name: Qualify real three-broker native ownership
         run: python3 -B tools/native-kafka-provision/qualify.py
       - name: Reconcile exact owned native cluster after interruption

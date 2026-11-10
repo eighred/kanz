@@ -15,6 +15,7 @@ import topology
 import image_custody
 import runtime_diagnostic
 import lifecycle
+import nats_fixture
 import system_bootstrap
 import argo_bootstrap
 
@@ -27,7 +28,7 @@ HISTORY_CASES = ('history-before', 'history-active', 'history-rollback')
 ACTIVATION_CASES = SYSTEM_CASES[:4] + ('history-before', 'system-activate', 'history-active',
                                        'system-rollback', 'history-rollback')
 REFUSAL_CASES = ('wrong-cluster', 'system-mismatch')
-CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-apply',
+CASES = ('discover', 'acme-idempotent',
          'wrong-cluster', 'tenant-a', 'tenant-b', 'compute-a', 'ungranted', 'partial',
          'acme-verify', 'bravo-verify', 'quorum-healthy', 'quorum-majority', 'quorum-minority', 'quorum-restored') + ACTIVATION_CASES
 ADMIN_PROBES = ('discover','partial','quorum-healthy','quorum-majority','quorum-minority','quorum-restored') + HISTORY_CASES
@@ -304,16 +305,14 @@ def validate_receipt(receipt, case, cluster, digest, count):
     else:
         if not receipt['complete'] or receipt['partial_or_unknown'] or receipt['missing_topics']!=0 or receipt['verified_topics']!=count or receipt['verified_acls']!=(0 if case in SYSTEM_CASES else 6):
             raise ValueError('incomplete CLI readback')
-        if case.endswith(('idempotent','verify')) or case in ('compute-apply','system-repeat','system-activate','system-rollback'):
+        if case.endswith(('idempotent','verify')) or case in ('system-repeat','system-activate','system-rollback'):
             if receipt['topic_attempts']!=0: raise ValueError('existing topic rewritten')
         if case.endswith(('idempotent','verify')) and receipt['acl_attempts']!=0:
             raise ValueError('existing ACL rewritten')
         if case in SYSTEM_CASES and receipt['acl_attempts']:
             raise ValueError('system scope attempted ACL writes')
-        if case in ('acme-apply','bravo-apply','system-create') and receipt['topic_attempts']!=count:
+        if case == 'system-create' and receipt['topic_attempts']!=count:
             raise ValueError('initial creation inventory differs')
-        if case in ('acme-apply','bravo-apply','compute-apply') and receipt['acl_attempts']!=6:
-            raise ValueError('initial grant inventory differs')
 
 
 def validate_diagnostics(value, source):
@@ -363,6 +362,8 @@ def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
     digest,count,partitions=canonical_inventory(manifest)
     lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'), count)
+    if value.get('natsVersions') != {tool: version for tool, (_, version) in nats_fixture.MODULES.items()}:
+        raise ValueError('NATS fixture tool versions differ')
     argo_bootstrap.validate(value.get('argoSyncs'))
     hook_diagnostics = value.get('argoHookDiagnostics')
     if not isinstance(hook_diagnostics, list) or len(hook_diagnostics) != len(SYSTEM_CASES):
@@ -601,10 +602,13 @@ def main():
                     raise ValueError('idempotency repeated effects')
                 validate_receipt(receipt,case,cluster,digest,count)
                 evidence['cases'].append({'case':case,'passed':True,'receipt':receipt})
-            cli('acme-apply','acme',principals['acme'],'apply')
+            evidence['stage']='golden-path-infrastructure'
+            evidence['lifecycleDiagnostic']={}
+            with tempfile.TemporaryDirectory(dir=scratch) as nats_scratch:
+                with nats_fixture.resolver(Path(nats_scratch)/'nats', ROOT) as nats:
+                    evidence['natsVersions']=nats.versions
+                    evidence['lifecycle']=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count,nats)
             cli('acme-idempotent','acme',principals['acme'],'apply')
-            cli('bravo-apply','bravo',principals['bravo'],'apply')
-            cli('compute-apply','acme',principals['compute'],'apply')
             cli('wrong-cluster','acme',principals['acme'],'apply',True)
             for case in ('tenant-a','tenant-b','compute-a','ungranted','partial'):
                 evidence['stage']=case
@@ -613,9 +617,6 @@ def main():
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
             cli('acme-verify','acme',principals['acme'],'verify')
             cli('bravo-verify','bravo',principals['bravo'],'verify')
-            evidence['stage']='tenantctl-lifecycle'
-            evidence['lifecycleDiagnostic']={}
-            evidence['lifecycle']=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count)
             # Revoke only the owned inter-broker replication policy; Kafka TLS
             # remains reachable. Pods and their retained volumes never restart.
             for case,connected in (('quorum-healthy',topology.BROKERS),('quorum-majority',topology.BROKERS[:2]),
