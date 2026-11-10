@@ -3,11 +3,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	ns "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 
@@ -15,6 +17,76 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
 )
+
+func TestSeedReadbackCountsOnlySnapshotSubject(t *testing.T) {
+	server, err := ns.NewServer(&ns.Options{
+		Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir(), NoLog: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go server.Start()
+	t.Cleanup(func() { server.Shutdown(); server.WaitForShutdown() })
+	if !server.ReadyForConnections(5 * time.Second) {
+		t.Fatal("fixture NATS did not start")
+	}
+	nc, err := nats.Connect(server.ClientURL(), nats.NoReconnect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream(nats.MaxWait(3 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{Name: "RISK", Subjects: []string{"risk.>"}, Storage: nats.MemoryStorage}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ONBOARDING_PROBE_PORTFOLIO", "PFACME")
+	if err := verifySeed(js, "acme", "seed-read"); err == nil {
+		t.Fatal("missing seed was accepted")
+	}
+	if _, err := js.Publish("risk.exposure.fixture", []byte("unrelated risk record")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: server.ClientURL()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "load-seed/seed", ProducerVersion: "dev", Tenant: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func() {
+		t.Helper()
+		if err := producer.Publish(ctx, bus.Event{
+			Subject: "risk.portfolio.snapshot", EventType: "risk.portfolio.snapshot",
+			EventClass: envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT, SchemaVersion: 1,
+			Domain: "risk", EventTime: time.Now().UTC(), PartitionKey: "PFACME",
+			PayloadSchemaRef: "domain.v1.PortfolioSnapshot:1",
+			Payload: &domainpb.PortfolioSnapshot{
+				Portfolio: &domainpb.PortfolioState{PortfolioId: "PFACME"},
+				Positions: []*domainpb.PositionState{{InstrumentId: "AAPL"}},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish()
+	if err := verifySeed(js, "acme", "seed-read"); err != nil {
+		t.Fatalf("one seed alongside unrelated risk traffic: %v", err)
+	}
+	if err := verifySeed(js, "bravo", "seed-read"); err == nil {
+		t.Fatal("wrong tenant seed was accepted")
+	}
+	publish()
+	if err := verifySeed(js, "acme", "seed-read"); err == nil {
+		t.Fatal("duplicate seed was accepted")
+	}
+}
 
 func verify(url, creds, tenant, mode string) error {
 	nc, err := nats.Connect(url, nats.UserCredentials(creds), nats.Timeout(3*time.Second), nats.NoReconnect())
@@ -95,14 +167,16 @@ func verifySeed(js nats.JetStreamContext, tenant, mode string) error {
 		})
 		return err
 	}
-	state, err := js.StreamInfo(stream)
+	// The live projection publishes other subjects into RISK. Require one
+	// snapshot, not one message in the entire stream or a particular sequence.
+	state, err := js.StreamInfo(stream, &nats.StreamInfoRequest{SubjectsFilter: subject})
 	if err != nil {
 		return err
 	}
-	if state.State.Msgs != 1 || state.State.FirstSeq != 1 || state.State.LastSeq != 1 {
-		return fmt.Errorf("expected one seed record in the tenant's stream")
+	if state.State.Subjects[subject] != 1 {
+		return fmt.Errorf("expected one seed record on the tenant's snapshot subject")
 	}
-	record, err := js.GetMsg(stream, 1)
+	record, err := js.GetLastMsg(stream, subject)
 	if err != nil {
 		return err
 	}
