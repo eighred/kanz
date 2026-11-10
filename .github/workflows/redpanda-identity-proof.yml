@@ -173,14 +173,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Qualify real three-broker native ownership
+      - name: Install pinned NATS resolver fixture tools
         run: |
           export GOBIN="$RUNNER_TEMP/native-onboarding-bin"
           go install github.com/nats-io/nsc/v2@v2.15.0
           go install github.com/nats-io/nats-server/v2@v2.14.5
-          export PATH="$GOBIN:$PATH"
+          echo "$GOBIN" >> "$GITHUB_PATH"
           sh -n kanz/infra/onboarding/provision-tenant.sh
-          python3 -B tools/native-kafka-provision/qualify.py
+      - name: Qualify real three-broker native ownership
+        run: python3 -B tools/native-kafka-provision/qualify.py
       - name: Reconcile exact owned native cluster after interruption
         if: always()
         run: python3 -B tools/native-kafka-provision/owned_cleanup.py
