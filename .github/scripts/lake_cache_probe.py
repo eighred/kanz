@@ -225,10 +225,10 @@ def copy_context(root, destination):
 
 
 def build_args(builder, context, version):
-    # Each BuildKit solve must import the external cache. A prior whole-image
-    # hit need not materialize intermediate dependency layers in this builder.
+    # Use only the local builder cache warmed by the canonical build. A remote
+    # cache hit can be advertised before its layers have been materialized.
     return ["docker", "buildx", "build", "--builder", builder, "--target", "rust-build",
-            "--progress=rawjson", "--output=type=cacheonly", "--cache-from=type=gha,scope=lake-sink",
+            "--progress=rawjson", "--output=type=cacheonly",
             "--build-arg", "VERSION=" + version, "--file", str(context / DOCKERFILE), str(context)]
 
 
@@ -238,7 +238,7 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ("source", "tree", "run", "attempt", "image", "builder", "output"): parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
-    if not os.environ.get("ACTIONS_RUNTIME_TOKEN") or not os.environ.get("ACTIONS_RESULTS_URL") or os.environ.get("ACTIONS_CACHE_MODE") != "read":
+    if os.environ.get("ACTIONS_CACHE_MODE") != "read":
         raise ValueError("read-only cache environment missing")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image): raise ValueError("canonical image must be immutable")
     root = Path.cwd()

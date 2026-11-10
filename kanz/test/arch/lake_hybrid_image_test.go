@@ -79,7 +79,7 @@ func lakeHybridCI(raw string) error {
 	}
 	fields := map[string]map[string]string{
 		"Install pinned hybrid signature verifier":              {},
-		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake-sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}"},
+		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake-sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}", "no-cache-filters": "rust-build", "cache-to": ""},
 		"Catalog actual hybrid applications and native runtime": {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
 		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
 	}
@@ -87,7 +87,7 @@ func lakeHybridCI(raw string) error {
 		"Verify complete source-bound owner evidence":                     {"check_lake_snapshot_owner_evidence.py --seal"},
 		"Bind actual hybrid image identity":                               {"image=$(docker image inspect", "echo \"image=$image\" >> \"$GITHUB_OUTPUT\""},
 		"Verify synthetic cache probe controls":                           {"test_lake_cache_probe.py"},
-		"Prove joint synthetic source and VERSION dependency cache reuse": {"const env = {};", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL", "env.ACTIONS_CACHE_MODE !== 'read'", "'.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE", "'--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER", "'--output', 'snapshot-owner-proof'], {stdio: 'inherit', env}"},
+		"Prove joint synthetic source and VERSION dependency cache reuse": {"const env = {};", "['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_CACHE_MODE']", "env.ACTIONS_CACHE_MODE !== 'read'", "'.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE", "'--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER", "'--output', 'snapshot-owner-proof'], {stdio: 'inherit', env}"},
 		"Install reviewed hybrid audit tools":                             {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
 		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
 		"Actual finite owner on both broker versions without skips":       {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
@@ -203,6 +203,9 @@ func TestLakeHybridCIWiring(t *testing.T) {
 	for _, m := range [][2]string{
 		{"env.ACTIONS_CACHE_MODE !== 'read'", "env.ACTIONS_CACHE_MODE !== 'write'"},
 		{"const env = {};", "const env = process.env;"},
+		{"'TMPDIR', 'ACTIONS_CACHE_MODE'", "'TMPDIR', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_CACHE_MODE'"},
+		{"no-cache-filters: rust-build", "no-cache-filters: rust-planner"},
+		{"no-cache-filters: rust-build", "no-cache-filters: rust-build\n          cache-to: type=gha,scope=lake-sink"},
 		{"name: Verify synthetic cache probe controls", "name: Missing synthetic controls"},
 		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Missing synthetic cache probe"},
 		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Prove joint synthetic source and VERSION dependency cache reuse\n        if: false"},
