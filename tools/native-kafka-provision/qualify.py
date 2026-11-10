@@ -364,6 +364,8 @@ def validate_report(value, source, tree, run, attempt, manifest):
     lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'), count)
     if value.get('natsVersions') != {tool: version for tool, (_, version) in nats_fixture.MODULES.items()}:
         raise ValueError('NATS fixture tool versions differ')
+    if value.get('natsSeedTenants') != ['acme', 'bravo']:
+        raise ValueError('NATS seed readback missing')
     argo_bootstrap.validate(value.get('argoSyncs'))
     hook_diagnostics = value.get('argoHookDiagnostics')
     if not isinstance(hook_diagnostics, list) or len(hook_diagnostics) != len(SYSTEM_CASES):
@@ -608,6 +610,8 @@ def main():
                 with nats_fixture.resolver(Path(nats_scratch)/'nats', ROOT) as nats:
                     evidence['natsVersions']=nats.versions
                     evidence['lifecycle']=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count,nats)
+                    evidence['stage']='golden-path-seed'
+                    evidence['natsSeedTenants']=nats.seed_portfolios(ROOT)
             cli('acme-idempotent','acme',principals['acme'],'apply')
             cli('wrong-cluster','acme',principals['acme'],'apply',True)
             for case in ('tenant-a','tenant-b','compute-a','ungranted','partial'):

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -84,6 +85,9 @@ type NATSConfig struct {
 	Username string
 	Password string
 	Token    string
+	// CredentialsFile selects a NATS account JWT and its user seed from one
+	// chained credentials file. Use a credential-free URL with this mode.
+	CredentialsFile string
 
 	// Metrics is the RED/USE exporter (OBS-01c). Supplying it is what puts this
 	// connection's state on kanz_bus_connected and its transitions on
@@ -171,6 +175,21 @@ type durableClaims struct {
 func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("nats: URL required")
+	}
+	if cfg.CredentialsFile != "" {
+		if cfg.Token != "" || cfg.Username != "" || cfg.Password != "" {
+			return nil, errors.New("nats: credentials file cannot be combined with token or password authentication")
+		}
+		for _, address := range strings.Split(cfg.URL, ",") {
+			address = strings.TrimSpace(address)
+			if !strings.Contains(address, "://") {
+				address = "nats://" + address
+			}
+			parsed, err := url.Parse(address)
+			if err != nil || parsed.User != nil {
+				return nil, errors.New("nats: credentials file requires valid server URLs without user info")
+			}
+		}
 	}
 	if cfg.ConnectTimeout == 0 {
 		cfg.ConnectTimeout = 10 * time.Second
@@ -260,6 +279,8 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 		opts = append(opts, nats.Secure(cfg.TLSConfig))
 	}
 	switch {
+	case cfg.CredentialsFile != "":
+		opts = append(opts, nats.UserCredentials(cfg.CredentialsFile))
 	case cfg.Token != "":
 		opts = append(opts, nats.Token(cfg.Token))
 	case cfg.Username != "":
