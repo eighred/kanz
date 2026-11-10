@@ -84,7 +84,7 @@ def resolver(scratch, root):
             raise ValueError(f'NATS fixture module version differs for {tool}')
         versions[tool] = expected
     probe = scratch / ('probe.exe' if os.name == 'nt' else 'probe')
-    run(['go', 'build', '-o', str(probe), str(root / 'tools/native-kafka-provision/nats_probe.go')],
+    run(['go', 'build', '-o', str(probe), './test/load/onboardingprobe'],
         os.environ, root / 'kanz', timeout=180)
     run(['nsc', 'add', 'operator', '-n', env['NATS_OPERATOR'], '--sys'], env, scratch)
     config = run(['nsc', 'generate', 'config', '--nats-resolver'], env, scratch)
