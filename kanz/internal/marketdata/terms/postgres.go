@@ -129,6 +129,50 @@ type Record struct {
 	Terms        *referencepb.ContractTerms
 }
 
+// validateRecord keeps the indexed identity and decoded contract in agreement.
+// Consumers use the kind for chain lookup and the oneof for valuation; neither
+// may silently refer to different terms for the same row.
+func validateRecord(r Record) error {
+	if r.InstrumentID == "" {
+		return errors.New("terms: cannot store a record with no instrument_id")
+	}
+	if r.Terms == nil {
+		return fmt.Errorf("terms: %s has no ContractTerms payload", r.InstrumentID)
+	}
+	stamp := r.Terms.GetAsOf()
+	if r.AsOf.IsZero() || stamp.CheckValid() != nil || !stamp.AsTime().Equal(r.AsOf) ||
+		r.Terms.GetInstrumentId() != r.InstrumentID {
+		return fmt.Errorf("terms: %s payload identity or effective time differs from row key", r.InstrumentID)
+	}
+	var kind Kind
+	switch payload := r.Terms.GetTerms().(type) {
+	case *referencepb.ContractTerms_Option:
+		if payload != nil && payload.Option != nil {
+			kind = KindOption
+		}
+	case *referencepb.ContractTerms_Swap:
+		if payload != nil && payload.Swap != nil {
+			kind = KindSwap
+		}
+	case *referencepb.ContractTerms_Future:
+		if payload != nil && payload.Future != nil {
+			kind = KindFuture
+		}
+	case *referencepb.ContractTerms_Bond:
+		if payload != nil && payload.Bond != nil {
+			kind = KindBond
+		}
+	case *referencepb.ContractTerms_Structured:
+		if payload != nil && payload.Structured != nil {
+			kind = KindStructured
+		}
+	}
+	if kind == "" || kind != r.Kind {
+		return fmt.Errorf("terms: %s row kind %q does not match its ContractTerms variant", r.InstrumentID, r.Kind)
+	}
+	return nil
+}
+
 // Put stores terms idempotently. The primary key is (instrument_id, as_of), so
 // an exact re-put is ON CONFLICT DO NOTHING — a terms record at a given as_of is
 // immutable, and an amendment is a new as_of row rather than an update. Written
@@ -139,6 +183,11 @@ func (p *Postgres) Put(ctx context.Context, recs []Record) error {
 	if len(recs) == 0 {
 		return nil
 	}
+	for _, r := range recs {
+		if err := validateRecord(r); err != nil {
+			return err
+		}
+	}
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("terms: begin: %w", err)
@@ -146,12 +195,6 @@ func (p *Postgres) Put(ctx context.Context, recs []Record) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, r := range recs {
-		if r.InstrumentID == "" {
-			return errors.New("terms: cannot store a record with no instrument_id")
-		}
-		if r.Terms == nil {
-			return fmt.Errorf("terms: %s has no ContractTerms payload", r.InstrumentID)
-		}
 		blob, merr := proto.Marshal(r.Terms)
 		if merr != nil {
 			return fmt.Errorf("terms: marshal %s: %w", r.InstrumentID, merr)
