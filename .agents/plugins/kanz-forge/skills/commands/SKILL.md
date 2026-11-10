@@ -5,9 +5,9 @@ description: Coordinate Kanz development in Codex Chat by selecting engineering 
 
 # Coordinate the work
 
-Use [the command catalog](commands.json) for shortcuts. `/work` starts the
-implementation workflow; `/ship` completes delivery. Ordinary development
-requests use the same routing below: users need not name skills or test suites.
+Use [the command catalog](commands.json) for shortcuts. `/work` owns the selected
+issue through verified closure. `/ship` starts at the delivery stage for an
+existing change. Ordinary development requests use the same skill routing.
 Execute in this chat with available host tools. There is no Forge agent runtime
 or terminal launcher. A catalog entry describes a workflow, not an executable
 handler or proof that the feature ran.
@@ -72,6 +72,18 @@ work. Carry existing permission forward; do not request it again because a
 later stage uses another skill. Resolve routine implementation choices from
 code and acceptance. Report a genuine missing decision with the concrete
 choice it blocks. Preserve the repository's execution and production boundaries.
+
+For `/work`, carry the selected issue from investigation and implementation
+through PR review, required checks, merge, merged-revision verification and
+issue closure. The invocation authorizes routine repository delivery for that
+issue and its scoped PRs, subject to explicit user limits, branch protections
+and any separate authorization required by policy. Use
+[pr-delivery](../pr-delivery/SKILL.md) without requiring another command.
+Fix recoverable failures and wait for pending gates. If a PR covers only one
+part of the issue, continue with the remaining in-scope acceptance. Close the
+issue only when the evidence covers its full acceptance. For a genuine external
+blocker, complete independent in-scope work, record the missing prerequisite
+and leave the issue open. Preserve explicit instructions to keep an issue open.
 
 For `/work subagents N [targets]` or an explicit request for parallel agents,
 use the [native parallel-work protocol](references/parallel-work.md). Inspect

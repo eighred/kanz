@@ -1,0 +1,124 @@
+// The tenant's own account must serve its acknowledged data under a stream
+// name shared by both fixture tenants.
+package main
+
+import (
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"google.golang.org/protobuf/proto"
+
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/eighred/kanz/pkg/bus"
+)
+
+func verify(url, creds, tenant, mode string) error {
+	nc, err := nats.Connect(url, nats.UserCredentials(creds), nats.Timeout(3*time.Second), nats.NoReconnect())
+	if err != nil {
+		return fmt.Errorf("authenticate probe: %w", err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream(nats.MaxWait(3 * time.Second))
+	if err != nil {
+		return err
+	}
+	info, err := js.AccountInfo()
+	if err != nil {
+		return err
+	}
+	if info.Limits.MaxMemory != 64_000_000 || info.Limits.MaxStore != 2_000_000_000 {
+		return fmt.Errorf("unexpected JetStream account limits")
+	}
+	if mode == "seed-prepare" || mode == "seed-read" {
+		return verifySeed(js, tenant, mode)
+	}
+	const stream = "LIFECYCLE"
+	const subject = "fixture.lifecycle"
+	if mode == "create" {
+		if _, err := js.AddStream(&nats.StreamConfig{
+			Name: stream, Subjects: []string{subject}, Storage: nats.MemoryStorage,
+		}); err != nil {
+			return err
+		}
+		ack, err := js.Publish(subject, []byte(tenant))
+		if err != nil {
+			return err
+		}
+		if ack.Stream != stream || ack.Sequence != 1 {
+			return fmt.Errorf("first publish did not start a tenant-local stream")
+		}
+	}
+	state, err := js.StreamInfo(stream)
+	if err != nil {
+		return err
+	}
+	if state.State.Msgs != 1 || state.State.FirstSeq != 1 || state.State.LastSeq != 1 {
+		return fmt.Errorf("expected one tenant-local record")
+	}
+	record, err := js.GetMsg(stream, 1)
+	if err != nil {
+		return err
+	}
+	if record.Subject != subject || string(record.Data) != tenant {
+		return fmt.Errorf("stream returned a record outside the tenant's account")
+	}
+	return nil
+}
+
+func verifySeed(js nats.JetStreamContext, tenant, mode string) error {
+	const stream = "RISK"
+	const subject = "risk.portfolio.snapshot"
+	if mode == "seed-prepare" {
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name: stream, Subjects: []string{subject}, Storage: nats.MemoryStorage,
+		})
+		return err
+	}
+	state, err := js.StreamInfo(stream)
+	if err != nil {
+		return err
+	}
+	if state.State.Msgs != 1 || state.State.FirstSeq != 1 || state.State.LastSeq != 1 {
+		return fmt.Errorf("expected one seed record in the tenant's stream")
+	}
+	record, err := js.GetMsg(stream, 1)
+	if err != nil {
+		return err
+	}
+	envelope, payload, err := bus.Unframe(record.Data)
+	if err != nil {
+		return err
+	}
+	if err := bus.Validate(envelope); err != nil {
+		return err
+	}
+	var snapshot domainpb.PortfolioSnapshot
+	if err := proto.Unmarshal(payload, &snapshot); err != nil {
+		return err
+	}
+	if record.Subject != subject || envelope.GetTenantId() != tenant ||
+		envelope.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT ||
+		snapshot.GetPortfolio().GetPortfolioId() != "PF1" || len(snapshot.GetPositions()) == 0 {
+		return fmt.Errorf("unexpected tenant portfolio seed")
+	}
+	return nil
+}
+
+func TestOnboardingProbe(t *testing.T) {
+	mode := os.Getenv("ONBOARDING_PROBE_MODE")
+	switch mode {
+	case "":
+		t.Skip("requires an owned onboarding NATS resolver")
+	case "create", "read", "seed-prepare", "seed-read":
+	default:
+		t.Fatal("unknown onboarding probe mode")
+	}
+	if err := verify(os.Getenv("ONBOARDING_PROBE_URL"), os.Getenv("ONBOARDING_PROBE_CREDS"),
+		os.Getenv("ONBOARDING_PROBE_TENANT"), mode); err != nil {
+		t.Fatal(err)
+	}
+}

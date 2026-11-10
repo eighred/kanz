@@ -423,9 +423,11 @@ if step policy; then
   echo "   admin subject: $ADMIN_SUBJECT → risk.admin (grant via the IdP group→role mapping)"
 fi
 
-# 4) Data-source binding + first portfolio: bind the tenant's market/reference feed
+# 5) Data-source binding + first portfolio: bind the tenant's market/reference feed
 #    entitlements (composition-root env on the market-data/datamaster adapters) and
 #    seed a first portfolio so the read path serves real data on day one.
+# In a JWT resolver estate, set SEED_NATS_CREDS_FILE to the chained credentials
+# for a publisher in this tenant's account, scoped to risk.portfolio.snapshot.
 if step seed; then
   echo "-- [5/6] seed first portfolio for $TENANT"
   SEED_TENANT="$TENANT" SEED_PORTFOLIO="${FIRST_PORTFOLIO:-PF1}" \
