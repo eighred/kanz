@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from statistics import median
+from issue_backlog import summarize as summarize_backlog
 
 PATHS = {
     "code": ["Fix the owning code and run its narrow regression", "Use an isolated baseline comparison"],
@@ -197,6 +198,8 @@ def assess(snapshot):
             "build": build_plan(snapshot["builders"])}
     if "period" in snapshot:
         result["daily_progress"] = daily_progress(snapshot["period"], result["blockers"])
+    if "backlog" in snapshot:
+        result["issue_backlog"] = summarize_backlog(snapshot["backlog"])
     return result
 
 

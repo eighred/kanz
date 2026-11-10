@@ -89,3 +89,24 @@ carry `owner` and `blocked_since`; missing values are unknown. Use the first
 evidenced blocking event, rather than the issue creation time by default.
 Pull timestamps from GitHub and the existing issue and CI evidence; do not
 maintain a second status board.
+
+For the backlog view, reconcile the paginated open-issue inventory against
+GitHub's total. Read the issue's acceptance and blocker text, and confirm that
+referenced PRs are current and actually cover that scope. Distinguish an active
+partial PR, a landed change awaiting acceptance, and a verified closure
+candidate. Age flags review, not closure. Treat similar issues as overlap
+candidates until their acceptance and owners match.
+
+Optional `backlog` takes `as_of`, `open_total`, `inventory_complete`, and
+`issues`. Each record includes `number`, `priority`, `component`,
+`security_impact`, `updated_at`, `next_action`, `acceptance_documented`, and
+one status: `ready to implement`, `blocked external`, `waiting on dependency`,
+`needs investigation`, or `ready for verification or closure`. Supply
+`owner`, `active_prs`, `unresolved_dependencies`, `blocked_since`, and
+`order` when supported by evidence. `closure_proof` requires the exact
+`merge_sha`, `evidence`, `verified_on_main`, and `all_acceptance_passed`.
+Use `keep_open` for an explicit hold. A link, stale date or green PR alone
+cannot make a closure candidate.
+Use `landed_scope_evidence` to show merged work awaiting acceptance even when
+verification is externally blocked. Use `independent_scope` for a reviewed
+remaining slice that can proceed alongside an active PR.

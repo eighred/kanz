@@ -25,6 +25,37 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_backlog_does_not_close_on_pr_link_or_incomplete_inventory(self):
+        data = snapshot()
+        issue = dict(number=42, status="ready for verification or closure",
+                     priority="P1", component="infra", security_impact="unknown",
+                     next_action="verify acceptance", updated_at="2026-08-01T00:00:00Z",
+                     blocked_since="2026-11-09T00:00:00Z", active_prs=[11],
+                     acceptance_documented=True)
+        data["backlog"] = dict(as_of="2026-11-10T00:00:00Z", inventory_complete=True,
+                               open_total=1, issues=[issue])
+        result = assess(data)["issue_backlog"]
+        self.assertEqual(result["awaiting_verification"], [42])
+        self.assertEqual(result["closure_candidates"], [])
+        self.assertEqual(result["issues"][0]["blocker_age_hours"], 24)
+        self.assertTrue(result["issues"][0]["stale_review"])
+        issue["closure_proof"] = dict(merge_sha=MAIN, verified_on_main=True,
+                                      all_acceptance_passed=True, evidence="run/5")
+        self.assertEqual(assess(data)["issue_backlog"]["closure_candidates"], [42])
+        data["backlog"]["open_total"] = 2
+        self.assertEqual(assess(data)["issue_backlog"]["closure_candidates"], [])
+
+    def test_backlog_prioritizes_actionable_work_and_preserves_holds(self):
+        data = snapshot()
+        issues = [dict(number=n, status="ready to implement", priority=priority,
+                       component="ci", security_impact="unknown", next_action="implement",
+                       updated_at="2026-11-09T00:00:00Z", acceptance_documented=True,
+                       unresolved_dependencies=deps)
+                  for n, priority, deps in [(1, "P0", [9]), (2, "P2", []), (3, "P1", [])]]
+        data["backlog"] = dict(as_of="2026-11-10T00:00:00Z", inventory_complete=True,
+                               open_total=3, issues=issues)
+        self.assertEqual(assess(data)["issue_backlog"]["top_five"], [3, 2])
+
     def test_required_green_cannot_hide_applicable_failure(self):
         data = snapshot()
         data["prs"][0]["observed"][1] = context("julia", HEAD, "FAILURE", kind="security",
