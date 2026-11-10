@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -107,12 +108,17 @@ func verifySeed(js nats.JetStreamContext, tenant, mode string) error {
 	return nil
 }
 
-func main() {
-	if len(os.Args) != 5 {
-		os.Exit(2)
+func TestOnboardingProbe(t *testing.T) {
+	mode := os.Getenv("ONBOARDING_PROBE_MODE")
+	switch mode {
+	case "":
+		t.Skip("requires an owned onboarding NATS resolver")
+	case "create", "read", "seed-prepare", "seed-read":
+	default:
+		t.Fatal("unknown onboarding probe mode")
 	}
-	if err := verify(os.Args[1], os.Args[2], os.Args[3], os.Args[4]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if err := verify(os.Getenv("ONBOARDING_PROBE_URL"), os.Getenv("ONBOARDING_PROBE_CREDS"),
+		os.Getenv("ONBOARDING_PROBE_TENANT"), mode); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -40,9 +40,16 @@ class Resolver:
                  '-o', str(credentials)], self.env, self.scratch)
         # Only the tracked caller can publish the account claim. Creating a probe
         # user here exercises that claim through a new authenticated connection.
-        run([str(self.probe), self.url, str(credentials), tenant,
-             'create' if create_probe else 'read'], self.env, self.scratch)
+        self.observe(tenant, 'create' if create_probe else 'read')
         return public_key
+
+    def observe(self, tenant, mode):
+        result = run([str(self.probe), '-test.v', '-test.run=^TestOnboardingProbe$'],
+                     dict(self.env, ONBOARDING_PROBE_URL=self.url, ONBOARDING_PROBE_TENANT=tenant,
+                          ONBOARDING_PROBE_CREDS=str(self.scratch / (tenant + '.creds')),
+                          ONBOARDING_PROBE_MODE=mode), self.scratch)
+        if not any(line.startswith('--- PASS: TestOnboardingProbe (') for line in result.splitlines()):
+            raise ValueError('NATS onboarding probe did not run')
 
     def seed_portfolios(self, root):
         tenants = ('acme', 'bravo')
@@ -50,9 +57,7 @@ class Resolver:
         go_env.update(json.loads(run(['go', 'env', '-json', 'GOCACHE', 'GOMODCACHE'],
                                      os.environ, root / 'kanz')))
         for tenant in tenants:
-            credentials = self.scratch / (tenant + '.creds')
-            run([str(self.probe), self.url, str(credentials), tenant, 'seed-prepare'],
-                self.env, self.scratch)
+            self.observe(tenant, 'seed-prepare')
             seed_creds = self.scratch / (tenant + '-seed.creds')
             run(['nsc', 'add', 'user', '-a', tenant, '-n', 'fixture-seed',
                  '--allow-pub', 'risk.portfolio.snapshot', '--allow-sub', '_INBOX.>'],
@@ -63,8 +68,7 @@ class Resolver:
                 SEED_NATS_URL=self.url, SEED_NATS_CREDS_FILE=str(seed_creds)),
                 root / 'kanz/infra/onboarding', timeout=180)
         for tenant in tenants:
-            run([str(self.probe), self.url, str(self.scratch / (tenant + '.creds')),
-                 tenant, 'seed-read'], self.env, self.scratch)
+            self.observe(tenant, 'seed-read')
         return list(tenants)
 
 
@@ -84,7 +88,7 @@ def resolver(scratch, root):
             raise ValueError(f'NATS fixture module version differs for {tool}')
         versions[tool] = expected
     probe = scratch / ('probe.exe' if os.name == 'nt' else 'probe')
-    run(['go', 'build', '-o', str(probe), './test/load/onboardingprobe'],
+    run(['go', 'test', '-c', '-o', str(probe), './test/load/onboardingprobe'],
         os.environ, root / 'kanz', timeout=180)
     run(['nsc', 'add', 'operator', '-n', env['NATS_OPERATOR'], '--sys'], env, scratch)
     config = run(['nsc', 'generate', 'config', '--nats-resolver'], env, scratch)
