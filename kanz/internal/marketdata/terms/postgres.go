@@ -144,30 +144,20 @@ func validateRecord(r Record) error {
 		r.Terms.GetInstrumentId() != r.InstrumentID {
 		return fmt.Errorf("terms: %s payload identity or effective time differs from row key", r.InstrumentID)
 	}
-	var kind Kind
+	var matches bool
 	switch payload := r.Terms.GetTerms().(type) {
 	case *referencepb.ContractTerms_Option:
-		if payload != nil && payload.Option != nil {
-			kind = KindOption
-		}
+		matches = r.Kind == KindOption && payload != nil && payload.Option != nil
 	case *referencepb.ContractTerms_Swap:
-		if payload != nil && payload.Swap != nil {
-			kind = KindSwap
-		}
+		matches = r.Kind == KindSwap && payload != nil && payload.Swap != nil
 	case *referencepb.ContractTerms_Future:
-		if payload != nil && payload.Future != nil {
-			kind = KindFuture
-		}
+		matches = r.Kind == KindFuture && payload != nil && payload.Future != nil
 	case *referencepb.ContractTerms_Bond:
-		if payload != nil && payload.Bond != nil {
-			kind = KindBond
-		}
+		matches = r.Kind == KindBond && payload != nil && payload.Bond != nil
 	case *referencepb.ContractTerms_Structured:
-		if payload != nil && payload.Structured != nil {
-			kind = KindStructured
-		}
+		matches = r.Kind == KindStructured && payload != nil && payload.Structured != nil
 	}
-	if kind == "" || kind != r.Kind {
+	if !matches {
 		return fmt.Errorf("terms: %s row kind %q does not match its ContractTerms variant", r.InstrumentID, r.Kind)
 	}
 	return nil
