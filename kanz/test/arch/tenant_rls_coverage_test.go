@@ -61,9 +61,9 @@ import (
 // rlsExempt is a DEFAULT-DENY allow-list: every tenant-scoped table declared in
 // the migrations is checked unless it is named here with a reason.
 //
-// This guard checks that an exempt table still exists; it does not prove the
-// exception's safety premise. The named directory, authentication and audit
-// controls need their own tests. #1331 tracks that remaining premise audit.
+// An exemption remains necessary only while the table exists and fails at
+// least one of this guard's RLS checks. The named directory, authentication
+// and audit controls need their own tests for their safety premises (#1331).
 var rlsExempt = map[string]string{
 	"identity_access_audit_tenants": "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
 	"bff_session_audit_tenants":     "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
@@ -143,6 +143,9 @@ func TestEveryTenantScopedTableIsUnderForcedRLS(t *testing.T) {
 		}
 		if _, ok := rlsExempt[name]; ok {
 			seenExempt[name] = true
+			if d.enabled && d.forced && d.policy && d.guarded {
+				t.Errorf("rlsExempt names %q, which now passes every RLS check. Delete the stale entry.", name)
+			}
 			continue
 		}
 		switch {
