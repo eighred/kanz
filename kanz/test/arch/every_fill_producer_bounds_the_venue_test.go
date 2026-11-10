@@ -171,10 +171,12 @@ func TestEveryFillFactProducerBoundsTheVenuesCumulative(t *testing.T) {
 			unbounded)
 	}
 
-	// DEAD-ENTRY ARM.
+	// Retire an exemption when its producer disappears or reaches the shared bound.
 	for key, reason := range fillBoundExempt {
 		if !producers[key] {
 			t.Errorf("exemption for %q (%s) names no fill-FACT producer — delete it", key, reason)
+		} else if bounded[key] {
+			t.Errorf("exemption for %q (%s) is stale: producer now reaches LeavesRemaining — delete it", key, reason)
 		}
 	}
 }
