@@ -912,6 +912,8 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 				t.Errorf("%s is exempt as a KNOWN unbounded leak but names no issue (%q) — a leak with no "+
 					"issue is a leak nobody is going to fix", key, ex.issue)
 			}
+		default:
+			t.Errorf("exemption %s has unknown eviction class %d", key, ex.class)
 		case boundedByConstruction:
 			// The obligation here is the argument in `why`, which no test can
 			// check. The floor below is that there IS one, at length: the entries
