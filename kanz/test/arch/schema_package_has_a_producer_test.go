@@ -65,7 +65,7 @@ import (
 //     match. The residue is bounded and the motivating defect is not in it:
 //     factor.v1 was named by NOTHING — no producer, no consumer, no signature —
 //     and total absence is what this catches, with margin.
-//   - It sees GO only. A package produced solely from kanz-py or kanz-web reads
+//   - It sees GO only. A package produced solely from kanz-py or web reads
 //     as dark here. That was checked by hand when this guard was written — every
 //     package the exemptions below name was dark in all three SDKs — and it is
 //     why each reason says which languages were searched.
@@ -143,7 +143,7 @@ func TestEverySchemaPackageHasAProducer(t *testing.T) {
 //
 // EVERY ENTRY HERE IS A REAL FINDING, not a design decision. They are the same
 // class of defect factor.v1 was, found by the same scan on the same day, and
-// each was checked against kanz-py/ and kanz-web/ as well as kanz/ — none of the
+// each was checked against kanz-py/ and web/ as well as kanz/ — none of the
 // four is produced in any language. They are listed rather than fixed because
 // each is its own piece of work with its own data seam, and a guard that lands
 // with four unrelated features attached is a guard that does not land.

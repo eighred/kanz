@@ -8,7 +8,7 @@ on:
   pull_request:
     paths:
       - 'kanz-rs/**'
-      - 'kanz-web/.nvmrc'
+      - 'web/.nvmrc'
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/tools/decimal-conformance/**'
@@ -48,7 +48,7 @@ on:
     branches: [main]
     paths:
       - 'kanz-rs/**'
-      - 'kanz-web/.nvmrc'
+      - 'web/.nvmrc'
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/tools/decimal-conformance/**'
@@ -414,7 +414,7 @@ jobs:
       - name: Select pinned Node for actual WASM qualification
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
       - name: Qualify actual browser rendering WASM
         working-directory: kanz-rs
         run: |

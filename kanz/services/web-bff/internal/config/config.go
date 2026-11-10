@@ -87,7 +87,7 @@ type Config struct {
 	// limiter too strict.
 	TrustedProxies []string
 
-	// StaticDir is the compiled SPA (kanz-web/dist) this BFF serves on its OWN
+	// StaticDir is the compiled SPA (web/dist) this BFF serves on its OWN
 	// origin, so the httpOnly session cookie needs no CORS and no cookie-domain
 	// syncing. Empty ⇒ API only, the local shape where Vite serves the SPA and
 	// proxies /api and /auth back here.

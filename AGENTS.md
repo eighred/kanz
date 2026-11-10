@@ -51,7 +51,7 @@ architecture violation even when tests pass.
 | `kanz/` | Go module `github.com/eighred/kanz`; Go 1.26.1 language / 1.26.10 toolchain. Services in `services/`, binaries in `cmd/`. |
 | `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
 | `kanz-py/` | Python inference service. |
-| `kanz-web/` | Browser client. |
+| `web/` | Browser client. |
 | `kanz-rs/` | Rust feed runtimes, canonical compatibility primitives and diagnostic financial workers; ownership changes require component-specific #1413 acceptance. |
 | `kanz-jl/` | Optional curve-calibration comparison worker; Go remains authoritative. |
 | `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |

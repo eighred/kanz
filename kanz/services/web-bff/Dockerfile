@@ -67,7 +67,7 @@ COPY --from=build /out/web-bff /web-bff
 # therefore the one CSRF defences exist to prevent — plus CORS-with-credentials
 # and a cookie domain kept in step with whatever the edge is called this week.
 #
-# BUILT BY THE WORKFLOW, NOT HERE. kanz-web/dist is gitignored (it is a build
+# BUILT BY THE WORKFLOW, NOT HERE. web/dist is gitignored (it is a build
 # artifact), and the build/release workflows run `npm ci && npm run build` into
 # the docker context before this file is read — the same arrangement the
 # generated Go SDK above uses, and for the same reason: no Node base image is
@@ -79,7 +79,7 @@ COPY --from=build /out/web-bff /web-bff
 # in a browser. WEB_BFF_STATIC_DIR must point here;
 # test/arch/bff_image_serves_the_spa_test.go fails the build if a manifest sets
 # it to a path this file does not populate.
-COPY kanz-web/dist/ /srv/spa/
+COPY web/dist/ /srv/spa/
 
 USER nonroot:nonroot
 EXPOSE 8084

@@ -46,7 +46,7 @@ func checkGoCacheProfile(data []byte) error {
 				return fmt.Errorf("implicit compiler cache writer enabled")
 			}
 		case step.Name == "Prepare complete MFA browser dependencies before compiler cache":
-			if native != -1 || step.If != "" || strings.TrimSpace(step.Run) != "cd kanz-web\nnpm ci --no-audit --no-fund\nnpx --no-install playwright install --with-deps chromium" {
+			if native != -1 || step.If != "" || strings.TrimSpace(step.Run) != "cd web\nnpm ci --no-audit --no-fund\nnpx --no-install playwright install --with-deps chromium" {
 				return fmt.Errorf("native dependencies no longer fully prepared")
 			}
 			native = i

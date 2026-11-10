@@ -11,7 +11,7 @@ on:
       - 'kanz/**'
       - 'kanz-rs/**'
       - 'kanz-py/**'
-      - 'kanz-web/**'
+      - 'web/**'
       - 'kanz-schemas/proto/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
@@ -324,7 +324,7 @@ jobs:
       # cross-site and therefore the one CSRF defences exist to prevent — plus
       # CORS-with-credentials and a cookie domain kept in step with the edge.
       #
-      # kanz-web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
+      # web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
       # and lands in the docker context, exactly as the generated Go SDK above
       # does. Without this the image builds, starts, serves /api and /auth
       # perfectly, and returns nothing at / — an application that is finished,
@@ -335,19 +335,19 @@ jobs:
         if: matrix.service == 'web-bff'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
           cache: npm
-          cache-dependency-path: kanz-web/package-lock.json
+          cache-dependency-path: web/package-lock.json
       - name: Install pinned Rust WASM target for BFF asset
         if: matrix.service == 'web-bff'
         run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
-      - name: Compile kanz-web into dist
+      - name: Build the web client
         if: matrix.service == 'web-bff'
-        working-directory: kanz-web
+        working-directory: web
         run: |
           npm ci
           npm run build
-          test -f dist/index.html || { echo "::error::kanz-web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
+          test -f dist/index.html || { echo "::error::web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
 
       # A FORK PR CANNOT PULL A PRIVATE BASE, AND MUST SAY SO IN ITS FIRST STEP.
       #

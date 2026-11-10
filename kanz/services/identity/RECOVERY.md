@@ -114,7 +114,7 @@ For the optional Chromium proof, build the BFF and SPA, install Playwright and
 its Chromium runtime in your test environment, and set `TEST_RECOVERY_BFF` to
 the compiled BFF, `TEST_RECOVERY_STATIC_DIR` to the SPA's `dist` directory,
 `TEST_RECOVERY_NODE` to Node, and `TEST_RECOVERY_BROWSER_SCRIPT` to
-`kanz-web/e2e/recovery.cjs`. `TEST_RECOVERY_PLAYWRIGHT` can name the installed
+`web/e2e/recovery.cjs`. `TEST_RECOVERY_PLAYWRIGHT` can name the installed
 Playwright module when it is outside Node's normal module search path. With the
 same disposable database configured, run:
 

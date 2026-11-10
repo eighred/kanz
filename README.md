@@ -39,7 +39,7 @@ are tracked in [GitHub Issues](https://github.com/eighred/kanz/issues) and PRs.
 | Market-data runtimes and Rust migration work | [Rust workspace](kanz-rs/README.md), including the feed runtimes and the diagnostic [bond-risk worker](kanz-rs/services/bond-risk-shadow/README.md). |
 | Independent curve calibration | [Julia worker](kanz-jl/README.md). It compares against the installed Go curve. |
 | Shared wire contracts and SDK generation | [Protobuf schemas](kanz-schemas/README.md) in `kanz-schemas/`. |
-| Operator interface | [Vue client](kanz-web/). |
+| Operator interface | [Vue client](web/). |
 | Authorized inference | [Python inference service](kanz-py/README.md). |
 | Deployment, operations, and CI | [Infrastructure](kanz/infra/README.md), [operator tools](tools/), and [workflows](.github/workflows/). |
 

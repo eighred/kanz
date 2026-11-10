@@ -11,7 +11,7 @@ import { homedir } from 'node:os'
 export const root = fileURLToPath(new URL('../../', import.meta.url))
 export const inputs = ['kanz-rs/Cargo.toml', 'kanz-rs/Cargo.lock', 'kanz-rs/rust-toolchain.toml',
   'kanz-rs/crates/browser-render/Cargo.toml', 'kanz-rs/crates/browser-render/src/lib.rs',
-  'kanz-web/scripts/build-renderer.mjs', 'kanz-web/scripts/build-renderer.test.mjs', 'kanz-web/.nvmrc']
+  'web/scripts/build-renderer.mjs', 'web/scripts/build-renderer.test.mjs', 'web/.nvmrc']
 export const exportsExpected = ['memory:memory', 'global:__data_end', 'global:__heap_base',
   'function:render_input_byte', 'function:render_output_byte', 'function:render_output_len',
   'function:render_reset', 'function:render_value'].sort()
@@ -112,9 +112,9 @@ export function build() {
     assert.equal(source, process.env.GITHUB_SHA)
     assert.match(process.env.GITHUB_RUN_ID || '', /^[1-9][0-9]{0,19}$/)
     assert.match(process.env.GITHUB_RUN_ATTEMPT || '', /^[1-9][0-9]{0,19}$/)
-    assert.equal(process.versions.node.split('.')[0], readFileSync(resolve(root, 'kanz-web/.nvmrc'), 'utf8').trim())
+    assert.equal(process.versions.node.split('.')[0], readFileSync(resolve(root, 'web/.nvmrc'), 'utf8').trim())
   }
-  command(process.execPath, ['--test', resolve(root, 'kanz-web/scripts/build-renderer.test.mjs')])
+  command(process.execPath, ['--test', resolve(root, 'web/scripts/build-renderer.test.mjs')])
   assert.match(command('rustc', ['+1.90.0', '--version']).toString(), /^rustc 1\.90\.0 /)
   command('cargo', ['+1.90.0', 'rustc', '--locked', '--release', '-p', 'kanz-browser-render',
     '--target', 'wasm32-unknown-unknown', '--target-dir', resolve(root, 'kanz-rs/target'), '--', '-C', 'link-arg=--max-memory=2097152',
@@ -130,7 +130,7 @@ export function build() {
     run: process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_RUN_ID : null,
     attempt: process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_RUN_ATTEMPT : null,
     sources, moduleSHA256, moduleBytes: bytes.length, maxMemoryBytes: 2097152 }
-  publishAsset(resolve(root, 'kanz-web/src/generated'), bytes, descriptor)
+  publishAsset(resolve(root, 'web/src/generated'), bytes, descriptor)
   return descriptor
 }
 

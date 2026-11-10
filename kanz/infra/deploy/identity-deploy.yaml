@@ -150,7 +150,7 @@ spec:
             # logins without shortening the exposure the clamp already governs.
             #
             # THE PRECONDITION WAS CHECKED, NOT ASSUMED: expiry drives a clean
-            # re-login rather than a broken screen, and kanz-web/src/main.test.ts
+            # re-login rather than a broken screen, and web/src/main.test.ts
             # now executes that composed path — which nothing did before, so a
             # regression that dropped the wiring kept 110 tests green.
             #

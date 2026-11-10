@@ -23,7 +23,7 @@ the BFF's browser policy or grant CORS access to its sessions.
 
 Regression tests cover rejection before body/session/upstream access, concurrent
 requests over real TLS, local HTTP, OIDC redirects, static assets, errors and
-hostile upstream headers. When changing CSP, also build `kanz-web` and exercise
+hostile upstream headers. When changing CSP, also build `web` and exercise
 login, authenticated navigation and logout in a real browser against the compiled
 BFF and identity service, checking for `securitypolicyviolation` events.
 

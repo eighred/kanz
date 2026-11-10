@@ -79,7 +79,7 @@ class GitScopeTests(unittest.TestCase):
             ".github/scripts/required_ci.py", ".github/scripts/release_source.py",
             ".github/actions/setup-buf/action.yml", ".github/workflows/kanz-ci.yml",
             "tools/Initialize-TestnetPortfolio.ps1", "kanz-schemas/packaging/go/go.mod",
-            "new-runtime/entrypoint", "kanz-web/README.md",
+            "new-runtime/entrypoint", "web/README.md",
         ):
             with self.subTest(name=name):
                 self.write(name, "fixture")
