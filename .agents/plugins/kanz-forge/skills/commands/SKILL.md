@@ -67,6 +67,24 @@ without source evidence does not advance the task.
 
 ## Execute and coordinate
 
+For unscoped `/work`, select and complete the highest-priority feasible task:
+
+1. Reconcile current main, issue acceptance, active PRs, and dependencies. Rank
+   by repository priority and impact. Within comparable priority, prefer
+   completing an existing change with a clear path to verified main.
+2. Name the selected task and its acceptance, then act. Fill in discoverable
+   gaps in scope, implementation, or evidence. Repair failures and continue
+   through exact-head checks, authorized merge, and verification on main.
+   A plan, local commit, open PR, or pending run is not completion.
+3. If progress depends on unavailable input, authority, infrastructure, or a
+   running check, identify the exact dependency and what it blocks. Record
+   the evidence and the next action in the owning issue or PR. For unscoped
+   work, move immediately to the next highest-priority feasible independent
+   task. Recheck a higher-priority task at a natural checkpoint if its blocker
+   clears. Keep explicit user scope and security holds intact.
+4. Report the completed outcome and its verification, or the specific reasons
+   no remaining candidate can proceed. Keep pending and partial work explicit.
+
 State the outcome and material assumptions briefly, then do the authorized
 work. Carry existing permission forward; do not request it again because a
 later stage uses another skill. Resolve routine implementation choices from

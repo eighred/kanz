@@ -25,6 +25,19 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_selects_highest_priority_feasible_task_and_rechecks_holds(self):
+        data = snapshot()
+        high = task("high", "risk", blockers=["signed upstream input"], priority=0)
+        medium = task("medium", "observability", priority=1)
+        low = task("low", "docs", priority=2)
+        data["tasks"] = [low, medium, high]
+        self.assertEqual(assess(data)["plan"]["next_actionable"], "medium")
+        high["blockers"] = []
+        self.assertEqual(assess(data)["plan"]["next_actionable"], "high")
+        for item in data["tasks"]:
+            item["blockers"] = ["required check pending"]
+        self.assertIsNone(assess(data)["plan"]["next_actionable"])
+
     def test_backlog_does_not_close_on_pr_link_or_incomplete_inventory(self):
         data = snapshot()
         issue = dict(number=42, status="ready for verification or closure",
