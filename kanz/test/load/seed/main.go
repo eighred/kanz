@@ -18,12 +18,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/eighred/kanz/internal/env"
 	"log"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/env"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -66,9 +66,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "load-seed"})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{
+		URL: url, Name: "load-seed", CredentialsFile: env.Or("SEED_NATS_CREDS_FILE", ""),
+	})
 	if err != nil {
-		log.Fatalf("seed: dial nats %s: %v", url, err)
+		log.Fatal("seed: NATS connection failed; check the broker and authentication configuration")
 	}
 	defer func() { _ = client.Close() }()
 

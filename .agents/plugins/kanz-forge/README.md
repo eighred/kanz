@@ -9,8 +9,8 @@ and carries a change through review and verification.
 
 | In Codex Chat | Behavior |
 |---|---|
-| `Kanz /work #1234` | Reconcile the issue, map ownership, implement, verify, and prepare delivery. |
-| `Kanz /work` | Select ready work from current Issues, PRs, and source. |
+| `Kanz /work #1234` | Resolve the issue through PR delivery, merged-main verification and issue closure. |
+| `Kanz /work` | Select ready work from current Issues, PRs, and source, then carry it through verified closure. |
 | `Kanz /work subagents 2` | Request two workers for independent tasks, bounded by host capacity. Issue numbers may follow. |
 | `Kanz /ship #1234` | Review and repair that PR, verify its final head, and merge with specific authorization. |
 | `Kanz /doctor` | Inspect installation, available host tools, and observed capability evidence. |

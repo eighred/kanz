@@ -1,8 +1,8 @@
 {
   "/work": {
     "target": "optional",
-    "description": "Deliver an issue with automatic skill selection; optionally /work subagents N.",
-    "workflow": "Inspect the current checkout, main, Issues and PRs. Select the highest-priority ready issue when no target is given, checking dependencies, duplicates and shipped work. Compose issue-archaeology, stack-routing, engineering-standard, kanz-verify and pr-delivery as needed; automatically include security-audit for trust boundaries and financial-verification for money or model changes. Do not require the user to select internal tools. For 'subagents N', use the native coordination protocol in references/parallel-work.md, bounded by host capacity; independent work may continue while another exact head is in CI. Preserve file ownership, dependency gates and specific merge approvals. No deployment or capital-halt change.",
+    "description": "Resolve an issue through verified closure with automatic skill selection.",
+    "workflow": "Inspect the current checkout, main, Issues and PRs. Select the highest-priority ready issue when no target is given, checking dependencies, duplicates and shipped work. Compose issue-archaeology, stack-routing, engineering-standard, kanz-verify and pr-delivery as needed; automatically include security-audit for trust boundaries and financial-verification for money or model changes. Do not require the user to select internal tools. For 'subagents N', use the native coordination protocol in references/parallel-work.md, bounded by host capacity; independent work may continue while another exact head is in CI. Follow the commands skill through PR review, required checks, merge and merged-main verification. The invocation authorizes routine delivery within the selected scope, subject to explicit user limits and repository policy. Continue remaining in-scope acceptance after a partial PR. Close the issue only after full acceptance. Record genuine external blockers and keep the issue open. No deployment or capital-halt change.",
     "primary": true,
     "skills": [
       "issue-archaeology",
