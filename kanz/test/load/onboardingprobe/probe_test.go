@@ -33,7 +33,7 @@ func verify(url, creds, tenant, mode string) error {
 	if info.Limits.MaxMemory != 64_000_000 || info.Limits.MaxStore != 2_000_000_000 {
 		return fmt.Errorf("unexpected JetStream account limits")
 	}
-	if mode == "seed-prepare" || mode == "seed-read" {
+	if mode == "seed-prepare" || mode == "seed-read" || mode == "projection-prepare" {
 		return verifySeed(js, tenant, mode)
 	}
 	const stream = "LIFECYCLE"
@@ -72,6 +72,23 @@ func verify(url, creds, tenant, mode string) error {
 func verifySeed(js nats.JetStreamContext, tenant, mode string) error {
 	const stream = "RISK"
 	const subject = "risk.portfolio.snapshot"
+	if mode == "projection-prepare" {
+		// Match the canonical bootstrap's subjects used by the risk process.
+		for _, stream := range []nats.StreamConfig{
+			{Name: "RISK", Subjects: []string{"risk.portfolio.>", "risk.exposure.>", "risk.signal.>", "risk.command.>", "risk.curve.>", "risk.factor.>"}},
+			{Name: "POSITION", Subjects: []string{"risk.position.>"}, MaxMsgsPerSubject: 1},
+			{Name: "PLATFORM", Subjects: []string{"platform.>"}},
+			{Name: "COMPLIANCE", Subjects: []string{"compliance.breach.>"}},
+			{Name: "MARKET", Subjects: []string{"market.>"}},
+			{Name: "OBSERVABILITY", Subjects: []string{"observability.>"}},
+		} {
+			stream.Storage = nats.MemoryStorage
+			if _, err := js.AddStream(&stream); err != nil {
+				return fmt.Errorf("prepare %s: %w", stream.Name, err)
+			}
+		}
+		return nil
+	}
 	if mode == "seed-prepare" {
 		_, err := js.AddStream(&nats.StreamConfig{
 			Name: stream, Subjects: []string{subject}, Storage: nats.MemoryStorage,
@@ -96,13 +113,17 @@ func verifySeed(js nats.JetStreamContext, tenant, mode string) error {
 	if err := bus.Validate(envelope); err != nil {
 		return err
 	}
+	portfolio := os.Getenv("ONBOARDING_PROBE_PORTFOLIO")
+	if portfolio == "" {
+		portfolio = "PF1"
+	}
 	var snapshot domainpb.PortfolioSnapshot
 	if err := proto.Unmarshal(payload, &snapshot); err != nil {
 		return err
 	}
 	if record.Subject != subject || envelope.GetTenantId() != tenant ||
 		envelope.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT ||
-		snapshot.GetPortfolio().GetPortfolioId() != "PF1" || len(snapshot.GetPositions()) == 0 {
+		snapshot.GetPortfolio().GetPortfolioId() != portfolio || len(snapshot.GetPositions()) == 0 {
 		return fmt.Errorf("unexpected tenant portfolio seed")
 	}
 	return nil
@@ -113,7 +134,7 @@ func TestOnboardingProbe(t *testing.T) {
 	switch mode {
 	case "":
 		t.Skip("requires an owned onboarding NATS resolver")
-	case "create", "read", "seed-prepare", "seed-read":
+	case "create", "read", "seed-prepare", "seed-read", "projection-prepare":
 	default:
 		t.Fatal("unknown onboarding probe mode")
 	}
