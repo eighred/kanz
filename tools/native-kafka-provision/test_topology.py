@@ -6,10 +6,25 @@ import qualify
 import owned_cleanup as cleanup
 import copy
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from test_lifecycle import evidence as lifecycle_evidence
 
 
 class TopologyTest(unittest.TestCase):
+    def test_onboarding_failure_preserves_phase_without_error_text(self):
+        diagnostic = {}
+
+        def fail(*args, **kwargs):
+            raise ValueError("fixture secret must not appear in evidence")
+
+        with TemporaryDirectory() as scratch:
+            with self.assertRaises(ValueError):
+                qualify.onboarding_all.qualify(
+                    topology.ROOT, Path(scratch), None, None, 'fixture', None,
+                    {}, 'source', fail, diagnostic)
+        self.assertEqual(diagnostic, {'phase': 'source-staging'})
+
     def test_full_inventory_fits_finite_fixture(self):
         raw=(topology.ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
         _,count,partitions=qualify.canonical_inventory(raw)

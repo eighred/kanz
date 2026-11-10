@@ -611,7 +611,10 @@ def main():
                     evidence['natsVersions']=nats.versions
                     evidence['lifecycle'], caller_env=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count,nats)
                     evidence['stage']='golden-path-all'
-                    evidence['onboardingAll']=onboarding_all.qualify(ROOT,scratch,k,apply,name,nats,caller_env,source,bounded_process.run)
+                    evidence['onboardingDiagnostic']={}
+                    evidence['onboardingAll']=onboarding_all.qualify(
+                        ROOT,scratch,k,apply,name,nats,caller_env,source,bounded_process.run,
+                        evidence['onboardingDiagnostic'])
             cli('acme-idempotent','acme',principals['acme'],'apply')
             cli('wrong-cluster','acme',principals['acme'],'apply',True)
             for case in ('tenant-a','tenant-b','compute-a','ungranted','partial'):

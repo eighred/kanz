@@ -103,10 +103,11 @@ def self_read(gateway, tenant, token, key):
 
 
 @contextmanager
-def services(scratch, nats, dsn, paths, jwt, signing, env):
+def services(scratch, nats, dsn, paths, jwt, signing, env, diagnostic):
     gateways = {}
     with ExitStack() as stack:
         for tenant in TENANTS:
+            diagnostic['phase'] = 'risk-ready-' + tenant
             grpc, health, http = bind_address(), bind_address(), bind_address()
             risk = stack.enter_context(process(paths['risk'], dict(env,
                 RISK_ENGINE_NATS_URL=nats.url,
@@ -115,6 +116,7 @@ def services(scratch, nats, dsn, paths, jwt, signing, env):
                 RISK_ENGINE_DATABASE_URL=dsn, RISK_ENGINE_TENANT=tenant,
                 RISK_ENGINE_SNAPSHOT_INTERVAL='1s'), scratch))
             ready('http://'+health+'/readyz', risk)
+            diagnostic['phase'] = 'gateway-ready-' + tenant
             gateway = stack.enter_context(process(paths['gateway'], dict(env,
                 API_GATEWAY_LISTEN=http, API_GATEWAY_RISK_ENGINE_ADDR=grpc,
                 API_GATEWAY_ALLOW_DEV_HS256='true', API_GATEWAY_JWT_SECRET=jwt,
@@ -126,7 +128,10 @@ def services(scratch, nats, dsn, paths, jwt, signing, env):
         yield gateways
 
 
-def qualify(root, scratch, api, apply, cluster, nats, caller_env, source, run):
+def qualify(root, scratch, api, apply, cluster, nats, caller_env, source, run, diagnostic):
+    # Keep only fixture-owned phase names, never exception text, commands,
+    # endpoints, tokens, or subprocess output in diagnostic evidence.
+    diagnostic['phase'] = 'source-staging'
     fixture = scratch/'onboarding-all'
     fixture.mkdir(mode=0o700)
     # STEP=compute writes rendered manifests. Run the exact source in disposable
@@ -138,6 +143,7 @@ def qualify(root, scratch, api, apply, cluster, nats, caller_env, source, run):
     run(['tar', '-xf', str(archive), '-C', str(checkout)], cwd=root, env=os.environ, timeout=90)
     (checkout/'kanz-schemas/gen').symlink_to(root/'kanz-schemas/gen', target_is_directory=True)
 
+    diagnostic['phase'] = 'build-programs'
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'GOCACHE', 'GOMODCACHE',
            'GOPATH', 'GOTOOLCHAIN', 'GOFLAGS', 'TMPDIR') if key in os.environ}
     paths = {}
@@ -149,27 +155,35 @@ def qualify(root, scratch, api, apply, cluster, nats, caller_env, source, run):
     ):
         paths[name] = fixture/name
         run(['go', 'build', '-o', str(paths[name]), package], cwd=root/'kanz', env=env, timeout=180)
+    diagnostic['phase'] = 'fixture-identities'
     jwt, signing = secrets.token_hex(32), secrets.token_hex(32)
     tokens = {tenant: run([str(paths['token']), '--tenant', tenant, '--subject', 'fixture-'+tenant],
                           cwd=fixture, env=dict(env, API_GATEWAY_JWT_SECRET=jwt), timeout=10)
               for tenant in TENANTS}
+    diagnostic['phase'] = 'prepare-nats-projection'
     seed_creds = {}
     for tenant in TENANTS:
         nats.observe(tenant, 'projection-prepare')
         seed_creds[tenant] = str(nats.publisher(tenant))
+    diagnostic['phase'] = 'postgres-install'
     pg.install(apply, api)
     kubeconfig = scratch/'kubeconfig'
+    diagnostic['phase'] = 'books-migrate'
     with pg.endpoint(kubeconfig, cluster, 'kanz-books-1') as books:
         pg.migrate(run, root, books, 'accounting', env)
+    diagnostic['phase'] = 'risk-migrate'
     with pg.endpoint(kubeconfig, cluster, 'kanz-risk-1') as risk:
         pg.migrate(run, root, risk, 'risk-engine', env)
-        with services(fixture, nats, risk, paths, jwt, signing, env) as gateways:
+        with services(fixture, nats, risk, paths, jwt, signing, env, diagnostic) as gateways:
             # Establish the other tenant's positive control using the same
             # canonical publisher, then invoke the real composed command once.
+            diagnostic['phase'] = 'comparison-tenant-seed'
             run([str(paths['seed'])], cwd=fixture, env=dict(env, SEED_TENANT='bravo',
                 SEED_PORTFOLIO=TENANTS['bravo'], SEED_NATS_URL=nats.url,
                 SEED_NATS_CREDS_FILE=seed_creds['bravo']), timeout=30)
+            diagnostic['phase'] = 'comparison-tenant-self-read'
             self_read(gateways['bravo'], 'bravo', tokens['bravo'], signing)
+            diagnostic['phase'] = 'step-all'
             output = run(['sh', './provision-tenant.sh'], cwd=checkout/'kanz/infra/onboarding',
                          env=dict(env, **{**caller_env, 'STEP': 'all', 'TENANT': 'acme',
                              'FIRST_PORTFOLIO': TENANTS['acme'], 'RISK_DB_NAME': 'risk', 'BOOKS_DB_NAME': 'books',
@@ -179,17 +193,26 @@ def qualify(root, scratch, api, apply, cluster, nats, caller_env, source, run):
                          timeout=360, stdout_limit=65536)
             if "tenant 'acme' provisioned (step(s) 'all')" not in output:
                 raise ValueError('composed provisioning completion missing')
+            diagnostic['phase'] = 'signed-tenant-reads'
             assert_reads(gateways, tokens, signing)
+            diagnostic['phase'] = 'nats-seed-readback'
             for tenant, portfolio in TENANTS.items():
                 nats.observe(tenant, 'seed-read', portfolio)
+            diagnostic['phase'] = 'postgres-before-restart'
             assert_storage(api, wait=True)
     # Risk processes and DB forwarding have stopped. Inspect the database before
     # risk reconnects so NATS redelivery cannot hide a missing persisted record.
+    diagnostic['phase'] = 'postgres-restart'
     restarts = pg.restart(api, 'kanz-risk-1')
+    diagnostic['phase'] = 'postgres-after-restart'
     assert_storage(api, wait=False)
+    diagnostic['phase'] = 'reconnect-after-restart'
+    diagnostic['afterRestart'] = True
     with pg.endpoint(kubeconfig, cluster, 'kanz-risk-1') as risk:
-        with services(fixture, nats, risk, paths, jwt, signing, env) as gateways:
+        with services(fixture, nats, risk, paths, jwt, signing, env, diagnostic) as gateways:
+            diagnostic['phase'] = 'signed-reads-after-restart'
             assert_reads(gateways, tokens, signing)
+    diagnostic['phase'] = 'complete'
     return {'step': 'all', 'tenant': 'acme', 'riskProjection': True,
             'postgresBefore': True, 'postgresAfterRestart': True,
             'postgresRestartCount': restarts, 'signedSelf': True, 'signedCrossRejected': True}
