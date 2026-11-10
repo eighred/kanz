@@ -36,4 +36,4 @@ if __name__ == "__main__":
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 26 required durable readiness outcomes passed in 4 complete packages")
+        print(f"All {sum(map(len, REQUIRED.values()))} required durable readiness outcomes passed in {len(REQUIRED)} complete packages")

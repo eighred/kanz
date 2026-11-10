@@ -8,7 +8,12 @@ equivalent to repository CI. `make help` lists the available targets.
 
 ## Prerequisites
 
-- Go (see `go.mod` for the version), Docker, and [buf](https://buf.build/docs/installation).
+- Go (see `go.mod` for the language/toolchain pin), Docker with a working Linux
+  engine and Compose v2, Python 3, GNU make, a POSIX shell, and
+  [buf 1.69.0](https://buf.build/docs/installation). `make generate` refuses a
+  different buf version. `make bootstrap` installs the pinned Go protobuf plugins;
+  put `$(go env GOPATH)/bin` on PATH. For lint, use the golangci-lint version in
+  `.github/workflows/kanz-ci.yml`.
 - The repo expects `kanz/` and `kanz-schemas/` as **sibling** directories — the
   Go module `replace`s the schema SDK to `../kanz-schemas/gen/go` (EVT-15a).
 - **On Windows, read AGENTS.md's "Windows environment" section first.** A
@@ -34,7 +39,9 @@ put both Go protobuf plugins on `PATH` before generation. Dependency tests need
 disposable real services and their explicit test configuration; see the service
 fixtures and `.github/workflows/kanz-ci.yml` for the current bootstrap sequence.
 Never use a production DSN. PostgreSQL isolation tests require a role with both
-`NOSUPERUSER` and `NOBYPASSRLS`; the Compose bootstrap role is not that role.
+`NOSUPERUSER` and `NOBYPASSRLS`. Compose creates `kanzapp` with both restrictions;
+the bootstrap role `kanz` is reserved for initialization. The live smoke service
+uses `kanz_risk_dev`; destructive test fixtures use the separate `kanzapp` database.
 
 Architecture tests invoke `bash` by name. In PowerShell, check
 `Get-Command bash -All` before running them. If Windows resolves the unconfigured
@@ -57,6 +64,15 @@ same relevant groups with `-race` on a cgo-capable host; Windows without cgo doe
 not establish race safety. Include `pkg`, `cmd`, tools and other test directories
 when claiming a complete suite, not only the example groups above.
 
+`make test` and `make test-race` now inventory `go list ./...`, run batches of at
+most 20 packages serially with fresh results, and reject incomplete JSON event
+streams, failed/cached results and missing packages. Every skipped test is
+reported; a complete package inventory still does not prove skipped dependencies.
+For a targeted check use `python3 dev/check.py test ./internal/risk/state/persist`.
+On Windows use `python`, or set `PYTHON=python` when running make. `make fmt`
+(`fmt-check` alias) includes tracked and untracked Go files, handles spaces and
+deleted files, and excludes ignored generated/build output.
+
 ### Why generation precedes builds
 
 Generated code is never committed (EVT-15a). The kanz module `replace`s
@@ -71,13 +87,25 @@ reviewed dependency versions, as CI does.
 ## Quick start
 
 ```sh
-make up            # generates the SDK, then starts the smoke stack and seeds it
+make up            # generates/builds, initializes, waits, seeds and checks the read path
 # ... develop ...
 make down          # stop without deleting volumes
 ```
 
-`make up` propagates seeding errors. Its exit status is still not proof of the
-capital path; this stack lacks OMS, compliance, mandates and venue adapters.
+`make up` propagates build, canonical NATS bootstrap, migration, readiness and
+seed/read failures. A successful check requires an unauthenticated 401 and an
+authenticated `dev`/`PF1` exposure containing the four seeded instruments.
+All published ports bind to `127.0.0.1`. This stack lacks OMS, compliance,
+mandates and venue adapters; it does not prove the capital path.
+
+NATS, PostgreSQL and Redpanda use project-owned named volumes. Ordinary shutdown
+preserves them. For an intentionally destructive fresh start, use
+`make reset CONFIRM=kanz-dev`; this deletes only the selected Compose project's
+volumes. Use `COMPOSE_PROJECT_NAME` to isolate parallel checkouts (host ports
+must also be free). Existing volumes are never silently repaired or deleted:
+PostgreSQL init scripts run only on an empty data directory. If using an older
+stack, preserve its data and choose a fresh project for this new schema/role
+bootstrap. Do not point test fixtures at `kanz_risk_dev`.
 
 The repository also contains a Tilt configuration (live dashboard and logs):
 
@@ -91,14 +119,14 @@ tilt up
 
 | Service | Port | Notes |
 |---|---|---|
-| api-gateway | 8080 | the read surface (auth/signing/quotas OFF for dev) |
+| api-gateway | 8080 | authenticated read surface, explicit public dev HS256 identity |
 | risk-engine | 8082 (HTTP), 8081 (gRPC) | durable state in Postgres |
-| NATS | 4222, 8222 | JetStream spine, `RISK` stream provisioned by `nats-init` |
+| NATS | 4222, 8222 | JetStream spine, canonical stream bootstrap via `nats-init` |
 | Redpanda (`kafka` alias) | 127.0.0.1:9092 | single-node Kafka-compatible broker; container clients use kafka:9092 |
-| Postgres | 5432 | `kanz/kanz`, db `kanz` |
+| Postgres | 5432 | restricted `kanzapp/kanz`; separate service and test databases |
 
 ```sh
-curl localhost:8080/v1/portfolios/PF1/exposure   # the seeded portfolio
+python3 dev/smoke.py  # verifies unauthenticated denial and authenticated seeded read
 ```
 
 ## Notes
@@ -146,8 +174,39 @@ evidence; record actual suite results and dependency skips separately.
 
 - Build context is the repo root: the service Dockerfiles COPY the generated
   `kanz-schemas/gen/go` SDK. `make up`, build, vet and test run generation first.
-- Auth/signing/quotas are disabled — this is a dev loop, not a security posture.
-- Seeding reuses `test/load/seed` (`SEED_NATS_URL` / `SEED_TENANT`).
+- Authentication uses the explicit public dev HS256 opt-in; mTLS and rate limits
+  are absent. This is a loopback smoke stack, not a production security posture.
+- Seeding reuses `test/load/seed` with tenant `dev`, matching the risk engine.
+- `risk-migrate` runs the canonical migration image before risk-engine startup.
+  The restricted role owns the smoke schema; FORCE RLS still applies. This is
+  not production separation between a DDL owner and the runtime role.
+
+### Disposable dependency verification
+
+After startup, verify the fixture role and run the real persistence tests:
+
+```sh
+docker compose -f dev/docker-compose.yml exec -T postgres psql -U kanz -d kanz \
+  -Atc "SELECT rolname,rolsuper,rolbypassrls FROM pg_roles WHERE rolname='kanzapp'"
+# Required: kanzapp|f|f
+export TEST_POSTGRES_URL='postgres://kanzapp:kanz@127.0.0.1:5432/kanzapp?sslmode=disable'
+python3 dev/check.py test ./internal/risk/state/persist
+TEST_KAFKA_BROKERS=127.0.0.1:9092 go test -p 1 -count=1 -run '^TestKafkaPublishSubscribe$' -v ./pkg/bus
+```
+
+These are public disposable credentials. Do not substitute a production DSN.
+The RLS test must run, not skip. Host Kafka publish/read exercises the external
+advertised listener; `rpk cluster info -X brokers=kafka:9092` inside the Kafka
+container checks the internal advertised address. NATS initialization and the
+host seed-to-container-risk-to-gateway check exercise both sides of that topology.
+The wider integration suite still needs its declared dependencies, including
+the routed broker config in `test/backing/nats-dev.conf`, separate live OMS DB,
+mTLS broker and Python inference worker. The smoke stack does not supply those.
+
+Rust, Julia and browser qualification remain separate from this Go smoke target:
+use `kanz-rs/README.md`, `kanz-jl/README.md`, `kanz-web/README.md` and their owning
+workflows for the pinned toolchains and gates. A local Go smoke pass does not
+qualify the Julia native runtime or permit bypassing its advisory check.
 
 ## Creating a new service
 
@@ -169,7 +228,7 @@ the portal.
 | `make generate` | regenerate the schema SDKs (after a `.proto` change) |
 | `make build` | build binaries into `bin/` |
 | `make test` / `make test-race` | serialized bounded package groups without / with race detection |
-| `make lint` | go vet, tracked gofmt check and golangci-lint |
+| `make lint` | go vet, tracked/untracked gofmt check and golangci-lint |
 | `make up` / `make down` | local dev stack |
 | `make scaffold NAME=x` | new service skeleton |
 | `make ci` | local convenience chain; actual CI is `.github/workflows/kanz-ci.yml` |

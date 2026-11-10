@@ -202,6 +202,10 @@ jobs:
       - name: Generate kanz-schemas Go SDK
         run: make -C kanz generate
 
+      - name: Verify developer formatting and package accounting
+        if: matrix.kind == 'quality'
+        run: python3 -B -m unittest discover -s kanz/dev -p 'test_*.py'
+
       - name: Download reviewed Go dependencies with bounded transport retries
         working-directory: kanz
         run: |
