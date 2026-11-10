@@ -8,6 +8,11 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"google.golang.org/protobuf/proto"
+
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 func verify(url, creds, tenant, mode string) error {
@@ -26,6 +31,9 @@ func verify(url, creds, tenant, mode string) error {
 	}
 	if info.Limits.MaxMemory != 64_000_000 || info.Limits.MaxStore != 2_000_000_000 {
 		return fmt.Errorf("unexpected JetStream account limits")
+	}
+	if mode == "seed-prepare" || mode == "seed-read" {
+		return verifySeed(js, tenant, mode)
 	}
 	const stream = "LIFECYCLE"
 	const subject = "fixture.lifecycle"
@@ -56,6 +64,45 @@ func verify(url, creds, tenant, mode string) error {
 	}
 	if record.Subject != subject || string(record.Data) != tenant {
 		return fmt.Errorf("stream returned a record outside the tenant's account")
+	}
+	return nil
+}
+
+func verifySeed(js nats.JetStreamContext, tenant, mode string) error {
+	const stream = "RISK"
+	const subject = "risk.portfolio.snapshot"
+	if mode == "seed-prepare" {
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name: stream, Subjects: []string{subject}, Storage: nats.MemoryStorage,
+		})
+		return err
+	}
+	state, err := js.StreamInfo(stream)
+	if err != nil {
+		return err
+	}
+	if state.State.Msgs != 1 || state.State.FirstSeq != 1 || state.State.LastSeq != 1 {
+		return fmt.Errorf("expected one seed record in the tenant's stream")
+	}
+	record, err := js.GetMsg(stream, 1)
+	if err != nil {
+		return err
+	}
+	envelope, payload, err := bus.Unframe(record.Data)
+	if err != nil {
+		return err
+	}
+	if err := bus.Validate(envelope); err != nil {
+		return err
+	}
+	var snapshot domainpb.PortfolioSnapshot
+	if err := proto.Unmarshal(payload, &snapshot); err != nil {
+		return err
+	}
+	if record.Subject != subject || envelope.GetTenantId() != tenant ||
+		envelope.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT ||
+		snapshot.GetPortfolio().GetPortfolioId() != "PF1" || len(snapshot.GetPositions()) == 0 {
+		return fmt.Errorf("unexpected tenant portfolio seed")
 	}
 	return nil
 }

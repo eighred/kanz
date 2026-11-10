@@ -44,6 +44,29 @@ class Resolver:
              'create' if create_probe else 'read'], self.env, self.scratch)
         return public_key
 
+    def seed_portfolios(self, root):
+        tenants = ('acme', 'bravo')
+        go_env = {key: os.environ[key] for key in ('GOTOOLCHAIN', 'GOTMPDIR', 'GOFLAGS') if key in os.environ}
+        go_env.update(json.loads(run(['go', 'env', '-json', 'GOCACHE', 'GOMODCACHE'],
+                                     os.environ, root / 'kanz')))
+        for tenant in tenants:
+            credentials = self.scratch / (tenant + '.creds')
+            run([str(self.probe), self.url, str(credentials), tenant, 'seed-prepare'],
+                self.env, self.scratch)
+            seed_creds = self.scratch / (tenant + '-seed.creds')
+            run(['nsc', 'add', 'user', '-a', tenant, '-n', 'fixture-seed',
+                 '--allow-pub', 'risk.portfolio.snapshot', '--allow-sub', '_INBOX.>'],
+                self.env, self.scratch)
+            run(['nsc', 'generate', 'creds', '-a', tenant, '-n', 'fixture-seed',
+                 '-o', str(seed_creds)], self.env, self.scratch)
+            run(['sh', './provision-tenant.sh'], dict(self.env, **go_env, TENANT=tenant, STEP='seed',
+                SEED_NATS_URL=self.url, SEED_NATS_CREDS_FILE=str(seed_creds)),
+                root / 'kanz/infra/onboarding', timeout=180)
+        for tenant in tenants:
+            run([str(self.probe), self.url, str(self.scratch / (tenant + '.creds')),
+                 tenant, 'seed-read'], self.env, self.scratch)
+        return list(tenants)
+
 
 @contextmanager
 def resolver(scratch, root):
