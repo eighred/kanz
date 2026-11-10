@@ -2,7 +2,9 @@
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
+from statistics import median
 
 PATHS = {
     "code": ["Fix the owning code and run its narrow regression", "Use an isolated baseline comparison"],
@@ -27,7 +29,7 @@ def checks(sha, expected, observed):
         evidence = matches[0] if len(matches) == 1 else {}
         status = evidence.get("status")
         if not matches:
-            state = "missing"
+            state = "stale" if any(c["id"] == name for c in observed) else "missing"
         elif len(matches) > 1:
             state = "ambiguous"
         elif status == "SUCCESS":
@@ -102,7 +104,51 @@ def plan(tasks, completed, active):
         else:
             selected.append(task["id"])
             claimed.append((task, owned))
-    return {"independent": selected, "deferred": deferred}
+    return {"next_actionable": selected[0] if selected else None,
+            "independent": selected, "deferred": deferred}
+
+
+def timestamp(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.utcoffset() is None:
+        raise ValueError("report timestamps require a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def daily_progress(period, blockers):
+    start, end = timestamp(period["start"]), timestamp(period["end"])
+    if start >= end:
+        raise ValueError("report window must have a positive duration")
+    ages = {}
+    for key, blocker in blockers.items():
+        since = timestamp(blocker["blocked_since"]) if blocker.get("blocked_since") else None
+        if since and since > end:
+            raise ValueError(f"blocker {key} starts after the report")
+        ages[key] = {"owner": blocker.get("owner"),
+                     "age_hours": (end - since).total_seconds() / 3600 if since else None}
+
+    merged, verified, cycle_hours, seen = [], [], [], set()
+    for item in period["merges"]:
+        number = item["number"]
+        if number in seen or not SHA.fullmatch(item["merge_sha"]):
+            raise ValueError("merge records require a unique PR and full SHA")
+        seen.add(number)
+        opened, merged_at = timestamp(item["opened_at"]), timestamp(item["merged_at"])
+        if not opened <= merged_at <= end:
+            raise ValueError("invalid PR lifecycle timestamps")
+        if start <= merged_at < end:
+            merged.append(number)
+            cycle_hours.append((merged_at - opened).total_seconds() / 3600)
+        proof = item.get("main_verification")
+        if proof:
+            checked = timestamp(proof["verified_at"])
+            if checked < merged_at:
+                raise ValueError("main verification predates merge")
+            if start <= checked < end and proof["sha"] == item["merge_sha"] and proof["evidence"] and proof["acceptance_passed"] is True:
+                verified.append(number)
+    return {"merged": sorted(merged), "verified_on_main": sorted(verified),
+            "median_pr_cycle_hours": median(cycle_hours) if cycle_hours else None,
+            "open_blockers": ages}
 
 
 def build_plan(builders):
@@ -142,13 +188,16 @@ def assess(snapshot):
             reasons.append("checks")
         queue.append({"number": pr["number"], "sha": pr["sha"], "candidate": not reasons,
                       "reasons": reasons, "checks": rows})
-    return {"main": {"sha": main["sha"],
+    result = {"main": {"sha": main["sha"],
                      "verified_checks": main.get("inventory_complete") is True and green(main_checks),
                      "checks": main_checks},
             "queue": queue,
             "blockers": blocker_report(snapshot.get("blockers", {})),
             "plan": plan(snapshot["tasks"], completed, snapshot["active_tasks"]),
             "build": build_plan(snapshot["builders"])}
+    if "period" in snapshot:
+        result["daily_progress"] = daily_progress(snapshot["period"], result["blockers"])
+    return result
 
 
 if __name__ == "__main__":

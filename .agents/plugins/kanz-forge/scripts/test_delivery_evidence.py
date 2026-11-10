@@ -38,7 +38,7 @@ class DeliveryEvidenceTests(unittest.TestCase):
 
     def test_exact_revision_expected_skips_and_unresolved_checks(self):
         for status, sha, skip, state in [
-            ("SUCCESS", MAIN, None, "missing"),
+            ("SUCCESS", MAIN, None, "stale"),
             ("IN_PROGRESS", HEAD, None, "pending"),
             ("SKIPPED", HEAD, None, "failed"),
             ("SKIPPED", HEAD, "manual-only on this event", "expected-skip"),
@@ -78,6 +78,7 @@ class DeliveryEvidenceTests(unittest.TestCase):
                          task("guard2", "kanz/test/arch/guard_test.go"),
                          task("forge", ".agents")]
         plan = assess(data)["plan"]
+        self.assertEqual(plan["next_actionable"], "guard")
         self.assertEqual(plan["independent"], ["guard", "forge"])
         self.assertEqual(plan["deferred"]["deployment"], [{"overlap": ["worker"]}])
         self.assertEqual(plan["deferred"]["broker"], [{"overlap": ["worker"]}])
@@ -119,6 +120,26 @@ class DeliveryEvidenceTests(unittest.TestCase):
         data["blockers"]["runner"]["kind"] = "probably-infrastructure"
         with self.assertRaises(ValueError):
             assess(data)
+
+    def test_daily_progress_distinguishes_merge_from_exact_main_acceptance(self):
+        data = snapshot()
+        data["blockers"] = {"openssl": dict(kind="dependency", cause="Release missing",
+                                          evidence="404", owner="release",
+                                          blocked_since="2026-11-09T00:00:00Z")}
+        data["period"] = dict(start="2026-11-10T00:00:00Z", end="2026-11-11T00:00:00Z",
+                              merges=[dict(number=1, merge_sha=MAIN,
+                                           opened_at="2026-11-09T00:00:00Z",
+                                           merged_at="2026-11-10T12:00:00Z",
+                                           main_verification=dict(sha=HEAD, acceptance_passed=True,
+                                                                  verified_at="2026-11-10T13:00:00Z",
+                                                                  evidence="run/1"))])
+        report = assess(data)["daily_progress"]
+        self.assertEqual(report["merged"], [1])
+        self.assertEqual(report["verified_on_main"], [])
+        self.assertEqual(report["median_pr_cycle_hours"], 36)
+        self.assertEqual(report["open_blockers"]["openssl"], {"owner": "release", "age_hours": 48})
+        data["period"]["merges"][0]["main_verification"]["sha"] = MAIN
+        self.assertEqual(assess(data)["daily_progress"]["verified_on_main"], [1])
 
 
 if __name__ == "__main__":
