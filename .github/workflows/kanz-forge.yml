@@ -33,3 +33,5 @@ jobs:
         run: python3 -B .agents/plugins/kanz-forge/scripts/test_provenance.py
       - name: Check optional receipt isolation and invalidation
         run: python3 -B .agents/plugins/kanz-forge/scripts/test_receipts.py
+      - name: Check delivery evidence and conflict planning
+        run: python3 -B .agents/plugins/kanz-forge/scripts/test_delivery_evidence.py
