@@ -98,6 +98,8 @@ profile files alone.
 Keep independent development moving while CI validates a fixed head. Queue
 dependent work and integrate in dependency order. No running pipeline proves
 an untested change; no failed worker makes unrelated work unsafe by itself.
+When choosing among issues or PRs, use [delivery coordination](references/delivery-coordination.md)
+to separate hard blockers, ready work, CI diagnosis, and exact-main proof.
 
 ## Keep useful context, reduce repetition
 
