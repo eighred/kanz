@@ -38,8 +38,12 @@ For checked nodes, `revision` is a full SHA. `validation` contains matching
 the reviewed applicable workflow inventory. A skipped check needs an explicit
 `skip_reason` in its expected record. Duplicate, absent, stale, canceled or
 unexpectedly skipped evidence cannot permit delivery. The collector binds a
-node's `subject` (`main` or `pr:N`) only when its reviewed revision still matches;
-it never invents the expected inventory from observed green checks.
+node's `subject` (`main` or `pr:N`) only when its reviewed revision still matches.
+The contract must name the current `main_revision`; every PR and every gate
+carrying check validation must have a live subject. A PR binds only to `pr:N`.
+Unbound historical checks cannot survive collection as current evidence. External
+runtime artifacts and holds retain their separately reviewed evidence. The
+collector never invents the expected inventory from observed green checks.
 
 `DELIVERABLE` also requires task/PR `review` with `passed: true`, matching `sha`
 and `evidence`. A PR requires `integration` with current `base_sha`, matching

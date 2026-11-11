@@ -100,8 +100,16 @@ def collect(repo, api=github, contract=None):
               "limitation": "check observations do not establish applicability, root cause, review or merge authority"}
     if contract:
         graph = copy.deepcopy(contract)
+        if graph.get("main_revision") != main:
+            raise ValueError("dependency contract main revision is missing or stale; review it again")
         for node in graph["nodes"]:
             subject = node.get("subject")
+            if (node.get("kind") == "pr" or
+                    (node.get("kind") == "gate" and "validation" in node)):
+                if not isinstance(subject, str) or not subject:
+                    raise ValueError("PR/check gate needs a live GitHub subject")
+            if node.get("kind") == "pr" and not re.fullmatch(r"pr:[1-9][0-9]*", subject):
+                raise ValueError("PR node needs a live PR subject")
             if subject:
                 if subject not in observations:
                     raise ValueError("contract subject is no longer in the live inventory")

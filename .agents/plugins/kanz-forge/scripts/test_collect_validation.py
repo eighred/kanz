@@ -33,8 +33,34 @@ class CollectorTests(unittest.TestCase):
     def contract(self):
         node = gate()
         node["subject"] = "pr:1"
-        return dict(nodes=[node, task("repair"), task("feature")],
+        return dict(main_revision=MAIN, nodes=[node, task("repair"), task("feature")],
                     edges=[edge("feature", "julia"), edge("repair", "julia", "recovers")])
+
+    def test_contract_must_bind_current_main(self):
+        for main in (None, SHA):
+            contract = self.contract()
+            contract["main_revision"] = main
+            with self.subTest(main=main), self.assertRaisesRegex(ValueError, "main revision"):
+                collect("eighred/kanz", self.api, contract)
+
+    def test_unbound_historical_pr_and_gate_checks_refuse(self):
+        # Historical green checks must not survive a changed live PR head.
+        self.pr["head"]["sha"] = "c" * 40
+        for kind in ("pr", "gate"):
+            node = dict(gate(status="SUCCESS"), kind=kind,
+                        review=dict(passed=True, sha=SHA, evidence="historical review"),
+                        integration=dict(base_sha=MAIN, head_sha=SHA, evidence="historical integration"))
+            contract = dict(main_revision=MAIN, nodes=[node], edges=[])
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "live GitHub subject"):
+                collect("eighred/kanz", self.api, contract)
+
+    def test_pr_cannot_use_main_as_its_live_binding(self):
+        contract = self.contract()
+        contract["nodes"][0].update(kind="pr", subject="main", revision=MAIN)
+        contract["nodes"] = contract["nodes"][:1]
+        contract["edges"] = []
+        with self.assertRaisesRegex(ValueError, "live PR subject"):
+            collect("eighred/kanz", self.api, contract)
 
     def test_live_collection_to_graph_blocks_feature_and_selects_repair(self):
         result = collect("eighred/kanz", self.api, self.contract())
