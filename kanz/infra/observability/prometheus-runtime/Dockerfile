@@ -1,5 +1,5 @@
 # Keep the source equal to the Prometheus release selected in prometheus.yaml.
-FROM quay.io/prometheus/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7 AS upstream
+FROM ghcr.io/eighred/base/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7 AS upstream
 FROM ghcr.io/eighred/base/distroless-static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 
 COPY --from=upstream /bin/prometheus /bin/promtool /bin/

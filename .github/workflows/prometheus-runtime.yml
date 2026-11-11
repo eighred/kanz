@@ -1,0 +1,49 @@
+name: prometheus-runtime
+
+on:
+  pull_request:
+    paths:
+      - 'kanz/infra/observability/prometheus-runtime/**'
+      - 'kanz/infra/observability/prometheus.yaml'
+      - '.github/workflows/prometheus-runtime.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz/infra/observability/prometheus-runtime/**'
+      - 'kanz/infra/observability/prometheus.yaml'
+      - '.github/workflows/prometheus-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  shell-free-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate for the reviewed private bases
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and stage the qualification inputs
+        run: |
+          docker pull ghcr.io/eighred/base/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+          docker pull ghcr.io/eighred/base/python:3.12-slim
+          docker build --network=none -t prometheus-runtime:qualification -f kanz/infra/observability/prometheus-runtime/Dockerfile .
+      - name: Compare shell inventory, binaries, TLS discovery and retained history
+        run: |
+          python3 kanz/infra/observability/prometheus-runtime/qualify.py \
+            --candidate prometheus-runtime:qualification \
+            --helper ghcr.io/eighred/base/python:3.12-slim \
+            --output "$RUNNER_TEMP/prometheus-runtime.json"
+      - name: Preserve source-bound qualification
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prometheus-runtime-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prometheus-runtime.json
+          if-no-files-found: error
