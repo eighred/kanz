@@ -168,6 +168,10 @@ jobs:
           # depends on Docker Hub at the capital-control boundary.
           - source: docker.io/cloudflare/cloudflared:2026.7.1
             target: ghcr.io/eighred/base/cloudflared:2026.7.1
+          # #1140 copies only the upstream binaries into a shell-free runtime.
+          # Populate and verify this source before the runtime FROM uses it.
+          - source: quay.io/prometheus/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+            target: ghcr.io/eighred/base/prometheus:v3.13.3
           # THE BUILDER ITSELF, which every other entry here quietly depended on.
           #
           # #161 moved all 52 FROMs under ghcr.io/eighred/base/*, and the
