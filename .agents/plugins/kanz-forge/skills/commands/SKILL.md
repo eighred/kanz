@@ -67,6 +67,13 @@ without source evidence does not advance the task.
 
 ## Execute and coordinate
 
+Use [validation readiness](references/validation-readiness.md) before selecting
+work. Build reviewed edges between tasks, PRs, runtimes and validation gates;
+file independence alone does not establish a delivery path. Prioritize
+executable shared-gate recovery, keep coding-only work distinct, and reassess
+after each meaningful validation result. Use the full engineering feedback
+loop there; legacy ownership-only planning is not validation readiness.
+
 For unscoped `/work`, select and complete the highest-priority feasible task:
 
 1. Reconcile current main, issue acceptance, active PRs, and dependencies. Rank

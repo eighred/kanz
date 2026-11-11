@@ -5,6 +5,12 @@ description: Bring a Kanz PR through current-main review, verification, merge, a
 
 # Deliver a Kanz PR
 
+Recalculate [validation readiness](../commands/references/validation-readiness.md)
+after a changed check, head/base, runtime artifact or operator hold. Distinguish
+a shared prerequisite failure from a regression introduced by the PR; repair
+the owning layer and retain every mandatory gate. DELIVERABLE is an evidenced
+candidate state, never merge authority or merged-main acceptance.
+
 Inspect every open PR in the requested scope individually. Compare its head
 with current main, linked issue, changed files, reviews, checks and follow-up
 commits. Identify superseded changes and real conflicts before rebasing. A

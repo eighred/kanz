@@ -2,7 +2,7 @@
   "/work": {
     "target": "optional",
     "description": "Complete the highest-priority feasible issue through verified closure.",
-    "workflow": "Inspect the current checkout, main, Issues and PRs. Without a target, select the highest-priority feasible task, checking dependencies, duplicates and shipped work. Fill in discoverable gaps and implement, verify and deliver the selected work. When a concrete blocker prevents progress, state the missing prerequisite and next action, keep the issue open, and proceed to the next feasible independent task in an unscoped run. Use issue-archaeology, stack-routing, engineering-standard, kanz-verify and pr-delivery as needed; include security-audit for trust boundaries and financial-verification for money or model changes. For 'subagents N', use references/parallel-work.md within host capacity. Follow the commands skill through PR review, required checks, authorized merge and merged-main verification. Continue remaining in-scope acceptance after a partial PR. Close only after full acceptance. Preserve explicit limits and repository policy. No deployment or capital-halt change.",
+    "workflow": "Inspect the current checkout, main, Issues and PRs. Without a target, select the highest-priority feasible task, checking dependencies, duplicates and shipped work. Fill in discoverable gaps and implement, verify and deliver the selected work. When a concrete blocker prevents progress, state the missing prerequisite and next action, keep the issue open, and proceed to the next feasible independent task in an unscoped run. Use issue-archaeology, stack-routing, engineering-standard, kanz-verify and pr-delivery as needed; include security-audit for trust boundaries and financial-verification for money or model changes. For 'subagents N', use references/parallel-work.md within host capacity. Follow the commands skill through PR review, required checks, authorized merge and merged-main verification. Continue remaining in-scope acceptance after a partial PR. Close only after full acceptance. Preserve explicit limits and repository policy. No deployment or capital-halt change. Before selecting work, collect current validation with scripts/collect_validation.py, review the dependency contract, and use scripts/validation_graph.py through delivery_evidence.py. Legacy ownership advice without a reviewed validation graph is not dispatch readiness. Prioritize executable recovery of critical shared gates. Reassess after every meaningful result; follow DISCOVER -> PLAN -> IMPLEMENT -> TEST -> VALIDATE -> REVIEW -> DELIVER -> REASSESS.",
     "primary": true,
     "skills": [
       "issue-archaeology",
@@ -115,7 +115,7 @@
   "/doctor": {
     "target": "optional",
     "description": "Check actual plugin installation and host capabilities.",
-    "workflow": "Read the plugin manifest and available skills/tools in this chat. Inspect codex plugin list --json when CLI exists; compare enabled version and source to the checkout. Run validate.py and provenance.py under .agents/plugins/kanz-forge/scripts when Python exists; a disposable test_install.py verifies CLI cache bytes and skill discovery, not this chat. Check GitHub access with a read-only repository query. Report implemented, configured, operational, incomplete or unverified per capability, with probe, revision and limitation. A listed profile is not a spawned worker; CI coordination requires observed independent work and exact-head CI evidence. Do not launch workers or mutate live installation merely for a status check. If a user names a different checkout or sees stale files, compare that checkout revision and local edits with installed source and current main; report each identity separately, preserving unrelated changes during reconciliation.",
+    "workflow": "Read the plugin manifest and available skills/tools in this chat. Inspect codex plugin list --json when CLI exists; compare enabled version and source to the checkout. Run validate.py and provenance.py under .agents/plugins/kanz-forge/scripts when Python exists; a disposable test_install.py verifies CLI cache bytes and skill discovery, not this chat. Check GitHub access with a read-only repository query. Report implemented, configured, operational, incomplete or unverified per capability, with probe, revision and limitation. A listed profile is not a spawned worker; CI coordination requires observed independent work and exact-head CI evidence. Do not launch workers or mutate live installation merely for a status check. If a user names a different checkout or sees stale files, compare that checkout revision and local edits with installed source and current main; report each identity separately, preserving unrelated changes during reconciliation. Distinguish live installed version, source checkout and reviewed upgrade candidate; never upgrade the live profile as a diagnostic. Use scripts/test_install.py only in its disposable profile.",
     "skills": [
       "commands"
     ]
@@ -225,6 +225,14 @@
     "target": "optional",
     "description": "Inspect specialist roles and native delegation availability.",
     "workflow": "Read the plugin's canonical agents/kanz_*.toml profiles and inspect actual native subagent tools in this chat. Explain each role and whether the host can invoke it; profiles alone are not installation evidence. Do not create .codex compatibility copies. Delegate only when requested or authorized by applicable workflow instructions, with file ownership, bounded task and host capacity. Use equivalent explicit task instructions when a named role is unavailable but native generic workers exist.",
+    "skills": [
+      "commands"
+    ]
+  },
+  "/help": {
+    "target": "optional",
+    "description": "Show primary commands, or /help all for the complete catalog.",
+    "workflow": "Read commands.json. Show primary entries and /help all; for all show every command and its actual scope. For a named or unknown command show matching choices without executing them.",
     "skills": [
       "commands"
     ]
