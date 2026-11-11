@@ -345,7 +345,7 @@ var controlTuning = ConsumerTuning{
 }
 
 // tickSubjectPrefix is the one subject class that gets its own tuning. It is a
-// prefix on the domain segment of the subject taxonomy (kanz-schemas/README.md
+// prefix on the domain segment of the subject taxonomy (kanz_schemas/README.md
 // § Subject Taxonomy §4), the same axis the stream layout in
 // infra/nats/bootstrap-job.yaml is cut on.
 const tickSubjectPrefix = "market."

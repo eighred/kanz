@@ -23,7 +23,7 @@ import (
 // of the estate nor disappear, which is what #419 is about cleaning up.
 //
 // #407 ADDED THE CHECK AND LEFT IT OFF, deliberately and with the reason written
-// down at services/venue-binance/cmd/venue-binance/quote_match_test.go: "a
+// down at services/venue_binance/cmd/venue_binance/quote_match_test.go: "a
 // control that refuses to start every adapter nobody has corrected yet is a
 // trading outage, and it is armed WITH the estate in hand."
 //

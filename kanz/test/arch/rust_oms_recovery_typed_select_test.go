@@ -81,7 +81,7 @@ func checkRecoveryTypedSelects(files map[string]string) error {
 	return nil
 }
 func TestRustRecoveryTypedSelectProtocol(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "src")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs", "crates", "oms_store", "src")
 	files := map[string]string{}
 	for _, scope := range recoveryTypedSelectScopes {
 		raw, err := os.ReadFile(filepath.Join(root, scope.file))

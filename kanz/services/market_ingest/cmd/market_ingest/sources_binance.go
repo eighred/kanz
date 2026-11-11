@@ -1,0 +1,39 @@
+package main
+
+import (
+	"log/slog"
+
+	"github.com/eighred/kanz/internal/marketedge/coverage"
+	"github.com/eighred/kanz/pkg/alpha"
+	"github.com/eighred/kanz/services/market_ingest/internal/config"
+)
+
+// binanceFeeds (binance build) binds the live Binance Spot depth + trade feeds for
+// an instrument, when a venue symbol is mapped for it. An unmapped instrument is
+// not tracked here — the edge never invents a symbol. Both streams are PUBLIC
+// market data: no API key is required.
+func binanceFeeds(cfg config.Config, instrument string, cov *coverage.Recorder, logger *slog.Logger) []alpha.Feed {
+	symbol, ok := cfg.BinanceSymbols[instrument]
+	if !ok {
+		return nil
+	}
+	logger.Info("binance feed wired",
+		"instrument", instrument, "symbol", symbol, "ws", cfg.BinanceWSBase)
+	feed := alpha.BinanceFeed(alpha.VenueFeedConfig{
+		InstrumentID: instrument, Symbol: symbol, MIC: cfg.BinanceMIC,
+		WSBase: cfg.BinanceWSBase, RESTBase: cfg.BinanceRESTBase,
+		DepthLimit: cfg.DepthLimit, DNSTTL: cfg.DNSTTL,
+		// The ingestion-coverage record (#591). A mapped symbol means a real
+		// subscription, and a real subscription is something this platform can
+		// honestly attest to.
+		Coverage: cov,
+	})
+	if cfg.BinanceDepthExternal(instrument) {
+		// Constructors do not dial. Retain the single existing trade subscription
+		// (and coverage observer), but never run a second depth publisher.
+		feed.Depth = nil
+		feed.ExternalDepth = true
+		logger.Warn("Binance depth assigned externally; Go retains trades only", "instrument", instrument, "symbol", symbol)
+	}
+	return []alpha.Feed{feed}
+}

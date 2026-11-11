@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const rustOMSStorePath = "crates/oms-store"
+const rustOMSStorePath = "crates/oms_store"
 
 var rustOMSStoreSources = []string{"src/lib.rs", "src/diagnostics.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/fee_commands.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs", "tests/typed_ack_protocol.rs"}
 
@@ -26,9 +26,9 @@ default = []
 qualification-diagnostics = []
 
 [dependencies]
-kanz-order-core = { path = "../order-core" }
+kanz-order-core = { path = "../order_core" }
 kanz-decimal-compat = { path = "../.." }
-kanz-proto-wire = { path = "../proto-wire" }
+kanz-proto-wire = { path = "../proto_wire" }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
 prost-reflect = "=0.16.2"
@@ -208,7 +208,7 @@ func checkRustOMSStoreBoundary(root string) error {
 	return nil
 }
 func TestRustOMSStoreBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	if e := checkRustOMSStoreBoundary(root); e != nil {
 		t.Fatal(e)
 	}
@@ -220,12 +220,12 @@ func checkRustOMSStoreEvidence(workflow, checker string) error {
 			return fmt.Errorf("missing lifecycle proof %s", marker)
 		}
 	}
-	for _, marker := range []string{"cargo test --locked -p kanz-oms-store --all-targets", "cargo clippy --locked -p kanz-oms-store --all-targets -- -D warnings", "cargo build --locked -p kanz-oms-store --example fixture", "KANZ_OMS_STORE_BIN:", "KANZ_OMS_STORE_VERSION:", "./services/oms/tools/store-conformance", "go test -race -p 1", "check_oms_fold_evidence.py"} {
+	for _, marker := range []string{"cargo test --locked -p kanz-oms-store --all-targets", "cargo clippy --locked -p kanz-oms-store --all-targets -- -D warnings", "cargo build --locked -p kanz-oms-store --example fixture", "KANZ_OMS_STORE_BIN:", "KANZ_OMS_STORE_VERSION:", "./services/oms/tools/store_conformance", "go test -race -p 1", "check_oms_fold_evidence.py"} {
 		if !strings.Contains(workflow, marker) {
 			return fmt.Errorf("missing Rust SQL execution gate: %s", marker)
 		}
 	}
-	for _, marker := range []string{"services/oms/tools/store-conformance", "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity", "TestRustExecutionEconomics", "TestRustRepositoryTransactions/", "durable-restart-exact-bytes", "duplicate-conflict-and-alias", "concurrent-duplicate", "fill-wins-cancel", "cancel-wins-fill", "commit-failure-rollback-reclaim", "tenant-and-missing-scope", "legacy-alias", "fee-head-duplicate-and-corruption", "unowned-outbox-refusal", "unsafe-rls-and-invalid-record"} {
+	for _, marker := range []string{"services/oms/tools/store_conformance", "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity", "TestRustExecutionEconomics", "TestRustRepositoryTransactions/", "durable-restart-exact-bytes", "duplicate-conflict-and-alias", "concurrent-duplicate", "fill-wins-cancel", "cancel-wins-fill", "commit-failure-rollback-reclaim", "tenant-and-missing-scope", "legacy-alias", "fee-head-duplicate-and-corruption", "unowned-outbox-refusal", "unsafe-rls-and-invalid-record"} {
 		if !strings.Contains(checker, marker) {
 			return fmt.Errorf("missing Rust SQL case: %s", marker)
 		}
@@ -245,7 +245,7 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 	if e = checkRustOMSStoreEvidence(string(w), string(c)); e != nil {
 		t.Fatal(e)
 	}
-	for _, marker := range []string{"--all-targets", "./services/oms/tools/store-conformance", "KANZ_OMS_STORE_BIN:"} {
+	for _, marker := range []string{"--all-targets", "./services/oms/tools/store_conformance", "KANZ_OMS_STORE_BIN:"} {
 		mut := strings.ReplaceAll(string(w), marker, "")
 		if checkRustOMSStoreEvidence(mut, string(c)) == nil {
 			t.Fatalf("missing workflow gate %s accepted", marker)
@@ -259,7 +259,7 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 	}
 }
 func TestRustOMSStoreBoundaryMutations(t *testing.T) {
-	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	for _, tc := range []struct{ file, from, to string }{
 		{"src/recovery_ack.rs", "status.case_id != ack.case_id", "false"},
 		{"src/recovery_ack.rs", "status.status != \"corrected\"", "false"},

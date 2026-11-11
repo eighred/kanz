@@ -194,7 +194,7 @@ func descriptorPostgresModel(t *testing.T, ctx context.Context) *factormodel.Mod
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market-data", "migrations", "0001_price_history.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market_data", "migrations", "0001_price_history.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}

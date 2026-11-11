@@ -74,7 +74,7 @@ A committed copy of the base would normally drift the moment the base
 changes, with nothing comparing the two — but this one is safe, because
 nothing ever hand-maintains it. `internal/tenantgen.Render(base, tenant)` is
 the ONE generator, and it is the ONLY thing that ever writes this file:
-`cmd/kanz-tenantgen` calls it (used by `provision-tenant.sh`'s `compute`
+`cmd/kanz_tenantgen` calls it (used by `provision-tenant.sh`'s `compute`
 step), and `test/arch/tenant_compute_test.go`'s drift guard calls the exact
 same function to re-render every committed manifest from the LIVE base on
 every CI run, diffing the whole document byte-for-byte. A new env var or
@@ -112,7 +112,7 @@ contract the drift guard depends on.
 
 ## Adding a real tenant
 
-1. `go run ./cmd/kanz-tenantgen -tenant <tenant>` from `kanz/` (or let
+1. `go run ./cmd/kanz_tenantgen -tenant <tenant>` from `kanz/` (or let
    `provision-tenant.sh`'s `compute` step do it). This writes one
    `infra/deploy/tenants/<tenant>/<service>-<tenant>.yaml` per declared service.
 2. Add each printed SPIFFE ID to the tenant's account in

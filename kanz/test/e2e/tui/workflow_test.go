@@ -199,7 +199,7 @@ func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	//
 	// 45s, up from the 20s the in-process dial needed. ctrl+t now creates a Job, waits
 	// for a pod to be scheduled and its container to start, and only then spends up to
-	// probeDialTimeout (10s, cmd/kanz-provisioner/probe.go) on the dial itself, so 20s
+	// probeDialTimeout (10s, cmd/kanz_provisioner/probe.go) on the dial itself, so 20s
 	// now sits below the floor of a perfectly healthy run on a cold image.
 	//
 	s.WaitFor(t, "✓ reachable", probeVerdictWait)

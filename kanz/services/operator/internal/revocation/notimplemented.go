@@ -19,7 +19,7 @@ var ErrNotImplemented = errors.New("not implemented on this estate")
 
 // NotImplementedHalter refuses to halt a tenant.
 //
-// WHY IT IS A STUB AND NOT A CALL INTO cmd/kanz-halt: the brake exists, but it
+// WHY IT IS A STUB AND NOT A CALL INTO cmd/kanz_halt: the brake exists, but it
 // is PLATFORM-WIDE. kanz-halt publishes ModeChanged{component: "system"}, and
 // its own --tenant flag documents that "the gate ignores this field and stops
 // every tenant's execution. There is no per-tenant halt today." Shelling out to
@@ -38,7 +38,7 @@ var ErrNotImplemented = errors.New("not implemented on this estate")
 type NotImplementedHalter struct{}
 
 func (NotImplementedHalter) HaltTrading(_ context.Context, req Request) error {
-	return fmt.Errorf("halt trading for tenant %q: %w: the brake is cmd/kanz-halt and it is "+
+	return fmt.Errorf("halt trading for tenant %q: %w: the brake is cmd/kanz_halt and it is "+
 		"PLATFORM-WIDE (lifecycle.v1.ModeChanged{component: %q}) — there is no per-tenant halt, "+
 		"so no implementation can stop this tenant alone. An operator must run kanz-halt by hand, "+
 		"knowing it stops everyone (#108)", req.Tenant, ErrNotImplemented, "system")

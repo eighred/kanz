@@ -154,7 +154,7 @@ func (e *StatusError) Error() string {
 //
 // QUERY IS SEPARATE FROM PATH BECAUSE THE SIGNATURE IS OVER THE PATH ALONE. The
 // gateway's Signing middleware computes HMAC over METHOD, then r.URL.Path, then
-// the body, newline-separated (services/api-gateway/internal/middleware).
+// the body, newline-separated (services/api_gateway/internal/middleware).
 // r.URL.Path EXCLUDES the query string, so a caller that folded "?as_of=..."
 // into path would sign more than the gateway does, and get a 401 that reads as
 // an expired token. The two cannot be one argument.

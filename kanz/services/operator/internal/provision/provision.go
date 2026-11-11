@@ -2,7 +2,7 @@
 // turns an AddNode request into a short-lived Secret (the bootstrap SSH key) and a
 // one-shot kanz-provisioner Job that owns it, and it derives provisioning status
 // from the Jobs' own status. It holds no SSH itself — crypto/ssh lives only in the
-// provisioner Job (cmd/kanz-provisioner).
+// provisioner Job (cmd/kanz_provisioner).
 //
 // Probe follows the same rule one step further: the operator holds no :22 egress
 // either. A pre-flight reachability dial at a caller-supplied address runs in an
@@ -473,7 +473,7 @@ func (p *Provisioner) awaitProbe(ctx context.Context, jobName string, timeout ti
 	}
 }
 
-// parseProbeMessage decodes the single line cmd/kanz-provisioner writes to
+// parseProbeMessage decodes the single line cmd/kanz_provisioner writes to
 // /dev/termination-log.
 //
 // An absent or unparseable message is an ERROR, never Reachable:false. "The probe could
@@ -498,7 +498,7 @@ func parseProbeMessage(msg string) (ProbeResult, error) {
 		return ProbeResult{Reachable: true, LatencyMS: ms}, nil
 	case "unreachable":
 		// Held to the same strictness as the reachable branch, for the same reason: the
-		// probe always writes a trimmed dial reason (cmd/kanz-provisioner/probe.go), so a
+		// probe always writes a trimmed dial reason (cmd/kanz_provisioner/probe.go), so a
 		// bare "unreachable" is a probe that malfunctioned, not a verdict. Defaulting the
 		// message to "unreachable" would launder that into a confident accusation against
 		// the target — the exact substitution this function exists to refuse.

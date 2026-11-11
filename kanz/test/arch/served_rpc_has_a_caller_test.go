@@ -93,13 +93,13 @@ var servedRPCExempt = map[string]string{}
 
 func TestEveryServedRPCHasACaller(t *testing.T) {
 	root := moduleRoot(t)
-	schema := loadProtoSchema(t, filepath.Join(filepath.Dir(root), "kanz-schemas", "proto"))
+	schema := loadProtoSchema(t, filepath.Join(filepath.Dir(root), "kanz_schemas", "proto"))
 
 	// NON-VACUITY, part one: the proto scan. An empty rpc list would pass this
 	// guard having examined nothing, which is the failure mode it exists to
 	// prevent one level up.
 	if len(schema.rpcs) < 15 {
-		t.Fatalf("found only %d rpcs across kanz-schemas/proto — the schema scan is broken, not "+
+		t.Fatalf("found only %d rpcs across kanz_schemas/proto — the schema scan is broken, not "+
 			"the estate", len(schema.rpcs))
 	}
 
@@ -110,7 +110,7 @@ func TestEveryServedRPCHasACaller(t *testing.T) {
 	// If the call-site scan stops seeing that, the guard has gone quiet.
 	if len(called["ListPendingApprovals"]) == 0 {
 		t.Fatalf("ListPendingApprovals has no detected caller — it does have one "+
-			"(services/api-gateway/internal/gateway), so the CallExpr scan has stopped matching. "+
+			"(services/api_gateway/internal/gateway), so the CallExpr scan has stopped matching. "+
 			"Found call sites for %d methods.", len(called))
 	}
 

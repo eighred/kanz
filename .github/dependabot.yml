@@ -21,7 +21,7 @@ updates:
   # Rust migration dependencies remain reviewable before runtime adoption (#1413).
   # Version changes also require the bounded migration guard to be reviewed.
   - package-ecosystem: cargo
-    directory: /kanz-rs
+    directory: /kanz_rs
     schedule: { interval: weekly }
     open-pull-requests-limit: 2
     groups:
@@ -43,7 +43,7 @@ updates:
   # was the one ecosystem that could open a PR per dependency, and each one paid for
   # 19 image builds to bump a tool that ships in no image.
   - package-ecosystem: gomod
-    directory: /kanz-schemas/tools/registry-ingest
+    directory: /kanz_schemas/tools/registry_ingest
     schedule: { interval: weekly }
     open-pull-requests-limit: 2
     groups:
@@ -53,7 +53,7 @@ updates:
 
   # Python inference package.
   - package-ecosystem: pip
-    directory: /kanz-py
+    directory: /kanz_py
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
@@ -63,7 +63,7 @@ updates:
 
   # TypeScript bus client.
   - package-ecosystem: npm
-    directory: /kanz/ts/kanz-bus
+    directory: /kanz/ts/kanz_bus
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
@@ -85,7 +85,7 @@ updates:
   # dependencies — the ones that ship to a browser — were the only unmonitored
   # tree in the repository.
   - package-ecosystem: npm
-    directory: /kanz-web
+    directory: /web
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
@@ -93,7 +93,7 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
     # Same reasoning as kanz-bus above: @types/node's major IS the Node major it
-    # describes, and kanz-web/.nvmrc is the runtime pin. Raise both together or
+    # describes, and web/.nvmrc is the runtime pin. Raise both together or
     # tsc will accept APIs the runtime does not have.
     ignore:
       - dependency-name: "@types/node"
@@ -104,15 +104,15 @@ updates:
   #
   # Both directories, not just root: SUPPLY-M1 pinned every `uses:` to an
   # immutable commit SHA, in both .github/workflows and
-  # kanz-schemas/.github/workflows. A pin is only as fresh as whatever can move
+  # kanz_schemas/.github/workflows. A pin is only as fresh as whatever can move
   # it, and Dependabot is now the ONLY thing that can — a floating tag used to
   # absorb upstream security fixes silently, a SHA never will. Scanning just "/"
-  # leaves the 14 pins under kanz-schemas frozen forever with no updater
-  # watching them. (If kanz-schemas is ever split into its own mirrored repo,
+  # leaves the 14 pins under kanz_schemas frozen forever with no updater
+  # watching them. (If kanz_schemas is ever split into its own mirrored repo,
   # its own Dependabot config would cover its workflows there — but today its
   # workflows live, and run, in this monorepo, so they're covered here.)
   - package-ecosystem: github-actions
-    directories: ["/", "/kanz-schemas"]
+    directories: ["/", "/kanz_schemas"]
     schedule: { interval: weekly }
     groups:
       ci-actions:
@@ -127,9 +127,9 @@ updates:
   # lands on one service and not the others is drift.
   - package-ecosystem: docker
     directories:
-      - /kanz/services/risk-engine
-      - /kanz/services/schema-registry
-      - /kanz/services/api-gateway
+      - /kanz/services/risk_engine
+      - /kanz/services/schema_registry
+      - /kanz/services/api_gateway
     schedule: { interval: weekly }
     open-pull-requests-limit: 2
     groups:

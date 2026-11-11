@@ -11,7 +11,7 @@ import (
 // These source/ordering checks bind the reviewed owners; actual PG differential
 // tests separately qualify SQL rollback, maker/checker and published FACTs.
 var rustFeeCommandMarkers = map[string][]string{
-	"crates/oms-recovery/src/fee_commands.rs": {
+	"crates/oms_recovery/src/fee_commands.rs": {
 		`env.value().tenant_id!=tenant`, `env.value().event_class!=2`, `payload.len()>65536`,
 		`m.target_id!=order`, `m.issuer.strip_prefix("user:")`, `!m.principal_portfolios.contains(&state.value().portfolio_id)`,
 		`c.order_id!=order`, `old.proposer!=actor||old.reason!=reason||old.order_id!=c.order_id`,
@@ -20,12 +20,12 @@ var rustFeeCommandMarkers = map[string][]string{
 		`control.approve(&old.approver,&old.digest,signed)`, `c.status=="investigating"&&c.checkpoint==0`,
 		`Error::FeeRevision|Error::EvidenceConflict|Error::PostedHistoryUnknown`, `returnErr(Error::RecoveryBlocked)`,
 	},
-	"crates/oms-recovery/src/fee_control.rs": {
+	"crates/oms_recovery/src/fee_control.rs": {
 		`DEFAULT_TTL_SECONDS:i64=24*60*60`, `actor==fee_subject::normalize(self.proposer)`,
 		`digest!=self.digest`, `now>=self.expires`, `(expiry-created).min(i128::from(i64::MAX))`,
 		`if!(n==number&&w==2)`, `h.update((part.len()asu64).to_be_bytes())`,
 	},
-	"crates/oms-store/src/fee_commands.rs": {
+	"crates/oms_store/src/fee_commands.rs": {
 		`PROPOSAL_BYTES:usize=512*1024`, `octet_length(proposal)::bigint<=$2`, `octet_length(approval)::bigint<=$2`,
 		`fact.tenant!=tenant`, `fact.partition_key!=order`, `fact.payload!=payload`,
 		`cas(&tx,&st,state,version).await?`, `old.value().digest!=a.digest`,
@@ -50,7 +50,7 @@ func checkRustFeeCommands(root string) error {
 				return fmt.Errorf("fee command %s missing %s", name, marker)
 			}
 		}
-		if strings.HasPrefix(name, "crates/oms-store/") {
+		if strings.HasPrefix(name, "crates/oms_store/") {
 			if strings.Count(code, `repository::scope(client,tenant).await?`) != 4 || strings.Count(code, `enqueue(&tx,std::slice::from_ref(fact)).await?`) != 2 {
 				return fmt.Errorf("fee scope/enqueue owners changed")
 			}
@@ -77,13 +77,13 @@ func checkRustFeeCommands(root string) error {
 	return nil
 }
 func TestRustFeeCommandBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	if err := checkRustFeeCommands(root); err != nil {
 		t.Fatal(err)
 	}
 }
 func TestRustFeeCommandBoundaryMutations(t *testing.T) {
-	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	for name, markers := range rustFeeCommandMarkers {
 		for _, marker := range markers {
 			t.Run(name+"/"+marker, func(t *testing.T) {

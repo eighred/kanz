@@ -42,7 +42,7 @@ const mirrorPrefix = "ghcr.io/eighred/base/"
 // weakened to express the other.
 //
 // SCOPE IS THE WHOLE REPOSITORY, not just the Go module. #55's own acceptance
-// grep is scoped to `kanz`, which misses kanz-py/Dockerfile — and that image
+// grep is scoped to `kanz`, which misses kanz_py/Dockerfile — and that image
 // (ghcr.io/eighred/inference) is built and deployed like any other, on
 // python:3.12-slim from the same Docker Hub. Inheriting that blind spot would
 // leave the guard asserting less than its title claims, so this walks from the
@@ -63,7 +63,7 @@ func TestEveryDockerfileBaseImageComesFromTheMirror(t *testing.T) {
 	for _, f := range froms {
 		// Docker scratch has no upstream registry. Only the source-free payload
 		// recipe guarded by TestRustAuditToolProducerBoundary uses it (#1413).
-		if f.image == "scratch" && f.file == "tools/rust-audit-tools/Dockerfile" {
+		if f.image == "scratch" && f.file == "tools/rust_audit_tools/Dockerfile" {
 			continue
 		}
 		if strings.HasPrefix(f.image, mirrorPrefix) {

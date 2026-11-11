@@ -14,7 +14,7 @@ import (
 // committed (EVT-15a — it is NOT in the checked-in gen/go tree, only its
 // .proto)". THE PREMISE WAS FALSE, and #589's body already said so:
 //
-//   - kanz-schemas/gen is not checked in AT ALL — `git ls-files kanz-schemas/gen`
+//   - kanz_schemas/gen is not checked in AT ALL — `git ls-files kanz_schemas/gen`
 //     returns nothing. EVERY generated package is generated-not-committed, so
 //     settlement.v1 is not special in any way.
 //   - this package already imports four of them — order/v1, common/v1,

@@ -31,7 +31,7 @@ def qualify(directory, expected, create=False):
     if not re.fullmatch(r"[0-9a-f]{64}", binary):
         raise ValueError("invalid executable digest")
     bound = {**expected, "stream_sha256": hashlib.sha256(raw).hexdigest(), "result": result,
-             "build": {"profile": "debug", "features": [], "target": "kanz-rs/target/debug/examples/order-attribution-fixture", "sha256": binary}}
+             "build": {"profile": "debug", "features": [], "target": "kanz_rs/target/debug/examples/order-attribution-fixture", "sha256": binary}}
     path = directory / "proof.json"
     if create:
         path.write_text(json.dumps(bound, sort_keys=True) + "\n", encoding="utf-8")

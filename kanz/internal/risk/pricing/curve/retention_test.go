@@ -21,7 +21,7 @@ func flat(z float64) *Curve {
 // Before this, every calibration refresh appended a version and nothing removed
 // one: `grep -rn "delete(" internal/risk/pricing` returned nothing. The
 // composition root registers an intraday AND a nightly job per currency
-// (services/risk-engine/cmd/risk-engine/main.go), so at the one-minute cadence
+// (services/risk_engine/cmd/risk_engine/main.go), so at the one-minute cadence
 // RISK_ENGINE_CALIBRATION_INTERVAL accepts, the store held ~525k *Curve values
 // per currency per year and the pod's pricing inputs degraded with how long it
 // had been up.

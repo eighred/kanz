@@ -71,7 +71,7 @@ type Config struct {
 	// back to plaintext. Keep a rotating identity source open until Close returns.
 	TLSConfig *tls.Config
 	SASL      sasl.Mechanism
-	// Topic is the source topic per kanz-schemas/README.md § Subject Taxonomy.
+	// Topic is the source topic per kanz_schemas/README.md § Subject Taxonomy.
 	Topic string
 	// Range bounds the per-partition read.
 	Range Range

@@ -1,15 +1,15 @@
 // Package prediction is the Go side of the hybrid prediction
 // layer — feature publishing (PRED-03), sync gRPC client (PRED-07),
 // and the shared types both paths consume. Symmetric counterpart
-// to kanz-py's `kanz_inference` package (PRED-04/05/08).
+// to kanz_py's `kanz_inference` package (PRED-04/05/08).
 //
 // # Where Go runs in the prediction layer
 //
 // THE HYBRID SPLIT, and it is verifiable from this repository rather than from
 // the design document that first stated it (deleted 2026-07-29): features are COMPUTED in
 // Go (the engine has the source state) and PUBLISHED to the bus.
-// services/risk-engine/internal/app/features.go is the Go half and
-// kanz-py/kanz_inference is the Python one.
+// services/risk_engine/internal/app/features.go is the Go half and
+// kanz_py/kanz_inference is the Python one.
 // Inference is computed in Python (model serving stack lives
 // there). Predictions flow back to Go via the bus (streaming) or
 // gRPC (sync). PRED-03 is the first half of that loop: Go →
@@ -41,7 +41,7 @@ import (
 
 // Event-type + schema-ref constants for the feature-published
 // FACT. Subject taxonomy: `inference.feature.computed`
-// (kanz-schemas/README.md § Subject Taxonomy §1 example).
+// (kanz_schemas/README.md § Subject Taxonomy §1 example).
 const (
 	EventTypeFeatureComputed = "inference.feature.computed"
 	SchemaRefFeatureVector   = "inference.v1.FeatureVector:1"

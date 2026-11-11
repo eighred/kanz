@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+// Package command.v1 defines the generic schemas for the COMMAND event class —
+// the universal structure shared by every command, and the universal outcome
+// FACT every command must produce (see kanz_schemas/README.md § Event Class
+// Rules §2). It is to commands what envelope/v1 is to events: the generic
+// layer.
+//
+// A concrete command (an order command, a rebalance command, ...) is owned by
+// its domain and embeds CommandMetadata as its first field; command.v1 itself
+// stays free of any domain-specific command body, so it has no domain imports.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants
+// the bus client library and command handlers enforce.
+package command.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// CommandMetadata is the command-common metadata embedded as field 1 of every
+// concrete command payload. It carries what is generic to all commands and not
+// already on the envelope — the envelope still owns idempotency_key (caller-
+// supplied dedup), partition_key (per-target ordering), and the causality ids.
+message CommandMetadata {
+  // issuer is the principal on whose authority the command is issued — the
+  // "who", distinct from the envelope `source` (the service that emitted it).
+  // Formatted "{type}:{id}", e.g. "user:akif", "strategy:momentum-v2",
+  // "operator:risk-desk". The handler MUST validate this principal's authority
+  // for the action before acting. Required.
+  string issuer = 1;
+
+  // target_id is the aggregate the command acts on (e.g. a portfolio_id, an
+  // order_id). The envelope partition_key is derived from it, so commands on
+  // one target are totally ordered. Restated here so a command body is
+  // self-contained. Required.
+  string target_id = 2;
+
+  // valid_until is the deadline after which the command MUST NOT be acted on —
+  // a stale command is REJECTED with an expiry reason, never executed. Unset
+  // (zero) means no expiry. Optional.
+  google.protobuf.Timestamp valid_until = 3;
+
+  // reason is a human-readable note on why the command was issued, retained
+  // for audit. Optional.
+  string reason = 4;
+
+  // principal_portfolios is the portfolio allow-list the ISSUER was entitled to
+  // at the moment the command was admitted — the caller's scope, carried to the
+  // handler that can actually check it.
+  //
+  // It exists because the entitlement and the resource live in different
+  // processes: the api-gateway knows WHO is calling but not which portfolio an
+  // order belongs to (it never reads the order), and the OMS holds the order but
+  // has no identity store. Without this the two facts never meet, and every
+  // holder of the coarse trade capability can cancel or amend ANY order in the
+  // tenant — which is exactly what was true before this field existed.
+  //
+  // SEMANTICS, and they are deliberately the opposite of pkg/auth's default:
+  // EMPTY MEANS DENY, not unrestricted. A handler MUST refuse a command whose
+  // list does not contain the target's portfolio, including when the list is
+  // absent. An entitlement that silently widens when a claim goes missing is not
+  // an entitlement; it is the fail-open shape this platform has already been
+  // bitten by. Tenant isolation is a SEPARATE guarantee (RLS + per-tenant OMS)
+  // and is not weakened or replaced by this field.
+  //
+  // The gateway is the only writer. It is populated from the authenticated
+  // principal's claims — never from client input.
+  repeated string principal_portfolios = 5;
+}

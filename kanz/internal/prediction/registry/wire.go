@@ -3,7 +3,7 @@ package registry
 // The Go end of the model registry's WIRE CONTRACT (#112 step 3).
 //
 // inference.v1.ModelRegistryEvent is the shared shape both halves of the fleet
-// speak; kanz-py's BusRegistryPublisher is the producer. Until this file the Go
+// speak; kanz_py's BusRegistryPublisher is the producer. Until this file the Go
 // registry.Event had NO wire form at all, which is why a registry that
 // "converges across replicas" converged only across replicas written in one
 // language.
@@ -30,7 +30,7 @@ import (
 )
 
 // The subject the registry log rides, and the payload contract on it. Both must
-// agree with kanz-py's publish.py — SUBJECT_MODEL_REGISTERED and
+// agree with kanz_py's publish.py — SUBJECT_MODEL_REGISTERED and
 // SCHEMA_REF_MODEL_REGISTRY there — because a producer and a consumer that
 // disagree about either one produce silence, not an error.
 const (

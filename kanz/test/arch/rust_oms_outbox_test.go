@@ -42,7 +42,7 @@ func checkRustOMSOutbox(source string) error {
 }
 
 func TestRustOMSOutboxBoundary(t *testing.T) {
-	path := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "src", "outbox.rs")
+	path := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs", "crates", "oms_store", "src", "outbox.rs")
 	raw, e := os.ReadFile(path)
 	if e != nil {
 		t.Fatal(e)
@@ -77,7 +77,7 @@ func TestRustOMSOutboxBoundary(t *testing.T) {
 }
 
 func TestRustOMSOutboxCancellationProof(t *testing.T) {
-	path := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "examples", "fixture.rs")
+	path := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs", "crates", "oms_store", "examples", "fixture.rs")
 	raw, e := os.ReadFile(path)
 	if e != nil {
 		t.Fatal(e)

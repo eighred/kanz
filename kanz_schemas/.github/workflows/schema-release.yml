@@ -1,0 +1,173 @@
+# Schema release: on a version tag, generate the per-language SDKs and publish
+# each as its own module/package, then ingest the same schemas into the
+# runtime schema-registry. Jobs: go (EVT-15a), python (EVT-15b), ts (EVT-15c),
+# registry-ingest (EVT-16b).
+#
+# Generated code is not committed to this repo. Required repo secrets:
+#   SCHEMAS_PUBLISH_TOKEN  write access to companion module repos (kanz-schemas-go)
+#   PYPI_TOKEN             API token for the Python package index
+#   PYPI_REPOSITORY_URL    optional — private index URL; unset publishes to PyPI
+#   NPM_TOKEN              auth token for the npm registry
+#   NPM_REGISTRY_URL       optional — private registry URL; unset publishes to npmjs.org
+#   SCHEMA_REGISTRY_URL    base URL of the runtime schema-registry (EVT-16)
+name: schema-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.23'
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Go plugin
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate
+        run: buf generate
+      - name: Assemble and verify module
+        working-directory: gen/go
+        run: |
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
+          go mod tidy
+          go build ./...
+      - name: Publish to companion module repo
+        env:
+          PUBLISH_TOKEN: ${{ secrets.SCHEMAS_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          git clone --depth 1 \
+            "https://x-access-token:${PUBLISH_TOKEN}@github.com/eighred/kanz/kanz-schemas-go.git" out
+          rsync -a --delete --exclude .git gen/go/ out/
+          cd out
+          git config user.name kanz-schemas-ci
+          git config user.email ci@eighred.invalid
+          git add -A
+          git commit -m "Generated from kanz_schemas ${tag}" || echo "no changes"
+          git tag "${tag}"
+          git push origin HEAD "${tag}"
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate
+        run: buf generate
+      - name: Assemble package
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          cp packaging/python/pyproject.toml gen/python/pyproject.toml
+          sed -i "s/^version = .*/version = \"${tag#v}\"/" gen/python/pyproject.toml
+          # protoc-gen-python emits no __init__.py; add them so setuptools
+          # discovers the package tree (the gen/python root itself excluded).
+          find gen/python -mindepth 1 -type d -exec touch {}/__init__.py \;
+      - name: Build
+        working-directory: gen/python
+        run: |
+          python -m pip install --quiet build
+          python -m build
+      - name: Verify wheel
+        working-directory: gen/python
+        run: |
+          python -m pip install --quiet dist/*.whl grpcio
+          python -c "import envelope.v1.envelope_pb2; import domain.v1.portfolio_pb2; import inference.v1.inference_service_pb2_grpc; print('import OK')"
+      - name: Publish
+        working-directory: gen/python
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+          TWINE_REPOSITORY_URL: ${{ secrets.PYPI_REPOSITORY_URL }}
+        run: |
+          python -m pip install --quiet twine
+          python -m twine upload dist/*
+
+  ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # Node 24 (Krypton) is the ACTIVE LTS; Node 20 (Iron) went end-of-life
+          # in April 2026, so this publish job was running on an unsupported
+          # runtime. Deliberately a literal and NOT kanz/ts/kanz_bus/.nvmrc:
+          # kanz_schemas is a candidate to be split into its own mirrored repo
+          # (see .github/dependabot.yml), and a path reaching outside this
+          # directory would break the moment it is. Bump both when the estate
+          # moves to the next LTS.
+          node-version: '24'
+          registry-url: ${{ secrets.NPM_REGISTRY_URL || 'https://registry.npmjs.org' }}
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate
+        run: buf generate
+      - name: Assemble package
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          cp packaging/ts/package.json gen/ts/package.json
+          node -e "const fs=require('fs');const p='gen/ts/package.json';const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');" "${tag#v}"
+      - name: Verify package
+        working-directory: gen/ts
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-package-lock @bufbuild/protobuf@^2.2.3
+          node --input-type=module -e "
+            import * as env from './envelope/v1/envelope_pb.js';
+            import * as port from './domain/v1/portfolio_pb.js';
+            if (!Object.keys(env).length || !Object.keys(port).length) {
+              throw new Error('generated module exported nothing');
+            }
+            console.log('import OK');
+          "
+      - name: Publish
+        working-directory: gen/ts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  registry-ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.23'
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build FileDescriptorSet
+        run: buf build -o /tmp/kanz-schemas.binpb
+      - name: Ingest into schema-registry
+        env:
+          REGISTRY_URL: ${{ secrets.SCHEMA_REGISTRY_URL }}
+        run: |
+          set -euo pipefail
+          go -C tools/registry_ingest run . \
+            -fds /tmp/kanz-schemas.binpb \
+            -registry "${REGISTRY_URL}" \
+            -tag "${GITHUB_REF_NAME}"

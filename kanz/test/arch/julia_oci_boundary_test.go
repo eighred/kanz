@@ -13,22 +13,22 @@ import (
 // #1413: scoped recipe/qualification checks, not a Julia semantic audit or proof
 // of OS isolation. The mandatory actual-image Linux lane owns those assertions.
 var juliaOCIMarkers = map[string][]string{
-	"kanz-jl/Dockerfile": {
+	"kanz_jl/Dockerfile": {
 		"FROM " + rustBuilderPin + " AS build",
 		"FROM " + rustRuntimePin,
 		"5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4  /tmp/julia.tar.gz",
 		"sha256sum --check --strict /tmp/locked.sha256",
-		"COPY kanz-jl/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh",
+		"COPY kanz_jl/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh",
 		"bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz",
-		"COPY kanz-schemas/proto/ /opt/kanz-schemas/proto/",
+		"COPY kanz_schemas/proto/ /opt/kanz_schemas/proto/",
 		"/opt/julia/share/julia/base/JuliaSyntax/docs", "/opt/julia/share/julia/stdlib/v1.13/TOML/docs",
 		"/opt/julia/share/julia/stdlib/v1.13/TOML/benchmark", "/opt/julia/share/julia/stdlib/v1.13/Tar/test",
 		"/opt/julia/share/julia/test; do", `test -d "$path" && test ! -L "$path" && rm -rf -- "$path" && test ! -e "$path" || exit 1`,
 		"JULIA_PKG_OFFLINE=true", "USER 65532:65532",
 		"printf '%s' \"$VERSION\" | grep -Eq '^[0-9a-f]{40}$'",
-		`ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/kanz-jl", "/opt/kanz-jl/bin/curve_worker.jl"]`,
+		`ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/kanz_jl", "/opt/kanz_jl/bin/curve_worker.jl"]`,
 	},
-	"kanz-jl/qualification/proof.py": {
+	"kanz_jl/qualification/proof.py": {
 		"'--network', 'none', '--read-only', '--user', '65532:65532'",
 		"'--memory', '1g', '--memory-swap', '1g', '--pids-limit', '64'",
 		"'--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--cpus', '1'",
@@ -43,7 +43,7 @@ var juliaOCIMarkers = map[string][]string{
 		"oracle(scratch, 'verify')", "report['passed'] &= clean",
 		"'juliaAdvisoryCoverage': 'unqualified-release-blocker'",
 	},
-	"kanz-jl/qualification/isolation.jl": {
+	"kanz_jl/qualification/isolation.jl": {
 		"bounded_hash(path, 768 * 2^20)", "native_total[] <= 2^31",
 		"native_links[relative] = target", "native_jll[name] = info",
 		`"share/julia/compiled"`, `haskey(native_files, relpath(path, "/opt/julia"))`,
@@ -71,7 +71,7 @@ var juliaOCIMarkers = map[string][]string{
 		`installed["version"] == entry["version"]`,
 		"@test actual == entry[\"git-tree-sha1\"]",
 	},
-	"kanz-jl/qualification/native_inventory.py": {
+	"kanz_jl/qualification/native_inventory.py": {
 		"hashlib.file_digest(stream, 'sha256').hexdigest() != ARCHIVE_SHA256",
 		"member.size > 768 << 20", "total > MAX_BYTES", "name in seen or len(seen) >= MAX_FILES",
 		"not safe_link(name, member.linkname)", "resolved not in files",
@@ -79,14 +79,14 @@ var juliaOCIMarkers = map[string][]string{
 		"native-library-advisory-ownership-unqualified", "generated = observed['generatedNativeImages']",
 		"sum(item['size'] for item in generated.values()) > MAX_BYTES",
 	},
-	"kanz-jl/qualification/openssl_runtime.py": {
+	"kanz_jl/qualification/openssl_runtime.py": {
 		"hashlib.file_digest(stream, 'sha256').hexdigest() != checksum",
 		"return verified_artifact(path, ARCHIVE_SHA256, expected)",
 		"member.name in found or not member.isfile()", "if found != expected:",
 		"base['files'].get(name) != BASE_FILES[name] or name in base['links']",
 		"inventory.get('nativeOpenSSL') != expected", "originalJLLVersion': '3.5.8+0'",
 	},
-	"kanz-jl/qualification/install-native-runtime.sh": {
+	"kanz_jl/qualification/install-native-runtime.sh": {
 		`[[ $(uname -s) == Linux && $# == 4 ]]`, `$(realpath -e -- "$root") == "$root"`,
 		`check 5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4 "$julia_archive"`,
 		`check 8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063 "$openssl_archive"`,
@@ -94,17 +94,17 @@ var juliaOCIMarkers = map[string][]string{
 		`check "${original[$i]}" "$path"`, `check "${replacement[$i]}" "$file"`,
 		`mv -T -- "${temporary[$i]}" "$root/lib/julia/${names[$i]}"`,
 	},
-	"kanz-jl/qualification/curl_runtime.py": {
+	"kanz_jl/qualification/curl_runtime.py": {
 		"openssl_runtime.verified_artifact(path, ARCHIVE_SHA256,",
 		"base['files'].get(PATH) != BASE or PATH in base['links']", "if (item != expected",
 		"'sslBackend': 'OpenSSL/3.5.9'", "'originalJLLVersion': '8.22.0+0'",
 	},
-	"kanz-jl/qualification/curl_advisory.py": {
+	"kanz_jl/qualification/curl_advisory.py": {
 		"range_affected(record, target)", "len(control) < 21 or current",
 		"curl_runtime.validate_component(inventory)", "'CURL-CVE-2026-92392'",
 		"'--disable', '--fail'", "libcurl-native-component-only-other-native-ownership-unqualified",
 	},
-	"kanz-jl/qualification/openssl_advisory.py": {
+	"kanz_jl/qualification/openssl_advisory.py": {
 		"set(records) != set(names)", "json.loads(raw, object_pairs_hook=pairs)",
 		"class Links(HTMLParser):", "for start in range(0, len(names), 8):",
 		"total > 16 << 20 or time.monotonic() >= deadline", "records[name] = raw",
@@ -113,7 +113,7 @@ var juliaOCIMarkers = map[string][]string{
 		"openssl_runtime.validate_component(inventory)", "ThreadPoolExecutor(max_workers=8)",
 		"OpenSSL-native-component-only-other-native-ownership-unqualified",
 	},
-	"kanz-jl/qualification/jll_advisory.py": {
+	"kanz_jl/qualification/jll_advisory.py": {
 		"hashlib.sha256(raw).hexdigest() != REGISTRY_SHA256", "len(raw) > 4 << 20",
 		"entry.get('name') != name", "len(result) != 23", "registry_identity(raw, expected)",
 		"registry_identity(raw, CONTROL)", "(control / 'Project.toml').write_bytes(project(CONTROL))",
@@ -124,7 +124,7 @@ var juliaOCIMarkers = map[string][]string{
 		"unmapped JLL finding refuses qualification",
 		"archive-bound-JLL-metadata-only", "'CVE-2024-5535'", "report != {",
 	},
-	"kanz-jl/qualification/native_mapping.py": {
+	"kanz_jl/qualification/native_mapping.py": {
 		"archive.get('files', {}).get(PATH) != FILE", "inventory.get('native7zip') != COMPONENT",
 		"validate_sources({key: value.encode('utf-8') for key, value in report['sourceBytes'].items()})",
 		"hashlib.sha256(raw).hexdigest() != item['sha256']", "vulnStatus') != 'Analyzed'",
@@ -134,14 +134,14 @@ var juliaOCIMarkers = map[string][]string{
 		"finding['PkgID'] == UUID", "finding['InstalledVersion'] == '17.8.3+0'",
 		"fixed-native-version-for-reviewed-advisory", "duplicate advisory JSON key",
 	},
-	"kanz-jl/qualification/install-audit.sh": {
+	"kanz_jl/qualification/install-audit.sh": {
 		"v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz",
 		"bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea",
 		"v1.56.0/syft_1.56.0_linux_amd64.tar.gz",
 		"1c2493cfcf52d3367d6cb25780d9190c111c2219c34c820574c43e8bae15c528",
 		"sha256sum --check --strict",
 	},
-	"kanz-jl/qualification/advisory.py": {
+	"kanz_jl/qualification/advisory.py": {
 		"proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),",
 		"jll_advisory.qualify(run, flags, scratch,",
 		"native_mapping.qualify(run, qualification['inventory'],",
@@ -170,7 +170,7 @@ var juliaOCIMarkers = map[string][]string{
 	".github/workflows/julia-calibration.yml": {
 		"packages: read", "name: Authenticate for private mirrored bases",
 		"python3 -m pip install PyYAML==6.0.3",
-		"run: python3 -B kanz-jl/qualification/proof.py", "if-no-files-found: error",
+		"run: python3 -B kanz_jl/qualification/proof.py", "if-no-files-found: error",
 	},
 }
 
@@ -182,7 +182,7 @@ func checkJuliaOCI(files map[string]string) error {
 			}
 		}
 	}
-	docker := files["kanz-jl/Dockerfile"]
+	docker := files["kanz_jl/Dockerfile"]
 	if strings.Count(docker, "\nFROM ") != 2 || strings.Contains(docker, "EXPOSE") {
 		return fmt.Errorf("Julia image cannot introduce another stage or network service")
 	}
@@ -212,8 +212,8 @@ func checkJuliaOCI(files map[string]string) error {
 	tools := 0
 	nativeHost := 0
 	for _, step := range job.Steps {
-		if strings.Contains(step.Run, "bash kanz-jl/qualification/install-native-runtime.sh") {
-			if step.If != "" || !strings.Contains(step.Run, `bash kanz-jl/qualification/install-native-runtime.sh "$RUNNER_TEMP/julia-1.13.3" "$RUNNER_TEMP/julia.tar.gz" "$RUNNER_TEMP/openssl.tar.gz" "$RUNNER_TEMP/libcurl.tar.gz"`) {
+		if strings.Contains(step.Run, "bash kanz_jl/qualification/install-native-runtime.sh") {
+			if step.If != "" || !strings.Contains(step.Run, `bash kanz_jl/qualification/install-native-runtime.sh "$RUNNER_TEMP/julia-1.13.3" "$RUNNER_TEMP/julia.tar.gz" "$RUNNER_TEMP/openssl.tar.gz" "$RUNNER_TEMP/libcurl.tar.gz"`) {
 				return fmt.Errorf("host native repair conditional or substituted")
 			}
 			nativeHost++
@@ -222,19 +222,19 @@ func checkJuliaOCI(files map[string]string) error {
 			return fmt.Errorf("host native repair must precede Pkg network access")
 		}
 		if step.Name == "Install checksum-pinned image advisory tools" {
-			if step.If != "" || step.Run != "bash kanz-jl/qualification/install-audit.sh" {
+			if step.If != "" || step.Run != "bash kanz_jl/qualification/install-audit.sh" {
 				return fmt.Errorf("scanner setup conditional or substituted")
 			}
 			tools++
 		}
 		if step.Name == "Qualify actual image Julia advisories and inventory" {
-			if found != 1 || tools != 1 || step.If != "" || step.Run != "python3 -B kanz-jl/qualification/advisory.py" {
+			if found != 1 || tools != 1 || step.If != "" || step.Run != "python3 -B kanz_jl/qualification/advisory.py" {
 				return fmt.Errorf("actual image advisory step conditional, reordered or substituted")
 			}
 			audit++
 		}
 		if step.Name == "Qualify the actual Julia image without network or write authority" {
-			if step.If != "" || step.Run != "python3 -B kanz-jl/qualification/proof.py" {
+			if step.If != "" || step.Run != "python3 -B kanz_jl/qualification/proof.py" {
 				return fmt.Errorf("actual OCI step conditional or substituted")
 			}
 			found++

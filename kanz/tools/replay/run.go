@@ -18,7 +18,7 @@ import (
 )
 
 // ReplayPrefix is the reserved top-level subject prefix from
-// kanz-schemas/README.md § Subject Taxonomy §6. Every replayed event lands
+// kanz_schemas/README.md § Subject Taxonomy §6. Every replayed event lands
 // under `{ReplayPrefix}{run_id}.{original_event_type}` so live sinks
 // subscribing to live subjects never see replayed traffic — that is the
 // namespace half of EVT-20b's isolation. EVT-20c adds defense-in-depth via the

@@ -95,7 +95,7 @@ func TestEveryServiceCanBeBuiltIntoAnImage(t *testing.T) {
 	var problems []string
 	seenExempt := map[string]bool{}
 	for _, svc := range services {
-		dockerfile := filepath.Join(root, "services", svc, "Dockerfile")
+		dockerfile := filepath.Join(root, "services", sourceDirectoryName(svc), "Dockerfile")
 		_, err := os.Stat(dockerfile)
 		hasDockerfile := err == nil
 		inMatrix := built[svc]
@@ -139,7 +139,7 @@ func TestEveryServiceCanBeBuiltIntoAnImage(t *testing.T) {
 		if seenExempt[svc] {
 			continue
 		}
-		_, err := os.Stat(filepath.Join(root, "services", svc, "Dockerfile"))
+		_, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc), "Dockerfile"))
 		switch {
 		case !scanned[svc] && serviceExists(root, svc):
 			// It exists but builds no binary, so it was never a candidate and the
@@ -188,8 +188,8 @@ func shippableServiceNames(t *testing.T, root string) []string {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
-		cmdDir := filepath.Join(root, "services", svc, "cmd", svc)
+		svc := deployedServiceName(e.Name())
+		cmdDir := filepath.Join(root, "services", sourceDirectoryName(svc), "cmd", sourceDirectoryName(svc))
 		files, err := os.ReadDir(cmdDir)
 		if err != nil {
 			continue // no cmd/<name> at all: a library-shaped directory
@@ -213,7 +213,7 @@ func shippableServiceNames(t *testing.T, root string) []string {
 }
 
 func serviceExists(root, svc string) bool {
-	info, err := os.Stat(filepath.Join(root, "services", svc))
+	info, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc)))
 	return err == nil && info.IsDir()
 }
 

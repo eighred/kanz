@@ -70,7 +70,7 @@ var workflowLatestExempt = map[string]string{}
 func TestNoWorkflowRunsAFloatingImageTag(t *testing.T) {
 	// The repo root, not the module root: workflows live a level above kanz/.
 	// workflowFiles is the existing discovery — it already handles BOTH
-	// .github/workflows trees (root and kanz-schemas) and skips nested worktree
+	// .github/workflows trees (root and kanz_schemas) and skips nested worktree
 	// checkouts, which a fresh glob here would have re-implemented wrongly.
 	files := workflowFiles(t, filepath.Dir(moduleRoot(t)))
 	// NON-VACUITY, the directory half: a moved workflow tree finds nothing and

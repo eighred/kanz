@@ -78,7 +78,7 @@ func TestServiceSubscribesOnlyToSubjectsItsTenancyPermissionsAllow(t *testing.T)
 	//
 	// archive.Drain reads DLQSubject through DLQReader, whose own doc comment calls
 	// it "the KAFKA side of the drain ... Satisfied by *bus.KafkaClient", and
-	// cmd/archiver-drain wires it as Reader: kafka from bus.DialKafka. The comment
+	// cmd/archiver_drain wires it as Reader: kafka from bus.DialKafka. The comment
 	// on DLQSubject in archiver.go says it outright: "dlq.archiver is Kafka". No NATS grant is
 	// needed or wanted, and granting one would widen a service's broker
 	// permissions to describe a topic that is not on the broker.
@@ -200,7 +200,7 @@ func TestServiceSubscribesOnlyToSubjectsItsTenancyPermissionsAllow(t *testing.T)
 // so the list is computed from the same source of truth that guard uses.
 func subscribeSurfacesFor(t *testing.T, root, svc string) []string {
 	t.Helper()
-	if callsHaltArm(t, filepath.Join(root, "services", svc, "cmd", svc)) {
+	if callsHaltArm(t, filepath.Join(root, "services", sourceDirectoryName(svc), "cmd", sourceDirectoryName(svc))) {
 		return []string{"internal/platform/halt"}
 	}
 	return nil
@@ -208,7 +208,7 @@ func subscribeSurfacesFor(t *testing.T, root, svc string) []string {
 
 func serviceSubscribedSubjects(t *testing.T, rc *resolveCache, root, svc string) map[string][]string {
 	t.Helper()
-	dirs := []string{filepath.Join(root, "services", svc)}
+	dirs := []string{filepath.Join(root, "services", sourceDirectoryName(svc))}
 	for _, extra := range subscribeSurfacesFor(t, root, svc) {
 		dirs = append(dirs, filepath.Join(root, filepath.FromSlash(extra)))
 	}
@@ -348,7 +348,7 @@ func TestEveryDeclaredDefaultSubscriptionSetIsGranted(t *testing.T) {
 		if !ok {
 			continue // the call-site arm already reports a missing permissions block
 		}
-		sets := declaredDefaultSubjects(t, rc, filepath.Join(root, "services", svc))
+		sets := declaredDefaultSubjects(t, rc, filepath.Join(root, "services", sourceDirectoryName(svc)))
 		for _, name := range sortedSubjectSetNames(sets) {
 			for _, subj := range sets[name] {
 				checked++

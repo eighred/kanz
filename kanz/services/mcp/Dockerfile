@@ -21,7 +21,7 @@
 # ended up reachable from kanz-observability with a self-chosen principal.
 #
 # Build context is the repo ROOT, not kanz/: the module's go.mod replaces
-# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz_schemas/gen/go, which is
 # generated-not-committed (EVT-15a). Build with:
 #   docker build -f kanz/services/mcp/Dockerfile .
 FROM ghcr.io/eighred/base/golang:1.26.10 AS build
@@ -30,7 +30,7 @@ ENV GOFLAGS=-mod=mod
 
 # Dependency layer: consumer and generated SDK module metadata only,
 # so schema source changes preserve the verified dependency download layer.
-COPY kanz-schemas/gen/go/go.mod kanz-schemas/gen/go/go.sum ./kanz-schemas/gen/go/
+COPY kanz_schemas/gen/go/go.mod kanz_schemas/gen/go/go.sum ./kanz_schemas/gen/go/
 COPY kanz/go.mod kanz/go.sum ./kanz/
 WORKDIR /src/kanz
 # The download is retried (#776): the module proxy and checksum database drop
@@ -40,7 +40,7 @@ WORKDIR /src/kanz
 COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh
 RUN sh /usr/local/bin/go-mod-download.sh
 
-COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/
+COPY kanz_schemas/gen/go/ /src/kanz_schemas/gen/go/
 COPY kanz/ ./
 # CGO off ⇒ a fully static binary, which is what distroless/static requires.
 ARG VERSION=

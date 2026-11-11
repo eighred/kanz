@@ -385,7 +385,7 @@ func externalDestinations(t *testing.T) []externalDest {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
+		svc := deployedServiceName(e.Name())
 		cfgDir := filepath.Join(servicesRoot, svc, "internal", "config")
 		files, gerr := filepath.Glob(filepath.Join(cfgDir, "*.go"))
 		if gerr != nil || len(files) == 0 {
@@ -1053,8 +1053,8 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
-		_ = filepath.WalkDir(filepath.Join(root, svc), func(path string, d fs.DirEntry, werr error) error {
+		svc := deployedServiceName(e.Name())
+		_ = filepath.WalkDir(filepath.Join(root, sourceDirectoryName(svc)), func(path string, d fs.DirEntry, werr error) error {
 			if werr != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}

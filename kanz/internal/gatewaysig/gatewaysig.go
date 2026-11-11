@@ -9,19 +9,19 @@
 // this package, four independent places each stated how:
 //
 //	internal/tui/gateway.Sign          the client the TUI dials with
-//	services/web-bff signRequest       its own reproduction, in its own words
+//	services/web_bff signRequest       its own reproduction, in its own words
 //	infra/onboarding/provision-tenant.sh  openssl + base64 + tr, in shell
 //	api-gateway middleware.Signing     the VERIFIER, which is the same fact again
 //
 // THREE CALLERS SHIPPED WITHOUT IT, one after another: the Copilot REPL's client
-// (#198), provision-tenant.sh's isolation probes (#774), and services/web-bff
+// (#198), provision-tenant.sh's isolation probes (#774), and services/web_bff
 // (#777). Each was repaired by re-deriving the signature at the call site, which
 // is why there was a fourth to find. AGENTS.md names the shape exactly: "A
 // copied helper is how a fix stops spreading."
 //
 // # Why the VERIFIER lives here too, and not only the signers
 //
-// services/web-bff's copy carried its own reason for existing: "It is a
+// services/web_bff's copy carried its own reason for existing: "It is a
 // reproduction rather than a shared call because the gateway's verifier lives
 // inside that service." That was true and it is the thing this package changes.
 // A shared signer that the verifier does not use is a convenience — the two can

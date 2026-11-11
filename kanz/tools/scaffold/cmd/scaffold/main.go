@@ -2,13 +2,14 @@
 //
 //	go run ./tools/scaffold/cmd/scaffold -name my-service
 //
-// Writes services/my-service/{cmd,internal,README.md}. Refuses to overwrite.
+// Writes services/my_service/{cmd,internal,README.md}. Refuses to overwrite.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/eighred/kanz/tools/scaffold"
 )
@@ -33,5 +34,6 @@ func main() {
 	for _, p := range created {
 		fmt.Printf("  %s\n", p)
 	}
-	fmt.Printf("\nnext: go build ./services/%s/... && go run ./services/%s/cmd/%s\n", *name, *name, *name)
+	directory := strings.ReplaceAll(*name, "-", "_")
+	fmt.Printf("\nnext: go build ./services/%s/... && go run ./services/%s/cmd/%s\n", directory, directory, directory)
 }

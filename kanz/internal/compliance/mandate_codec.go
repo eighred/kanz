@@ -338,7 +338,7 @@ var ErrMandateIncomplete = errors.New("compliance: mandate is incomplete")
 // on that portfolio's subject, and every consumer that boots arms itself with it,
 // forever, until somebody publishes a good one.
 //
-// ONE IMPLEMENTATION, CALLED BY BOTH PUBLISHERS (#562). cmd/kanz-mandate had
+// ONE IMPLEMENTATION, CALLED BY BOTH PUBLISHERS (#562). cmd/kanz_mandate had
 // these checks written out in loadMandate, and the compliance service's propose
 // route needs the same ones; a second copy is how the two come to accept
 // different mandates — the divergence the shared proposal store was promoted to

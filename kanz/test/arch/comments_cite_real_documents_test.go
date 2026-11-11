@@ -59,7 +59,7 @@ import (
 // The consequence is worth stating, because it got larger on 2026-08-26. The
 // docs/ trees were retired that day and their content folded into README files
 // and AGENTS.md, so most citations now name one of those — and this guard
-// cannot tell a live "kanz-schemas/README.md § Subject Taxonomy §4" from a
+// cannot tell a live "kanz_schemas/README.md § Subject Taxonomy §4" from a
 // citation to a section that has since been renamed or deleted. The basename
 // resolves either way. That is the same floor-not-ceiling limit stated above,
 // but it now applies to nearly every citation in the estate rather than to a
@@ -105,7 +105,7 @@ var citationExempt = map[string]string{
 
 func TestCommentsCiteDocumentsThatExist(t *testing.T) {
 	root := moduleRoot(t)
-	parent := filepath.Dir(root) // the repo root; kanz/ and kanz-schemas/ are siblings
+	parent := filepath.Dir(root) // the repo root; kanz/ and kanz_schemas/ are siblings
 	docs := markdownIndex(t, parent)
 
 	type violation struct{ where, cited string }

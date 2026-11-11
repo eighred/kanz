@@ -54,7 +54,7 @@ import (
 const (
 	custodyPkgDir   = "../../services/accounting/internal/custody"
 	reconPkgDir     = "../../services/accounting/internal/recon"
-	custodyProtoRel = "../../../kanz-schemas/proto/accounting/v1/accounting.proto"
+	custodyProtoRel = "../../../kanz_schemas/proto/accounting/v1/accounting.proto"
 	custodyRulesRel = "../../infra/observability/alerts/operational.rules.yaml"
 )
 

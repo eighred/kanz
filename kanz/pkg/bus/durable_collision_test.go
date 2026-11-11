@@ -17,7 +17,7 @@ package bus
 //   - TestDurableCollisionIsRefusedAcrossProcesses drives the REAL Subscribe path
 //     against a REAL broker with TWO clients, because a unit test on claimDurable
 //     proves nothing about whether Subscribe calls it — and because the reachable
-//     case is cmd/kanz-redrive, where the two colliding subscribes are two
+//     case is cmd/kanz_redrive, where the two colliding subscribes are two
 //     separate invocations and no in-process map can see both.
 
 import (
@@ -35,7 +35,7 @@ import (
 
 // collidingPairs are subject pairs that differ ONLY where durableName is lossy.
 //
-// The second pair is not hypothetical: cmd/kanz-redrive takes its subject from an
+// The second pair is not hypothetical: cmd/kanz_redrive takes its subject from an
 // operator's `--subject` flag whose own help text offers `dlq.order.>` as an
 // example, and `dlq.order.*` is the same flag one keystroke away.
 var collidingPairs = [][2]string{

@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+#
+# market-data container (CICD-01c). Distroless + static binary.
+#
+# The durable price-history service: folds market.v1 FACTs off the bus into the
+# price_observations store the risk engine marks against. No build tags, no
+# variants — it holds no credentials and links no vendor SDK.
+#
+# Build context is the repo ROOT, not kanz/: the module's go.mod replaces
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz_schemas/gen/go, which is
+# generated-not-committed (EVT-15a). The build workflow runs `buf generate`
+# first, so both trees sit side by side in the context. Build with:
+#   docker build -f kanz/services/market_data/Dockerfile .
+FROM ghcr.io/eighred/base/golang:1.26.10 AS build
+WORKDIR /src
+ENV GOFLAGS=-mod=mod
+
+# Dependency layer: consumer and generated SDK module metadata only,
+# so schema source changes preserve the verified dependency download layer.
+COPY kanz_schemas/gen/go/go.mod kanz_schemas/gen/go/go.sum ./kanz_schemas/gen/go/
+COPY kanz/go.mod kanz/go.sum ./kanz/
+WORKDIR /src/kanz
+# The download is retried (#776): the module proxy and checksum database drop
+# HTTP/2 streams mid-transfer, and a bare `go mod download` turns that into a
+# red build on a commit that is fine. The script is shared rather than copied
+# into 29 Dockerfiles, and a genuine outage still fails this build.
+COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh
+RUN sh /usr/local/bin/go-mod-download.sh
+
+COPY kanz_schemas/gen/go/ /src/kanz_schemas/gen/go/
+COPY kanz/ ./
+# CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
+# is pure Go), which is what distroless/static requires. -trimpath strips local
+# paths; -s -w drop the symbol/debug tables.
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
+      -o /out/market-data ./services/market_data/cmd/market_data
+
+# Distroless static: no shell, no libc, no package manager — minimal attack
+# surface. :nonroot runs as uid 65532. (Pinning by digest is a CICD-01d
+# supply-chain hardening follow-up.)
+FROM ghcr.io/eighred/base/distroless-static:nonroot
+COPY --from=build /out/market-data /market-data
+USER nonroot:nonroot
+EXPOSE 8082
+ENTRYPOINT ["/market-data"]

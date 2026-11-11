@@ -193,7 +193,7 @@ func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 // services/<name> build a Go binary". That is the right question for the
 // deployability and NATS guards, and the WRONG one here: what Prometheus scrapes
 // is a POD, and a pod does not have to be Go. The estate deploys one that is not
-// — the Python inference service, which lives in kanz-py/ and is deployed by
+// — the Python inference service, which lives in kanz_py/ and is deployed by
 // infra/deploy/inference-deploy.yaml. Enumerating from the Go tree made it
 // structurally invisible to this guard, so a workload with no scrape annotation
 // and no HTTP surface at all read as a clean estate rather than an unmonitored
@@ -241,7 +241,7 @@ func scrapeTargets(t *testing.T, root string) []string {
 		if seen[trimmed] {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(root, "services", trimmed)); err == nil {
+		if _, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(trimmed))); err == nil {
 			continue // a Go service; servicesWithEntrypoints and notDeployed already ruled on it
 		}
 		seen[trimmed] = true
@@ -269,7 +269,7 @@ func scrapeTargets(t *testing.T, root string) []string {
 func registersMetrics(t *testing.T, root, svc string) bool {
 	t.Helper()
 
-	svcDir := filepath.Join(root, "services", svc)
+	svcDir := filepath.Join(root, "services", sourceDirectoryName(svc))
 	if _, err := os.Stat(svcDir); err != nil {
 		return registersMetricsOutsideGo(t, root, svc)
 	}
@@ -286,7 +286,7 @@ func registersMetrics(t *testing.T, root, svc string) bool {
 }
 
 // registersMetricsOutsideGo answers assertion 3 for a deployed workload that has
-// no Go package — today, the Python inference service in kanz-py/.
+// no Go package — today, the Python inference service in kanz_py/.
 //
 // IT REFUSES TO GUESS. A workload whose source this cannot locate makes the
 // guard fail, loudly, rather than return false (which would read as "checked,
@@ -297,7 +297,7 @@ func registersMetrics(t *testing.T, root, svc string) bool {
 func registersMetricsOutsideGo(t *testing.T, root, svc string) bool {
 	t.Helper()
 
-	pkg := filepath.Join(filepath.Dir(root), "kanz-py", "kanz_"+strings.ReplaceAll(svc, "-", "_"))
+	pkg := filepath.Join(filepath.Dir(root), "kanz_py", "kanz_"+strings.ReplaceAll(svc, "-", "_"))
 	if _, err := os.Stat(pkg); err != nil {
 		t.Fatalf("%s is deployed by infra/deploy/ but has neither a Go package under services/ "+
 			"nor a Python package at %s. This guard cannot tell whether it serves /metrics, and "+
@@ -349,7 +349,7 @@ func treeContainsAny(dir, ext string, literals ...string) bool {
 // held `inference` — the one deployed pod with no HTTP surface at all, whose
 // manifest opened exactly one port (grpc 50051) probed by two tcpSocket checks,
 // so no annotation could name a scrapable port. #241 built the surface
-// (kanz-py/kanz_inference/observability/) and opened { containerPort: 8093, name:
+// (kanz_py/kanz_inference/observability/) and opened { containerPort: 8093, name:
 // http }; the moment the manifest carried the annotation, the dead-entry check
 // below failed the build naming this service, and the entry was removed in the
 // same change. That is the intended lifecycle — an exemption is a debt with an

@@ -114,12 +114,12 @@ var bookHistoryClaimSites = []struct {
 			"it is the first thing anyone asking what the snapshot is for will open",
 	},
 	{
-		path: filepath.Join("services", "market-ingest", "cmd", "market-ingest", "main.go"),
+		path: filepath.Join("services", "market_ingest", "cmd", "market_ingest", "main.go"),
 		why: "the composition root is what an operator reads to find out what this pod emits and " +
 			"why, and it repeated the durable-replay claim in its own words",
 	},
 	{
-		path: filepath.FromSlash("../kanz-schemas/proto/market/v1/order_book.proto"),
+		path: filepath.FromSlash("../kanz_schemas/proto/market/v1/order_book.proto"),
 		why: "the schema doc reaches every consumer in every language, including ones outside " +
 			"this module, and it additionally claimed OrderBookDelta was schema'd for a " +
 			"durable-log replay consumer that does not exist",

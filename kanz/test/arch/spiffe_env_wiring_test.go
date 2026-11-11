@@ -123,7 +123,7 @@ func spiffeEnvByService(t *testing.T, root string) map[string][]string {
 			}
 		}
 		if len(seen) > 0 {
-			out[e.Name()] = sortedKeys(seen)
+			out[deployedServiceName(e.Name())] = sortedKeys(seen)
 		}
 	}
 	return out

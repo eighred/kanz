@@ -26,7 +26,7 @@ metadata:
   # component each one is about), which turns a broken pointer into a dangling
   # one. Restoring this needs a real TechDocs source, not a path.
   links:
-    - { url: https://github.com/eighred/kanz/tree/main/kanz/services/risk-engine, title: source }
+    - { url: https://github.com/eighred/kanz/tree/main/kanz/services/risk_engine, title: source }
 spec:
   type: service
   lifecycle: production
@@ -118,4 +118,4 @@ spec:
   owner: risk-platform
   system: kanz
   definition:
-    $text: https://github.com/eighred/kanz/kanz-schemas/blob/main/proto/query/v1/risk_query.proto
+    $text: https://github.com/eighred/kanz/blob/main/kanz_schemas/proto/query/v1/risk_query.proto

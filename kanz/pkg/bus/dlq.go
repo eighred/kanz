@@ -15,7 +15,7 @@ const dlqSubjectPrefix = "dlq."
 func dlqSubject(orig string) string { return dlqSubjectPrefix + orig }
 
 // IsDLQSubject reports whether subject sits in the reserved DLQ namespace
-// (kanz-schemas/README.md § Subject Taxonomy §6).
+// (kanz_schemas/README.md § Subject Taxonomy §6).
 //
 // Exported because the DRAIN side has to ask the question in both directions:
 // the subject it reads FROM must be a DLQ subject, and the subject it
@@ -28,7 +28,7 @@ func IsDLQSubject(subject string) bool { return strings.HasPrefix(subject, dlqSu
 //
 // These header names are the ONLY link between the side that parks a message
 // (Consumer.publishDLQ) and the side that drains one (Redriver,
-// cmd/kanz-redrive). Until #220 there was no drain side at all, so the names
+// cmd/kanz_redrive). Until #220 there was no drain side at all, so the names
 // were free to drift: they were string literals at their single use site, and
 // services/archiver independently grew its own near-miss spelling of the same
 // idea — `Kanz-DLQ-Subject` where this package writes

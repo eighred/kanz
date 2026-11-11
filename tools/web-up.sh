@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command to get the web surface running locally (#371).
 #
-# It installs kanz-web's dependencies, builds the SPA, and prints the exact
+# It installs web's dependencies, builds the SPA, and prints the exact
 # environment the BFF needs to serve it. It does NOT start anything: the local
 # rig is `kanz/test/backing/up.sh`, and a second script that starts services
 # would be a second answer to "how do I run this".
@@ -12,15 +12,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WEB="$ROOT/kanz-web"
+WEB="$ROOT/web"
 BFF_INTERNAL_PORT="${BFF_INTERNAL_PORT:-8084}"
 
 # The shared npm prebuild refuses missing Rust/target or stale assets. Install
 # the pinned prerequisites explicitly; this helper never downloads a fallback.
 command -v rustup >/dev/null 2>&1 || { echo "FAIL: Rustup with Rust 1.90.0 and wasm32-unknown-unknown is required"; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "FAIL: npm is required (Node 24, as pinned in kanz-web/.nvmrc)"; exit 1; }
+command -v npm >/dev/null 2>&1 || { echo "FAIL: npm is required (Node 24, as pinned in web/.nvmrc)"; exit 1; }
 
-echo "==> installing kanz-web dependencies"
+echo "==> installing web dependencies"
 ( cd "$WEB" && npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund )
 
 echo "==> building the SPA"
@@ -34,7 +34,7 @@ cat <<BANNER
 The SPA is built. Two processes serve it, in this order.
 
 1. THE IDENTITY SERVICE — where a credential becomes a token. Its schema is
-   applied by cmd/kanz-migrate, not by the service:
+   applied by cmd/kanz_migrate, not by the service:
 
   export IDENTITY_DATABASE_URL='postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable'
   export IDENTITY_TOKEN_ISSUER='http://127.0.0.1:8087'
@@ -50,7 +50,7 @@ The SPA is built. Two processes serve it, in this order.
   export WEB_BFF_IDENTITY_URL='http://127.0.0.1:8087'
   export WEB_BFF_GATEWAY_URL='http://127.0.0.1:8080'    # the api-gateway
   export WEB_BFF_INSECURE_COOKIES=1                     # LOCAL HTTP ONLY
-  go run ./services/web-bff/cmd/web-bff
+  go run ./services/web_bff/cmd/web_bff
 
   open http://127.0.0.1:$BFF_INTERNAL_PORT
 
@@ -58,7 +58,7 @@ The SPA is built. Two processes serve it, in this order.
    provisioned, and the FIRST one has to be created by whoever holds the
    database credential, because there is no operator yet to authorise it.
 
-  go run ./cmd/kanz-invite -subject user:you -tenant acme       -roles kanz-operator,kanz-trader -by bootstrap
+  go run ./cmd/kanz_invite -subject user:you -tenant acme       -roles kanz-operator,kanz-trader -by bootstrap
 
    It prints a single-use token ONCE — only its SHA-256 is stored. Redeem it on
    the sign-in page; redeeming sets the password AND signs you in.

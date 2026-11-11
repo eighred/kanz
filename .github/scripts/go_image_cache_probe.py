@@ -25,7 +25,7 @@ from lake_cache_probe import strict, target_progress, command_name_matches
 
 DOCKERFILE = "kanz/services/regulatory/Dockerfile"
 SOURCE = "kanz/services/regulatory/cmd/regulatory/main.go"
-SDK = "kanz-schemas/gen/go"
+SDK = "kanz_schemas/gen/go"
 MODULE = "kanz/go.mod"
 SDK_MODULE = SDK + "/go.mod"
 COMMENT = b"\n// Synthetic Go image cache qualification only.\n"
@@ -257,7 +257,7 @@ def execute(args, output, state):
         def git(*parts): return command(["git",*parts],2<<20)
         state["stage"]="source"
         if git("rev-parse","HEAD","HEAD^{tree}").decode().splitlines()!=[args.source,args.tree]: raise ValueError("checkout differs")
-        if git("status","--porcelain","--untracked-files=no","--","kanz","kanz-schemas/proto",".dockerignore"): raise ValueError("tracked build source dirty")
+        if git("status","--porcelain","--untracked-files=no","--","kanz","kanz_schemas/proto",".dockerignore"): raise ValueError("tracked build source dirty")
         entries=git("ls-tree","-r","-l","-z",args.source,"--","kanz",".dockerignore").split(b"\0")
         inventory={};total=0
         def capture(name,mode,blob=None,length=None):
@@ -291,7 +291,7 @@ def execute(args, output, state):
                 path=Path(directory)/filename;capture(path.relative_to(root).as_posix(),"100644")
         if not {DOCKERFILE,SOURCE,MODULE,SDK_MODULE,".dockerignore"}<=inventory.keys():raise ValueError("incomplete context")
         dockerfile=(context/DOCKERFILE).read_text()
-        for part in ("RUN "+DOWNLOAD,"COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/","COPY kanz/ ./","-o /out/regulatory ./services/regulatory/cmd/regulatory"):
+        for part in ("RUN "+DOWNLOAD,"COPY kanz_schemas/gen/go/ /src/kanz_schemas/gen/go/","COPY kanz/ ./","-o /out/regulatory ./services/regulatory/cmd/regulatory"):
             if dockerfile.count(part)!=1:raise ValueError("consumer recipe changed")
         state["stage"]="builder-image"
         image=json.loads(command(["docker","image","inspect",BUILDER_IMAGE],1<<20),object_pairs_hook=strict)
@@ -340,7 +340,7 @@ def execute(args, output, state):
                 raise
             state["builderCleanup"]=True
         state["stage"]="seal"
-        if git("status","--porcelain","--untracked-files=no","--","kanz","kanz-schemas/proto",".dockerignore"):raise ProbeFailure("source")
+        if git("status","--porcelain","--untracked-files=no","--","kanz","kanz_schemas/proto",".dockerignore"):raise ProbeFailure("source")
         for name in (SOURCE,MODULE,SDK_MODULE,DOCKERFILE,".dockerignore"):
             if digest(read_file(root/name))!=inventory[name]["sha256"]:raise ProbeFailure("source")
         report={"schema":1,"source":args.source,"tree":args.tree,"run":args.run,"attempt":args.attempt,

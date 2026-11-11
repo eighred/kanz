@@ -15,7 +15,7 @@ COUNT = 2
 # serial tests remain mandatory.
 SHARD_OWNERS = {
     "github.com/eighred/kanz/pkg/bus": 1,
-    "github.com/eighred/kanz/services/risk-engine/internal/app": 0,
+    "github.com/eighred/kanz/services/risk_engine/internal/app": 0,
 }
 MAX_PACKAGES = 10000
 MAX_INVENTORY = 4 * 1024 * 1024

@@ -8,8 +8,8 @@ import (
 )
 
 // Validate enforces the publish-side envelope invariants from
-// kanz-schemas/README.md § Envelope Policy §7 plus the per-class rules from
-// kanz-schemas/README.md § Event Class Rules. Producer.Publish runs this after
+// kanz_schemas/README.md § Envelope Policy §7 plus the per-class rules from
+// kanz_schemas/README.md § Event Class Rules. Producer.Publish runs this after
 // stamping; the live-consumer path (the default for bus.Consumer) runs it on
 // receive so a replayed event that somehow leaks into a live subject is
 // hard-rejected at the bus boundary — that is the live-sink enforcement half of

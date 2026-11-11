@@ -9,8 +9,8 @@ equivalent to repository CI. `make help` lists the available targets.
 ## Prerequisites
 
 - Go (see `go.mod` for the version), Docker, and [buf](https://buf.build/docs/installation).
-- The repo expects `kanz/` and `kanz-schemas/` as **sibling** directories — the
-  Go module `replace`s the schema SDK to `../kanz-schemas/gen/go` (EVT-15a).
+- The repo expects `kanz/` and `kanz_schemas/` as **sibling** directories — the
+  Go module `replace`s the schema SDK to `../kanz_schemas/gen/go` (EVT-15a).
 - **On Windows, read AGENTS.md's "Windows environment" section first.** A
   `GOTMPDIR` outside `%TEMP%`, `GOFLAGS`, build tags and the LF line-ending rule
   are required there, and skipping them makes `go test` fail at random while the
@@ -60,7 +60,7 @@ when claiming a complete suite, not only the example groups above.
 ### Why generation precedes builds
 
 Generated code is never committed (EVT-15a). The kanz module `replace`s
-`kanz-schemas-go` to `../kanz-schemas/gen/go`, so that tree must exist before
+`kanz-schemas-go` to `../kanz_schemas/gen/go`, so that tree must exist before
 anything builds. `buf generate` needs `protoc-gen-go-grpc` on `PATH` — it emits
 the inference + query gRPC stubs that `protoc-gen-go` alone omits — and `make
 bootstrap` installs it. `GOFLAGS=-mod=mod` permits dependency resolution; it
@@ -145,7 +145,7 @@ ranges and lake-sink durability. A YAML/config validation pass is not runtime
 evidence; record actual suite results and dependency skips separately.
 
 - Build context is the repo root: the service Dockerfiles COPY the generated
-  `kanz-schemas/gen/go` SDK. `make up`, build, vet and test run generation first.
+  `kanz_schemas/gen/go` SDK. `make up`, build, vet and test run generation first.
 - Auth/signing/quotas are disabled — this is a dev loop, not a security posture.
 - Seeding reuses `test/load/seed` (`SEED_NATS_URL` / `SEED_TENANT`).
 
@@ -153,7 +153,7 @@ evidence; record actual suite results and dependency skips separately.
 
 ```sh
 make scaffold NAME=my-service     # EVT-16a layout, on-convention from line 1
-go build ./services/my-service/...
+go build ./services/my_service/...
 ```
 
 The scaffold (DEVX-01b, `tools/scaffold`) emits `cmd/<name>/main.go` +
@@ -178,7 +178,7 @@ the portal.
 
 - Services: `services/<name>/` (entrypoint `cmd/<name>`, packages `internal/`).
 - Shared libs: `pkg/` (cross-service) and `internal/` (cross-service, unexported).
-- Schemas: the sibling `kanz-schemas/` module — proto + buf, and the five
+- Schemas: the sibling `kanz_schemas/` module — proto + buf, and the five
   normative wire specifications in its `README.md`. SDKs generate into `gen/`.
 - Infra: `infra/` (k8s, GitOps, security, observability, lakehouse, catalog,
   backstage). Portal: `infra/backstage`.

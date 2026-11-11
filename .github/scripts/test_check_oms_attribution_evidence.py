@@ -39,7 +39,7 @@ class AttributionProof(unittest.TestCase):
         raw = self.raw(self.events())
         expected = c.metadata("a" * 40, "b" * 40, "123", "1")
         proof = {**expected, "stream_sha256": hashlib.sha256(raw).hexdigest(), "result": {"required_passes": 72},
-                 "build": {"profile": "debug", "features": [], "target": "kanz-rs/target/debug/examples/order-attribution-fixture", "sha256": "c" * 64}}
+                 "build": {"profile": "debug", "features": [], "target": "kanz_rs/target/debug/examples/order-attribution-fixture", "sha256": "c" * 64}}
         return expected, proof, {"attribution.jsonl": raw, "binary.sha256": ("c" * 64 + "\n").encode()}
     def test_proof_bindings(self):
         expected, proof, files = self.fixture()

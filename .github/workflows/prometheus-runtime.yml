@@ -3,13 +3,13 @@ name: prometheus-runtime
 on:
   pull_request:
     paths:
-      - 'kanz/infra/observability/prometheus-runtime/**'
+      - 'kanz/infra/observability/prometheus_runtime/**'
       - 'kanz/infra/observability/prometheus.yaml'
       - '.github/workflows/prometheus-runtime.yml'
   push:
     branches: [main]
     paths:
-      - 'kanz/infra/observability/prometheus-runtime/**'
+      - 'kanz/infra/observability/prometheus_runtime/**'
       - 'kanz/infra/observability/prometheus.yaml'
       - '.github/workflows/prometheus-runtime.yml'
   workflow_dispatch:
@@ -34,10 +34,10 @@ jobs:
         run: |
           docker pull ghcr.io/eighred/base/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
           docker pull ghcr.io/eighred/base/python:3.12-slim
-          docker build --network=none -t prometheus-runtime:qualification -f kanz/infra/observability/prometheus-runtime/Dockerfile .
+          docker build --network=none -t prometheus-runtime:qualification -f kanz/infra/observability/prometheus_runtime/Dockerfile .
       - name: Compare shell inventory, binaries, TLS discovery and retained history
         run: |
-          python3 kanz/infra/observability/prometheus-runtime/qualify.py \
+          python3 kanz/infra/observability/prometheus_runtime/qualify.py \
             --candidate prometheus-runtime:qualification \
             --helper ghcr.io/eighred/base/python:3.12-slim \
             --output "$RUNNER_TEMP/prometheus-runtime.json"

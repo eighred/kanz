@@ -7,7 +7,7 @@
 # — this is a dev loop, not a security posture (that is infra/security in anger).
 #
 # Build context is the repo ROOT (../..): the service Dockerfiles COPY the generated
-# kanz-schemas Go SDK, so `make generate` must run before first build.
+# kanz_schemas Go SDK, so `make generate` must run before first build.
 name: kanz-dev
 
 services:
@@ -96,7 +96,7 @@ services:
   risk-engine:
     build:
       context: ../..
-      dockerfile: kanz/services/risk-engine/Dockerfile
+      dockerfile: kanz/services/risk_engine/Dockerfile
     depends_on:
       nats-init:
         condition: service_completed_successfully
@@ -116,7 +116,7 @@ services:
   api-gateway:
     build:
       context: ../..
-      dockerfile: kanz/services/api-gateway/Dockerfile
+      dockerfile: kanz/services/api_gateway/Dockerfile
     depends_on:
       risk-engine:
         condition: service_started
@@ -130,7 +130,7 @@ services:
       # exactly that way until now. Locally it runs the bundled HS256 validator;
       # mint a token the gateway accepts with:
       #
-      #   go run ./cmd/kanz-devtoken --secret dev-secret --tenant acme
+      #   go run ./cmd/kanz_devtoken --secret dev-secret --tenant acme
       #
       # The secret is symmetric and public — it is fine here and NOWHERE ELSE.
       # Production authenticates against Eighred SSO over OIDC/JWKS.

@@ -18,7 +18,7 @@ import (
 //
 // # The case that produced this guard
 //
-// kanz-schemas/proto/factor/v1 declares FactorModel, FactorExposure,
+// kanz_schemas/proto/factor/v1 declares FactorModel, FactorExposure,
 // FactorReturn and FactorCovariance — the multi-factor risk model, every message
 // keyed model_id + as_of, with a package doc explaining the point-in-time
 // discipline a historical recompute reads them under. It is generated into the
@@ -48,7 +48,7 @@ import (
 // names a type in a signature, or reads an enum constant, is not enough.
 //
 // THE THREE SPELLINGS ARE ALL THREE REQUIRED, and the second is why. cmd/kanz-
-// altevent and cmd/kanz-household are real producers — they publish
+// altevent and cmd/kanz_household are real producers — they publish
 // alternatives.v1 and wealth.v1 FACTs onto the bus — and NEITHER writes a
 // composite literal: both declare `var m pb.T` and fill it by unmarshalling an
 // operator's JSON. A composite-literal-only rule reported both as dark on the
@@ -65,7 +65,7 @@ import (
 //     match. The residue is bounded and the motivating defect is not in it:
 //     factor.v1 was named by NOTHING — no producer, no consumer, no signature —
 //     and total absence is what this catches, with margin.
-//   - It sees GO only. A package produced solely from kanz-py or kanz-web reads
+//   - It sees GO only. A package produced solely from kanz_py or web reads
 //     as dark here. That was checked by hand when this guard was written — every
 //     package the exemptions below name was dark in all three SDKs — and it is
 //     why each reason says which languages were searched.
@@ -75,14 +75,14 @@ import (
 //     overlapping.
 func TestEverySchemaPackageHasAProducer(t *testing.T) {
 	root := moduleRoot(t)
-	repo := filepath.Dir(root) // kanz/ and kanz-schemas/ are siblings
+	repo := filepath.Dir(root) // kanz/ and kanz_schemas/ are siblings
 
-	packages := schemaPackages(t, filepath.Join(repo, "kanz-schemas", "proto"))
+	packages := schemaPackages(t, filepath.Join(repo, "kanz_schemas", "proto"))
 	// NON-VACUITY, FIRST ARM. A scan that finds no proto packages — a moved
 	// directory, a renamed layout — passes every assertion below while the estate
 	// grows its next factor.v1.
 	if len(packages) < 20 {
-		t.Fatalf("found only %d proto packages under kanz-schemas/proto — the scan is broken, "+
+		t.Fatalf("found only %d proto packages under kanz_schemas/proto — the scan is broken, "+
 			"not the estate; this repository declares far more", len(packages))
 	}
 
@@ -143,7 +143,7 @@ func TestEverySchemaPackageHasAProducer(t *testing.T) {
 //
 // EVERY ENTRY HERE IS A REAL FINDING, not a design decision. They are the same
 // class of defect factor.v1 was, found by the same scan on the same day, and
-// each was checked against kanz-py/ and kanz-web/ as well as kanz/ — none of the
+// each was checked against kanz_py/ and web/ as well as kanz/ — none of the
 // four is produced in any language. They are listed rather than fixed because
 // each is its own piece of work with its own data seam, and a guard that lands
 // with four unrelated features attached is a guard that does not land.
@@ -162,7 +162,7 @@ var schemaPackageWithoutAProducerExempt = map[string]string{
 }
 
 // schemaPackages returns every "<domain>/<version>" directory under
-// kanz-schemas/proto that holds at least one .proto file — DERIVED from the
+// kanz_schemas/proto that holds at least one .proto file — DERIVED from the
 // schema tree rather than listed here, because "somebody enumerated the set by
 // hand and missed a member" is the exact defect this guard exists to catch, and
 // a list written here would be one more copy of the thing that broke.

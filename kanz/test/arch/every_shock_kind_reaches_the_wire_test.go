@@ -98,7 +98,7 @@ func TestEveryShockKindReachesTheWire(t *testing.T) {
 	}
 
 	decoded := shockTypesConstructedIn(t,
-		filepath.Join(root, "services", "risk-engine", "internal", "grpcsrv", "server.go"),
+		filepath.Join(root, "services", "risk_engine", "internal", "grpcsrv", "server.go"),
 		"apiShocks")
 	// NON-VACUITY (3/4): the decode switch must be found. A renamed or moved
 	// apiShocks yields an empty set, which would fail loudly here rather than
@@ -129,14 +129,14 @@ func TestEveryShockKindReachesTheWire(t *testing.T) {
 				"is how sector and vol stress, and with them every named historical and climate "+
 				"scenario, were unreachable for as long as they existed (#1004).\n"+
 				"Add `%s <snake_case> = <next>;` to the oneof in "+
-				"kanz-schemas/proto/query/v1/risk_query.proto (additive, so buf breaking passes) "+
+				"kanz_schemas/proto/query/v1/risk_query.proto (additive, so buf breaking passes) "+
 				"and regenerate the SDK.", name, name)
 		}
 		if !decoded[name] {
 			t.Errorf("grpcsrv.apiShocks has no case constructing v1.%s.\n"+
 				"A oneof member the decode does not handle falls to the default arm and is "+
 				"refused, so putting it on the wire changed the error message and nothing else.\n"+
-				"Add the case in services/risk-engine/internal/grpcsrv/server.go.", name)
+				"Add the case in services/risk_engine/internal/grpcsrv/server.go.", name)
 		}
 		if !applied[name] {
 			t.Errorf("scenario.applyShock has no case for v1.%s.\n"+

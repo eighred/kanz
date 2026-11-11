@@ -27,7 +27,7 @@ func TestFor_TenantPrefixed(t *testing.T) {
 }
 
 // __system__ carries cross-cutting platform events and keeps the UN-PREFIXED
-// legacy topic names (kanz-schemas/README.md § Subject Taxonomy §6).
+// legacy topic names (kanz_schemas/README.md § Subject Taxonomy §6).
 func TestFor_SystemTenantIsUnprefixed(t *testing.T) {
 	got, err := topic.For(env("platform.mode.changed", "__system__", fact), "__system__")
 	if err != nil {
@@ -39,7 +39,7 @@ func TestFor_SystemTenantIsUnprefixed(t *testing.T) {
 }
 
 // A snapshot needs COMPACTION while its sibling FACTs need time-retention, so
-// it goes to a separate compacted topic (kanz-schemas/README.md § Subject
+// it goes to a separate compacted topic (kanz_schemas/README.md § Subject
 // Taxonomy §5).
 func TestFor_SnapshotGoesToCompactedSibling(t *testing.T) {
 	got, err := topic.For(env("risk.position.changed", "acme", snapshot), "acme")

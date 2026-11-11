@@ -89,7 +89,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	// called from inside runEngine, which only runs when RISK_ENGINE_NATS_URL is
 	// set, so a broker-less risk-engine exported none of these series while its
 	// probes stayed green. The call now sits in run(), ABOVE that branch — see
-	// services/risk-engine/cmd/risk-engine/main.go. Nothing below is conditional,
+	// services/risk_engine/cmd/risk_engine/main.go. Nothing below is conditional,
 	// and the caller must keep it that way.
 	reg.MustRegister(m.recomputeTotal, m.recomputeDuration, m.emitSkipped, m.awaitingEmit,
 		m.recomputeInflight, m.recomputeQueueDepth)

@@ -6,7 +6,7 @@ package registry
 //
 // # This side FOLLOWS, it does not register
 //
-// The registrar is kanz-py: it holds the weights, it runs the MLOPS-01a
+// The registrar is kanz_py: it holds the weights, it runs the MLOPS-01a
 // validation, and BusRegistryPublisher is what puts a mutation on
 // platform.model.registered. A Go replica reads that log to answer ONE question
 // — which model, if any, serves a given feature contract — and answering it does
@@ -34,7 +34,7 @@ import (
 
 // ErrNotRegistrar is returned by a follower's Publish.
 var ErrNotRegistrar = errors.New(
-	"registry: this replica FOLLOWS the model log and cannot write to it — kanz-py's " +
+	"registry: this replica FOLLOWS the model log and cannot write to it — kanz_py's " +
 		"BusRegistryPublisher is the registrar (it holds the weights and runs the MLOPS-01a " +
 		"validation), and this account holds no publish grant on " + SubjectModelRegistered)
 

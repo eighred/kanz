@@ -1,0 +1,218 @@
+syntax = "proto3";
+
+// Risk-measure payloads. Companion to exposure.proto (the
+// portfolio-state aggregates). Lives in domain.v1 because risk
+// outputs are part of the same bounded-context state model — the
+// engine that produces ExposureSet also produces RiskMeasureSet,
+// keyed by the same portfolio_id, ordered by the same per-aggregate
+// partition rule.
+//
+// Why not observation.v1.MetricObservation: MetricObservation uses
+// `double` and is the OBSERVATION-class metric for system behaviour
+// (latency, throughput). Risk measures are FACT-class outputs whose
+// money values must use the exact-Decimal rule (banned-double per
+// kanz_schemas/README.md § Event Class Rules + common/v1/decimal.proto).
+package domain.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// RiskMeasure is one named risk-measure value with propagated
+// uncertainty and lineage to the events that produced it.
+message RiskMeasure {
+  // name is the canonical measure name (e.g. "VaR99", "Delta",
+  // "GrossExposure"). Same name space as the engine's measure
+  // registry (RISK-07). Required.
+  string name = 1;
+
+  // value is the measure value, exact Decimal. Money-valued
+  // measures (Gross/Net exposure, VaR, ...) are in the portfolio's
+  // base currency at the time of computation. Required.
+  common.v1.Decimal value = 2;
+
+  // uncertainty_abs is the one-sigma absolute uncertainty band
+  // around value, propagated per RISK-08's rules. Absent (no value
+  // set) means no uncertainty was propagated — distinct from "zero
+  // uncertainty", which would be a calibrated point estimate.
+  common.v1.Decimal uncertainty_abs = 3;
+
+  // source_event_ids are the event_ids of the inputs whose state
+  // produced this measure — typically the position-state /
+  // portfolio-state events read from the engine at computation
+  // time. Optional; may be empty when lineage is implicit via the
+  // envelope causation_id (the case for measures derived from a
+  // single triggering event). When the measure is derived from many
+  // inputs (the common case), the envelope causation_id carries no
+  // single answer and this list is the auditable trail.
+  repeated string source_event_ids = 4;
+
+  // coverage says how much of the book value was actually computed
+  // over. ABSENT means this measure does not report input coverage —
+  // it does NOT mean everything resolved. See InputCoverage.
+  //
+  // Without this field a caller had one set-level flag and nothing
+  // else between it and a confident zero: the response could say that
+  // SOMETHING in the set was computed over nothing, never which
+  // measure or how much, so a caller could not refuse the degraded
+  // number without refusing the sound ones beside it (#509).
+  InputCoverage coverage = 5;
+
+  // provenance names the MODEL that produced value. ABSENT means this
+  // measure does not declare a model — it does NOT mean the number is
+  // model-derived, and it does NOT mean it is a placeholder. See
+  // MeasureProvenance.
+  //
+  // The name was never enough of a key. "VaR99" was served by 1% of
+  // gross exposure and by historical simulation over a price panel,
+  // and the two were byte-identical on this message: same name, same
+  // Decimal, nothing else. Which one a deployment served depended on
+  // one environment variable, and the OMS pre-trade gate checked a
+  // mandate's VaR limit against whichever arrived (#1037).
+  MeasureProvenance provenance = 6;
+}
+
+// MeasureProvenance names the model behind one measure value — the
+// difference between a number a quant team calibrated and an
+// illustrative constant with the same name (#1037).
+//
+// PRESENCE IS THE SIGNAL, for the same reason InputCoverage is a
+// message and not two scalars on RiskMeasure. Absent means "this
+// producer declares no model"; present with method =
+// "placeholder_1pct_gross" means "it declares one, and it is a
+// placeholder". A bare string field would render both as "" and
+// re-create the conflation the record exists to break — and the
+// unsafe reading is the empty one, because every measure published
+// before this field existed carries no provenance at all.
+//
+// NO QUALITY CLAIM IS MADE BY THE SCHEMA. method is a name, not a
+// verdict; what a consumer may do with a given method is the
+// consumer's ruling, and this estate's is that a gating read
+// (order admission) REFUSES a placeholder method and leaves the
+// measure unknown, while an advisory read may display it labelled.
+// The Go vocabulary and the placeholder predicate live in one place,
+// kanz/internal/risk/api/v1 — a second copy is how the producer and
+// the gate come to disagree about which methods are real.
+message MeasureProvenance {
+  // method is the model that produced the value, from a closed
+  // low-cardinality vocabulary: "historical_simulation",
+  // "monte_carlo", "portfolio_arithmetic",
+  // "option_pricing_greeks", "placeholder_1pct_gross",
+  // "net_exposure_placeholder". Required when this message is
+  // present — a provenance that names no method says less than no
+  // provenance at all, because it looks like a declaration.
+  string method = 1;
+
+  // model_id keys the fitted model where one applies, matching
+  // factor.v1.FactorModel.model_id. Empty for methods that fit no
+  // model (portfolio arithmetic, the placeholders) — which is most
+  // of them, and is not a defect.
+  string model_id = 2;
+
+  // model_as_of is the domain time the model behind model_id was
+  // fitted at. It is NOT the measure's as_of: a VaR computed this
+  // morning off a factor model fitted last quarter is stale in a way
+  // RiskMeasureSet.as_of cannot express. Absent when no model was
+  // fitted.
+  google.protobuf.Timestamp model_as_of = 3;
+
+  // params are the model's parameters — lookback, confidence, seed —
+  // as the operator would need them to reproduce the number. LOW
+  // CARDINALITY BY CONTRACT: these travel on every measure of every
+  // FACT, and a reader may group by them. Never per-position data,
+  // never the inputs themselves.
+  map<string, string> params = 4;
+
+  // Digest of the actual dated input panel. High-cardinality audit identity,
+  // deliberately separate from grouping parameters. Empty means undeclared.
+  string input_digest = 5;
+
+  // Absolute market value excluded from this panel calculation, in portfolio
+  // base currency. Absent means unreported/unrepresentable, never zero.
+  common.v1.Decimal excluded_gross = 6;
+
+  // Digest of the complete retained evaluation manifest: portfolio state,
+  // resolved pricing inputs and calculator profile. Separate from the dated
+  // panel digest; absent means the evaluation makes no durable replay claim.
+  string input_manifest_digest = 7;
+}
+
+// InputCoverage records how much of the book one measure was actually
+// computed over — the difference between a MEASURED zero and a
+// CONFIDENT one (#527).
+//
+// A measure that resolves per-position inputs through a provider —
+// bond terms, a discount curve, a factor model, a return series —
+// skips whatever does not resolve and returns its accumulator
+// regardless. When nothing resolved the accumulator is zero, and that
+// zero crosses the wire as an ACTIVE CLAIM: DV01 = 0 says the book
+// carries no interest-rate risk, byte-identical to the answer for a
+// book that genuinely holds no bonds. The contract-terms store has no
+// production writer on this estate, so that is not a corner case — it
+// is the answer every fixed-income query gets today.
+//
+// PRESENCE IS THE SIGNAL, which is why this is a message and not two
+// scalars on RiskMeasure. Absent means "this measure does not report
+// coverage"; present with excluded_count = 0 means "it reports, and
+// everything applicable was covered". Scalars would render both as
+// zero and re-create the conflation the record exists to break.
+//
+// NO DIRECTION CLAIM IS MADE. Dropping positions shrinks a SUM but
+// RAISES a ratio or weighted average (Duration, HHI,
+// LiquidationHorizon), and removing one leg of a hedged pair raises a
+// portfolio quantile (VaR99, FactorVaR99). So a caller gating on a
+// money measure must treat a non-zero excluded_count as a REFUSAL TO
+// ANSWER, not as an annotation on a good number.
+message InputCoverage {
+  // contributed is how many positions reached the measure's
+  // arithmetic. Zero WITH a non-zero excluded_count is the case above:
+  // computed over nothing at all.
+  uint32 contributed = 1;
+
+  // excluded_count is how many positions could not be assessed. It is
+  // the TOTAL, not the length of exclusions — that sample is bounded
+  // and this is not, because the count is what says how bad it is and
+  // the sample is what lets somebody go and look.
+  uint32 excluded_count = 2;
+
+  // exclusions is a BOUNDED SAMPLE of the excluded positions. On a
+  // book whose reference data was never loaded every position is an
+  // exclusion, so carrying them all would put the whole book on every
+  // FACT and in every query response.
+  repeated InputExclusion exclusions = 3;
+}
+
+// InputExclusion names one position left out of one measure because an
+// input that measure needed did not resolve.
+message InputExclusion {
+  // instrument_id is the position that was left out. EMPTY means the
+  // exclusion belongs to the whole evaluation rather than to any
+  // holding — no factor model for this snapshot, no counterparty
+  // exposures, too little history to form a distribution. A reader
+  // labelling by instrument must expect the empty value and must not
+  // drop it: it is the whole-book outage, the worst case, not a
+  // malformed row.
+  string instrument_id = 1;
+
+  // reason is the measure family's own closed vocabulary for why the
+  // input did not resolve (no_terms, no_curve, no_model, ...). Free
+  // text to this schema; in practice a label an operator groups by, so
+  // it must stay low-cardinality.
+  string reason = 2;
+}
+
+// RiskMeasureSet is the full set of risk measures for a portfolio,
+// computed in one pass. It is the payload of risk-measures-computed
+// FACTs — measures are emitted as a coherent set so a consumer
+// always sees a consistent snapshot, same per-aggregate-consistency
+// discipline as ExposureSet.
+message RiskMeasureSet {
+  // portfolio_id is the portfolio these measures are for. Required.
+  string portfolio_id = 1;
+
+  // measures is the full set. Non-empty.
+  repeated RiskMeasure measures = 2;
+
+  // as_of is the domain time the whole set is effective at — every
+  // contained RiskMeasure shares it. Required.
+  google.protobuf.Timestamp as_of = 3;
+}

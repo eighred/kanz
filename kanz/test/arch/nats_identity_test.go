@@ -149,7 +149,7 @@ var operatorSVIDs = map[string]string{
 // authority the operator plane needs. TestReadOnlyObserversCannotPublish below
 // makes "watches the loop, cannot move it" a guarded fact, not a comment.
 //
-// kanz-monitor is the read-only Bubble Tea TUI (cmd/kanz-monitor): it
+// kanz-monitor is the read-only Bubble Tea TUI (cmd/kanz_monitor): it
 // SubscribeBroadcasts order.> and risk.position.> and publishes NO business
 // subject. Its manifest half (a kanz-operator ServiceAccount) is not yet
 // shipped — like the operator tools, the broker-side half is declared in
@@ -311,7 +311,7 @@ func dialsNATS(t *testing.T, root, svc string) bool {
 	if svc == "identity" || svc == "web-bff" {
 		return dialsNATSInDir(t, filepath.Join(root, "internal/auditdelivery"))
 	}
-	return dialsNATSInDir(t, filepath.Join(root, "services", svc, "cmd"))
+	return dialsNATSInDir(t, filepath.Join(root, "services", sourceDirectoryName(svc), "cmd"))
 }
 
 // TestOperatorCLIsHaveBrokerAccounts is the cmd/ half. The services guard above
@@ -338,15 +338,15 @@ func TestOperatorCLIsHaveBrokerAccounts(t *testing.T) {
 		if !e.IsDir() || !dialsNATSInDir(t, filepath.Join(root, "cmd", e.Name())) {
 			continue
 		}
-		seen[e.Name()] = true
+		seen[deployedServiceName(e.Name())] = true
 		// A cmd/ dialer is acceptable if it declares an SVID in EITHER plane:
 		// operatorSVIDs (operators, which publish) or readOnlyObserverSVIDs
 		// (read-only observers, whose grant denies business publish). Both map
 		// to a __system__ user that must be admitted; a name in NEITHER map is
 		// the real failure this guard exists to catch.
-		svid, declared := operatorSVIDs[e.Name()]
+		svid, declared := operatorSVIDs[deployedServiceName(e.Name())]
 		if !declared {
-			svid, declared = readOnlyObserverSVIDs[e.Name()]
+			svid, declared = readOnlyObserverSVIDs[deployedServiceName(e.Name())]
 		}
 		if !declared {
 			problems = append(problems, e.Name()+": dials bus.DialNATS but declares no SVID in operatorSVIDs or "+
@@ -568,7 +568,7 @@ func groupedSubscribeCallsInDir(t *testing.T, root, dir string) []string {
 // A grouped Subscribe from an observer would JOIN the durable consumer
 // group the real OMS/tv-sync replicas share on that subject and STEAL
 // deliveries meant for them — a capital-path incident, not a UI bug (see
-// busreader.go's own SubscribeBroadcast comments in cmd/kanz-monitor for the
+// busreader.go's own SubscribeBroadcast comments in cmd/kanz_monitor for the
 // same property described at the call site).
 //
 // Before this guard, "SubscribeBroadcast only" was verified by grep alone —
@@ -589,7 +589,7 @@ func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
 	var problems []string
 	checked := 0
 	for name := range readOnlyObserverSVIDs {
-		dir := filepath.Join(root, "cmd", name)
+		dir := filepath.Join(root, "cmd", sourceDirectoryName(name))
 
 		// A typo'd observer name (or one whose cmd/ tree was removed/renamed)
 		// must fail loudly here rather than let the scan below run over a
@@ -622,7 +622,7 @@ func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
 		// the observer the moment any of its code moved out — and #67 is exactly
 		// that move: "fold kanz-monitor in". Demonstrated before the fix: a
 		// grouped Subscribe planted in internal/tui/monitor/ (where a fold would
-		// naturally put the bus reader) PASSED this guard, because cmd/kanz-monitor/
+		// naturally put the bus reader) PASSED this guard, because cmd/kanz_monitor/
 		// still existed, still held .go files, and no longer held the subscribe.
 		//
 		// All three vacuity checks above kept passing while the property they

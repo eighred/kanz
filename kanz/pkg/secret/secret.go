@@ -3,7 +3,7 @@
 // but unreadable.
 //
 // IT EXISTS BECAUSE SEVENTEEN COPIES OF IT DID. Every service composition root
-// plus cmd/kanz-migrate carried its own `func secret(k string) string`, and
+// plus cmd/kanz_migrate carried its own `func secret(k string) string`, and
 // fifteen of them discarded os.ReadFile's error:
 //
 //	if p := os.Getenv(k + "_FILE"); p != "" {

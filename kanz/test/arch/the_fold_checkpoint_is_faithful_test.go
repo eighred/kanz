@@ -39,12 +39,12 @@ import (
 //     startup that lengthens with the fund's history.
 
 const (
-	cpFileRel   = "../../services/tv-sync/internal/projection/checkpoint.go"
-	cpProjRel   = "../../services/tv-sync/internal/projection/projection.go"
-	cpStoreRel  = "../../services/tv-sync/internal/projection/postgres.go"
-	cpMainRel   = "../../services/tv-sync/cmd/tv-sync/main.go"
-	cpLoopRel   = "../../services/tv-sync/cmd/tv-sync/checkpoint.go"
-	cpSchemaRel = "../../../kanz-schemas/proto/tvsync/v1/snapshot.proto"
+	cpFileRel   = "../../services/tv_sync/internal/projection/checkpoint.go"
+	cpProjRel   = "../../services/tv_sync/internal/projection/projection.go"
+	cpStoreRel  = "../../services/tv_sync/internal/projection/postgres.go"
+	cpMainRel   = "../../services/tv_sync/cmd/tv_sync/main.go"
+	cpLoopRel   = "../../services/tv_sync/cmd/tv_sync/checkpoint.go"
+	cpSchemaRel = "../../../kanz_schemas/proto/tvsync/v1/snapshot.proto"
 )
 
 // TestTheCheckpointCarriesTheFillDedupSet holds rule one.

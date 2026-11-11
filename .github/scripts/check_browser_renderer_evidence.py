@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PACKAGE = "github.com/eighred/kanz/services/web-bff/internal/server"
+PACKAGE = "github.com/eighred/kanz/services/web_bff/internal/server"
 TEST = "TestBrowserRendererProductionBundle"
 MARKER = "Browser renderer: actual WASM, legacy fallback, missing/tampered/aborted asset and strict CSP controls PASS"
 
@@ -49,9 +49,9 @@ def validate(data):
         raise ValueError("browser proof incomplete")
 
 
-INPUTS = ("kanz-rs/Cargo.toml", "kanz-rs/Cargo.lock", "kanz-rs/rust-toolchain.toml",
-          "kanz-rs/crates/browser-render/Cargo.toml", "kanz-rs/crates/browser-render/src/lib.rs",
-          "kanz-web/scripts/build-renderer.mjs", "kanz-web/scripts/build-renderer.test.mjs", "kanz-web/.nvmrc")
+INPUTS = ("kanz_rs/Cargo.toml", "kanz_rs/Cargo.lock", "kanz_rs/rust-toolchain.toml",
+          "kanz_rs/crates/browser_render/Cargo.toml", "kanz_rs/crates/browser_render/src/lib.rs",
+          "web/scripts/build-renderer.mjs", "web/scripts/build-renderer.test.mjs", "web/.nvmrc")
 
 
 def digest(data): return hashlib.sha256(data).hexdigest()
@@ -121,10 +121,10 @@ def main():
         current = read_file(root / name, 4194304)
         if current != git("show", "HEAD:" + name): raise ValueError("uncommitted build input")
         hashes[name] = digest(current)
-    modules = list((root / "kanz-web/dist/assets").glob("*.wasm"))
+    modules = list((root / "web/dist/assets").glob("*.wasm"))
     if len(modules) != 1: raise ValueError("module inventory")
     result = qualify(read_file(Path(sys.argv[1]), 4194304),
-                     read_file(root / "kanz-web/src/generated/browser-render.ts", 65536),
+                     read_file(root / "web/src/generated/browser-render.ts", 65536),
                      read_file(modules[0], 2097152), identity, hashes)
     with open(sys.argv[2], "x", encoding="utf-8") as target:
         json.dump(result, target, sort_keys=True); target.write("\n")

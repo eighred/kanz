@@ -45,7 +45,7 @@ def image_recipe(service):
     if service == "lake-sink":
         return ImageRecipe("/kanz-lake-snapshot", "kanz-lake-snapshot",
                            frozenset(("datafusion", "parquet", "arrow", "tokio", "prost")),
-                           "/lake-sink", "github.com/eighred/kanz/services/lake-sink/cmd/lake-sink",
+                           "/lake-sink", "github.com/eighred/kanz/services/lake_sink/cmd/lake_sink",
                            CC_RUNTIME)
     raise ValueError("unsupported image recipe")
 LIMIT = 8 * 1024 * 1024
@@ -268,7 +268,7 @@ def validate_go_buildinfo(info, expected, sums, toolchain, sbom):
         if replacement is not None:
             if (name != "github.com/eighred/kanz/kanz-schemas-go" or
                     version != "v0.0.0-00010101000000-000000000000" or
-                    replacement != {"Path": "../kanz-schemas/gen/go", "Version": "(devel)"}):
+                    replacement != {"Path": "../kanz_schemas/gen/go", "Version": "(devel)"}):
                 raise ValueError("unreviewed binary module replacement")
             # Syft1.56 golang/package.go builds the versionless PURL before
             # package_task_factory.go stubs the empty display version as UNKNOWN.
@@ -499,7 +499,7 @@ def validate_hybrid_native(base, actual, go_sha, worker_sha):
 
 
 def generated_sdk_digest(root):
-    directory = root / "kanz-schemas/gen/go"
+    directory = root / "kanz_schemas/gen/go"
     files = []
     total = 0
     for base, directories, names in os.walk(directory, followlinks=False):
@@ -528,7 +528,7 @@ def verify_hybrid(root, image, image_inspect, binary, temp, destination, sbom):
             image_inspect.get("Config", {}).get("Entrypoint") != ["/lake-sink"] or
             image_inspect.get("Config", {}).get("User") != "nonroot:nonroot"):
         raise ValueError("wrong hybrid runtime configuration")
-    go_binary = temp / "lake-sink"
+    go_binary = temp / "lake_sink"
     container = output(["docker", "create", image])
     try:
         run(["docker", "cp", f"{container}:/lake-sink", str(go_binary)])
@@ -618,7 +618,7 @@ def main():
     validate_reference(args.service, args.image, args.local)
     recipe = image_recipe(args.service)
     root = Path(__file__).resolve().parents[2]
-    lock_path = root / "kanz-rs/Cargo.lock"
+    lock_path = root / "kanz_rs/Cargo.lock"
     lock = tomllib.loads(lock_path.read_text())
     sbom = read_json(args.sbom, 64 * 1024 * 1024)
     destination = args.output.resolve()

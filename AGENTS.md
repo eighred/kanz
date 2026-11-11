@@ -49,20 +49,35 @@ architecture violation even when tests pass.
 | Location | Responsibility |
 |---|---|
 | `kanz/` | Go module `github.com/eighred/kanz`; Go 1.26.1 language / 1.26.10 toolchain. Services in `services/`, binaries in `cmd/`. |
-| `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
-| `kanz-py/` | Python inference service. |
-| `kanz-web/` | Browser client. |
-| `kanz-rs/` | Rust feed runtimes, canonical compatibility primitives and diagnostic financial workers; ownership changes require component-specific #1413 acceptance. |
-| `kanz-jl/` | Optional curve-calibration comparison worker; Go remains authoritative. |
+| `kanz_schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
+| `kanz_py/` | Python inference service. |
+| `web/` | Browser client. |
+| `kanz_rs/` | Rust feed runtimes, canonical compatibility primitives and diagnostic financial workers; ownership changes require component-specific #1413 acceptance. |
+| `kanz_jl/` | Optional curve-calibration comparison worker; Go remains authoritative. |
 | `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
 | `tools/`, `.github/` | Host/operator scripts and CI. |
 
-Keep sibling directories in place: Go replacements and build contexts depend on
-them. Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
+Use snake_case for project-owned directory names. Preserve tool discovery names
+(such as `.github` and Forge skill entrypoints), deployed service identities,
+package names and released binary filenames. The directory naming guard in
+`kanz/test/arch/repository_directory_names_test.go` records the tool exceptions.
+
+Choose short, lowercase paths that name the responsibility for new components.
+Use a language name where it clarifies the runtime within that responsibility
+(for example, `workers/julia/` for calibration). Keep runbooks with their
+components. The path alone grants no runtime or financial authority.
+
+Move existing components one at a time when the move clarifies ownership.
+Update all path consumers in the same change, including build contexts,
+module and generated SDK resolution, CI triggers, architecture guards, and
+deployment references as applicable. Verify the affected build and workflow
+entry points before merging. Preserve the Go module and schema SDK's relative
+layout until their consumers can be updated and verified together.
+
+Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
 Kafka (segmentio) is the derived archival/CDC path. Start setup at
-`kanz/dev/README.md`, schema generation at `kanz-schemas/README.md`, and Python
-setup at `kanz-py/README.md`. Keep operational runbooks beside their component;
-do not move packages merely for tidiness.
+`kanz/dev/README.md`, schema generation at `kanz_schemas/README.md`, and Python
+setup at `kanz_py/README.md`.
 
 ## Execution and trust boundaries
 
@@ -174,7 +189,7 @@ go test -p 1 ./test/arch/ -count=1
 golangci-lint run ./...
 git ls-files -z '*.go' | xargs -0 gofmt -l
 
-cd ../kanz-schemas
+cd ../kanz_schemas
 buf generate
 bash bootstrap-go-sdk.sh
 ```
@@ -233,7 +248,7 @@ Bash; use equivalent native commands in PowerShell.
    `git ls-files` for gofmt, never a tree walk that includes generated test mains.
 
 2. **Generate the schema SDK.** `kanz/go.mod` replaces the SDK with
-   `../kanz-schemas/gen/go`; ignored `gen/` is never committed (EVT-15a).
+   `../kanz_schemas/gen/go`; ignored `gen/` is never committed (EVT-15a).
    Missing generated code causes unresolved imports in a fresh checkout. The
    host's downloaded `~/go/bin/buf.exe` is blocked; the established project-local
    source build is:
@@ -243,7 +258,7 @@ Bash; use equivalent native commands in PowerShell.
    ```
 
    If policy blocks that build too, report it rather than trying alternate
-   routes. Run `buf generate` and `bash bootstrap-go-sdk.sh` in `kanz-schemas`
+   routes. Run `buf generate` and `bash bootstrap-go-sdk.sh` in `kanz_schemas`
    after schema changes and on fresh checkouts.
 
 3. **Use actual build tags.** There are no `binance` or `okx` tags; venue
@@ -251,7 +266,7 @@ Bash; use equivalent native commands in PowerShell.
 
    | Tag | Selects | Default (`!tag`) |
    |---|---|---|
-   | `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
+   | `redis` | `pkg/redisadapter/goredis.go`, `risk_engine/dedup_redis.go`, `webhook_ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
    | `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
    | `openrouter` | `copilot/model_openrouter.go` and tests | Provider absent |
    | `perf` | `internal/risk/compute/latency_budget_test.go` | No performance test |

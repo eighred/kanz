@@ -27,7 +27,7 @@ import (
 // follow-up that enumerated that residue, #185, listed three sites by hand and
 // grpcsrv was not among them.
 //
-// The result: services/risk-engine/internal/grpcsrv passed a caller-supplied
+// The result: services/risk_engine/internal/grpcsrv passed a caller-supplied
 // ScenarioShock.Pct straight into the risk compute layer. Decimal.exponent is a
 // plain int32 on the wire, and the compute layer expanded 10^abs(exponent) in a
 // loop — {coefficient: 1, exponent: -2000000000} meant two billion iterations
@@ -65,7 +65,7 @@ var pendingGRPCDomainChecks = map[string]string{}
 
 func TestGRPCServersBoundTheDecimalDomain(t *testing.T) {
 	root := moduleRoot(t)
-	schema := loadProtoSchema(t, filepath.Join(filepath.Dir(root), "kanz-schemas", "proto"))
+	schema := loadProtoSchema(t, filepath.Join(filepath.Dir(root), "kanz_schemas", "proto"))
 
 	// NON-VACUITY, part one: the schema scanner.
 	if len(schema.fields) == 0 {

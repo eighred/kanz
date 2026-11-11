@@ -1,6 +1,6 @@
 // Package publish is the risk engine's bus publish layer (RISK-10).
 // Translates domain values (RISK-03 in-memory shapes) into
-// kanz-schemas/proto/domain/v1 wire shapes and emits them as FACT
+// kanz_schemas/proto/domain/v1 wire shapes and emits them as FACT
 // envelopes via the shared bus.Producer (EVT-17).
 //
 // # Two event types
@@ -51,7 +51,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 )
 
-// Event-type names follow kanz-schemas/README.md § Subject Taxonomy §1
+// Event-type names follow kanz_schemas/README.md § Subject Taxonomy §1
 // ({domain}.{entity}.{event_type}, past-tense for FACTs). These are
 // the values external consumers (downstream services, dashboards,
 // audit pipeline) subscribe to.
@@ -203,7 +203,7 @@ func measureQualityFlags(measures *domain.MeasureSet) []envelopepb.QualityFlag {
 // --- Translation: domain → proto --------------------------------------
 //
 // ToProtoExposureSet / ToProtoMeasureSet are exported so the risk query
-// gRPC server (API-01b, services/risk-engine/internal/grpcsrv) serves the
+// gRPC server (API-01b, services/risk_engine/internal/grpcsrv) serves the
 // EXACT same wire payloads this publisher emits — one domain→proto mapping,
 // not two divergent copies. They live here (the publish layer that owns the
 // domain↔proto boundary) rather than being re-derived in grpcsrv.
@@ -322,7 +322,7 @@ func toProtoProvenance(p v1.MeasureProvenance) *domainpb.MeasureProvenance {
 // toProtoDimension maps the closed domain enum to the proto enum. Domain values
 // without a wire counterpart map to UNSPECIFIED so a future domain-side
 // addition that hasn't yet propagated to the schema still publishes (with
-// consumers seeing the unknown bucket as UNSPECIFIED per kanz-schemas/README.md
+// consumers seeing the unknown bucket as UNSPECIFIED per kanz_schemas/README.md
 // § Event Class Rules §3 enum-unknown semantics).
 func toProtoDimension(d domain.ExposureDimension) domainpb.ExposureDimension {
 	switch d {

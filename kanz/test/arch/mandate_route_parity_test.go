@@ -25,7 +25,7 @@ import (
 // measured rather than assumed:
 //
 //	services/compliance/...   ok   (4 packages)
-//	services/api-gateway/...  ok   (8 packages)
+//	services/api_gateway/...  ok   (8 packages)
 //
 // Twelve green packages, both halves internally consistent, and every request a
 // signatory makes in production answers 404. The gateway tests cannot see it:
@@ -87,7 +87,7 @@ func TestTheMandateRoutesAreOneToOneAcrossTheGateway(t *testing.T) {
 		filepath.Join(root, "services", "compliance", "internal", "api", "api.go"),
 		complianceMuxRouteRe)
 	gateway := routeParityMatches(t,
-		filepath.Join(root, "services", "api-gateway", "internal", "proxy", "proxy.go"),
+		filepath.Join(root, "services", "api_gateway", "internal", "proxy", "proxy.go"),
 		gatewayComplianceRouteRe)
 
 	// NON-VACUITY. Two empty sets are equal, and a broken regex produces two empty

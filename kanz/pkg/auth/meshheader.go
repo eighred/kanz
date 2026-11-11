@@ -18,7 +18,7 @@ import (
 // AND ANY CALLER NAMES ANY TENANT AND IS SERVED THAT TENANT'S BOOK.
 //
 // WHY HERE AND NOT WITH THE INJECTOR. The injector is
-// services/api-gateway/internal/proxy, and Go's internal rule makes it
+// services/api_gateway/internal/proxy, and Go's internal rule makes it
 // unimportable by the services that must read what it writes. So five packages
 // each grew their own copy of the constant AND their own enforcement (#258): a
 // change to how this header is validated — a canonicalisation rule, a spoofing

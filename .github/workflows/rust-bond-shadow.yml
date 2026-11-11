@@ -3,14 +3,14 @@ name: rust-bond-shadow
 on:
   pull_request:
     paths:
-      - 'kanz-rs/**'
-      - 'kanz-schemas/proto/**'
+      - 'kanz_rs/**'
+      - 'kanz_schemas/proto/**'
       - 'kanz/internal/risk/pricing/**'
       - 'kanz/internal/risk/compute/**'
       - 'kanz/internal/risk/termsource/**'
-      - 'kanz/services/risk-engine/**'
+      - 'kanz/services/risk_engine/**'
       - 'kanz/internal/shadowprocess/**'
-      - 'kanz/services/risk-engine/tools/bond-risk-conformance/**'
+      - 'kanz/services/risk_engine/tools/bond_risk_conformance/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_bond_shadow_evidence.py'
@@ -18,14 +18,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'kanz-rs/**'
-      - 'kanz-schemas/proto/**'
+      - 'kanz_rs/**'
+      - 'kanz_schemas/proto/**'
       - 'kanz/internal/risk/pricing/**'
       - 'kanz/internal/risk/compute/**'
       - 'kanz/internal/risk/termsource/**'
-      - 'kanz/services/risk-engine/**'
+      - 'kanz/services/risk_engine/**'
       - 'kanz/internal/shadowprocess/**'
-      - 'kanz/services/risk-engine/tools/bond-risk-conformance/**'
+      - 'kanz/services/risk_engine/tools/bond_risk_conformance/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_bond_shadow_evidence.py'
@@ -48,7 +48,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate canonical Go contracts
@@ -58,7 +58,7 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
           make -C kanz generate
       - name: Build and verify the pinned Rust kernel
-        working-directory: kanz-rs
+        working-directory: kanz_rs
         env:
           KANZ_BUILD_VERSION: ${{ github.sha }}
         run: |
@@ -71,15 +71,15 @@ jobs:
         working-directory: kanz
         run: |
           go test -p 1 ./test/arch -run 'Test(Rust|Julia|BondCanonicalClone|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
-          go test -p 1 ./internal/risk/pricing/... ./internal/risk/compute/... ./internal/risk/termsource ./services/risk-engine/internal/replay ./services/risk-engine/internal/config ./services/risk-engine/cmd/risk-engine -count=1
+          go test -p 1 ./internal/risk/pricing/... ./internal/risk/compute/... ./internal/risk/termsource ./services/risk_engine/internal/replay ./services/risk_engine/internal/config ./services/risk_engine/cmd/risk_engine -count=1
       - name: Compare actual stamped worker through the production supervisor
         working-directory: kanz
         env:
-          KANZ_BOND_RISK_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-bond-risk-shadow
+          KANZ_BOND_RISK_BIN: ${{ github.workspace }}/kanz_rs/target/debug/kanz-bond-risk-shadow
           KANZ_BOND_RISK_VERSION: ${{ github.sha }}
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/risk-engine/tools/bond-risk-conformance ./services/risk-engine/internal/bondshadow ./internal/shadowprocess -count=1 -json | tee "$RUNNER_TEMP/bond-shadow.jsonl"
+          go test -race -p 1 ./services/risk_engine/tools/bond_risk_conformance ./services/risk_engine/internal/bondshadow ./internal/shadowprocess -count=1 -json | tee "$RUNNER_TEMP/bond-shadow.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 ../.github/scripts/check_bond_shadow_evidence.py "$RUNNER_TEMP/bond-shadow.jsonl"
       - name: Preserve numerical execution evidence

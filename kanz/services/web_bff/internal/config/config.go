@@ -1,0 +1,235 @@
+// Package config loads the web-BFF's runtime configuration from the
+// environment. The BFF is the browser front-of-house over the delivered /v1
+// edge (PS-02a): it runs the OIDC authorization-code + PKCE login against
+// Eighred SSO, holds the issued token server-side in a session, and
+// reverse-proxies the browser's API calls to the api-gateway with that token
+// attached. It adds no backend analytics — it is the CLI's browser counterpart.
+package config
+
+import (
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/eighred/kanz/internal/auditdelivery"
+	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/web_bff/internal/session"
+)
+
+// Config is the resolved BFF configuration.
+type Config struct {
+	AuditDelivery auditdelivery.Config
+	Listen        string
+	LogLevel      slog.Level
+
+	// Issuer is the Eighred SSO issuer base URL the login flow runs against.
+	// Endpoints are discovered from {Issuer}/.well-known/openid-configuration.
+	Issuer string
+	// ClientID is the identifier the BFF is registered as with Eighred SSO. The
+	// SSO client registry must allow RedirectURL as a redirect_uri for it.
+	ClientID string
+	// RedirectURL is this BFF's public callback URL (e.g.
+	// https://app.eighred.com/auth/callback) the SSO redirects the code back to.
+	RedirectURL string
+	// Scope is the space-delimited scope requested at login.
+	Scope string
+
+	// GatewayURL is the base URL of the api-gateway edge the BFF proxies to.
+	GatewayURL string
+	// GatewaySPIFFESocket selects a mutually authenticated gateway connection.
+	// A configured socket requires HTTPS; it never falls back to plaintext.
+	GatewaySPIFFESocket string
+
+	// SessionTTL bounds how long a browser session (and its held token) lives
+	// before re-login is required.
+	SessionTTL    time.Duration
+	SessionMode   string
+	SessionDSN    string
+	SessionKey    []byte
+	SessionLimits session.Limits
+	// SecureCookies sets the Secure flag on cookies. Default true; set
+	// WEB_BFF_INSECURE_COOKIES=1 for local http development only.
+	// SigningSecret is the gateway's API-01d request-signing secret, read via
+	// pkg/secret so WEB_BFF_SIGNING_SECRET_FILE is preferred over the plaintext
+	// var -- the same mount shape the gateway's own secret uses.
+	//
+	// EMPTY IS NOT SAFE IN PRODUCTION. Every deployment manifest sets the
+	// gateway's signing secret, and an unsigned proxied request is refused
+	// before authentication runs -- so an unset value here is a web app whose
+	// login works and whose every data screen 401s (#777). It stays optional
+	// because a gateway with signing disabled is a legitimate local setup, and
+	// the composition root says which one it is at startup.
+	SigningSecret string
+	SecureCookies bool
+
+	// IdentityURL is the platform identity provider (#364) the credential login
+	// exchanges against. REQUIRED — it is how anyone signs in.
+	IdentityURL string
+
+	// TrustedProxyHeader names the forwarded-for header the edge sets, e.g.
+	// "CF-Connecting-IP" under the Cloudflare Tunnel model. Empty ⇒ the peer
+	// address is used and no header is honoured.
+	TrustedProxyHeader string
+	// TrustedProxies are the peers permitted to set that header.
+	//
+	// BOTH ARE REQUIRED TOGETHER OR THE HEADER IS IGNORED, and that is the safe
+	// direction: the login limiter keys on the resolved address, so honouring a
+	// header from an untrusted peer turns the limiter into nothing — an attacker
+	// varies the value per request and guesses credentials unbounded, while the
+	// traffic looks like many well-behaved clients. Ignoring it merely makes the
+	// limiter too strict.
+	TrustedProxies []string
+
+	// StaticDir is the compiled SPA (web/dist) this BFF serves on its OWN
+	// origin, so the httpOnly session cookie needs no CORS and no cookie-domain
+	// syncing. Empty ⇒ API only, the local shape where Vite serves the SPA and
+	// proxies /api and /auth back here.
+	StaticDir string
+
+	// PreflightEvidencePath is the projected, non-secret result produced by the
+	// repository-owned exact-main OMS preflight. Empty leaves the authenticated
+	// status endpoint available but UNKNOWN. PreflightEvidenceMaxAge is the
+	// maximum age that may still be represented as PASS or FAIL.
+	PreflightEvidencePath   string
+	PreflightEvidenceMaxAge time.Duration
+
+	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
+	OTLPEndpoint string
+}
+
+// Load reads the configuration from WEB_BFF_* environment variables with
+// production-safe defaults, and validates the required values.
+func Load() (Config, error) {
+	cfg := Config{
+		AuditDelivery:       auditdelivery.Config{NATSURL: os.Getenv("WEB_BFF_AUDIT_NATS_URL"), SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET")},
+		Listen:              env.Or("WEB_BFF_LISTEN", ":8084"),
+		LogLevel:            env.ParseLevelOr(os.Getenv("WEB_BFF_LOG_LEVEL"), slog.LevelInfo),
+		Issuer:              strings.TrimRight(os.Getenv("WEB_BFF_SSO_ISSUER"), "/"),
+		ClientID:            env.Or("WEB_BFF_CLIENT_ID", "kanz-web"),
+		RedirectURL:         os.Getenv("WEB_BFF_REDIRECT_URL"),
+		Scope:               env.Or("WEB_BFF_SCOPE", "openid profile"),
+		GatewayURL:          strings.TrimRight(os.Getenv("WEB_BFF_GATEWAY_URL"), "/"),
+		GatewaySPIFFESocket: os.Getenv("WEB_BFF_GATEWAY_SPIFFE_SOCKET"),
+		SessionTTL:          parseDuration(os.Getenv("WEB_BFF_SESSION_TTL"), time.Hour),
+		SecureCookies:       os.Getenv("WEB_BFF_INSECURE_COOKIES") == "",
+		OTLPEndpoint:        os.Getenv("WEB_BFF_OTLP_ENDPOINT"),
+
+		IdentityURL:           strings.TrimRight(os.Getenv("WEB_BFF_IDENTITY_URL"), "/"),
+		TrustedProxyHeader:    os.Getenv("WEB_BFF_TRUSTED_PROXY_HEADER"),
+		TrustedProxies:        env.SplitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
+		StaticDir:             os.Getenv("WEB_BFF_STATIC_DIR"),
+		PreflightEvidencePath: os.Getenv("WEB_BFF_PREFLIGHT_EVIDENCE_PATH"),
+		PreflightEvidenceMaxAge: parseDuration(
+			os.Getenv("WEB_BFF_PREFLIGHT_EVIDENCE_MAX_AGE"), 15*time.Minute),
+	}
+	// Read AFTER the literal because it can fail, and an unreadable declared
+	// mount is a deployment fault that must not degrade to "" (pkg/secret).
+	signing, err := secret.Read("WEB_BFF_SIGNING_SECRET")
+	if err != nil {
+		return Config{}, fmt.Errorf("WEB_BFF_SIGNING_SECRET: %w", err)
+	}
+	cfg.SigningSecret = signing
+	if cfg.IdentityURL == "" {
+		return Config{}, errors.New("WEB_BFF_IDENTITY_URL is required (the identity service base URL) — " +
+			"it is how anyone signs in")
+	}
+	if cfg.GatewayURL == "" {
+		return Config{}, errors.New("WEB_BFF_GATEWAY_URL is required (the api-gateway base URL)")
+	}
+	if cfg.GatewaySPIFFESocket != "" {
+		u, err := url.Parse(cfg.GatewayURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return Config{}, errors.New("WEB_BFF_GATEWAY_SPIFFE_SOCKET requires a credential-free HTTPS gateway URL")
+		}
+	}
+	// SSO IS NOW OPTIONAL, AND THAT IS THE POINT OF THIS CHANGE. WEB_BFF_SSO_ISSUER
+	// used to be required, so this service could not START without an Eighred SSO
+	// that does not exist — the browser path was as dead as the TUI's /login.
+	// Credential login against the identity service replaces it.
+	//
+	// The OIDC arm is kept rather than deleted, for the same reason pkg/auth keeps
+	// its authenticator seam: a fund manager who requires their own Okta or Entra
+	// tenant is then configuration, not a re-architecture. Configured HALF-way is
+	// the one thing refused — an issuer with no redirect URL would advertise a
+	// login route that cannot complete.
+	if (cfg.Issuer == "") != (cfg.RedirectURL == "") {
+		return Config{}, errors.New("WEB_BFF_SSO_ISSUER and WEB_BFF_REDIRECT_URL must be set together " +
+			"or not at all — an issuer with no redirect URL offers a login that cannot complete")
+	}
+	// Naming a header with nobody trusted to send it, or the reverse, silently
+	// disables it. Refuse rather than run in a state the operator believes is
+	// configured — see clientip's package comment for what that costs.
+	if (cfg.TrustedProxyHeader == "") != (len(cfg.TrustedProxies) == 0) {
+		return Config{}, errors.New("WEB_BFF_TRUSTED_PROXY_HEADER and WEB_BFF_TRUSTED_PROXIES must be " +
+			"set together or not at all — one without the other reads as configured and honours nothing")
+	}
+	if err := loadSessions(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+func parseDuration(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+func loadSessions(c *Config) error {
+	c.SessionMode = env.Or("WEB_BFF_SESSION_MODE", "memory")
+	c.SessionLimits = session.DefaultLimits()
+	for name, dst := range map[string]*int{"WEB_BFF_MAX_SESSIONS": &c.SessionLimits.Sessions, "WEB_BFF_MAX_PENDING_LOGINS": &c.SessionLimits.Pending, "WEB_BFF_MAX_SESSIONS_PER_SUBJECT": &c.SessionLimits.PerSubject} {
+		if raw, ok := os.LookupEnv(name); ok {
+			v, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("%s must be an integer", name)
+			}
+			*dst = v
+		}
+	}
+	if c.SessionLimits.Validate() != nil {
+		return errors.New("invalid browser session capacity limits")
+	}
+	if raw := os.Getenv("WEB_BFF_SESSION_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil || v <= 0 || v > 24*time.Hour {
+			return errors.New("WEB_BFF_SESSION_TTL must be positive and at most 24h")
+		}
+		c.SessionTTL = v
+	}
+	dsn, err := secret.Read("WEB_BFF_SESSION_DSN")
+	if err != nil {
+		return errors.New("cannot read WEB_BFF_SESSION_DSN")
+	}
+	key, err := secret.Read("WEB_BFF_SESSION_KEY")
+	if err != nil {
+		return errors.New("cannot read WEB_BFF_SESSION_KEY")
+	}
+	switch c.SessionMode {
+	case "memory":
+		if dsn != "" || key != "" {
+			return errors.New("shared session settings require postgres mode")
+		}
+	case "postgres":
+		decoded, err := base64.StdEncoding.DecodeString(key)
+		if dsn == "" || err != nil || len(decoded) != 32 {
+			return errors.New("postgres sessions require DSN and base64-encoded 32-byte key")
+		}
+		c.SessionDSN = dsn
+		c.SessionKey = decoded
+	default:
+		return errors.New("WEB_BFF_SESSION_MODE must be memory or postgres")
+	}
+	return nil
+}

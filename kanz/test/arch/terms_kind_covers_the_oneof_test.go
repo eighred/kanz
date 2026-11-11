@@ -44,8 +44,8 @@ import (
 
 func TestEveryContractTermsVariantHasAKind(t *testing.T) {
 	root := moduleRoot(t)
-	// kanz/ and kanz-schemas/ are siblings under the repo root.
-	protoPath := filepath.Join(filepath.Dir(root), "kanz-schemas", "proto", "reference", "v1", "contract.proto")
+	// kanz/ and kanz_schemas/ are siblings under the repo root.
+	protoPath := filepath.Join(filepath.Dir(root), "kanz_schemas", "proto", "reference", "v1", "contract.proto")
 
 	variants := oneofCases(t, protoPath, "ContractTerms")
 	if len(variants) < 3 {

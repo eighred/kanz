@@ -134,7 +134,7 @@ var orderDigestScheduleExempt = map[string]string{
 
 func TestTheOrderDigestCoversEverySubmitOrderField(t *testing.T) {
 	root := moduleRoot(t)
-	protoRoot := filepath.Join(filepath.Dir(root), "kanz-schemas", "proto")
+	protoRoot := filepath.Join(filepath.Dir(root), "kanz_schemas", "proto")
 	cmdFields := protoFieldNames(t, filepath.Join(protoRoot, filepath.FromSlash(digestCommandProto)), digestCommandMsg)
 	scheduleFields := protoFieldNames(t, filepath.Join(protoRoot, filepath.FromSlash(digestCommandProto)), digestScheduleMsg)
 
@@ -391,7 +391,7 @@ func goFuncBody(t *testing.T, src, prefix string) string {
 //	// handleProxy forwards /api/* to the gateway /v1/* as the session's caller.
 //
 // opened a block comment that never closed, and EVERY REMAINING LINE OF THE FILE
-// was swallowed. services/web-bff/internal/server/server.go carries exactly that
+// was swallowed. services/web_bff/internal/server/server.go carries exactly that
 // comment on line 381, so the file's last hundred-odd lines were invisible to
 // every guard built on this helper. It was found by mutating a caller and
 // watching the guard pass.

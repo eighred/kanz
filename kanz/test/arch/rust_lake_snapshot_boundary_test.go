@@ -15,7 +15,7 @@ import (
 // This closed source/declaration guard is not a Rust AST, macro expansion,
 // transitive dependency audit or kernel proof. Actual Linux worker and seccomp
 // subprocess tests remain mandatory. Go retains identity, files and publication.
-const rustLakePath = "services/lake-snapshot"
+const rustLakePath = "services/lake_snapshot"
 const rustLakeCargo = `[package]
 name = "kanz-lake-snapshot"
 version = "0.1.0"
@@ -45,7 +45,7 @@ protoc-bin-vendored = "=3.2.0"`
 // shared Rust comment masker and whitespace compaction. Changes require review;
 // comments cannot confer an exemption or hide executable tokens.
 var rustLakePinned = map[string]string{
-	"build.rs":                  "4b23d1a679817025a1f215db5e5ee3ed89c93bddf5c4664774bee3602ff68a94",
+	"build.rs":                  "980264282dac8f1acd17c5de4228517ca81923d2be1c394790a338385bbbca18",
 	"examples/sandbox-probe.rs": "14cc4f882990c62aa6a374ad4b2c2332a4081bfdb846b84117ce10bfa205461c",
 	"src/main.rs":               "e0a32604d98cf6f72eaf21fbcbe836a59a9a2e389816dfee7bb0c1e23a3f3c12",
 	"src/proto.rs":              "002b6f86d61dedc8a1ac2b7d2cbe9ed64fdec7cd1078c03c4f8c27cf09983c87",
@@ -125,14 +125,14 @@ func checkRustLakeSnapshot(root string) error {
 }
 
 func TestRustLakeSnapshotBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	if err := checkRustLakeSnapshot(root); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRustLakeSnapshotBoundaryRejectsWeakening(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	for _, tc := range []struct{ name, file, old, new string }{
 		{"request_before_filter", "src/main.rs", "if sandbox::install().is_err()", "let _ = run(&runtime); if sandbox::install().is_err()"},
 		{"drop_filter", "src/main.rs", "sandbox::install().is_err()", "false"},

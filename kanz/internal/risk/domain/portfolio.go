@@ -5,9 +5,9 @@
 // (RISK-06/07/08) builds them, the api/v1 surface returns them, and
 // callers inspect them through the narrow interface methods.
 //
-// # Why these types are not the kanz-schemas proto types
+// # Why these types are not the kanz_schemas proto types
 //
-// kanz-schemas/proto/domain/v1 (PortfolioState, PositionState, ...)
+// kanz_schemas/proto/domain/v1 (PortfolioState, PositionState, ...)
 // is the **wire shape** for state events on the bus — designed for
 // serialization, evolution, and cross-language consumption. These
 // domain types are the **engine's working in-memory shape** —
@@ -62,7 +62,7 @@ import (
 // v1.InstrumentID so the api/v1 surface (which carries the type for
 // external scenario-shock callers per RISK-09) and the internal
 // domain types share one canonical identifier with zero
-// conversion. Same key kanz-schemas/proto/market/v1 uses for
+// conversion. Same key kanz_schemas/proto/market/v1 uses for
 // partition_key on market-data events.
 type InstrumentID = v1.InstrumentID
 
@@ -73,7 +73,7 @@ type CurrencyCode string
 
 // Portfolio is the in-memory aggregate state for one portfolio. It is
 // the consumer of domain.v1.PortfolioState + PositionState events
-// (kanz-schemas/proto/domain/v1) — RISK-04 ingests those, RISK-05
+// (kanz_schemas/proto/domain/v1) — RISK-04 ingests those, RISK-05
 // applies them. This struct is the engine's working copy.
 type Portfolio struct {
 	id               v1.PortfolioID
@@ -119,7 +119,7 @@ type Portfolio struct {
 
 // AggregateUpdate carries the portfolio-level fields from a
 // domain.v1.PortfolioState event payload — passed to SetAggregate
-// without coupling the domain package to the kanz-schemas domain.v1
+// without coupling the domain package to the kanz_schemas domain.v1
 // proto (it already depends on common.v1 for Money / Decimal /
 // LogPosition, but limiting the schemas dep at the package boundary
 // keeps the proto→domain mapping in one place: RISK-05).
@@ -288,7 +288,7 @@ func (p *Portfolio) ClearPositions() {
 // tracked. The engine retains zero-quantity positions for audit
 // lineage until explicitly forgotten via a state event (Portfolio.Forget).
 //
-// Fields mirror domain.v1.PositionState (kanz-schemas) but as a
+// Fields mirror domain.v1.PositionState (kanz_schemas) but as a
 // plain Go struct — proto types are wire-shape, this is the
 // engine's working-shape (see package doc).
 type Position struct {

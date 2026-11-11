@@ -77,9 +77,9 @@ class GitScopeTests(unittest.TestCase):
     def test_policy_and_build_helpers_cannot_skip(self):
         for name in (
             ".github/scripts/required_ci.py", ".github/scripts/release_source.py",
-            ".github/actions/setup-buf/action.yml", ".github/workflows/kanz-ci.yml",
-            "tools/Initialize-TestnetPortfolio.ps1", "kanz-schemas/packaging/go/go.mod",
-            "new-runtime/entrypoint", "kanz-web/README.md",
+            ".github/actions/setup_buf/action.yml", ".github/workflows/kanz-ci.yml",
+            "tools/Initialize-TestnetPortfolio.ps1", "kanz_schemas/packaging/go/go.mod",
+            "new-runtime/entrypoint", "web/README.md",
         ):
             with self.subTest(name=name):
                 self.write(name, "fixture")

@@ -3,30 +3,30 @@ name: envoy-edge
 on:
   pull_request:
     paths:
-      - 'kanz/services/web-bff/**'
-      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/web_bff/**'
+      - 'kanz/services/api_gateway/**'
       - 'kanz/pkg/transport/**'
       - 'kanz/internal/testidentity/**'
       - 'kanz/pkg/auth/**'
       - 'kanz/internal/gatewaysig/**'
       - 'kanz/infra/edge/**'
-      - 'kanz/services/tv-sync/test/isolation.py'
-      - 'kanz-jl/qualification/install-audit.sh'
+      - 'kanz/services/tv_sync/test/isolation.py'
+      - 'kanz_jl/qualification/install-audit.sh'
       - '.github/scripts/*envoy*'
       - '.github/scripts/check_migration_evidence.py'
       - '.github/workflows/envoy-edge.yml'
   push:
     branches: [main]
     paths:
-      - 'kanz/services/web-bff/**'
-      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/web_bff/**'
+      - 'kanz/services/api_gateway/**'
       - 'kanz/pkg/transport/**'
       - 'kanz/internal/testidentity/**'
       - 'kanz/pkg/auth/**'
       - 'kanz/internal/gatewaysig/**'
       - 'kanz/infra/edge/**'
-      - 'kanz/services/tv-sync/test/isolation.py'
-      - 'kanz-jl/qualification/install-audit.sh'
+      - 'kanz/services/tv_sync/test/isolation.py'
+      - 'kanz_jl/qualification/install-audit.sh'
       - '.github/scripts/*envoy*'
       - '.github/scripts/check_migration_evidence.py'
       - '.github/workflows/envoy-edge.yml'
@@ -48,7 +48,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate canonical contracts
@@ -59,7 +59,7 @@ jobs:
           make -C kanz generate
       - name: Load the locked actual proxy
         run: |
-          image=$(python3 -c 'import json; print(json.load(open("kanz/services/web-bff/internal/edgeconfig/image.json"))["reference"])')
+          image=$(python3 -c 'import json; print(json.load(open("kanz/services/web_bff/internal/edgeconfig/image.json"))["reference"])')
           docker pull --platform linux/amd64 "$image"
           echo "TEST_ENVOY_IMAGE=$image" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/envoy-edge-evidence"
@@ -67,14 +67,14 @@ jobs:
         working-directory: kanz
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server ./services/web-bff/internal/config ./services/api-gateway/cmd/api-gateway ./services/api-gateway/internal/config -run 'Test(EnvoyEdgeActualBFF|InvalidProfilesDoNotReplaceExistingConfiguration|WriterReplacesFinalSymlinkWithoutFollowingItsTarget|EdgeConfigurationDoesNotLoadApplicationCredentials|GatewayWorkloadTransport|GatewayWorkloadConfiguration|BFFWorkloadListener|BFFWorkloadConfiguration)$' -count=1 -json | tee "$RUNNER_TEMP/envoy-edge-evidence/tests.jsonl"
-          go vet ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server ./services/web-bff/internal/config ./services/api-gateway/cmd/api-gateway ./services/api-gateway/internal/config ./internal/testidentity
+          go test -race -p 1 ./services/web_bff/internal/edgeconfig ./services/web_bff/cmd/web_bff ./services/web_bff/internal/server ./services/web_bff/internal/config ./services/api_gateway/cmd/api_gateway ./services/api_gateway/internal/config -run 'Test(EnvoyEdgeActualBFF|InvalidProfilesDoNotReplaceExistingConfiguration|WriterReplacesFinalSymlinkWithoutFollowingItsTarget|EdgeConfigurationDoesNotLoadApplicationCredentials|GatewayWorkloadTransport|GatewayWorkloadConfiguration|BFFWorkloadListener|BFFWorkloadConfiguration)$' -count=1 -json | tee "$RUNNER_TEMP/envoy-edge-evidence/tests.jsonl"
+          go vet ./services/web_bff/internal/edgeconfig ./services/web_bff/cmd/web_bff ./services/web_bff/internal/server ./services/web_bff/internal/config ./services/api_gateway/cmd/api_gateway ./services/api_gateway/internal/config ./internal/testidentity
           go test -p 1 ./test/arch -run 'Test(SyntheticIdentityCannotBecomeRuntimeAuthority|EveryHeaderTrustJustificationNamesTheRealControl|OnlyThePlatformConstructorBuildsAnHTTPServer|EveryWorkflowGoTestIsSerialised)$' -count=1
-          go build -o "$RUNNER_TEMP/web-bff-edge" ./services/web-bff/cmd/web-bff
+          go build -o "$RUNNER_TEMP/web-bff-edge" ./services/web_bff/cmd/web_bff
           WEB_BFF_SESSION_MODE=invalid WEB_BFF_SIGNING_SECRET_FILE=/does-not-exist "$RUNNER_TEMP/web-bff-edge" envoy-config --output "$RUNNER_TEMP/envoy-edge-evidence/cli.json" --admin-loopback
       - name: Install checksum-pinned advisory tools
         run: |
-          bash kanz-jl/qualification/install-audit.sh
+          bash kanz_jl/qualification/install-audit.sh
           python3 -m pip install PyYAML==6.0.3
       - name: Validate executed cases and fresh image scan
         env:

@@ -46,7 +46,7 @@ unauthenticated run measures the latency of 401s), `RATE`/`DURATION` (soak).
 Against the local stack in `docker-compose.yml`, mint one:
 
 ```bash
-TOKEN=$(go run ./cmd/kanz-devtoken --secret load-secret --tenant PF1-tenant) \
+TOKEN=$(go run ./cmd/kanz_devtoken --secret load-secret --tenant PF1-tenant) \
   k6 run -e BASE_URL=http://localhost:8080 -e TOKEN=$TOKEN baseline.js
 ```
 
@@ -89,8 +89,8 @@ autoscaling thresholds.
 `api-gateway` (auth/signing/quotas OFF, plaintext upstream). No Postgres/Kafka:
 the engine re-derives state from the seeded snapshot on the live spine.
 
-The service images COPY the **generated** kanz-schemas Go SDK
-(`kanz-schemas/gen/go`, EVT-15a generated-not-committed), so `buf generate` must
+The service images COPY the **generated** kanz_schemas Go SDK
+(`kanz_schemas/gen/go`, EVT-15a generated-not-committed), so `buf generate` must
 run before `docker compose build` (the CI workflow does this; locally, generate
 per the kanz onboarding flow):
 
@@ -207,7 +207,7 @@ recipe below is the one that produced the numbers in `capacity-model.md`.
 #    services' fixtures, and migration set 0003 collides with them).
 docker exec kanz-ci-postgres psql -U kanz -d kanz -c "CREATE DATABASE kanzload OWNER kanzapp;"
 KANZ_MIGRATE_DATABASE_URL='postgres://kanzapp:kanz@localhost:5432/kanzload?sslmode=disable' \
-  go run ./cmd/kanz-migrate --dir ./services/oms/migrations --set oms
+  go run ./cmd/kanz_migrate --dir ./services/oms/migrations --set oms
 
 # 2. The OMS, in simulator posture (no OMS_VENUE_ENDPOINTS ⇒ SimVenue ⇒ the
 #    posture gauges the harness refuses on).
@@ -223,7 +223,7 @@ API_GATEWAY_LISTEN=:8080 API_GATEWAY_NATS_URL=nats://localhost:4222 \
 API_GATEWAY_RISK_ENGINE_ADDR=127.0.0.1:8081 \
 API_GATEWAY_JWT_SECRET=load-secret API_GATEWAY_ALLOW_DEV_HS256=true \
 API_GATEWAY_REQUIRED_ROLE=kanz-user API_GATEWAY_TRADE_ROLE=kanz-trader \
-  go run ./services/api-gateway/cmd/api-gateway &
+  go run ./services/api_gateway/cmd/api_gateway &
 
 # 4. PUT THE PORTFOLIO UNDER MANDATE, or the run is INVALID and says so.
 kanz-mandate propose --tenant load-test --file mandate.json --by operator:a \
@@ -234,7 +234,7 @@ kanz-mandate approve --tenant load-test --file mandate.json \
 # 5. A token carrying BOTH roles and the portfolio entitlement. Without
 #    --portfolio the OMS denies every order NOT_ENTITLED (#225) — the token
 #    authenticates cleanly and the run measures refusals.
-go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test \
+go run ./cmd/kanz_devtoken --secret load-secret --tenant load-test \
   --role kanz-user,kanz-trader --portfolio PF1 > ./token
 
 ORDERFLOW_TOKEN_FILE=./token go run ./test/load/orderflow

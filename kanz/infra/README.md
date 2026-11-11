@@ -21,7 +21,7 @@ requires) and is not an OpenID provider, so it serves no discovery document:
 
 ```sh
 export KANZ_GATEWAY_URL=http://localhost:8080
-export KANZ_TOKEN="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
+export KANZ_TOKEN="$(go run ./cmd/kanz_devtoken --secret load-secret --tenant load-test --role kanz-user)"
 ```
 
 For the WEB app, sign-in is a credential exchange against the identity service

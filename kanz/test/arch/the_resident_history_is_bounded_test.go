@@ -34,14 +34,14 @@ import (
 )
 
 const (
-	retProjRel   = "../../services/tv-sync/internal/projection/retention.go"
-	retModelRel  = "../../services/tv-sync/internal/projection/model.go"
-	retFoldRel   = "../../services/tv-sync/internal/projection/projection.go"
-	retMainRel   = "../../services/tv-sync/cmd/tv-sync/main.go"
-	retLoopRel   = "../../services/tv-sync/cmd/tv-sync/retention.go"
-	retCfgRel    = "../../services/tv-sync/internal/config/config.go"
-	retCPFileRel = "../../services/tv-sync/internal/projection/checkpoint.go"
-	retSchemaRel = "../../../kanz-schemas/proto/tvsync/v1/snapshot.proto"
+	retProjRel   = "../../services/tv_sync/internal/projection/retention.go"
+	retModelRel  = "../../services/tv_sync/internal/projection/model.go"
+	retFoldRel   = "../../services/tv_sync/internal/projection/projection.go"
+	retMainRel   = "../../services/tv_sync/cmd/tv_sync/main.go"
+	retLoopRel   = "../../services/tv_sync/cmd/tv_sync/retention.go"
+	retCfgRel    = "../../services/tv_sync/internal/config/config.go"
+	retCPFileRel = "../../services/tv_sync/internal/projection/checkpoint.go"
+	retSchemaRel = "../../../kanz_schemas/proto/tvsync/v1/snapshot.proto"
 )
 
 // TestTheCompositionRootBoundsTheResidentHistory holds rules one and two.

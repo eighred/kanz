@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-const rustOMSPath = "services/oms-fold-shadow"
+const rustOMSPath = "services/oms_fold_shadow"
 
 var rustOMSSources = []string{"build.rs", "src/main.rs", "src/lib.rs"}
 
@@ -25,7 +25,7 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
-kanz-order-core = { path = "../../crates/order-core" }
+kanz-order-core = { path = "../../crates/order_core" }
 kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
@@ -38,7 +38,7 @@ prost-build = "=0.14.1"
 protoc-bin-vendored = "=3.2.0"
 `
 const rustOMSBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = "../../../kanz-schemas/proto";
+    let root = "../../../kanz_schemas/proto";
     println!("cargo:rerun-if-changed={root}");
     println!("cargo:rerun-if-env-changed=KANZ_BUILD_VERSION");
     let mut config = prost_build::Config::new();
@@ -228,7 +228,7 @@ func checkOMSGoBoundary(files map[string]string) error {
 	return nil
 }
 func TestRustOMSFillShadowBoundary(t *testing.T) {
-	if e := checkRustOMSFillShadow(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")); e != nil {
+	if e := checkRustOMSFillShadow(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")); e != nil {
 		t.Fatal(e)
 	}
 	if e := checkOMSGoBoundary(omsGoSources(t)); e != nil {
@@ -263,7 +263,7 @@ func TestRustOMSFillShadowBoundaryMutations(t *testing.T) {
 			}
 		})
 	}
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	for _, tc := range []struct{ file, append string }{{"Cargo.toml", "\nreqwest=\"=0.1.0\"\n"}, {"src/lib.rs", "\nstruct Decimal { coefficient:i64 }\n"}, {"src/lib.rs", "\nfn forbidden()->f64{0.0}\n"}, {"src/main.rs", "\nfn extra(){}\n"}} {
 		t.Run(tc.file+tc.append, func(t *testing.T) {
 			dst := t.TempDir()

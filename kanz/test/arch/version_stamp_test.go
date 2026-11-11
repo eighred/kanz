@@ -144,7 +144,7 @@ func TestEveryGoImageStampsItsVersion(t *testing.T) {
 			return rerr
 		}
 		body := string(b)
-		// Only Go images are in scope — kanz-py builds no Go binary and has no
+		// Only Go images are in scope — kanz_py builds no Go binary and has no
 		// linker to pass a flag to.
 		if !goBuildCommand.MatchString(body) {
 			return nil

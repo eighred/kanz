@@ -143,7 +143,7 @@ func uint64GetterNames(t *testing.T, protoRoot string) map[string]string {
 
 func TestNoUint64RidesAHandBuiltJSONBodyAsANumber(t *testing.T) {
 	root := moduleRoot(t)
-	protoRoot := filepath.Join(filepath.Dir(root), "kanz-schemas", "proto")
+	protoRoot := filepath.Join(filepath.Dir(root), "kanz_schemas", "proto")
 
 	getters := uint64GetterNames(t, protoRoot)
 

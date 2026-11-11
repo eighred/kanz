@@ -12,7 +12,7 @@ import (
 
 func checkTVReplayVerifier(files map[string]string) error {
 	required := map[string][]string{
-		"services/tv-sync/internal/projection/verify_replay.go": {
+		"services/tv_sync/internal/projection/verify_replay.go": {
 			"IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly",
 			"currentTenant != tenant", "unsafe", "rolsuper OR rolbypassrls", "relrowsecurity AND relforcerowsecurity",
 			"octet_length(event_id)", "octet_length(event_type)", "maxID > 1024", "maxType > 1024",
@@ -21,17 +21,17 @@ func checkTVReplayVerifier(files map[string]string) error {
 			"full: true", "full.Rehydrate(ctx)", "restored.Rehydrate(ctx)", "!proto.Equal(want, got)", "tx.Rollback(ctx)",
 			"compareReplayExact(full, restored)", "hashReplayPart(stateDigest, exactHash[:])",
 		},
-		"services/tv-sync/internal/projection/verify_replay_validation.go": {
+		"services/tv_sync/internal/projection/verify_replay_validation.go": {
 			"RecursionLimit: 64", "len(m.GetUnknown()) != 0", "boundedReplayRational(s)", "a.TenantId != tenant", "cp.Seq != snap.checkpointSeq",
 		},
-		"services/tv-sync/cmd/tv-sync-replay/main.go": {
+		"services/tv_sync/cmd/tv_sync_replay/main.go": {
 			"!version.IsStamped()", "expected != version.String()", `os.Getenv("TV_SYNC_DATABASE_URL") != ""`,
 			`secret.ReadBounded("TV_SYNC_DATABASE_URL", 16<<10)`, "pg.NewTenantPool(ctx, dsn, tenant)", "projection.VerifyPostgresSnapshot(ctx, pool, tenant, retention)",
 		},
 		"pkg/secret/secret.go":                                        {"io.LimitReader(f, maxBytes+1)", "maxBytes > 1<<20", "!info.Mode().IsRegular()"},
 		"pkg/secret/bounded_mount_linux.go":                           {"unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK"},
-		"services/tv-sync/internal/projection/verify_replay_exact.go": {"a.Cmp(b) != 0", "{a.baseline, b.baseline}, {a.live, b.live}", "a.Num().Bytes()", "a.Denom().Bytes()"},
-		"services/tv-sync/Dockerfile":                                 {"/out/tv-sync-replay ./services/tv-sync/cmd/tv-sync-replay", "COPY --from=build /out/tv-sync-replay /tv-sync-replay"},
+		"services/tv_sync/internal/projection/verify_replay_exact.go": {"a.Cmp(b) != 0", "{a.baseline, b.baseline}, {a.live, b.live}", "a.Num().Bytes()", "a.Denom().Bytes()"},
+		"services/tv_sync/Dockerfile":                                 {"/out/tv-sync-replay ./services/tv_sync/cmd/tv_sync_replay", "COPY --from=build /out/tv-sync-replay /tv-sync-replay"},
 	}
 	for path, markers := range required {
 		for _, marker := range markers {
@@ -40,11 +40,11 @@ func checkTVReplayVerifier(files map[string]string) error {
 			}
 		}
 	}
-	verifier := files["services/tv-sync/internal/projection/verify_replay.go"]
+	verifier := files["services/tv_sync/internal/projection/verify_replay.go"]
 	if strings.Contains(verifier, ".fold(") || strings.Contains(verifier, "replayEverythingForTest") {
 		return fmt.Errorf("verifier must use the production Rehydrate fold")
 	}
-	command := files["services/tv-sync/cmd/tv-sync-replay/main.go"]
+	command := files["services/tv_sync/cmd/tv_sync_replay/main.go"]
 	for _, forbidden := range []string{"pkg/bus", "os/exec", "logger.", "fmt.Print", "err.Error()"} {
 		if strings.Contains(command, forbidden) {
 			return fmt.Errorf("verifier command must not publish or disclose errors")
@@ -54,7 +54,7 @@ func checkTVReplayVerifier(files map[string]string) error {
 }
 
 func checkTVReplayCI(data []byte) error {
-	return checkTVProofCI(data, "check_tv_replay_evidence.py --pattern", "TEST_POSTGRES_URL", "postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable", []string{"set -euo pipefail", "python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py", `go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"`, `python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"`})
+	return checkTVProofCI(data, "check_tv_replay_evidence.py --pattern", "TEST_POSTGRES_URL", "postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable", []string{"set -euo pipefail", "python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py", `go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv_sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"`, `python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"`})
 }
 
 func checkTVProofCI(data []byte, pattern, envName, envValue string, want []string) error {
@@ -115,7 +115,7 @@ func TestTVReplayVerifierRequiresActualPostgresEvidence(t *testing.T) {
 }
 
 func TestTVReplayVerifierPreservesReadOnlyCanonicalBoundary(t *testing.T) {
-	paths := []string{"services/tv-sync/internal/projection/verify_replay.go", "services/tv-sync/internal/projection/verify_replay_validation.go", "services/tv-sync/cmd/tv-sync-replay/main.go", "pkg/secret/secret.go", "services/tv-sync/Dockerfile", "pkg/secret/bounded_mount_linux.go", "services/tv-sync/internal/projection/verify_replay_exact.go"}
+	paths := []string{"services/tv_sync/internal/projection/verify_replay.go", "services/tv_sync/internal/projection/verify_replay_validation.go", "services/tv_sync/cmd/tv_sync_replay/main.go", "pkg/secret/secret.go", "services/tv_sync/Dockerfile", "pkg/secret/bounded_mount_linux.go", "services/tv_sync/internal/projection/verify_replay_exact.go"}
 	files := map[string]string{}
 	for _, path := range paths {
 		b, err := os.ReadFile(filepath.Join(moduleRoot(t), path))

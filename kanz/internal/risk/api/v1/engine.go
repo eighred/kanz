@@ -26,7 +26,7 @@
 //
 // This package is `kanz/internal/risk/api/v1`. The Engine interface
 // and every type in this file is **additive-only within v1** under the
-// same logic as kanz-schemas/README.md § Envelope Policy §1: a method
+// same logic as kanz_schemas/README.md § Envelope Policy §1: a method
 // removed or retyped here breaks every caller, and breaking changes
 // are rare and require a sibling `v2/` package + dual-path migration.
 // A new method may be added to Engine when every plausible
@@ -220,7 +220,7 @@ type Measure struct {
 	Name MeasureName
 	// Value is the canonical exact-decimal value. common.v1.Decimal is
 	// the system-wide money/size/price representation
-	// (kanz-schemas/proto/common/v1/decimal.proto) — using it here
+	// (kanz_schemas/proto/common/v1/decimal.proto) — using it here
 	// keeps the api surface coherent with the risk-output events
 	// RISK-10 publishes.
 	Value *commonpb.Decimal
@@ -403,7 +403,7 @@ const (
 )
 
 // QualityFlag annotates a response with trust signals. Mirrors the
-// envelope QualityFlag concept (kanz-schemas/proto/envelope/v1/envelope.proto)
+// envelope QualityFlag concept (kanz_schemas/proto/envelope/v1/envelope.proto)
 // without depending on the proto type, so api/v1 stays free of
 // envelope-versioning churn for purely Go-API concerns.
 type QualityFlag string
@@ -479,7 +479,7 @@ const (
 
 // QualityFlags is every flag the engine can attach to a response. It
 // exists so translation layers (the query.v1 gRPC mapping in
-// services/risk-engine/internal/grpcsrv) can be proven exhaustive by a
+// services/risk_engine/internal/grpcsrv) can be proven exhaustive by a
 // test rather than silently dropping a flag they were never taught —
 // which would restore exactly the silence QualityFlagCurrencyExcluded
 // was added to break. Append here when adding a flag above.

@@ -235,7 +235,7 @@ caller's own latency stays bounded.
 histogram_quantile(0.99, sum(rate(kanz_risk_recompute_duration_seconds_bucket[5m])) by (le))  # bounded — breaker is shedding
 ```
 Degraded predictions surface via the PRED-02 `degraded_reason` on the prediction
-envelope / kanz-py inference logs (`circuit_open`).
+envelope / kanz_py inference logs (`circuit_open`).
 
 #### Impact
 The PRED-07 breaker is doing its job: it opened after consecutive timeouts and

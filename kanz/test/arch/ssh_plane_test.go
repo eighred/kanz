@@ -57,7 +57,7 @@ import (
 // shape that does not decay.
 
 // sshImportAllowed is now PATH-SCOPED (S2a): golang.org/x/crypto/ssh is permitted
-// ONLY inside cmd/kanz-provisioner/, the one-shot Job that bootstraps a node's k3s
+// ONLY inside cmd/kanz_provisioner/, the one-shot Job that bootstraps a node's k3s
 // join over SSH. SSH returns to the estate at exactly this one point (KANZ_BRAIN.md,
 // "estate is Kubernetes-managed", refined 2026-07-24: the node-join handshake). The
 // same import ANYWHERE ELSE is still the cancelled operator plane arriving and
@@ -71,7 +71,7 @@ import (
 // the opposite of the reason this test exists: it is what makes the one permitted SSH
 // session verify WHO it is talking to. That session used to run with
 // ssh.InsecureIgnoreHostKey, so it piped K3S_TOKEN — cluster admission — to whatever
-// answered the dial (see cmd/kanz-provisioner/hostkey.go for the full account). This
+// answered the dial (see cmd/kanz_provisioner/hostkey.go for the full account). This
 // entry does not widen the plane by a single call site; it narrows the one that exists.
 //
 // It needs its own entry only because this map is keyed on the EXACT import path, which
@@ -80,8 +80,8 @@ import (
 // deny-by-default shape this file argues for. Removing the insecure callback without
 // this line leaves the build red, so the two changes belong together.
 var sshImportAllowed = map[string]string{
-	"golang.org/x/crypto/ssh":            "cmd/kanz-provisioner/",
-	"golang.org/x/crypto/ssh/knownhosts": "cmd/kanz-provisioner/",
+	"golang.org/x/crypto/ssh":            "cmd/kanz_provisioner/",
+	"golang.org/x/crypto/ssh/knownhosts": "cmd/kanz_provisioner/",
 }
 
 func TestNoSSHPlane(t *testing.T) {
@@ -179,7 +179,7 @@ func TestNoSSHPlane(t *testing.T) {
 			"on this point.\n\n" +
 			"For node deployment or tenant revocation, inspect AGENTS.md, this guard,\n" +
 			"and the current operator code and Issues. The node-join SSH exception is\n" +
-			"limited to cmd/kanz-provisioner; tenant revocation remains incomplete (#108).\n\n" +
+			"limited to cmd/kanz_provisioner; tenant revocation remains incomplete (#108).\n\n" +
 			"If this import is genuinely not the operator plane returning, add it to\n" +
 			"sshImportAllowed with the reason why. Reviving the SSH plane is a lead decision\n" +
 			"recorded in an Issue with an updated guard — it is not a test edit alone.")

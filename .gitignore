@@ -7,8 +7,8 @@
 # freshly built test binaries in %TEMP%, so the Makefile points GOTMPDIR here.
 .gotmp/
 
-# Rust migration build output; canonical schemas remain tracked in kanz-schemas.
-/kanz-rs/target/
+# Rust migration build output; canonical schemas remain tracked in kanz_schemas.
+/kanz_rs/target/
 
 # Stripped release binaries (`make release`).
 bin/
@@ -22,6 +22,8 @@ bin/
 /kanz/universe.exe
 /kanz/kanz-provisioner
 /kanz/kanz-provisioner.exe
+/kanz/kanz_provisioner
+/kanz/kanz_provisioner.exe
 
 # Compiled binaries. `go build ./cmd/<x>` from the module root drops the binary
 # beside the source, and one reached a commit that way (#410's branch). Untracked

@@ -10,7 +10,7 @@ import (
 
 func TestProductionCloseOwnershipUsesDurableView(t *testing.T) {
 	for _, venue := range []string{"binance", "okx"} {
-		path := filepath.Join(moduleRoot(t), "services", "venue-"+venue, "cmd", "venue-"+venue, "main.go")
+		path := filepath.Join(moduleRoot(t), "services", "venue_"+venue, "cmd", "venue_"+venue, "main.go")
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
 			t.Fatal(err)

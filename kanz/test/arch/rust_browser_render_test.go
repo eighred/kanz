@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const browserRenderPath = "crates/browser-render"
+const browserRenderPath = "crates/browser_render"
 const browserRenderManifest = `[package]
 name = "kanz-browser-render"
 version = "0.1.0"
@@ -28,11 +28,11 @@ crate-type = ["cdylib", "rlib"]`
 // alternate source or frontend activation can enter this reviewed local kernel.
 // Digests normalize only checkout line endings; they do not prove arithmetic.
 var browserRenderSources = map[string]string{
-	"tests/build-wasm.sh": "e6533f275385afeba9d1d76b7bdf6b8463860e0962e7b0b81fa08c6e2cfe5f81",
+	"tests/build-wasm.sh": "f44823924f2420941a69f6844f4b0c2492563cc3bb39495f1593a60607a65a6a",
 	"src/lib.rs":          "48a1c581f891ab3df8e32d8b0218427f60ca2617714953792e504474ec0e2e37",
 	"tests/kernel.rs":     "dea7cd95e81117924dfb753af7d6d7b25d5835055141d4ba87b265ca95915ae7",
 	"tests/oracle.ts":     "a72c54727aafd9b6e9325f5631a9f1a0235d5cc66cb70d93c9f21003bdd9441b",
-	"tests/wasm.mjs":      "29201476520b74b1d6770de1caeaee2e8f12e89ff68d801e2139faa5a5093cca",
+	"tests/wasm.mjs":      "406d23e7c55f1ae30be42c2d0c33b3fb9031546db1717cf8ab89a25da70cae02",
 }
 
 func checkBrowserRender(root string) error {
@@ -84,7 +84,7 @@ func checkBrowserRender(root string) error {
 	return nil
 }
 func TestRustBrowserRenderBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	if err := checkBrowserRender(root); err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +152,8 @@ func browserAssetHooks(raw string) bool {
 func TestBrowserRenderAssetBuildClosure(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
 	sources := map[string]string{
-		"kanz-web/scripts/build-renderer.mjs":      "0ee042397b965439daa2a781935075901faa60e666226e378f8bbab7c00d4477",
-		"kanz-web/scripts/build-renderer.test.mjs": "ef3dcab1681352e85e34b91727c401aeca7c8a342aee9158c1a174b2ca9d4d6e",
+		"web/scripts/build-renderer.mjs":      "96bc7f50a580f2b0ee4981d1178c195420480362a45014ec30e8d303d6d08f06",
+		"web/scripts/build-renderer.test.mjs": "7f38646ecb2b474485a5a40a5c48069d7a997a05bfa533534809ca4bca4f4f46",
 	}
 	for name, expected := range sources {
 		raw, err := os.ReadFile(filepath.Join(root, name))
@@ -173,7 +173,7 @@ func TestBrowserRenderAssetBuildClosure(t *testing.T) {
 		}
 		return string(raw)
 	}
-	if !browserAssetHooks(read("kanz-web/package.json")) {
+	if !browserAssetHooks(read("web/package.json")) {
 		t.Fatal("missing shared browser build hook")
 	}
 	for _, bad := range []string{`{"scripts":{"prebuild":"node scripts/build-renderer.mjs"},"nested":{"predev":"node scripts/build-renderer.mjs"}}`, `{"nested":{"scripts":{"prebuild":"node scripts/build-renderer.mjs","predev":"node scripts/build-renderer.mjs"}}}`, `{"scripts":{"prebuild":"true","predev":"node scripts/build-renderer.mjs"}}`} {
@@ -181,14 +181,14 @@ func TestBrowserRenderAssetBuildClosure(t *testing.T) {
 			t.Fatal("nested/missing/bypassed hook accepted")
 		}
 	}
-	receipt := read("kanz-rs/crates/browser-render/tests/wasm.mjs")
-	for _, name := range []string{"kanz-rs/rust-toolchain.toml", "kanz-web/scripts/build-renderer.mjs", "kanz-web/scripts/build-renderer.test.mjs"} {
+	receipt := read("kanz_rs/crates/browser_render/tests/wasm.mjs")
+	for _, name := range []string{"kanz_rs/rust-toolchain.toml", "web/scripts/build-renderer.mjs", "web/scripts/build-renderer.test.mjs"} {
 		if !strings.Contains(receipt, "'"+name+"'") {
 			t.Fatal("build receipt omits shared compiler input")
 		}
 	}
-	recipe := read("kanz-rs/crates/browser-render/tests/build-wasm.sh")
-	if !strings.Contains(recipe, "node ../kanz-web/scripts/build-renderer.mjs") || strings.Contains(recipe, "cargo +1.90.0 rustc") {
+	recipe := read("kanz_rs/crates/browser_render/tests/build-wasm.sh")
+	if !strings.Contains(recipe, "node ../web/scripts/build-renderer.mjs") || strings.Contains(recipe, "cargo +1.90.0 rustc") {
 		t.Fatal("qualification bypasses shared recipe")
 	}
 }
@@ -228,15 +228,15 @@ func browserRenderWorkflow(raw []byte) bool {
 	for _, step := range job.Steps {
 		switch step.Name {
 		case "Select pinned Node for actual WASM qualification":
-			if step.Uses != "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" || step.With["node-version-file"] != "kanz-web/.nvmrc" {
+			if step.Uses != "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" || step.With["node-version-file"] != "web/.nvmrc" {
 				return false
 			}
 		case "Qualify actual browser rendering WASM":
-			if step.Directory != "kanz-rs" || strings.TrimSpace(step.Run) != "set -euo pipefail\ncargo +1.90.0 test --locked --release -p kanz-browser-render\nrustup target add wasm32-unknown-unknown --toolchain 1.90.0\nbash crates/browser-render/tests/build-wasm.sh | tee \"$RUNNER_TEMP/browser-render.json\"" {
+			if step.Directory != "kanz_rs" || strings.TrimSpace(step.Run) != "set -euo pipefail\ncargo +1.90.0 test --locked --release -p kanz-browser-render\nrustup target add wasm32-unknown-unknown --toolchain 1.90.0\nbash crates/browser_render/tests/build-wasm.sh | tee \"$RUNNER_TEMP/browser-render.json\"" {
 				return false
 			}
 		case "Preserve actual Node WASM evidence":
-			if step.Uses != "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" || step.With["name"] != "browser-render-wasm" || step.With["if-no-files-found"] != "error" || strings.TrimSpace(step.With["path"]) != "${{ runner.temp }}/browser-render.json\nkanz-rs/target/wasm32-unknown-unknown/release/kanz_browser_render.wasm" {
+			if step.Uses != "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" || step.With["name"] != "browser-render-wasm" || step.With["if-no-files-found"] != "error" || strings.TrimSpace(step.With["path"]) != "${{ runner.temp }}/browser-render.json\nkanz_rs/target/wasm32-unknown-unknown/release/kanz_browser_render.wasm" {
 				return false
 			}
 		default:
@@ -262,11 +262,11 @@ func TestRustBrowserWASMQualificationRequired(t *testing.T) {
 		{"  compatibility:\n", "  compatibility:\n    if: false\n"},
 		{"cargo +1.90.0 test --locked --release -p kanz-browser-render", "true"},
 		{"rustup target add wasm32-unknown-unknown --toolchain 1.90.0", "true"},
-		{"bash crates/browser-render/tests/build-wasm.sh", "echo proof"},
+		{"bash crates/browser_render/tests/build-wasm.sh", "echo proof"},
 		{"name: Qualify actual browser rendering WASM", "name: Qualify actual browser rendering WASM\n        if: false"},
 		{"name: Qualify actual browser rendering WASM", "name: Qualify actual browser rendering WASM\n        continue-on-error: true"},
 		{"name: browser-render-wasm", "name: unrelated"},
-		{"node-version-file: kanz-web/.nvmrc", "node-version: latest"},
+		{"node-version-file: web/.nvmrc", "node-version: latest"},
 	} {
 		changed := strings.Replace(string(raw), m[0], m[1], 1)
 		if changed == string(raw) {

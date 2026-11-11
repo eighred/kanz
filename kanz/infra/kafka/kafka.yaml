@@ -161,7 +161,7 @@ spec:
             - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "2" }
             - { name: KAFKA_MIN_INSYNC_REPLICAS, value: "2" }
             # Topics are provisioned explicitly
-            # (kanz-schemas/README.md § Subject Taxonomy §7).
+            # (kanz_schemas/README.md § Subject Taxonomy §7).
             - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
             - { name: KAFKA_NUM_PARTITIONS, value: "3" }
           volumeMounts:

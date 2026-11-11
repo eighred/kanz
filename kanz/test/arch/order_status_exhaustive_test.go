@@ -17,7 +17,7 @@ import (
 //
 // order.v1.OrderStatus gained ORDER_STATUS_WORKING_SCHEDULED in #435 — a parent
 // order being sliced over a window. Adding an enum value is deliberately
-// NON-BREAKING on the wire (kanz-schemas/README.md § Schema Evolution §4), and
+// NON-BREAKING on the wire (kanz_schemas/README.md § Schema Evolution §4), and
 // that is what makes this dangerous rather than safe: nothing in buf, the
 // compiler, or `go vet` notices that a switch somewhere has stopped covering
 // its own domain. Go has no exhaustiveness check for enums, because a protobuf

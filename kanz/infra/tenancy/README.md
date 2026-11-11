@@ -50,7 +50,7 @@ kubectl -n kanz-tenancy wait --for=condition=complete job/tenant-onboard-acme
 
 Legacy Kafka remains the default. To opt into the qualified native path, supply
 the exact image, manifest digest, broker identity and cluster inputs described in
-[the native tool runbook](../../cmd/kanz-kafka-provision/README.md). For the
+[the native tool runbook](../../cmd/kanz_kafka_provision/README.md). For the
 in-cluster runner, also create `tenantctl-native-topics` in `kanz-tenancy` with
 `--from-file=topics-job.yaml=../kafka/topics-job.yaml`; the optional volume mounts
 it at `/kafka`, preserving the caller's relative input layout. Native preflight
@@ -97,7 +97,7 @@ The disposable acceptance harness requires Linux, Python 3 with PyYAML, bash, jq
 kind and Docker. In an approved isolated test environment, from the repo root:
 
 ```sh
-python3 -B tools/tenant-quota/qualify.py
+python3 -B tools/tenant_quota/qualify.py
 cd kanz
 go test -p 1 ./test/arch/ -count=1
 ```

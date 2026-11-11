@@ -140,7 +140,7 @@ func TestEveryExecutionAlgoNamesAWireEnumValue(t *testing.T) {
 			"algo.Lookup resolves them and no order can ask for one, because an order names its "+
 			"algorithm through order.v1.ExecutionSchedule.algo and nothing else. The code is in the "+
 			"binary and unreachable from outside.\n"+
-			"Add the enum value to kanz-schemas/proto/order/v1/order.proto, or add an argued entry "+
+			"Add the enum value to kanz_schemas/proto/order/v1/order.proto, or add an argued entry "+
 			"to algoWithoutEnumExempt.",
 			len(unnamed), enumPrefix+"<NAME>", strings.Join(unnamed, ", "))
 	}

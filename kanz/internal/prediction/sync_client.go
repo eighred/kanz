@@ -41,7 +41,7 @@ import (
 	inferencepb "github.com/eighred/kanz/kanz-schemas-go/inference/v1"
 )
 
-// Degraded-reason identifiers matching PRED-02 §2 + kanz-py's
+// Degraded-reason identifiers matching PRED-02 §2 + kanz_py's
 // streaming worker constants. Named bindings (not free-form
 // strings at call sites) so a rename surfaces as a Go compile
 // error rather than silent alert-rule breakage.
@@ -84,7 +84,7 @@ type SyncClientOptions struct {
 	// this package knows enough to pick them. The subject population does not
 	// belong to this package at all: Predict checks SubjectID only for
 	// emptiness, and "it is a portfolio id" is a convention that lives at the
-	// caller (services/risk-engine/internal/app/features.go), not a property of
+	// caller (services/risk_engine/internal/app/features.go), not a property of
 	// the type. A default here would be this package inventing a bound on
 	// somebody else's key space and then reading its own invention back as a
 	// fact — which is the shape the cache was enumerated as an unbounded leak

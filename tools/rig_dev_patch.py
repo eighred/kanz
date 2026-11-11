@@ -145,7 +145,7 @@ _DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS", "API_GATEWAY_OIDC_ISSUER"})
 _ADD_ENV = {
     "api-gateway-deploy.yaml": [
         # The HS256 dev validator's key. api-gateway picks OIDC over HS256 when
-        # API_GATEWAY_OIDC_ISSUER is set (cmd/api-gateway/main.go), which is why
+        # API_GATEWAY_OIDC_ISSUER is set (cmd/api_gateway/main.go), which is why
         # that var is dropped above — the rig cannot reach login.eighred.com, so
         # with OIDC selected the gateway can authenticate nobody and its order
         # routes are untestable here. The key is read from the api-gateway-secrets

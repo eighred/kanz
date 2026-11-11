@@ -27,7 +27,7 @@ func checkRustOMSPosition(raw string) error {
 	return nil
 }
 func TestRustOMSPositionBoundary(t *testing.T) {
-	p := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "src", "position.rs")
+	p := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs", "crates", "oms_store", "src", "position.rs")
 	b, e := os.ReadFile(p)
 	if e != nil {
 		t.Fatal(e)
@@ -63,7 +63,7 @@ func TestRustOMSPositionBoundary(t *testing.T) {
 }
 
 func TestRustOMSPositionMathBoundary(t *testing.T) {
-	b, e := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "src", "position_math.rs"))
+	b, e := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs", "crates", "oms_store", "src", "position_math.rs"))
 	if e != nil {
 		t.Fatal(e)
 	}

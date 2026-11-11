@@ -17,7 +17,7 @@ import (
 // explicit review while this transitional boundary remains in force. Rust's
 // compiler and Go-oracle conformance tests establish different properties.
 func TestRustMigrationRemainsCanonicalCompatibilityLibrary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	if err := checkRustMigrationBoundary(root); err != nil {
 		t.Fatal(err)
 	}
@@ -39,21 +39,21 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.2.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
-	"workspace":          {"members": `["crates/oms-recovery", "crates/order-core", "crates/market-feed", "crates/oms-store", "crates/proto-wire", "crates/oms-venue", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow", "services/lake-snapshot", "crates/browser-render"]`, "resolver": `"2"`},
+	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render"]`, "resolver": `"2"`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
 // pass when it occurred in a comment or an unused variable beside another input.
 const rustMigrationBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let schema = "../kanz-schemas/proto/common/v1/decimal.proto";
+    let schema = "../kanz_schemas/proto/common/v1/decimal.proto";
     println!("cargo:rerun-if-changed={schema}");
     let mut config = prost_build::Config::new();
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
-    let money = "../kanz-schemas/proto/common/v1/money.proto";
+    let money = "../kanz_schemas/proto/common/v1/money.proto";
     println!("cargo:rerun-if-changed={money}");
-    let position = "../kanz-schemas/proto/common/v1/log_position.proto";
+    let position = "../kanz_schemas/proto/common/v1/log_position.proto";
     println!("cargo:rerun-if-changed={position}");
-    config.compile_protos(&[schema, money, position], &["../kanz-schemas/proto"])?;
+    config.compile_protos(&[schema, money, position], &["../kanz_schemas/proto"])?;
     Ok(())
 }
 `
@@ -226,7 +226,7 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
-			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms-store" || rel == "crates/proto-wire" || rel == "crates/oms-venue" || rel == "crates/order-core" || rel == "crates/oms-recovery" || rel == browserRenderPath {
+			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms_store" || rel == "crates/proto_wire" || rel == "crates/oms_venue" || rel == "crates/order_core" || rel == "crates/oms_recovery" || rel == browserRenderPath {
 				return filepath.SkipDir
 			} // Separately guarded above.
 			if rel == "target" || rel == ".git" {
@@ -286,7 +286,7 @@ func checkRustMigrationBoundary(root string) error {
 // Mutations run against disposable copies, never the shared checkout. This
 // proves the named guard cases, not complete semantic Rust analysis.
 func TestRustMigrationBoundaryRejectsMutations(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	for _, tc := range []struct{ name, path, appendText string }{
 		{"runtime_dependency", "Cargo.toml", "\n[target.'cfg(unix)'.dependencies]\ntokio = \"1\"\n"},
 		{"binary_entrypoint", "src/main.rs", "fn main() {}\n"},

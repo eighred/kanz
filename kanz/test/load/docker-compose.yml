@@ -8,7 +8,7 @@
 # live spine. Seeded by `go run ./test/load/seed` (one PortfolioSnapshot for PF1).
 #
 # Build context is the repo ROOT (../../..): the service Dockerfiles COPY the
-# generated kanz-schemas Go SDK (kanz-schemas/gen/go, EVT-15a generated-not-
+# generated kanz_schemas Go SDK (kanz_schemas/gen/go, EVT-15a generated-not-
 # committed), so `buf generate` must run before `docker compose build`. See
 # .github/workflows/latency.yml and README.md "CI gate".
 #
@@ -61,7 +61,7 @@ services:
   risk-engine:
     build:
       context: ../../..
-      dockerfile: kanz/services/risk-engine/Dockerfile
+      dockerfile: kanz/services/risk_engine/Dockerfile
     depends_on:
       nats-init:
         condition: service_completed_successfully
@@ -82,7 +82,7 @@ services:
   api-gateway:
     build:
       context: ../../..
-      dockerfile: kanz/services/api-gateway/Dockerfile
+      dockerfile: kanz/services/api_gateway/Dockerfile
     depends_on:
       risk-engine:
         condition: service_started
@@ -96,7 +96,7 @@ services:
       # middleware is in the hot path of every request production will ever serve.
       # Mint the TOKEN the k6 script sends (test/load/config.js):
       #
-      #   TOKEN=$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test) \
+      #   TOKEN=$(go run ./cmd/kanz_devtoken --secret load-secret --tenant load-test) \
       #     k6 run test/load/smoke.js
       #
       # THE TENANT IS load-test, not PF1-anything. It must match SEED_TENANT in

@@ -69,7 +69,7 @@ package order
 // FLOOR — what must still admit. The longest id naming a real instrument is
 // XOKX:BTC-USD-241227-60000-C, 27 bytes (internal/marketdata/termsload/
 // okx_test.go); the longest in the estate at all is 30, and it is a deliberately
-// oversized column-truncation fixture (cmd/kanz-monitor/view_test.go). But the
+// oversized column-truncation fixture (cmd/kanz_monitor/view_test.go). But the
 // floor is NOT either of those numbers, because the 27-byte one is composed
 // rather than written down: termsload.contractID returns ContractNamespace + ":"
 // + instID, the namespace is operator-supplied, required, and has no default and

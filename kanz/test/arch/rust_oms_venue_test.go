@@ -20,8 +20,8 @@ publish = false
 
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
-kanz-order-core = { path = "../order-core" }
-kanz-proto-wire = { path = "../proto-wire" }
+kanz-order-core = { path = "../order_core" }
+kanz-proto-wire = { path = "../proto_wire" }
 prost = "=0.14.1"
 prost-reflect = "=0.16.2"
 bytes = "=1.12.1"
@@ -59,7 +59,7 @@ prost = "=0.14.1"
 prost-reflect = "=0.16.2"
 `
 const rustVenueBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = "../../../kanz-schemas/proto";
+    let root = "../../../kanz_schemas/proto";
     println!("cargo:rerun-if-changed={root}");
     let mut config = prost_build::Config::new();
     config.file_descriptor_set_path(
@@ -74,7 +74,7 @@ const rustVenueBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
 `
 
 func checkRustVenueBoundary(root string) error {
-	for path, want := range map[string]string{"crates/oms-venue/Cargo.toml": rustVenueCargo, "crates/proto-wire/Cargo.toml": rustProtoWireCargo, "crates/oms-venue/build.rs": rustVenueBuild} {
+	for path, want := range map[string]string{"crates/oms_venue/Cargo.toml": rustVenueCargo, "crates/proto_wire/Cargo.toml": rustProtoWireCargo, "crates/oms_venue/build.rs": rustVenueBuild} {
 		raw, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if e != nil {
 			return e
@@ -91,9 +91,9 @@ func checkRustVenueBoundary(root string) error {
 			return fmt.Errorf("unreviewed venue recipe %s", path)
 		}
 	}
-	allowed := map[string]bool{"crates/oms-venue/build.rs": true, "crates/oms-venue/src/lib.rs": true, "crates/oms-venue/src/client.rs": true, "crates/oms-venue/src/transport.rs": true, "crates/oms-venue/src/wire.rs": true, "crates/oms-venue/examples/oms-venue-fixture.rs": true, "crates/proto-wire/src/canonical.rs": true, "crates/proto-wire/src/lib.rs": true}
+	allowed := map[string]bool{"crates/oms_venue/build.rs": true, "crates/oms_venue/src/lib.rs": true, "crates/oms_venue/src/client.rs": true, "crates/oms_venue/src/transport.rs": true, "crates/oms_venue/src/wire.rs": true, "crates/oms_venue/examples/oms-venue-fixture.rs": true, "crates/proto_wire/src/canonical.rs": true, "crates/proto_wire/src/lib.rs": true}
 	files := map[string]string{}
-	for _, dir := range []string{"crates/oms-venue", "crates/proto-wire"} {
+	for _, dir := range []string{"crates/oms_venue", "crates/proto_wire"} {
 		if e := filepath.WalkDir(filepath.Join(root, filepath.FromSlash(dir)), func(path string, d fs.DirEntry, e error) error {
 			if e != nil {
 				return e
@@ -144,12 +144,12 @@ func checkRustVenueBoundary(root string) error {
 }
 func checkRustVenueMarkers(files map[string]string) error {
 	required := map[string][]string{
-		"crates/oms-venue/examples/oms-venue-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `Some("127.0.0.1"|"localhost"|"[::1]")`, `client.close().await`, `input.read(&mutbyte)`},
-		"crates/oms-venue/src/transport.rs":              {`connection_host(&uri)?`, `parse::<std::net::Ipv6Addr>()`, `uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
-		"crates/oms-venue/src/client.rs":                 {`error.is::<tonic::TimeoutExpired>()`, `.map_err(rpc_error)`, `max_decoding_message_size(budget.bytes())`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout_at(expires,async`, `letexpires=tokio::time::Instant::now()+deadline`, `before_deadline(expires,result)`, `tokio::time::Instant::now()>=expires`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
-		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::Canonical::decode(raw)`, `kanz_proto_wire::Canonical::from_value(value)`, `src.remaining()>self.1.bytes()`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode_with_budget(nested,budget)`},
-		"crates/proto-wire/src/canonical.rs":             {`normalize_with_budget(T::descriptor()?,raw,budget)`, `value.encoded_len()>MAX_BYTES`},
-		"crates/proto-wire/src/lib.rs":                   {`raw.len()>limit`, `out.len().checked_add(raw.len()).is_none_or(|n|n>limit)`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child,limit)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
+		"crates/oms_venue/examples/oms-venue-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `Some("127.0.0.1"|"localhost"|"[::1]")`, `client.close().await`, `input.read(&mutbyte)`},
+		"crates/oms_venue/src/transport.rs":              {`connection_host(&uri)?`, `parse::<std::net::Ipv6Addr>()`, `uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
+		"crates/oms_venue/src/client.rs":                 {`error.is::<tonic::TimeoutExpired>()`, `.map_err(rpc_error)`, `max_decoding_message_size(budget.bytes())`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout_at(expires,async`, `letexpires=tokio::time::Instant::now()+deadline`, `before_deadline(expires,result)`, `tokio::time::Instant::now()>=expires`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
+		"crates/oms_venue/src/wire.rs":                   {`kanz_proto_wire::Canonical::decode(raw)`, `kanz_proto_wire::Canonical::from_value(value)`, `src.remaining()>self.1.bytes()`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode_with_budget(nested,budget)`},
+		"crates/proto_wire/src/canonical.rs":             {`normalize_with_budget(T::descriptor()?,raw,budget)`, `value.encoded_len()>MAX_BYTES`},
+		"crates/proto_wire/src/lib.rs":                   {`raw.len()>limit`, `out.len().checked_add(raw.len()).is_none_or(|n|n>limit)`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child,limit)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
 	}
 	for name, markers := range required {
 		code, e := rustMigrationWithoutComments(files[name])
@@ -166,12 +166,12 @@ func checkRustVenueMarkers(files map[string]string) error {
 	return nil
 }
 func TestRustVenueClientBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	if e := checkRustVenueBoundary(root); e != nil {
 		t.Fatal(e)
 	}
 	files := map[string]string{}
-	for _, name := range []string{"crates/oms-venue/src/transport.rs", "crates/oms-venue/src/client.rs", "crates/oms-venue/src/wire.rs", "crates/proto-wire/src/lib.rs", "crates/proto-wire/src/canonical.rs", "crates/oms-venue/examples/oms-venue-fixture.rs"} {
+	for _, name := range []string{"crates/oms_venue/src/transport.rs", "crates/oms_venue/src/client.rs", "crates/oms_venue/src/wire.rs", "crates/proto_wire/src/lib.rs", "crates/proto_wire/src/canonical.rs", "crates/oms_venue/examples/oms-venue-fixture.rs"} {
 		raw, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 		if e != nil {
 			t.Fatal(e)
@@ -194,7 +194,7 @@ func TestRustVenueClientBoundary(t *testing.T) {
 		{"raw-wire", "wire.rs", `dst.put_slice(item.wire())`, `dst.put_slice(&item.value.encode_to_vec())`},
 	} {
 		t.Run(m.name, func(t *testing.T) {
-			path := "crates/oms-venue/src/" + m.file
+			path := "crates/oms_venue/src/" + m.file
 			before := files[path]
 			after := strings.ReplaceAll(before, m.from, m.to)
 			if after == before {
@@ -220,7 +220,7 @@ func TestRustVenueActualEvidenceRequired(t *testing.T) {
 		t.Fatal(e)
 	}
 	check := func(w, c string) bool {
-		for _, marker := range []string{"cargo test --locked -p kanz-oms-venue --all-targets", "cargo clippy --locked -p kanz-oms-venue --all-targets -- -D warnings", "cargo build --locked -p kanz-oms-venue --example oms-venue-fixture", "KANZ_OMS_VENUE_BIN:", "KANZ_OMS_VENUE_VERSION:", "./services/oms/tools/venue-conformance", "set -o pipefail", "check_oms_fold_evidence.py"} {
+		for _, marker := range []string{"cargo test --locked -p kanz-oms-venue --all-targets", "cargo clippy --locked -p kanz-oms-venue --all-targets -- -D warnings", "cargo build --locked -p kanz-oms-venue --example oms-venue-fixture", "KANZ_OMS_VENUE_BIN:", "KANZ_OMS_VENUE_VERSION:", "./services/oms/tools/venue_conformance", "set -o pipefail", "check_oms_fold_evidence.py"} {
 			if !strings.Contains(w, marker) {
 				return false
 			}
@@ -235,7 +235,7 @@ func TestRustVenueActualEvidenceRequired(t *testing.T) {
 	if !check(string(w), string(c)) {
 		t.Fatal("venue proof not mandatory")
 	}
-	for _, marker := range []string{"KANZ_OMS_VENUE_VERSION:", "./services/oms/tools/venue-conformance", "set -o pipefail"} {
+	for _, marker := range []string{"KANZ_OMS_VENUE_VERSION:", "./services/oms/tools/venue_conformance", "set -o pipefail"} {
 		if check(strings.ReplaceAll(string(w), marker, "removed"), string(c)) {
 			t.Fatal("workflow mutation accepted")
 		}

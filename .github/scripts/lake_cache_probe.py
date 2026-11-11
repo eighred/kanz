@@ -15,11 +15,11 @@ from rust_release_evidence import bounded_command
 
 COOK = "cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot"
 BUILD = 'test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot'
-SOURCE = "kanz-rs/services/lake-snapshot/src/main.rs"
+SOURCE = "kanz_rs/services/lake_snapshot/src/main.rs"
 COMMENT = b"\n// Synthetic joint source and VERSION cache qualification only.\n"
-DOCKERFILE = "kanz/services/lake-sink/Dockerfile"
+DOCKERFILE = "kanz/services/lake_sink/Dockerfile"
 LIMIT = 16 << 20
-PATHS = ("kanz-rs", "kanz-schemas/proto", DOCKERFILE, ".dockerignore")
+PATHS = ("kanz_rs", "kanz_schemas/proto", DOCKERFILE, ".dockerignore")
 SOURCE_HASHES = ("contextSHA256", "dockerfileSHA256", "sourceBeforeSHA256", "sourceAfterSHA256")
 
 
@@ -139,7 +139,7 @@ def checked_path(name, mode, blob):
     path = Path(name)
     if mode not in ("100644", "100755") or not re.fullmatch(r"[0-9a-f]{40}", blob) or path.is_absolute() or ".." in path.parts:
         raise ValueError("unsupported tracked file")
-    if not (name.startswith("kanz-rs/") or name.startswith("kanz-schemas/proto/") or name in (DOCKERFILE, ".dockerignore")):
+    if not (name.startswith("kanz_rs/") or name.startswith("kanz_schemas/proto/") or name in (DOCKERFILE, ".dockerignore")):
         raise ValueError("unapproved source path")
     return path
 

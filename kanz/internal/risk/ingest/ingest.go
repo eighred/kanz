@@ -1,7 +1,7 @@
 // Package ingest is the risk module's bus→engine bridge. It takes
 // bus deliveries (after the bus.Consumer has already validated the
 // envelope per EVT-17), discriminates by event_type, unmarshals the
-// payload into the correct kanz-schemas domain.v1 proto, and
+// payload into the correct kanz_schemas domain.v1 proto, and
 // dispatches to the RISK-05 Applier.
 //
 // # Scope split with RISK-05
@@ -44,9 +44,9 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 )
 
-// Event-type names follow kanz-schemas/README.md § Subject Taxonomy §1
+// Event-type names follow kanz_schemas/README.md § Subject Taxonomy §1
 // ({domain}.{entity}.{event_type}) and the per-payload doc comments in
-// kanz-schemas/proto/domain/v1/portfolio.proto. They are the values
+// kanz_schemas/proto/domain/v1/portfolio.proto. They are the values
 // the engine's orchestrator subscribes to and the values RISK-10 will
 // publish under.
 const (
@@ -71,7 +71,7 @@ type Applier interface {
 	// ApplyPositionChanged applies a position-level state update.
 	ApplyPositionChanged(ctx context.Context, env *envelopepb.Envelope, p *domainpb.PositionState) error
 	// ApplyPortfolioSnapshot applies a full materialized snapshot; see
-	// kanz-schemas/README.md § Event Class Rules §3 (snapshot then log-resume from
+	// kanz_schemas/README.md § Event Class Rules §3 (snapshot then log-resume from
 	// the snapshot's log_position).
 	ApplyPortfolioSnapshot(ctx context.Context, env *envelopepb.Envelope, p *domainpb.PortfolioSnapshot) error
 }

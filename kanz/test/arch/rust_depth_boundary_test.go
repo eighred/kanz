@@ -14,7 +14,7 @@ import (
 // direct-declaration checks are not Rust AST, macro expansion, data flow, Cargo
 // resolution or TLS proof. Compiler, replay, broker and dependency checks remain.
 const rustDepthBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = "../../../kanz-schemas/proto";
+    let root = "../../../kanz_schemas/proto";
     let schemas = [
         "market/v1/order_book.proto",
         "market/v1/market_data.proto",
@@ -39,7 +39,7 @@ type rustFeedSpec struct {
 }
 
 var rustFeedPackages = map[string]rustFeedSpec{
-	"crates/market-feed": {manifest: `[package]
+	"crates/market_feed": {manifest: `[package]
 name = "kanz-market-feed"
 version = "0.1.0"
 edition = "2021"
@@ -68,7 +68,7 @@ protoc-bin-vendored = "=3.2.0"
 [dev-dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"`, sources: map[string]bool{"build.rs": true, "src/lib.rs": true, "src/book.rs": true, "src/decimal.rs": true, "src/publisher.rs": true, "src/source.rs": true, "src/runtime.rs": true, "tests/go_okx_conformance.rs": true, "tests/support/go_corpus.rs": true}},
-	"services/binance-depth": {manifest: `[package]
+	"services/binance_depth": {manifest: `[package]
 name = "kanz-binance-depth"
 version = "0.1.0"
 edition = "2021"
@@ -76,7 +76,7 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
-kanz-market-feed = { path = "../../crates/market-feed" }
+kanz-market-feed = { path = "../../crates/market_feed" }
 kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
@@ -87,7 +87,7 @@ futures-util = { version = "=0.3.34", features = ["sink"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "json", "query"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }`, sources: map[string]bool{"src/lib.rs": true, "src/main.rs": true, "src/source.rs": true, "tests/go_conformance.rs": true}},
-	"services/okx-depth": {manifest: `[package]
+	"services/okx_depth": {manifest: `[package]
 name = "kanz-okx-depth"
 version = "0.1.0"
 edition = "2021"
@@ -96,7 +96,7 @@ publish = false
 
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
-kanz-market-feed = { path = "../../crates/market-feed" }
+kanz-market-feed = { path = "../../crates/market_feed" }
 prost-types = "=0.14.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
@@ -127,12 +127,12 @@ func rustBoundaryFixtureFiles() []string {
 	for _, file := range rustOMSStoreSources {
 		out = append(out, rustOMSStorePath+"/"+file)
 	}
-	out = append(out, "crates/oms-venue/Cargo.toml", "crates/oms-venue/build.rs", "crates/oms-venue/src/lib.rs", "crates/oms-venue/src/client.rs", "crates/oms-venue/src/wire.rs", "crates/oms-venue/src/transport.rs", "crates/oms-venue/examples/oms-venue-fixture.rs", "crates/proto-wire/Cargo.toml", "crates/proto-wire/src/lib.rs")
-	out = append(out, "crates/order-core/Cargo.toml", "crates/proto-wire/src/canonical.rs")
+	out = append(out, "crates/oms_venue/Cargo.toml", "crates/oms_venue/build.rs", "crates/oms_venue/src/lib.rs", "crates/oms_venue/src/client.rs", "crates/oms_venue/src/wire.rs", "crates/oms_venue/src/transport.rs", "crates/oms_venue/examples/oms-venue-fixture.rs", "crates/proto_wire/Cargo.toml", "crates/proto_wire/src/lib.rs")
+	out = append(out, "crates/order_core/Cargo.toml", "crates/proto_wire/src/canonical.rs")
 	for _, file := range rustOrderCoreSources {
-		out = append(out, "crates/order-core/"+file)
+		out = append(out, "crates/order_core/"+file)
 	}
-	out = append(out, "crates/oms-recovery/Cargo.toml", "crates/oms-recovery/src/lib.rs", "crates/oms-recovery/src/coordinator.rs", "crates/oms-recovery/src/observation.rs", "crates/oms-recovery/src/preparation.rs", "crates/oms-recovery/src/approval.rs", "crates/oms-recovery/src/fee_control.rs", "crates/oms-recovery/src/fee_commands.rs", "crates/oms-recovery/src/handlers.rs", "crates/oms-recovery/src/history.rs", "crates/oms-recovery/examples/recovery-coordinator-fixture.rs")
+	out = append(out, "crates/oms_recovery/Cargo.toml", "crates/oms_recovery/src/lib.rs", "crates/oms_recovery/src/coordinator.rs", "crates/oms_recovery/src/observation.rs", "crates/oms_recovery/src/preparation.rs", "crates/oms_recovery/src/approval.rs", "crates/oms_recovery/src/fee_control.rs", "crates/oms_recovery/src/fee_commands.rs", "crates/oms_recovery/src/handlers.rs", "crates/oms_recovery/src/history.rs", "crates/oms_recovery/examples/recovery-coordinator-fixture.rs")
 	out = append(out, rustLakePath+"/Cargo.toml")
 	for _, file := range rustLakeSources {
 		out = append(out, rustLakePath+"/"+file)
@@ -145,7 +145,7 @@ func rustBoundaryFixtureFiles() []string {
 }
 func checkRustDepthBoundary(root string) error {
 	for name, spec := range rustFeedPackages {
-		if err := checkRustFeedPackage(filepath.Join(root, filepath.FromSlash(name)), spec, name == "crates/market-feed"); err != nil {
+		if err := checkRustFeedPackage(filepath.Join(root, filepath.FromSlash(name)), spec, name == "crates/market_feed"); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
@@ -224,7 +224,7 @@ func checkRustFeedPackage(root string, spec rustFeedSpec, shared bool) error {
 			expectedPath = `#[path = "support/go_corpus.rs"]`
 		}
 		if !shared && rel == "tests/go_conformance.rs" {
-			expectedPath = `#[path = "../../../crates/market-feed/tests/support/go_corpus.rs"]`
+			expectedPath = `#[path = "../../../crates/market_feed/tests/support/go_corpus.rs"]`
 		}
 		if expectedPath == "" && len(paths) != 0 || expectedPath != "" && (len(paths) != 1 || rustMigrationCompact(paths[0]) != rustMigrationCompact(expectedPath)) {
 			return fmt.Errorf("unreviewed source path attribute in %s", rel)
@@ -280,29 +280,29 @@ func checkRustFeedPackage(root string, spec rustFeedSpec, shared bool) error {
 	return nil
 }
 func TestRustDepthRuntimeBoundary(t *testing.T) {
-	if err := checkRustDepthBoundary(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")); err != nil {
+	if err := checkRustDepthBoundary(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")); err != nil {
 		t.Fatal(err)
 	}
 }
 func TestRustDepthBoundaryRejectsMutations(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz_rs")
 	for _, tc := range []struct{ name, path, text string }{
-		{"dependency", "services/binance-depth/Cargo.toml", "\n[dev-dependencies]\nreqwest=\"*\"\n"},
-		{"alternatebuild", "crates/market-feed/build.rs", "\nfn other() {}\n"},
-		{"alternatepath", "services/okx-depth/src/source.rs", `#[path="/tmp/extra.rs"] mod extra;`},
-		{"alternateinclude", "services/okx-depth/src/source.rs", "\ninclude!(\"hidden.rs\");"},
-		{"copiedproto", "services/binance-depth/proto/market.proto", "message PriceLevel {}"},
-		{"unreviewedmodule", "crates/market-feed/src/extra.rs", "pub fn extra() {}"},
-		{"unsafe", "crates/market-feed/src/book.rs", "\nunsafe fn raw() {}"},
-		{"float", "crates/market-feed/src/decimal.rs", "\npub fn amount()->f64 { 1.0 }"},
-		{"unsuffixedfloat", "crates/market-feed/src/decimal.rs", "\nfn amount(){let n=1e3;}"},
-		{"copieddecimal", "crates/market-feed/src/book.rs", "\nstruct Decimal { coefficient:i64 }"},
-		{"trading", "services/okx-depth/src/main.rs", "\nconst SUBJECT:&str=\"order.submit\";"},
-		{"exchangecredential", "services/binance-depth/src/source.rs", "\nconst KEY:&str=\"X-MBX-APIKEY\";"},
-		{"thirdsubject", "crates/market-feed/src/publisher.rs", "\nconst OTHER:&str=\"market.other\";"},
-		{"alternatepublisher", "services/okx-depth/src/source.rs", "\nfn send(){client.publish(subject,body);}"},
-		{"binancepublisher", "services/binance-depth/src/source.rs", "\nfn send(){client.publish(subject,body);}"},
-		{"okxcredential", "services/okx-depth/src/source.rs", "\nconst KEY:&str=\"OK-ACCESS-KEY\";"},
+		{"dependency", "services/binance_depth/Cargo.toml", "\n[dev-dependencies]\nreqwest=\"*\"\n"},
+		{"alternatebuild", "crates/market_feed/build.rs", "\nfn other() {}\n"},
+		{"alternatepath", "services/okx_depth/src/source.rs", `#[path="/tmp/extra.rs"] mod extra;`},
+		{"alternateinclude", "services/okx_depth/src/source.rs", "\ninclude!(\"hidden.rs\");"},
+		{"copiedproto", "services/binance_depth/proto/market.proto", "message PriceLevel {}"},
+		{"unreviewedmodule", "crates/market_feed/src/extra.rs", "pub fn extra() {}"},
+		{"unsafe", "crates/market_feed/src/book.rs", "\nunsafe fn raw() {}"},
+		{"float", "crates/market_feed/src/decimal.rs", "\npub fn amount()->f64 { 1.0 }"},
+		{"unsuffixedfloat", "crates/market_feed/src/decimal.rs", "\nfn amount(){let n=1e3;}"},
+		{"copieddecimal", "crates/market_feed/src/book.rs", "\nstruct Decimal { coefficient:i64 }"},
+		{"trading", "services/okx_depth/src/main.rs", "\nconst SUBJECT:&str=\"order.submit\";"},
+		{"exchangecredential", "services/binance_depth/src/source.rs", "\nconst KEY:&str=\"X-MBX-APIKEY\";"},
+		{"thirdsubject", "crates/market_feed/src/publisher.rs", "\nconst OTHER:&str=\"market.other\";"},
+		{"alternatepublisher", "services/okx_depth/src/source.rs", "\nfn send(){client.publish(subject,body);}"},
+		{"binancepublisher", "services/binance_depth/src/source.rs", "\nfn send(){client.publish(subject,body);}"},
+		{"okxcredential", "services/okx_depth/src/source.rs", "\nconst KEY:&str=\"OK-ACCESS-KEY\";"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := t.TempDir()

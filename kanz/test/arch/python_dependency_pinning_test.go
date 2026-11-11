@@ -15,7 +15,7 @@ import (
 // release.yml's trivy/cosign/SBOM chain is proven — it has succeeded on tags
 // v0.1.0 and v0.2.0, and the images are in Rekor. That makes this gap worse, not
 // better: the pipeline was attesting an artifact whose contents could not be
-// derived from the commit it claimed to be built from. kanz-py/Dockerfile:39-40
+// derived from the commit it claimed to be built from. kanz_py/Dockerfile:39-40
 // installed the inference service's runtime dependencies as floating ranges —
 //
 //	pip install --no-cache-dir "nats-py>=2.7.0" "aiokafka>=0.10.0" \
@@ -26,7 +26,7 @@ import (
 // breaking API arrives with no PR, no diff, and a green release. Every Go image
 // in this estate builds against a checksummed go.sum; this one had nothing.
 //
-// THE SECOND HALF WAS THE DIVERGENCE. Line 38 copied kanz-py/pyproject.toml into
+// THE SECOND HALF WAS THE DIVERGENCE. Line 38 copied kanz_py/pyproject.toml into
 // the image and nothing ever installed from it, while lines 39-40 restated the
 // same four dependencies by hand — the `secret()` shape AGENTS.md warns about
 // ("17 services each had their own, and 15 were wrong"), applied to the
@@ -163,7 +163,7 @@ func TestNoDockerfileInstallsPythonPackagesWithoutHashes(t *testing.T) {
 			"requirements file and pass --require-hashes, so the image built from a commit is "+
 			"determined BY that commit. Without it the release pipeline signs and attests an "+
 			"artifact whose contents cannot be reproduced — a valid signature over an unknown "+
-			"build. Generate the lock (see kanz-py/requirements.txt's header for the command) "+
+			"build. Generate the lock (see kanz_py/requirements.txt's header for the command) "+
 			"or add the file to pipInstallsPendingHashPinning with the OPEN issue that removes it.",
 			len(problems), strings.Join(problems, "\n  "))
 	}
@@ -174,7 +174,7 @@ func TestNoDockerfileInstallsPythonPackagesWithoutHashes(t *testing.T) {
 // `pip install` is not hash-pinned fails unless it is named here with a reason
 // and the OPEN issue that removes it.
 //
-// IT IS EMPTY, AND THAT IS THE POINT. Both installs in kanz-py/Dockerfile — the
+// IT IS EMPTY, AND THAT IS THE POINT. Both installs in kanz_py/Dockerfile — the
 // grpcio-tools builder stage and the runtime stage — read from a hash-pinned
 // requirements file. An entry here is a regression, not a state to settle into.
 //
@@ -290,7 +290,7 @@ type dockerfileCommand struct {
 // and drops comments.
 //
 // Reading physical lines would miss every real install in this repository:
-// kanz-py/Dockerfile's runtime install spans two lines, so a per-line scan sees
+// kanz_py/Dockerfile's runtime install spans two lines, so a per-line scan sees
 // `RUN pip install --no-cache-dir \` with no packages after it and concludes
 // there is nothing to check. Comment lines are dropped — including comment lines
 // INSIDE a continuation, which Docker permits — so that the prose above a RUN
@@ -354,8 +354,8 @@ func collapse(s string) string {
 // it, and the service fails at import time on a pod nobody is watching.
 //
 // So the lock is DERIVED, and this is what makes "derived" mean something:
-// every runtime dependency declared in kanz-py/pyproject.toml must appear in
-// kanz-py/requirements.txt as an `==` pin, or be named in
+// every runtime dependency declared in kanz_py/pyproject.toml must appear in
+// kanz_py/requirements.txt as an `==` pin, or be named in
 // dependenciesNotInstalledInTheImage with the reason it is not.
 //
 // It compares NAMES, not version ranges. Resolving a PEP 440 specifier in Go
@@ -366,19 +366,19 @@ func collapse(s string) string {
 // that will actually do the install.
 func TestInferenceLockCoversEveryDeclaredDependency(t *testing.T) {
 	repoRoot := filepath.Dir(moduleRoot(t))
-	pyDir := filepath.Join(repoRoot, "kanz-py")
+	pyDir := filepath.Join(repoRoot, "kanz_py")
 
 	declared := declaredPythonDependencies(t, filepath.Join(pyDir, "pyproject.toml"))
 	// NON-VACUITY. An empty parse — a reformatted pyproject, a renamed table —
 	// would satisfy every assertion below while checking nothing.
 	if len(declared) == 0 {
-		t.Fatal("parsed zero dependencies from kanz-py/pyproject.toml — the parser is broken, " +
+		t.Fatal("parsed zero dependencies from kanz_py/pyproject.toml — the parser is broken, " +
 			"not the manifest (this guard would otherwise pass vacuously)")
 	}
 
 	locked := lockedPythonPackages(t, filepath.Join(pyDir, "requirements.txt"))
 	if len(locked) == 0 {
-		t.Fatal("parsed zero `name==version` pins from kanz-py/requirements.txt — the parser is " +
+		t.Fatal("parsed zero `name==version` pins from kanz_py/requirements.txt — the parser is " +
 			"broken, or the lock is empty (this guard would otherwise pass vacuously)")
 	}
 
@@ -393,7 +393,7 @@ func TestInferenceLockCoversEveryDeclaredDependency(t *testing.T) {
 			continue
 		}
 		problems = append(problems, fmt.Sprintf(
-			"%s is declared in kanz-py/pyproject.toml but has no `==` pin in kanz-py/requirements.txt "+
+			"%s is declared in kanz_py/pyproject.toml but has no `==` pin in kanz_py/requirements.txt "+
 				"— the image would build reproducibly WITHOUT it, and the service would fail at import "+
 				"on a pod nobody is watching. Regenerate the lock (see its header) or, if the image "+
 				"genuinely must not install it, add it to dependenciesNotInstalledInTheImage with the reason.",
@@ -410,14 +410,14 @@ func TestInferenceLockCoversEveryDeclaredDependency(t *testing.T) {
 		}
 		if !seenExempt[name] {
 			problems = append(problems, name+
-				": in dependenciesNotInstalledInTheImage but kanz-py/pyproject.toml no longer declares it "+
+				": in dependenciesNotInstalledInTheImage but kanz_py/pyproject.toml no longer declares it "+
 				"(or the lock now pins it) — dead entry, remove it")
 		}
 	}
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		t.Fatalf("kanz-py/requirements.txt has drifted from kanz-py/pyproject.toml (%d):\n\n  %s",
+		t.Fatalf("kanz_py/requirements.txt has drifted from kanz_py/pyproject.toml (%d):\n\n  %s",
 			len(problems), strings.Join(problems, "\n  "))
 	}
 	t.Logf("%d declared dependency/ies, %d locked package(s), no drift", len(declared), len(locked))
@@ -429,8 +429,8 @@ func TestInferenceLockCoversEveryDeclaredDependency(t *testing.T) {
 // This is not a hole in the pinning — it is the one case where "installed from
 // PyPI" is the wrong answer entirely, and saying so out loud is the point.
 var dependenciesNotInstalledInTheImage = map[string]string{
-	"kanz-schemas": "the Python schema SDK is GENERATED, NOT PUBLISHED (EVT-15a) — kanz-py/Dockerfile's " +
-		"builder stage runs grpc_tools.protoc over kanz-schemas/proto/ and copies the result to " +
+	"kanz-schemas": "the Python schema SDK is GENERATED, NOT PUBLISHED (EVT-15a) — kanz_py/Dockerfile's " +
+		"builder stage runs grpc_tools.protoc over kanz_schemas/proto/ and copies the result to " +
 		"/app/gen, which PYTHONPATH picks up as a sibling namespace root. Installing a PyPI " +
 		"distribution of this name would either 404 the build or, worse, resolve to somebody " +
 		"else's package. There is nothing to pin because there is no artifact to fetch.",
@@ -565,7 +565,7 @@ test = [
 //
 // Quote-aware rather than a plain Cut: PEP 508 lets a requirement carry a URL
 // with a fragment ("pkg @ https://host/w.whl#sha256=..."), and those live inside
-// the quoted spec. Nothing in kanz-py uses that form today, which is exactly why
+// the quoted spec. Nothing in kanz_py uses that form today, which is exactly why
 // a naive cut would sit here working until the day one did.
 func stripTOMLComment(line string) string {
 	inQuote := byte(0)

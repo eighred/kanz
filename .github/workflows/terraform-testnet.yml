@@ -39,7 +39,7 @@ jobs:
           else
             base_sha="$PUSH_BEFORE_SHA"
           fi
-          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform-testnet/ .github/workflows/terraform-testnet.yml)"
+          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform_testnet/ .github/workflows/terraform-testnet.yml)"
           if [[ -n "$changed" ]]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           else
@@ -81,20 +81,20 @@ jobs:
 
       - name: Check Terraform formatting
         if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
+        working-directory: kanz/infra/terraform_testnet
         run: terraform fmt -check -recursive
 
       - name: Initialize providers without backend
         if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
+        working-directory: kanz/infra/terraform_testnet
         run: terraform init -backend=false -input=false -lockfile=readonly -no-color
 
       - name: Validate Terraform configuration
         if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
+        working-directory: kanz/infra/terraform_testnet
         run: terraform validate -no-color
 
       - name: Run mocked Terraform tests
         if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
+        working-directory: kanz/infra/terraform_testnet
         run: terraform test -no-color
