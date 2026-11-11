@@ -29,8 +29,8 @@ arrow-schema = "=59.3.2"
 bytes = "=1.12.1"
 datafusion = { version = "=54.1.0", default-features = false }
 parquet = { version = "=59.3.2", default-features = false, features = ["arrow"] }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
 sha2 = "=0.10.9"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt", "time"] }
 
@@ -39,7 +39,7 @@ libc = "=0.2.191"
 
 [build-dependencies]
 prost-build = "=0.14.1"
-protoc-bin-vendored = "=3.2.0"`
+protoc-bin-vendored = "=3.3.0"`
 
 // Hash reviewed startup, canonical generation and process-test seams after the
 // shared Rust comment masker and whitespace compaction. Changes require review;
