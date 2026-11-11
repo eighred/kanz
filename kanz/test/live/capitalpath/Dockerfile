@@ -2,7 +2,7 @@
 # One-shot Issue #71 capital-path certifier. It contains no exchange credential:
 # those terminate in the venue adapter. The Job receives only an authenticated
 # gateway token, a SELECT-only ledger DSN, and a SPIFFE workload identity.
-FROM ghcr.io/eighred/base/golang:1.26.10 AS build
+FROM ghcr.io/eighred/base/golang:1.26.11 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

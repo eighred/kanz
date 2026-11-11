@@ -48,7 +48,7 @@ on:
       - '.github/workflows/base-image-mirror.yml'
       - 'kanz/test/arch/rust_audit_tool_producer_test.go'
   # A MIRROR WITHOUT A REFRESH PATH SILENTLY AGES, and that is worse than not
-  # mirroring at all. `golang:1.26.10` is a MUTABLE tag: upstream rebuilds it
+  # mirroring at all. `golang:1.26.11` is a MUTABLE tag: upstream rebuilds it
   # with OS security patches under the same name. Copy it once and the estate
   # stops receiving those patches while every Dockerfile still points at the
   # tag, believing it current — so the mirror converts a supply-chain
