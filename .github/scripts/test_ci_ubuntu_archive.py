@@ -30,6 +30,17 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(result.count(b'URIs: '+archive.TARGET), 2)
         self.assertEqual(archive.rewrite(result), result)
 
+    def test_output_preserves_approved_https_authority(self):
+        approved = {
+            b'https://azure.archive.ubuntu.com/ubuntu/',
+            b'https://archive.ubuntu.com/ubuntu/',
+            b'https://security.ubuntu.com/ubuntu/',
+        }
+        uris = [line.split(b': ', 1)[1] for line in archive.rewrite(SOURCE).splitlines()
+                if line.startswith(b'URIs: ')]
+        self.assertEqual(len(uris), 2)
+        self.assertTrue(all(uri in approved for uri in uris))
+
     def test_crlf_and_comments_preserved(self):
         raw = SOURCE.replace(b'\n', b'\r\n')
         self.assertEqual(archive.rewrite(raw).count(b'\r\n'), raw.count(b'\r\n'))

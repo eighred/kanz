@@ -9,7 +9,8 @@ import re
 import stat
 
 SOURCE = Path('/etc/apt/sources.list.d/ubuntu.sources')
-TARGET = b'https://archive.ubuntu.com/ubuntu/'
+# #1583: qualify the runner-provided mirror over HTTPS without changing apt trust.
+TARGET = b'https://azure.archive.ubuntu.com/ubuntu/'
 ALLOWED = {b'mirror+file:/etc/apt/apt-mirrors.txt'} | {
     (scheme + host + '/ubuntu' + tail).encode('ascii')
     for scheme in ('http://', 'https://')
@@ -78,7 +79,8 @@ def apply():
         source.seek(0)
         if source.read(LIMIT + 1) != changed:
             raise ValueError('Ubuntu source readback differs')
-    print('Ubuntu archive uses official HTTPS; repository fields and signature policy preserved')
+    print('Ubuntu archive uses ' + TARGET.decode('ascii') +
+          '; repository fields and signature policy preserved')
 
 
 if __name__ == '__main__':
