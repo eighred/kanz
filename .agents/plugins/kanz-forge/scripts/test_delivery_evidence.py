@@ -25,15 +25,30 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_validation_selection_preserves_active_file_ownership(self):
+        from test_validation_graph import fixture
+        data = snapshot()
+        data['validation_graph'] = fixture()
+        data['tasks'] = [task('feature', 'feature', priority=0), task('repair', 'runtime', priority=2),
+                         task('independent', 'docs', priority=1)]
+        self.assertEqual(assess(data)['plan']['next_actionable'], 'repair')
+        data['active_tasks'] = [task('active', 'runtime')]
+        report = assess(data)
+        self.assertEqual(report['plan']['next_actionable'], 'independent')
+        self.assertIn('overlap', report['plan']['deferred']['repair'][0])
+        self.assertIn('feature', report['plan']['deferred'])
+
     def test_selects_highest_priority_feasible_task_and_rechecks_holds(self):
         data = snapshot()
         high = task("high", "risk", blockers=["signed upstream input"], priority=0)
         medium = task("medium", "observability", priority=1)
         low = task("low", "docs", priority=2)
         data["tasks"] = [low, medium, high]
-        self.assertEqual(assess(data)["plan"]["next_actionable"], "medium")
+        self.assertEqual(assess(data)["plan"]["ownership_candidate"], "medium")
+        self.assertIsNone(assess(data)["plan"]["next_actionable"])
+        self.assertFalse(assess(data)["plan"]["validation_aware"])
         high["blockers"] = []
-        self.assertEqual(assess(data)["plan"]["next_actionable"], "high")
+        self.assertEqual(assess(data)["plan"]["ownership_candidate"], "high")
         for item in data["tasks"]:
             item["blockers"] = ["required check pending"]
         self.assertIsNone(assess(data)["plan"]["next_actionable"])
@@ -122,7 +137,7 @@ class DeliveryEvidenceTests(unittest.TestCase):
                          task("guard2", "kanz/test/arch/guard_test.go"),
                          task("forge", ".agents")]
         plan = assess(data)["plan"]
-        self.assertEqual(plan["next_actionable"], "guard")
+        self.assertEqual(plan["ownership_candidate"], "guard")
         self.assertEqual(plan["independent"], ["guard", "forge"])
         self.assertEqual(plan["deferred"]["deployment"], [{"overlap": ["worker"]}])
         self.assertEqual(plan["deferred"]["broker"], [{"overlap": ["worker"]}])

@@ -108,6 +108,13 @@ component. See [DEPENDENCIES.md](DEPENDENCIES.md) for provenance and scope.
 
 ## Capabilities and proof
 
+The [validation readiness workflow](skills/commands/references/validation-readiness.md)
+collects current main/PR checks and uses reviewed task → PR → runtime/gate
+dependencies. It propagates shared blockers, distinguishes coding from delivery
+readiness, prioritizes executable shared recovery, and explains state changes.
+Its six delivery states require evidence; it never authorizes a merge or treats
+an incomplete inventory as successful validation.
+
 `Kanz /doctor` distinguishes **implemented** (instructions or code exist),
 **configured** (installation and access are present), **operational** (a named
 probe succeeded), **incomplete** (observed failure or missing setup), and
@@ -148,15 +155,38 @@ installed by these original workflows. See
 | `provenance.py`, `test_provenance.py` | Verify imported bytes and detect tampering or broken dispatch references. |
 | `skill_discovery.py`, `test_install.py` | Check real CLI discovery and installed bytes in a disposable profile. |
 | `receipts.py`, `test_receipts.py` | Optional compatibility with existing local test history; unnecessary for ordinary Chat work. |
-| `delivery_evidence.py`, `test_delivery_evidence.py` | Optional offline checks of delivery evidence and task conflicts. |
+| `delivery_evidence.py`, `validation_graph.py`, `collect_validation.py`, `failure_classification.py` and their tests | Current GitHub observations, reviewed validation dependencies, recovery priorities, failure classification and ownership checks. |
 
 These checks use the standard library. Replacing deterministic integrity and
 installation checks with prose would remove their regression protection.
 `forge.py` and the orchestration wrappers remain deleted.
 
 The [Forge CI workflow](../../../.github/workflows/kanz-forge.yml) verifies
-structure, imported-source integrity, Linux security validators, and optional
-receipt behavior. A disposable installation test is available as
-`python -B .agents/plugins/kanz-forge/scripts/test_install.py` from a staged or
-committed checkout. It checks installed bytes and fresh CLI skill discovery.
+structure, imported-source integrity, Linux security validators, planner and
+collector regressions, and optional receipt behavior. Run the offline suite with
+`python -B -m unittest discover -s .agents/plugins/kanz-forge/scripts -p 'test_*.py' -v`.
+Run `python -B .agents/plugins/kanz-forge/scripts/test_install.py` explicitly for
+a disposable current-byte snapshot installation and fresh CLI skill discovery.
+It includes new files, excludes deletions/ignored artifacts and rejects missing,
+extra or changed installed files. Importing the test never installs anything.
 None of these checks authorize a merge, infrastructure apply, or live trade.
+
+## Controlled upgrade and rollback
+
+Keep the live profile unchanged until explicit upgrade authorization. Record
+its marketplace source, enabled version and loaded skill source with supported
+CLI discovery. Review and commit the candidate in a clean current-main checkout;
+run tracked validation, provenance, all offline tests, Linux validators, actual
+applicable CI and the disposable installation test. Preserve existing user
+configuration and optional receipt data. Do not copy the whole older dirty
+checkout over current main or edit an installed cache.
+
+The 0.12 candidate ports the compatible 0.11 packaging repairs onto current main
+and adds validation-aware planning. Earlier local 0.11 tests are historical,
+not evidence for this candidate. After approval, register the exact reviewed
+checkout through `codex plugin marketplace add <reviewed-checkout>` and reinstall
+with `codex plugin add kanz-forge@kanz-local`. Verify the reported version/source,
+compare every installed file against the reviewed package inventory, and use a
+fresh Chat to verify loaded skills. Retain the prior reviewed checkout for
+rollback through the same supported marketplace/install commands. Neither an
+upgrade nor rollback changes application deployment or trading authority.
