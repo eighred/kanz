@@ -38,6 +38,9 @@ with the expected workflow, including unexpected skips and missing jobs.
 Use an event or bounded wait when available; while CI runs, continue authorized
 independent work instead of repeatedly polling unchanged state. Carry already
 granted merge permission for this specific PR forward, within its stated scope.
+When reviewing a queue, use [delivery coordination](../commands/references/delivery-coordination.md)
+to rank independent candidates. A green required-context list cannot override
+an applicable security failure or an explicit hold.
 
 Treat gates according to observed state:
 
