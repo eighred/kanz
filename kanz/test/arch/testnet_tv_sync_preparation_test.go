@@ -66,7 +66,7 @@ func TestTokyoTVSyncPreparationDoesNotActivateWorkloads(t *testing.T) {
 		count int
 		want  []string
 	}{
-		{"infra/overlays/testnet-tokyo/data", 37, nil},
+		{"infra/overlays/testnet-tokyo/data", 38, nil},
 		{"infra/overlays/testnet-tokyo/tv-sync-preparation", 4, []string{"name: tv-sync-provisioner", "name: tv-sync-migration", "name: tv-sync-role-passwords"}},
 	} {
 		output, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(root, fixture.path)).Output()

@@ -88,8 +88,8 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if (-not $PrepareTVSync -and $resourceCount -ne 37) {
-    throw "Expected 37 rendered resources; found $resourceCount. Review the transfer and readiness contract."
+if (-not $PrepareTVSync -and $resourceCount -ne 38) {
+    throw "Expected 38 rendered resources; found $resourceCount. Review the transfer and readiness contract."
 }
 if ($PrepareTVSync -and $resourceCount -ne 4) { throw "Expected four preparation resources; found $resourceCount." }
 if (-not $PrepareTVSync) {
