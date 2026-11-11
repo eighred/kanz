@@ -57,7 +57,9 @@ def image_inventory(image, scratch, suffix):
             command("docker", "cp", name + ":/bin/" + binary, str(path))
             binaries[binary] = digest(path)
         identity = json.loads(command("docker", "image", "inspect", image).stdout)[0]
-        return {"image_id": identity["Id"], "user": identity["Config"]["User"], "shell_paths": forbidden,
+        return {"image_id": identity["Id"], "os": identity["Os"],
+                "architecture": identity["Architecture"],
+                "user": identity["Config"]["User"], "shell_paths": forbidden,
                 "ca_count": ca_count, "binaries_sha256": binaries}
     finally:
         command("docker", "rm", "-f", "-v", name, check=False)
@@ -209,6 +211,7 @@ def main():
         receipt = {"source": command("git", "rev-parse", "HEAD").stdout.decode().strip(),
                    "tree": command("git", "rev-parse", "HEAD^{tree}").stdout.decode().strip(),
                    "recipe_sha256": digest(HERE / "Dockerfile"), "upstream": upstream,
+                   "runtime_base": re.findall(r"^FROM (\S+)$", recipe, re.MULTILINE)[-1],
                    "baseline": baseline, "candidate": candidate,
                    "helper_image_id": json.loads(command("docker", "image", "inspect", args.helper).stdout)[0]["Id"]}
     args.output.parent.mkdir(parents=True, exist_ok=True)
