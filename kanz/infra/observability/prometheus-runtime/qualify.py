@@ -140,6 +140,8 @@ scrape_configs:
                 "--config.file=/fixture/prometheus.yml", "--storage.tsdb.path=/prometheus",
                 "--web.listen-address=127.0.0.1:9090")
         start_api()
+        wait_for(lambda: json.loads(command("docker", "exec", api, "python",
+                                            "/fixture/kube_fixture.py", "status").stdout))
         wait_for(lambda: "Ready" in probe(api, "/-/ready"))
         value = query(api, "vector(1)")
         if len(value) != 1 or value[0]["value"][1] != "1":
@@ -148,10 +150,18 @@ scrape_configs:
             values = query(api, 'up{job="kubernetes-pods"}')
             return values if len(values) == 1 and values[0]["value"][1] == "1" else None
 
-        observed = wait_for(discovered)
+        try:
+            observed = wait_for(discovered)
+        except TimeoutError as error:
+            # These are only the owned dummy fixture's logs, with no real
+            # account credentials or externally supplied configuration.
+            logs = command("docker", "logs", "--tail=15", name, check=False)
+            raise TimeoutError("TLS discovery failed: " + logs.stderr.decode()[-4000:]) from error
         if len(observed) != 1 or observed[0]["value"][1] != "1":
             raise ValueError("TLS pod discovery did not scrape its target")
         at = observed[0]["value"][0]
+        discovery_status = json.loads(command("docker", "exec", api, "python",
+                                              "/fixture/kube_fixture.py", "status").stdout)
         command("docker", "rm", "-f", api)
         command("docker", "stop", "--time=15", name)
         command("docker", "start", name)
@@ -161,7 +171,8 @@ scrape_configs:
         if len(retained) != 1 or retained[0]["value"][1] != "1":
             raise ValueError("pre-restart observation was lost from the owned volume")
         return {"readiness": True, "constant_query": True,
-                "tls_pod_discovery": True, "retained_history_after_restart": True}
+                "tls_pod_discovery": True, "watch_protocol": discovery_status,
+                "retained_history_after_restart": True}
     finally:
         survivors = []
         for container in (api, name, holder):
