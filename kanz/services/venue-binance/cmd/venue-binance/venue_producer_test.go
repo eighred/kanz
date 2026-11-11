@@ -200,6 +200,12 @@ func TestFillRefusedCounterRegistersAndCounts(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(fillRefused)
 
+	seed, err := reg.Gather()
+	if err != nil || len(seed) != 1 || len(seed[0].GetMetric()) != 1 ||
+		seed[0].GetMetric()[0].GetCounter().GetValue() != 0 {
+		t.Fatalf("overfill counter must be exported at zero before any refusal: %v (%v)", seed, err)
+	}
+
 	fillRefused.WithLabelValues("overfill").Inc()
 
 	families, err := reg.Gather()
