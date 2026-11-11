@@ -105,6 +105,9 @@ jobs:
           # a new entry here AND a Dockerfile change, together.
           - source: docker.io/library/golang:1.26.10
             target: ghcr.io/eighred/base/golang:1.26.10
+          # #1579: verify the patched builder before repointing consumers.
+          - source: docker.io/library/golang:1.26.11
+            target: ghcr.io/eighred/base/golang:1.26.11
           - source: gcr.io/distroless/static:nonroot
             target: ghcr.io/eighred/base/distroless-static:nonroot
           # Rust migration bases are immutable reviewed inputs (#1413).
