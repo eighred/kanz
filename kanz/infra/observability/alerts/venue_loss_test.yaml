@@ -1,0 +1,147 @@
+rule_files:
+- operational.rules.yaml
+evaluation_interval: 1m
+tests:
+- interval: 1m
+  input_series:
+  - series: kanz_venue_closes_unhealable_total{venue="okx",reason="no_instrument"}
+    values: 0 0 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: VenueCloseUnhealable
+    exp_alerts:
+    - exp_labels:
+        venue: okx
+        reason: no_instrument
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Venue close cannot be healed
+        description: The watchdog retained an in-flight close without a venue query.
+          Check the reason, instrument attribution and symbol map before recovery.
+  - eval_time: 10m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: kanz_venue_closes_unhealable_total{venue="okx",reason="no_instrument"}
+    values: 1 1 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: VenueCloseUnhealable
+    exp_alerts:
+    - exp_labels:
+        venue: okx
+        reason: no_instrument
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Venue close cannot be healed
+        description: The watchdog retained an in-flight close without a venue query.
+          Check the reason, instrument attribution and symbol map before recovery.
+  - eval_time: 10m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: kanz_venue_closes_unhealable_total{venue="binance",reason="unmapped_symbol"}
+    values: 0 0 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: VenueCloseUnhealable
+    exp_alerts:
+    - exp_labels:
+        venue: binance
+        reason: unmapped_symbol
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Venue close cannot be healed
+        description: The watchdog retained an in-flight close without a venue query.
+          Check the reason, instrument attribution and symbol map before recovery.
+  - eval_time: 10m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: kanz_venue_closes_unhealable_total{venue="binance",reason="unmapped_symbol"}
+    values: 1 1 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: VenueCloseUnhealable
+    exp_alerts:
+    - exp_labels:
+        venue: binance
+        reason: unmapped_symbol
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Venue close cannot be healed
+        description: The watchdog retained an in-flight close without a venue query.
+          Check the reason, instrument attribution and symbol map before recovery.
+  - eval_time: 10m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: kanz_venue_mark_tick_dropped_total{venue="binance",mic="BINANCE",instrument="BTC-USD"}
+    values: 0 0 1 1 1 1 1 1 1 1 1
+  - series: kanz_venue_mark_tick_dropped_total{venue="binance",mic="BINANCE",instrument="ETH-USD"}
+    values: 0 0 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: VenueMarkTicksDropped
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: VenueMarkTicksDropped
+    exp_alerts:
+    - exp_labels:
+        venue: binance
+        mic: BINANCE
+        severity: warning
+        layer: operational
+      exp_annotations:
+        summary: Venue mark ticks were dropped
+        description: Check mark publication and broker refusals for this venue and
+          MIC; inspect the per-instrument drop counters and adapter logs.
+  - eval_time: 10m
+    alertname: VenueMarkTicksDropped
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: kanz_venue_mark_tick_dropped_total{venue="binance",mic="BINANCE",instrument="BTC-USD"}
+    values: 1 1 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: VenueMarkTicksDropped
+    exp_alerts:
+    - exp_labels:
+        venue: binance
+        mic: BINANCE
+        severity: warning
+        layer: operational
+      exp_annotations:
+        summary: Venue mark ticks were dropped
+        description: Check mark publication and broker refusals for this venue and
+          MIC; inspect the per-instrument drop counters and adapter logs.
+  - eval_time: 10m
+    alertname: VenueMarkTicksDropped
+    exp_alerts: []
+- interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: VenueCloseUnhealable
+    exp_alerts: []
+- interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: VenueMarkTicksDropped
+    exp_alerts: []

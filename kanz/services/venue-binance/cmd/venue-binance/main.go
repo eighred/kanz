@@ -103,32 +103,8 @@ var markTickDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
 	ConstLabels: prometheus.Labels{"venue": "binance"},
 }, []string{"mic", "instrument"})
 
-// fillRefused counts venue execution reports this adapter REFUSED to publish as
-// a fill FACT, by reason (#1045).
-//
-// THE FIRST REASON IS AN OVER-FILL: the exchange reporting a cumulative filled
-// quantity larger than the quantity this platform sent it. That is the venue and
-// the platform disagreeing about what was authorised, and on the user-data
-// websocket nothing else forms an opinion — the two fill paths that meet the OMS
-// aggregate get its OVERFILL refusal and its quarantine counter, and this one
-// meets neither, because the OMS order aggregate does not consume the fill
-// subject. Without this metric, "the venue over-filled us and we refused" and
-// "no venue has ever over-filled us" are the same silence.
-//
-// REGISTERED UNCONDITIONALLY, beside the other package-level collectors and NOT
-// inside a branch that depends on the broker or the exchange being reachable. A
-// collector registered on one arm of an `if` exports no series at all on the
-// other, so an alert written `== 0` over it is silent in exactly the deployment
-// state it was written for — twice shipped in this estate and caught both times
-// only by running the binary.
-var fillRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "kanz_venue_fill_refused_total",
-	Help: "Venue execution reports this adapter refused to publish as a fill FACT, by reason. " +
-		"Non-zero means the venue reported an execution this platform did not authorise; the " +
-		"order is frozen in the adapter's order view and a human must resolve it against the " +
-		"exchange's own order history.",
-	ConstLabels: prometheus.Labels{"venue": "binance"},
-}, []string{"reason"})
+// fillRefused seeds the overfill counter before either dependency is dialed.
+var fillRefused = execution.NewFillRefusedCounter("binance")
 
 // closesUnhealable counts in-flight closes the healing watchdog retained WITHOUT
 // asking the exchange anything, by reason (#1036).

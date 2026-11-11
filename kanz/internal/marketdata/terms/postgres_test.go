@@ -327,3 +327,24 @@ func TestPutRefusesARecordWithNoTerms(t *testing.T) {
 			"message, which reads as a derivative whose specification is absent rather than as an error")
 	}
 }
+
+func TestPutRefusesInconsistentTermsBeforeDatabaseAccess(t *testing.T) {
+	for name, corrupt := range map[string]func(*Record){
+		"kind differs from variant": func(r *Record) { r.Kind = KindBond },
+		"missing variant":           func(r *Record) { r.Terms.Terms = nil },
+		"typed nil variant":         func(r *Record) { r.Terms.Terms = (*referencepb.ContractTerms_Option)(nil) },
+		"empty variant":             func(r *Record) { r.Terms.Terms = &referencepb.ContractTerms_Option{} },
+		"different instrument":      func(r *Record) { r.Terms.InstrumentId = "OTHER" },
+		"missing effective time":    func(r *Record) { r.Terms.AsOf = nil },
+		"different effective time":  func(r *Record) { r.Terms.AsOf = timestamppb.New(t0.Add(time.Hour)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := optionRec("BTC-60000-C", "BTC", 60000, t0, 1)
+			corrupt(&record)
+			// A nil pool makes any attempt to start the transaction fail the test.
+			if err := NewPostgres(nil).Put(context.Background(), []Record{record}); err == nil {
+				t.Fatal("inconsistent contract terms were accepted")
+			}
+		})
+	}
+}
