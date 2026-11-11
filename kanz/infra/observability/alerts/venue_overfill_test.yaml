@@ -25,3 +25,18 @@ tests:
       - eval_time: 5m
         alertname: VenueOverfillRefused
         exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'kanz_venue_fill_refused_total{venue="binance",reason="overfill"}'
+        values: '1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: VenueOverfillRefused
+        exp_alerts:
+          - exp_labels: {severity: critical, layer: operational, venue: binance, reason: overfill}
+            exp_annotations:
+              summary: "Venue execution exceeded authorized quantity"
+              description: "Inspect the frozen adapter order and reconcile against the exchange's own order history before attempting recovery."
+      - eval_time: 10m
+        alertname: VenueOverfillRefused
+        exp_alerts: []
