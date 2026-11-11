@@ -13,9 +13,8 @@ TLS pod API exercises discovery, and the same owned, size-bounded memory volume
 survives a process restart to check retained queries. This does not establish
 production PVC continuity or node-loss recovery.
 
-The workflow has read-only package access and publishes only a non-secret test
-receipt. Build/release matrix integration, final signed ECR image/scan evidence
-and an authorized Tokyo deployment preserving the existing PVC remain on
-#1140. Adding the image to the fixed build inventory requires the corresponding
-architecture guard update and its full applicable qualification; #1564 currently
-blocks that Julia advisory gate. Preserve the gate.
+The qualification workflow has read-only package access and publishes only a
+non-secret test receipt. Image publication and signing use the canonical
+build/release workflows; release qualification checks the actual immutable
+image before signing. Final ECR scan evidence and a controlled Tokyo deployment
+preserving the existing PVC require the operational acceptance in #1140.
