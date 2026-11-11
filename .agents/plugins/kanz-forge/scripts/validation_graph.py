@@ -180,7 +180,7 @@ def assess_graph(graph):
             continue
         affected = set()
         for gate in recovers[key]:
-            if results[gate]["state"] == "DELIVERABLE":
+            if results[gate]["state"] not in {"BLOCKED", "VALIDATION_FAILED"}:
                 continue
             affected.add(gate)
             affected.update(consumer for consumer, row in results.items() if gate in row["root_blockers"])

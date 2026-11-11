@@ -95,6 +95,13 @@ class GraphTests(unittest.TestCase):
         data["nodes"][0]["validation"]["observed"] = []
         self.assertEqual(assess_graph(data)["nodes"]["julia"]["state"], "BLOCKED")
 
+    def test_pending_gate_is_not_a_broken_gate_to_repair(self):
+        data = fixture()
+        data['nodes'][0]['validation']['observed'][0]['status'] = 'IN_PROGRESS'
+        result = assess_graph(data)
+        self.assertEqual(result['next_actionable'], 'independent')
+        self.assertNotIn('critical', result['nodes']['repair']['selection_reason'])
+
     def test_execution_prerequisite_prevents_dispatch(self):
         data = fixture()
         data["edges"].append(edge("repair", "julia", "execution-requires"))
