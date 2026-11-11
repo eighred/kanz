@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,29 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT.parent / '.github' / 'scripts'))
 from go_shard_evidence import validate_events  # noqa: E402
+
+
+def run_tests(command, *, cwd, stdout, timeout=600):
+    # go test owns child test binaries. subprocess.run's timeout kills only Go,
+    # leaving those binaries able to use the shared fixture database afterward.
+    process = subprocess.Popen(command, cwd=cwd, stdout=stdout,
+                               start_new_session=os.name == 'posix')
+    try:
+        return subprocess.CompletedProcess(command, process.wait(timeout=timeout))
+    except BaseException:
+        try:
+            if os.name == 'posix':
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                # Keep the parent alive until taskkill has enumerated its tree.
+                subprocess.run(['taskkill.exe', '/PID', str(process.pid), '/T', '/F'],
+                               check=True, timeout=15, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=15)
+        raise
 
 
 def formatting(root=ROOT):
@@ -38,8 +63,8 @@ def test_packages(patterns, race=False, root=ROOT):
     for start in range(0, len(packages), 20):
         batch = packages[start:start + 20]
         with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as output:
-            result = subprocess.run(['go', 'test', *flags, '-p', '1', '-count=1', '-json', *batch],
-                                    cwd=root, stdout=output, timeout=600)
+            result = run_tests(['go', 'test', *flags, '-p', '1', '-count=1', '-json', *batch],
+                               cwd=root, stdout=output)
             output.seek(0)
             raw = output.read()
         for line in raw.splitlines():

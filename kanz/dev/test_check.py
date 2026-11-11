@@ -1,8 +1,11 @@
 """Regressions for omitted/untracked files and incomplete Go test streams."""
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -58,7 +61,7 @@ class AccountingTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 1 if mode == 'failure' else 0)
 
         with patch.object(check.subprocess, 'check_output', return_value='\n'.join(packages)), \
-                patch.object(check.subprocess, 'run', side_effect=run):
+                patch.object(check, 'run_tests', side_effect=run):
             check.test_packages(['./...'], race=True)
         return calls
 
@@ -72,6 +75,29 @@ class AccountingTests(unittest.TestCase):
     def test_failed_process_with_pass_events_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'exit 1'):
             self.run_fixture('failure')
+
+
+class TimeoutTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'POSIX process-group fixture')
+    def test_timeout_stops_child_before_it_can_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / 'orphan-wrote'
+            ready = root / 'ready'
+            child = ('import pathlib,time; '
+                     f'pathlib.Path({str(ready)!r}).touch(); '
+                     'time.sleep(2); '
+                     f'pathlib.Path({str(marker)!r}).touch()')
+            parent = ('import subprocess,sys,time; '
+                      f'subprocess.Popen([sys.executable,"-c",{child!r}]); '
+                      'time.sleep(60)')
+            with open(os.devnull, 'w') as output:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    check.run_tests([sys.executable, '-c', parent], cwd=root,
+                                    stdout=output, timeout=1)
+            self.assertTrue(ready.exists(), 'child must have started to exercise cleanup')
+            time.sleep(2)
+            self.assertFalse(marker.exists(), 'timed-out child survived the Go parent')
 
 
 if __name__ == '__main__':
