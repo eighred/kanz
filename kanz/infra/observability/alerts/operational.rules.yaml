@@ -2115,6 +2115,28 @@ groups:
           summary: "{{ $labels.venue }} balance reconciliation has been unable to check assets for 30 minutes ({{ $labels.reason }})"
           description: "The {{ $labels.venue }} adapter's reconciliation pass has skipped at least one asset at every evaluation for the last thirty minutes because it has no usable expected balance for it (reason={{ $labels.reason }}). The pass completes and publishes no accounting.balance.reconciled FACT, which is exactly what a clean comparison also does — so this alert is the only thing that separates them. While it holds, nothing is comparing this exchange account's books against the venue, and balance reconciliation is the last layer able to notice a fill the user-data websocket missed, one posted to the wrong account, or a residual a healing sweep left behind. reason=never_announced means no accounting.balance.portfolio announcement has ever reached this pod: check that the broadcast subscription landed and that accounting is publishing (kanz_venue_binance_balance_announcements_dropped_total / the okx equivalent will show announcements arriving and being discarded). reason=stale means announcements arrived and stopped, so the balance aged past its freshness bound. reason=unattributed means the balance seam answered UNKNOWN without saying why, which is a defect in the seam rather than in the estate. Read kanz_venue_balance_reconciliation_configured beside this: 0 there means no comparison is wired at all, which is a different and worse state."
 
+      - alert: VenueOverfillRefused
+        # A first scrape can already be nonzero; increase alone needs two samples.
+        expr: (increase(kanz_venue_fill_refused_total{reason="overfill"}[5m]) > 0) or ((kanz_venue_fill_refused_total{reason="overfill"} > 0) unless kanz_venue_fill_refused_total{reason="overfill"} offset 5m)
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Venue execution exceeded authorized quantity"
+          description: "Inspect the frozen adapter order and reconcile against the exchange's own order history before attempting recovery."
+
+      - alert: VenueCloseUnhealable
+        expr: (increase(kanz_venue_closes_unhealable_total[5m]) > 0) or ((kanz_venue_closes_unhealable_total > 0) unless kanz_venue_closes_unhealable_total offset 5m)
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Venue close cannot be healed"
+          description: "The watchdog retained an in-flight close without a venue query. Check the reason, instrument attribution and symbol map before recovery."
+
+      - alert: VenueMarkTicksDropped
+        expr: sum by (venue, mic) ((increase(kanz_venue_mark_tick_dropped_total[5m]) > 0) or ((kanz_venue_mark_tick_dropped_total > 0) unless kanz_venue_mark_tick_dropped_total offset 5m)) > 0
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "Venue mark ticks were dropped"
+          description: "Check mark publication and broker refusals for this venue and MIC; inspect the per-instrument drop counters and adapter logs."
+
       - alert: VenueDiscrepancyObserved
         expr: increase(kanz_venue_discrepancy_publish_total{result="published"}[5m]) > 0
         labels: { severity: warning, layer: operational }
