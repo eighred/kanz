@@ -175,6 +175,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install pinned hybrid signature verifier
         uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.0.6
       - name: Install reviewed hybrid audit tools
         run: |
           set -euo pipefail
@@ -555,6 +557,8 @@ jobs:
           syft-version: v1.56.0
           upload-artifact: false
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.0.6
       - name: Verify signed tool consumer boundaries
         run: python3 -B -m unittest discover -s tools/rust-audit-tools -p test_consume.py
       - name: Install pinned Rust evidence tools

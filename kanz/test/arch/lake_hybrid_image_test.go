@@ -78,7 +78,7 @@ func lakeHybridCI(raw string) error {
 		return err
 	}
 	fields := map[string]map[string]string{
-		"Install pinned hybrid signature verifier":              {},
+		"Install pinned hybrid signature verifier":              {"cosign-release": "v3.0.6"},
 		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake-sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}"},
 		"Catalog actual hybrid applications and native runtime": {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
 		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
@@ -117,7 +117,7 @@ func lakeHybridCI(raw string) error {
 		if step.Continue != nil || (step.Name != "Stop owned snapshot fixture dependencies and prove absence" && step.If != nil) {
 			return fmt.Errorf("hybrid step bypass")
 		}
-		if step.Name == "Install pinned hybrid signature verifier" && step.Uses != "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6" {
+		if step.Name == "Install pinned hybrid signature verifier" && step.Uses != "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532" {
 			return fmt.Errorf("hybrid signature verifier identity missing")
 		}
 		for key, value := range wanted {
@@ -168,7 +168,11 @@ func TestLakeHybridCIWiring(t *testing.T) {
 	if err := lakeHybridCI(raw); err != nil {
 		t.Fatal(err)
 	}
-	installer := "      - name: Install pinned hybrid signature verifier\n        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+	installer := "      - name: Install pinned hybrid signature verifier\n        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3\n        with:\n          cosign-release: v3.0.6\n"
+	wrongVersion := strings.Replace(raw, installer, strings.Replace(installer, "v3.0.6", "v3.1.4", 1), 1)
+	if wrongVersion == raw || lakeHybridCI(wrongVersion) == nil {
+		t.Fatal("unreviewed verifier version accepted")
+	}
 	without := strings.Replace(raw, installer, "", 1)
 	late := strings.Replace(without, "      - name: Require hybrid binary provenance and fresh Rust and Go audits\n", installer+"      - name: Require hybrid binary provenance and fresh Rust and Go audits\n", 1)
 	if without == raw || late == without || lakeHybridCI(without) == nil || lakeHybridCI(late) == nil {
@@ -212,7 +216,7 @@ func TestLakeHybridCIWiring(t *testing.T) {
 		{"name: Install pinned hybrid signature verifier", "name: Missing hybrid signature verifier"},
 		{"name: Install pinned hybrid signature verifier", "name: Install pinned hybrid signature verifier\n        if: false"},
 		{"name: Install pinned hybrid signature verifier", "name: Install pinned hybrid signature verifier\n        continue-on-error: true"},
-		{"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6", "sigstore/cosign-installer@main"},
+		{"sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532", "sigstore/cosign-installer@main"},
 		{"name: Build actual hybrid lake image without publishing", "name: Missing hybrid image"},
 		{"name: Require hybrid binary provenance and fresh Rust and Go audits", "name: Require hybrid binary provenance and fresh Rust and Go audits\n        continue-on-error: true"},
 		{"govulncheck@v1.6.0", "govulncheck@latest"},
