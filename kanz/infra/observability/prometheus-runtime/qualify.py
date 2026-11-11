@@ -57,7 +57,7 @@ def image_inventory(image, scratch, suffix):
             command("docker", "cp", name + ":/bin/" + binary, str(path))
             binaries[binary] = digest(path)
         identity = json.loads(command("docker", "image", "inspect", image).stdout)[0]
-        return {"image_id": identity["Id"], "shell_paths": forbidden,
+        return {"image_id": identity["Id"], "user": identity["Config"]["User"], "shell_paths": forbidden,
                 "ca_count": ca_count, "binaries_sha256": binaries}
     finally:
         command("docker", "rm", "-f", "-v", name, check=False)
@@ -192,10 +192,12 @@ def main():
         scratch = Path(directory)
         baseline = image_inventory(upstream, scratch, suffix + "-upstream")
         candidate = image_inventory(args.candidate, scratch, suffix + "-candidate")
-        if not baseline["shell_paths"]:
-            raise ValueError("affected upstream control did not expose shell tooling")
+        if not any(Path(path).name == "busybox" for path in baseline["shell_paths"]):
+            raise ValueError("affected upstream control did not expose BusyBox")
         if candidate["shell_paths"]:
             raise ValueError("candidate retains shell tooling")
+        if candidate["user"] != "65534:65534":
+            raise ValueError("candidate default identity changed")
         if candidate["binaries_sha256"] != baseline["binaries_sha256"]:
             raise ValueError("candidate binaries differ from the pinned upstream")
         baseline["runtime"] = runtime(upstream, args.helper, scratch, suffix + "-upstream")
