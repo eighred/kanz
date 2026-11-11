@@ -138,7 +138,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
 
       # Complete native browser installation before restoring any Go outputs.
       # The compiler cache binds the resulting full package fingerprint.
@@ -149,7 +149,7 @@ jobs:
 
       - name: Prepare complete MFA browser dependencies before compiler cache
         run: |
-          cd kanz-web
+          cd web
           npm ci --no-audit --no-fund
           npx --no-install playwright install --with-deps chromium
 
@@ -513,7 +513,7 @@ jobs:
 
       - name: Build the real MFA browser boundary
         run: |
-          cd kanz-web
+          cd web
           npm run build
           cd ../kanz
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
@@ -522,9 +522,9 @@ jobs:
         if: matrix.kind == 'quality'
         working-directory: kanz
         env:
-          TEST_RENDER_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/browser-renderer.cjs
-          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/kanz-web/dist
-          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
+          TEST_RENDER_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/browser-renderer.cjs
+          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/web/dist
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           TEST_MFA_NODE: node
         run: |
           set -o pipefail
@@ -540,8 +540,8 @@ jobs:
           path: |
             ${{ runner.temp }}/browser-renderer-proof.jsonl
             ${{ runner.temp }}/browser-renderer-proof.json
-            kanz-web/src/generated/browser-render.ts
-            kanz-web/dist/assets/*.wasm
+            web/src/generated/browser-render.ts
+            web/dist/assets/*.wasm
           if-no-files-found: error
           retention-days: 7
 
@@ -591,12 +591,12 @@ jobs:
           TEST_OMS_ON_BUS: "1"
           TEST_INFERENCE_ON_BUS: "1"
           TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
-          TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/sessions.cjs
-          TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
-          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
+          TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/sessions.cjs
+          TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/mfa.cjs
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           TEST_MFA_NODE: node
           TEST_MFA_BFF: ${{ runner.temp }}/mfa-web-bff
-          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/kanz-web/dist
+          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/web/dist
           # Both are required by the mTLS suite; a test that gated on one alone
           # would FAIL rather than skip when the other went missing.
           TEST_NATS_MTLS_URL: nats://localhost:4223
@@ -1038,7 +1038,7 @@ jobs:
         working-directory: kanz/ts/kanz-bus
         run: npm test
 
-  # THE OPERATOR SURFACE (#371). Nothing guarded kanz-web until this job: it was
+  # THE OPERATOR SURFACE (#371). Nothing guarded web until this job: it was
   # absent from every workflow, and the paths filter above did not even list it,
   # so a pull request touching only the SPA ran NO checks whatsoever — a type
   # error or a broken build reached main unremarked.
@@ -1057,35 +1057,35 @@ jobs:
           # Its OWN .nvmrc, not kanz-bus's: two independently versioned
           # workspaces sharing one pin means bumping either one silently moves
           # the other's runtime.
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
 
       # npm ci, not npm install: the lockfile is tracked, and ci fails on a
       # lockfile that disagrees with package.json rather than quietly resolving
       # something the developer never ran.
       - name: Install
-        working-directory: kanz-web
+        working-directory: web
         run: npm ci --no-audit --no-fund
 
       - name: Install pinned Rust WASM target for browser rendering
         run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
 
       - name: Prepare checked browser rendering asset
-        working-directory: kanz-web
+        working-directory: web
         run: npm run prebuild
 
       - name: Typecheck
-        working-directory: kanz-web
+        working-directory: web
         run: npm run typecheck
 
       - name: Test
-        working-directory: kanz-web
+        working-directory: web
         run: npm test
 
       # Build separately before browser qualification, so a failure here is distinguishable from a
       # type error above — the BFF serves this output, and a bundle that does
       # not build is a blank operator surface.
       - name: Build
-        working-directory: kanz-web
+        working-directory: web
         run: npm run build
 
       # Avoid the observed Azure mirror font-download stalls without changing
@@ -1096,7 +1096,7 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
 
       - name: Qualify broker history rendering in Chromium
-        working-directory: kanz-web
+        working-directory: web
         run: |
           set -euo pipefail
           npx --no-install playwright install --with-deps chromium

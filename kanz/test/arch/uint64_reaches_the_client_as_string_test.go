@@ -24,7 +24,7 @@ import (
 //
 // compliance made the repair: proposalJSON emits `jsonUint64(...)`, so
 // `version` became a JSON string on all four mandate bodies.
-// kanz-web was never updated. It still declared `version?: number`, and
+// web was never updated. It still declared `version?: number`, and
 // renderVersion opened with `if (typeof v !== 'number') return null`. Against a
 // string that test is ALWAYS true, so the signatory's queue rendered "VERSION NOT
 // RENDERABLE" on every row — not just the ones above 2^53 the check existed to
@@ -48,7 +48,7 @@ import (
 // Every uint64/fixed64 field name in the schema tree is a JSON key that reaches a
 // browser as a STRING — from protojson, which has always rendered 64-bit integers
 // that way, or from the jsonUint64 wrapper the server-half guard requires. So if
-// kanz-web declares a field of that name in its API types, the declared type must
+// web declares a field of that name in its API types, the declared type must
 // be `string`, never `number`.
 //
 // DERIVED FROM THE PROTOS, not listed, for uint64_json_domain_test.go's reason: a
@@ -58,16 +58,16 @@ import (
 // # What it CANNOT check, stated plainly
 //
 //   - It matches on FIELD NAME, not on the message the field belongs to. A
-//     kanz-web interface with a `version` that is genuinely some other message's
+//     web interface with a `version` that is genuinely some other message's
 //     string field would be checked too — and would PASS, since the requirement
 //     is `string`. The failure direction is a TS field named after a proto uint64
 //     and typed `number`, which is the defect itself.
 //   - It reads TypeScript with a regexp. There is no TS parser here and adding a
 //     Node toolchain to the Go arch suite to get one is a cost this repository has
-//     declined before (see decimal_domain_test.go, which reads kanz-web the same
+//     declined before (see decimal_domain_test.go, which reads web the same
 //     way for the same reason). A field declared through a mapped type or a
 //     generic would be invisible; none exists in src/api today.
-//   - It says nothing about fields kanz-web does NOT declare. That is the correct
+//   - It says nothing about fields web does NOT declare. That is the correct
 //     scope: a key the client never reads cannot be misread by it.
 
 // uint64ClientExempt maps "<file>:<field>" to the reason a client-side field
@@ -79,7 +79,7 @@ import (
 var uint64ClientExempt = map[string]string{}
 
 // tsFieldRe matches an interface property declaration: `  name?: type` — the
-// shape every kanz-web API type uses. The type runs to end of line so a union is
+// shape every web API type uses. The type runs to end of line so a union is
 // captured whole.
 var tsFieldRe = regexp.MustCompile(`^\s*([a-z][a-zA-Z0-9_]*)\??:\s*(.+?)\s*$`)
 
@@ -100,13 +100,13 @@ func TestAUint64FieldReachesTheClientAsAString(t *testing.T) {
 	}
 	if len(fields) == 0 {
 		t.Fatal("derived zero uint64/fixed64 proto fields — the schema walk is broken, not the " +
-			"client. A guard that checks an empty set passes no matter what kanz-web declares")
+			"client. A guard that checks an empty set passes no matter what web declares")
 	}
 
-	apiDir := filepath.Join(repoRoot, "kanz-web", "src", "api")
+	apiDir := filepath.Join(repoRoot, "web", "src", "api")
 	entries, err := os.ReadDir(apiDir)
 	if err != nil {
-		t.Fatalf("read %s: %v — kanz-web is the browser client for these bodies, and this guard "+
+		t.Fatalf("read %s: %v — web is the browser client for these bodies, and this guard "+
 			"cannot hold the client half if it cannot find it", apiDir, err)
 	}
 
@@ -118,7 +118,7 @@ func TestAUint64FieldReachesTheClientAsAString(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".test.ts") {
 			continue
 		}
-		rel := "kanz-web/src/api/" + e.Name()
+		rel := "web/src/api/" + e.Name()
 		b, err := os.ReadFile(filepath.Join(apiDir, e.Name()))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
@@ -154,7 +154,7 @@ func TestAUint64FieldReachesTheClientAsAString(t *testing.T) {
 		}
 	}
 
-	// NON-VACUITY. kanz-web declares at least one proto uint64 field today
+	// NON-VACUITY. web declares at least one proto uint64 field today
 	// (PendingMandateChange.version, on the mandate dual-control queue). A scan
 	// finding none has lost sight of the client types — through a moved directory,
 	// a renamed extension, or a declaration shape this regexp no longer matches —

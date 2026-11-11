@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command to get the web surface running locally (#371).
 #
-# It installs kanz-web's dependencies, builds the SPA, and prints the exact
+# It installs web's dependencies, builds the SPA, and prints the exact
 # environment the BFF needs to serve it. It does NOT start anything: the local
 # rig is `kanz/test/backing/up.sh`, and a second script that starts services
 # would be a second answer to "how do I run this".
@@ -12,15 +12,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WEB="$ROOT/kanz-web"
+WEB="$ROOT/web"
 BFF_INTERNAL_PORT="${BFF_INTERNAL_PORT:-8084}"
 
 # The shared npm prebuild refuses missing Rust/target or stale assets. Install
 # the pinned prerequisites explicitly; this helper never downloads a fallback.
 command -v rustup >/dev/null 2>&1 || { echo "FAIL: Rustup with Rust 1.90.0 and wasm32-unknown-unknown is required"; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "FAIL: npm is required (Node 24, as pinned in kanz-web/.nvmrc)"; exit 1; }
+command -v npm >/dev/null 2>&1 || { echo "FAIL: npm is required (Node 24, as pinned in web/.nvmrc)"; exit 1; }
 
-echo "==> installing kanz-web dependencies"
+echo "==> installing web dependencies"
 ( cd "$WEB" && npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund )
 
 echo "==> building the SPA"

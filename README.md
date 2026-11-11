@@ -33,22 +33,18 @@ are tracked in [GitHub Issues](https://github.com/eighred/kanz/issues) and PRs.
 
 ## Repository layout
 
-| Path | Contents |
+| If you are working on | Start here |
 |---|---|
-| [`kanz/`](kanz/) | Go services, shared libraries, command-line tools, migrations, and architecture tests. |
-| [`kanz-rs/`](kanz-rs/README.md) | Rust market-data runtimes, canonical compatibility primitives, and diagnostic bond-risk and fill-fold workers. |
-| [`kanz-jl/`](kanz-jl/README.md) | Julia curve-calibration worker, compared against the existing Go calculation. |
-| [`kanz-schemas/`](kanz-schemas/README.md) | Protobuf contracts, event specifications, and generated SDK tooling. |
-| [`kanz-web/`](kanz-web/) | Vue operator interface. |
-| [`kanz-py/`](kanz-py/README.md) | Python event-bus client and inference service. |
-| [`kanz/infra/`](kanz/infra/README.md) | Deployment, infrastructure, workload identity, and operational configuration. |
-| [`tools/`](tools/) | Host and operator tooling. |
-| [`.github/workflows/`](.github/workflows/) | CI, security, schema, and release workflows. |
-| [`.agents/plugins/kanz-forge/`](.agents/plugins/kanz-forge/README.md) | The repository-owned Codex engineering assistant. |
+| Live risk decisions and financial state | [Go risk engine](kanz/services/risk-engine/), [risk calculations](kanz/internal/risk/), and [OMS](kanz/services/oms/) in the `kanz/` Go module. |
+| Market-data runtimes and Rust migration work | [Rust workspace](kanz-rs/README.md), including the feed runtimes and the diagnostic [bond-risk worker](kanz-rs/services/bond-risk-shadow/README.md). |
+| Independent curve calibration | [Julia worker](kanz-jl/README.md). It compares against the installed Go curve. |
+| Shared wire contracts and SDK generation | [Protobuf schemas](kanz-schemas/README.md) in `kanz-schemas/`. |
+| Operator interface | [Vue client](web/). |
+| Authorized inference | [Python inference service](kanz-py/README.md). |
+| Deployment, operations, and CI | [Infrastructure](kanz/infra/README.md), [operator tools](tools/), and [workflows](.github/workflows/). |
 
-Keep the Go module and schema directories as siblings: local SDK resolution
-and build contexts depend on that layout. Component runbooks stay beside their
-code.
+See [Planes and layout](AGENTS.md#planes-and-layout) for naming and moving
+components as the repository evolves.
 
 The migration in [#1413](https://github.com/eighred/kanz/issues/1413) is incremental
 and incomplete. Rust feed runtimes support explicit depth ownership handoff;

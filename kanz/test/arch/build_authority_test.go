@@ -56,7 +56,7 @@ func validateImageAuthority(w imageAuthorityWorkflow) error {
 	if len(pr.Steps) == 0 || !reflect.DeepEqual(pr.Steps, publish.Steps) || !reflect.DeepEqual(pr.Strategy, publish.Strategy) {
 		return fmt.Errorf("validation and publication must use the same nonempty build definition")
 	}
-	for _, required := range []string{"kanz/**", "kanz-py/**", "kanz-web/**", ".dockerignore", ".github/actions/**", ".github/scripts/**"} {
+	for _, required := range []string{"kanz/**", "kanz-py/**", "web/**", ".dockerignore", ".github/actions/**", ".github/scripts/**"} {
 		found := false
 		for _, path := range w.On.PullRequest.Paths {
 			found = found || path == required

@@ -51,18 +51,28 @@ architecture violation even when tests pass.
 | `kanz/` | Go module `github.com/eighred/kanz`; Go 1.26.1 language / 1.26.10 toolchain. Services in `services/`, binaries in `cmd/`. |
 | `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
 | `kanz-py/` | Python inference service. |
-| `kanz-web/` | Browser client. |
+| `web/` | Browser client. |
 | `kanz-rs/` | Rust feed runtimes, canonical compatibility primitives and diagnostic financial workers; ownership changes require component-specific #1413 acceptance. |
 | `kanz-jl/` | Optional curve-calibration comparison worker; Go remains authoritative. |
 | `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
 | `tools/`, `.github/` | Host/operator scripts and CI. |
 
-Keep sibling directories in place: Go replacements and build contexts depend on
-them. Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
+Choose short, lowercase paths that name the responsibility for new components.
+Use a language name where it clarifies the runtime within that responsibility
+(for example, `workers/julia/` for calibration). Keep runbooks with their
+components. The path alone grants no runtime or financial authority.
+
+Move existing components one at a time when the move clarifies ownership.
+Update all path consumers in the same change, including build contexts,
+module and generated SDK resolution, CI triggers, architecture guards, and
+deployment references as applicable. Verify the affected build and workflow
+entry points before merging. Preserve the Go module and schema SDK's relative
+layout until their consumers can be updated and verified together.
+
+Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
 Kafka (segmentio) is the derived archival/CDC path. Start setup at
 `kanz/dev/README.md`, schema generation at `kanz-schemas/README.md`, and Python
-setup at `kanz-py/README.md`. Keep operational runbooks beside their component;
-do not move packages merely for tidiness.
+setup at `kanz-py/README.md`.
 
 ## Execution and trust boundaries
 

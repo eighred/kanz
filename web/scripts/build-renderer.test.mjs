@@ -80,9 +80,9 @@ test('untracked Cargo config and ambient compiler overrides fail closed', t => {
 })
 
 test('failed prerequisite stops prebuild without accepting an old entrypoint', () => {
-  const entry = join(root, 'kanz-web/src/generated/browser-render.ts')
+  const entry = join(root, 'web/src/generated/browser-render.ts')
   const previous = fs.existsSync(entry) ? fs.readFileSync(entry) : null
-  const child = spawnSync(process.execPath, [join(root, 'kanz-web/scripts/build-renderer.mjs')],
+  const child = spawnSync(process.execPath, [join(root, 'web/scripts/build-renderer.mjs')],
     { env: { ...process.env, PATH: '', GITHUB_ACTIONS: 'false' }, encoding: 'utf8', timeout: 10000 })
   assert.equal(child.status, 1)
   assert.equal(child.stdout, '')

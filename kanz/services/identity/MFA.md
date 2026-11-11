@@ -80,7 +80,7 @@ go test -p 1 ./pkg/auth ./services/api-gateway/cmd/api-gateway ./services/api-ga
 ```
 
 The browser test additionally requires `TEST_MFA_BROWSER_SCRIPT` pointing to
-`kanz-web/e2e/mfa.cjs`, `TEST_MFA_PLAYWRIGHT` to an installed Playwright module,
+`web/e2e/mfa.cjs`, `TEST_MFA_PLAYWRIGHT` to an installed Playwright module,
 `TEST_MFA_NODE`, `TEST_MFA_BFF` to the built BFF executable, and
 `TEST_MFA_STATIC_DIR` to the built web distribution. It starts real identity/BFF
 HTTP services against Postgres and drives Chromium's virtual UV authenticator:

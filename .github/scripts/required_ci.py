@@ -41,7 +41,7 @@ def commit(repo, value):
 def application_path(path):
     # Only known non-runtime material may skip application CI. Unknown new
     # directories run the suite until deliberately classified in this policy.
-    if path.startswith((b"kanz/", b"kanz-py/", b"kanz-web/", b"kanz-schemas/",
+    if path.startswith((b"kanz/", b"kanz-py/", b"web/", b"kanz-schemas/",
                         b"tools/", b".github/scripts/", b".github/actions/",
                         b".github/workflows/")):
         return True

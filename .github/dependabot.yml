@@ -85,7 +85,7 @@ updates:
   # dependencies — the ones that ship to a browser — were the only unmonitored
   # tree in the repository.
   - package-ecosystem: npm
-    directory: /kanz-web
+    directory: /web
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
@@ -93,7 +93,7 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
     # Same reasoning as kanz-bus above: @types/node's major IS the Node major it
-    # describes, and kanz-web/.nvmrc is the runtime pin. Raise both together or
+    # describes, and web/.nvmrc is the runtime pin. Raise both together or
     # tsc will accept APIs the runtime does not have.
     ignore:
       - dependency-name: "@types/node"
