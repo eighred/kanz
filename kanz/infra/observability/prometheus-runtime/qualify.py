@@ -101,7 +101,7 @@ def runtime(image, helper, scratch, suffix):
             "-subj", "/CN=qualification", "-addext", "subjectAltName=IP:127.0.0.1",
             "-keyout", str(fixture / "server.key"), "-out", str(fixture / "server.crt"))
     # These are ephemeral dummy fixture keys, never retained in the receipt.
-    os.chmod(fixture / "server.key", 0o644)
+    os.chmod(fixture / "server.key", 0o600)
     (fixture / "prometheus.yml").write_text("""global:
   scrape_interval: 1s
 scrape_configs:
@@ -113,7 +113,7 @@ scrape_configs:
           ca_file: /fixture/server.crt
 """, encoding="utf-8")
     sandbox = ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-               "--pids-limit=64", "--memory=512m", "--cpus=1", "--user=65534:65534",
+               "--pids-limit=64", "--memory=512m", "--cpus=1",
                "--ulimit=fsize=268435456:268435456",
                "--log-opt=max-size=1m", "--log-opt=max-file=1",
                "--tmpfs=/tmp:rw,noexec,nosuid,size=16m", "--env=HOME=/tmp",
@@ -121,7 +121,8 @@ scrape_configs:
 
     def start_api():
         command("docker", "run", "-d", "--name", api, "--network=container:" + name,
-                *sandbox, helper, "python", "/fixture/kube_fixture.py", "serve")
+                *sandbox, f"--user={os.getuid()}:{os.getgid()}",
+                helper, "python", "/fixture/kube_fixture.py", "serve")
 
     try:
         command("docker", "volume", "create", "--driver=local", "--opt=type=tmpfs",
@@ -130,9 +131,10 @@ scrape_configs:
         # This proves process/WAL recovery, not node loss or a production PVC.
         data_mount = f"type=volume,source={volume},target=/prometheus,volume-nocopy"
         command("docker", "run", "-d", "--name", holder, "--network=none", *sandbox,
-                "--mount", data_mount, helper, "python", "-c", "import time; time.sleep(480)")
+                "--user=65534:65534", "--mount", data_mount,
+                helper, "python", "-c", "import time; time.sleep(480)")
         command("docker", "run", "-d", "--name", name, "--network=none", *sandbox,
-                "--mount", data_mount, image,
+                "--user=65534:65534", "--mount", data_mount, image,
                 "--config.file=/fixture/prometheus.yml", "--storage.tsdb.path=/prometheus",
                 "--web.listen-address=127.0.0.1:9090")
         start_api()
@@ -183,6 +185,8 @@ def main():
     parser.add_argument("--helper", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if os.getuid() == 0:
+        raise ValueError("qualification requires a non-root Linux supervisor")
     recipe = (HERE / "Dockerfile").read_text()
     upstream = re.search(r"^FROM (\S+) AS upstream$", recipe, re.MULTILINE)[1]
     if "@sha256:" not in upstream:
