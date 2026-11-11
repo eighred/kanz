@@ -60,6 +60,12 @@ requires new checks. No polling daemon, second task board, external scheduler,
 or service credentials are introduced. Native tool availability and capacity
 determine whether parallel execution is possible.
 
+[Delivery coordination](skills/commands/references/delivery-coordination.md)
+uses live evidence to separate blockers from independent work. The optional
+offline reducer checks a reviewed snapshot for stale CI evidence, queue holds,
+ownership conflicts and missing local builder proof. It does not orchestrate
+workers or authorize delivery.
+
 ## Context and memory
 
 Stable constraints live in AGENTS.md; decisions and blockers in Issues; review
@@ -142,6 +148,7 @@ installed by these original workflows. See
 | `provenance.py`, `test_provenance.py` | Verify imported bytes and detect tampering or broken dispatch references. |
 | `skill_discovery.py`, `test_install.py` | Check real CLI discovery and installed bytes in a disposable profile. |
 | `receipts.py`, `test_receipts.py` | Optional compatibility with existing local test history; unnecessary for ordinary Chat work. |
+| `delivery_evidence.py`, `test_delivery_evidence.py` | Optional offline checks of delivery evidence and task conflicts. |
 
 These checks use the standard library. Replacing deterministic integrity and
 installation checks with prose would remove their regression protection.
