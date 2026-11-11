@@ -25,7 +25,7 @@ func checkBrowserArchiveRecipe(data []byte) error {
 					return fmt.Errorf("archive setup cannot be omitted or duplicated")
 				}
 				setup = i
-				if strings.TrimSpace(s.Run) != "python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py\nsudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py" {
+				if strings.TrimSpace(s.Run) != "python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py\nsudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py\nsudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py --verify" {
 					return fmt.Errorf("unreviewed archive recipe")
 				}
 			}
@@ -54,6 +54,7 @@ func TestCIBrowserArchivePreservesCompleteDependencyInstall(t *testing.T) {
 		{"--with-deps chromium", "chromium"},
 		{"python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py", "true"},
 		{"sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py", "true"},
+		{"python3 .github/scripts/ci_ubuntu_archive.py --verify", "python3 .github/scripts/ci_ubuntu_archive.py # verification omitted"},
 	} {
 		changed := strings.Replace(string(data), m[0], m[1], 1)
 		if changed == string(data) {

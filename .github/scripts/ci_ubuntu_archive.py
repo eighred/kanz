@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import stat
+import argparse
+import subprocess
 
 SOURCE = Path('/etc/apt/sources.list.d/ubuntu.sources')
 TARGET = b'https://archive.ubuntu.com/ubuntu/'
@@ -81,5 +83,39 @@ def apply():
     print('Ubuntu archive uses official HTTPS; repository fields and signature policy preserved')
 
 
+def verify():
+    """Refuse unavailable signed indexes before downstream missing-package noise."""
+    if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_OS') != 'Linux':
+        raise ValueError('archive verification is restricted to disposable GitHub Linux jobs')
+    fd = os.open(SOURCE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > LIMIT:
+            raise ValueError('Ubuntu source is not a bounded regular file')
+        raw = source.read(LIMIT + 1)
+    if rewrite(raw) != raw:
+        raise ValueError('official signed archive selection must precede verification')
+    try:
+        result = subprocess.run(['apt-get', '-o', 'APT::Update::Error-Mode=any',
+                                 '-o', 'Acquire::Retries=2', '-o', 'Acquire::http::Timeout=20',
+                                 '-o', 'Acquire::https::Timeout=20', 'update'], timeout=180)
+        if result.returncode == 0:
+            print('Signed package metadata available; complete Playwright installation remains required')
+            return
+    except subprocess.TimeoutExpired:
+        print('Signed package metadata probe exceeded 180 seconds', flush=True)
+    # A failed DNS lookup explains the observed boundary, not the provider cause.
+    try:
+        probe = subprocess.run(['getent', 'ahosts', 'archive.ubuntu.com'],
+                               capture_output=True, text=True, timeout=10)
+        print('archive.ubuntu.com DNS resolution: ' + ('available' if probe.returncode == 0 else 'unavailable'), flush=True)
+    except (OSError, subprocess.TimeoutExpired):
+        print('archive.ubuntu.com DNS diagnostic unavailable', flush=True)
+    raise ValueError('signed Ubuntu metadata unavailable; dependency setup failed before application tests')
+
+
 if __name__ == '__main__':
-    apply()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify', action='store_true', help='strict bounded signed-index check on the selected archive')
+    args = parser.parse_args()
+    verify() if args.verify else apply()
