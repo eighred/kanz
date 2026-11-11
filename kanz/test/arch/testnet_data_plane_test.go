@@ -4,9 +4,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"sigs.k8s.io/yaml"
 )
@@ -284,4 +290,52 @@ func bytesBeforeNextDocument(raw []byte) int {
 		return i
 	}
 	return len(raw)
+}
+
+// The namespace and pod selectors belong to the same peer (AND). Splitting
+// them into peers would authorize every pod in observability and same-namespace
+// pods with the scraper label. This is structural proof, not CNI enforcement.
+func TestTokyoPostgresMetricsPolicy(t *testing.T) {
+	raw := mustReadArchFile(t, filepath.Join(moduleRoot(t), "infra", "overlays", "testnet-tokyo", "data", "postgres.yaml"))
+	docs, err := decodeYAMLStream[map[string]any](raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, doc := range docs {
+		body, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var policy networkingv1.NetworkPolicy
+		if err := json.Unmarshal(body, &policy); err != nil {
+			t.Fatal(err)
+		}
+		if policy.Kind != "NetworkPolicy" || policy.Name != "postgres-prometheus-metrics" {
+			continue
+		}
+		found++
+		if policy.Namespace != "kanz-data" || !reflect.DeepEqual(policy.Spec, tokyoPostgresMetricsSpec()) {
+			t.Fatal("Postgres metrics must admit only kanz-observability/app=prometheus to this CNPG cluster on TCP 9187, without egress or database access")
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected one bounded Postgres metrics policy, found %d", found)
+	}
+}
+
+func tokyoPostgresMetricsSpec() networkingv1.NetworkPolicySpec {
+	port := intstr.FromInt32(9187)
+	protocol := corev1.ProtocolTCP
+	return networkingv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"cnpg.io/cluster": "kanz-testnet-postgres"}},
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{{
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kanz-observability"}},
+				PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "prometheus"}},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{{Port: &port, Protocol: &protocol}},
+		}},
+	}
 }
