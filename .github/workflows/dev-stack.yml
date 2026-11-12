@@ -1,0 +1,69 @@
+name: dev-stack
+
+on:
+  pull_request:
+    paths: ['kanz/dev/**', 'kanz/Makefile', '.github/workflows/dev-stack.yml']
+  push:
+    branches: [main]
+    paths: ['kanz/dev/**', 'kanz/Makefile', '.github/workflows/dev-stack.yml']
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: kanz-dev-ci
+      GOFLAGS: -mod=mod
+      TEST_POSTGRES_URL: postgres://kanzapp:kanz@127.0.0.1:5432/kanzapp?sslmode=disable
+      TEST_KAFKA_BROKERS: 127.0.0.1:9092
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache: false
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      # The existing Go/distroless mirrors require authenticated pulls even on
+      # PR builds. This token cannot publish images or modify the repository.
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fresh checkout bootstrap and real Make entrypoint
+        run: |
+          make -C kanz bootstrap
+          make -C kanz up
+      - name: Prove restricted role, real RLS and both broker listeners
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          role=$(docker compose -f dev/docker-compose.yml exec -T postgres psql -U kanz -d kanz -Atc "SELECT rolname,rolsuper,rolbypassrls FROM pg_roles WHERE rolname='kanzapp'")
+          test "$role" = 'kanzapp|f|f'
+          go test -p 1 -count=1 -json ./internal/risk/state/persist > .gotmp/dev-persist.jsonl
+          python3 -c 'import json; e=[json.loads(l) for l in open(".gotmp/dev-persist.jsonl")]; assert not any(x["Action"] in ("skip","fail") for x in e); assert any(x["Action"]=="pass" and x.get("Test")=="TestPostgres_RLSTenantIsolation" for x in e)'
+          go test -p 1 -count=1 -run '^TestKafkaPublishSubscribe$' -v ./pkg/bus
+          docker compose -f dev/docker-compose.yml exec -T kafka rpk cluster info -X brokers=kafka:9092
+      - name: Shutdown preserves data and the stack restarts
+        working-directory: kanz
+        run: |
+          make down
+          for volume in nats-data postgres-data redpanda-data; do
+            docker volume inspect "${COMPOSE_PROJECT_NAME}_${volume}" > /dev/null
+          done
+          docker compose -f dev/docker-compose.yml up -d --no-build
+          python3 dev/wait-ready.py
+          python3 dev/smoke.py
+      - name: Capture disposable stack logs
+        if: always()
+        working-directory: kanz
+        run: docker compose -f dev/docker-compose.yml logs --no-color --tail 100
+      - name: Remove disposable CI stack
+        if: always()
+        run: make -C kanz reset CONFIRM=kanz-dev

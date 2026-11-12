@@ -172,7 +172,7 @@ go test -p 1 ./internal/... -count=1
 go test -p 1 ./services/... -count=1
 go test -p 1 ./test/arch/ -count=1
 golangci-lint run ./...
-git ls-files -z '*.go' | xargs -0 gofmt -l
+python3 dev/check.py fmt
 
 cd ../kanz-schemas
 buf generate
@@ -229,8 +229,9 @@ Bash; use equivalent native commands in PowerShell.
    go env -w GOTMPDIR="$HOME/.go-tmp"  # undo: go env -u GOTMPDIR
    ```
 
-   The Makefile overrides this with in-module `kanz/.gotmp` in CI. Use
-   `git ls-files` for gofmt, never a tree walk that includes generated test mains.
+   The Makefile overrides this with in-module `kanz/.gotmp` in CI. From `kanz/`,
+   run `python dev/check.py fmt` on Windows (`python3` on Linux). It checks Git's
+   tracked and untracked files while excluding ignored generated test mains.
 
 2. **Generate the schema SDK.** `kanz/go.mod` replaces the SDK with
    `../kanz-schemas/gen/go`; ignored `gen/` is never committed (EVT-15a).
