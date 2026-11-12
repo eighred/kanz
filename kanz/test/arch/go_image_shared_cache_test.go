@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const goSharedImport = "type=gha,scope=${{ matrix.service }}\n${{ startsWith(matrix.dockerfile, 'kanz/') && matrix.service != 'cloudflared' && 'type=gha,scope=accounting' || '' }}"
+const goSharedImport = "type=gha,scope=${{ matrix.service }}\n${{ startsWith(matrix.dockerfile, 'kanz/') && matrix.service != 'cloudflared' && matrix.service != 'prometheus' && 'type=gha,scope=accounting' || '' }}"
 const goOwnExport = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=gha,scope={0},mode=max', matrix.service) || '' }}"
 
 func checkGoSharedCache(raw string, files map[string]string) error {
@@ -116,7 +116,7 @@ cp.execFileSync('python', ['.github/scripts/go_image_cache_probe.py', '--source'
 				return fmt.Errorf("build/cache input or authority changed")
 			}
 		}
-		if builds != 1 || len(job.Strategy.Matrix.Include) != 35 {
+		if builds != 1 || len(job.Strategy.Matrix.Include) != 36 {
 			return fmt.Errorf("image inventory changed")
 		}
 		prefix := ""
@@ -135,7 +135,7 @@ cp.execFileSync('python', ['.github/scripts/go_image_cache_probe.py', '--source'
 				return fmt.Errorf("missing Dockerfile")
 			}
 			actualGo := strings.Contains(body, "FROM ghcr.io/eighred/base/golang:")
-			selected := strings.HasPrefix(row.Dockerfile, "kanz/") && row.Service != "cloudflared"
+			selected := strings.HasPrefix(row.Dockerfile, "kanz/") && row.Service != "cloudflared" && row.Service != "prometheus"
 			if actualGo != selected {
 				return fmt.Errorf("shared scope selects wrong image")
 			}
@@ -204,6 +204,7 @@ func TestGoImagesImportSharedDependenciesWithoutSharedWrites(t *testing.T) {
 		{"type=gha,scope=${{ matrix.service }}\n", ""},
 		{"&& 'type=gha,scope=accounting'", "&& 'type=gha,scope=oms'"},
 		{"matrix.service != 'cloudflared'", "matrix.service != 'inference'"},
+		{" && matrix.service != 'prometheus'", ""},
 		{"github.event_name == 'push' && github.ref == 'refs/heads/main' && format", "github.event_name == 'pull_request' && format"},
 		{"scope={0},mode=max", "scope=accounting,mode=max"},
 		{"context: .\n", "context: https://example.invalid\n"},
