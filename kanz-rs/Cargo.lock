@@ -2213,6 +2213,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanz-option-pricing"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kanz-order-core"
 version = "0.1.0"
 dependencies = [
