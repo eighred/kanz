@@ -65,6 +65,31 @@ func TestApprove_OneNameSpelledTwoWaysIsStillOnePerson(t *testing.T) {
 	}
 }
 
+// Go 1.27 adds these case pairs. A compiler upgrade must not leave a Rust
+// consumer accepting the same authenticated person as both maker and checker.
+func TestApprove_Unicode17CasePairsCannotSupplyBothSignatures(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"\u1c89", "\u1c8a"},
+		{"\ua7cb", "\u0264"},
+		{"\U00010d50", "\U00010d70"},
+		{"\U00016ea0", "\U00016ebb"},
+	} {
+		for _, actors := range [][2]string{pair, {pair[1], pair[0]}} {
+			proposer, approver := actors[0]+"@kanz", "\u2003"+actors[1]+"@kanz\u00a0"
+			if !dualcontrol.SameSubject(proposer, approver) {
+				t.Fatalf("case pair is not recognized as one subject: %U / %U", []rune(actors[0])[0], []rune(actors[1])[0])
+			}
+			if _, err := proposal(t, proposer).Approve(approver, digest(), now.Add(time.Hour)); !errors.Is(err, dualcontrol.ErrSelfApproval) {
+				t.Fatalf("case pair supplied both signatures: %v", err)
+			}
+			approval, err := proposal(t, proposer).Approve("checker@kanz", digest(), now.Add(time.Hour))
+			if err != nil || approval.Proposer() != proposer || approval.Approver() != "checker@kanz" {
+				t.Fatalf("distinct-person approval must retain the original subjects: %v", err)
+			}
+		}
+	}
+}
+
 // THE APPROVAL COVERS THE VALUE, NOT MERELY THE REQUEST.
 //
 // Propose a defensible price, collect the second signature, apply a different
