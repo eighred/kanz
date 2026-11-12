@@ -6,8 +6,8 @@ caller. It does not depend on the unmerged accounting/precision branches.
 
 | Existing owner | Family and boundary |
 | --- | --- |
-| `pricing.PriceGreeks` Ã¢â€ â€™ `BlackScholesPrice/Greeks` | European BSM price and per-unit analytic Greeks: the family qualified here. |
-| `pricing.PriceGreeks` Ã¢â€ â€™ `BinomialPrice/Greeks` | American CRR remains Go-owned; this candidate returns `UnsupportedModel`. |
+| `pricing.PriceGreeks` → `BlackScholesPrice/Greeks` | European BSM price and per-unit analytic Greeks: the family qualified here. |
+| `pricing.PriceGreeks` -> `BinomialPrice/Greeks` | American CRR candidate in `american::evaluate`; fixed 200 steps, Go-compatible bumps and explicit unavailable-tree refusal. The root European `evaluate` still refuses American exercise. |
 | `pricing.Bond.CurveRisk` and existing `bond-risk-shadow` | Separate qualified bond family; no change here. |
 | `compute.positionGreekContribution` | Go resolves terms, spot, vol, valuation time and curve, handles missing/expired inputs, scales dollar Greeks and emits canonical Decimals. No Rust substitution occurs. |
 
@@ -20,7 +20,8 @@ floating point into journals, cash or positions.
 
 The Go compute caller passes zero yield and derives years with
 `Expiry.Sub(asOf).Hours()/24/365`, and retains input/provenance/coverage and
-financial authority. Its production registration remains held by #1230. The library also preserves the existing general pricing
+financial authority. Its production registration remains held by #1230.
+The library also preserves the existing general pricing
 API's continuous-yield convention. A matching kernel cannot establish that
 terms, volatility or source coverage are available.
 
@@ -101,8 +102,10 @@ Go previously substituted a European Black-Scholes price when CRR probability
 fell outside [0,1]. The regression `S=60,K=100,T=1,r=1,q=0,sigma=.001` returned
 zero despite the American holder's immediate exercise payoff of 40. Go now
 returns NaN for an inadmissible/nonfinite tree; a single failed Greek bump makes
-all five Greeks unavailable. The registered Go measure records incomplete coverage; the revaluation helper
-returns unavailable and reports `invalid_pricing_result` through its skip callback. Rust returns a typed error with no partial
+all five Greeks unavailable. The registered Go measure records incomplete
+coverage; the revaluation helper returns unavailable and reports
+`invalid_pricing_result` through its skip callback. Rust returns a typed error
+with no partial
 candidate. This is an intentional Go correctness repair, not compatibility with
 the erroneous fallback. Ordinary valid trees retain the existing calculation.
 
