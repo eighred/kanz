@@ -146,6 +146,7 @@ jobs:
         run: |
           python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py --verify
 
       - name: Prepare complete MFA browser dependencies before compiler cache
         run: |
@@ -1094,6 +1095,7 @@ jobs:
         run: |
           python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py --verify
 
       - name: Qualify broker history rendering in Chromium
         working-directory: kanz-web
