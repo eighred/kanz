@@ -53,6 +53,28 @@ The report validators check structure and evidence contracts; they do not prove
 that Kanz is secure. Full-audit isolation requirements remain binding. Hostile
 code and production probes are not authorized by installation.
 
+## Review upstream changes during Forge maintenance
+
+At each Forge upgrade, and before an audit that depends on the imported
+methodology, compare `upstreams.json` with the publisher's current release or
+default-branch commit. Record the checked date, source URL and observed revision
+in the existing maintenance PR or owning issue. If unchanged, retain the pin
+and imported bytes; a successful local provenance check alone does not check
+upstream freshness.
+
+When upstream has changed, review its diff, license and compatibility with the
+Kanz boundaries before adoption. Update the reviewed commit, blob identifiers,
+local hashes and any adapted overlay together. Retain the license notice, run
+provenance and offline tests, and verify the protected-input validators on Linux.
+Deliver through the normal PR and supported plugin installation workflow. A
+new upstream revision is a review candidate, not permission to replace installed
+files or clear an existing blocker.
+
+Context7 remains optional documentation access, with no imported source to
+refresh. Check its availability and applicable provider terms when using it;
+resolve documentation versions under the evidence guide. This maintenance
+instruction adds no background updater, recurring job or service dependency.
+
 ## Optional history
 
 `scripts/receipts.py` preserves the existing local pricing-test receipt format.
