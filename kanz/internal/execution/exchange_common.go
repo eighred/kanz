@@ -191,23 +191,29 @@ type VenueSettings struct {
 	DNSTTL       time.Duration     // DNS cache TTL for the bypass dialer (default 5m)
 }
 
-// formatDec renders a common.v1.Decimal as a plain decimal string for an
-// exchange API. NOTE: exchange lot/price-filter precision rounding is a
-// hardening item — testnet tolerates unrounded values; production binds the
-// symbol filters before send.
-// FormatDec renders an exact decimal for an exchange wire field.
-func FormatDec(d *commonpb.Decimal) string {
-	s := dec.FromProto(d).FloatString(8)
-	for len(s) > 0 && s[len(s)-1] == '0' {
-		s = s[:len(s)-1]
+var ErrVenueDecimal = errors.New("missing or unsupported exact venue decimal")
+
+// FormatDec renders every digit, or refuses before an exchange request can be
+// signed. The venue boundary uses dec.ToProtoExact's normalized int64 coefficient
+// and [-60,60] exponent domain; it does not quantize to a venue's lot/tick grid.
+// Validate the incoming exponent before materializing its power of ten. Missing
+// values are unknown, including where FromProto would have treated nil as zero.
+func FormatDec(d *commonpb.Decimal) (string, error) {
+	if d == nil {
+		return "", ErrVenueDecimal
 	}
-	if len(s) > 0 && s[len(s)-1] == '.' {
-		s = s[:len(s)-1]
+	r, ok := dec.FromProtoChecked(d)
+	if !ok {
+		return "", ErrVenueDecimal
 	}
-	if s == "" {
-		s = "0"
+	if _, ok := dec.ToProtoExact(r); !ok {
+		return "", ErrVenueDecimal
 	}
-	return s
+	text, err := dec.ExactFromRat(r)
+	if err != nil {
+		return "", ErrVenueDecimal
+	}
+	return string(text), nil
 }
 
 // ParseDec parses an exchange decimal string into an exact common.v1.Decimal.
@@ -229,20 +235,26 @@ func FormatDec(d *commonpb.Decimal) string {
 //     position in tokens: OKX lists assets that trade in the trillions, and an
 //     accFillSz of 1e12 came back through here as 77662796314.5224192.
 //
-// dec.ToProtoScaled preserves magnitude and reports when it cannot, so a real
-// large fill converts exactly and only a genuinely unrepresentable one refuses.
+// The bounded exact parser accepts decimal text (and exact terminating rational
+// text), with a normalized int64 coefficient and exponent in [-60,60]. Scientific
+// notation is refused before exponentiation. ToProtoScaled is inappropriate here:
+// it silently rounds observations beyond eight places (#1594).
 func ParseDec(s string) (*commonpb.Decimal, bool) {
-	r, ok := new(big.Rat).SetString(s)
-	if !ok {
-		return nil, false
-	}
-	return dec.ToProtoScaled(r)
+	return dec.ParseProtoExact(s)
 }
 
 // SubDec returns a − b as an exact common.v1.Decimal. ok=false when the result
 // cannot be represented; see ParseDec for why that is a refusal and not a zero.
 func SubDec(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
-	return dec.ToProtoScaled(new(big.Rat).Sub(dec.FromProto(a), dec.FromProto(b)))
+	if a == nil || b == nil {
+		return nil, false
+	}
+	ar, aok := dec.FromProtoChecked(a)
+	br, bok := dec.FromProtoChecked(b)
+	if !aok || !bok {
+		return nil, false
+	}
+	return dec.ToProtoExact(new(big.Rat).Sub(ar, br))
 }
 
 // ErrVenueOverfill is the exchange claiming a cumulative filled quantity LARGER
@@ -291,15 +303,22 @@ var ErrLeavesUnrepresentable = errors.New("leaves quantity is not representable 
 // EQUALITY IS NOT AN OVERFILL. A report that completes the order exactly is the
 // ordinary terminal case and leaves zero.
 func LeavesRemaining(ordered, cumulative *commonpb.Decimal) (*commonpb.Decimal, error) {
-	o, c := dec.FromProto(ordered), dec.FromProto(cumulative)
+	if ordered == nil || cumulative == nil {
+		return nil, ErrLeavesUnrepresentable
+	}
+	o, ook := dec.FromProtoChecked(ordered)
+	c, cok := dec.FromProtoChecked(cumulative)
+	if !ook || !cok {
+		return nil, ErrLeavesUnrepresentable
+	}
 	if c.Cmp(o) > 0 {
 		return nil, fmt.Errorf("%w: ordered %s, venue reports %s cumulative filled",
-			ErrVenueOverfill, o.FloatString(8), c.FloatString(8))
+			ErrVenueOverfill, o.RatString(), c.RatString())
 	}
 	leaves, ok := SubDec(ordered, cumulative)
 	if !ok {
 		return nil, fmt.Errorf("%w: ordered %s minus cumulative %s",
-			ErrLeavesUnrepresentable, o.FloatString(8), c.FloatString(8))
+			ErrLeavesUnrepresentable, o.RatString(), c.RatString())
 	}
 	return leaves, nil
 }

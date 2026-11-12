@@ -179,9 +179,9 @@ func marginSupport(accountLevel string) SupportStatus {
 
 // parseVenueRat converts an exchange decimal string EXACTLY, or reports UNKNOWN.
 //
-// nil FOR ANYTHING THAT IS NOT A NUMBER, which is the whole reason this is not
-// ParseDec: that helper answers an unparseable string with ZERO, and a zero
-// margin figure is a claim rather than an absence. OKX returns "" for every
+// nil FOR ANYTHING THAT IS NOT A NUMBER. Unlike ParseDec, this returns an exact
+// rational for internal margin computation rather than a canonical wire value.
+// A zero margin figure is a claim rather than an absence. OKX returns "" for every
 // margin field on an account it does not margin, so the empty case is not a
 // corner — it is the answer this adapter will get most often until an account is
 // switched to a margin mode.

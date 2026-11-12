@@ -245,11 +245,15 @@ func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {
 	if err != nil {
 		return nil, err
 	}
+	quantity, err := formatDec(st.GetOrderedQuantity())
+	if err != nil {
+		return nil, fmt.Errorf("binance: quantity: %w", err)
+	}
 	p := url.Values{
 		"symbol":           {symbol},
 		"side":             {side},
 		"newClientOrderId": {st.GetOrderId()}, // deterministic ⇒ exchange-side idempotency
-		"quantity":         {formatDec(st.GetOrderedQuantity())},
+		"quantity":         {quantity},
 	}
 	switch st.GetOrderType() {
 	case orderpb.OrderType_ORDER_TYPE_MARKET:
@@ -264,7 +268,11 @@ func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {
 		}
 		p.Set("type", "LIMIT")
 		p.Set("timeInForce", tif)
-		p.Set("price", formatDec(st.GetLimitPrice()))
+		price, err := formatDec(st.GetLimitPrice())
+		if err != nil {
+			return nil, fmt.Errorf("binance: price: %w", err)
+		}
+		p.Set("price", price)
 	case orderpb.OrderType_ORDER_TYPE_STOP:
 		// STOP_LOSS: becomes a MARKET order once stopPrice trades, which is what
 		// order.v1's ORDER_TYPE_STOP means. No price, no timeInForce — Binance
@@ -273,7 +281,11 @@ func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {
 			return nil, errors.New("binance: stop order requires a positive stop price")
 		}
 		p.Set("type", "STOP_LOSS")
-		p.Set("stopPrice", formatDec(st.GetStopPrice()))
+		stopPrice, err := formatDec(st.GetStopPrice())
+		if err != nil {
+			return nil, fmt.Errorf("binance: stopPrice: %w", err)
+		}
+		p.Set("stopPrice", stopPrice)
 	case orderpb.OrderType_ORDER_TYPE_STOP_LIMIT:
 		// STOP_LOSS_LIMIT: becomes a LIMIT order at price once stopPrice trades.
 		if dec.IsZero(st.GetStopPrice()) {
@@ -287,8 +299,16 @@ func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {
 			return nil, err
 		}
 		p.Set("type", "STOP_LOSS_LIMIT")
-		p.Set("stopPrice", formatDec(st.GetStopPrice()))
-		p.Set("price", formatDec(st.GetLimitPrice()))
+		stopPrice, err := formatDec(st.GetStopPrice())
+		if err != nil {
+			return nil, fmt.Errorf("binance: stopPrice: %w", err)
+		}
+		p.Set("stopPrice", stopPrice)
+		price, err := formatDec(st.GetLimitPrice())
+		if err != nil {
+			return nil, fmt.Errorf("binance: price: %w", err)
+		}
+		p.Set("price", price)
 		p.Set("timeInForce", tif)
 	default:
 		return nil, fmt.Errorf("binance: unsupported order type %v", st.GetOrderType())
