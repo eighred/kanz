@@ -40,40 +40,49 @@ var ErrParBootstrap = errors.New("curve: cannot bootstrap par quotes")
 // interp. A solved discount factor that is non-positive (or a non-ascending /
 // non-positive tenor) yields ErrParBootstrap rather than a garbage curve.
 func Bootstrap(quotes []ParQuote, interp Interpolation) (*Curve, error) {
-	if len(quotes) == 0 {
+	if len(quotes) == 0 || !validInterpolation(interp) {
 		return nil, ErrParBootstrap
+	}
+	for _, q := range quotes {
+		if !finite(q.Tenor, q.Rate) {
+			return nil, ErrParBootstrap
+		}
 	}
 	qs := make([]ParQuote, len(quotes))
 	copy(qs, quotes)
 	sort.Slice(qs, func(i, j int) bool { return qs[i].Tenor < qs[j].Tenor })
 
-	dfs := make([]float64, len(qs)) // discount factor at each pillar
 	tenors := make([]float64, len(qs))
+	zeros := make([]float64, len(qs))
 	prevTenor := 0.0
+	annuity := 0.0
 	for n, q := range qs {
 		if q.Tenor <= 0 || q.Tenor <= prevTenor && n > 0 {
 			return nil, ErrParBootstrap
 		}
-		// Σ_{i<n} τ_i·DF_i over the already-solved pillars.
-		annuity := 0.0
-		pt := 0.0
-		for i := 0; i < n; i++ {
-			annuity += (tenors[i] - pt) * dfs[i]
-			pt = tenors[i]
-		}
+		// Every input uses the same prefix of coupon dates. Retain its annuity
+		// rather than summing that identical prefix again for each pillar.
 		tauN := q.Tenor - prevTenor
-		dfN := (1 - q.Rate*annuity) / (1 + q.Rate*tauN)
-		if dfN <= 0 || dfN > 1.0000001 {
+		numerator := 1 - q.Rate*annuity
+		denominator := 1 + q.Rate*tauN
+		dfN := numerator / denominator
+		// A positive factor above one is valid under negative rates. Positivity
+		// and finite arithmetic are required; descending discounts are not policy.
+		if !finite(annuity, numerator, denominator, dfN) || numerator <= 0 || denominator <= 0 || dfN <= 0 {
 			return nil, ErrParBootstrap
 		}
-		dfs[n] = dfN
+		// Taking log of a rounded DF=1 erases sub-epsilon nonzero rates.
+		lnDF := math.Log1p(-q.Rate*annuity) - math.Log1p(q.Rate*tauN)
+		zeros[n] = -lnDF / q.Tenor
+		if !finite(zeros[n]) {
+			return nil, ErrParBootstrap
+		}
 		tenors[n] = q.Tenor
+		annuity += tauN * dfN
+		if !finite(annuity) {
+			return nil, ErrParBootstrap
+		}
 		prevTenor = q.Tenor
-	}
-
-	zeros := make([]float64, len(qs))
-	for i := range qs {
-		zeros[i] = -math.Log(dfs[i]) / tenors[i] // continuous zero from DF
 	}
 	return NewZeroCurve(tenors, zeros, Continuous, interp)
 }
@@ -81,18 +90,24 @@ func Bootstrap(quotes []ParQuote, interp Interpolation) (*Curve, error) {
 // ParRate reprices a par instrument of the given tenor off the curve: the fixed
 // rate c that makes 1 = c·Σ τ_i·DF_i + DF_tenor, i.e. the curve's implied par
 // yield at that tenor. couponTimes are the coupon dates (years, ascending,
-// ending at tenor); an empty/short set defaults to annual coupons to tenor. The
+// ending at tenor); an absent/invalid schedule is unavailable (NaN). The
 // inverse of Bootstrap — repricing a bootstrap input recovers its quote.
 func (c *Curve) ParRate(couponTimes []float64) float64 {
 	if len(couponTimes) == 0 {
-		return 0
+		return math.NaN()
 	}
 	annuity := 0.0
 	prev := 0.0
 	for _, t := range couponTimes {
+		if !finite(t) || t <= prev {
+			return math.NaN()
+		}
 		annuity += (t - prev) * c.Discount(t)
 		prev = t
 	}
 	last := couponTimes[len(couponTimes)-1]
-	return (1 - c.Discount(last)) / annuity
+	if !finite(annuity) || annuity <= 0 {
+		return math.NaN()
+	}
+	return finiteOrNaN(-math.Expm1(-c.Zero(last)*last) / annuity)
 }

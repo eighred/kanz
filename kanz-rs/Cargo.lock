@@ -2040,6 +2040,7 @@ name = "kanz-bond-risk-shadow"
 version = "0.1.0"
 dependencies = [
  "kanz-decimal-compat",
+ "kanz-term-structure",
  "num-bigint 0.4.6",
  "num-rational",
  "num-traits",
@@ -2238,6 +2239,15 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-reflect",
+]
+
+[[package]]
+name = "kanz-term-structure"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

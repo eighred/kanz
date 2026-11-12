@@ -108,7 +108,10 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 }
 
 func rustBoundaryFixtureFiles() []string {
-	out := []string{"Cargo.toml", "build.rs", "src/lib.rs", "tests/go_conformance.rs"}
+	out := []string{"Cargo.toml", "build.rs", "src/lib.rs", "tests/go_conformance.rs", rustTermPath + "/Cargo.toml"}
+	for _, file := range append(append([]string{}, rustTermSources...), rustTermArtifacts...) {
+		out = append(out, rustTermPath+"/"+file)
+	}
 	for name, spec := range rustFeedPackages {
 		out = append(out, name+"/Cargo.toml")
 		for file := range spec.sources {
