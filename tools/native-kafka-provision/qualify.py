@@ -16,6 +16,7 @@ import image_custody
 import runtime_diagnostic
 import lifecycle
 import nats_fixture
+import onboarding_all
 import system_bootstrap
 import argo_bootstrap
 
@@ -364,8 +365,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
     lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'), count)
     if value.get('natsVersions') != {tool: version for tool, (_, version) in nats_fixture.MODULES.items()}:
         raise ValueError('NATS fixture tool versions differ')
-    if value.get('natsSeedTenants') != ['acme', 'bravo']:
-        raise ValueError('NATS seed readback missing')
+    onboarding_all.validate(value.get('onboardingAll'))
     argo_bootstrap.validate(value.get('argoSyncs'))
     hook_diagnostics = value.get('argoHookDiagnostics')
     if not isinstance(hook_diagnostics, list) or len(hook_diagnostics) != len(SYSTEM_CASES):
@@ -609,9 +609,12 @@ def main():
             with tempfile.TemporaryDirectory(dir=scratch) as nats_scratch:
                 with nats_fixture.resolver(Path(nats_scratch)/'nats', ROOT) as nats:
                     evidence['natsVersions']=nats.versions
-                    evidence['lifecycle']=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count,nats)
-                    evidence['stage']='golden-path-seed'
-                    evidence['natsSeedTenants']=nats.seed_portfolios(ROOT)
+                    evidence['lifecycle'], caller_env=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image,evidence['lifecycleDiagnostic'],count,nats)
+                    evidence['stage']='golden-path-all'
+                    evidence['onboardingDiagnostic']={}
+                    evidence['onboardingAll']=onboarding_all.qualify(
+                        ROOT,scratch,k,apply,name,nats,caller_env,source,bounded_process.run,
+                        evidence['onboardingDiagnostic'])
             cli('acme-idempotent','acme',principals['acme'],'apply')
             cli('wrong-cluster','acme',principals['acme'],'apply',True)
             for case in ('tenant-a','tenant-b','compute-a','ungranted','partial'):

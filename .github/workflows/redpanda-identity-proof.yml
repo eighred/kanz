@@ -148,6 +148,7 @@ jobs:
         working-directory: kanz
         run: |
           go test -race -p 1 ./cmd/kanz-kafka-provision/... -count=1
+          go test -race -p 1 ./test/load/onboardingprobe -run '^TestSeedReadbackCountsOnlySnapshotSubject$' -count=1
           go vet ./cmd/kanz-kafka-provision/...
       - name: Lint native owner with repository policy
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0

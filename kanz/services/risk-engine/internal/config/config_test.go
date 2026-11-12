@@ -26,6 +26,23 @@ func TestParseDuration(t *testing.T) {
 	}
 }
 
+func TestLoadNATSCredentialsFileRequiresBroker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "risk-engine.creds")
+	t.Setenv("RISK_ENGINE_NATS_CREDS_FILE", path)
+	t.Setenv("RISK_ENGINE_NATS_URL", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RISK_ENGINE_NATS_CREDS_FILE requires RISK_ENGINE_NATS_URL") {
+		t.Fatalf("Load without a broker URL: %v", err)
+	}
+	t.Setenv("RISK_ENGINE_NATS_URL", "nats://127.0.0.1:4222")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSCredentialsFile != path {
+		t.Fatal("Load did not preserve the mounted credentials path")
+	}
+}
+
 // DSN resolution is the SEC-01d seam that keeps the DSN out of plaintext env: a
 // CSI-mounted file must win over a plaintext env var. This exercises it through
 // Load rather than through a local helper, because there no longer is one —
