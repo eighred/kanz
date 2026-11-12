@@ -461,7 +461,7 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 		l := x.agg.Lot()
 		mv := new(big.Rat).Mul(l.AvgCost, l.Qty)
 		nav.Add(nav, mv)
-		marketValue, err := p.money(mv)
+		marketValue, err := projectionMark(mv, p.baseCcy)
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s: %w", portfolioID, instrument, err)
 		}
@@ -469,7 +469,7 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s realized pnl: %w", portfolioID, instrument, err)
 		}
-		qty, ok := dec.ToProtoScaled(l.Qty)
+		qty, ok := dec.ToProtoExact(l.Qty)
 		if !ok {
 			return nil, fmt.Errorf("portfolio %s position %s: quantity is not representable", portfolioID, instrument)
 		}
@@ -488,7 +488,7 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 		})
 	}
 
-	navMoney, err := p.money(nav)
+	navMoney, err := projectionMark(nav, p.baseCcy)
 	if err != nil {
 		return nil, fmt.Errorf("portfolio %s NAV: %w", portfolioID, err)
 	}
@@ -509,7 +509,7 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 // aggregate: it belongs to no single exchange.
 func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
 	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.AvgCost), l.Qty)
-	qty, ok := dec.ToProtoScaled(l.Qty)
+	qty, ok := dec.ToProtoExact(l.Qty)
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
 	}
@@ -517,7 +517,7 @@ func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price 
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
 	}
-	marketValue, err := p.money(new(big.Rat).Mul(price, l.Qty))
+	marketValue, err := projectionMark(new(big.Rat).Mul(price, l.Qty), p.baseCcy)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
 	}
@@ -542,25 +542,8 @@ func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price 
 	}, nil
 }
 
-// money wraps an exact amount as Money, refusing rather than fabricating one.
-// dec.ToProtoScaled preserves magnitude by rescaling, so a $100bn position value
-// is represented at a coarser exponent rather than wrapped into a small number.
-//
-// THE !ok BRANCH IS EFFECTIVELY UNREACHABLE, AND IS KEPT ON PURPOSE. Refusal
-// requires a value ToProtoScaled cannot represent at ANY exponent it will
-// reach — around two billion decimal digits, which no position value approaches
-// and no test can construct in finite time. It stays because the contract
-// returns `ok` and discarding it is how the wrapping bug got in: the compiler is
-// the only thing that keeps a future edit from ignoring it. Do not "simplify" it
-// away on the grounds that it never fires.
-//
-// Returning a zero Money instead of an error would be worse than returning
-// nothing: heldPositions treats a zero-valued position as flat and drops it, so
-// the compliance rules would stop seeing the holding entirely (COMP-M1).
+// money preserves finite amounts and retains the established rounding of
+// nonterminating weighted-cost P&L and cost-marked snapshot values.
 func (p *Postgres) money(r *big.Rat) (*commonpb.Money, error) {
-	amt, ok := dec.ToProtoScaled(r)
-	if !ok {
-		return nil, fmt.Errorf("amount is not representable as a Decimal")
-	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: p.baseCcy}, nil
+	return projectionMoney(r, p.baseCcy)
 }

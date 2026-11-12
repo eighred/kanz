@@ -31,15 +31,15 @@ fn rounded(n: BigInt, d: &BigInt) -> BigInt {
     q
 }
 // Go dec.ToProtoScaled: first round at 1e-8, then repeated half-away /10.
-/// Checked existing Go ToProtoScaled conversion shared with position outputs.
+/// Checked existing Go ToProtoScaled conversion for derived rounded outputs.
 pub fn decimal(value: BigRational) -> Option<Decimal> {
     decimal_fit(value, 64)
 }
 
-/// Go dec.ToProtoExact's bounded quantity contract: a normalized i64
+/// Go dec.ToProtoExact's bounded exact contract: a normalized i64
 /// coefficient, exponent [-60,60], and no rounding or implicit zero. Keep this
-/// distinct from the established average-price/position output conversion.
-pub(crate) fn exact_decimal(value: BigRational) -> Option<Decimal> {
+/// distinct from the established average-price output conversion.
+pub fn exact_decimal(value: BigRational) -> Option<Decimal> {
     if value.numer().bits() > 512 || value.denom().bits() > 512 {
         return None;
     }
@@ -49,19 +49,9 @@ pub(crate) fn exact_decimal(value: BigRational) -> Option<Decimal> {
             exponent: 0,
         });
     }
-    let mut denominator = value.denom().clone();
-    let mut twos = 0;
-    let mut fives = 0;
-    while (&denominator % 2_u32).is_zero() {
-        denominator /= 2_u32;
-        twos += 1;
-    }
-    while (&denominator % 5_u32).is_zero() {
-        denominator /= 5_u32;
-        fives += 1;
-    }
+    let (twos, fives) = decimal_factors(&value)?;
     let places = twos.max(fives);
-    if denominator != BigInt::from(1) || places > 128 {
+    if places > 128 {
         return None;
     }
     let mut coefficient =
@@ -78,6 +68,28 @@ pub(crate) fn exact_decimal(value: BigRational) -> Option<Decimal> {
         coefficient: coefficient.to_i64()?,
         exponent,
     })
+}
+
+/// Distinguishes a terminating observation from derived repeating arithmetic.
+/// This is not representability: an oversized finite value must still refuse
+/// exact conversion rather than fall back to a rounded success.
+pub fn has_terminating_decimal(value: &BigRational) -> bool {
+    decimal_factors(value).is_some()
+}
+
+fn decimal_factors(value: &BigRational) -> Option<(u32, u32)> {
+    let mut denominator = value.denom().clone();
+    let mut twos = 0;
+    let mut fives = 0;
+    while (&denominator % 2_u32).is_zero() {
+        denominator /= 2_u32;
+        twos += 1;
+    }
+    while (&denominator % 5_u32).is_zero() {
+        denominator /= 5_u32;
+        fives += 1;
+    }
+    (denominator == BigInt::from(1)).then_some((twos, fives))
 }
 
 /// Diagnostic Go-wire candidate only. The caller bounds rational inputs and

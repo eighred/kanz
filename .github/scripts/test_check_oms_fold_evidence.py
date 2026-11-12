@@ -28,6 +28,15 @@ class OMSEvidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verify(events, REQUIRED)
 
+    def test_position_precision_requires_both_real_owners_and_control_path(self):
+        cases = REQUIRED["services/oms/tools/store-conformance"]
+        for owner in ("go", "rust"):
+            for name in ("TestRustPositionPrecisionPostgresNATS/" + owner,
+                         "TestRustPositionPrecisionTransactions/" + owner + "/finite-overflow-rolls-back",
+                         "TestRustPositionPrecisionTransactions/" + owner + "/repeating-cost-keeps-executions",
+                         "TestRustPositionPrecisionTransactions/" + owner + "/tiny-repeating-cost-refuses-snapshot"):
+                self.assertIn(name, cases)
+
     def test_skips_and_failures_refuse(self):
         for index in range(len(self.events())):
             for action in ("skip", "fail"):

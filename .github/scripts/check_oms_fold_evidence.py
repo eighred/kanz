@@ -134,6 +134,15 @@ REQUIRED = {
         "TestRustVenueIPv6RPC",
     },
     "services/oms/internal/position": {
+        "TestPositionPrecisionAccumulatedSignedFills",
+        "TestPositionPrecisionAccumulatedSignedFills/SIDE_BUY",
+        "TestPositionPrecisionAccumulatedSignedFills/SIDE_SELL",
+        "TestPositionPrecisionFiniteMoneyAndDerivedRounding",
+        "TestPositionPrecisionPartialClosePnL",
+        "TestPositionPrecisionRefusesWithoutClaimOrMutation",
+        "TestPositionPrecisionFiniteLimitsNeverRound",
+        "TestPositionPrecisionRepeatingCostDoesNotDiscardFill",
+        "TestPositionPrecisionTinyRepeatingSnapshotRefusesWithoutLosingFill",
         "TestARedeliveredFillIsFoldedOnceByEveryStore",
         "TestARedeliveredFillStillAnnouncesInEveryStore",
         "TestApprovedPositionFeesPreserveQuantityCostAndReplayClaims",
@@ -190,6 +199,13 @@ REQUIRED = {
     },
     "internal/shadowprocess": set(),
     "services/oms/tools/store-conformance": {
+        "TestRustPositionPrecisionPostgresNATS",
+        "TestRustPositionPrecisionTransactions",
+        *{"TestRustPositionPrecisionPostgresNATS/" + owner for owner in ("go", "rust")},
+        *{"TestRustPositionPrecisionTransactions/" + owner + suffix
+          for owner in ("go", "rust")
+          for suffix in ("", "/finite-overflow-rolls-back", "/repeating-cost-keeps-executions",
+                         "/tiny-repeating-cost-refuses-snapshot")},
         "TestRustPositionProjectorPostgresNATS",
         *{"TestRustPositionProjectorPostgresNATS/" + case for case in (
             "filled-partial-lineage-and-restart",
