@@ -65,7 +65,8 @@ func validRateQuote(q RateQuote) bool {
 	return finite(q.Tenor, q.Span, q.Value, q.end()) &&
 		q.Kind >= Deposit && q.Kind <= Swap &&
 		q.Tenor >= 0 && (q.Kind == Future || q.Tenor > 0) &&
-		q.Span >= 0 && (q.Kind != Swap || q.Tenor <= maxCalibrationCoupons)
+		q.Span >= 0 && (q.Kind != Future || q.end() > q.Tenor) &&
+		(q.Kind != Swap || q.Tenor <= maxCalibrationCoupons)
 }
 
 // QuoteRate reprices the declared simple deposit/forward or annual par quote.
@@ -143,21 +144,37 @@ func Calibrate(quotes []RateQuote, interp Interpolation) (*Curve, error) {
 		var z float64
 		switch q.Kind {
 		case Deposit, Future:
-			period, logStart := q.Tenor, 0.0
+			period := q.Tenor
 			if q.Kind == Future {
-				// A later pillar must not change the start discount used by the
-				// closed form. Gaps require a different calibration equation.
-				if len(b.tenors) == 0 || q.Tenor > prevEnd {
-					return nil, fmt.Errorf("%w: future has no fixed start discount", ErrCalibrate)
-				}
 				period = q.span()
-				logStart = b.Zero(q.Tenor) * q.Tenor
 			}
 			u := q.Value * period
-			if !finite(u, logStart) || u <= -1 {
+			if !finite(u) || u <= -1 {
 				return nil, fmt.Errorf("%w: invalid simple-rate discount", ErrCalibrate)
 			}
-			z = (logStart + math.Log1p(u)) / end
+			accrual := math.Log1p(u)
+			z = accrual / end
+			if q.Kind == Future {
+				if len(b.tenors) == 0 {
+					return nil, fmt.Errorf("%w: future has no short-end anchor", ErrCalibrate)
+				}
+				if q.Tenor <= prevEnd {
+					z = (b.Zero(q.Tenor)*q.Tenor + accrual) / end
+				} else {
+					// Solve H(end)-H(start)=log1p(rate*span) with the new
+					// pillar participating in interpolation at BOTH endpoints.
+					// Normalized weights avoid e-s*w and 1-w cancellation.
+					forward := accrual / (end - q.Tenor)
+					lastZero := b.zeros[len(b.zeros)-1]
+					if interp == LogLinearDF {
+						z = (prevEnd/end)*lastZero + ((end-prevEnd)/end)*forward
+					} else {
+						alpha := q.Tenor / (end - prevEnd)
+						inverse := 1 / (1 + alpha)
+						z = (alpha*inverse)*lastZero + inverse*forward
+					}
+				}
+			}
 		case Swap:
 			var err error
 			z, err = solveSwapPillar(b, q)

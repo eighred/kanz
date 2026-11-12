@@ -75,8 +75,8 @@ struct ReferenceQuote {
 #[test]
 fn independent_price_equations_and_tiny_rates() {
     let data: Reference = serde_json::from_str(include_str!("mixed_reference.json")).unwrap();
-    assert_eq!(data.method, "decimal_price_newton_160_200_v1");
-    assert_eq!(data.cases.len(), 12);
+    assert_eq!(data.method, "decimal_price_newton_160_200_v2");
+    assert_eq!(data.cases.len(), 24);
     let mut ids = BTreeSet::new();
     for row in data.cases {
         assert!(ids.insert(row.id.clone()));
@@ -126,8 +126,52 @@ fn invalid_and_over_budget_calibration_refuses() {
             tenor: 4097.0,
             ..q
         }],
+        vec![
+            q,
+            RateQuote {
+                kind: QuoteKind::Future,
+                tenor: 1e16,
+                span: 0.25,
+                value: 0.03,
+            },
+        ],
     ] {
         assert!(Curve::calibrate(&qs, Interpolation::LinearZero).is_err());
+    }
+}
+
+#[test]
+fn gapped_future_satisfies_rational_discount_identities() {
+    for i in [0, 1] {
+        let qs = [
+            RateQuote {
+                kind: QuoteKind::Deposit,
+                tenor: 0.25,
+                span: 0.0,
+                value: 0.03,
+            },
+            RateQuote {
+                kind: QuoteKind::Future,
+                tenor: 1.0,
+                span: 0.25,
+                value: 0.035,
+            },
+        ];
+        let c = Curve::calibrate(&qs, interpolation(i).unwrap()).unwrap();
+        for q in qs {
+            assert!(
+                (c.quote_rate(q).unwrap() - q.value).abs() <= 128.0 * f64::EPSILON * q.value.abs()
+            );
+        }
+        let df = c.discount(1.25).unwrap();
+        // Direct rational consequences of DF(.25)=400/403 and the future
+        // factor 807/800, independent of production's normalized weights.
+        let (got, want) = if i == 0 {
+            (df * df, (320000.0_f64 / 325221.0).powi(5))
+        } else {
+            (df, (400.0 / 403.0) * (800.0_f64 / 807.0).powi(4))
+        };
+        assert!((got - want).abs() <= 32.0 * f64::EPSILON * want);
     }
 }
 
@@ -170,10 +214,10 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
     }
     let data: Corpus = serde_json::from_slice(raw).map_err(|_| "malformed capture")?;
     if data.schema != 1
-        || data.method != "go_mixed_v1"
+        || data.method != "go_mixed_v2"
         || data.source_sha != source
-        || data.case_count != 198
-        || data.cases.len() != 198
+        || data.case_count != 294
+        || data.cases.len() != 294
     {
         return Err("capture identity/inventory mismatch".into());
     }
@@ -217,7 +261,7 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
         }
         *counts.entry(row.outcome).or_insert(0) += 1;
     }
-    if counts != BTreeMap::from([("refused".into(), 32), ("value".into(), 166)]) {
+    if counts != BTreeMap::from([("refused".into(), 32), ("value".into(), 262)]) {
         return Err("outcome inventory differs".into());
     }
     Ok(counts)
@@ -238,7 +282,7 @@ fn fresh_mixed_go_oracle_is_required() {
     let raw = std::fs::read(path).expect("fresh actual Go capture required");
     let counts = verify(&raw, &source).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-    for mutation in 0..4 {
+    for mutation in 0..5 {
         let mut broken = value.clone();
         match mutation {
             0 => broken["source_sha"] = "0000000000000000000000000000000000000000".into(),
@@ -248,14 +292,15 @@ fn fresh_mixed_go_oracle_is_required() {
                 broken["cases"][0]["values"][n] = (f64::from_bits(bits) * 1.01).to_bits().into();
             }
             2 => broken["cases"][1]["id"] = broken["cases"][0]["id"].clone(),
-            _ => {
+            3 => {
                 broken["cases"].as_array_mut().unwrap().pop();
             }
+            _ => broken["method"] = "go_mixed_v1".into(),
         }
         assert!(
             verify(&serde_json::to_vec(&broken).unwrap(), &source).is_err(),
             "negative control {mutation} accepted"
         );
     }
-    println!("fresh mixed Go source={source} cases=198 outcomes={counts:?} negative_controls=4");
+    println!("fresh mixed Go source={source} cases=294 outcomes={counts:?} negative_controls=5");
 }

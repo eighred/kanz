@@ -22,6 +22,12 @@ for interp in [0, 1]:
         ("zero", [quote(0,".25","0"),quote(1,".25","0",".25"),quote(2,"3.5","0")]),
         ("irregular", [quote(2,"3.5",".039"),quote(0,".125",".03"),quote(1,".125",".033",".375"),quote(2,"1.25",".036")]),
         ("negative", [quote(0,".25","-.03"),quote(1,".25","-.033",".25"),quote(2,"2","-.036"),quote(2,"5","-.039")]),
+        ("rational_gap", [quote(0,".25",".03"),quote(1,"1",".035",".25")]),
+        ("negative_gap", [quote(0,".25","-.02"),quote(1,"1","-.01",".25")]),
+        ("tiny_gap", [quote(0,".25","1e-100"),quote(1,"1","1e-100",".25")]),
+        ("gap_chain", [quote(1,"1.25",".036",".5"),quote(0,".125",".03"),quote(1,".5",".033",".25"),quote(2,"3.5",".039")]),
+        ("irregular_gap", [quote(0,".2",".03"),quote(1,".9",".033",".35"),quote(2,"2.5",".036")]),
+        ("default_span_gap", [quote(0,".25",".03"),quote(1,"1",".035")]),
     ]:
         CASES.append(dict(id=f"{name}/{interp}",interp=interp,quotes=quotes,queries=[".1","1","7"]))
 
@@ -48,12 +54,15 @@ def oracle(case, precision):
         for q in sorted(case["quotes"],key=end):
             t,r=end(q),D(q["value"])
             if q["kind"]==0: z=-(1/(1+r*t)).ln()/t
-            elif q["kind"]==1: z=-(df(D(q["tenor"]))/(1+r*span(q))).ln()/t
             else:
                 ts.append(t);zs.append(D(0))
                 schedule=dates(t)
                 def balance(log_discount):
                     zs[-1]=-log_discount/t
+                    if q["kind"]==1:
+                        # Solve both endpoint discounts AFTER appending the
+                        # candidate. No production gap weights are used here.
+                        return df(D(q["tenor"]))-(1+r*span(q))*log_discount.exp()
                     annuity=sum((v-(schedule[i-1] if i else 0))*df(v) for i,v in enumerate(schedule))
                     return log_discount.exp()+r*annuity-1
                 x=-r*t
@@ -102,7 +111,7 @@ def generate():
         with localcontext() as ctx:
             ctx.prec=40
             rows.append(dict(case,values=[str(+v) for v in high]))
-    return dict(method="decimal_price_newton_160_200_v1",cases=rows)
+    return dict(method="decimal_price_newton_160_200_v2",cases=rows)
 
 
 if __name__=="__main__":
@@ -111,4 +120,4 @@ if __name__=="__main__":
     result=generate()
     if args.check: assert json.loads(path.read_text(encoding="utf-8"))==result,"stale mixed reference"
     else:path.write_text(json.dumps(result,indent=2)+"\n",encoding="utf-8",newline="\n")
-    print("Decimal mixed calibration: 12 price-equation Newton references, precision 160/200 verified")
+    print("Decimal mixed calibration: 24 price-equation Newton references, precision 160/200 verified")

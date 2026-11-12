@@ -110,15 +110,37 @@ swap rates. A future tenor is its period start; span zero keeps the existing
 This does not infer calendars, day counts, collateral or projection curves.
 
 Deposits and futures carry log-discounts through `log1p` instead of rounding a
-discount then taking log. Future starts must be fixed by already solved pillars;
-extrapolating a start then changing it with the new pillar cannot qualify a curve.
+discount then taking log. If a future starts beyond the last solved pillar,
+its start and end discounts are solved together under the declared interpolation.
+A separate short-end anchor remains mandatory; no calendar or missing term is
+inferred. A positive span that rounds away when added to its start refuses.
 `quote_rate`/Go `QuoteRate` reprice simple instruments with `expm1` and forwards.
+
+For last pillar `(a,z_a)`, future start `s>a`, end `e=s+h` and quoted span `h`,
+let `F=log1p(r*h)/(e-s)`. The existing interpolation equations give:
+
+- Linear zero: `alpha=s/(e-a)` and
+  `z_e=(alpha/(1+alpha))*z_a + (1/(1+alpha))*F`.
+- Log discount: `z_e=(a/e)*z_a + ((e-a)/e)*F`.
+
+Normalized weights avoid subtracting nearly equal interpolation coefficients.
+This is an O(1) future solve with no extra iteration budget. The separate full
+repricing check still refuses an unrepresentable result; tolerances do not change.
+The simple-forward discount ratio and linear/log-linear definitions are public
+methodology: [Strata forward rates](https://raw.githubusercontent.com/OpenGamma/Strata/main/modules/pricer/src/main/java/com/opengamma/strata/pricer/rate/DiscountIborIndexRates.java)
+and [interpolation definitions](https://strata.opengamma.io/apidocs/com/opengamma/strata/market/curve/interpolator/CurveInterpolators.html),
+checked 2026-11-13. No Strata code or dependency is included.
+
+The `.25y/3%` deposit followed by a `1y` start / `.25y` span / `3.5%` future
+has independent identities `DF(1.25)=(400/403)*(800/807)^4` for log discounts,
+and `DF(1.25)^2=(320000/325221)^5` for linear zeros. Both languages check these
+direct rational consequences, in addition to quote repricing.
 
 Swap roots retain Go's existing zero-rate domain **[-0.5, 1]**. Quote-scale
 bracketing and bisection share at most **256 evaluations per swap**. Success
 requires bracket width at most `64*EPS*max(abs(lo),abs(hi))` and quote residual
 at most `64*EPS*abs(quote)`. Nonfinite evaluations, exhausted work, stagnant
-brackets and roots outside the domain refuse. No approximate endpoint is success.
+brackets and roots outside the domain refuse. Exhausted work never promotes an endpoint.
 See [Boost's root-finding contract](https://www.boost.org/latest/libs/math/doc/html/math_toolkit/roots_noderiv/bisect.html),
 checked 2026-11-12, which distinguishes convergence from iteration exhaustion.
 No Boost code or dependency is included.
@@ -132,21 +154,25 @@ not permission to use floating-point money or relax canonical Decimal controls.
 Go failure precedes recording, PIT installation and shadow capture; prior state
 and coverage reporting remain intact. Rust has no publication or runtime route.
 
-`reference/mixed_reference.py` independently solves coupon-price equations by
-damped Newton in log-discount using a high-precision central derivative. It uses
-direct Decimal discount ratios for simple quotes, not the production log1p,
-ParRate objective, bracketing or bisection branches. Twelve references at **160
+`reference/mixed_reference.py` independently solves swap-price and future
+discount-ratio equations by damped Newton in log-discount using a high-precision
+central derivative. It appends the candidate pillar before evaluating both future
+endpoints, rather than copying production gap weights, log1p, ParRate objective
+or bisection branches. Twenty-four references at **160
 and 200 digits** must agree within **1e-45 relative error**, including near-zero
 results; 40 significant digits are retained. Both oracle precisions separately
 reprice their input quotes to that relative budget.
 
-The fresh actual Go mixed corpus has **198 unique cases: 166 values / 32
+The fresh actual Go mixed corpus has **294 unique cases: 262 values / 32
 refusals**. It includes both interpolations, negative/zero/tiny/high rates,
-unsorted and irregular mixed strips, 256 pillars, domain edges and invalid inputs.
+unsorted and irregular mixed strips, chained/irregular pillar gaps, 256 pillars,
+domain edges and invalid inputs.
 Every sorted tenor, zero, input repricing and queried zero/discount is compared.
 Tenors are bit-exact; other fields use `2048*EPS*pillars*abs(expected)` with no
 absolute floor. Missing/malformed captures, wrong source, altered zero, duplicate
-identity and truncated inventory refuse. CI explicitly invokes the otherwise
+identity, truncated inventory and the obsolete `go_mixed_v1` contract refuse.
+The new corpus method is `go_mixed_v2`; old captures cannot qualify it.
+CI explicitly invokes the otherwise
 ignored `fresh_mixed_go_oracle_is_required` test and retains both references,
 corpora, source/tree/digests and results. The parent zero/par and actual bond
 supervisor gates remain required. None of this activates Rust calibration.

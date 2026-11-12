@@ -62,6 +62,11 @@ func captureMixed(source string) error {
 				{{Kind: curve.Swap, Tenor: 1, Value: r}, {Kind: curve.Swap, Tenor: 2, Value: r}, {Kind: curve.Swap, Tenor: 3, Value: r}, {Kind: curve.Swap, Tenor: 5, Value: r}},
 				{{Kind: curve.Deposit, Tenor: .125, Value: r}, {Kind: curve.Future, Tenor: .125, Span: .375, Value: r * 1.1}, {Kind: curve.Swap, Tenor: 1.25, Value: r * 1.2}, {Kind: curve.Swap, Tenor: 3.5, Value: r * 1.3}},
 			}
+			families = append(families,
+				[]curve.RateQuote{{Kind: curve.Deposit, Tenor: .25, Value: r}, {Kind: curve.Future, Tenor: 1, Span: .25, Value: r * 1.1}},
+				[]curve.RateQuote{{Kind: curve.Deposit, Tenor: .125, Value: r}, {Kind: curve.Future, Tenor: .5, Span: .25, Value: r * 1.1}, {Kind: curve.Future, Tenor: 1.25, Span: .5, Value: r * 1.2}, {Kind: curve.Swap, Tenor: 3.5, Value: r * 1.3}},
+				[]curve.RateQuote{{Kind: curve.Deposit, Tenor: .2, Value: r}, {Kind: curve.Future, Tenor: .9, Span: .35, Value: r * 1.1}, {Kind: curve.Swap, Tenor: 2.5, Value: r * 1.2}},
+			)
 			for family, qs := range families {
 				for order := 0; order < 2; order++ {
 					copyQuotes := slices.Clone(qs)
@@ -76,7 +81,7 @@ func captureMixed(source string) error {
 			nil, {{Kind: 99, Tenor: 1, Value: .03}}, {{Kind: curve.Deposit, Tenor: 1, Value: math.NaN()}},
 			{{Kind: curve.Deposit, Tenor: math.Inf(1), Value: .03}}, {{Kind: curve.Future, Tenor: 1, Span: -1, Value: .03}},
 			{{Kind: curve.Deposit, Tenor: 1, Value: .03}, {Kind: curve.Swap, Tenor: 1, Value: .03}},
-			{{Kind: curve.Future, Tenor: 1, Value: .03}}, {{Kind: curve.Deposit, Tenor: .25, Value: .03}, {Kind: curve.Future, Tenor: 1, Span: .25, Value: .035}},
+			{{Kind: curve.Future, Tenor: 1, Value: .03}}, {{Kind: curve.Deposit, Tenor: .25, Value: .03}, {Kind: curve.Future, Tenor: 1e16, Span: .25, Value: .035}},
 			{{Kind: curve.Deposit, Tenor: 0, Value: .03}}, {{Kind: curve.Swap, Tenor: 4097, Value: .03}}, {{Kind: curve.Swap, Tenor: 5, Value: 3}},
 			{{Kind: curve.Deposit, Tenor: 1, Value: -1}}, {{Kind: curve.Deposit, Tenor: 1, Value: -2}},
 			{{Kind: curve.Deposit, Tenor: 1e-300, Value: 1e-300}}, {{Kind: curve.Future, Tenor: -1, Value: .03}}, {{Kind: curve.Future, Tenor: 1, Span: math.Inf(1), Value: .03}},
@@ -93,7 +98,7 @@ func captureMixed(source string) error {
 			rows = append(rows, mixedCapture(fmt.Sprintf("edge/%d/%d", interp, i), interp, []curve.RateQuote{{Kind: curve.Swap, Tenor: 1, Value: r}}))
 		}
 	}
-	if len(rows) != 198 {
+	if len(rows) != 294 {
 		return fmt.Errorf("mixed curve reference: incomplete inventory")
 	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
@@ -102,5 +107,5 @@ func captureMixed(source string) error {
 		Source string        `json:"source_sha"`
 		Count  int           `json:"case_count"`
 		Cases  []mixedSample `json:"cases"`
-	}{1, "go_mixed_v1", source, len(rows), rows})
+	}{1, "go_mixed_v2", source, len(rows), rows})
 }

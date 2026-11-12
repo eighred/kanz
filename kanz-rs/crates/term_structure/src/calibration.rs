@@ -41,6 +41,7 @@ impl RateQuote {
             && self.tenor >= 0.0
             && (matches!(self.kind, QuoteKind::Future) || self.tenor > 0.0)
             && self.span >= 0.0
+            && (!matches!(self.kind, QuoteKind::Future) || self.end() > self.tenor)
             && (!matches!(self.kind, QuoteKind::Swap) || self.tenor <= MAX_COUPONS as f64)
     }
 }
@@ -82,19 +83,38 @@ impl Curve {
             }
             let zero = match q.kind {
                 QuoteKind::Deposit | QuoteKind::Future => {
-                    let (period, log_start) = if matches!(q.kind, QuoteKind::Future) {
-                        if curve.points.is_empty() || q.tenor > prev {
-                            return Err(Error::InvalidInput);
-                        }
-                        (q.span(), curve.zero(q.tenor)? * q.tenor)
+                    let period = if matches!(q.kind, QuoteKind::Future) {
+                        q.span()
                     } else {
-                        (q.tenor, 0.0)
+                        q.tenor
                     };
                     let u = q.value * period;
-                    if !u.is_finite() || !log_start.is_finite() || u <= -1.0 {
+                    if !u.is_finite() || u <= -1.0 {
                         return Err(Error::NumericalFailure);
                     }
-                    (log_start + libm::log1p(u)) / end
+                    let accrual = libm::log1p(u);
+                    if matches!(q.kind, QuoteKind::Deposit) {
+                        accrual / end
+                    } else {
+                        let last = curve.points.last().ok_or(Error::InvalidInput)?;
+                        if q.tenor <= prev {
+                            (curve.zero(q.tenor)? * q.tenor + accrual) / end
+                        } else {
+                            // Both endpoints belong to the extended segment;
+                            // solve its forward constraint with normalized weights.
+                            let forward = accrual / (end - q.tenor);
+                            match interpolation {
+                                Interpolation::LogLinearDiscount => {
+                                    (prev / end) * last.zero + ((end - prev) / end) * forward
+                                }
+                                Interpolation::LinearZero => {
+                                    let alpha = q.tenor / (end - prev);
+                                    let inverse = 1.0 / (1.0 + alpha);
+                                    (alpha * inverse) * last.zero + inverse * forward
+                                }
+                            }
+                        }
+                    }
                 }
                 QuoteKind::Swap => solve_swap(&curve, q, MAX_EVALUATIONS)?,
             };
