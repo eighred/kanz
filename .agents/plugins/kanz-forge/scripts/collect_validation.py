@@ -13,7 +13,7 @@ import subprocess
 import sys
 from urllib.parse import quote
 
-from validation_graph import assess_graph
+from validation_graph import SHA, assess_graph
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
@@ -48,6 +48,44 @@ def collection(api, path, key=None):
     return result
 
 
+def numbered(records):
+    indexed = {}
+    for record in records:
+        number = record.get("number") if isinstance(record, dict) else None
+        if type(number) is not int or number <= 0 or number in indexed:
+            raise ValueError("invalid or duplicate inventory identity")
+        indexed[number] = record
+    return indexed
+
+
+def reconcile_inventory(issues, prs, total):
+    if type(total) is not int or total < 0:
+        raise ValueError("invalid open-issue inventory total")
+    issues, prs = numbered(issues), numbered(prs)
+    ordinary = {}
+    for number, issue in issues.items():
+        if "pull_request" in issue:
+            marker = issue["pull_request"]
+            if (not isinstance(marker, dict) or not isinstance(marker.get("url"), str)
+                    or not marker["url"] or number not in prs):
+                raise ValueError("issue-side PR has no matching pull-request identity")
+        elif number in prs:
+            raise ValueError("ordinary issue conflicts with pull-request identity")
+        else:
+            ordinary[number] = issue
+    for pr in prs.values():
+        for revision in ("head", "base"):
+            ref = pr.get(revision)
+            sha = ref.get("sha") if isinstance(ref, dict) else None
+            if not isinstance(sha, str) or not SHA.fullmatch(sha):
+                raise ValueError("invalid pull-request revision")
+    # /issues may contain PR records or ordinary issues only. Count repository
+    # identities across both endpoints, without hiding duplicate or missing rows.
+    if len(issues.keys() | prs.keys()) != total:
+        raise ValueError("open-issue inventory differs from GitHub total")
+    return ordinary, prs
+
+
 def check_rows(records, sha):
     rows = []
     for check in records:
@@ -71,9 +109,7 @@ def collect(repo, api=github, contract=None):
     main = objects(api, base + "/branches/" + branch)[0]["commit"]["sha"]
     prs = collection(api, base + "/pulls?state=open&per_page=100")
     issues = collection(api, base + "/issues?state=open&per_page=100")
-    # Repository count includes PRs. A changing inventory must be recollected.
-    if metadata["open_issues_count"] != len(issues):
-        raise ValueError("open-issue inventory differs from GitHub total")
+    ordinary, pr_index = reconcile_inventory(issues, prs, metadata["open_issues_count"])
     observations = {}
     failures = []
     for key, sha in [("main", main)] + [("pr:" + str(pr["number"]), pr["head"]["sha"]) for pr in prs]:
@@ -88,12 +124,21 @@ def collect(repo, api=github, contract=None):
     if objects(api, base + "/branches/" + branch)[0]["commit"]["sha"] != main:
         raise ValueError("main moved during collection; reassess on a fresh snapshot")
     latest_prs = collection(api, base + "/pulls?state=open&per_page=100")
-    if {p["number"]: p["head"]["sha"] for p in latest_prs} != {p["number"]: p["head"]["sha"] for p in prs}:
-        raise ValueError("PR inventory or heads changed during collection")
+    latest_issues = collection(api, base + "/issues?state=open&per_page=100")
+    latest_metadata = objects(api, base)[0]
+    latest_ordinary, latest_pr_index = reconcile_inventory(
+        latest_issues, latest_prs, latest_metadata["open_issues_count"])
+    if latest_metadata["default_branch"] != metadata["default_branch"]:
+        raise ValueError("default branch changed during collection")
+    if latest_ordinary.keys() != ordinary.keys():
+        raise ValueError("issue inventory changed during collection")
+    if ({number: (pr["head"]["sha"], pr["base"]["sha"]) for number, pr in latest_pr_index.items()}
+            != {number: (pr["head"]["sha"], pr["base"]["sha"]) for number, pr in pr_index.items()}):
+        raise ValueError("PR inventory or revisions changed during collection")
     result = {"repository": repo, "main": main,
               "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "issues": [{"number": i["number"], "title": i["title"], "url": i["html_url"],
-                          "labels": [label["name"] for label in i["labels"]]} for i in issues if not i.get("pull_request")],
+                          "labels": [label["name"] for label in i["labels"]]} for i in ordinary.values()],
               "prs": [{"number": p["number"], "head": p["head"]["sha"], "base": p["base"]["sha"],
                        "draft": p["draft"], "url": p["html_url"]} for p in prs],
               "observations": observations, "unresolved_checks": failures,
