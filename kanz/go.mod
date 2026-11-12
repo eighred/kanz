@@ -2,7 +2,7 @@ module github.com/eighred/kanz
 
 go 1.26.1
 
-toolchain go1.26.11
+toolchain go1.27.4
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0

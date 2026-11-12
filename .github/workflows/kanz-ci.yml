@@ -774,7 +774,7 @@ jobs:
         # mismatch is exactly why `version: latest` on v6 silently pinned us to v1.
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          # goinstall builds golangci-lint with this job's Go 1.26 toolchain, so
+          # goinstall builds golangci-lint with this job's selected toolchain, so
           # its parser always understands the module's language version.
           install-mode: goinstall
           # PINNED, AND ON PURPOSE.

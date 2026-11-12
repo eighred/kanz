@@ -3,7 +3,7 @@
 # kanz-kafka-provision: opt-in non-destructive tenant topic/ACL Job.
 # No broker, PVC or default onboarding changes. Build context is the repo ROOT:
 #   docker build -f kanz/cmd/kanz-kafka-provision/Dockerfile .
-FROM ghcr.io/eighred/base/golang:1.26.11 AS build
+FROM ghcr.io/eighred/base/golang:1.27.4 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
