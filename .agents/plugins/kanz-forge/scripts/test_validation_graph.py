@@ -30,6 +30,50 @@ def fixture():
 
 
 class GraphTests(unittest.TestCase):
+    def test_reviewed_pr_then_branch_precedes_equivalent_new_work(self):
+        data = dict(nodes=[task("a-new", priority=1),
+                           task("b-branch", priority=1, continuation=dict(kind="branch", evidence="ref @ head; diff reviewed")),
+                           task("z-pr", priority=1, continuation=dict(kind="pr", evidence="PR URL @ head; diff reviewed"))], edges=[])
+        result = assess_graph(data)
+        self.assertEqual(result["execution_candidates"], ["z-pr", "b-branch", "a-new"])
+        data["nodes"][0]["priority"] = 0
+        self.assertEqual(assess_graph(data)["next_actionable"], "a-new")
+
+    def test_continuation_cannot_bypass_critical_recovery_or_holds(self):
+        data = fixture()
+        data["nodes"][-1]["continuation"] = dict(kind="pr", evidence="reviewed PR @ head")
+        self.assertEqual(assess_graph(data)["next_actionable"], "repair")
+        data["nodes"][-1]["holds"] = [dict(reason="active owner", evidence="worktree ownership")]
+        data["nodes"][3]["holds"] = [dict(reason="missing approval", evidence="issue decision")]
+        self.assertIsNone(assess_graph(data)["next_actionable"])
+
+    def test_continuation_requires_supported_kind_and_evidence_on_a_task(self):
+        for value in (None, True, "pr", {}, dict(kind="issue", evidence="reviewed"),
+                      dict(kind="pr"), dict(kind="branch", evidence=" ")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                assess_graph(dict(nodes=[task("work", continuation=value)], edges=[]))
+        with self.assertRaises(ValueError):
+            assess_graph(dict(nodes=[dict(gate(), continuation=dict(kind="pr", evidence="reviewed"))], edges=[]))
+
+    def test_unavailable_runtime_prevents_repeated_recovery_until_input_changes(self):
+        data = fixture()
+        data["nodes"].append(dict(id="patched-runtime", kind="runtime", holds=[
+            dict(reason="reviewed archive unavailable", evidence="owning issue and release listing")]))
+        data["edges"].append(edge("repair", "patched-runtime", "execution-requires"))
+        before = assess_graph(data)
+        self.assertEqual(before["next_actionable"], "independent")
+        self.assertFalse(before["nodes"]["repair"]["execution_ready"])
+        self.assertIn("patched-runtime", before["nodes"]["repair"]["root_blockers"])
+        self.assertEqual(assess_graph(copy.deepcopy(data)), before)
+        # New reviewed artifact qualification, rather than another chat/run,
+        # satisfies the prerequisite and makes shared-gate repair executable.
+        data["previous_states"] = {k: row["state"] for k, row in before["nodes"].items()}
+        data["nodes"][-1] = dict(gate("patched-runtime", "SUCCESS"), kind="runtime")
+        after = assess_graph(data)
+        self.assertEqual(after["next_actionable"], "repair")
+        self.assertTrue(after["nodes"]["repair"]["execution_ready"])
+        self.assertTrue(after["reassessment_required"])
+
     def test_shared_failure_blocks_delivery_but_not_independent_work(self):
         result = assess_graph(fixture())
         self.assertEqual(result["nodes"]["julia"]["state"], "VALIDATION_FAILED")

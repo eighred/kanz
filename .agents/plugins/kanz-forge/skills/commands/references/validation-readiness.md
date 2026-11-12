@@ -58,7 +58,10 @@ DELIVERABLE separately, with reasons and evidence. Propagate failed or unavailab
 prerequisites only along reviewed edges. Keep `execution_only` tasks visible,
 but do not select another undeliverable feature merely because its files differ.
 Executable recovery of critical shared gates ranks first, then other shared
-recovery, then independent work by repository priority. Apply the existing file,
+recovery, then independent work by repository priority. For equal ranks, reviewed
+task `continuation` metadata prefers an existing PR, then a branch, over new work;
+see [repository engineering](repository-engine.md) for evidence and re-entry rules.
+Apply the existing file,
 contract and active-worker ownership plan before dispatch. A legacy reducer
 result with `validation_aware: false` is insufficient for task selection.
 
