@@ -86,9 +86,13 @@ func history(st *orderpb.OrderState) *venuepb.QueryOrderResponse {
 	return &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED, Fills: fills, ExecutedQuantity: &commonpb.Decimal{Coefficient: 2}}
 }
 func TestRustRecoveryObservation(t *testing.T) {
-	for _, name := range []string{"complete-terminal-history", "complete-raw-observation-unknown", "complete-large-history-small-facts", "complete-single-round-weighted-average", "complete-identical-redelivery-history", "missing-order-blocked", "conflicting-observation-blocked", "incomplete-total-blocked", "missing-total-blocked", "unknown-view-blocked", "duplicate-execution-conflict-blocked"} {
+	for _, name := range []string{"complete-terminal-history", "complete-sub-eight-place-quantities", "complete-raw-observation-unknown", "complete-large-history-small-facts", "complete-single-round-weighted-average", "complete-identical-redelivery-history", "missing-order-blocked", "conflicting-observation-blocked", "incomplete-total-blocked", "missing-total-blocked", "unknown-view-blocked", "duplicate-execution-conflict-blocked"} {
 		t.Run(name, func(t *testing.T) {
 			count, filled, leaves := 2, int64(2), int64(2)
+			quantityExponent := int32(0)
+			if name == "complete-sub-eight-place-quantities" {
+				quantityExponent = -9
+			}
 			average := &commonpb.Decimal{Coefficient: 1005, Exponent: -1}
 			if name == "complete-single-round-weighted-average" {
 				count, filled, leaves = 3, 6, 4
@@ -99,6 +103,7 @@ func TestRustRecoveryObservation(t *testing.T) {
 			for _, owner := range []string{"go", "rust"} {
 				f := newFixture(t)
 				st := initial()
+				st.OrderedQuantity.Exponent = quantityExponent
 				if name == "complete-single-round-weighted-average" {
 					st.OrderedQuantity.Coefficient = 10
 				}
@@ -113,6 +118,11 @@ func TestRustRecoveryObservation(t *testing.T) {
 					v.history.ExecutedQuantity = &commonpb.Decimal{Coefficient: 3}
 				}
 				switch name {
+				case "complete-sub-eight-place-quantities":
+					for _, fill := range v.history.Fills {
+						fill.Quantity.Exponent = -9
+					}
+					v.history.ExecutedQuantity.Exponent = -9
 				case "complete-large-history-small-facts":
 					for _, fill := range v.history.Fills {
 						unknown := append([]byte(nil), fill.ProtoReflect().GetUnknown()...)
@@ -221,7 +231,7 @@ func TestRustRecoveryObservation(t *testing.T) {
 					// Independent arithmetic: ordinary(100+101)/2=100.5. Weighted
 					// (1*1+2*2+3*1)/6=1.33333333 at1e-8; rounded incremental
 					// averaging yields1.33333334, which must not be accepted.
-					if got.Status != orderpb.OrderStatus_ORDER_STATUS_CANCELLED || dec.Cmp(got.FilledQuantity, &commonpb.Decimal{Coefficient: filled}) != 0 || dec.Cmp(got.AverageFillPrice, average) != 0 || dec.Cmp(got.LeavesQuantity, &commonpb.Decimal{Coefficient: leaves}) != 0 {
+					if got.Status != orderpb.OrderStatus_ORDER_STATUS_CANCELLED || dec.Cmp(got.FilledQuantity, &commonpb.Decimal{Coefficient: filled, Exponent: quantityExponent}) != 0 || dec.Cmp(got.AverageFillPrice, average) != 0 || dec.Cmp(got.LeavesQuantity, &commonpb.Decimal{Coefficient: leaves, Exponent: quantityExponent}) != 0 {
 						t.Fatal("terminal recovery arithmetic or status differs")
 					}
 					if got.AsOf == nil || got.AsOf.CheckValid() != nil {

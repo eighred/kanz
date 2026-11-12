@@ -100,8 +100,14 @@ class RecoveryEvidenceTests(unittest.TestCase):
 
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 114)
+        self.assertEqual(result["required_passes"], 115)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
+    def test_sub_eight_place_recovery_is_mandatory(self):
+        name = "TestRustRecoveryObservation/complete-sub-eight-place-quantities"
+        self.assertIn(name, proof.NAMES)
+        original = proof.events(self.root / "recovery.jsonl")
+        self.write("recovery.jsonl", [e for e in original if e.get("Test") != name])
+        with self.assertRaises(ValueError): proof.checked(self.root)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):
             with self.subTest(mode=mode):

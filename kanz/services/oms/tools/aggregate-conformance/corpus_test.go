@@ -67,6 +67,34 @@ func rounded(r *big.Rat) *commonpb.Decimal {
 	}
 	return decimal(n.Int64(), e)
 }
+
+// exactQuantity searches canonical scales independently of both implementations.
+// No rounding tolerance is permitted for an observed quantity.
+func exactQuantity(r *big.Rat) *commonpb.Decimal {
+	if r.Sign() == 0 {
+		return &commonpb.Decimal{}
+	}
+	for exponent := int32(60); exponent >= -60; exponent-- {
+		power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absExponent(exponent))), nil)
+		scaled := new(big.Rat).Set(r)
+		if exponent >= 0 {
+			scaled.Quo(scaled, new(big.Rat).SetInt(power))
+		} else {
+			scaled.Mul(scaled, new(big.Rat).SetInt(power))
+		}
+		if scaled.IsInt() && scaled.Num().IsInt64() {
+			return &commonpb.Decimal{Coefficient: scaled.Num().Int64(), Exponent: exponent}
+		}
+	}
+	return nil
+}
+func absExponent(e int32) int32 {
+	if e < 0 {
+		return -e
+	}
+	return e
+}
+
 func rational(d *commonpb.Decimal) *big.Rat {
 	if d == nil {
 		return new(big.Rat)
@@ -118,8 +146,8 @@ func corpus() []sample {
 					want = changed(s, status)
 				case "ApplyFill":
 					want = changed(s, 3)
-					want.FilledQuantity = decimal(100000000, -8)
-					want.LeavesQuantity = decimal(900000000, -8)
+					want.FilledQuantity = decimal(1, 0)
+					want.LeavesQuantity = decimal(9, 0)
 					want.AverageFillPrice = decimal(200000000, -8)
 				}
 			}
@@ -206,8 +234,8 @@ func corpus() []sample {
 			if leaves.Sign() == 0 {
 				want.Status = 4
 			}
-			want.FilledQuantity = rounded(filled)
-			want.LeavesQuantity = rounded(leaves)
+			want.FilledQuantity = exactQuantity(filled)
+			want.LeavesQuantity = exactQuantity(leaves)
 			want.AverageFillPrice = rounded(avg)
 		}
 		add("numeric-"+name, "ApplyFill", s, want, code)
@@ -247,7 +275,7 @@ func corpus() []sample {
 			want = changed(s, s.Status)
 			if v.q != nil {
 				want.OrderedQuantity = v.q
-				want.LeavesQuantity = rounded(new(big.Rat).Sub(rational(v.q), rational(s.FilledQuantity)))
+				want.LeavesQuantity = exactQuantity(new(big.Rat).Sub(rational(v.q), rational(s.FilledQuantity)))
 			}
 			if v.p != nil {
 				want.LimitPrice = v.p
@@ -264,6 +292,7 @@ func corpus() []sample {
 		q.At = stamp
 		out = append(out, sample{name: fmt.Sprintf("timestamp-%d-%d", stamp.Seconds, stamp.Nanos), request: q, want: want})
 	}
+	out = append(out, quantityPrecisionCases()...)
 	return append(append(append(out, wireCases()...), wrongWireCases()...), replayCases()...)
 }
 func wireCases() []sample {
@@ -305,8 +334,8 @@ func wireCases() []sample {
 		case "ApplyFill":
 			q.Fill = wire(&orderpb.Fill{Quantity: decimal(1, 0), Price: decimal(2, 0)})
 			want.Status = 3
-			want.FilledQuantity = decimal(100000000, -8)
-			want.LeavesQuantity = decimal(900000000, -8)
+			want.FilledQuantity = decimal(1, 0)
+			want.LeavesQuantity = decimal(9, 0)
 			want.AverageFillPrice = decimal(200000000, -8)
 		}
 		out = append(out, sample{name: "wire-duplicate-unknown-" + op, request: q, want: want, quantity: qty})
@@ -325,12 +354,12 @@ func replayCases() []sample {
 	first := accepted(c)
 	routed := changed(first, 2)
 	partial := changed(routed, 3)
-	partial.FilledQuantity = decimal(300000000, -8)
-	partial.LeavesQuantity = decimal(700000000, -8)
+	partial.FilledQuantity = decimal(3, 0)
+	partial.LeavesQuantity = decimal(7, 0)
 	partial.AverageFillPrice = decimal(2000000000, -8)
 	amended := changed(partial, 3)
 	amended.OrderedQuantity = decimal(12, 0)
-	amended.LeavesQuantity = decimal(900000000, -8)
+	amended.LeavesQuantity = decimal(9, 0)
 	cancelled := changed(amended, 5)
 	return []sample{
 		{name: "replay-accept", request: request{Operation: "Accept", Command: wire(c), At: at()}, want: first},

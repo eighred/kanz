@@ -13,6 +13,14 @@ class OMSEvidenceTests(unittest.TestCase):
     def test_complete(self):
         verify(self.events(), REQUIRED)
 
+    def test_exact_quantity_outcomes_are_mandatory(self):
+        aggregate = REQUIRED["services/oms/tools/aggregate-conformance"]
+        for case in ("sequence-10", "domain--60", "domain-60", "refusal-ApplyFill",
+                     "refusal-Amend", "refusal-filled-sum", "refusal-OVERFILL"):
+            self.assertIn("TestRustOrderAggregateDifferential/exact-quantity-" + case, aggregate)
+        self.assertIn("TestRustFillFoldProcessConformance/exact-quantity-sequence-10",
+                      REQUIRED["services/oms/tools/fill-conformance"])
+
     def test_every_case_and_package_must_complete(self):
         for index in range(len(self.events())):
             events = self.events()
