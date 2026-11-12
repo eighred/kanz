@@ -12,8 +12,9 @@ on:
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/internal/costbasis/**'
-      - 'kanz/services/accounting/internal/ledger/**'
+      - 'kanz/services/accounting/internal/**'
       - 'kanz/services/accounting/tools/ledger_conformance/**'
+      - 'kanz/services/accounting/tools/nav_conformance/**'
       - 'kanz/tools/decimal-conformance/**'
       - 'kanz/tools/depth-conformance/**'
       - 'kanz/pkg/alpha/**'
@@ -55,8 +56,9 @@ on:
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/internal/costbasis/**'
-      - 'kanz/services/accounting/internal/ledger/**'
+      - 'kanz/services/accounting/internal/**'
       - 'kanz/services/accounting/tools/ledger_conformance/**'
+      - 'kanz/services/accounting/tools/nav_conformance/**'
       - 'kanz/tools/decimal-conformance/**'
       - 'kanz/tools/depth-conformance/**'
       - 'kanz/pkg/alpha/**'
@@ -129,11 +131,11 @@ jobs:
       - name: Verify Go owner and guarded pure candidate
         run: |
           set -euo pipefail
-          (cd kanz && go test -p 1 ./internal/costbasis ./services/accounting/internal/ledger ./services/accounting/tools/ledger_conformance -count=1 -json) | tee ledger-proof/go-tests.jsonl
+          (cd kanz && go test -p 1 ./internal/costbasis ./services/accounting/internal ./services/accounting/internal/ledger ./services/accounting/internal/server ./services/accounting/tools/ledger_conformance ./services/accounting/tools/nav_conformance -count=1 -json) | tee ledger-proof/go-tests.jsonl
           (cd kanz && go test -p 1 ./test/arch -run 'TestRust' -count=1) | tee ledger-proof/guards.txt
           cargo +1.90.0 fmt --manifest-path kanz-rs/Cargo.toml --all -- --check
           cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-ledger-replay -p kanz-order-core -p kanz-oms-store --lib --bins
-          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-ledger-replay --test go_conformance | tee ledger-proof/independent-tests.txt
+          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-ledger-replay --test go_conformance --test nav_conformance | tee ledger-proof/independent-tests.txt
           cargo +1.90.0 clippy --locked --manifest-path kanz-rs/Cargo.toml -p kanz-ledger-replay -p kanz-order-core -p kanz-oms-store --all-targets -- -D warnings
       - name: Compare fresh Go history with Rust at scale
         env:
@@ -143,6 +145,14 @@ jobs:
           (cd kanz && go run ./services/accounting/tools/ledger_conformance) > "$KANZ_LEDGER_CORPUS"
           cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-ledger-replay --test go_conformance -- --ignored --nocapture | tee ledger-proof/parity.txt
           sha256sum ledger-proof/go-corpus.json kanz-rs/Cargo.lock > ledger-proof/sha256.txt
+      - name: Compare fresh Go NAV values and complete refusals
+        env:
+          KANZ_NAV_CORPUS: ${{ github.workspace }}/ledger-proof/nav-corpus.json
+        run: |
+          set -euo pipefail
+          (cd kanz && go run ./services/accounting/tools/nav_conformance) > "$KANZ_NAV_CORPUS"
+          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-ledger-replay --test nav_conformance -- --ignored --nocapture | tee ledger-proof/nav-parity.txt
+          sha256sum ledger-proof/nav-corpus.json >> ledger-proof/sha256.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
