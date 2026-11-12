@@ -34,11 +34,15 @@ type corpus struct {
 }
 
 func capture(id string, right pricing.OptionType, exercise pricing.Exercise, v input) sample {
+	return captureFamily(id, right, exercise, v, pricing.European)
+}
+
+func captureFamily(id string, right pricing.OptionType, exercise pricing.Exercise, v input, family pricing.Exercise) sample {
 	s := sample{ID: id, Right: int(right), Exercise: int(exercise), Outcome: "unsupported_model"}
 	for i, value := range v {
 		s.InputBits[i] = math.Float64bits(value)
 	}
-	if exercise != pricing.European {
+	if exercise != family {
 		return s
 	}
 	for _, value := range v {
@@ -53,6 +57,9 @@ func capture(id string, right pricing.OptionType, exercise pricing.Exercise, v i
 	for i, value := range values {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			s.Outcome = "nonfinite_output"
+			if family == pricing.American {
+				s.Outcome = "unavailable"
+			}
 			return s
 		}
 		bits[i] = math.Float64bits(value)
@@ -103,19 +110,70 @@ func cases() []sample {
 	return rows
 }
 
+func americanCases() []sample {
+	var rows []sample
+	add := func(id string, right pricing.OptionType, exercise pricing.Exercise, v input) {
+		rows = append(rows, captureFamily(id, right, exercise, v, pricing.American))
+	}
+	for _, right := range []pricing.OptionType{pricing.Call, pricing.Put} {
+		for si, spot := range []float64{1e-6, 100, 1e6} {
+			for ki, strike := range []float64{.5, 1, 2} {
+				for ti, years := range []float64{1e-5, .25, 5} {
+					for vi, vol := range []float64{.2, 1} {
+						for ri, rate := range []float64{-.05, .05} {
+							for qi, yield := range []float64{0, .03} {
+								add(fmt.Sprintf("grid/%d/%d/%d/%d/%d/%d/%d", right, si, ki, ti, vi, ri, qi), right, pricing.American, input{spot, spot * strike, years, rate, yield, vol})
+							}
+						}
+					}
+				}
+			}
+		}
+		for n, v := range []input{{100, 95, 0, .05, .02, .2}, {100, 95, -1, .05, .02, .2}, {100, 95, .5, .05, .02, 0}, {100, 95, .5, .05, .02, -.2}, {0, 95, .5, .05, .02, .2}, {-100, 95, .5, .05, .02, .2}, {100, 0, .5, .05, .02, .2}, {100, -95, .5, .05, .02, .2}} {
+			add(fmt.Sprintf("legacy/%d/%d", right, n), right, pricing.American, v)
+		}
+		for field := range 6 {
+			for n, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+				v := input{100, 95, .5, .05, .02, .2}
+				v[field] = bad
+				add(fmt.Sprintf("nonfinite/%d/%d/%d", right, field, n), right, pricing.American, v)
+			}
+		}
+		for n, v := range []input{{60, 100, 1, 1, 0, .001}, {100, 100, 1, -.02, 0, .001415}, {100, 100, 1e-320, 0, 0, 1e-320}, {100, 100, 1, 0, 0, 1000}, {1e308, 100, 1, 0, 0, 1}, {100, 100, 1, 0, -1000, .2}} {
+			add(fmt.Sprintf("unavailable/%d/%d", right, n), right, pricing.American, v)
+		}
+		for n, v := range []input{{100, 100, 1e-5, 0, 0, .2}, {100, 100, 1, 0, 0, .0005}} {
+			add(fmt.Sprintf("bump-limit/%d/%d", right, n), right, pricing.American, v)
+		}
+		add(fmt.Sprintf("unsupported/%d", right), right, pricing.European, input{100, 95, .5, .05, .02, .2})
+	}
+	return rows
+}
+
 func main() {
+	family := flag.String("family", "european", "reviewed family: european or american")
 	source := flag.String("source", "", "reviewed source revision (40 lowercase hex digits)")
 	flag.Parse()
 	if flag.NArg() != 0 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(*source) {
 		fmt.Fprintln(os.Stderr, "option reference: a source revision is required")
 		os.Exit(2)
 	}
-	rows := cases()
-	if len(rows) != 8162 {
+	var rows []sample
+	method, expected := "go_bsm_legacy_v1", 8162
+	switch *family {
+	case "european":
+		rows = cases()
+	case "american":
+		rows, method, expected = americanCases(), "go_american_crr_refusal_v1", 502
+	default:
+		fmt.Fprintln(os.Stderr, "option reference: unsupported family")
+		os.Exit(2)
+	}
+	if len(rows) != expected {
 		fmt.Fprintln(os.Stderr, "option reference: incomplete case inventory")
 		os.Exit(1)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(corpus{Schema: 1, Method: "go_bsm_legacy_v1", SourceSHA: *source, CaseCount: len(rows), Cases: rows}); err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(corpus{Schema: 1, Method: method, SourceSHA: *source, CaseCount: len(rows), Cases: rows}); err != nil {
 		fmt.Fprintln(os.Stderr, "option reference: capture failed")
 		os.Exit(1)
 	}
