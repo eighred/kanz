@@ -14,8 +14,6 @@ import (
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/subject"
-	riskapi "github.com/eighred/kanz/internal/risk/api/v1"
-	riskstate "github.com/eighred/kanz/internal/risk/state"
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -27,8 +25,8 @@ import (
 )
 
 // Both actual owners publish through the durable outbox and broker. Observe
-// quantities/value independently, then feed the actual FACT into the risk fold
-// and the PostgreSQL snapshot into the production pre-trade BookSource.
+// quantities/value independently, then feed the PostgreSQL snapshot into the
+// production pre-trade BookSource. Risk ingest is qualified in its own module.
 func TestRustPositionPrecisionPostgresNATS(t *testing.T) {
 	for _, owner := range []string{"go", "rust"} {
 		t.Run(owner, func(t *testing.T) {
@@ -65,7 +63,6 @@ func TestRustPositionPrecisionPostgresNATS(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			risk := riskstate.NewStore()
 			for i := int64(1); i <= 11; i++ {
 				when := at.Add(time.Duration(i) * time.Second)
 				v := positionFill(fmt.Sprint(i), orderpb.Side_SIDE_BUY, 1, 1, when)
@@ -110,18 +107,8 @@ func TestRustPositionPrecisionPostgresNATS(t *testing.T) {
 					t.Fatal("invalid broker position")
 				}
 				positionNumbers(t, &observed, qty, "0", realized, value, "0")
-				if err := risk.ApplyPositionChanged(f.ctx, frame.Envelope, &observed); err != nil {
-					t.Fatal(err)
-				}
-				view, ok := risk.Snapshot(riskapi.PortfolioID(portfolio))
-				if !ok || len(view.Positions()) != 1 {
-					t.Fatal("risk consumer lost holding")
-				}
 				wantQty, _ := new(big.Rat).SetString(qty)
 				wantValue, _ := new(big.Rat).SetString(value)
-				if positionRat(view.Positions()[0].Quantity).Cmp(wantQty) != 0 || positionRat(view.Positions()[0].MarketValue.Amount).Cmp(wantValue) != 0 {
-					t.Fatal("risk consumer rounded precise FACT")
-				}
 				// A newly opened Go reader must observe the Rust writer too.
 				book, err := omscomp.NewBookSource(position.NewPostgres(f.open(f.tenant), "USD"), nil, nil, nil).Book(f.ctx, portfolio)
 				if err != nil || len(book.Positions) != 1 {

@@ -198,6 +198,9 @@ REQUIRED = {
         )},
     },
     "internal/shadowprocess": set(),
+    "internal/risk/ingest": {"TestPositionPrecisionFACTOverJetStream",
+                             "TestPositionPrecisionFACTOverJetStream/long",
+                             "TestPositionPrecisionFACTOverJetStream/short"},
     "services/oms/tools/store-conformance": {
         "TestRustPositionPrecisionPostgresNATS",
         "TestRustPositionPrecisionTransactions",

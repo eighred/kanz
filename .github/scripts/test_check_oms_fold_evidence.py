@@ -30,6 +30,9 @@ class OMSEvidenceTests(unittest.TestCase):
 
     def test_position_precision_requires_both_real_owners_and_control_path(self):
         cases = REQUIRED["services/oms/tools/store-conformance"]
+        for side in ("long", "short"):
+            self.assertIn("TestPositionPrecisionFACTOverJetStream/" + side,
+                          REQUIRED["internal/risk/ingest"])
         for owner in ("go", "rust"):
             for name in ("TestRustPositionPrecisionPostgresNATS/" + owner,
                          "TestRustPositionPrecisionTransactions/" + owner + "/finite-overflow-rolls-back",

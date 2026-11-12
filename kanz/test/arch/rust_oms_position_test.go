@@ -105,6 +105,7 @@ func TestRustOMSPositionCanonicalBrokerRequired(t *testing.T) {
 		"-e NATS_REPLICAS=1",
 		"sh -s < \"$RUNNER_TEMP/oms-bootstrap.sh\"",
 		"./services/oms/internal/position",
+		"./internal/risk/ingest",
 	}
 	check := func(s string) bool {
 		for _, marker := range markers {
