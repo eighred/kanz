@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
-//! Pure, non-authoritative compatibility candidate for Go's European BSM analytics.
+//! Pure, non-authoritative European BSM and American CRR compatibility candidates.
 //! No terms, market-data, freshness, portfolio scaling, or financial-record authority.
 
 use std::f64::consts::{PI, SQRT_2};
+
+pub mod american;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Right {
@@ -55,6 +57,7 @@ pub enum Error {
     UnsupportedModel,
     NonFiniteInput,
     NonFiniteOutput,
+    InvalidTree,
 }
 
 fn cdf(x: f64) -> f64 {

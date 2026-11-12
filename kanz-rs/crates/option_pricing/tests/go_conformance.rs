@@ -1,56 +1,11 @@
 use kanz_option_pricing::{evaluate, Error, Exercise, Input, Right};
-use serde::Deserialize;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::File,
-    io::Read,
-};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Corpus {
-    schema: u32,
-    method: String,
-    source_sha: String,
-    case_count: usize,
-    cases: Vec<Case>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Case {
-    id: String,
-    right: u8,
-    exercise: u8,
-    input_bits: [u64; 6],
-    outcome: String,
-    values_bits: Option<[u64; 6]>,
-}
+mod support;
+use std::{collections::BTreeMap, fs::File, io::Read};
 
 fn verify(raw: &[u8], expected_source: &str) -> Result<BTreeMap<String, usize>, String> {
-    if raw.len() > 8 * 1024 * 1024
-        || expected_source.len() != 40
-        || !expected_source
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err("invalid capture/source bounds".into());
-    }
-    let corpus: Corpus = serde_json::from_slice(raw).map_err(|_| "malformed capture")?;
-    if corpus.schema != 1
-        || corpus.method != "go_bsm_legacy_v1"
-        || corpus.source_sha != expected_source
-        || corpus.case_count != 8162
-        || corpus.cases.len() != corpus.case_count
-    {
-        return Err("capture identity/inventory mismatch".into());
-    }
-    let mut ids = BTreeSet::new();
+    let corpus = support::capture(raw, expected_source, "go_bsm_legacy_v1", 8162)?;
     let mut counts = BTreeMap::new();
     for c in corpus.cases {
-        if c.id.is_empty() || c.id.len() > 128 || !ids.insert(c.id.clone()) {
-            return Err("missing/duplicate case identity".into());
-        }
         let right = match c.right {
             0 => Right::Call,
             1 => Right::Put,
