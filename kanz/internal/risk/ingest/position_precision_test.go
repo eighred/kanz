@@ -26,6 +26,12 @@ import (
 // test exercises the production risk handler/fold without an OMS import of risk
 // internals or a new production API solely for testing.
 func TestPositionPrecisionFACTOverJetStream(t *testing.T) {
+	config := bus.ProducerConfig{Source: "oms/precision-fixture", ProducerVersion: "0.0.0-test"}
+	// NewProducer validates metadata without touching its client. Check this
+	// before dependency skipping, so a missing fixture version fails locally too.
+	if _, err := bus.NewProducer(new(bus.NATSClient), config); err != nil {
+		t.Fatal(err)
+	}
 	address := os.Getenv("TEST_NATS_URL")
 	if address == "" {
 		t.Skip("TEST_NATS_URL unavailable: actual risk precision broker required")
@@ -46,7 +52,7 @@ func TestPositionPrecisionFACTOverJetStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms/precision-fixture"})
+	producer, err := bus.NewProducer(client, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +81,7 @@ func TestPositionPrecisionFACTOverJetStream(t *testing.T) {
 				return &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: c, Exponent: -18}, CurrencyCode: "USD"}
 			}
 			position := &domainpb.PositionState{PortfolioId: portfolio, InstrumentId: "instrument", Quantity: &commonpb.Decimal{Coefficient: tc.sign, Exponent: -9}, MarketValue: money(tc.sign), RealizedPnl: money(3), UnrealizedPnl: money(-2), AsOf: timestamppb.Now()}
-			if err := producer.Publish(bus.WithTenantID(ctx, "precision"), bus.Event{Subject: key, EventType: ingest.EventTypePositionChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "risk", EventTime: position.AsOf.AsTime(), PartitionKey: key, PayloadSchemaRef: "domain.v1.PositionState:1", Payload: position}); err != nil {
+			if err := producer.Publish(bus.WithTenantID(ctx, "precision"), bus.Event{Subject: key, EventType: ingest.EventTypePositionChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "risk", EventTime: position.AsOf.AsTime(), PartitionKey: key, PayloadSchemaRef: "domain.v1.PositionState:1", Payload: position, CorrelationID: uuid.Must(uuid.NewV7()).String(), CausationID: uuid.Must(uuid.NewV7()).String(), TraceContext: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}); err != nil {
 				t.Fatal(err)
 			}
 			msg, err := consumer.Next(jetstream.FetchMaxWait(5 * time.Second))
