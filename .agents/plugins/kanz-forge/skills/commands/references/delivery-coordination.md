@@ -1,5 +1,9 @@
 # Delivery coordination
 
+Apply [validation readiness](validation-readiness.md) to the collected snapshot
+before dispatching another task. The graph supplies gate/runtime dependencies
+and state evidence; the existing ownership plan still protects active work.
+
 Start with current main and one read of open PRs, relevant Issues and current
 check metadata. Use GitHub rulesets and workflow triggers to determine the
 required and applicable contexts. Inspect failed steps or their evidence

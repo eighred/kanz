@@ -1,19 +1,25 @@
 # Kanz Forge
 
 Kanz is Eighred's institutional investment operating system. Forge is its
-repository-owned development assistant for Codex Chat: it investigates current
-code and Issues, selects the relevant engineering skills, coordinates workers,
-and carries a change through review and verification.
+repository-owned engineering workflow for Codex Chat: it understands current
+code and unfinished changes, selects useful work, and carries it through review
+and verification using the existing component owners and host tools.
 
 ## Work from one request
 
 | In Codex Chat | Behavior |
 |---|---|
 | `Kanz /work #1234` | Resolve the issue through PR delivery, merged-main verification and issue closure. |
-| `Kanz /work` | Select ready work from current Issues, PRs, and source, then carry it through verified closure. |
+| `Kanz /work` | Select feasible work from source, branches, PRs and Issues; prefer completing equivalent existing work. |
 | `Kanz /work subagents 2` | Request two workers for independent tasks, bounded by host capacity. Issue numbers may follow. |
+| `Kanz /branches` | Inspect unfinished branches and ownership; `fix` or an explicit branch starts recovery. |
 | `Kanz /ship #1234` | Review and repair that PR, verify its final head, and merge with specific authorization. |
+| `Kanz /audit [fix]` | Find evidenced engineering gaps; `fix` also implements scoped repairs. |
+| `Kanz /secure [fix]` | Inspect security boundaries; `fix` repairs confirmed feasible defects. |
+| `Kanz /evolve` | Propose justified improvements; `implement <target>` works on an accepted scope. |
+| `Kanz /plan` | Order current work by impact, dependencies and validation readiness. |
 | `Kanz /doctor` | Inspect installation, available host tools, and observed capability evidence. |
+| `Kanz /status` | Report current work, blockers and next actions without repairs or test runs. |
 | `Kanz /help all` | Show specialist commands and their scope. |
 
 `/work` and `/ship` inspect the actual change and select skills automatically.
@@ -46,6 +52,15 @@ profile and passes its instructions to a native worker. Plugin profiles do not
 automatically register named Codex agent types, and no `.codex/agents` copies
 are required. There is one source to edit, under this plugin.
 
+[Repository engineering](skills/commands/references/repository-engine.md) is
+the shared discovery and selection workflow. It reconciles existing branches
+and PRs before opening competing work, uses changed-input re-entry conditions
+for known blockers, and traces path consumers for directory standardization.
+New project-owned directories use snake_case where no ecosystem/discovery
+contract requires another name. Existing layout migrations are reviewed and
+reused rather than recreated. These instructions do not rename the repository
+or qualify an untested migration by themselves.
+
 The [parallel protocol](skills/commands/references/parallel-work.md) assigns
 ownership, acceptance criteria, dependencies, and a return contract before
 dispatch. Independent edits use disjoint files in a shared checkout or separate
@@ -73,6 +88,13 @@ and verification evidence in PRs; implementation history in git. Retrieval
 starts with current source and follows only the relevant links. Historical
 conclusions must be checked against the current revision. Forge does not copy
 Codex conversation memory or maintain a separate project-state database.
+
+[Version-aware documentation](skills/commands/references/context-and-evidence.md#check-version-specific-documentation)
+uses an available Context7 connection for focused API/version questions and
+checks release or security-fix claims against current primary sources. Missing
+index versions, access or quota fall back to official docs and tagged source.
+Context7 is optional; no package, account or paid plan is added to Forge. Its
+open client and hosted backend are distinct; see [dependencies](DEPENDENCIES.md#optional-documentation-access).
 
 The optional [receipts utility](scripts/receipts.py) preserves existing pricing
 test history at `~/.kanz-forge/receipts-v1.sqlite`. It scopes records by the Git
@@ -107,6 +129,13 @@ validator tests. Application test tools are selected from the affected
 component. See [DEPENDENCIES.md](DEPENDENCIES.md) for provenance and scope.
 
 ## Capabilities and proof
+
+The [validation readiness workflow](skills/commands/references/validation-readiness.md)
+collects current main/PR checks and uses reviewed task → PR → runtime/gate
+dependencies. It propagates shared blockers, distinguishes coding from delivery
+readiness, prioritizes executable shared recovery, and explains state changes.
+Its six delivery states require evidence; it never authorizes a merge or treats
+an incomplete inventory as successful validation.
 
 `Kanz /doctor` distinguishes **implemented** (instructions or code exist),
 **configured** (installation and access are present), **operational** (a named
@@ -148,15 +177,39 @@ installed by these original workflows. See
 | `provenance.py`, `test_provenance.py` | Verify imported bytes and detect tampering or broken dispatch references. |
 | `skill_discovery.py`, `test_install.py` | Check real CLI discovery and installed bytes in a disposable profile. |
 | `receipts.py`, `test_receipts.py` | Optional compatibility with existing local test history; unnecessary for ordinary Chat work. |
-| `delivery_evidence.py`, `test_delivery_evidence.py` | Optional offline checks of delivery evidence and task conflicts. |
+| `delivery_evidence.py`, `validation_graph.py`, `collect_validation.py`, `failure_classification.py` and their tests | Current GitHub observations, reviewed validation dependencies, recovery priorities, failure classification and ownership checks. |
 
 These checks use the standard library. Replacing deterministic integrity and
 installation checks with prose would remove their regression protection.
 `forge.py` and the orchestration wrappers remain deleted.
 
 The [Forge CI workflow](../../../.github/workflows/kanz-forge.yml) verifies
-structure, imported-source integrity, Linux security validators, and optional
-receipt behavior. A disposable installation test is available as
-`python -B .agents/plugins/kanz-forge/scripts/test_install.py` from a staged or
-committed checkout. It checks installed bytes and fresh CLI skill discovery.
+structure, imported-source integrity, Linux security validators, planner and
+collector regressions, and optional receipt behavior. Run the offline suite with
+`python -B -m unittest discover -s .agents/plugins/kanz-forge/scripts -p 'test_*.py' -v`.
+Run `python -B .agents/plugins/kanz-forge/scripts/test_install.py` explicitly for
+a disposable current-byte snapshot installation and fresh CLI skill discovery.
+It includes new files, excludes deletions/ignored artifacts and rejects missing,
+extra or changed installed files. Importing the test never installs anything.
 None of these checks authorize a merge, infrastructure apply, or live trade.
+
+## Controlled upgrade and rollback
+
+Keep the live profile unchanged until explicit upgrade authorization. Record
+its marketplace source, enabled version and loaded skill source with supported
+CLI discovery. Review and commit the candidate in a clean current-main checkout;
+run tracked validation, provenance, all offline tests, Linux validators, actual
+applicable CI and the disposable installation test. Preserve existing user
+configuration and optional receipt data. Do not copy the whole older dirty
+checkout over current main or edit an installed cache.
+
+The 0.13 candidate extends 0.12 with repository engineering and branch recovery,
+changed-input blocker re-entry, and reviewed continuation ranking. Earlier
+version tests are historical, not evidence for this candidate. After approval,
+register the exact reviewed
+checkout through `codex plugin marketplace add <reviewed-checkout>` and reinstall
+with `codex plugin add kanz-forge@kanz-local`. Verify the reported version/source,
+compare every installed file against the reviewed package inventory, and use a
+fresh Chat to verify loaded skills. Retain the prior reviewed checkout for
+rollback through the same supported marketplace/install commands. Neither an
+upgrade nor rollback changes application deployment or trading authority.

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from statistics import median
 from issue_backlog import summarize as summarize_backlog
+from validation_graph import assess_graph
 
 PATHS = {
     "code": ["Fix the owning code and run its narrow regression", "Use an isolated baseline comparison"],
@@ -78,14 +79,15 @@ def paths(task):
     return result
 
 
-def plan(tasks, completed, active):
+def plan(tasks, completed, active, rank=None):
     identifiers = [task["id"] for task in (*tasks, *active)]
     if len(set(identifiers)) != len(identifiers):
         raise ValueError("task ownership requires unique IDs")
     selected = []
     deferred = {}
     claimed = [(task, paths(task)) for task in active]
-    for task in sorted(tasks, key=lambda item: (item["priority"], item["id"])):
+    rank = rank or {}
+    for task in sorted(tasks, key=lambda item: (rank.get(item["id"], len(tasks)), item["priority"], item["id"])):
         owned = paths(task)
         missing = sorted(set(task["depends_on"]) - completed)
         overlap = [other["id"] for other, scope in claimed
@@ -200,6 +202,23 @@ def assess(snapshot):
         result["daily_progress"] = daily_progress(snapshot["period"], result["blockers"])
     if "backlog" in snapshot:
         result["issue_backlog"] = summarize_backlog(snapshot["backlog"])
+    if "validation_graph" in snapshot:
+        result["validation"] = assess_graph(snapshot["validation_graph"])
+        validation = result["validation"]
+        if any(task["id"] not in validation["nodes"] for task in snapshot["tasks"]):
+            raise ValueError("every queued task needs a reviewed validation node")
+        rank = {key: i for i, key in enumerate(validation["execution_candidates"])}
+        eligible = [task for task in snapshot["tasks"] if task["id"] in rank]
+        result["plan"] = plan(eligible, completed, snapshot["active_tasks"], rank)
+        for task in snapshot["tasks"]:
+            if task["id"] not in rank:
+                result["plan"]["deferred"][task["id"]] = validation["nodes"][task["id"]]["reasons"]
+        result["plan"]["validation_aware"] = True
+    else:
+        result["plan"]["ownership_candidate"] = result["plan"]["next_actionable"]
+        result["plan"]["next_actionable"] = None
+        result["plan"]["validation_aware"] = False
+        result["plan"]["limitation"] = "legacy ownership advice only; validation dependencies unverified"
     return result
 
 

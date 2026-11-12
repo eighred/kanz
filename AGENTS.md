@@ -57,6 +57,11 @@ architecture violation even when tests pass.
 | `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
 | `tools/`, `.github/` | Host/operator scripts and CI. |
 
+Use snake_case for new project-owned directories, except ecosystem and tool
+discovery contracts. Preserve existing package, wire and deployed identities.
+Reconcile active layout branches before migrating established paths; update and
+verify imports, generation, build, CI, deployment and guard consumers together.
+
 Keep sibling directories in place: Go replacements and build contexts depend on
 them. Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
 Kafka (segmentio) is the derived archival/CDC path. Start setup at

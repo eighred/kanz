@@ -75,15 +75,20 @@ def command_files() -> list[Path]:
     catalog_path = PLUGIN / "skills/commands/commands.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     files = [catalog_path]
-    if not {"/work", "/ship"}.issubset(catalog):
+    if not isinstance(catalog, dict) or not {
+            "/work", "/branches", "/ship", "/audit", "/secure", "/evolve",
+            "/plan", "/doctor", "/status", "/help"}.issubset(catalog):
         fail("core native commands are missing")
     for name, item in catalog.items():
-        if not re.fullmatch(r"/[a-z-]+", name) or item.get("target") not in {"optional", "required"}:
+        if (not re.fullmatch(r"/[a-z-]+", name) or not isinstance(item, dict)
+                or item.get("target") not in {"optional", "required"}):
             fail(f"invalid native command: {name}")
-        if item.get("mode") or not item.get("workflow") or not item.get("description"):
+        if ("mode" in item or not isinstance(item.get("workflow"), str) or not item["workflow"].strip()
+                or not isinstance(item.get("description"), str) or not item["description"].strip()):
             fail(f"command must have a native workflow: {name}")
         skills = item.get("skills", [])
-        if not skills or not isinstance(skills, list) or any(skill not in EXPECTED_SKILLS for skill in skills):
+        if (not skills or not isinstance(skills, list)
+                or any(not isinstance(skill, str) or skill not in EXPECTED_SKILLS for skill in skills)):
             fail(f"unknown or missing skill mapping: {name}")
         for skill in skills:
             path = PLUGIN / "skills" / skill / "SKILL.md"
@@ -103,7 +108,7 @@ def command_files() -> list[Path]:
 
 def tracked(paths: list[Path]) -> None:
     required = {path.relative_to(ROOT).as_posix() for path in paths}
-    raw = subprocess.check_output(["git", "ls-files", "-z", "--", *sorted(required)], cwd=ROOT)
+    raw = subprocess.check_output(["git", "ls-files", "-z", "--", *sorted(required)], cwd=ROOT, timeout=30)
     missing = required - set(raw.decode("utf-8").split("\0"))
     if missing:
         fail("required plugin files not tracked: " + ", ".join(sorted(missing)))
