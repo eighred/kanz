@@ -33,6 +33,11 @@ changes from moves so a reviewer can see both. Prefer an explicit branch or type
 contract over an abstraction whose only consumer is the new code. Check error
 propagation, resource cleanup, cancellation and retry boundaries where relevant.
 
+For directory naming or layout work, use the
+[structure contract](../commands/references/repository-engine.md#repository-structure-is-a-contract).
+Reconcile existing migration branches first, follow the owning ecosystem's names,
+and verify every path consumer before treating a move as complete.
+
 Use [change review](references/change-review.md) for a new boundary, persistence
 change, operational control or removal. Select only the applicable rows. It maps
 failure modes to implementation decisions and discriminating checks, including

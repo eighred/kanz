@@ -1,13 +1,15 @@
 ---
 name: commands
-description: Coordinate Kanz development in Codex Chat by selecting engineering and security skills, tracing dependencies, verifying changes, and delivering work through /work and /ship.
+description: Coordinate repository engineering, branch and PR recovery, discovery, verification and delivery for Kanz in Codex Chat.
 ---
 
 # Coordinate the work
 
-Use [the command catalog](commands.json) for shortcuts. `/work` owns the selected
-issue through verified closure. `/ship` starts at the delivery stage for an
-existing change. Ordinary development requests use the same skill routing.
+Use [the command catalog](commands.json) for shortcuts. `/work` completes
+feasible engineering work; `/ship` repairs and delivers existing changes.
+Use [repository engineering](references/repository-engine.md) for shared source,
+branch and PR discovery, blocker re-entry, planning and layout decisions.
+Ordinary development requests use the same skill routing.
 Execute in this chat with available host tools. There is no Forge agent runtime
 or terminal launcher. A catalog entry describes a workflow, not an executable
 handler or proof that the feature ran.
@@ -74,10 +76,12 @@ executable shared-gate recovery, keep coding-only work distinct, and reassess
 after each meaningful validation result. Use the full engineering feedback
 loop there; legacy ownership-only planning is not validation readiness.
 
-For unscoped `/work`, select and complete the highest-priority feasible task:
+For unscoped `/work`, select and complete the highest-priority feasible task
+from source, existing branches, PRs and Issues:
 
-1. Reconcile current main, issue acceptance, active PRs, and dependencies. Rank
-   by repository priority and impact. Within comparable priority, prefer
+1. Reconcile current main, source gaps, branch ownership, issue acceptance,
+   active PRs, and dependencies. Rank by repository priority and impact.
+   Within comparable priority, prefer
    completing an existing change with a clear path to verified main.
 2. Name the selected task and its acceptance, then act. Fill in discoverable
    gaps in scope, implementation, or evidence. Repair failures and continue
@@ -85,8 +89,9 @@ For unscoped `/work`, select and complete the highest-priority feasible task:
    A plan, local commit, open PR, or pending run is not completion.
 3. If progress depends on unavailable input, authority, infrastructure, or a
    running check, identify the exact dependency and what it blocks. Record
-   the evidence and the next action in the owning issue or PR. For unscoped
-   work, move immediately to the next highest-priority feasible independent
+   the evidence, next action and changed-input re-entry condition in the owning
+   issue or PR. Recheck that condition before repeating a known failed run.
+   For unscoped work, move immediately to the next highest-priority feasible independent
    task. Recheck a higher-priority task at a natural checkpoint if its blocker
    clears. Keep explicit user scope and security holds intact.
 4. Report the completed outcome and its verification, or the specific reasons

@@ -75,7 +75,9 @@ def command_files() -> list[Path]:
     catalog_path = PLUGIN / "skills/commands/commands.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     files = [catalog_path]
-    if not isinstance(catalog, dict) or not {"/work", "/ship", "/help", "/doctor"}.issubset(catalog):
+    if not isinstance(catalog, dict) or not {
+            "/work", "/branches", "/ship", "/audit", "/secure", "/evolve",
+            "/plan", "/doctor", "/status", "/help"}.issubset(catalog):
         fail("core native commands are missing")
     for name, item in catalog.items():
         if (not re.fullmatch(r"/[a-z-]+", name) or not isinstance(item, dict)

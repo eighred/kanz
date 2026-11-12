@@ -1,19 +1,25 @@
 # Kanz Forge
 
 Kanz is Eighred's institutional investment operating system. Forge is its
-repository-owned development assistant for Codex Chat: it investigates current
-code and Issues, selects the relevant engineering skills, coordinates workers,
-and carries a change through review and verification.
+repository-owned engineering workflow for Codex Chat: it understands current
+code and unfinished changes, selects useful work, and carries it through review
+and verification using the existing component owners and host tools.
 
 ## Work from one request
 
 | In Codex Chat | Behavior |
 |---|---|
 | `Kanz /work #1234` | Resolve the issue through PR delivery, merged-main verification and issue closure. |
-| `Kanz /work` | Select ready work from current Issues, PRs, and source, then carry it through verified closure. |
+| `Kanz /work` | Select feasible work from source, branches, PRs and Issues; prefer completing equivalent existing work. |
 | `Kanz /work subagents 2` | Request two workers for independent tasks, bounded by host capacity. Issue numbers may follow. |
+| `Kanz /branches` | Inspect unfinished branches and ownership; `fix` or an explicit branch starts recovery. |
 | `Kanz /ship #1234` | Review and repair that PR, verify its final head, and merge with specific authorization. |
+| `Kanz /audit [fix]` | Find evidenced engineering gaps; `fix` also implements scoped repairs. |
+| `Kanz /secure [fix]` | Inspect security boundaries; `fix` repairs confirmed feasible defects. |
+| `Kanz /evolve` | Propose justified improvements; `implement <target>` works on an accepted scope. |
+| `Kanz /plan` | Order current work by impact, dependencies and validation readiness. |
 | `Kanz /doctor` | Inspect installation, available host tools, and observed capability evidence. |
+| `Kanz /status` | Report current work, blockers and next actions without repairs or test runs. |
 | `Kanz /help all` | Show specialist commands and their scope. |
 
 `/work` and `/ship` inspect the actual change and select skills automatically.
@@ -45,6 +51,15 @@ maps requests to them. The specialist profiles provide
 profile and passes its instructions to a native worker. Plugin profiles do not
 automatically register named Codex agent types, and no `.codex/agents` copies
 are required. There is one source to edit, under this plugin.
+
+[Repository engineering](skills/commands/references/repository-engine.md) is
+the shared discovery and selection workflow. It reconciles existing branches
+and PRs before opening competing work, uses changed-input re-entry conditions
+for known blockers, and traces path consumers for directory standardization.
+New project-owned directories use snake_case where no ecosystem/discovery
+contract requires another name. Existing layout migrations are reviewed and
+reused rather than recreated. These instructions do not rename the repository
+or qualify an untested migration by themselves.
 
 The [parallel protocol](skills/commands/references/parallel-work.md) assigns
 ownership, acceptance criteria, dependencies, and a return contract before
@@ -181,9 +196,10 @@ applicable CI and the disposable installation test. Preserve existing user
 configuration and optional receipt data. Do not copy the whole older dirty
 checkout over current main or edit an installed cache.
 
-The 0.12 candidate ports the compatible 0.11 packaging repairs onto current main
-and adds validation-aware planning. Earlier local 0.11 tests are historical,
-not evidence for this candidate. After approval, register the exact reviewed
+The 0.13 candidate extends 0.12 with repository engineering and branch recovery,
+changed-input blocker re-entry, and reviewed continuation ranking. Earlier
+version tests are historical, not evidence for this candidate. After approval,
+register the exact reviewed
 checkout through `codex plugin marketplace add <reviewed-checkout>` and reinstall
 with `codex plugin add kanz-forge@kanz-local`. Verify the reported version/source,
 compare every installed file against the reviewed package inventory, and use a

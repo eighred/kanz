@@ -62,6 +62,12 @@ def assess_graph(graph):
         key = node["id"]
         if not proof(key) or key in nodes or node.get("kind") not in KINDS:
             raise ValueError("graph needs unique node IDs and supported kinds")
+        continuation = node.get("continuation")
+        if "continuation" in node and (
+                node["kind"] != "task" or not isinstance(continuation, dict)
+                or continuation.get("kind") not in {"pr", "branch"}
+                or not proof(continuation.get("evidence"))):
+            raise ValueError("task continuation needs a reviewed PR or branch and evidence")
         nodes[key] = node
     if len(nodes) > 2000 or len(graph["edges"]) > 10000:
         raise ValueError("validation graph exceeds its bounded scope")
@@ -189,7 +195,11 @@ def assess_graph(graph):
             results[key]["selection_reason"] = "coding may proceed; do not enqueue another undeliverable feature"
             continue
         critical = any(nodes[gate].get("critical") is True for gate in recovers[key] if gate in affected)
-        candidates.append((not critical, not bool(affected), node.get("priority", 2), -len(affected), key))
+        # Finish reviewed existing work before opening equivalent new work.
+        # This tie-break cannot outrank critical recovery or repository priority.
+        continuation = {"pr": 0, "branch": 1}.get(node.get("continuation", {}).get("kind"), 2)
+        candidates.append((not critical, not bool(affected), node.get("priority", 2),
+                           -len(affected), continuation, key))
         results[key]["selection_reason"] = (
             "recover critical shared validation prerequisite" if critical else
             "recover shared validation prerequisite" if affected else
