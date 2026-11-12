@@ -1,8 +1,8 @@
 {
   "/work": {
     "target": "optional",
-    "description": "Complete the highest-priority feasible issue through verified closure.",
-    "workflow": "Inspect the current checkout, main, Issues and PRs. Without a target, select the highest-priority feasible task, checking dependencies, duplicates and shipped work. Fill in discoverable gaps and implement, verify and deliver the selected work. When a concrete blocker prevents progress, state the missing prerequisite and next action, keep the issue open, and proceed to the next feasible independent task in an unscoped run. Use issue-archaeology, stack-routing, engineering-standard, kanz-verify and pr-delivery as needed; include security-audit for trust boundaries and financial-verification for money or model changes. For 'subagents N', use references/parallel-work.md within host capacity. Follow the commands skill through PR review, required checks, authorized merge and merged-main verification. Continue remaining in-scope acceptance after a partial PR. Close only after full acceptance. Preserve explicit limits and repository policy. No deployment or capital-halt change. Before selecting work, collect current validation with scripts/collect_validation.py, review the dependency contract, and use scripts/validation_graph.py through delivery_evidence.py. Legacy ownership advice without a reviewed validation graph is not dispatch readiness. Prioritize executable recovery of critical shared gates. Reassess after every meaningful result; follow DISCOVER -> PLAN -> IMPLEMENT -> TEST -> VALIDATE -> REVIEW -> DELIVER -> REASSESS.",
+    "description": "Complete feasible repository work, continuing existing branches and PRs where useful.",
+    "workflow": "Use references/repository-engine.md and references/validation-readiness.md. Inspect current source, main, branch/worktree ownership, open PRs and Issues. Resolve acceptance and existing work before choosing the highest-priority feasible outcome. Reuse a reviewed PR or branch within comparable priority; source-discovered defects are eligible after confirming behavior and searching existing Issues. Read known blockers and recheck their changed-input re-entry conditions before repeating a failed run. Keep unavailable prerequisites blocked and continue independent work with a validation path. Use the existing validation graph and collector when available; failed collection is unavailable evidence. Implement, test, review and deliver through the selected skills and current repository authority, preserving user limits and merged-main acceptance. For subagents N use references/parallel-work.md within host capacity; otherwise do not delegate implicitly. No deployment or capital-halt change.",
     "primary": true,
     "skills": [
       "issue-archaeology",
@@ -14,13 +14,14 @@
   },
   "/audit": {
     "target": "optional",
-    "description": "Audit institutional capabilities or a domain; stop before implementation.",
-    "workflow": "Default to the whole repository. Trace served code, data sources, guards, exemptions, history, tests and active issues across portfolio, quantitative risk, execution, operations, settlement, PIT replay and concurrency. Separate a library, a wired production path and observed estate evidence. Compare institutional capabilities only against attributable sources. Rank financial gaps and integrity vulnerabilities by severity, evidence and impact. Reuse or file actionable issues per AGENTS.md. Report the 2-3 largest gaps, target architecture, prioritized roadmap and one recommended task with test strategy. Ask for explicit authorization before implementing. No code or production changes.",
+    "description": "Find engineering gaps; fix also implements confirmed scoped repairs.",
+    "workflow": "Use references/repository-engine.md. Default to the whole repository. Trace served code, data sources, guards, exemptions, history, tests and active issues across portfolio, quantitative risk, execution, operations, settlement, PIT replay and concurrency. Separate a library, a wired production path and observed estate evidence. Compare institutional capabilities only against attributable sources. Rank financial gaps and integrity vulnerabilities by severity, evidence and impact. Reuse or file actionable issues per AGENTS.md. Report the 2-3 largest gaps, target architecture, prioritized roadmap and one recommended task with test strategy. Default to discovery without implementation. With fix, implement confirmed feasible repairs through the shared /work skills within the requested scope. Do not invent features, create repository plan files or make production changes.",
     "skills": [
       "stack-routing",
       "issue-archaeology",
       "kanz-verify"
-    ]
+    ],
+    "primary": true
   },
   "/ci": {
     "target": "required",
@@ -66,8 +67,8 @@
   },
   "/security": {
     "target": "optional",
-    "description": "Audit a concrete security boundary and verify findings.",
-    "workflow": "Use security-audit to inspect the requested principal, resource, input, control, callers and tests. Produce source-grounded findings with safe validation and explicit coverage limits. Imported validator self-tests prove report tooling only; they do not audit Kanz. Follow the skill's Linux-only finding validator and isolation requirements.",
+    "description": "Compatibility spelling for /secure audit.",
+    "workflow": "Use security-audit through the /secure audit workflow in this catalog and references/repository-engine.md. Preserve the same security skill modes, isolation, evidence and read-only scope; do not run a separate audit engine.",
     "skills": [
       "security-audit"
     ]
@@ -118,7 +119,8 @@
     "workflow": "Read the plugin manifest and available skills/tools in this chat. Inspect codex plugin list --json when CLI exists; compare enabled version and source to the checkout. Run validate.py and provenance.py under .agents/plugins/kanz-forge/scripts when Python exists; a disposable test_install.py verifies CLI cache bytes and skill discovery, not this chat. Check GitHub access with a read-only repository query. Report implemented, configured, operational, incomplete or unverified per capability, with probe, revision and limitation. A listed profile is not a spawned worker; CI coordination requires observed independent work and exact-head CI evidence. Do not launch workers or mutate live installation merely for a status check. If a user names a different checkout or sees stale files, compare that checkout revision and local edits with installed source and current main; report each identity separately, preserving unrelated changes during reconciliation. Distinguish live installed version, source checkout and reviewed upgrade candidate; never upgrade the live profile as a diagnostic. Use scripts/test_install.py only in its disposable profile.",
     "skills": [
       "commands"
-    ]
+    ],
+    "primary": true
   },
   "/remember": {
     "target": "optional",
@@ -188,7 +190,7 @@
   "/ship": {
     "target": "optional",
     "description": "Deliver a change: PR, CI repair, authorized merge and main verification.",
-    "workflow": "Resolve target as a PR, branch, issue or change in this checkout. Without a target use the current branch and its PR; on main without a unique change show open PR candidates and ask rather than selecting one. Inspect status, preserve unrelated edits, prepare or update the PR, review the diff, run applicable local checks, investigate and repair CI failures, and wait for required checks/reviews on the exact head. Merge only with specific authorization. Verify the resulting main SHA and its checks. Report PR, SHA, test evidence and blockers. Delivery here ends at verified main. Deployment needs a separately named environment, authorization and rollback plan; never modify the capital halt. Compose the same security, financial, mapping and verification skills as /work from the actual diff. While CI runs, continue only independent authorized work using references/parallel-work.md; never mutate a head currently being treated as validated.",
+    "workflow": "Resolve target as a PR, branch, issue or change in this checkout. Use references/repository-engine.md. Without a target continue the active change when identifiable; otherwise inspect the open PR queue and repair the highest-priority feasible existing change. Check existing ownership before editing and record external blocker re-entry conditions instead of blindly rerunning CI. Inspect status, preserve unrelated edits, prepare or update the PR, review the diff, run applicable local checks, investigate and repair CI failures, and wait for required checks/reviews on the exact head. Merge only with specific authorization. Verify the resulting main SHA and its checks. Report PR, SHA, test evidence and blockers. Delivery here ends at verified main. Deployment needs a separately named environment, authorization and rollback plan; never modify the capital halt. Compose the same security, financial, mapping and verification skills as /work from the actual diff. While CI runs, continue only independent authorized work using references/parallel-work.md; never mutate a head currently being treated as validated.",
     "primary": true,
     "skills": [
       "pr-delivery",
@@ -199,7 +201,6 @@
     "target": "optional",
     "description": "Find confirmed gaps in repository files or engineering coverage.",
     "workflow": "Inspect the scoped manifests, imports, links, build entrypoints, CI and actual callers with native tools. Reconcile apparent missing files with current main and history: generated, optional and locally deleted files are not automatically defects. Search existing Issues before recording confirmed distinct gaps according to AGENTS.md and current user scope. Report evidence, expected behavior, verification and false positives. Do not file issues solely from string matches or implement repairs under this action.",
-    "primary": true,
     "skills": [
       "issue-archaeology"
     ]
@@ -213,7 +214,6 @@
     ]
   },
   "/update": {
-    "primary": true,
     "target": "optional",
     "description": "Review and update Kanz Forge dependencies; prepare and test a dependency PR.",
     "workflow": "Maintain Kanz Forge dependencies, not the installed Codex cache or unrelated trading-service dependencies. Read DEPENDENCIES.md and upstreams.json. Resolve any named dependency to a unique registry entry or documented development tool; refuse unknown or ambiguous names. Use /upstream to discover pins and check the selected registered projects (all if omitted), compare releases, patches, advisories, changed files, local overlays, compatibility, license evidence and integrity. For unpinned development tools inspect the owning CI/toolchain declaration and supported versions; report host-only tools separately, never install or globally upgrade them without authorization. Separate adopted dependencies from reference-only projects. Prepare an actionable old-to-new proposal with source, reason, risk and rollback; if already current say so. Before adopting changed external code obtain explicit approval for that pin. After approval update only reviewed files, preserve overlays, regenerate provenance digests, update pins and dependency links, run installation, discovery and applicable regression tests, and open or update a reviewable PR. Do not silently turn a reference into a dependency, merge, deploy or alter the capital halt.",
@@ -235,6 +235,65 @@
     "workflow": "Read commands.json. Show primary entries and /help all; for all show every command and its actual scope. For a named or unknown command show matching choices without executing them.",
     "skills": [
       "commands"
-    ]
+    ],
+    "primary": true
+  },
+  "/branches": {
+    "target": "optional",
+    "description": "Inspect branches and recover useful unfinished work with fix or an explicit target.",
+    "workflow": "Use references/repository-engine.md to inventory local/remote refs, worktrees and matching PR heads. Inspect actual remaining behavior against current main before classifying active, recoverable, blocked, superseded or unresolved work. Report ownership, evidence and the next action. With fix or an explicit branch, recover the best feasible in-scope change using the shared /work workflow. Preserve dirty/staged files and unique commits; no branch deletion, force push or automatic closing of competing work.",
+    "skills": [
+      "issue-archaeology",
+      "stack-routing",
+      "engineering-standard",
+      "kanz-verify",
+      "pr-delivery"
+    ],
+    "primary": true
+  },
+  "/secure": {
+    "target": "optional",
+    "description": "Discover security defects; fix authorizes scoped repairs through the shared workflow.",
+    "workflow": "Use references/repository-engine.md and security-audit. Default or audit reviews the requested principal, resource and trust boundary without implementation; preserve the security skill isolation requirements. With fix, repair confirmed feasible defects using engineering-standard, kanz-verify and pr-delivery. Reuse current findings and blockers. No gate weakening, unsafe probes or production changes.",
+    "skills": [
+      "security-audit",
+      "engineering-standard",
+      "kanz-verify",
+      "pr-delivery"
+    ],
+    "primary": true
+  },
+  "/evolve": {
+    "target": "optional",
+    "description": "Propose evidenced product improvements or implement an accepted target.",
+    "workflow": "Use references/repository-engine.md. Default, discover or plan investigates Kanz purpose, current code, observed operational/user gaps, existing Issues and active changes. Rank justified improvements with acceptance, owner, risks, dependencies and a discriminating check. Distinguish hypotheses from requirements. Do not implement speculative features or adopt dependencies. With implement and an accepted target, follow the shared /work workflow within that scope and current authority.",
+    "skills": [
+      "stack-routing",
+      "issue-archaeology",
+      "engineering-standard",
+      "kanz-verify"
+    ],
+    "primary": true
+  },
+  "/plan": {
+    "target": "optional",
+    "description": "Order evidenced repository work by impact, dependencies and validation readiness.",
+    "workflow": "Use references/repository-engine.md and references/validation-readiness.md. Reconcile source gaps, existing branches, PRs and Issues before proposing dependency order. Identify duplicate or already implemented scope, next executable outcomes, validation paths and unresolved decisions. Return a concise plan in chat and reuse existing issue owners under AGENTS.md. Do not dispatch, implement, create repository roadmap/status files or grant delivery authority.",
+    "skills": [
+      "issue-archaeology",
+      "stack-routing",
+      "kanz-verify"
+    ],
+    "primary": true
+  },
+  "/status": {
+    "target": "optional",
+    "description": "Report current repository work and blockers from observed evidence without running repairs.",
+    "workflow": "Use references/repository-engine.md. Read checkout/main identities, dirty paths, branch/worktree ownership, current PR heads, relevant Issues and check metadata. Report active work, feasible continuations, blocked scopes with owners and re-entry conditions, inventory limits and the next action. Distinguish stale, pending, failed and unverified evidence. Use the existing collector when appropriate; an incomplete inventory stays incomplete. Do not execute test suites, dispatch workers, mutate trackers, rerun CI or change installation merely to show status.",
+    "skills": [
+      "issue-archaeology",
+      "kanz-verify"
+    ],
+    "primary": true
   }
 }

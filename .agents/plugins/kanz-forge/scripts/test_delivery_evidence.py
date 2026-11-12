@@ -25,6 +25,18 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_continuation_ranking_survives_delivery_ownership_filter(self):
+        from test_validation_graph import task as graph_task
+        data = snapshot()
+        data['tasks'] = [task('new', 'new'), task('branch', 'branch'), task('pr', 'pr')]
+        data['validation_graph'] = dict(nodes=[
+            graph_task('new', priority=1),
+            graph_task('branch', priority=1, continuation=dict(kind='branch', evidence='reviewed branch @ head')),
+            graph_task('pr', priority=1, continuation=dict(kind='pr', evidence='reviewed PR @ head'))], edges=[])
+        self.assertEqual(assess(data)['plan']['next_actionable'], 'pr')
+        data['active_tasks'] = [task('other-owner', 'pr')]
+        self.assertEqual(assess(data)['plan']['next_actionable'], 'branch')
+
     def test_validation_selection_preserves_active_file_ownership(self):
         from test_validation_graph import fixture
         data = snapshot()
