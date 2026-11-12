@@ -2,10 +2,10 @@ package pricing
 
 import "math"
 
-// Cox-Ross-Rubinstein binomial tree — the American-option pricer (early exercise
+// Cox-Ross-Rubinstein binomial tree â€” the American-option pricer (early exercise
 // is checked at every node) and the model-agnostic bumped-Greeks engine.
 
-// DefaultBinomialSteps is the existing served tree depth. Discretization error
+// DefaultBinomialSteps is the existing Go pricing API tree depth. Discretization error
 // depends on the contract and inputs; this is not a universal cent-accuracy
 // guarantee or evidence of continuous-time American-model convergence.
 const DefaultBinomialSteps = 200
@@ -36,7 +36,7 @@ func BinomialPrice(otype OptionType, exercise Exercise, S, K, t, r, q, sigma flo
 		return math.NaN()
 	}
 
-	// Terminal payoffs: node j has j up-moves, steps−j down-moves.
+	// Terminal payoffs: node j has j up-moves, stepsâˆ’j down-moves.
 	values := make([]float64, steps+1)
 	for j := 0; j <= steps; j++ {
 		st := S * math.Pow(u, float64(j)) * math.Pow(d, float64(steps-j))
@@ -67,12 +67,12 @@ func BinomialPrice(otype OptionType, exercise Exercise, S, K, t, r, q, sigma flo
 	return values[0]
 }
 
-// Bump sizes for finite-difference Greeks — relative to spot for Δ/Γ, absolute
+// Bump sizes for finite-difference Greeks â€” relative to spot for Î”/Î“, absolute
 // for the rate/vol/time variables, chosen small enough for accuracy yet large
 // enough to stay clear of tree-granularity noise.
-// bumpSpotRel is 1% of spot — large enough to average over the CRR node spacing
-// (≈ S·σ·√dt), so the second difference (Gamma) is not swamped by tree
-// quantization noise that a sub-node bump amplifies via 1/h².
+// bumpSpotRel is 1% of spot â€” large enough to average over the CRR node spacing
+// (â‰ˆ SÂ·ÏƒÂ·âˆšdt), so the second difference (Gamma) is not swamped by tree
+// quantization noise that a sub-node bump amplifies via 1/hÂ².
 const (
 	bumpSpotRel = 1e-2
 	bumpVol     = 1e-3
@@ -81,7 +81,7 @@ const (
 )
 
 // BinomialGreeks computes Greeks by central finite differences of the binomial
-// price — the model-agnostic path used for American options (no closed form).
+// price â€” the model-agnostic path used for American options (no closed form).
 // Each Greek is the derivative w.r.t. its own variable, matching the analytic
 // convention in pricing.go.
 func BinomialGreeks(otype OptionType, exercise Exercise, S, K, t, r, q, sigma float64, steps int) Greeks {
@@ -99,13 +99,13 @@ func BinomialGreeks(otype OptionType, exercise Exercise, S, K, t, r, q, sigma fl
 
 	tt := t
 	if tt-bumpTime <= 0 {
-		tt = bumpTime * 2 // keep t−bump positive near expiry
+		tt = bumpTime * 2 // keep tâˆ’bump positive near expiry
 	}
 	volUp, volDown := price(S, t, r, sigma+bumpVol), price(S, t, r, sigma-bumpVol)
 	timeUp, timeDown := price(S, tt+bumpTime, r, sigma), price(S, tt-bumpTime, r, sigma)
 	rateUp, rateDown := price(S, t, r+bumpRate, sigma), price(S, t, r-bumpRate, sigma)
-	// One failed bump makes the whole sensitivity set unavailable. The served
-	// Greek path selects one field at a time, so partial validity would hide the
+	// One failed bump makes the whole sensitivity set unavailable. The registered
+	// Greek measure selects one field at a time, so partial validity would hide the
 	// model failure from whichever measure happened to select a finite field.
 	if !finiteBinomial(up, mid, down, volUp, volDown, timeUp, timeDown, rateUp, rateDown) {
 		return unavailableBinomialGreeks()

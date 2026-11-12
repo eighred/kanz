@@ -6,8 +6,8 @@ caller. It does not depend on the unmerged accounting/precision branches.
 
 | Existing owner | Family and boundary |
 | --- | --- |
-| `pricing.PriceGreeks` â†’ `BlackScholesPrice/Greeks` | European BSM price and per-unit analytic Greeks: the family qualified here. |
-| `pricing.PriceGreeks` â†’ `BinomialPrice/Greeks` | American CRR remains Go-owned; this candidate returns `UnsupportedModel`. |
+| `pricing.PriceGreeks` Ã¢â€ â€™ `BlackScholesPrice/Greeks` | European BSM price and per-unit analytic Greeks: the family qualified here. |
+| `pricing.PriceGreeks` Ã¢â€ â€™ `BinomialPrice/Greeks` | American CRR remains Go-owned; this candidate returns `UnsupportedModel`. |
 | `pricing.Bond.CurveRisk` and existing `bond-risk-shadow` | Separate qualified bond family; no change here. |
 | `compute.positionGreekContribution` | Go resolves terms, spot, vol, valuation time and curve, handles missing/expired inputs, scales dollar Greeks and emits canonical Decimals. No Rust substitution occurs. |
 
@@ -18,16 +18,16 @@ the negative of desk calendar theta. There is no quantity, Money or canonical
 financial wire here. These existing transcendental analytics do not extend
 floating point into journals, cash or positions.
 
-The served Go caller currently passes zero yield, derives years with
+The Go compute caller passes zero yield and derives years with
 `Expiry.Sub(asOf).Hours()/24/365`, and retains input/provenance/coverage and
-financial authority. The library also preserves the existing general pricing
+financial authority. Its production registration remains held by #1230. The library also preserves the existing general pricing
 API's continuous-yield convention. A matching kernel cannot establish that
 terms, volatility or source coverage are available.
 
 Finite degenerate inputs (nonpositive time, volatility, spot or strike) preserve
 Go's **legacy spot intrinsic price and zero Greeks**. This is compatibility,
 not the mathematical discounted zero-volatility limit or an admission default.
-The served Go caller already excludes missing spot/vol and expired contracts.
+The Go compute path excludes missing spot/vol and expired contracts.
 Nonfinite working inputs/results refuse without a partial candidate. Unsupported
 models never silently use the European formula.
 
@@ -101,8 +101,8 @@ Go previously substituted a European Black-Scholes price when CRR probability
 fell outside [0,1]. The regression `S=60,K=100,T=1,r=1,q=0,sigma=.001` returned
 zero despite the American holder's immediate exercise payoff of 40. Go now
 returns NaN for an inadmissible/nonfinite tree; a single failed Greek bump makes
-all five Greeks unavailable. The existing served coverage and revaluation gates
-then report `invalid_pricing_result`. Rust returns a typed error with no partial
+all five Greeks unavailable. The registered Go measure records incomplete coverage; the revaluation helper
+returns unavailable and reports `invalid_pricing_result` through its skip callback. Rust returns a typed error with no partial
 candidate. This is an intentional Go correctness repair, not compatibility with
 the erroneous fallback. Ordinary valid trees retain the existing calculation.
 
@@ -150,3 +150,12 @@ and lock digests, source/tree, tools and all result logs. The European inventory
 and independently required gate remain intact. Existing Go/OpenSSL runtime holds
 remain pending. Served Rust scheduling, snapshot provenance, measured capacity
 and governed promotion/rollback remain later #1534 acceptance.
+
+Production wiring is explicitly unproven: `RegisterGreeks`, `NewRevaluer` and
+`EvaluateReval` remain named dark seams in `no_dark_measure_seam_test.go`, with
+#1230/#1333 owning live option-input/identity wiring and #1232 owning scenario
+dispatch. The consumer regressions exercise the real Go registry and revaluation
+helper in process; they do not observe production loss or a deployed denial.
+The scenario wrapper's existing linear fallback after unavailable revaluation
+is unchanged. This slice does not certify complete scenario coverage or activate
+these seams; that acceptance remains with the existing owners.

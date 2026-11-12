@@ -79,7 +79,7 @@ fn price(i: Input, steps: usize) -> Result<f64, Error> {
     Ok(values[0])
 }
 
-/// Match the served Go American family: 200 steps and its existing bumps.
+/// Match the Go American pricing API: 200 steps and its existing bumps.
 /// A failed tree or bump refuses the entire candidate, without substituting
 /// European analytics or fabricating zero sensitivities. Legacy finite
 /// degenerate inputs remain spot intrinsic/zero Greeks, not admission defaults.
