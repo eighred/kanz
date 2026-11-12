@@ -14,7 +14,7 @@ func checkRustOMSPosition(raw string) error {
 		return e
 	}
 	s = rustMigrationCompact(s)
-	for _, m := range []string{`pubasyncfnapply<F>`, `pubasyncfnsnapshot(`, `scoped(client,tenant).await?`, `relrowsecurityANDrelforcerowsecurity`, `ifn!=4`, `pg_advisory_xact_lock(hashtext(app_current_tenant()||'/'||$1),hashtext($2))`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `ifclaimed>0`, `verify_duplicate(&tx,portfolio,&wire).await?`, `enqueue(&tx,&records).await?`, `commit(tx).await?`, `bounded_records(&records)?`, `record_execution(&tx,portfolio,&wire,as_of,l).await?`, `fee_journal::record_for(tx,Book::Position`, `fee_journal::head_for(tx,Book::Position`, `wire.journal_bytes()?`, `ORDERBYexecution_time,execution_keyLIMIT10001`, `ORDERBYexecution_timeDESC,execution_keyDESCLIMIT1`, `if(backdated||f.recovery.is_some())&&!complete`, `returnErr(Error::PositionHistoryUnknown)`, `ifrows.len()>MAX_ROWS`, `n<=10000ANDbytes<=1048576`, `sum(octet_length(fill)::bigint)OVER()`, `if!identity::domain(execution.value())`, `l.fold(execution.value())?`, `math::aggregate(`, `st.unrealized_pnl=None`, `log_position:None`, `tx.rollback().await?`, `result.encoded_len()>MAX_BYTES`, `applied.venue.encoded_len().checked_add(applied.aggregate.encoded_len())`, `stored.iter().any(|v|v.len()>4096)`, `math::bound(&nav)?`} {
+	for _, m := range []string{`pubasyncfnapply<F>`, `pubasyncfnsnapshot(`, `scoped(client,tenant).await?`, `relrowsecurityANDrelforcerowsecurity`, `ifn!=4`, `pg_advisory_xact_lock(hashtext(app_current_tenant()||'/'||$1),hashtext($2))`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `ifclaimed>0`, `verify_duplicate(&tx,portfolio,&wire).await?`, `enqueue(&tx,&records).await?`, `commit(tx).await?`, `bounded_records(&records)?`, `record_execution(&tx,portfolio,&wire,as_of,l).await?`, `fee_journal::record_for(tx,Book::Position`, `fee_journal::head_for(tx,Book::Position`, `wire.journal_bytes()?`, `ORDERBYexecution_time,execution_keyLIMIT10001`, `ORDERBYexecution_timeDESC,execution_keyDESCLIMIT1`, `if(backdated||f.recovery.is_some())&&!complete`, `returnErr(Error::PositionHistoryUnknown)`, `ifrows.len()>MAX_ROWS`, `n<=10000ANDbytes<=1048576`, `sum(octet_length(fill)::bigint)OVER()`, `if!identity::domain(execution.value())`, `l.fold(execution.value())?`, `math::aggregate(`, `st.unrealized_pnl=None`, `log_position:None`, `tx.rollback().await?`, `result.encoded_len()>MAX_BYTES`, `applied.venue.encoded_len().checked_add(applied.aggregate.encoded_len())`, `stored.iter().any(|v|v.len()>4096)`, `math::bound(&nav)?`, `total_market_value:Some(math::marked_money(nav,ccy)?)`} {
 		if !strings.Contains(s, m) {
 			return fmt.Errorf("position owner missing %s", m)
 		}
@@ -73,7 +73,7 @@ func TestRustOMSPositionMathBoundary(t *testing.T) {
 			return false
 		}
 		code = rustMigrationCompact(code)
-		for _, m := range []string{`kanz_order_core::{decimal,`, `rational,`, `v.numer().bits()>16384||v.denom().bits()>16384`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&out.qty)?`, `bound(&out.realized)?`, `bound(&weight)?`, `bound(&v)?`, `decimal(v).ok_or(Error::Capacity)?`} {
+		for _, m := range []string{`kanz_order_core::{decimal,exact_decimal,has_terminating_decimal,`, `rational,`, `v.numer().bits()>16384||v.denom().bits()>16384`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&out.qty)?`, `bound(&out.realized)?`, `bound(&weight)?`, `bound(&v)?`, `ifhas_terminating_decimal(&v){exact_decimal(v)}else{decimal(v)}.ok_or(Error::Capacity)?`, `quantity:Some(exact_decimal(l.qty.clone()).ok_or(Error::Capacity)?)`, `average_price:Some(decimal(l.avg.clone()).ok_or(Error::Capacity)?)`, `market_value:Some(marked_money(price*&l.qty,ccy)?)`, `ifnonzero&&result.amount.as_ref().is_none_or(|d|d.coefficient==0)`} {
 			if !strings.Contains(code, m) {
 				return false
 			}
@@ -84,7 +84,7 @@ func TestRustOMSPositionMathBoundary(t *testing.T) {
 	if !check(s) {
 		t.Fatal("math ownership/bounds missing")
 	}
-	for _, m := range []string{"v.numer().bits() > 16384", "s.len() > 4096", "bound(&weight)?", "bound(&v)?"} {
+	for _, m := range []string{"v.numer().bits() > 16384", "s.len() > 4096", "bound(&weight)?", "bound(&v)?", "has_terminating_decimal(&v)", "exact_decimal(v)", "exact_decimal(l.qty.clone())", "nonzero &&"} {
 		t.Run(m, func(t *testing.T) {
 			changed := strings.ReplaceAll(s, m, "false")
 			if changed == s || check(changed) {
@@ -105,6 +105,7 @@ func TestRustOMSPositionCanonicalBrokerRequired(t *testing.T) {
 		"-e NATS_REPLICAS=1",
 		"sh -s < \"$RUNNER_TEMP/oms-bootstrap.sh\"",
 		"./services/oms/internal/position",
+		"./internal/risk/ingest",
 	}
 	check := func(s string) bool {
 		for _, marker := range markers {
