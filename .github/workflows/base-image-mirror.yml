@@ -108,6 +108,9 @@ jobs:
           # #1579: verify the patched builder before repointing consumers.
           - source: docker.io/library/golang:1.26.11
             target: ghcr.io/eighred/base/golang:1.26.11
+          # #1579: stage the reviewed 1.27.4 index before changing consumers.
+          - source: docker.io/library/golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d
+            target: ghcr.io/eighred/base/golang:1.27.4
           - source: gcr.io/distroless/static:nonroot
             target: ghcr.io/eighred/base/distroless-static:nonroot
           # Rust migration bases are immutable reviewed inputs (#1413).
