@@ -34,8 +34,10 @@ Opaque journal provenance remains owned by Go; this arithmetic capture neither
 serializes nor replaces immutable records. Full #1535 acceptance remains open.
 
 Inputs are bounded to 65,536 entries, 256 UTF-8 bytes per relevant key and 16,384
-bits per rational numerator/denominator, including fold results. Capacity or
-unsupported errors return no partial book. UTC timestamps use seconds and nanos
+bits per rational numerator/denominator, including fold results. Rationals must
+be reduced with a positive denominator; noncanonical `BigRational::new_raw` values
+are refused before arithmetic. Capacity, invalid-rational or unsupported errors
+return no partial book. UTC timestamps use seconds and nanos
 over years 1–9999; they do not overflow through a Unix-nanosecond conversion.
 This is a finite qualification domain, not an unbounded historical-store API.
 

@@ -314,6 +314,17 @@ fn limits_and_failed_cost_fold_are_atomic() {
     let before = lot.clone();
     assert!(lot.fold(&huge, &number("1")).is_err());
     assert_eq!(lot, before);
+    for (n, d) in [(1, 0), (1, -2), (2, 4), (0, 2)] {
+        let raw = Rat::new_raw(n.into(), d.into());
+        let mut e = entry("raw", "1", "1", "-1").unwrap();
+        e.cash = Some(raw.clone());
+        assert_eq!(
+            replay("p", &[Some(e)], None, None),
+            Err(Error::InvalidRational)
+        );
+        assert!(lot.fold(&raw, &number("1")).is_err());
+        assert_eq!(lot, before);
+    }
     // Both inputs fit, but their sum exceeds the output budget after arithmetic.
     lot.qty = Rat::from_integer(BigInt::from(1) << 16383);
     let before = lot.clone();

@@ -14,7 +14,16 @@ const MAX_KEY_BYTES: usize = 256;
 pub enum Error {
     Capacity,
     InvalidTime,
+    InvalidRational,
     Unsupported,
+}
+impl From<kanz_order_core::cost_basis::Error> for Error {
+    fn from(value: kanz_order_core::cost_basis::Error) -> Self {
+        match value {
+            kanz_order_core::cost_basis::Error::Capacity => Self::Capacity,
+            kanz_order_core::cost_basis::Error::InvalidRational => Self::InvalidRational,
+        }
+    }
 }
 
 /// UTC seconds plus nanoseconds, avoiding UnixNano overflow outside 1678–2262.
@@ -78,7 +87,7 @@ impl Book {
 fn add(map: &mut BTreeMap<String, Rat>, key: &str, value: &Rat) -> Result<(), Error> {
     let next = map.entry(key.to_owned()).or_default();
     *next += value;
-    bound(next).map_err(|_| Error::Capacity)
+    bound(next).map_err(Error::from)
 }
 
 /// Reconstruct ordinary trade/cash/fee/accrual postings exactly, in stable
@@ -128,7 +137,7 @@ pub fn replay(
             .into_iter()
             .flatten()
         {
-            bound(value).map_err(|_| Error::Capacity)?;
+            bound(value)?;
         }
         ordered.push(entry);
     }
@@ -156,14 +165,12 @@ pub fn replay(
             book.positions
                 .entry(entry.instrument.clone())
                 .or_default()
-                .fold(quantity, price)
-                .map_err(|_| Error::Capacity)?;
+                .fold(quantity, price)?;
             if settled {
                 book.settled_positions
                     .entry(entry.instrument.clone())
                     .or_default()
-                    .fold(quantity, price)
-                    .map_err(|_| Error::Capacity)?;
+                    .fold(quantity, price)?;
             }
         }
         if let Some(cash) = entry.cash.as_ref().filter(|v| !v.is_zero()) {

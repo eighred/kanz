@@ -76,7 +76,7 @@ func TestRustOMSPositionMathBoundary(t *testing.T) {
 	check := func(raw, common string) bool {
 		for source, markers := range map[string][]string{
 			raw:    {`kanz_order_core::{decimal,`, `rational,`, `kanz_order_core::cost_basis::bound(v)`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&v)?`, `decimal(v).ok_or(Error::Capacity)?`, `self.0.fold(&q,&p)`, `kanz_order_core::cost_basis::aggregate(lots.iter().map(|l|&l.0))`},
-			common: {`value.numer().bits()>16384||value.denom().bits()>16384`, `forvaluein[&out.qty,&out.realized,&weight,&cost]`, `bound(value)?`, `letmutnext=self.clone()`, `*self=next;`, `closed*(price-&self.avg)*self.qty.signum()`},
+			common: {`value.numer().bits()>16384||value.denom().bits()>16384`, `!value.denom().is_positive()`, `letreduced=value.reduced()`, `forvaluein[&out.qty,&out.realized,&weight,&cost]`, `bound(value)?`, `letmutnext=self.clone()`, `*self=next;`, `closed*(price-&self.avg)*self.qty.signum()`},
 		} {
 			code, e := rustMigrationWithoutComments(source)
 			if e != nil {
@@ -102,6 +102,7 @@ func TestRustOMSPositionMathBoundary(t *testing.T) {
 	}{
 		{false, "s.len() > 4096"}, {false, "bound(&v)?"}, {false, "self.0.fold(&q, &p)"},
 		{true, "value.numer().bits() > 16384"}, {true, "&weight, &cost"}, {true, "bound(value)?"}, {true, "*self = next;"},
+		{true, "!value.denom().is_positive()"}, {true, "let reduced = value.reduced()"},
 	} {
 		t.Run(m.from, func(t *testing.T) {
 			a, b := wrapper, shared

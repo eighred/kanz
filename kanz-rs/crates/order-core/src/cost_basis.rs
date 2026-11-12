@@ -4,12 +4,25 @@ use num_rational::BigRational as Rat;
 use num_traits::{Signed, Zero};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Capacity;
+pub enum Error {
+    Capacity,
+    InvalidRational,
+}
 
-pub fn bound(value: &Rat) -> Result<(), Capacity> {
+pub fn bound(value: &Rat) -> Result<(), Error> {
     if value.numer().bits() > 16384 || value.denom().bits() > 16384 {
-        Err(Capacity)
+        Err(Error::Capacity)
     } else {
+        // BigRational::new_raw permits zero/negative denominators and unreduced
+        // values. Go big.Rat inputs cannot carry that representation. Refuse it
+        // before sign/zero tests or arithmetic can panic or misinterpret it.
+        if !value.denom().is_positive() {
+            return Err(Error::InvalidRational);
+        }
+        let reduced = value.reduced();
+        if reduced.numer() != value.numer() || reduced.denom() != value.denom() {
+            return Err(Error::InvalidRational);
+        }
         Ok(())
     }
 }
@@ -24,7 +37,7 @@ pub struct Lot {
 impl Lot {
     /// A rejected operation leaves the lot unchanged. Inputs and intermediates
     /// are bounded before another operation can amplify their allocation.
-    pub fn fold(&mut self, quantity: &Rat, price: &Rat) -> Result<(), Capacity> {
+    pub fn fold(&mut self, quantity: &Rat, price: &Rat) -> Result<(), Error> {
         for value in [&self.qty, &self.avg, &self.realized, quantity, price] {
             bound(value)?;
         }
@@ -53,7 +66,7 @@ impl Lot {
     }
 }
 
-pub fn aggregate<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> Result<Lot, Capacity> {
+pub fn aggregate<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> Result<Lot, Error> {
     let mut out = Lot::default();
     let mut weight = Rat::zero();
     let mut cost = Rat::zero();

@@ -18,7 +18,13 @@ impl std::ops::Deref for Lot {
     }
 }
 pub(crate) fn bound(v: &Rat) -> Result<(), Error> {
-    kanz_order_core::cost_basis::bound(v).map_err(|_| Error::Capacity)
+    kanz_order_core::cost_basis::bound(v).map_err(math_error)
+}
+fn math_error(value: kanz_order_core::cost_basis::Error) -> Error {
+    match value {
+        kanz_order_core::cost_basis::Error::Capacity => Error::Capacity,
+        kanz_order_core::cost_basis::Error::InvalidRational => Error::InvalidInput,
+    }
 }
 pub(crate) fn parse(s: &str) -> Result<Rat, Error> {
     if s.len() > 4096 {
@@ -63,13 +69,13 @@ impl Lot {
             q = -q;
         }
         let p = rational(fill.price.as_ref()).ok_or(Error::InvalidInput)?;
-        self.0.fold(&q, &p).map_err(|_| Error::Capacity)
+        self.0.fold(&q, &p).map_err(math_error)
     }
 }
 pub(crate) fn aggregate(lots: &[Lot]) -> Result<Lot, Error> {
     kanz_order_core::cost_basis::aggregate(lots.iter().map(|l| &l.0))
         .map(Lot)
-        .map_err(|_| Error::Capacity)
+        .map_err(math_error)
 }
 pub(crate) fn money(v: Rat, ccy: &str) -> Result<Money, Error> {
     bound(&v)?;
