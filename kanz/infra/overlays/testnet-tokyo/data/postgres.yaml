@@ -122,3 +122,25 @@ spec:
         - ipBlock: { cidr: 10.71.0.15/32 }
       ports:
         - { protocol: TCP, port: 6443 }
+---
+# #1142: metrics use a separate listener; the scraper needs no database access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-prometheus-metrics
+  namespace: kanz-data
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: kanz-testnet-postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - { protocol: TCP, port: 9187 }
