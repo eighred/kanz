@@ -56,6 +56,11 @@ security and verification. A comment correction needs the owning context and
 a diff check. A pricing fix adds financial verification; it does not require
 the user to know the pricing test command. Choose the smallest sufficient set.
 
+For library APIs, dependency upgrades or toolchain/version questions, use
+[version-specific documentation](references/context-and-evidence.md#check-version-specific-documentation).
+Context7 can assist when available; current primary sources and repository pins
+still determine which version and behavior the evidence actually supports.
+
 Financial methodology supports implementation choices and their proof; it does
 not turn an ordinary development task into an investment-analysis assignment.
 For policy changes, follow enforcement and audit evidence with engineering and

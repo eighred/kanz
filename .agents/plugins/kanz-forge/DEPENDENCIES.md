@@ -19,6 +19,20 @@ runtime. Financial methodology is information for designing and testing Kanz's
 pricing, risk and execution behavior, not a finance-package dependency or a
 financial-analysis product.
 
+## Optional documentation access
+
+An already connected Context7 host tool can retrieve version-specific public
+documentation under the [evidence guide](skills/commands/references/context-and-evidence.md#check-version-specific-documentation).
+Forge requires no Context7 package, server, API key or subscription; official
+documentation and tagged upstream source provide the fallback.
+
+The [Context7 repository](https://github.com/upstash/context7) publishes its MCP
+client under MIT. Its README excludes the hosted API, parsing and crawling
+backends from that source, and the local client defaults to the hosted API.
+Running that client locally does not provide an independent offline backend.
+Free access limits and paid plans are provider terms to check when relevant,
+not a permanent free-service guarantee. No upstream Context7 code is imported.
+
 ## Imported source
 
 The only imported external project is

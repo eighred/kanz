@@ -89,6 +89,13 @@ starts with current source and follows only the relevant links. Historical
 conclusions must be checked against the current revision. Forge does not copy
 Codex conversation memory or maintain a separate project-state database.
 
+[Version-aware documentation](skills/commands/references/context-and-evidence.md#check-version-specific-documentation)
+uses an available Context7 connection for focused API/version questions and
+checks release or security-fix claims against current primary sources. Missing
+index versions, access or quota fall back to official docs and tagged source.
+Context7 is optional; no package, account or paid plan is added to Forge. Its
+open client and hosted backend are distinct; see [dependencies](DEPENDENCIES.md#optional-documentation-access).
+
 The optional [receipts utility](scripts/receipts.py) preserves existing pricing
 test history at `~/.kanz-forge/receipts-v1.sqlite`. It scopes records by the Git
 common directory, so worktrees share identity and independent clones do not.
