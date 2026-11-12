@@ -12,8 +12,8 @@ import (
 
 const rustTermPath = "crates/term_structure"
 
-var rustTermSources = []string{"src/lib.rs", "src/calibration.rs", "tests/numerical.rs", "tests/go_conformance.rs", "tests/calibration.rs", "tests/support/mod.rs"}
-var rustTermArtifacts = []string{"reference/reference.py", "tests/reference.json", "reference/mixed_reference.py", "tests/mixed_reference.json"}
+var rustTermSources = []string{"src/lib.rs", "src/calibration.rs", "tests/numerical.rs", "tests/go_conformance.rs", "tests/calibration.rs", "tests/interpolation.rs", "tests/support/mod.rs"}
+var rustTermArtifacts = []string{"reference/reference.py", "tests/reference.json", "reference/mixed_reference.py", "tests/mixed_reference.json", "reference/interpolation_reference.py", "tests/interpolation_reference.json"}
 
 const rustTermCargo = `[package]
 name = "kanz-term-structure"
@@ -202,6 +202,7 @@ func TestRustTermStructureRequiresFreshIndependentGate(t *testing.T) {
 	s = s[start:]
 	markers := []string{`go run ./services/risk-engine/tools/curve_reference -source "$GITHUB_SHA"`, `python3 -B crates/term_structure/reference/reference.py --check`, `cargo test --locked -p kanz-term-structure --test numerical`, `missing_or_malformed_capture_refuses -- --exact`, `fresh_go_oracle_is_required -- --ignored --exact --nocapture`, `KANZ_CURVE_SOURCE: ${{ github.sha }}`, `KANZ_CURVE_CORPUS:`, `cargo clippy --locked -p kanz-term-structure --all-targets -- -D warnings`, `term-structure-evidence`}
 	markers = append(markers, `go run ./services/risk-engine/tools/curve_reference -mixed -source "$GITHUB_SHA"`, `python3 -B crates/term_structure/reference/mixed_reference.py --check`, `cargo test --locked -p kanz-term-structure --lib`, `cargo test --locked -p kanz-term-structure --test calibration`, `fresh_mixed_go_oracle_is_required -- --ignored --exact --nocapture`, `KANZ_MIXED_SOURCE: ${{ github.sha }}`, `KANZ_MIXED_CORPUS:`)
+	markers = append(markers, `python3 -B crates/term_structure/reference/interpolation_reference.py --check`, `sha256sum crates/term_structure/reference/interpolation_reference.py crates/term_structure/tests/interpolation_reference.json`, `cargo test --locked -p kanz-term-structure --test interpolation`)
 	check := func(s string) bool {
 		for _, m := range markers {
 			if !strings.Contains(s, m) {

@@ -26,7 +26,8 @@ type mixedSample struct {
 }
 
 func mixedCapture(id string, interp int, qs []curve.RateQuote) mixedSample {
-	s := mixedSample{ID: id, Interp: interp, Quotes: make([]mixedQuote, len(qs)), Queries: bits([]float64{.1, 1, 7}), Outcome: "refused"}
+	queries := []float64{.1, 1, math.Nextafter(2, 1), 2, math.Nextafter(2, 3), 7}
+	s := mixedSample{ID: id, Interp: interp, Quotes: make([]mixedQuote, len(qs)), Queries: bits(queries), Outcome: "refused"}
 	for i, q := range qs {
 		s.Quotes[i] = mixedQuote{int(q.Kind), math.Float64bits(q.Tenor), math.Float64bits(q.Span), math.Float64bits(q.Value)}
 	}
@@ -38,7 +39,7 @@ func mixedCapture(id string, interp int, qs []curve.RateQuote) mixedSample {
 	for _, q := range qs {
 		v = append(v, c.QuoteRate(q))
 	}
-	for _, t := range []float64{.1, 1, 7} {
+	for _, t := range queries {
 		v = append(v, c.Zero(t), c.Discount(t))
 	}
 	for _, x := range v {
@@ -97,8 +98,17 @@ func captureMixed(source string) error {
 		for i, r := range []float64{-.39, 1.7} {
 			rows = append(rows, mixedCapture(fmt.Sprintf("edge/%d/%d", interp, i), interp, []curve.RateQuote{{Kind: curve.Swap, Tenor: 1, Value: r}}))
 		}
+		for i, tiny := range []float64{-1e-20, 0, 1e-20} {
+			for order := 0; order < 2; order++ {
+				quotes := []curve.RateQuote{{Kind: curve.Deposit, Tenor: 1, Value: .03}, {Kind: curve.Deposit, Tenor: 2, Value: tiny}, {Kind: curve.Deposit, Tenor: 3, Value: .04}}
+				if order == 1 {
+					slices.Reverse(quotes)
+				}
+				rows = append(rows, mixedCapture(fmt.Sprintf("interior/%d/%d/%d", interp, i, order), interp, quotes))
+			}
+		}
 	}
-	if len(rows) != 294 {
+	if len(rows) != 306 {
 		return fmt.Errorf("mixed curve reference: incomplete inventory")
 	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
@@ -107,5 +117,5 @@ func captureMixed(source string) error {
 		Source string        `json:"source_sha"`
 		Count  int           `json:"case_count"`
 		Cases  []mixedSample `json:"cases"`
-	}{1, "go_mixed_v2", source, len(rows), rows})
+	}{1, "go_mixed_v3", source, len(rows), rows})
 }

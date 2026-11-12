@@ -76,7 +76,7 @@ struct ReferenceQuote {
 fn independent_price_equations_and_tiny_rates() {
     let data: Reference = serde_json::from_str(include_str!("mixed_reference.json")).unwrap();
     assert_eq!(data.method, "decimal_price_newton_160_200_v2");
-    assert_eq!(data.cases.len(), 24);
+    assert_eq!(data.cases.len(), 30);
     let mut ids = BTreeSet::new();
     for row in data.cases {
         assert!(ids.insert(row.id.clone()));
@@ -214,10 +214,10 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
     }
     let data: Corpus = serde_json::from_slice(raw).map_err(|_| "malformed capture")?;
     if data.schema != 1
-        || data.method != "go_mixed_v2"
+        || data.method != "go_mixed_v3"
         || data.source_sha != source
-        || data.case_count != 294
-        || data.cases.len() != 294
+        || data.case_count != 306
+        || data.cases.len() != 306
     {
         return Err("capture identity/inventory mismatch".into());
     }
@@ -228,7 +228,7 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
             || row.id.len() > 128
             || !ids.insert(row.id.clone())
             || row.quotes.len() > 256
-            || row.queries.len() != 3
+            || row.queries.len() != 6
         {
             return Err("case identity/bounds refused".into());
         }
@@ -249,7 +249,7 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
         match (row.outcome.as_str(), row.values, built) {
             ("refused", None, Err(_)) => (),
             ("value", Some(bits), Ok((qs, c))) => {
-                if bits.len() != 3 * qs.len() + 6 {
+                if bits.len() != 3 * qs.len() + 12 {
                     return Err("result inventory differs".into());
                 }
                 let queries: Vec<_> = row.queries.into_iter().map(f64::from_bits).collect();
@@ -261,7 +261,7 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
         }
         *counts.entry(row.outcome).or_insert(0) += 1;
     }
-    if counts != BTreeMap::from([("refused".into(), 32), ("value".into(), 262)]) {
+    if counts != BTreeMap::from([("refused".into(), 32), ("value".into(), 274)]) {
         return Err("outcome inventory differs".into());
     }
     Ok(counts)
@@ -282,7 +282,7 @@ fn fresh_mixed_go_oracle_is_required() {
     let raw = std::fs::read(path).expect("fresh actual Go capture required");
     let counts = verify(&raw, &source).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-    for mutation in 0..5 {
+    for mutation in 0..6 {
         let mut broken = value.clone();
         match mutation {
             0 => broken["source_sha"] = "0000000000000000000000000000000000000000".into(),
@@ -295,12 +295,13 @@ fn fresh_mixed_go_oracle_is_required() {
             3 => {
                 broken["cases"].as_array_mut().unwrap().pop();
             }
-            _ => broken["method"] = "go_mixed_v1".into(),
+            4 => broken["method"] = "go_mixed_v1".into(),
+            _ => broken["method"] = "go_mixed_v2".into(),
         }
         assert!(
             verify(&serde_json::to_vec(&broken).unwrap(), &source).is_err(),
             "negative control {mutation} accepted"
         );
     }
-    println!("fresh mixed Go source={source} cases=294 outcomes={counts:?} negative_controls=5");
+    println!("fresh mixed Go source={source} cases=306 outcomes={counts:?} negative_controls=6");
 }

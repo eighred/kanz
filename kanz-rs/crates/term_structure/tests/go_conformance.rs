@@ -45,10 +45,10 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
     }
     let data: Corpus = serde_json::from_slice(raw).map_err(|_| "malformed capture")?;
     if data.schema != 1
-        || data.method != "go_zero_par_v1"
+        || data.method != "go_zero_par_v2"
         || data.source_sha != source
-        || data.case_count != 864
-        || data.cases.len() != 864
+        || data.case_count != 876
+        || data.cases.len() != 876
     {
         return Err("capture identity/inventory mismatch".into());
     }
@@ -98,7 +98,7 @@ fn verify(raw: &[u8], source: &str) -> Result<BTreeMap<String, usize>, String> {
     }
     if counts
         != BTreeMap::from([
-            ("value".into(), 820),
+            ("value".into(), 832),
             ("refused".into(), 29),
             ("unavailable".into(), 15),
         ])
@@ -131,11 +131,14 @@ fn fresh_go_oracle_is_required() {
     changed = original.clone();
     changed["cases"][1]["id"] = changed["cases"][0]["id"].clone();
     assert!(verify(&serde_json::to_vec(&changed).unwrap(), &source).is_err());
-    changed = original;
+    changed = original.clone();
     changed["cases"].as_array_mut().unwrap().pop();
-    changed["case_count"] = serde_json::json!(863);
+    changed["case_count"] = serde_json::json!(875);
     assert!(verify(&serde_json::to_vec(&changed).unwrap(), &source).is_err());
-    println!("fresh Go curve source={source} cases=864 outcomes={counts:?} negative_controls=4");
+    changed = original;
+    changed["method"] = "go_zero_par_v1".into();
+    assert!(verify(&serde_json::to_vec(&changed).unwrap(), &source).is_err());
+    println!("fresh Go curve source={source} cases=876 outcomes={counts:?} negative_controls=5");
 }
 
 #[test]

@@ -61,12 +61,29 @@ prefix annuity, or copy piecewise-forward integration. Ten references at 80 and
 110 Decimal digits must agree within `1e-45*(1+abs(value))`; 40 significant digits
 are retained. Near-zero cases also have explicit relative-accuracy controls.
 
-The source-bound Go corpus contains **864 unique cases: 820 values, 29 refused
+The source-bound Go corpus contains **876 unique cases: 832 values, 29 refused
 definitions and 15 unavailable queries/results**. Cases cover both constructions,
 both interpolations, three compounding conventions, negative/zero/tiny/high rates,
 unsorted/irregular dates, 256 pillars, short/long extrapolation, adjacent forward
 endpoints, bumps, absent schedules and IEEE invalid values. Every sorted pillar,
 zero, discount, bumped zero, forward and par result is checked.
+The private method is `go_zero_par_v2`; five negative controls include rejection
+of obsolete v1 captures. Interior positive/negative/zero rates and their adjacent
+binary64 queries are included in both input orders.
+
+Known pillars return their stored continuous rate exactly, including the existing
+pre-interpolation bump. Between pillars, both distances are computed directly and
+their endpoint contributions are summed. This preserves a tiny endpoint beside a
+larger rate without changing the linear-zero or log-discount model. The public
+[linear](https://raw.githubusercontent.com/OpenGamma/Strata/main/modules/market/src/main/java/com/opengamma/strata/market/curve/interpolator/LinearCurveInterpolator.java)
+and [log-linear](https://raw.githubusercontent.com/OpenGamma/Strata/main/modules/market/src/main/java/com/opengamma/strata/market/curve/interpolator/LogLinearCurveInterpolator.java)
+definitions were checked 2026-11-13; no upstream implementation is included.
+`reference/interpolation_reference.py` uses exact Fraction arithmetic for **12
+curves / 84 queries**, rounding once at the result. Go independently checks the
+same mathematical contract with `math/big.Rat`. The new knot/adjacent-query budget
+is **16*EPS*abs(expected)** with no floor; known knot bits must match exactly.
+The existing comparison budgets below are unchanged. CI regenerates the rational
+fixture, runs its test and retains both hashes and results.
 
 Comparison budgets are fixed before execution: exact tenor bits; discount error
 at most `1024*EPS*pillar_count*abs(expected)`; rate-unit error at most the same
@@ -158,20 +175,23 @@ and coverage reporting remain intact. Rust has no publication or runtime route.
 discount-ratio equations by damped Newton in log-discount using a high-precision
 central derivative. It appends the candidate pillar before evaluating both future
 endpoints, rather than copying production gap weights, log1p, ParRate objective
-or bisection branches. Twenty-four references at **160
+or bisection branches. Thirty references at **160
 and 200 digits** must agree within **1e-45 relative error**, including near-zero
 results; 40 significant digits are retained. Both oracle precisions separately
 reprice their input quotes to that relative budget.
 
-The fresh actual Go mixed corpus has **294 unique cases: 262 values / 32
+The fresh actual Go mixed corpus has **306 unique cases: 274 values / 32
 refusals**. It includes both interpolations, negative/zero/tiny/high rates,
 unsorted and irregular mixed strips, chained/irregular pillar gaps, 256 pillars,
-domain edges and invalid inputs.
+domain edges, small interior deposits and invalid inputs. Every case also queries
+the two-year knot and its immediately adjacent binary64 tenors. Independent tiny
+interior references use exact Decimal images of those queries.
 Every sorted tenor, zero, input repricing and queried zero/discount is compared.
 Tenors are bit-exact; other fields use `2048*EPS*pillars*abs(expected)` with no
 absolute floor. Missing/malformed captures, wrong source, altered zero, duplicate
-identity, truncated inventory and the obsolete `go_mixed_v1` contract refuse.
-The new corpus method is `go_mixed_v2`; old captures cannot qualify it.
+identity, truncated inventory and obsolete `go_mixed_v1`/`go_mixed_v2` contracts
+refuse in six negative controls. The new corpus method is `go_mixed_v3`; old
+captures cannot qualify it.
 CI explicitly invokes the otherwise
 ignored `fresh_mixed_go_oracle_is_required` test and retains both references,
 corpora, source/tree/digests and results. The parent zero/par and actual bond

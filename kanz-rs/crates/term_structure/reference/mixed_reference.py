@@ -5,6 +5,7 @@ ParRate objective, bisection, root bracket or termination branches.
 """
 import argparse
 import json
+import math
 from decimal import Decimal as D, localcontext
 from pathlib import Path
 
@@ -28,8 +29,16 @@ for interp in [0, 1]:
         ("gap_chain", [quote(1,"1.25",".036",".5"),quote(0,".125",".03"),quote(1,".5",".033",".25"),quote(2,"3.5",".039")]),
         ("irregular_gap", [quote(0,".2",".03"),quote(1,".9",".033",".35"),quote(2,"2.5",".036")]),
         ("default_span_gap", [quote(0,".25",".03"),quote(1,"1",".035")]),
+        ("interior_positive", [quote(0,"1",".03"),quote(0,"2","1e-20"),quote(0,"3",".04")]),
+        ("interior_negative", [quote(0,"1",".03"),quote(0,"2","-1e-20"),quote(0,"3",".04")]),
+        ("interior_zero", [quote(0,"1",".03"),quote(0,"2","0"),quote(0,"3",".04")]),
     ]:
-        CASES.append(dict(id=f"{name}/{interp}",interp=interp,quotes=quotes,queries=[".1","1","7"]))
+        queries = [".1","1","7"]
+        if name.startswith("interior_"):
+            # Exact Decimal images of adjacent binary64 queries; a shortened
+            # decimal near a knot describes a materially different distance.
+            queries = [str(D.from_float(v)) for v in [math.nextafter(2.,1.), 2., math.nextafter(2.,3.)]]
+        CASES.append(dict(id=f"{name}/{interp}",interp=interp,quotes=quotes,queries=queries))
 
 
 def oracle(case, precision):
@@ -120,4 +129,4 @@ if __name__=="__main__":
     result=generate()
     if args.check: assert json.loads(path.read_text(encoding="utf-8"))==result,"stale mixed reference"
     else:path.write_text(json.dumps(result,indent=2)+"\n",encoding="utf-8",newline="\n")
-    print("Decimal mixed calibration: 24 price-equation Newton references, precision 160/200 verified")
+    print("Decimal mixed calibration: 30 price-equation Newton references, precision 160/200 verified")
