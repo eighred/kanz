@@ -124,8 +124,8 @@ func checkRustOrderCore(root string) error {
 }
 func checkOrderCoreMarkers(files map[string]string) error {
 	required := map[string][]string{
-		"src/lib.rs":                          {`pubusekanz_decimal_compat::common;`, `pubusearithmetic::{decimal,rational};`},
-		"src/arithmetic.rs":                   {`(-64..=64).contains(&d.exponent)`, `rem.abs()*2>=d.abs()`, `rounded(value.numer()*BigInt::from(100_000_000),value.denom())`, `q=rounded(q,&BigInt::from(10))`},
+		"src/lib.rs":                          {`pubusekanz_decimal_compat::common;`, `pubusearithmetic::{decimal,exact_decimal,has_terminating_decimal,rational};`},
+		"src/arithmetic.rs":                   {`(-64..=64).contains(&d.exponent)`, `rem.abs()*2>=d.abs()`, `rounded(value.numer()*BigInt::from(100_000_000),value.denom())`, `q=rounded(q,&BigInt::from(10))`, `pubfnexact_decimal(value:BigRational)->Option<Decimal>`, `value.numer().bits()>512||value.denom().bits()>512`, `if!(-60..=60).contains(&exponent)`, `coefficient:coefficient.to_i64()?`, `decimal_factors(value).is_some()`},
 		"src/aggregate.rs":                    {`working(st)?`, `ifq>leaves`, `ifq_value<filled`, `Action::Quarantine`, `st.venue_ack_at.is_none()`, `c.instrument_id.len()>64`, `b<0x20||b==0x7f`, `letmutnext=st.clone()`, `fields(st.wire(),|n,w|!changed_field(n,w))`, `next.status=ifremaining.is_zero()`, `carry(out,cmd,"new_quantity","ordered_quantity")`, `carry(state,cmd,from,to)`, `kanz_proto_wire::accepts_wire(&f,w)`, `n==source_number&&w==2`, `n!=target_number||w!=2`},
 		"examples/order-aggregate-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `take(2*1024*1024+1)`, `state.message_wire("leaves_quantity")?`},
 	}
@@ -157,6 +157,10 @@ func TestRustPureOrderOwnerBoundary(t *testing.T) {
 		files[p] = string(raw)
 	}
 	for _, m := range []struct{ name, file, from, to string }{
+		{"exact-export", "src/lib.rs", "decimal, exact_decimal, has_terminating_decimal, rational", "decimal, rational"},
+		{"exact-domain", "src/arithmetic.rs", "if !(-60..=60).contains(&exponent)", "if false"},
+		{"exact-coefficient", "src/arithmetic.rs", "coefficient.to_i64()?", "Some(0)?"},
+		{"terminating-owner", "src/arithmetic.rs", "decimal_factors(value).is_some()", "true"},
 		{"half-away", "src/arithmetic.rs", "rem.abs() * 2 >= d.abs()", "rem.abs() * 2 > d.abs()"},
 		{"rescale", "src/arithmetic.rs", "q = rounded(q, &BigInt::from(10))", "q /= 10"},
 		{"domain", "src/arithmetic.rs", "(-64..=64).contains(&d.exponent)", "true"},
