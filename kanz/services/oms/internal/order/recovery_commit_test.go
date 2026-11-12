@@ -20,21 +20,26 @@ import (
 )
 
 func TestRecoveryCommitPreservesSubEightPlaceQuantities(t *testing.T) {
-	pool := newPool(t)
-	s := NewPostgres(pool)
 	ctx := bus.WithTenantID(context.Background(), testTenant)
 	st := &orderpb.OrderState{OrderId: "nano-recovery", PortfolioId: "fund", Venue: "BINANCE", VenueAccountId: "account",
 		InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY, OrderedQuantity: d(4, -9),
 		Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}
-	if err := s.Create(ctx, st, nil); err != nil {
-		t.Fatal(err)
-	}
 	fills := make([]*orderpb.Fill, 2)
 	for i := range fills {
 		id := fmt.Sprintf("nano-execution-%d", i)
 		fills[i] = &orderpb.Fill{OrderId: st.OrderId, FillId: id, VenueExecutionId: id, Venue: st.Venue,
 			VenueAccountId: st.VenueAccountId, InstrumentId: st.InstrumentId, Side: st.Side,
-			Quantity: d(1, -9), Price: d(1, 0), ExecutedAt: timestamppb.New(t0)}
+			Quantity: d(1, -9), Price: d(1, 0), Fee: &commonpb.Money{Amount: d(0, 0), CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(t0)}
+	}
+	view := execution.OrderView{State: execution.OrderViewCancelled, ExecutedQuantity: d(2, -9), Fills: fills}
+	// Check the financial fixture before the optional database setup can skip.
+	if _, err := execution.CompleteHistory(st, view); err != nil {
+		t.Fatal(err)
+	}
+	pool := newPool(t)
+	s := NewPostgres(pool)
+	if err := s.Create(ctx, st, nil); err != nil {
+		t.Fatal(err)
 	}
 	mapping := RecoveryMapping{testTenant, st.PortfolioId, st.Venue, st.VenueAccountId, "fixture-exchange-account"}
 	version, err := s.RecordRecoveryMapping(ctx, mapping, execution.AccountProof{Verified: true, ExchangeAccountID: mapping.ExchangeAccount})
@@ -45,8 +50,7 @@ func TestRecoveryCommitPreservesSubEightPlaceQuantities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FreezeRecoveryHistory(ctx, c, version, st, execution.OrderView{State: execution.OrderViewCancelled,
-		ExecutedQuantity: d(2, -9), Fills: fills}, t0); err != nil {
+	if err := s.FreezeRecoveryHistory(ctx, c, version, st, view, t0); err != nil {
 		t.Fatal(err)
 	}
 	c, err = s.RecoveryCase(ctx, c.ID)
