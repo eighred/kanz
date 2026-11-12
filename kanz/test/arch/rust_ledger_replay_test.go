@@ -28,7 +28,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 `
 
-var rustLedgerSources = []string{"src/lib.rs", "tests/go_conformance.rs"}
+var rustLedgerSources = []string{"src/lib.rs", "src/valuation.rs", "tests/go_conformance.rs", "tests/nav_conformance.rs"}
 
 // Conservative source/recipe guard, not Rust AST, data-flow or dependency proof.
 func checkRustLedgerReplay(root string) error {
@@ -72,6 +72,11 @@ func checkRustLedgerReplay(root string) error {
 		if e != nil {
 			return e
 		}
+		if rel == "src/valuation.rs" {
+			if err := checkRustValuationCoverage(string(raw)); err != nil {
+				return err
+			}
+		}
 		if strings.HasPrefix(rel, "src/") && regexp.MustCompile(`\b(?:f32|f64|unsafe|TcpStream|Command|File)\b|std::(?:net|fs|process|env|thread|io)|\bfn\s+main\s*\(|\b(?:struct|type)\s+(?:Decimal|Money|Lot)\b|include\w*\s*!`).MatchString(strings.ReplaceAll(code, "forbid(unsafe_code)", "")) {
 			return fmt.Errorf("ledger candidate acquired IO or parallel financial arithmetic")
 		}
@@ -88,6 +93,43 @@ func checkRustLedgerReplay(root string) error {
 	return nil
 }
 
+// This lexical coverage check cannot establish arithmetic; the fresh Go oracle does.
+func checkRustValuationCoverage(raw string) error {
+	code, err := rustMigrationWithoutComments(raw)
+	if err != nil {
+		return err
+	}
+	code = rustMigrationCompact(code)
+	for _, marker := range []string{
+		`for(instrument,lot)in&book.positions`, `for(currency,amount)in&book.cash`, `for(currency,amount)in&book.accrued`,
+		`super::add(&mutself.local,currency,amount)?`, `!rate.is_positive()`, `Error::MissingConverter`,
+		`Err(Error::MissingFx(converter.missing.into_iter().collect()))`, `bound(&result.total)?`,
+	} {
+		if !strings.Contains(code, marker) {
+			return fmt.Errorf("Rust NAV coverage missing %s", marker)
+		}
+	}
+	return nil
+}
+
+func TestRustNAVCoverageRejectsOmittedBucketsAndUnknownRates(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", rustLedgerPath, "src/valuation.rs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = checkRustValuationCoverage(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"&book.cash", "&book.accrued", "&book.positions", "!rate.is_positive()", "bound(&result.total)?", "converter.missing.into_iter().collect()"} {
+		t.Run(marker, func(t *testing.T) {
+			changed := strings.ReplaceAll(string(raw), marker, "removed")
+			if changed == string(raw) || checkRustValuationCoverage(changed) == nil {
+				t.Fatal("mutation missed/accepted")
+			}
+		})
+	}
+}
+
 func TestRustLedgerReplayBoundaryRejectsMutations(t *testing.T) {
 	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
 	for _, mutation := range []struct{ path, body string }{
@@ -95,6 +137,8 @@ func TestRustLedgerReplayBoundaryRejectsMutations(t *testing.T) {
 		{"src/lib.rs", "\nfn amount()->f64{1.0}"},
 		{"src/lib.rs", "\npub struct Lot {}"},
 		{"src/lib.rs", "\nfn config(){std::env::var(\"DSN\");}"},
+		{"src/valuation.rs", "\nfn read(){std::fs::read(\"nav\");}"},
+		{"src/valuation.rs", "\nfn amount()->f64{1.0}"},
 		{"src/owner.rs", "fn main(){}"},
 		{"build.rs", "fn main(){}"},
 		{"Cargo.toml", "\nredis=\"*\""},

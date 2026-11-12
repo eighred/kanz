@@ -7,6 +7,8 @@ use num_rational::BigRational as Rat;
 use num_traits::Zero;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod valuation;
+
 pub const MAX_ENTRIES: usize = 65_536;
 const MAX_KEY_BYTES: usize = 256;
 
