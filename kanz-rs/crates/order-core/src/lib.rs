@@ -34,6 +34,7 @@ pub mod aggregate;
 pub mod arithmetic;
 pub mod attribution;
 pub mod attribution_projection;
+pub mod cost_basis;
 pub mod schedule_identity;
 pub use arithmetic::{decimal, rational};
 

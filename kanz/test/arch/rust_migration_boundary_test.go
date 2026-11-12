@@ -39,7 +39,7 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.2.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
-	"workspace":          {"members": `["crates/oms-recovery", "crates/order-core", "crates/market-feed", "crates/oms-store", "crates/proto-wire", "crates/oms-venue", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow", "services/lake-snapshot", "crates/browser-render"]`, "resolver": `"2"`},
+	"workspace":          {"members": `["crates/oms-recovery", "crates/order-core", "crates/market-feed", "crates/oms-store", "crates/proto-wire", "crates/oms-venue", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow", "services/lake-snapshot", "crates/browser-render", "crates/ledger_replay"]`, "resolver": `"2"`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
@@ -145,6 +145,9 @@ func checkRustMigrationBoundary(root string) error {
 	if err := checkRustRecoveryCoordinator(root); err != nil {
 		return err
 	}
+	if err := checkRustLedgerReplay(root); err != nil {
+		return err
+	}
 	if err := checkRustOrderCore(root); err != nil {
 		return err
 	}
@@ -226,7 +229,7 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
-			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms-store" || rel == "crates/proto-wire" || rel == "crates/oms-venue" || rel == "crates/order-core" || rel == "crates/oms-recovery" || rel == browserRenderPath {
+			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms-store" || rel == "crates/proto-wire" || rel == "crates/oms-venue" || rel == "crates/order-core" || rel == "crates/oms-recovery" || rel == browserRenderPath || rel == "crates/ledger_replay" {
 				return filepath.SkipDir
 			} // Separately guarded above.
 			if rel == "target" || rel == ".git" {

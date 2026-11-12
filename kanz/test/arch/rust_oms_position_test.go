@@ -63,31 +63,54 @@ func TestRustOMSPositionBoundary(t *testing.T) {
 }
 
 func TestRustOMSPositionMathBoundary(t *testing.T) {
-	b, e := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "src", "position_math.rs"))
-	if e != nil {
-		t.Fatal(e)
-	}
-	check := func(raw string) bool {
-		code, e := rustMigrationWithoutComments(raw)
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	read := func(path string) string {
+		b, e := os.ReadFile(filepath.Join(root, path))
 		if e != nil {
-			return false
+			t.Fatal(e)
 		}
-		code = rustMigrationCompact(code)
-		for _, m := range []string{`kanz_order_core::{decimal,`, `rational,`, `v.numer().bits()>16384||v.denom().bits()>16384`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&out.qty)?`, `bound(&out.realized)?`, `bound(&weight)?`, `bound(&v)?`, `decimal(v).ok_or(Error::Capacity)?`} {
-			if !strings.Contains(code, m) {
+		return string(b)
+	}
+	wrapper := read("crates/oms-store/src/position_math.rs")
+	shared := read("crates/order-core/src/cost_basis.rs")
+	check := func(raw, common string) bool {
+		for source, markers := range map[string][]string{
+			raw:    {`kanz_order_core::{decimal,`, `rational,`, `kanz_order_core::cost_basis::bound(v)`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&v)?`, `decimal(v).ok_or(Error::Capacity)?`, `self.0.fold(&q,&p)`, `kanz_order_core::cost_basis::aggregate(lots.iter().map(|l|&l.0))`},
+			common: {`value.numer().bits()>16384||value.denom().bits()>16384`, `forvaluein[&out.qty,&out.realized,&weight,&cost]`, `bound(value)?`, `letmutnext=self.clone()`, `*self=next;`, `closed*(price-&self.avg)*self.qty.signum()`},
+		} {
+			code, e := rustMigrationWithoutComments(source)
+			if e != nil {
 				return false
 			}
+			code = rustMigrationCompact(code)
+			for _, m := range markers {
+				if !strings.Contains(code, m) {
+					return false
+				}
+			}
 		}
+		code, _ := rustMigrationWithoutComments(raw)
+		code = rustMigrationCompact(code)
 		return !strings.Contains(code, "fnrational(") && !strings.Contains(code, "fndecimal(")
 	}
-	s := string(b)
-	if !check(s) {
-		t.Fatal("math ownership/bounds missing")
+	if !check(wrapper, shared) {
+		t.Fatal("shared math ownership/bounds missing")
 	}
-	for _, m := range []string{"v.numer().bits() > 16384", "s.len() > 4096", "bound(&weight)?", "bound(&v)?"} {
-		t.Run(m, func(t *testing.T) {
-			changed := strings.ReplaceAll(s, m, "false")
-			if changed == s || check(changed) {
+	for _, m := range []struct {
+		shared bool
+		from   string
+	}{
+		{false, "s.len() > 4096"}, {false, "bound(&v)?"}, {false, "self.0.fold(&q, &p)"},
+		{true, "value.numer().bits() > 16384"}, {true, "&weight, &cost"}, {true, "bound(value)?"}, {true, "*self = next;"},
+	} {
+		t.Run(m.from, func(t *testing.T) {
+			a, b := wrapper, shared
+			if m.shared {
+				b = strings.ReplaceAll(b, m.from, "removed")
+			} else {
+				a = strings.ReplaceAll(a, m.from, "removed")
+			}
+			if (a == wrapper && b == shared) || check(a, b) {
 				t.Fatal("mutation missed/accepted")
 			}
 		})

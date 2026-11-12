@@ -59,7 +59,7 @@ const rustOrderCoreBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> 
 }
 `
 
-var rustOrderCoreSources = []string{"build.rs", "src/lib.rs", "src/aggregate.rs", "src/arithmetic.rs", "src/attribution.rs", "src/attribution_projection.rs", "src/schedule_identity.rs", "examples/order-aggregate-fixture.rs", "examples/order-attribution-fixture.rs"}
+var rustOrderCoreSources = []string{"build.rs", "src/lib.rs", "src/aggregate.rs", "src/arithmetic.rs", "src/cost_basis.rs", "src/attribution.rs", "src/attribution_projection.rs", "src/schedule_identity.rs", "examples/order-aggregate-fixture.rs", "examples/order-attribution-fixture.rs"}
 
 func checkRustOrderCore(root string) error {
 	dir := filepath.Join(root, "crates/order-core")
