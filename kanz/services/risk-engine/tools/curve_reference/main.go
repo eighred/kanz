@@ -175,10 +175,18 @@ func cases() []sample {
 
 func main() {
 	source := flag.String("source", "", "reviewed 40-hex source revision")
+	mixed := flag.Bool("mixed", false, "capture mixed deposit/future/swap calibration")
 	flag.Parse()
 	if flag.NArg() != 0 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(*source) {
 		fmt.Fprintln(os.Stderr, "curve reference: source required")
 		os.Exit(2)
+	}
+	if *mixed {
+		if err := captureMixed(*source); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	rows := cases()
 	if len(rows) != 864 {

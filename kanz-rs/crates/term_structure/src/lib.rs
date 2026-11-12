@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
-//! Bounded scalar zero/par term structures. No market, record or runtime owner.
+//! Bounded scalar term structures and mixed quotes. No market, record or runtime owner.
+
+mod calibration;
+pub use calibration::{QuoteKind, RateQuote};
 
 pub const MAX_PILLARS: usize = 256;
 pub const MAX_COUPONS: usize = 4096;

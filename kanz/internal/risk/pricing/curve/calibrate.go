@@ -13,8 +13,8 @@ import (
 // from a homogeneous par strip; a live curve is calibrated from the mixed
 // money-market universe — deposits on the short end, rate futures in the belly,
 // par swaps on the long end. Calibrate solves the mixed set sequentially into
-// zero pillars and hands them to NewZeroCurve; on a swaps-only annual strip it
-// reproduces Bootstrap exactly (the consistency test).
+// sorted continuously compounded zero pillars; on a swaps-only annual strip it
+// agrees with Bootstrap within binary64 error (the consistency test).
 //
 // Quotes reach the calibrator through the QuoteSource seam — the live surface
 // (the PARITY-01h feed.Snapshot) is market-data-service-internal, so the
@@ -52,12 +52,46 @@ func FutureRateFromPrice(price float64) float64 { return (100 - price) / 100 }
 
 // ErrCalibrate is returned when a quote set cannot be calibrated (empty set,
 // duplicate/non-positive pillars, a future with no short-end anchor, or an
-// unsolvable/arbitrageable quote).
+// unsolvable, unconverged or unrepresentable quote).
 var ErrCalibrate = errors.New("curve: cannot calibrate quotes")
 
 // Bound the annual fixed-leg work, not economic rate signs or maturities of
 // directly supplied zero curves. A malformed swap must not allocate forever.
 const maxCalibrationCoupons = 4096
+const maxCalibrationEvaluations = 256
+const calibrationEpsilon = 0x1p-52
+
+func validRateQuote(q RateQuote) bool {
+	return finite(q.Tenor, q.Span, q.Value, q.end()) &&
+		q.Kind >= Deposit && q.Kind <= Swap &&
+		q.Tenor >= 0 && (q.Kind == Future || q.Tenor > 0) &&
+		q.Span >= 0 && (q.Kind != Swap || q.Tenor <= maxCalibrationCoupons)
+}
+
+// QuoteRate reprices the declared simple deposit/forward or annual par quote.
+// It uses log-discount differences and expm1, so a tiny nonzero quote is not
+// erased by subtracting rounded discount factors. Unavailable is NaN.
+func (c *Curve) QuoteRate(q RateQuote) float64 {
+	if !c.usable() || !validRateQuote(q) {
+		return math.NaN()
+	}
+	switch q.Kind {
+	case Deposit:
+		return finiteOrNaN(math.Expm1(c.Zero(q.Tenor)*q.Tenor) / q.Tenor)
+	case Future:
+		return finiteOrNaN(math.Expm1(c.Forward(q.Tenor, q.end())*(q.end()-q.Tenor)) / q.span())
+	case Swap:
+		return c.ParRate(annualCouponTimes(q.Tenor))
+	default:
+		return math.NaN()
+	}
+}
+
+func quoteResidualFits(got, want float64) bool {
+	// Rate fractions: 128 binary64 epsilons relative to this quote, with no
+	// absolute floor that could silently accept an erased near-zero input.
+	return finite(got, want) && math.Abs(got-want) <= 128*calibrationEpsilon*math.Abs(want)
+}
 
 // end returns the pillar tenor a quote resolves: instrument maturity.
 func (q RateQuote) end() float64 {
@@ -79,6 +113,8 @@ func (q RateQuote) span() float64 {
 // each pillar off the curve built so far (interpolated per interp). Deposits
 // and futures solve in closed form; a swap pillar is solved by bisection so the
 // curve's ParRate reproduces the quote (the FI-01f round-trip property).
+// Every input is repriced before returning; a failed residual check returns no
+// curve, so Refresh cannot record, install or capture a failed calibration.
 func Calibrate(quotes []RateQuote, interp Interpolation) (*Curve, error) {
 	if len(quotes) == 0 {
 		return nil, fmt.Errorf("%w: no quotes", ErrCalibrate)
@@ -89,7 +125,7 @@ func Calibrate(quotes []RateQuote, interp Interpolation) (*Curve, error) {
 	for _, q := range quotes {
 		// Validate before sorting or generating annual coupon dates. A malformed
 		// tenor must not turn an unknown input into an unbounded allocation.
-		if !finite(q.Tenor, q.Span, q.Value, q.end()) || q.Tenor < 0 || (q.Kind != Future && q.Tenor == 0) || q.Span < 0 || (q.Kind == Swap && q.Tenor > maxCalibrationCoupons) {
+		if !validRateQuote(q) {
 			return nil, fmt.Errorf("%w: invalid or over-budget quote", ErrCalibrate)
 		}
 	}
@@ -104,62 +140,130 @@ func Calibrate(quotes []RateQuote, interp Interpolation) (*Curve, error) {
 		if end <= 0 || end <= prevEnd {
 			return nil, fmt.Errorf("%w: pillar tenors must be strictly ascending and positive (%.4g after %.4g)", ErrCalibrate, end, prevEnd)
 		}
-		var df float64
+		var z float64
 		switch q.Kind {
-		case Deposit:
-			df = 1 / (1 + q.Value*q.Tenor)
-		case Future:
-			if len(b.tenors) == 0 {
-				return nil, fmt.Errorf("%w: future at %.4g has no short-end anchor", ErrCalibrate, q.Tenor)
+		case Deposit, Future:
+			period, logStart := q.Tenor, 0.0
+			if q.Kind == Future {
+				// A later pillar must not change the start discount used by the
+				// closed form. Gaps require a different calibration equation.
+				if len(b.tenors) == 0 || q.Tenor > prevEnd {
+					return nil, fmt.Errorf("%w: future has no fixed start discount", ErrCalibrate)
+				}
+				period = q.span()
+				logStart = b.Zero(q.Tenor) * q.Tenor
 			}
-			df = b.Discount(q.Tenor) / (1 + q.Value*q.span())
+			u := q.Value * period
+			if !finite(u, logStart) || u <= -1 {
+				return nil, fmt.Errorf("%w: invalid simple-rate discount", ErrCalibrate)
+			}
+			z = (logStart + math.Log1p(u)) / end
 		case Swap:
-			z, err := solveSwapPillar(b, q)
+			var err error
+			z, err = solveSwapPillar(b, q)
 			if err != nil {
 				return nil, err
 			}
-			df = math.Exp(-z * end)
-		default:
-			return nil, fmt.Errorf("%w: unknown quote kind %d", ErrCalibrate, q.Kind)
 		}
-		if df <= 0 || !finite(df) {
-			return nil, fmt.Errorf("%w: non-positive discount factor at %.4g", ErrCalibrate, end)
+		df := math.Exp(-z * end)
+		if !finite(z, df) || df <= 0 {
+			return nil, fmt.Errorf("%w: unavailable discount at %.4g", ErrCalibrate, end)
 		}
 		b.tenors = append(b.tenors, end)
-		b.zeros = append(b.zeros, -math.Log(df)/end)
+		b.zeros = append(b.zeros, z)
 		prevEnd = end
 	}
-	return NewZeroCurve(b.tenors, b.zeros, Continuous, interp)
+	for _, q := range qs {
+		if !quoteResidualFits(b.QuoteRate(q), q.Value) {
+			return nil, fmt.Errorf("%w: quote repricing residual at %.4g exceeds budget", ErrCalibrate, q.end())
+		}
+	}
+	return b, nil
 }
 
-// solveSwapPillar finds the zero rate at the swap's maturity that makes the
-// curve-so-far (plus the trial pillar) reprice the swap to par: ParRate over
-// annual coupon dates equals the quote. Bisection — ParRate is monotone
-// increasing in the final zero, so one sign change brackets the root.
+// solveSwapPillar retains the existing [-0.5, 1] zero-rate domain. It brackets
+// from zero and the quote's scale, then requires both a narrow interval and a
+// small repricing residual. Exhaustion or nonfinite evaluation never succeeds.
 func solveSwapPillar(b *Curve, q RateQuote) (float64, error) {
+	return solveSwapPillarWithBudget(b, q, maxCalibrationEvaluations)
+}
+
+func solveSwapPillarWithBudget(b *Curve, q RateQuote, budget int) (float64, error) {
 	times := annualCouponTimes(q.Tenor)
-	parErr := func(z float64) float64 {
-		trial := &Curve{
-			tenors: append(append([]float64{}, b.tenors...), q.Tenor),
-			zeros:  append(append([]float64{}, b.zeros...), z),
-			interp: b.interp,
+	trial := &Curve{
+		tenors: append(append([]float64{}, b.tenors...), q.Tenor),
+		zeros:  append(append([]float64{}, b.zeros...), 0),
+		interp: b.interp,
+	}
+	evaluate := func(z float64) (float64, error) {
+		if budget <= 0 {
+			return 0, fmt.Errorf("%w: swap evaluation budget exhausted", ErrCalibrate)
 		}
-		return trial.ParRate(times) - q.Value
+		budget--
+		trial.zeros[len(trial.zeros)-1] = z
+		residual := trial.ParRate(times) - q.Value
+		if !finite(residual) {
+			return 0, fmt.Errorf("%w: nonfinite swap evaluation", ErrCalibrate)
+		}
+		return residual, nil
 	}
-	lo, hi := -0.5, 1.0
-	fLo, fHi := parErr(lo), parErr(hi)
-	if fLo > 0 || fHi < 0 || math.IsNaN(fLo) || math.IsNaN(fHi) {
-		return 0, fmt.Errorf("%w: swap quote %.4g at %.4gy is unsolvable", ErrCalibrate, q.Value, q.Tenor)
+	f0, err := evaluate(0)
+	if err != nil {
+		return 0, err
 	}
-	for i := 0; i < 200 && hi-lo > 1e-14; i++ {
-		mid := (lo + hi) / 2
-		if parErr(mid) < 0 {
-			lo = mid
+	if q.Value == 0 {
+		if f0 != 0 {
+			return 0, fmt.Errorf("%w: zero swap does not reprice", ErrCalibrate)
+		}
+		return 0, nil
+	}
+	bound := 1.0
+	if q.Value < 0 {
+		bound = -0.5
+	}
+	edge := math.Copysign(math.Min(2*math.Abs(q.Value), math.Abs(bound)), bound)
+	var fe float64
+	for {
+		fe, err = evaluate(edge)
+		if err != nil {
+			return 0, err
+		}
+		if (bound > 0 && fe >= 0) || (bound < 0 && fe <= 0) {
+			break
+		}
+		if edge == bound {
+			return 0, fmt.Errorf("%w: swap root outside supported domain", ErrCalibrate)
+		}
+		edge = math.Copysign(math.Min(2*math.Abs(edge), math.Abs(bound)), bound)
+	}
+	lo, hi := math.Min(0, edge), math.Max(0, edge)
+	flo, fhi := f0, fe
+	if edge < 0 {
+		flo, fhi = fe, f0
+	}
+	for {
+		mid := lo + (hi-lo)/2
+		if mid == lo || mid == hi {
+			return 0, fmt.Errorf("%w: swap bracket stagnated", ErrCalibrate)
+		}
+		f, err := evaluate(mid)
+		if err != nil {
+			return 0, err
+		}
+		if f < 0 {
+			lo, flo = mid, f
 		} else {
-			hi = mid
+			hi, fhi = mid, f
+		}
+		best, residual := lo, flo
+		if math.Abs(fhi) < math.Abs(flo) {
+			best, residual = hi, fhi
+		}
+		if hi-lo <= 64*calibrationEpsilon*math.Max(math.Abs(lo), math.Abs(hi)) &&
+			math.Abs(residual) <= 64*calibrationEpsilon*math.Abs(q.Value) && best != 0 {
+			return best, nil
 		}
 	}
-	return (lo + hi) / 2, nil
 }
 
 // annualCouponTimes are the fixed-leg payment dates of a par swap maturing at

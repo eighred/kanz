@@ -1,4 +1,4 @@
-# Zero/par term-structure compatibility kernel
+# Term-structure compatibility kernels
 
 This bounded #1534 family covers continuously compounded zero curves, conversion
 from annual/semiannual quotes, sequential par bootstrapping, flat-zero
@@ -20,9 +20,8 @@ Tenors are already resolved years; rates are annual fractions, with continuous
 zeros internally. A one-basis-point parallel bump is `0.0001` before interpolation.
 Calendar/day-count selection and multi-curve collateral/projection conventions
 are not inferred here. Par inputs explicitly use the declared pillar dates as
-their common coupon schedule; mixed deposit/future/swap calibration remains Go.
-Its solver convergence/near-zero calibration is not qualified by this family;
-that remaining #1534 work needs its own repricing and residual controls.
+their common coupon schedule. The separate mixed quote family below preserves
+the existing Go deposit/future/swap conventions; Go retains its authority.
 
 - Finite strictly positive ascending tenors are required after sorting. Annual
   rates must exceed -1, semiannual rates -2; continuous negative rates are valid.
@@ -101,3 +100,53 @@ specific numerical/compatibility evidence; it does not establish BlackRock
 equivalence, superior pricing, production performance or whole-platform parity.
 Those claims require representative model/market-data/portfolio and runtime
 benchmarks. Existing data/terms/model owners and Go/OpenSSL delivery holds remain.
+
+## Mixed deposit/future/swap calibration
+
+`Curve::calibrate` is a bounded scalar candidate for Go's `curve.Calibrate`.
+Inputs are annual simple-rate fractions for deposits/futures and annual par
+swap rates. A future tenor is its period start; span zero keeps the existing
+0.25-year default. Annual swap dates retain the existing `tenor-1e-9` stub rule.
+This does not infer calendars, day counts, collateral or projection curves.
+
+Deposits and futures carry log-discounts through `log1p` instead of rounding a
+discount then taking log. Future starts must be fixed by already solved pillars;
+extrapolating a start then changing it with the new pillar cannot qualify a curve.
+`quote_rate`/Go `QuoteRate` reprice simple instruments with `expm1` and forwards.
+
+Swap roots retain Go's existing zero-rate domain **[-0.5, 1]**. Quote-scale
+bracketing and bisection share at most **256 evaluations per swap**. Success
+requires bracket width at most `64*EPS*max(abs(lo),abs(hi))` and quote residual
+at most `64*EPS*abs(quote)`. Nonfinite evaluations, exhausted work, stagnant
+brackets and roots outside the domain refuse. No approximate endpoint is success.
+See [Boost's root-finding contract](https://www.boost.org/latest/libs/math/doc/html/math_toolkit/roots_noderiv/bisect.html),
+checked 2026-11-12, which distinguishes convergence from iteration exhaustion.
+No Boost code or dependency is included.
+
+The complete returned curve must reprice **every** input within
+`128*EPS*abs(quote)` in annual rate fractions. There is no absolute tolerance
+floor: zero quotes require zero, and erasing a nonzero quote fails. In particular,
+a tiny forward on top of a much larger accumulated log-discount may be
+unrepresentable in binary64 and must refuse. This is scalar analytic precision,
+not permission to use floating-point money or relax canonical Decimal controls.
+Go failure precedes recording, PIT installation and shadow capture; prior state
+and coverage reporting remain intact. Rust has no publication or runtime route.
+
+`reference/mixed_reference.py` independently solves coupon-price equations by
+damped Newton in log-discount using a high-precision central derivative. It uses
+direct Decimal discount ratios for simple quotes, not the production log1p,
+ParRate objective, bracketing or bisection branches. Twelve references at **160
+and 200 digits** must agree within **1e-45 relative error**, including near-zero
+results; 40 significant digits are retained. Both oracle precisions separately
+reprice their input quotes to that relative budget.
+
+The fresh actual Go mixed corpus has **198 unique cases: 166 values / 32
+refusals**. It includes both interpolations, negative/zero/tiny/high rates,
+unsorted and irregular mixed strips, 256 pillars, domain edges and invalid inputs.
+Every sorted tenor, zero, input repricing and queried zero/discount is compared.
+Tenors are bit-exact; other fields use `2048*EPS*pillars*abs(expected)` with no
+absolute floor. Missing/malformed captures, wrong source, altered zero, duplicate
+identity and truncated inventory refuse. CI explicitly invokes the otherwise
+ignored `fresh_mixed_go_oracle_is_required` test and retains both references,
+corpora, source/tree/digests and results. The parent zero/par and actual bond
+supervisor gates remain required. None of this activates Rust calibration.
