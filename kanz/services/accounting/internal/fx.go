@@ -42,12 +42,12 @@ func NewFXTable(reporting string, rates map[string]*big.Rat) *FXTable {
 
 // Rate returns units of reporting per 1 unit of `from`. The reporting currency
 // (and the empty currency, treated as domestic) is 1; a foreign currency with no
-// configured rate is (nil, false).
+// usable positive rate is (nil, false), matching the live FX feed's input rule.
 func (t *FXTable) Rate(from string) (*big.Rat, bool) {
 	if from == "" || from == t.reporting {
 		return big.NewRat(1, 1), true
 	}
-	if r, ok := t.rates[from]; ok {
+	if r, ok := t.rates[from]; ok && r.Sign() > 0 {
 		return new(big.Rat).Set(r), true
 	}
 	return nil, false
