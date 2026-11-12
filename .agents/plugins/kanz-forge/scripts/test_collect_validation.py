@@ -36,6 +36,117 @@ class CollectorTests(unittest.TestCase):
         return dict(main_revision=MAIN, nodes=[node, task("repair"), task("feature")],
                     edges=[edge("feature", "julia"), edge("repair", "julia", "recovers")])
 
+    def inventory_api(self, *, issues=None, prs=None, total=None):
+        def api(path):
+            result = self.api(path)
+            if '/issues?' in path and issues is not None:
+                return copy.deepcopy(issues)
+            if '/pulls?' in path and prs is not None:
+                return [copy.deepcopy(prs)]
+            if path.endswith('/kanz') and total is not None:
+                result[0]['open_issues_count'] = total
+            return result
+        return api
+
+    def test_ordinary_only_and_mixed_issue_responses_preserve_the_same_evidence(self):
+        mixed = self.api('repos/eighred/kanz/issues?state=open&per_page=100')
+        ordinary = [[], mixed[1]]
+        expected = collect('eighred/kanz', self.api, self.contract())
+        actual = collect('eighred/kanz', self.inventory_api(issues=ordinary), self.contract())
+        for result in (expected, actual):
+            result.pop('collected_at')
+        self.assertEqual(actual, expected)
+        self.assertEqual(set(actual['observations']), {'main', 'pr:1'})
+        self.assertEqual(actual['assessment']['nodes']['feature']['state'], 'BLOCKED')
+
+    def test_empty_inventory_is_valid(self):
+        result = collect('eighred/kanz', self.inventory_api(issues=[[]], prs=[], total=0))
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(result['prs'], [])
+        self.assertEqual(set(result['observations']), {'main'})
+
+    def test_missing_issue_or_pr_cannot_be_hidden_by_another_endpoint(self):
+        mixed = self.api('repos/eighred/kanz/issues?state=open&per_page=100')
+        for name, issues, prs in (
+                ('missing ordinary issue', [mixed[0]], [self.pr]),
+                ('missing PR from both sources', [mixed[1]], []),
+                ('PR listed as issue but missing head', mixed, [])):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                collect('eighred/kanz', self.inventory_api(issues=issues, prs=prs))
+
+    def test_duplicate_or_conflicting_inventory_identities_refuse(self):
+        mixed = self.api('repos/eighred/kanz/issues?state=open&per_page=100')
+        ordinary = mixed[1][0]
+        conflict = copy.deepcopy(ordinary)
+        conflict['number'] = self.pr['number']
+        for name, issues, prs, total in (
+                ('duplicate ordinary issue', mixed + [[ordinary]], [self.pr], 3),
+                ('duplicate issue-side PR', mixed + [mixed[0]], [self.pr], 3),
+                ('duplicate pull request', mixed, [self.pr, self.pr], 2),
+                ('ordinary issue conflicts with PR', [[conflict], [ordinary]], [self.pr], 2)):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                collect('eighred/kanz', self.inventory_api(issues=issues, prs=prs, total=total))
+
+    def test_invalid_inventory_numbers_and_metadata_counts_refuse(self):
+        mixed = self.api('repos/eighred/kanz/issues?state=open&per_page=100')
+        for number in (True, 0, -1, '2', None):
+            issues = copy.deepcopy(mixed)
+            issues[1][0]['number'] = number
+            with self.subTest(number=number), self.assertRaises(ValueError):
+                collect('eighred/kanz', self.inventory_api(issues=issues))
+            pr = copy.deepcopy(self.pr)
+            pr['number'] = number
+            with self.subTest(pr_number=number), self.assertRaises(ValueError):
+                collect('eighred/kanz', self.inventory_api(prs=[pr]))
+        for total in (True, -1, '2', 2.0):
+            with self.subTest(total=total), self.assertRaises(ValueError):
+                collect('eighred/kanz', self.inventory_api(total=total))
+        for marker in (None, {}, 'pr/1'):
+            issues = copy.deepcopy(mixed)
+            issues[0][0]['pull_request'] = marker
+            with self.subTest(marker=marker), self.assertRaises(ValueError):
+                collect('eighred/kanz', self.inventory_api(issues=issues))
+
+    def test_changing_issue_identity_or_metadata_requires_recollection(self):
+        for change in ('issue', 'metadata', 'default branch'):
+            self.calls = []
+            def api(path):
+                result = self.api(path)
+                if self.calls.count(path) > 1:
+                    if change == 'issue' and '/issues?' in path:
+                        result[1][0]['number'] = 3
+                    elif change == 'metadata' and path.endswith('/kanz'):
+                        result[0]['open_issues_count'] = 3
+                    elif change == 'default branch' and path.endswith('/kanz'):
+                        result[0]['default_branch'] = 'release'
+                return result
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                collect('eighred/kanz', api)
+
+    def test_changing_pr_head_or_duplicate_final_pr_requires_recollection(self):
+        for change in ('head', 'base', 'duplicate'):
+            self.calls = []
+            def api(path):
+                result = self.api(path)
+                if '/pulls?' in path and self.calls.count(path) > 1:
+                    if change == 'head':
+                        result[0][0]['head']['sha'] = 'c' * 40
+                    elif change == 'base':
+                        result[0][0]['base']['sha'] = 'c' * 40
+                    else:
+                        result[0].append(copy.deepcopy(result[0][0]))
+                return result
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                collect('eighred/kanz', api)
+
+    def test_invalid_pr_revision_cannot_enter_the_snapshot(self):
+        for field in ('head', 'base'):
+            for ref in (None, {}, {'sha': 'short'}, {'sha': True}):
+                pr = copy.deepcopy(self.pr)
+                pr[field] = ref
+                with self.subTest(field=field, ref=ref), self.assertRaises(ValueError):
+                    collect('eighred/kanz', self.inventory_api(prs=[pr]))
+
     def test_contract_must_bind_current_main(self):
         for main in (None, SHA):
             contract = self.contract()
