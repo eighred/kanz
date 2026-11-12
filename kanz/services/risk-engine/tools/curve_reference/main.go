@@ -170,22 +170,43 @@ func cases() []sample {
 	for i, z := range []float64{1000, -1000} {
 		rows = append(rows, capture(fmt.Sprintf("numerical/%d", i), 0, 0, 0, []float64{1}, []float64{z}, []float64{1}, nil, []float64{1}))
 	}
+	for interp := 0; interp < 2; interp++ {
+		for i, middle := range []float64{0x1p-80, -0x1p-80, 0} {
+			for order := 0; order < 2; order++ {
+				ts, rs := []float64{1, 2, 3}, []float64{1.0 / 32, middle, -1.0 / 16}
+				if order == 1 {
+					slices.Reverse(ts)
+					slices.Reverse(rs)
+				}
+				queries := []float64{1, math.Nextafter(1, 2), math.Nextafter(2, 1), 2, math.Nextafter(2, 3), math.Nextafter(3, 2), 3}
+				rows = append(rows, capture(fmt.Sprintf("interior/%d/%d/%d", interp, i, order), 0, 0, interp, ts, rs, queries, nil, []float64{1, 2, 3}))
+			}
+		}
+	}
 	return rows
 }
 
 func main() {
 	source := flag.String("source", "", "reviewed 40-hex source revision")
+	mixed := flag.Bool("mixed", false, "capture mixed deposit/future/swap calibration")
 	flag.Parse()
 	if flag.NArg() != 0 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(*source) {
 		fmt.Fprintln(os.Stderr, "curve reference: source required")
 		os.Exit(2)
 	}
+	if *mixed {
+		if err := captureMixed(*source); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	rows := cases()
-	if len(rows) != 864 {
+	if len(rows) != 876 {
 		fmt.Fprintln(os.Stderr, "curve reference: incomplete inventory")
 		os.Exit(1)
 	}
-	if json.NewEncoder(os.Stdout).Encode(corpus{1, "go_zero_par_v1", *source, len(rows), rows}) != nil {
+	if json.NewEncoder(os.Stdout).Encode(corpus{1, "go_zero_par_v2", *source, len(rows), rows}) != nil {
 		fmt.Fprintln(os.Stderr, "curve reference: capture failed")
 		os.Exit(1)
 	}

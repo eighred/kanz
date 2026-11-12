@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
-//! Bounded scalar zero/par term structures. No market, record or runtime owner.
+//! Bounded scalar term structures and mixed quotes. No market, record or runtime owner.
+
+mod calibration;
+pub use calibration::{QuoteKind, RateQuote};
 
 pub const MAX_PILLARS: usize = 256;
 pub const MAX_COUPONS: usize = 4096;
@@ -140,22 +143,25 @@ impl Curve {
             return Err(Error::InvalidQuery);
         }
         let at = self.points.partition_point(|p| p.tenor < t);
-        let value = if at == 0 {
-            self.points[0].zero + bump
-        } else if at == self.points.len() {
+        let value = if at == self.points.len() {
             self.points[at - 1].zero + bump
+        } else if at == 0 || self.points[at].tenor == t {
+            self.points[at].zero + bump
         } else {
             let a = self.points[at - 1];
             let b = self.points[at];
             let za = a.zero + bump;
             let zb = b.zero + bump;
-            let w = (t - a.tenor) / (b.tenor - a.tenor);
+            // Direct distances preserve tiny endpoint contributions and
+            // adjacent queries without subtracting rounded rates or weights.
+            let left = (b.tenor - t) / (b.tenor - a.tenor);
+            let right = (t - a.tenor) / (b.tenor - a.tenor);
             match self.interpolation {
-                Interpolation::LinearZero => za + w * (zb - za),
+                Interpolation::LinearZero => left * za + right * zb,
                 Interpolation::LogLinearDiscount => {
                     let lo = -za * a.tenor;
                     let hi = -zb * b.tenor;
-                    -(lo + w * (hi - lo)) / t
+                    -(left * lo + right * hi) / t
                 }
             }
         };

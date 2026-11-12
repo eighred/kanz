@@ -186,16 +186,22 @@ func (c *Curve) Zero(t float64) float64 {
 		return finiteOrNaN(c.zeros[n-1])
 	}
 	i := sort.SearchFloat64s(c.tenors, t) // first index with tenor >= t
+	if t == c.tenors[i] {
+		return finiteOrNaN(c.zeros[i])
+	}
 	t0, t1 := c.tenors[i-1], c.tenors[i]
 	z0, z1 := c.zeros[i-1], c.zeros[i]
-	w := (t - t0) / (t1 - t0)
+	// Keep each endpoint's contribution: z0+w*(z1-z0) can erase a tiny
+	// z1 at its own pillar or immediately next to it. Compute both distances
+	// directly rather than subtracting a rounded interpolation weight from 1.
+	left, right := (t1-t)/(t1-t0), (t-t0)/(t1-t0)
 	if c.interp == LogLinearDF {
 		// Linear in ln(DF) = -z·t between the two pillars.
 		l0, l1 := -z0*t0, -z1*t1
-		lnDF := l0 + w*(l1-l0)
+		lnDF := left*l0 + right*l1
 		return finiteOrNaN(-lnDF / t)
 	}
-	return finiteOrNaN(z0 + w*(z1-z0)) // LinearZero
+	return finiteOrNaN(left*z0 + right*z1) // LinearZero
 }
 
 // Discount returns the discount factor DF(t) = exp(-z(t)·t). t<=0 ⇒ 1.

@@ -115,16 +115,20 @@ jobs:
           mkdir -p "$RUNNER_TEMP/term-structure-evidence"
           go test -p 1 ./internal/risk/pricing/curve ./internal/risk/pricing ./internal/risk/compute ./services/risk-engine/tools/curve_reference -count=1
           go run ./services/risk-engine/tools/curve_reference -source "$GITHUB_SHA" > "$RUNNER_TEMP/term-structure-evidence/go-reference.json"
+          go run ./services/risk-engine/tools/curve_reference -mixed -source "$GITHUB_SHA" > "$RUNNER_TEMP/term-structure-evidence/go-mixed-reference.json"
           git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/term-structure-evidence/source.txt"
           go version > "$RUNNER_TEMP/term-structure-evidence/go-version.txt"
           sha256sum ../kanz-rs/Cargo.lock > "$RUNNER_TEMP/term-structure-evidence/lock.sha256"
           sha256sum "$RUNNER_TEMP/term-structure-evidence/go-reference.json" > "$RUNNER_TEMP/term-structure-evidence/corpus.sha256"
+          sha256sum "$RUNNER_TEMP/term-structure-evidence/go-mixed-reference.json" > "$RUNNER_TEMP/term-structure-evidence/mixed-corpus.sha256"
           go test -p 1 ./internal/risk/pricing/curve -run '^$' -bench '^BenchmarkBootstrap$' -benchtime=100ms -count=3 | tee "$RUNNER_TEMP/term-structure-evidence/current-benchmark.log"
       - name: Verify independent equations and fresh Go compatibility
         working-directory: kanz-rs
         env:
           KANZ_CURVE_CORPUS: ${{ runner.temp }}/term-structure-evidence/go-reference.json
           KANZ_CURVE_SOURCE: ${{ github.sha }}
+          KANZ_MIXED_SOURCE: ${{ github.sha }}
+          KANZ_MIXED_CORPUS: ${{ runner.temp }}/term-structure-evidence/go-mixed-reference.json
         run: |
           set -euo pipefail
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
@@ -132,8 +136,16 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked -p kanz-term-structure --all-targets -- -D warnings
           python3 -B crates/term_structure/reference/reference.py --check 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/decimal-reference.log"
+          python3 -B crates/term_structure/reference/mixed_reference.py --check 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-decimal-reference.log"
+          python3 -B crates/term_structure/reference/interpolation_reference.py --check 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/rational-reference.log"
+          sha256sum crates/term_structure/reference/interpolation_reference.py crates/term_structure/tests/interpolation_reference.json > "$RUNNER_TEMP/term-structure-evidence/rational-reference.sha256"
+          sha256sum crates/term_structure/reference/mixed_reference.py crates/term_structure/tests/mixed_reference.json > "$RUNNER_TEMP/term-structure-evidence/mixed-reference.sha256"
           sha256sum crates/term_structure/reference/reference.py crates/term_structure/tests/reference.json > "$RUNNER_TEMP/term-structure-evidence/reference.sha256"
           cargo test --locked -p kanz-term-structure --test numerical 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/numerical.log"
+          cargo test --locked -p kanz-term-structure --test interpolation 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/interpolation.log"
+          cargo test --locked -p kanz-term-structure --lib 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-budget.log"
+          cargo test --locked -p kanz-term-structure --test calibration 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-numerical.log"
+          cargo test --locked -p kanz-term-structure --test calibration fresh_mixed_go_oracle_is_required -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-conformance.log"
           cargo test --locked -p kanz-term-structure --test go_conformance missing_or_malformed_capture_refuses -- --exact 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/capture-refusal.log"
           cargo test --locked -p kanz-term-structure --test go_conformance fresh_go_oracle_is_required -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/conformance.log"
       - name: Verify scalar ownership and required evidence
