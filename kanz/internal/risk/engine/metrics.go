@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -46,6 +47,7 @@ type Metrics struct {
 	// whether anything is running.
 	recomputeInflight   prometheus.Gauge
 	recomputeQueueDepth prometheus.Gauge
+	inflightMu          sync.Mutex
 }
 
 // NewMetrics builds and registers the risk-engine collectors on reg (the
@@ -143,17 +145,19 @@ func (m *Metrics) setAwaitingEmit(n int) {
 
 // setInflight publishes how many recomputes are executing right now (#1050).
 //
-// The caller passes the OCCUPANCY OF THE DISPATCH SEMAPHORE rather than a
-// separate counter it increments and decrements. That is deliberate: the number
-// exported is then read off the very channel that ENFORCES the bound, so the
-// gauge cannot disagree with the ceiling it is supposed to describe, and there is
-// no second counter to drift below zero when a worker's decrement races the
-// dispatcher's increment over a long uptime.
-func (m *Metrics) setInflight(n int) {
+// Read the dispatch semaphore rather than maintaining a second counter. Sampling
+// and publication must share one critical section: otherwise a finishing worker
+// can publish an old occupancy after another worker reported zero. Drain joins
+// both workers but would still leave that stale busy reading latched (#1050).
+// Semaphore acquisition/release stays outside this lock so dispatch cannot hold
+// it while waiting for a worker to free a slot.
+func (m *Metrics) setInflight(sem <-chan struct{}) {
 	if m == nil {
 		return
 	}
-	m.recomputeInflight.Set(float64(n))
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+	m.recomputeInflight.Set(float64(len(sem)))
 }
 
 // setQueueDepth publishes how many portfolios are dirty and not yet dispatched
