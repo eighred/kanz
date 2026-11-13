@@ -19,19 +19,21 @@ runtime. Financial methodology is information for designing and testing Kanz's
 pricing, risk and execution behavior, not a finance-package dependency or a
 financial-analysis product.
 
-## Optional documentation access
+## Public upstream and documentation access
 
-An already connected Context7 host tool can retrieve version-specific public
-documentation under the [evidence guide](skills/commands/references/context-and-evidence.md#check-version-specific-documentation).
-Forge requires no Context7 package, server, API key or subscription; official
-documentation and tagged upstream source provide the fallback.
+Forge's [native upstream lookup](scripts/upstream.py) reads Go's official release
+feed and public GitHub publisher releases/refs with Python's standard library.
+The [evidence guide](skills/commands/references/context-and-evidence.md#check-version-specific-documentation)
+then resolves API questions against official versioned documentation and source.
+No Context7 package, server, API key, account, subscription or imported code is needed.
+Other registries use their official sources through existing host tools.
 
-The [Context7 repository](https://github.com/upstash/context7) publishes its MCP
-client under MIT. Its README excludes the hosted API, parsing and crawling
-backends from that source, and the local client defaults to the hosted API.
-Running that client locally does not provide an independent offline backend.
-Free access limits and paid plans are provider terms to check when relevant,
-not a permanent free-service guarantee. No upstream Context7 code is imported.
+This is metadata discovery, not an automatic updater, hosted documentation index
+or replacement crawler. Upstream services must be reachable; failure is reported
+as unknown, never evidence that no new release exists. GitHub public API limits
+apply. The helper does not use host credentials/proxies or follow redirects, and
+it never installs, executes or adopts the returned version. Record dated results
+in the existing maintenance PR/issue, not a second memory database.
 
 ## Imported source
 
@@ -70,10 +72,10 @@ Deliver through the normal PR and supported plugin installation workflow. A
 new upstream revision is a review candidate, not permission to replace installed
 files or clear an existing blocker.
 
-Context7 remains optional documentation access, with no imported source to
-refresh. Check its availability and applicable provider terms when using it;
-resolve documentation versions under the evidence guide. This maintenance
-instruction adds no background updater, recurring job or service dependency.
+Use the native lookup's `github OWNER/REPO --default-branch` observation for
+branch-pinned imports, or its release lookup for published tools. A lookup does
+not refresh pins or imported files. This maintenance instruction adds no
+background updater, recurring job or service dependency.
 
 ## Optional history
 
