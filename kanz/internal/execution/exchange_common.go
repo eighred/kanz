@@ -268,11 +268,9 @@ func SubDec(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 // consume that subject, so this sentinel is the whole bound on that path.
 var ErrVenueOverfill = errors.New("venue reports a cumulative filled quantity greater than the ordered quantity")
 
-// ErrLeavesUnrepresentable is ordered − cumulative not fitting a Decimal at all.
-// Separate from ErrVenueOverfill because they are different findings: one is a
-// venue contradiction an operator must resolve against the exchange's own order
-// history, the other is a number too large to carry, and merging them would make
-// the counter that fires on the first unreadable.
+// ErrLeavesUnrepresentable rejects an unsupported quantity domain or a residual
+// that cannot be carried as a Decimal. It stays separate from ErrVenueOverfill:
+// an execution exceeding the ordered amount must retain its own refusal counter.
 var ErrLeavesUnrepresentable = errors.New("leaves quantity is not representable as a Decimal")
 
 // LeavesRemaining is ordered − cumulative for a venue execution report, and the
@@ -310,6 +308,9 @@ func LeavesRemaining(ordered, cumulative *commonpb.Decimal) (*commonpb.Decimal, 
 	c, cok := dec.FromProtoChecked(cumulative)
 	if !ook || !cok {
 		return nil, ErrLeavesUnrepresentable
+	}
+	if o.Sign() < 0 || c.Sign() < 0 {
+		return nil, fmt.Errorf("%w: quantities must be nonnegative", ErrLeavesUnrepresentable)
 	}
 	if c.Cmp(o) > 0 {
 		return nil, fmt.Errorf("%w: ordered %s, venue reports %s cumulative filled",
