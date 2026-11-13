@@ -6,41 +6,33 @@ name: kanz-build
 
 on:
   workflow_dispatch:
+  # Scope uses complete Git history, including deleted/renamed inputs.
   pull_request:
-    paths:
-      - 'kanz/**'
-      - 'kanz-rs/**'
-      - 'kanz-py/**'
-      - 'kanz-web/**'
-      - 'kanz-schemas/proto/**'
-      - 'kanz-schemas/buf.yaml'
-      - 'kanz-schemas/buf.gen.yaml'
-      - '.github/workflows/build.yml'
-      - '.github/actions/**'
-      - '.github/scripts/**'
-      - '.dockerignore'
   push:
     branches: [main]
-    # DOCS DO NOT BUILD IMAGES.
-    #
-    # The pull_request trigger above is already path-filtered; this one was not, so a
-    # commit touching only markdown ran the full matrix — for kanz-build, that is 19
-    # Docker image builds to record that a board item moved. On a private repo billing per
-    # minute, that is real money for zero signal.
-    #
-    # paths-ignore only skips a push when EVERY changed file matches, so a commit mixing
-    # docs and code still runs the gate.
-    paths-ignore:
-      - '**/*.md'
-      - '.gitignore'
 
 permissions:
   contents: read
   packages: read    # private base-image pulls; PR code cannot publish or mint OIDC
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      application: ${{ steps.scope.outputs.application }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify scope policy
+        run: python3 -B -m unittest discover -s .github/scripts -p test_required_ci.py
+      - name: Select image scope before registry or publisher authority
+        id: scope
+        run: python3 .github/scripts/required_ci.py images
+
   image:
-    if: github.event_name == 'pull_request'
+    needs: scope
+    if: github.event_name == 'pull_request' && needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     strategy: &image-strategy
       fail-fast: false
@@ -612,7 +604,8 @@ jobs:
           docker push "${target}"
 
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz'
+    needs: scope
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz' && needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -624,7 +617,8 @@ jobs:
     steps: *image-steps
 
   go-cache-qualification:
-    if: github.event_name == 'workflow_dispatch'
+    needs: scope
+    if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     cache-mode: read
     permissions:

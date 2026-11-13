@@ -20,6 +20,9 @@ CORE_JOBS = frozenset({
     "release-custody", "go", "go-race", "python", "ts", "web", "sdk-guard",
     "module-graph", "observability", "buf-breaking",
 })
+FORGE_JOB = "forge"
+FORGE_IF = "needs.scope.outputs.forge == 'true'"
+
 SCOPE_IF = "needs.scope.outputs.application == 'true'"
 
 
@@ -38,6 +41,13 @@ def commit(repo, value):
     return value
 
 
+def forge_path(path):
+    return (path.startswith((b".agents/", b"plugins/kanz-forge/"))
+            or path in {b"AGENTS.md", b"README.md", b".github/workflows/kanz-forge.yml",
+                        b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py",
+                        b".github/scripts/test_required_ci.py"})
+
+
 def application_path(path):
     # Only known non-runtime material may skip application CI. Unknown new
     # directories run the suite until deliberately classified in this policy.
@@ -45,13 +55,17 @@ def application_path(path):
                         b"tools/", b".github/scripts/", b".github/actions/",
                         b".github/workflows/")):
         return True
-    return not (path.endswith(b".md") or path == b".gitignore")
+    return not (path.startswith(b".agents/plugins/kanz-forge/")
+                or path == b".agents/plugins/marketplace.json"
+                or path.endswith(b".md") or path == b".gitignore")
 
 
-def scope(repo, event_name, event, checked_sha):
+def scope(repo, event_name, event, checked_sha, *, images=False):
     checked_sha = commit(repo, checked_sha)
     if git(repo, "rev-parse", "HEAD").decode().strip() != checked_sha:
         raise ValueError("checkout does not match the workflow commit")
+    if images and event_name == "workflow_dispatch":
+        return {"application": True, "forge": True}, "explicit full image qualification"
     if event_name == "pull_request":
         pr = event["pull_request"]
         base = commit(repo, pr["base"]["sha"])
@@ -66,7 +80,7 @@ def scope(repo, event_name, event, checked_sha):
         if head != checked_sha or event.get("deleted", False):
             raise ValueError("push does not describe the checked-out commit")
         if event["before"] == "0" * 40:
-            return True, "new branch: full application suite"
+            return {"application": True, "forge": True}, "new branch: full verification"
         base = commit(repo, event["before"])
     else:
         raise ValueError("unsupported workflow event")
@@ -78,7 +92,7 @@ def scope(repo, event_name, event, checked_sha):
         raise ValueError("incomplete Git path output")
     paths = raw.split(b"\0")[:-1] if raw else []
     needed = any(application_path(path) for path in paths)
-    return needed, f"{len(paths)} changed paths; base={base}; head={head}"
+    return {"application": needed, "forge": any(forge_path(path) for path in paths)}, f"{len(paths)} changed paths; base={base}; head={head}"
 
 
 def workflow_jobs(text):
@@ -100,10 +114,27 @@ def workflow_jobs(text):
             raise ValueError("unsupported or duplicate job declaration")
         current = match[1]
         blocks[current] = []
+    scope_job = blocks.get("scope", [])
+    for line in (
+        "      application: ${{ steps.scope.outputs.application }}",
+        "      forge: ${{ steps.scope.outputs.forge }}",
+        "          fetch-depth: 0",
+        "        id: scope",
+        "        run: python3 .github/scripts/required_ci.py scope",
+    ):
+        if scope_job.count(line) != 1:
+            raise ValueError("scope must bind complete Git history and both verified outputs")
     expected = set(blocks) - {"scope", "kanz-ci-required"}
-    if not CORE_JOBS <= expected or not {"scope", "kanz-ci-required"} <= set(blocks):
+    if not (CORE_JOBS | {FORGE_JOB}) <= expected or not {"scope", "kanz-ci-required"} <= set(blocks):
         raise ValueError("required application or coordination job removed")
     for name in expected:
+        if name == FORGE_JOB:
+            if (blocks[name].count("    needs: scope") != 1
+                    or blocks[name].count(f"    if: {FORGE_IF}") != 1
+                    or blocks[name].count("    uses: ./.github/workflows/kanz-forge.yml") != 1
+                    or any(line.startswith(("    continue-on-error:", "    secrets:")) for line in blocks[name])):
+                raise ValueError("Forge must use its scoped required read-only workflow")
+            continue
         if name == "go":
             if blocks[name].count("    needs: [scope, go-race]") != 1 or blocks[name].count(
                 "    if: ${{ always() && needs.scope.outputs.application == 'true' }}"
@@ -126,6 +157,27 @@ def workflow_jobs(text):
     return expected
 
 
+def forge_workflow(text):
+    """The non-runtime exemption always retains its owning Linux checks."""
+    commands = [line.strip().removeprefix("run: ") for line in text.splitlines()
+                if line.startswith("        run: ")]
+    required = [
+        "python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked",
+        "python3 -B .agents/plugins/kanz-forge/scripts/provenance.py",
+        "node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs",
+        "python3 -B -m unittest discover -s .agents/plugins/kanz-forge/scripts -p 'test_*.py' -v",
+    ]
+    uses = [line.strip() for line in text.splitlines() if line.strip().startswith("- uses:")]
+    if ("on:\n  workflow_call:\n" not in text or "  pull_request:" in text or "  push:" in text
+            or "permissions:\n  contents: read\n" not in text
+            or "    runs-on: ubuntu-latest" not in text
+            or commands != required
+            or uses != ["- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"]
+            or any(line.strip().startswith(("if:", "continue-on-error:", "secrets:", "defaults:", "shell:", "env:", "container:", "strategy:", "working-directory:"))
+                   for line in text.splitlines())):
+        raise ValueError("Forge owner must retain its unconditional read-only Linux verification")
+
+
 def aggregate(needs, expected):
     if not isinstance(needs, dict) or set(needs) != expected | {"scope"}:
         raise ValueError("missing or unexpected prerequisite results")
@@ -135,27 +187,32 @@ def aggregate(needs, expected):
     selected = scope_result.get("outputs", {}).get("application")
     if selected not in ("true", "false"):
         raise ValueError("missing or invalid application scope")
+    forge = scope_result.get("outputs", {}).get("forge")
+    if forge not in ("true", "false"):
+        raise ValueError("missing or invalid Forge scope")
     required = "success" if selected == "true" else "skipped"
     for name in sorted(expected):
-        if needs[name].get("result") != required:
-            raise ValueError(f"{name}: expected {required}, got {needs[name].get('result')}")
+        wanted = ("success" if forge == "true" else "skipped") if name == FORGE_JOB else required
+        if needs[name].get("result") != wanted:
+            raise ValueError(f"{name}: expected {wanted}, got {needs[name].get('result')}")
     return "application suite passed" if selected == "true" else "explicit non-application scope passed"
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("scope", "aggregate"))
+    parser.add_argument("mode", choices=("scope", "images", "aggregate"))
     args = parser.parse_args()
     expected = workflow_jobs(WORKFLOW.read_text(encoding="utf-8"))
+    forge_workflow(Path(".github/workflows/kanz-forge.yml").read_text(encoding="utf-8"))
     if args.mode == "aggregate":
         print(aggregate(json.loads(os.environ["NEEDS_JSON"]), expected))
     else:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-        selected, reason = scope(Path.cwd(), os.environ["GITHUB_EVENT_NAME"], event, os.environ["GITHUB_SHA"])
-        value = "true" if selected else "false"
+        selected, reason = scope(Path.cwd(), os.environ["GITHUB_EVENT_NAME"], event, os.environ["GITHUB_SHA"], images=args.mode == "images")
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-            output.write(f"application={value}\n")
-        print(f"application={value}; {reason}")
+            for name, needed in selected.items():
+                output.write(f"{name}={str(needed).lower()}\n")
+        print(f"scope={selected}; {reason}")
 
 
 if __name__ == "__main__":

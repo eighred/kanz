@@ -1,21 +1,8 @@
 name: kanz-forge
 
+# Called exactly once by the always-present required CI gate.
 on:
-  pull_request:
-    paths:
-      - '.agents/**'
-      - 'plugins/kanz-forge/**'
-      - 'AGENTS.md'
-      - 'README.md'
-      - '.github/workflows/kanz-forge.yml'
-  push:
-    branches: [main]
-    paths:
-      - '.agents/**'
-      - 'plugins/kanz-forge/**'
-      - 'AGENTS.md'
-      - 'README.md'
-      - '.github/workflows/kanz-forge.yml'
+  workflow_call:
 
 permissions:
   contents: read
@@ -27,6 +14,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate marketplace, plugin, tracked skills and references
         run: python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked
+      - name: Verify imported source integrity
+        run: python3 -B .agents/plugins/kanz-forge/scripts/provenance.py
       - name: Exercise offline audit validators on Linux
         run: node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs
       - name: Verify offline planner, collector, classification and package regressions

@@ -52,7 +52,7 @@ func checkGoSharedCache(raw string, files map[string]string) error {
 		return fmt.Errorf("manual trigger missing")
 	}
 	manual, ok := workflow.Jobs["go-cache-qualification"]
-	if !ok || manual.If != "github.event_name == 'workflow_dispatch'" || manual.CacheMode != "read" || manual.Continue != nil || !reflect.DeepEqual(manual.Permissions, map[string]string{"contents": "read", "packages": "read"}) || !reflect.DeepEqual(manual.Steps, workflow.Jobs["image"].Steps) {
+	if !ok || manual.If != "github.event_name == 'workflow_dispatch' && needs.scope.outputs.application == 'true'" || manual.CacheMode != "read" || manual.Continue != nil || !reflect.DeepEqual(manual.Permissions, map[string]string{"contents": "read", "packages": "read"}) || !reflect.DeepEqual(manual.Steps, workflow.Jobs["image"].Steps) {
 		return fmt.Errorf("manual qualification authority/steps differ")
 	}
 	rows := manual.Strategy.Matrix.Include
@@ -100,10 +100,10 @@ cp.execFileSync('python', ['.github/scripts/go_image_cache_probe.py', '--source'
 		if !ok {
 			return fmt.Errorf("missing image owner")
 		}
-		if name == "image" && (job.If != "github.event_name == 'pull_request'" || len(job.Permissions) != 0) {
+		if name == "image" && (job.If != "github.event_name == 'pull_request' && needs.scope.outputs.application == 'true'" || len(job.Permissions) != 0) {
 			return fmt.Errorf("PR authority changed")
 		}
-		if name == "publish" && job.If != "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz'" {
+		if name == "publish" && job.If != "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz' && needs.scope.outputs.application == 'true'" {
 			return fmt.Errorf("publisher authority changed")
 		}
 		builds := 0
