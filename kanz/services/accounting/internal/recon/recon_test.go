@@ -78,11 +78,11 @@ func TestReconcileTolerance(t *testing.T) {
 		Positions:   map[string]*big.Rat{"AAPL": dec.Rat("100.5"), "MSFT": dec.Rat("200")},
 		Cash:        map[string]*big.Rat{"USD": b.CashBalance("USD")},
 	}
-	// Within a tolerance of 1 share â‡’ no break.
+	// Within a tolerance of 1 share ⇒ no break.
 	if breaks, _ := reconcileForTest(t, b, nil, stmt, dec.Rat("1")); len(breaks) != 0 {
 		t.Fatalf("within tolerance should not break, got %v", breaks)
 	}
-	// Exact match required â‡’ the 0.5 difference breaks.
+	// Exact match required ⇒ the 0.5 difference breaks.
 	if breaks, _ := reconcileForTest(t, b, nil, stmt, nil); len(breaks) != 1 || breaks[0].Kind != BreakQuantity {
 		t.Fatalf("exact match should detect the 0.5 break, got %v", breaks)
 	}
