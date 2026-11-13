@@ -13,29 +13,9 @@ import (
 	"github.com/eighred/kanz/internal/risk/pricing"
 )
 
-// Provider resolves contract terms from the store, satisfying
-// compute.TermsProvider — the seam the Greeks layer and the revaluation path
-// consume, and which until now had NO production implementation (#345).
-//
-// # Why the missing case is a counter and not an error
-//
-// compute.TermsProvider returns (OptionSpec, bool) with no error channel, and
-// greeks.go states the contract it built that on: "isOption=false when the
-// position is not an option OR its pricing inputs are unavailable (the caller
-// falls back to the linear treatment)". Both collapse to false, deliberately.
-//
-// That is fine for a share and dangerous for a derivative whose terms were never
-// LOADED — the same instrument the estate believes it is pricing as an option
-// gets priced as if it were stock, quietly. Widening the seam would touch every
-// consumer and is a change worth taking on its own evidence, not smuggled in
-// with the first implementation.
-//
-// So the resolution is made OBSERVABLE instead: onMissing fires for every
-// instrument the store has no terms for. It cannot say which of those are really
-// options — that needs reference.v1.InstrumentReference.asset_class, which
-// nothing stores yet — but a count that climbs while the book holds derivatives
-// is the signal that terms are not being loaded, and it exists rather than the
-// silence that exists today.
+// Provider resolves point-in-time contract terms. Unknown classification and
+// unreadable terms never certify a linear instrument; only a recognized stored
+// non-option variant licenses that treatment (#1333).
 type Provider struct {
 	store     *terms.Postgres
 	onMissing func(instrumentID string)
@@ -44,8 +24,8 @@ type Provider struct {
 // ProviderOption customizes a Provider.
 type ProviderOption func(*Provider)
 
-// WithMissingTermsObserver sets the hook invoked when the store holds no terms
-// for an instrument — the "priced linearly because we had nothing" signal. Nil
+// WithMissingTermsObserver sets the hook invoked when terms are missing or
+// unusable. The consumer also reports those exclusions through coverage. Nil
 // (the default) means the case is unobserved, which is the state before this
 // type existed; wire it at the composition root.
 func WithMissingTermsObserver(fn func(instrumentID string)) ProviderOption {
@@ -67,41 +47,46 @@ func NewProvider(store *terms.Postgres, opts ...ProviderOption) *Provider {
 var _ compute.TermsProvider = (*Provider)(nil)
 
 // OptionTerms resolves an instrument's option terms as of a point in time.
-// ok=false means "do not price this as an option" — see the type comment for
-// what that does and does not distinguish.
-func (p *Provider) OptionTerms(ctx context.Context, instrumentID string, asOf time.Time) (compute.OptionSpec, bool) {
+// Errors retain an unknown classification after readiness, including transient
+// read failures. Consumers map them to bounded reasons rather than publish text.
+func (p *Provider) OptionTerms(ctx context.Context, instrumentID string, asOf time.Time) (compute.OptionSpec, compute.TermsResolution, error) {
 	if p == nil || p.store == nil {
-		return compute.OptionSpec{}, false
+		return compute.OptionSpec{}, compute.TermsUnknown, nil
 	}
 	rec, err := p.store.LatestAsOf(ctx, instrumentID, asOf)
 	if err != nil {
 		if errors.Is(err, terms.ErrNoTerms) && p.onMissing != nil {
 			p.onMissing(instrumentID)
 		}
-		// A STORE ERROR ALSO RETURNS false, and that is forced rather than
-		// chosen: the seam has no error channel. It is not silent, though — a
-		// database that cannot be read fails the readiness Ping long before it
-		// fails here, so the loud signal exists upstream of this call.
-		return compute.OptionSpec{}, false
+		if errors.Is(err, terms.ErrNoTerms) {
+			return compute.OptionSpec{}, compute.TermsUnknown, nil
+		}
+		return compute.OptionSpec{}, compute.TermsUnknown, err
 	}
+	spec, resolution, err := resolveOptionRecord(rec)
+	if resolution == compute.TermsUnusable && p.onMissing != nil {
+		p.onMissing(instrumentID)
+	}
+	return spec, resolution, err
+}
+
+func resolveOptionRecord(rec terms.Record) (compute.OptionSpec, compute.TermsResolution, error) {
 	opt := rec.Terms.GetOption()
 	if opt == nil {
-		// A swap or a future. Genuinely "not an option": the linear fallback is
-		// the correct answer and this is NOT the missing-terms case, so the
-		// observer deliberately does not fire.
-		return compute.OptionSpec{}, false
+		knownOther := (rec.Kind == terms.KindSwap && rec.Terms.GetSwap() != nil) ||
+			(rec.Kind == terms.KindFuture && rec.Terms.GetFuture() != nil) ||
+			(rec.Kind == terms.KindBond && rec.Terms.GetBond() != nil) ||
+			(rec.Kind == terms.KindStructured && rec.Terms.GetStructured() != nil)
+		if knownOther {
+			return compute.OptionSpec{}, compute.TermsOtherVariant, nil
+		}
+		return compute.OptionSpec{}, compute.TermsUnknown, nil
 	}
 	spec, ok := toSpec(opt)
-	if !ok {
-		// Terms that exist but cannot be used — a non-positive strike or
-		// multiplier, an unspecified type. Reported as missing, because the
-		// consequence is identical: this option is about to be priced linearly.
-		if p.onMissing != nil {
-			p.onMissing(instrumentID)
-		}
-		return compute.OptionSpec{}, false
+	if !ok || rec.Kind != terms.KindOption {
+		return compute.OptionSpec{}, compute.TermsUnusable, nil
 	}
-	return spec, true
+	return spec, compute.TermsResolved, nil
 }
 
 // toSpec converts reference.v1.OptionTerms to the float working shape the
@@ -163,21 +148,8 @@ var _ compute.BondTermsProvider = (*Provider)(nil)
 
 // BondTerms resolves an instrument's bond terms as of a point in time.
 //
-// # This seam is the widened one, and OptionTerms above is not
-//
-// The type comment explains why OptionTerms answers with a bool that collapses
-// "not an option" and "never loaded", and says widening "would touch every
-// consumer and is a change worth taking on its own evidence, not smuggled in
-// with the first implementation". #527 IS that evidence, for the bond half: with
-// no production writer for the contract-terms store, every position took the
-// never-loaded branch, the FI measures could not tell it from a share, and DV01
-// came back as a confident zero for every portfolio on the estate. So this half
-// now answers with a compute.TermsResolution, which keeps the two apart.
-//
-// The option half is left alone deliberately. Its consumer (the Greeks band) is
-// still unregistered, so widening it would be a change with no reachable
-// behaviour to verify — and the evidence it should be taken on is the same
-// evidence, arriving when that band is wired.
+// BondTerms retains the FI resolution contract introduced by #527. OptionTerms
+// uses the same classification states and also carries transient read errors.
 func (p *Provider) BondTerms(ctx context.Context, instrumentID string, asOf time.Time) (compute.BondSpec, compute.TermsResolution) {
 	if p == nil || p.store == nil {
 		return compute.BondSpec{}, compute.TermsUnknown

@@ -36,8 +36,8 @@ func TestInvalidVolatilityIsExcludedFromGreeksAndRevaluation(t *testing.T) {
 		wg.Wait()
 		var skipped string
 		providers.OnSkip = func(_, reason string) { skipped = reason }
-		if money, ok := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{PriceFrac: -.1}); ok || money != nil || skipped != SkipNoVol {
-			t.Fatalf("invalid vol entered revaluation: %v %v %s", money, ok, skipped)
+		if result := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{PriceFrac: -.1}); result.Status != RevalUnassessed || result.Value != nil || skipped != SkipNoVol {
+			t.Fatalf("invalid vol entered revaluation: %+v %s", result, skipped)
 		}
 	}
 }
@@ -59,8 +59,8 @@ func TestFiniteInputsCannotSerializeFailedPricingArithmetic(t *testing.T) {
 	}
 	var skipped string
 	providers.OnSkip = func(_, reason string) { skipped = reason }
-	if money, ok := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{}); ok || money != nil || skipped != SkipInvalidPricing {
-		t.Fatalf("failed revaluation serialized: %v %v %s", money, ok, skipped)
+	if result := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{}); result.Status != RevalUnassessed || result.Value != nil || skipped != SkipInvalidPricing {
+		t.Fatalf("failed revaluation serialized: %+v %s", result, skipped)
 	}
 	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), math.MaxFloat64, 0x1p63} {
 		if representablePricingAmount(value, 0) {

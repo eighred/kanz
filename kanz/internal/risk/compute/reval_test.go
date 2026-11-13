@@ -29,24 +29,24 @@ func TestRevaluer_RepricesNonlinearly(t *testing.T) {
 
 	// Price −10%: the call reprices to its BS value at the shocked spot, not a
 	// linear 10%·delta move.
-	down, ok := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{PriceFrac: -0.10})
-	if !ok {
+	down := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{PriceFrac: -0.10})
+	if down.Status != RevalPriced {
 		t.Fatal("expected option to be revalued")
 	}
 	wantDown := pricing.BlackScholesPrice(pricing.Call, spot*0.9, 100, ttm, 0, 0, sigma) * n
-	if d := math.Abs(decutil.Float64Or(down.GetAmount(), 0) - wantDown); d > 1.0 {
-		t.Fatalf("reval down: got %.2f want %.2f", decutil.Float64Or(down.GetAmount(), 0), wantDown)
+	if d := math.Abs(decutil.Float64Or(down.Value.GetAmount(), 0) - wantDown); d > 1.0 {
+		t.Fatalf("reval down: got %.2f want %.2f", decutil.Float64Or(down.Value.GetAmount(), 0), wantDown)
 	}
 
 	// Vol +5 points raises the (long) option's value — the vega effect a linear
 	// price shock cannot express.
-	volUp, _ := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{GlobalVolBump: 0.05})
-	if decutil.Float64Or(volUp.GetAmount(), 0) <= basePrice*n {
-		t.Fatalf("vol bump should raise long-call value: got %.2f base %.2f", decutil.Float64Or(volUp.GetAmount(), 0), basePrice*n)
+	volUp := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{GlobalVolBump: 0.05})
+	if volUp.Status != RevalPriced || decutil.Float64Or(volUp.Value.GetAmount(), 0) <= basePrice*n {
+		t.Fatalf("vol bump should raise long-call value: got %+v base %.2f", volUp, basePrice*n)
 	}
 
 	// A non-option instrument is not revalued (linear fallback applies upstream).
-	if _, ok := rv.RevalueOption(context.Background(), "EQ", asOf, baseMV, RevalShocks{PriceFrac: -0.1}); ok {
+	if result := rv.RevalueOption(context.Background(), "EQ", asOf, baseMV, RevalShocks{PriceFrac: -0.1}); result.Status != RevalKnownLinear {
 		t.Fatal("non-option instrument must not be revalued")
 	}
 }
@@ -102,7 +102,7 @@ func TestRevalueOption_ReportsWhenItFallsBackToLinear(t *testing.T) {
 			p.OnSkip = func(id, reason string) { got = append(got, id+":"+reason) }
 
 			rv := NewRevaluer(p)
-			if _, ok := rv.RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{PriceFrac: -0.1}); ok {
+			if result := rv.RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{PriceFrac: -0.1}); result.Status != RevalUnassessed || result.Reason != c.want {
 				t.Fatal("repriced despite a missing input — the fixture is not exercising the fallback")
 			}
 			if len(got) == 0 {

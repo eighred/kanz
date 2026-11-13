@@ -25,13 +25,13 @@ func TestAmericanInvalidTreeIsUnassessedInGreeksAndRevaluation(t *testing.T) {
 	}
 	var skipped string
 	providers.OnSkip = func(_, reason string) { skipped = reason }
-	if value, ok := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{}); ok || value != nil || skipped != SkipInvalidPricing {
-		t.Fatalf("invalid American tree revalued: %v %v %q", value, ok, skipped)
+	if result := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{}); result.Status != RevalUnassessed || result.Value != nil || skipped != SkipInvalidPricing {
+		t.Fatalf("invalid American tree revalued: %+v %q", result, skipped)
 	}
 	// A valid base snapshot must not make a failed shocked lattice look usable.
 	providers.Curve, providers.Vol = pricing.FlatCurve(.05), constVol(.2)
 	skipped = ""
-	if value, ok := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{GlobalVolBump: -.199999}); ok || value != nil || skipped != SkipInvalidPricing {
-		t.Fatalf("invalid shocked American tree revalued: %v %v %q", value, ok, skipped)
+	if result := NewRevaluer(providers).RevalueOption(context.Background(), "OPT_A", asOf, dec0("USD"), RevalShocks{GlobalVolBump: -.199999}); result.Status != RevalUnassessed || result.Value != nil || skipped != SkipInvalidPricing {
+		t.Fatalf("invalid shocked American tree revalued: %+v %q", result, skipped)
 	}
 }

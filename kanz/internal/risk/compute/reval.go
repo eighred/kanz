@@ -31,9 +31,24 @@ type RevalShocks struct {
 	VolByUnderlying map[string]float64
 }
 
-// Revaluer reprices option positions under shocks. It is wired with the option
-// terms / spot / vol / curve providers; a non-option position (or one missing
-// pricing inputs) returns ok=false so the scenario keeps the linear shock.
+// RevalStatus separates a successfully priced option, an authoritatively known
+// non-option, and an unassessed position. The zero value refuses classification.
+type RevalStatus int
+
+const (
+	RevalUnassessed RevalStatus = iota
+	RevalPriced
+	RevalKnownLinear
+)
+
+// RevalResult carries the disposition and bounded reason into scenario coverage.
+type RevalResult struct {
+	Value  *commonpb.Money
+	Status RevalStatus
+	Reason string
+}
+
+// Revaluer reprices option positions under shocks using point-in-time inputs.
 type Revaluer struct{ providers GreeksProviders }
 
 // NewRevaluer wraps the providers (curve defaults to flat zero).
@@ -47,51 +62,41 @@ func NewRevaluer(p GreeksProviders) *Revaluer {
 // RevalueOption returns baseMV repriced under shocks. baseMV is the position's
 // current MarketValue (price × quantity × multiplier), so the revalued value is
 // baseMV × (shockedPrice / basePrice) — scaling preserves the position size and
-// sign (a short option keeps its negative value). ok=false ⇒ leave to the linear
-// path.
-//
-// # THE LINEAR FALLBACK STAYS HERE, unlike in greeks.go, and the difference is
-// the caller's obligation
-//
-// greeks.go stopped returning "not an option" when an option could not be priced,
-// because the caller's Δ≡1 branch then reported a contract as stock. Here the
-// caller is a SCENARIO, and it must produce a shocked value for every position:
-// there is no third answer. Refusing outright would drop the position from the
-// shocked book entirely, which understates the scenario loss — strictly worse
-// than shocking it linearly.
-//
-// So the linear fallback is correct AND it is a real degradation: an option
-// shocked linearly carries no convexity, so a large down-shock understates the
-// loss on a long put and overstates it on a short one. That is why every exit
-// below reports through OnSkip. It used to be silent, and a scenario that
-// quietly linearised half the option book looks exactly like one that repriced
-// it.
-func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf time.Time, baseMV *commonpb.Money, shocks RevalShocks) (*commonpb.Money, bool) {
-	if rv.providers.Terms == nil || baseMV == nil {
-		return nil, false
+// sign (a short option keeps its negative value). Only RevalKnownLinear licenses
+// a clean linear result. An unassessed position may be retained in a degraded
+// linear approximation, but the caller must record the returned exclusion.
+func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf time.Time, baseMV *commonpb.Money, shocks RevalShocks) RevalResult {
+	unassessed := func(reason string) RevalResult {
+		skipOption(rv.providers, instrumentID, reason)
+		return RevalResult{Status: RevalUnassessed, Reason: reason}
 	}
-	spec, ok := rv.providers.Terms.OptionTerms(ctx, instrumentID, asOf)
-	if !ok {
-		return nil, false
+	spec, resolution, reason := resolveOptionTerms(ctx, rv.providers.Terms, instrumentID, asOf)
+	if resolution == TermsOtherVariant {
+		return RevalResult{Status: RevalKnownLinear}
+	}
+	if resolution != TermsResolved {
+		return unassessed(reason)
+	}
+	if baseMV == nil {
+		return unassessed(SkipInvalidPricing)
 	}
 	// NIL-GUARDED, like greeks.go. These two were dereferenced unconditionally
 	// and a GreeksProviders with no Spot or Vol panicked on the first option —
 	// the same defect, on the same struct, reached from the scenario path instead
 	// of the measure path.
 	var spot float64
+	var ok bool
 	if rv.providers.Spot != nil {
 		spot, ok = rv.providers.Spot.Spot(ctx, spec.UnderlyingID, asOf)
 	} else {
 		ok = false
 	}
 	if !ok || spot <= 0 {
-		skipOption(rv.providers, instrumentID, SkipNoSpot)
-		return nil, false
+		return unassessed(SkipNoSpot)
 	}
 	ttm := spec.Expiry.Sub(asOf).Hours() / 24 / 365
 	if ttm <= 0 {
-		skipOption(rv.providers, instrumentID, SkipExpired)
-		return nil, false
+		return unassessed(SkipExpired)
 	}
 	var vol float64
 	if rv.providers.Vol != nil {
@@ -100,17 +105,15 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 		ok = false
 	}
 	if !ok || vol <= 0 || math.IsNaN(vol) || math.IsInf(vol, 0) {
-		skipOption(rv.providers, instrumentID, SkipNoVol)
-		return nil, false
+		return unassessed(SkipNoVol)
 	}
 	r := rv.providers.Curve.Rate(ttm)
 	basePrice := pricing.Price(spec.Type, spec.Exercise, spot, spec.Strike, ttm, r, 0, vol)
 	if math.IsNaN(basePrice) || math.IsInf(basePrice, 0) {
-		skipOption(rv.providers, instrumentID, SkipInvalidPricing)
-		return nil, false
+		return unassessed(SkipInvalidPricing)
 	}
 	if basePrice <= 0 {
-		return nil, false // cannot scale off a zero base
+		return unassessed(SkipInvalidPricing) // cannot scale off a zero base
 	}
 
 	shockedSpot := spot * (1 + shocks.PriceFrac)
@@ -123,8 +126,7 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 	ratio := shockedPrice / basePrice
 	newAmount := decutil.Float64Or(baseMV.GetAmount(), 0) * ratio
 	if !representablePricingAmount(newAmount, revalMoneyExp) {
-		skipOption(rv.providers, instrumentID, SkipInvalidPricing)
-		return nil, false
+		return unassessed(SkipInvalidPricing)
 	}
-	return &commonpb.Money{Amount: floatToDecimal(newAmount, revalMoneyExp), CurrencyCode: baseMV.GetCurrencyCode()}, true
+	return RevalResult{Status: RevalPriced, Value: &commonpb.Money{Amount: floatToDecimal(newAmount, revalMoneyExp), CurrencyCode: baseMV.GetCurrencyCode()}}
 }
