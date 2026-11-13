@@ -123,7 +123,10 @@ func TestSnapshotActualRuntimeDurablePublicationQueryAndEstablishedChannelFailur
 		stopOwner()
 		if !joined {
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Error("cancelled snapshot owner join failed")
+				}
 			case <-time.After(35 * time.Second):
 				t.Error("actual snapshot owner did not join")
 			}

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -205,8 +206,12 @@ func startHandoffProcess(t *testing.T, b *handoffBroker, binary, principal strin
 		if !p.joined {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			select {
-			case <-p.done:
+			case err := <-p.done:
 				p.joined = true
+				var exit *exec.ExitError
+				if err != nil && !errors.As(err, &exit) {
+					t.Error("killed handoff child join failed")
+				}
 			case <-time.After(10 * time.Second):
 				t.Error("handoff child join unconfirmed")
 			}
