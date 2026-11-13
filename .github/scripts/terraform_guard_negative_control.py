@@ -182,6 +182,13 @@ def parse_phase(output, exit_code, assertion_line, negative=False):
                     or "state" in r for r in records), "cleanup/interrupt/state output cannot qualify")
     terminals, errors, files = {}, [], []
     for r in records:
+        # Envelope errors apply to every record type. Only the negative phase's
+        # single error diagnostic may proceed to the exact assertion checks below.
+        if r.get("@level") == "error":
+            require(negative and r["type"] == "diagnostic"
+                    and isinstance(r.get("diagnostic"), dict)
+                    and r["diagnostic"].get("severity") == "error",
+                    "unexpected Terraform error envelope")
         if r["type"] == "test_run":
             run = r.get("test_run", {})
             require(isinstance(run, dict) and run.get("path") == FIXTURE
@@ -204,8 +211,6 @@ def parse_phase(output, exit_code, assertion_line, negative=False):
                     "invalid diagnostic")
             if diagnostic["severity"] == "error":
                 errors.append(r)
-        elif r.get("@level") == "error":
-            raise QualificationError("unstructured Terraform error")
     require(set(terminals) == set(RUNS), "incomplete terminal run inventory")
     counts = Counter(terminals.values())
     summaries = [r for r in records if r["type"] == "test_summary"]

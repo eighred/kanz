@@ -105,6 +105,23 @@ class EvidenceTests(unittest.TestCase):
             with self.subTest(addition=addition):
                 self.assert_rejected(transcript(True) + [addition])
 
+    def test_error_envelope_cannot_hide_in_recognized_record_types(self):
+        additions = (
+            {"type": "test_run", "@testfile": "testnet.tftest.hcl",
+             "@testrun": "cost_and_security_envelope", "test_run": {
+                 "path": "testnet.tftest.hcl", "run": "cost_and_security_envelope", "progress": "running"}},
+            {"type": "test_file", "@testfile": "testnet.tftest.hcl", "test_file": {
+                "path": "testnet.tftest.hcl", "progress": "running"}},
+            {"type": "diagnostic", "diagnostic": {"severity": "warning", "summary": "Fixture warning"}},
+        )
+        for addition in additions:
+            for negative in (False, True):
+                with self.subTest(record_type=addition["type"], negative=negative):
+                    record = {**addition, "@level": "error"}
+                    self.assert_rejected(transcript(negative) + [record], code=int(negative), negative=negative)
+        warning = {**additions[-1], "@level": "warn"}
+        guard.parse_phase(encode(transcript() + [warning]), 0, 30)
+
     def test_incomplete_duplicate_unexpected_outcomes_and_summary_refuse(self):
         mutations = (
             lambda r: r.pop(3),
