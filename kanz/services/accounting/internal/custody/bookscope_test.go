@@ -192,7 +192,7 @@ func TestTwoCustodiansOnOnePortfolioReconcileClean(t *testing.T) {
 	}
 
 	for _, custodian := range []string{"CUST-A", "CUST-B"} {
-		run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: custodian, BusinessDate: t0})
+		run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: custodian, BusinessDate: t0})
 		if err != nil {
 			t.Fatalf("%s: Reconcile: %v", custodian, err)
 		}
@@ -231,7 +231,7 @@ func TestAnUnclaimedExchangeAccountFailsTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err == nil {
 		t.Fatal("Reconcile succeeded over a book missing an unclaimed account's holdings — it would " +
 			"break every position that account holds, at every custodian")
@@ -346,7 +346,7 @@ func TestAnUnattributedEntryFabricatesNoBreakAtASingleCustodian(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestAnEmptyDerivedBasisRefusesRatherThanBreakingTheWholeBook(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err == nil {
 		t.Fatalf("the run succeeded over an EMPTY comparison basis and reported %d break(s): %+v.\n\n"+
 			"Nothing in this journal names an exchange account, so the basis folds to nothing and every "+

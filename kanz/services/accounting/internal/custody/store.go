@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
@@ -29,6 +30,10 @@ var ErrNoStatement = errors.New("custody: no statement for subject")
 // exist nowhere else, and losing them resets every break to OPEN — which
 // regenerates the exact "list nobody reads" this control was built to prevent.
 type Store interface {
+	// CommitRun commits the run, its verifying break transitions and completion
+	// FACT together. Failed/no-statement runs leave existing breaks unchanged.
+	CommitRun(context.Context, Run) (Run, error)
+	Outbox() outbox.Queue
 	// SaveStatement records a custodian statement, idempotent on StatementID. A
 	// restatement for a subject already reconciled REPLACES the latest statement;
 	// it does not mutate the runs that reconciled the earlier one, because the
@@ -109,6 +114,8 @@ type MemoryStore struct {
 	runs       map[string][]Run       // portfolio|custodian -> runs, append order
 	runIDs     map[string]struct{}
 	breaks     map[string]Break // break id -> break
+	outbox     *outbox.Memory
+	committed  map[string]Run
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -118,6 +125,8 @@ func NewMemoryStore() *MemoryStore {
 		runs:       map[string][]Run{},
 		runIDs:     map[string]struct{}{},
 		breaks:     map[string]Break{},
+		outbox:     outbox.NewMemory(),
+		committed:  map[string]Run{},
 	}
 }
 

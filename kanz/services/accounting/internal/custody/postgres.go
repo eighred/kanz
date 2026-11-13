@@ -27,6 +27,7 @@ import (
 // seam and is only actually proven here.
 type Postgres struct {
 	pool *pgxpool.Pool
+	tx   pgx.Tx // optional owner transaction; helpers use nested savepoints
 }
 
 // NewPostgres returns a Postgres store over an existing pool. The caller owns the
@@ -287,7 +288,13 @@ SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee,
 FROM custody_breaks
 WHERE status IN ('open', 'assigned', 'explained')
 ORDER BY break_id`
-	rows, err := p.pool.Query(ctx, q)
+	var rows pgx.Rows
+	var err error
+	if p.tx != nil {
+		rows, err = p.tx.Query(ctx, q)
+	} else {
+		rows, err = p.pool.Query(ctx, q)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("custody: outstanding breaks: %w", err)
 	}
