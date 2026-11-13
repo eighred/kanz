@@ -243,6 +243,28 @@ func ParseDec(s string) (*commonpb.Decimal, bool) {
 	return dec.ParseProtoExact(s)
 }
 
+// ErrVenueExecutionPrice refuses an executed quantity without a supported,
+// strictly positive price. A parsed zero is a free trade, not an unknown mark.
+var ErrVenueExecutionPrice = errors.New("executed quantity requires a strictly positive supported price")
+
+// ValidateExecutedPrice applies the same economic bound at both venues' REST
+// and websocket fill boundaries. It does not reinterpret zero-size fee-only or
+// early order reports as executions, or constrain signed Decimal parsing.
+func ValidateExecutedPrice(quantity, price *commonpb.Decimal) error {
+	q, ok := dec.FromProtoChecked(quantity)
+	if quantity == nil || !ok {
+		return ErrVenueExecutionPrice
+	}
+	if q.Sign() <= 0 {
+		return nil
+	}
+	p, ok := dec.FromProtoChecked(price)
+	if price == nil || !ok || p.Sign() <= 0 {
+		return ErrVenueExecutionPrice
+	}
+	return nil
+}
+
 // SubDec returns a − b as an exact common.v1.Decimal. ok=false when the result
 // cannot be represented; see ParseDec for why that is a refusal and not a zero.
 func SubDec(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
@@ -480,6 +502,8 @@ func RefusalKind(err error) string {
 		return "overfill"
 	case errors.Is(err, ErrLeavesUnrepresentable):
 		return "unrepresentable"
+	case errors.Is(err, ErrVenueExecutionPrice):
+		return "invalid_price"
 	default:
 		return "other"
 	}

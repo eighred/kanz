@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"net/http"
@@ -228,6 +229,10 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	if !qok || !pok {
 		return fmt.Errorf("binance: order %s fill is not representable as a Decimal (lastQty=%q lastPrice=%q)",
 			rep.ClientOrderID, rep.LastQty, rep.LastPrice)
+	}
+	if err := execution.ValidateExecutedPrice(qty, px); err != nil {
+		i.refusal.Refuse(rep.ClientOrderID, err)
+		return nil
 	}
 	feeMoney, feeOK := reportFee(rep)
 	if !feeOK {
