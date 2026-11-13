@@ -478,7 +478,14 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 		ibor, iok := exactProto(b.IBOR)
 		cust, cok := exactProto(b.Custodian)
 		diff, dok := exactProto(b.Diff)
-		if !iok || !cok || !dok {
+		// Reference-only discrepancies can lack the reporting side's quantity.
+		// Omit that unavailable amount and difference, preserving the reference
+		// and known opposite-side zero. Legacy or unrepresentable figures still
+		// refuse publication rather than acquiring an exact-looking value.
+		iborAbsent := b.ValuesVerified && b.Kind == recon.BreakExecutionMissingAtCustodian && b.IBOR == nil
+		custAbsent := b.ValuesVerified && b.Kind == recon.BreakExecutionMissingInIBOR && b.Custodian == nil
+		diffAbsent := (iborAbsent || custAbsent) && b.Diff == nil
+		if (!iok && !iborAbsent) || (!cok && !custAbsent) || (!dok && !diffAbsent) {
 			return nil, fmt.Errorf("custody: run %s: break %s figures are not representable as Decimals", run.RunID, b.BreakID)
 		}
 		out.Breaks = append(out.Breaks, &accountingpb.ReconciliationBreak{
