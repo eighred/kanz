@@ -1,6 +1,7 @@
 package consume_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -248,6 +249,10 @@ func TestCashPayloadTimestampJetStreamJournalOutboxReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dlq, err := dlqStream.CreateConsumer(ctx, jetstream.ConsumerConfig{Name: id + "-dlq", FilterSubject: "dlq." + cashSubjectWildcard, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
@@ -295,6 +300,12 @@ func TestCashPayloadTimestampJetStreamJournalOutboxReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	type retainedRefusal struct {
+		sequence uint64
+		eventID  string
+		data     []byte
+	}
+	refusals := make(map[string]retainedRefusal, len(bad))
 	for pass := range 2 {
 		// Recreate the folder/consumer on the same durable store. The second
 		// fresh durable replays retained original frames without local dedup.
@@ -303,10 +314,6 @@ func TestCashPayloadTimestampJetStreamJournalOutboxReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		consumer, err := bus.NewConsumer(client, bus.WithDLQ(client), bus.WithDedupWindow(0, 0))
-		if err != nil {
-			t.Fatal(err)
-		}
-		dlq, err := dlqStream.CreateConsumer(ctx, jetstream.ConsumerConfig{Name: fmt.Sprintf("%s-dlq-%d", id, pass), FilterSubject: "dlq." + cashSubjectWildcard, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -367,32 +374,50 @@ func TestCashPayloadTimestampJetStreamJournalOutboxReplay(t *testing.T) {
 			}
 		}
 		await(bad, true)
-		parked := map[string]bool{}
-		for range bad {
-			msg, err := dlq.Next(jetstream.FetchMaxWait(5 * time.Second))
-			if err != nil {
-				t.Fatal(err)
+		if pass == 0 {
+			parked := map[string]bool{}
+			for range bad {
+				msg, err := dlq.Next(jetstream.FetchMaxWait(5 * time.Second))
+				if err != nil {
+					t.Fatal(err)
+				}
+				env, payload, err := bus.Unframe(msg.Data())
+				var entry accountingpb.LedgerEntry
+				if err != nil || proto.Unmarshal(payload, &entry) != nil || inputIDs[entry.EntryId] != env.GetEventId() || parked[entry.EntryId] || msg.Headers().Get(bus.HeaderDLQOriginalSubject) != strings.TrimPrefix(msg.Subject(), "dlq.") {
+					t.Fatal("DLQ lost source identity or duplicated a refusal")
+				}
+				parked[entry.EntryId] = true
+				meta, err := msg.Metadata()
+				if err != nil {
+					t.Fatal(err)
+				}
+				retained, err := dlqStream.GetMsg(ctx, meta.Sequence.Stream)
+				if err != nil {
+					t.Fatal(err)
+				}
+				retainedEnv, _, err := bus.Unframe(retained.Data)
+				if err != nil || retainedEnv.GetEventId() != env.GetEventId() {
+					t.Fatal("refusal was not retained by JetStream")
+				}
+				refusals[entry.EntryId] = retainedRefusal{meta.Sequence.Stream, env.GetEventId(), append([]byte(nil), retained.Data...)}
+				if err := msg.Ack(); err != nil {
+					t.Fatal(err)
+				}
 			}
-			env, payload, err := bus.Unframe(msg.Data())
-			var entry accountingpb.LedgerEntry
-			if err != nil || proto.Unmarshal(payload, &entry) != nil || inputIDs[entry.EntryId] != env.GetEventId() || parked[entry.EntryId] || msg.Headers().Get(bus.HeaderDLQOriginalSubject) != strings.TrimPrefix(msg.Subject(), "dlq.") {
-				t.Fatal("DLQ lost source identity or duplicated a refusal")
-			}
-			parked[entry.EntryId] = true
-			meta, err := msg.Metadata()
-			if err != nil {
-				t.Fatal(err)
-			}
-			retained, err := dlqStream.GetMsg(ctx, meta.Sequence.Stream)
-			if err != nil {
-				t.Fatal(err)
-			}
-			retainedEnv, _, err := bus.Unframe(retained.Data)
-			if err != nil || retainedEnv.GetEventId() != env.GetEventId() {
-				t.Fatal("refusal was not retained by JetStream")
-			}
-			if err := msg.Ack(); err != nil {
-				t.Fatal(err)
+		} else {
+			// Re-parking preserves the source message ID, so JetStream's broker
+			// deduplication may acknowledge it without retaining another copy.
+			// Verify the original refusal instead; the input ACK check below
+			// separately proves that the replay completed.
+			for _, entry := range bad {
+				original, ok := refusals[entry.EntryId]
+				if !ok || original.eventID != inputIDs[entry.EntryId] {
+					t.Fatal("replay lost the original refused event identity")
+				}
+				retained, err := dlqStream.GetMsg(ctx, original.sequence)
+				if err != nil || !bytes.Equal(retained.Data, original.data) {
+					t.Fatal("replay lost or changed the original retained refusal")
+				}
 			}
 		}
 		if pass == 0 {
