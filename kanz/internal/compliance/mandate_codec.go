@@ -373,5 +373,11 @@ func ValidateMandate(m *compliancepb.Mandate) error {
 		return fmt.Errorf("%w: effective_at is required: it is part of what the approval covers, "+
 			"so it cannot be defaulted per-invocation", ErrMandateIncomplete)
 	}
+	for _, rule := range m.GetRules() {
+		if _, valid := violationSeverity(rule); !valid {
+			return fmt.Errorf("%w: rule %q has unsupported on_violation %d", ErrMandateIncomplete,
+				rule.GetRuleId(), rule.GetOnViolation())
+		}
+	}
 	return nil
 }
