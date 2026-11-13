@@ -22,11 +22,15 @@ financial-analysis product.
 ## Public upstream and documentation access
 
 Forge's [native upstream lookup](scripts/upstream.py) reads Go's official release
-feed and public GitHub publisher releases/refs with Python's standard library.
+feed, public GitHub publisher releases and name-search candidates, and any public
+HTTPS Git server's refs with Python's standard library. The Git reader uses the
+standard ref advertisement protocol, without a checkout, Git subprocess or SDK.
 The [evidence guide](skills/commands/references/context-and-evidence.md#check-version-specific-documentation)
 then resolves API questions against official versioned documentation and source.
 No Context7 package, server, API key, account, subscription or imported code is needed.
-Other registries use their official sources through existing host tools.
+Names are candidates requiring official publisher identity verification. Registries
+and projects outside GitHub's name index use official sources through host tools,
+then the same generic URL lookup. This is independent of the target repository's language.
 
 This is metadata discovery, not an automatic updater, hosted documentation index
 or replacement crawler. Upstream services must be reachable; failure is reported

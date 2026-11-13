@@ -58,7 +58,7 @@ the user to know the pricing test command. Choose the smallest sufficient set.
 
 For library APIs, dependency upgrades or toolchain/version questions, use
 [version-specific documentation](references/context-and-evidence.md#check-version-specific-documentation).
-Use the bundled public upstream lookup and official versioned docs/tagged source;
+Use the bundled public name/HTTPS repository lookup and official versioned docs/tagged source;
 no Context7 connection is required. Available releases remain candidates until qualified.
 
 For a Forge upgrade or preparation for an audit using imported methodology,
