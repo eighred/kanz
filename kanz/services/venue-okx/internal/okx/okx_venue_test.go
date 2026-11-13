@@ -109,8 +109,11 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 }
 
 func odec(v string) *commonpb.Decimal {
-	r, _ := new(big.Rat).SetString(v)
-	return dec.ToProto(r)
+	d, ok := ParseDec(v)
+	if !ok {
+		panic("invalid exact OKX decimal fixture")
+	}
+	return d
 }
 
 func okxVenueOver(f *fakeOKX) *OKXVenue {
