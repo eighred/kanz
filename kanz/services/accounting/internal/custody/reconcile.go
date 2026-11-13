@@ -315,7 +315,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 			CompletedAt: now,
 		})
 	case err != nil:
-		return r.recordFailure(ctx, subject, now, fmt.Sprintf("load statement: %v", err))
+		return r.recordFailure(ctx, subject, now, fmt.Errorf("load statement: %w", err))
 	}
 
 	// BOTH GRAINS OUT OF ONE CALL, and the pair is bound here rather than
@@ -323,10 +323,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	// slice of the journal the custodian is scoped to.
 	book, executions, err := r.book(ctx, subject)
 	if err != nil {
-		return r.recordFailure(ctx, subject, now, fmt.Sprintf("materialize book: %v", err))
+		return r.recordFailure(ctx, subject, now, fmt.Errorf("materialize book: %w", err))
 	}
 
-	detected, leg := recon.Reconcile(book, executions, recon.Statement{
+	detected, leg, err := recon.Reconcile(book, executions, recon.Statement{
 		PortfolioID:  subject.PortfolioID,
 		Positions:    stmt.Positions,
 		Cash:         stmt.Cash,
@@ -334,6 +334,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		Transactions: stmt.Transactions,
 		Grain:        stmt.Grain,
 	}, r.tolerance)
+	if err != nil {
+		return r.recordFailure(ctx, subject, now, fmt.Errorf("compare executions: %w", err))
+	}
 	r.stateLeg(subject, stmt, leg, len(executions))
 
 	outcome := OutcomeClean
@@ -355,7 +358,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		CompletedAt: now,
 	})
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
-		return r.recordFailure(ctx, subject, now, fmt.Sprintf("commit reconciliation: %v", err))
+		return r.recordFailure(ctx, subject, now, fmt.Errorf("commit reconciliation: %w", err))
 	}
 	return run, err
 }
@@ -394,19 +397,19 @@ func (r *Reconciler) stateLeg(subject Subject, stmt Statement, leg recon.LegStat
 // reconciliation which could not run looks exactly like one that never came due.
 // The estate must be able to tell "the book would not materialize for three days"
 // from "nothing was scheduled".
-func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now time.Time, reason string) (Run, error) {
+func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now time.Time, reason error) (Run, error) {
 	run, err := r.record(ctx, Run{
 		RunID:         runID(subject, now),
 		Subject:       subject,
 		Outcome:       OutcomeFailed,
 		Tolerance:     r.tolerance,
 		CompletedAt:   now,
-		FailureReason: reason,
+		FailureReason: reason.Error(),
 	})
 	if err != nil {
-		return run, err
+		return run, errors.Join(reason, err)
 	}
-	return run, errors.New("custody: " + reason)
+	return run, fmt.Errorf("custody: %w", reason)
 }
 
 // record persists a run, publishes it, and moves the metrics.

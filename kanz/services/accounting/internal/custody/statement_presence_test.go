@@ -76,10 +76,13 @@ func TestStatementPresencePreservesOptionalFiguresAndReferenceBreak(t *testing.T
 		t.Fatalf("unreported transaction figures became measured values: %+v", line)
 	}
 	// An absent amount must not delete the independent reference discrepancy.
-	breaks, leg := recon.Reconcile(bookWith(nil, nil), nil, recon.Statement{
+	breaks, leg, err := recon.Reconcile(bookWith(nil, nil), nil, recon.Statement{
 		PortfolioID: statement.PortfolioID, Positions: statement.Positions, Cash: statement.Cash,
 		BusinessDate: statement.BusinessDate, Transactions: statement.Transactions, Grain: statement.Grain,
 	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !leg.Ran() || len(breaks) != 1 || breaks[0].Kind != recon.BreakExecutionMissingInIBOR || breaks[0].Key != "unavailable" {
 		t.Fatalf("unavailable transaction lost its reference discrepancy: %s %+v", leg, breaks)
 	}

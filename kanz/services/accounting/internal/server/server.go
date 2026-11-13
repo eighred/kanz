@@ -429,7 +429,11 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// the whole comparison basis against it would report every execution the fund
 	// has ever made as one the custodian never saw. An operator investigating gets
 	// the netted answer, and the response says which grain it is.
-	breaks, leg := recon.Reconcile(book, executions, recon.Statement{PortfolioID: id, Positions: positions, Cash: cash}, tol)
+	breaks, leg, err := recon.Reconcile(book, executions, recon.Statement{PortfolioID: id, Positions: positions, Cash: cash}, tol)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	out := make([]map[string]string, 0, len(breaks))
 	for _, b := range breaks {
 		out = append(out, map[string]string{
