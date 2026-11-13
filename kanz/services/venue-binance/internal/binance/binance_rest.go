@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
 
 // binanceREST is a minimal, dependency-free Binance Spot REST client. It signs
@@ -160,7 +161,7 @@ func (c *binanceREST) signedGet(ctx context.Context, path string, params url.Val
 	full := c.baseURL + path + "?" + query + "&signature=" + c.sign(query)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance: create REST request: %w", transporterr.Redact(err))
 	}
 	req.Header.Set("X-MBX-APIKEY", c.apiKey)
 	return c.do(req)
@@ -289,7 +290,7 @@ func (c *binanceREST) tickerPrice(ctx context.Context, symbol string) (string, e
 	u := c.baseURL + "/api/v3/ticker/price?symbol=" + url.QueryEscape(symbol)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("binance: create REST request: %w", transporterr.Redact(err))
 	}
 	body, err := c.do(req)
 	if err != nil {
@@ -322,7 +323,7 @@ func (c *binanceREST) signedOrderCall(ctx context.Context, method, path string, 
 
 	req, err := http.NewRequestWithContext(ctx, method, full, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance: create REST request: %w", transporterr.Redact(err))
 	}
 	req.Header.Set("X-MBX-APIKEY", c.apiKey)
 
@@ -346,12 +347,12 @@ func (c *binanceREST) signedOrderCall(ctx context.Context, method, path string, 
 func (c *binanceREST) do(req *http.Request) ([]byte, error) {
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance: send REST request: %w", transporterr.Redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("binance: read REST response: %w", transporterr.Redact(err))
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("%w: status %d", ErrEgressDenied, resp.StatusCode)
