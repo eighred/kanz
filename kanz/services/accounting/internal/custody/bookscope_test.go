@@ -288,7 +288,7 @@ func TestASingleCustodianBookExcludesAnUnattributedEntry(t *testing.T) {
 		t.Fatal("a portfolio with one custodian and no declaration reports a DECLARED scope — the " +
 			"loader would then ask for accounts nobody declared and refuse the run")
 	}
-	book, _, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
+	book, _, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
 	}
 	stated := &captureLogger{}
 	if _, _, err := LedgerBookLoader(st, scope, stated.logger())(ctx,
-		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
+		Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0}); err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	for _, want := range []string{"NOTHING RECONCILES THEM", "USD 1000.00000000", BasisDerived, "PF1"} {
@@ -408,7 +408,7 @@ func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
 	seedEntry(t, clean, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
 	quiet := &captureLogger{}
 	if _, _, err := LedgerBookLoader(clean, scope, quiet.logger())(ctx,
-		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
+		Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0}); err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if quiet.sawAt(slog.LevelWarn, "NOTHING RECONCILES THEM") {

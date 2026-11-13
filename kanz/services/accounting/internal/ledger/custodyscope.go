@@ -39,7 +39,9 @@ func NewAccountScope(accounts ...string) (AccountScope, error) {
 
 // MaterializeForAccounts folds a portfolio's journal restricted to the entries
 // that settled against one of scope's accounts, and reports any account the
-// journal touched that NO custodian claims.
+// journal touched that NO custodian claims. The required effectiveAsOf cutoff is
+// inclusive; recorded knowledge is unbounded, so late corrections restate the
+// comparison date. Scope, residue, book and executions use that same dated slice.
 //
 // # Why this exists (#1006)
 //
@@ -114,12 +116,16 @@ func NewAccountScope(accounts ...string) (AccountScope, error) {
 // journal or they disagree about what they are reconciling, and one return value
 // out of one filter is what makes that structural rather than remembered.
 func MaterializeForAccounts(
-	ctx context.Context, st Store, portfolioID string, scope, claimed AccountScope,
+	ctx context.Context, st Store, portfolioID string, scope, claimed AccountScope, effectiveAsOf time.Time,
 ) (CustodyBasis, error) {
+	if effectiveAsOf.IsZero() {
+		return CustodyBasis{}, fmt.Errorf("ledger: custody comparison requires an effective cutoff")
+	}
 	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
 		return CustodyBasis{}, err
 	}
+	events = sortedFor(events, effectiveAsOf, time.Time{}, true)
 	basis := foldForAccounts(portfolioID, events, scope, claimed)
 	basis.Accounts = scope
 	return basis, nil
@@ -150,11 +156,17 @@ func MaterializeForAccounts(
 // it must not arrive by derivation instead. This returns the evidence; the custody
 // loader is where the refusal belongs, because "compared against a custodian" is
 // what makes an empty basis wrong rather than merely small.
-func MaterializeAttributed(ctx context.Context, st Store, portfolioID string) (CustodyBasis, error) {
+// Its effectiveAsOf cutoff has the same required, inclusive, restated semantics
+// as MaterializeForAccounts, including for the derived account set.
+func MaterializeAttributed(ctx context.Context, st Store, portfolioID string, effectiveAsOf time.Time) (CustodyBasis, error) {
+	if effectiveAsOf.IsZero() {
+		return CustodyBasis{}, fmt.Errorf("ledger: custody comparison requires an effective cutoff")
+	}
 	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
 		return CustodyBasis{}, err
 	}
+	events = sortedFor(events, effectiveAsOf, time.Time{}, true)
 	scope := AttributedAccounts(events)
 	basis := foldForAccounts(portfolioID, events, scope, scope)
 	basis.Accounts = scope
