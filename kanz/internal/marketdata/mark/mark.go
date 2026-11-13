@@ -302,7 +302,11 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 	if price == nil || price.Sign() <= 0 {
 		return nil
 	}
-	asOf := s.clampSkew(eventTime(env, &ev))
+	at, ok := eventTime(env, &ev)
+	if !ok {
+		return nil // malformed present time: acknowledge without changing price or touch
+	}
+	asOf := s.clampSkew(at)
 	s.mu.Lock()
 	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: asOf}
 	// THE WIDTH IS WRITTEN ONLY BY THE QUOTE ARM. recordTouchLocked drops a nil,
@@ -409,9 +413,15 @@ func (s *Source) clampSkew(asOf time.Time) time.Time {
 // eventTime prefers the MarketDataEvent's own event_time — it is the venue
 // timestamp for THIS event and stays correct inside a batch, where one envelope
 // carries many events with different times. The envelope is the fallback.
-func eventTime(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) time.Time {
-	if ts := ev.GetEventTime(); ts != nil {
-		return ts.AsTime()
+func eventTime(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (time.Time, bool) {
+	ts := ev.GetEventTime()
+	if ts == nil {
+		ts = env.GetEventTime()
 	}
-	return env.GetEventTime().AsTime()
+	// Only absence selects the envelope. AsTime would normalize a malformed
+	// present field into a different, potentially fresh and usable instant.
+	if ts != nil && ts.CheckValid() != nil {
+		return time.Time{}, false
+	}
+	return ts.AsTime(), true
 }
