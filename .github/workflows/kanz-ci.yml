@@ -774,8 +774,8 @@ jobs:
         # mismatch is exactly why `version: latest` on v6 silently pinned us to v1.
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          # goinstall builds golangci-lint with this job's selected toolchain, so
-          # its parser always understands the module's language version.
+          # Build with this job's toolchain and pin a release whose analyzers
+          # support its export format; rebuilding an older release is insufficient.
           install-mode: goinstall
           # PINNED, AND ON PURPOSE.
           #
@@ -789,7 +789,7 @@ jobs:
           #
           # Pinned to v2, with the rules written down in kanz/.golangci.yml. Local and CI
           # now agree, and moving the gate is a reviewable change.
-          version: v2.12.2
+          version: v2.14.0
           working-directory: kanz
           # --build-tags OR THE ADAPTERS BEHIND A TAG ARE NEVER LINTED (#179).
           # Without it this gate analysed the DEFAULT build only, so

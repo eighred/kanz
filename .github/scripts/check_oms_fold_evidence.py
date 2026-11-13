@@ -282,6 +282,7 @@ REQUIRED = {
         )},
         *{"TestRustFeeTermsCompatibility/" + case for case in (
             "same-actor", "blank-actor", "case-binding", "malformed-digest", "previous-digest-binding",
+            "unicode17-cyrillic-actor", "unicode17-latin-actor", "unicode17-garay-actor", "unicode17-beria-actor",
             "approval-clock", "bad-nanos", "unknown-price", "currency-change", "unchanged-fee", "outside-decimal-domain",
         )},
         "TestRustRecoveryAcknowledgements",

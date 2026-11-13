@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,7 +44,8 @@ func subject(cert *x509.Certificate, id string) (string, error) {
 		return "", errors.New("subject CN does not match first bounded DNS SAN")
 	}
 	h := sha256.Sum256([]byte(id))
-	expected := map[string]string{"2.5.4.45": hex.EncodeToString(h[:16]), "2.5.4.3": cert.Subject.CommonName, "2.5.4.10": "SPIRE", "2.5.4.6": "US"}
+	uid := hex.EncodeToString(h[:16])
+	expected := map[string]string{"2.5.4.45": uid, "2.5.4.3": cert.Subject.CommonName, "2.5.4.10": "SPIRE", "2.5.4.6": "US"}
 	for _, n := range cert.Subject.Names {
 		want, ok := expected[n.Type.String()]
 		if !ok || n.Value != want {
@@ -54,7 +56,14 @@ func subject(cert *x509.Certificate, id string) (string, error) {
 	if len(expected) != 0 {
 		return "", errors.New("required subject attribute missing")
 	}
-	return cert.Subject.String(), nil
+	// Go 1.27 changed pkix.Name.String's rendering of this OID. Preserve the
+	// qualified broker DN instead of letting a display helper change ACL identity.
+	// The CN is restricted above to DNS characters, so it needs no DN escaping.
+	der, err := asn1.MarshalWithParams(uid, "printable")
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("CN=%s,O=SPIRE,C=US,2.5.4.45=#%s", cert.Subject.CommonName, hex.EncodeToString(der)), nil
 }
 
 func produce(ctx context.Context, c *kafka.Client, topic, value string) error {

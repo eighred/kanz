@@ -94,7 +94,7 @@ func checkGoShardMatrix(data []byte) error {
 				}
 			}
 			if step.Name == "golangci-lint" && (step.Uses != "golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a" ||
-				step.With["version"] != "v2.12.2" || step.With["args"] != "--timeout=5m --build-tags=anthropic,openrouter,redis") {
+				step.With["version"] != "v2.14.0" || step.With["args"] != "--timeout=5m --build-tags=anthropic,openrouter,redis") {
 				return fmt.Errorf("quality lint must retain its pinned complete tag profile")
 			}
 		}
@@ -149,7 +149,7 @@ func TestGoCIShardsRequireCompleteUnion(t *testing.T) {
 		{"name: golangci-lint", "name: golangci-lint\n        continue-on-error: true"},
 		{"go test -tags anthropic,openrouter -p 1 -count=1", "go test -tags anthropic,openrouter -p 1"},
 		{"go test -tags redis -p 1 -race -count=1", "go test -tags redis -p 1 -count=1"},
-		{"version: v2.12.2", "version: latest"},
+		{"version: v2.14.0", "version: latest"},
 		{"fail-fast: false", "fail-fast: true"}, {"needs: [scope, go-race]", "needs: [scope]"}, {`test "$SHARD_RESULT" = success`, "true"}, {"go_shard_evidence.py aggregate", "go_shard_evidence.py select"}, {`go test -race -p 1 -count=1 -json "${packages[@]}"`, `go test -p 1 -json "${packages[@]}"`}} {
 		changed := strings.Replace(string(data), mutation[0], mutation[1], 1)
 		if changed == string(data) {
