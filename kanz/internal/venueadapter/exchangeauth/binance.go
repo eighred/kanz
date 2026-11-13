@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/eighred/kanz/internal/execution"
+	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
 
 // SignBinance returns the hex HMAC-SHA256 of query under secret — the value
@@ -49,7 +50,7 @@ func binanceAccount(ctx context.Context, cred Credential, opt Options) (AccountI
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
 	if err != nil {
-		return AccountInfo{}, err
+		return AccountInfo{}, fmt.Errorf("exchangeauth: create Binance REST request: %w", transporterr.Redact(err))
 	}
 	req.Header.Set("X-MBX-APIKEY", cred.APIKey)
 
