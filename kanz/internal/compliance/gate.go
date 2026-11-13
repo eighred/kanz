@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math"
+	"math/big"
 	"strings"
 	"time"
 
@@ -586,6 +586,9 @@ func bookInDomain(b *Book) bool {
 	if b.NAV != nil && !decimalInDomain(b.NAV.GetAmount()) {
 		return false
 	}
+	if b.Cash != nil && !decimalInDomain(b.Cash.GetAmount()) {
+		return false
+	}
 	for i := range b.Positions {
 		if !decimalInDomain(b.Positions[i].Quantity) {
 			return false
@@ -943,30 +946,31 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 	//
 	// ok=false on an unrepresentable cash delta, for the same reason the notional
 	// does: the caller must REFUSE rather than evaluate a fabricated balance.
-	if proj.Cash != nil {
-		spend, ok := mulDecimal(d.SignedQuantity, d.Price)
+	// A Money without an Amount remains unknown, as a missing Money does. It
+	// must reach BuyingPowerRule without a fabricated balance from this trade.
+	if proj.Cash != nil && proj.Cash.GetAmount() != nil {
+		currency := proj.Cash.GetCurrencyCode()
+		if currency == "" || d.Currency == "" || currency != d.Currency {
+			return nil, false
+		}
+		cash, cashOK := decutil.FromProtoChecked(proj.Cash.GetAmount())
+		quantity, quantityOK := decutil.FromProtoChecked(d.SignedQuantity)
+		price, priceOK := decutil.FromProtoChecked(d.Price)
+		if !cashOK || !quantityOK || !priceOK {
+			return nil, false
+		}
+		// Subtract before encoding: negating a MinInt64 coefficient is not a
+		// representable Decimal, even when the final cash balance is. The existing
+		// exact codec refuses unsupported results rather than rounding admission
+		// cash; its bounded encoding domain is deliberately unchanged.
+		spend := new(big.Rat).Mul(quantity, price)
+		after, ok := decutil.ToProtoExact(new(big.Rat).Sub(cash, spend))
 		if !ok {
 			return nil, false
 		}
-		after, ok := addDecimal(proj.Cash.GetAmount(), negateDecimal(spend))
-		if !ok {
-			return nil, false
-		}
-		proj.Cash = &commonpb.Money{Amount: after, CurrencyCode: proj.Cash.GetCurrencyCode()}
+		proj.Cash = &commonpb.Money{Amount: after, CurrencyCode: currency}
 	}
 	return proj, true
-}
-
-// negateDecimal flips a Decimal's sign. The coefficient is an int64 and math.MinInt64
-// has no positive counterpart, so that one value is refused by returning it
-// unchanged — it cannot arise from a real order (decutil.InDomainDeep bounds the
-// exponent, and a coefficient that large is not a tradeable size), and inventing
-// a wrapped positive would be the #94 defect in a new place.
-func negateDecimal(d *commonpb.Decimal) *commonpb.Decimal {
-	if d == nil || d.GetCoefficient() == math.MinInt64 {
-		return d
-	}
-	return &commonpb.Decimal{Coefficient: -d.GetCoefficient(), Exponent: d.GetExponent()}
 }
 
 // addDecimal and mulDecimal MOVED to internal/dec (arith.go) for #216.
