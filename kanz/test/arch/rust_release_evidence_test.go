@@ -78,8 +78,14 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	if strings.Contains(installer, "cargo ") || strings.Contains(installer, "||") {
 		return fmt.Errorf("source-build fallback refused")
 	}
-	if !strings.Contains(build, "- 'kanz-rs/**'") {
-		return fmt.Errorf("Rust-only PRs must build images")
+	var images imageAuthorityWorkflow
+	if err := yaml.Unmarshal([]byte(build), &images); err != nil {
+		return err
+	}
+	// Every PR reaches the complete Git-diff selector; Rust runtime paths are
+	// application inputs there. A trigger filter could hide a renamed input.
+	if err := validateImageAuthority(images); err != nil {
+		return fmt.Errorf("Rust image scope: %w", err)
 	}
 	for _, service := range []string{"binance-depth", "okx-depth"} {
 		entry := "- service: " + service + "\n            dockerfile: kanz-rs/services/" + service + "/Dockerfile"
@@ -135,7 +141,7 @@ func TestRustReleaseEvidenceMutations(t *testing.T) {
 		{"mutable-image", 0, "RUST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}", "RUST_IMAGE: ${{ env.IMAGE }}:latest"},
 		{"missing-binance", 0, "service: binance-depth", "service: absent"},
 		{"missing-okx", 1, "service: okx-depth", "service: absent"},
-		{"missing-rust-trigger", 1, "- 'kanz-rs/**'", "- 'other/**'"},
+		{"filtered-rust-trigger", 1, "  pull_request:", "  pull_request:\n    paths: ['kanz/**']"},
 		{"missing-ci-okx", 2, "--local --service okx-depth", "--local --service other"},
 		{"missing-hybrid-gate", 0, " || matrix.service == 'lake-sink'", ""},
 		{"unpinned-go-audit", 0, "govulncheck@v1.6.0", "govulncheck@latest"},
