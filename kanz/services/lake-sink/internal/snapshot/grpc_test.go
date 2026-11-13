@@ -50,7 +50,13 @@ func TestSnapshotGRPCAuthenticatesExactGatewayBeforeDelegation(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
-	t.Cleanup(func() { server.Stop(); _ = listener.Close(); <-done })
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+		if err := <-done; err != nil {
+			t.Errorf("gRPC server shutdown: %v", err)
+		}
+	})
 	for _, peer := range []spiffeid.ID{gateway, spiffeid.RequireFromString("spiffe://snapshot.test/ns/kanz-services/sa/other")} {
 		t.Run(peer.Path(), func(t *testing.T) {
 			conn, err := grpc.NewClient(listener.Addr().String(), transport.ClientDialOption(issue(peer), transport.AuthorizeServices(lake)))
@@ -189,7 +195,14 @@ func TestSnapshotGRPCStopJoinsCancelledHeldHandler(t *testing.T) {
 	go func() { served <- server.Serve(listener) }()
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(held.release) }) }
-	t.Cleanup(func() { release(); server.Stop(); _ = listener.Close(); <-served })
+	t.Cleanup(func() {
+		release()
+		server.Stop()
+		_ = listener.Close()
+		if err := <-served; err != nil {
+			t.Errorf("gRPC server shutdown: %v", err)
+		}
+	})
 	conn, err := grpc.NewClient(listener.Addr().String(), transport.ClientDialOption(issue(gateway), transport.AuthorizeServices(lake)))
 	if err != nil {
 		t.Fatal(err)

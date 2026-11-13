@@ -98,7 +98,10 @@ func TestWorkerDeliversDurablePostgresChallengeThroughRealSMTP(t *testing.T) {
 	defer func() {
 		stop()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("worker shutdown: %v", err)
+			}
 		case <-time.After(2 * time.Second):
 			t.Error("worker did not stop")
 		}

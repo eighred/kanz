@@ -217,7 +217,9 @@ func TestDurableCollisionIsRefusedAcrossProcesses(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	ctlCancel()
-	<-ctlErr
+	if err := <-ctlErr; err != nil {
+		t.Fatalf("subscription shutdown: %v", err)
+	}
 
 	// THE SECOND CONTROL, AND IT IS THE ONE THAT MATTERS MOST. A different process
 	// binding the SAME subject in the same group is not a collision — it is what a
@@ -285,7 +287,9 @@ func TestDurableClaimHoldsAfterTheConsumerIsGone(t *testing.T) {
 	}()
 	rig.awaitDurable(t, rig.client, subjA)
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("subscription shutdown: %v", err)
+	}
 
 	if err := rig.js.DeleteConsumer(context.Background(), rig.stream, durableName(rig.group, subjA)); err != nil {
 		t.Fatalf("delete consumer: %v", err)
@@ -358,8 +362,7 @@ func subscribeOutcome(t *testing.T, c *NATSClient, subject, group string, settle
 		return err
 	case <-time.After(settle):
 		cancel()
-		<-done
-		return nil
+		return <-done
 	}
 }
 

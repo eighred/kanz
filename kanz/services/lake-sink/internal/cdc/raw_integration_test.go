@@ -203,7 +203,9 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					}
 				} else {
 					stop()
-					<-done
+					if err := <-done; err != nil {
+						t.Fatalf("subscription shutdown: %v", err)
+					}
 				}
 			} else {
 				select {

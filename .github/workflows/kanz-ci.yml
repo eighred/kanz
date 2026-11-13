@@ -789,7 +789,7 @@ jobs:
           #
           # Pinned to v2, with the rules written down in kanz/.golangci.yml. Local and CI
           # now agree, and moving the gate is a reviewable change.
-          version: v2.14.0
+          version: v2.15.0
           working-directory: kanz
           # --build-tags OR THE ADAPTERS BEHIND A TAG ARE NEVER LINTED (#179).
           # Without it this gate analysed the DEFAULT build only, so
