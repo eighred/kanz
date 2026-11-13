@@ -4,8 +4,10 @@ import (
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -16,9 +18,16 @@ func decimal(coeff int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}
 }
 
-func fxQuote(id string, bid, ask *commonpb.Decimal) []byte {
+var fxFixtureTime = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+func fxQuote(id string, bid, ask *commonpb.Decimal, times ...time.Time) []byte {
+	at := fxFixtureTime
+	if len(times) > 0 {
+		at = times[0]
+	}
 	ev := &marketpb.MarketDataEvent{
 		InstrumentId: id,
+		EventTime:    timestamppb.New(at),
 		Data:         &marketpb.MarketDataEvent_Quote{Quote: &marketpb.Quote{BidPrice: bid, AskPrice: ask}},
 	}
 	b, _ := proto.Marshal(ev)
@@ -54,7 +63,7 @@ func TestConverterSnapshotIsImmutable(t *testing.T) {
 	env := &envelopepb.Envelope{EventType: "market.fx.quote"}
 	_ = l.Handler(context.Background(), env, fxQuote("EURUSD", decimal(108, -2), decimal(108, -2)))
 	before := l.Converter()
-	_ = l.Handler(context.Background(), env, fxQuote("EURUSD", decimal(120, -2), decimal(120, -2)))
+	_ = l.Handler(context.Background(), env, fxQuote("EURUSD", decimal(120, -2), decimal(120, -2), fxFixtureTime.Add(time.Second)))
 
 	r, _ := before.Rate("EUR")
 	if r.Cmp(big.NewRat(108, 100)) != 0 {
