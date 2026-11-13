@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       application: ${{ steps.scope.outputs.application }}
+      forge: ${{ steps.scope.outputs.forge }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,6 +44,11 @@ jobs:
       - name: Select application scope from checked Git history
         id: scope
         run: python3 .github/scripts/required_ci.py scope
+
+  forge:
+    needs: scope
+    if: needs.scope.outputs.forge == 'true'
+    uses: ./.github/workflows/kanz-forge.yml
 
   release-custody:
     needs: scope
@@ -1448,7 +1454,7 @@ jobs:
   # cancellation, and accidental skips must never masquerade as successful CI.
   kanz-ci-required:
     if: ${{ always() }}
-    needs: [scope, release-custody, go, go-race, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
+    needs: [scope, forge, release-custody, go, go-race, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

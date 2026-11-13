@@ -29,7 +29,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def public_json(url):
-    # All URLs come from the two fixed publishers below. No ambient proxy,
+    # URLs come from fixed publisher APIs, including repository search. No ambient proxy,
     # credentials, provider SDK, release-body text or downloaded code is used.
     opener = build_opener(ProxyHandler({}), NoRedirect())
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "kanz-forge-upstream"})
@@ -90,7 +90,8 @@ def observe(provider, project=None, tag=None, default_branch=False, fetch=public
             if default_branch:
                 result["selection"] = "default_branch"
                 repo = get(api)
-                if (not isinstance(repo, dict) or repo.get("full_name", "").lower() != project.lower()
+                if (not isinstance(repo, dict) or not isinstance(repo.get("full_name"), str)
+                        or repo["full_name"].lower() != project.lower()
                         or repo.get("private") is not False):
                     raise LookupError("repository_identity_mismatch")
                 branch = repo.get("default_branch")
@@ -150,11 +151,21 @@ def main():
     selection = github.add_mutually_exclusive_group()
     selection.add_argument("--tag", help="exact published stable release tag")
     selection.add_argument("--default-branch", action="store_true", help="observe HEAD when maintaining an imported pin")
+    repo = commands.add_parser("repo", help="public HTTPS Git repository, independent of host or language")
+    repo.add_argument("url", help="HTTPS clone URL or GitHub OWNER/REPO")
+    repo.add_argument("--tag-prefix", help="explicit numeric tag family, for example component/v")
+    search = commands.add_parser("find", help="public name search; candidates require publisher identity verification")
+    search.add_argument("name")
     args = parser.parse_args()
-    result = observe(args.provider, getattr(args, "project", None), getattr(args, "tag", None),
-                     getattr(args, "default_branch", False))
+    if args.provider in ("repo", "find"):
+        import repository_discovery as discovery
+        result = (discovery.find(args.name, public_json, LookupError) if args.provider == "find" else
+                  discovery.discover(args.url, observe, public_json, LookupError, prefix=args.tag_prefix))
+    else:
+        result = observe(args.provider, getattr(args, "project", None), getattr(args, "tag", None),
+                         getattr(args, "default_branch", False))
     print(json.dumps(result, indent=2))
-    return 0 if result["status"] == "observed" else 1
+    return 0 if result["status"] in ("observed", "candidates") else 1
 
 
 if __name__ == "__main__":
