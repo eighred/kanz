@@ -506,6 +506,17 @@ func (e *Engine) Evaluate(ctx context.Context, c *Candidate, m *compliancepb.Man
 		EvaluatedAt:    timestamppb.New(c.AsOf),
 	}
 	for _, rule := range m.GetRules() {
+		severity, valid := violationSeverity(rule)
+		if !valid {
+			res.Violations = append(res.Violations, &compliancepb.Violation{
+				RuleId: rule.GetRuleId(), RuleType: rule.GetType(),
+				Severity: compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH,
+				Message:  "unsupported violation severity — mandate cannot be evaluated",
+				Evidence: map[string]string{"on_violation": rule.GetOnViolation().String()},
+			})
+			res.Status = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+			continue
+		}
 		fn, ok := e.registry.funcs[rule.GetType()]
 		if !ok {
 			res.Violations = append(res.Violations, &compliancepb.Violation{
@@ -524,7 +535,7 @@ func (e *Engine) Evaluate(ctx context.Context, c *Candidate, m *compliancepb.Man
 		}
 		v.RuleId = rule.GetRuleId()
 		v.RuleType = rule.GetType()
-		v.Severity = violationSeverity(rule)
+		v.Severity = severity
 		res.Violations = append(res.Violations, v)
 		res.Status = worst(res.Status, v.Severity)
 	}
@@ -533,12 +544,18 @@ func (e *Engine) Evaluate(ctx context.Context, c *Candidate, m *compliancepb.Man
 
 // violationSeverity is the rule's configured on_violation, defaulting to BREACH
 // (deny-by-default) when unspecified.
-func violationSeverity(rule *compliancepb.Rule) compliancepb.ComplianceStatus {
-	s := rule.GetOnViolation()
-	if s == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED {
-		return compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+func violationSeverity(rule *compliancepb.Rule) (compliancepb.ComplianceStatus, bool) {
+	switch rule.GetOnViolation() {
+	case compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED,
+		compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH:
+		return compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH, true
+	case compliancepb.ComplianceStatus_COMPLIANCE_STATUS_WARN:
+		return compliancepb.ComplianceStatus_COMPLIANCE_STATUS_WARN, true
+	default:
+		// A status the consumer cannot interpret must not demote a refusal to
+		// PASS through rank's unknown-value fallback.
+		return compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH, false
 	}
-	return s
 }
 
 // worst returns the more severe of two statuses (PASS < WARN < BREACH).

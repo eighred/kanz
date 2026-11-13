@@ -158,6 +158,9 @@ func (p *Publisher) Publish(ctx context.Context, m *compliancepb.Mandate, approv
 	if err := approval.Covers(dualcontrol.ActMandateChange, digest); err != nil {
 		return fmt.Errorf("mandate %s/%s: %w", m.GetTenantId(), m.GetPortfolioId(), err)
 	}
+	if err := ValidateMandate(m); err != nil {
+		return err
+	}
 	if p.state == nil {
 		return fmt.Errorf("mandate %s/%s: no reader for the mandate subject is wired, so this "+
 			"publisher cannot see which mandates the portfolio's subject already carries. "+
