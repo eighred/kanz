@@ -54,6 +54,9 @@ on:
   # tag, believing it current — so the mirror converts a supply-chain
   # dependency into a supply-chain freeze, and nothing anywhere says so.
   #
+  # Digest-pinned sources below are reviewed snapshots. Scheduled copies retain
+  # those bytes; an upstream rebuild needs a reviewed digest update.
+  #
   # Weekly rather than daily. The upstream cadence for base-image patch
   # rebuilds is roughly that, and a daily run that almost always finds nothing
   # trains its reader to ignore it — which matters here because the ONE thing
