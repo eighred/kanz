@@ -26,6 +26,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Test the mock qualification evidence parser
+        run: python3 -m unittest discover -s .github/scripts -p 'test_terraform_guard_negative_control.py' -v
+
       - name: Find Terraform testnet changes
         id: scope
         shell: bash
@@ -39,7 +42,7 @@ jobs:
           else
             base_sha="$PUSH_BEFORE_SHA"
           fi
-          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform-testnet/ .github/workflows/terraform-testnet.yml)"
+          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform-testnet/ .github/workflows/terraform-testnet.yml .github/scripts/terraform_guard_negative_control.py .github/scripts/test_terraform_guard_negative_control.py)"
           if [[ -n "$changed" ]]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           else
@@ -79,22 +82,12 @@ jobs:
             printf 'PR head: %s\n' "$PR_HEAD_SHA"
           fi
 
-      - name: Check Terraform formatting
+      # The helper copies seven regular inputs into scratch, uses an empty HOME
+      # and credential-free environment, and initializes without a backend. The
+      # original four mock runs must pass before and after the AMI-only mutation;
+      # a generic CLI failure cannot satisfy the named assertion control.
+      - name: Qualify positive, named AMI refusal, and restored mock tests
         if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
-        run: terraform fmt -check -recursive
-
-      - name: Initialize providers without backend
-        if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
-        run: terraform init -backend=false -input=false -lockfile=readonly -no-color
-
-      - name: Validate Terraform configuration
-        if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
-        run: terraform validate -no-color
-
-      - name: Run mocked Terraform tests
-        if: steps.scope.outputs.run == 'true'
-        working-directory: kanz/infra/terraform-testnet
-        run: terraform test -no-color
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/terraform_guard_negative_control.py
