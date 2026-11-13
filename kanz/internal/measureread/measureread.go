@@ -51,6 +51,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	riskv1 "github.com/eighred/kanz/internal/risk/api/v1"
 )
 
 // Status is whether a value may be stated. It is deliberately two-valued and
@@ -93,6 +94,23 @@ type Coverage struct {
 	ExclusionReasons []string `json:"exclusion_reasons,omitempty"`
 }
 
+// ModelStatus distinguishes what the producer declared, independently of whether
+// coverage permits stating its value. A declared model is not a model approval.
+type ModelStatus string
+
+const (
+	ModelUndeclared  ModelStatus = "UNDECLARED"
+	ModelPlaceholder ModelStatus = "PLACEHOLDER"
+	ModelDeclared    ModelStatus = "DECLARED_MODEL"
+)
+
+// Provenance keeps the model label an advisory reader needs. Parameters, input
+// identities and private model metadata are not part of this projection.
+type Provenance struct {
+	Status ModelStatus          `json:"status"`
+	Method riskv1.MeasureMethod `json:"method,omitempty"`
+}
+
 // Measure is one governed value and whether it may be stated.
 type Measure struct {
 	Name   string `json:"name"`
@@ -108,6 +126,9 @@ type Measure struct {
 	// Reason is why the value is withheld. Empty when Status is MEASURED.
 	Reason   string   `json:"reason,omitempty"`
 	Coverage Coverage `json:"coverage"`
+	// Risk measures always report a model state, including UNDECLARED. Exposure
+	// records carry no model provenance on the wire and omit this field.
+	Provenance *Provenance `json:"provenance,omitempty"`
 }
 
 // Set is a projected governed read.
@@ -184,7 +205,7 @@ func ProjectExposure(resp *querypb.ExposureResponse) Set {
 }
 
 func projectMeasure(m *domainpb.RiskMeasure, withholdAll bool, flagReason string) Measure {
-	out := Measure{Name: m.GetName(), Coverage: coverageOf(m.GetCoverage())}
+	out := Measure{Name: m.GetName(), Coverage: coverageOf(m.GetCoverage()), Provenance: provenanceOf(m.GetProvenance())}
 	out = stateValue(out, m.GetValue(), m.GetCoverage(), withholdAll, flagReason)
 	if out.Status == StatusMeasured {
 		if u, ok := dec.Float64(m.GetUncertaintyAbs()); ok {
@@ -192,6 +213,18 @@ func projectMeasure(m *domainpb.RiskMeasure, withholdAll bool, flagReason string
 		}
 	}
 	return out
+}
+
+func provenanceOf(p *domainpb.MeasureProvenance) *Provenance {
+	method := riskv1.MeasureMethod(p.GetMethod())
+	status := ModelUndeclared
+	if method != "" {
+		status = ModelDeclared
+		if method.IsPlaceholder() {
+			status = ModelPlaceholder
+		}
+	}
+	return &Provenance{Status: status, Method: method}
 }
 
 // stateValue is the whole decision, and the ORDER OF THE CHECKS IS THE
