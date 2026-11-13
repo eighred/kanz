@@ -408,13 +408,12 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// subject names the BOOK SLICE and nothing else. It carries no business date
-	// on purpose: this comparison is against a statement in the request, so there
-	// is no stored statement, run or break for a date to key — and a date invented
-	// here would be a business date on evidence nobody chose. Nothing persists or
-	// publishes it, so Subject.Validate's date requirement does not apply.
+	// This ad-hoc read compares the scoped book right now, rather than a stored
+	// statement's business close. Capture that effective cutoff explicitly once;
+	// it is not a statement date and nothing here persists a statement or run.
 	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
-	book, executions, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger)(r.Context(), subject)
+	now := time.Now().UTC()
+	book, executions, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger, custody.EffectiveCutoff{AsOf: now})(r.Context(), subject)
 	if err != nil {
 		// The loader refuses rather than returning a partial book — an exchange
 		// account no custodian claims, most often. Surface the reason: it names

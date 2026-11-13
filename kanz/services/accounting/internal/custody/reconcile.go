@@ -48,6 +48,11 @@ type Publisher interface {
 // enforces, rather than needing a guard of its own to be remembered.
 type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error)
 
+// EffectiveCutoff explicitly selects an effective instant for the read-only
+// ad-hoc comparison, whose request has no statement business date. Zero refuses
+// the read; omitting the option retains the dated statement-close contract.
+type EffectiveCutoff struct{ AsOf time.Time }
+
 // LedgerBookLoader is the production BookLoader over a ledger store.
 //
 // EVERY PATH IS SCOPED, AND THAT IS THE POINT (#1073). A portfolio custodied in
@@ -73,16 +78,43 @@ type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, []ledg
 // confirm, so it is an UNRECONCILED BUCKET rather than a break or a zero, and the
 // loader names it and its amount on every run that has one. Book.CashBalance
 // remains the portfolio total for NAV and every other reader.
-func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger) BookLoader {
+func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger, cutoff ...EffectiveCutoff) BookLoader {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error) {
+		var close time.Time
+		switch len(cutoff) {
+		case 0:
+			if err := subject.Validate(); err != nil {
+				return nil, nil, err
+			}
+			// BusinessDay names a UTC calendar date. Its close includes that
+			// entire date and excludes the following midnight; no venue-local
+			// close is inferred.
+			close = BusinessDay(subject.BusinessDate).AddDate(0, 0, 1).Add(-time.Nanosecond)
+		case 1:
+			close = cutoff[0].AsOf.UTC()
+			if close.IsZero() {
+				return nil, nil, errors.New("custody: explicit effective cutoff is zero")
+			}
+			// Validate the same subject identity against the explicit read
+			// instant. This does not invent a stored statement business date.
+			identity := subject
+			identity.BusinessDate = close
+			if err := identity.Validate(); err != nil {
+				return nil, nil, err
+			}
+		default:
+			return nil, nil, errors.New("custody: multiple effective cutoffs")
+		}
+		// Both modes are restated effective views of the recorded journal,
+		// with no historical knowledge-time bound.
 		if !scope.Declared(subject.PortfolioID) {
 			// ONE CUSTODIAN: the scope is derived from the journal rather than
 			// declared. See ledger.MaterializeAttributed for why that is scoped by
 			// construction and why no declaration could add to it.
-			basis, err := ledger.MaterializeAttributed(ctx, store, subject.PortfolioID)
+			basis, err := ledger.MaterializeAttributed(ctx, store, subject.PortfolioID, close)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -115,7 +147,7 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger)
 			return nil, nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
 				"book slice to compare its statement against", subject.PortfolioID, subject.CustodianID)
 		}
-		basis, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed)
+		basis, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed, close)
 		if err != nil {
 			return nil, nil, err
 		}

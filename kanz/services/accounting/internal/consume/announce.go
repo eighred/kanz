@@ -180,10 +180,15 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 	if a.publisher == nil || portfolioID == "" {
 		return nil, nil
 	}
-	book, _, err := ledger.MaterializeCurrent(ctx, st, portfolioID)
+	// One transaction-visible journal and one effective cutoff govern every
+	// field. Knowledge remains unbounded, as in MaterializeCurrent: late
+	// corrections already recorded by this transaction belong in the level.
+	now := a.now().UTC()
+	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
-		return nil, fmt.Errorf("announce %s: materialize: %w", portfolioID, err)
+		return nil, fmt.Errorf("announce %s: journal: %w", portfolioID, err)
 	}
+	book := ledger.ReplayAsOf(portfolioID, events, now, time.Time{})
 	total, ok := dec.ToProtoExact(book.CashBalance(a.baseCcy))
 	if !ok {
 		// EXACT, NEVER ROUNDED (#1062). A balance the platform cannot represent
@@ -199,12 +204,11 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 		return nil, fmt.Errorf("announce %s: cash balance is not representable as a Decimal", portfolioID)
 	}
 
-	perAccount, err := a.byVenueAccount(ctx, st, portfolioID)
+	perAccount, err := a.byVenueAccount(events, portfolioID, now)
 	if err != nil {
 		return nil, err
 	}
 
-	now := a.now().UTC()
 	coverage, excluded := cashCurrencyCoverage(book, a.baseCcy)
 	msg := &accountingpb.PortfolioCashBalance{
 		PortfolioId:        portfolioID,
@@ -252,12 +256,8 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 //
 // Sorted, so the announcement is byte-stable for a given book: an unsorted map
 // range would make every republish look like a change to anything diffing them.
-func (a *Announcer) byVenueAccount(ctx context.Context, st ledger.Store, portfolioID string) ([]*accountingpb.VenueAccountCash, error) {
-	events, err := st.Journal(ctx, portfolioID)
-	if err != nil {
-		return nil, fmt.Errorf("announce %s: journal: %w", portfolioID, err)
-	}
-	balances := ledger.VenueAccountCash(events)
+func (a *Announcer) byVenueAccount(events []*ledger.Event, portfolioID string, effectiveAsOf time.Time) ([]*accountingpb.VenueAccountCash, error) {
+	balances := ledger.VenueAccountCashAsOf(events, effectiveAsOf, time.Time{})
 
 	var out []*accountingpb.VenueAccountCash
 	for _, account := range ledger.VenueAccounts(balances) {

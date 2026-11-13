@@ -270,10 +270,21 @@ func (r *Registry) render(ctx context.Context, label string, reading governed.Re
 	// no such risk", the same false claim the confident zero made.
 	for _, m := range reading.Measures {
 		if m.Status == measureread.StatusMeasured && m.Value != nil {
-			fmt.Fprintf(&b, "- %s = %g\n", m.Name, *m.Value)
-			continue
+			fmt.Fprintf(&b, "- %s = %g", m.Name, *m.Value)
+		} else {
+			fmt.Fprintf(&b, "- %s: UNAVAILABLE — %s", m.Name, m.Reason)
 		}
-		fmt.Fprintf(&b, "- %s: UNAVAILABLE — %s\n", m.Name, m.Reason)
+		// The shared projection classifies the model once. Keep that label on
+		// the value's own line so a placeholder does not become an unlabelled
+		// risk number on the final hop into the agent's context.
+		if m.Provenance != nil {
+			fmt.Fprintf(&b, " [model: %s", m.Provenance.Status)
+			if m.Provenance.Method != "" {
+				fmt.Fprintf(&b, "; method: %q", m.Provenance.Method)
+			}
+			b.WriteByte(']')
+		}
+		b.WriteByte('\n')
 	}
 	if len(reading.QualityFlags) > 0 {
 		// Named on the reading rather than folded into the values, because
