@@ -8,7 +8,7 @@ import (
 
 func TestMissingExecutionQuantityRemainsUnknown(t *testing.T) {
 	book := ledger.NewBook("PF")
-	breaks, leg := Reconcile(book, nil, Statement{PortfolioID: "PF", BusinessDate: day(1), Grain: GrainTransactions, Transactions: []Transaction{{ExternalRef: "unknown-quantity"}}}, nil)
+	breaks, leg := reconcileForTest(t, book, nil, Statement{PortfolioID: "PF", BusinessDate: day(1), Grain: GrainTransactions, Transactions: []Transaction{{ExternalRef: "unknown-quantity"}}}, nil)
 	if !leg.Ran() || len(breaks) != 1 {
 		t.Fatalf("reference comparison disappeared: %v %v", leg, breaks)
 	}
