@@ -61,6 +61,11 @@ For library APIs, dependency upgrades or toolchain/version questions, use
 Context7 can assist when available; current primary sources and repository pins
 still determine which version and behavior the evidence actually supports.
 
+For a Forge upgrade or preparation for an audit using imported methodology,
+follow [upstream maintenance](../../DEPENDENCIES.md#review-upstream-changes-during-forge-maintenance).
+Check current upstream evidence separately from local provenance; adopt changes
+only through a reviewed source update and supported installation.
+
 Financial methodology supports implementation choices and their proof; it does
 not turn an ordinary development task into an investment-analysis assignment.
 For policy changes, follow enforcement and audit evidence with engineering and
