@@ -3,6 +3,7 @@ package ledger
 import (
 	"math/big"
 	"sort"
+	"time"
 )
 
 // VenueAccountCash answers "what does this portfolio hold in okx-sub-1", per
@@ -76,6 +77,12 @@ func VenueAccountCash(events []*Event) map[string]map[string]*big.Rat {
 		add(byCcy, e.CashCurrency, e.Cash)
 	}
 	return out
+}
+
+// VenueAccountCashAsOf uses the same bitemporal entry selection as ReplayAsOf
+// before summing account cash. A zero bound leaves that axis unbounded.
+func VenueAccountCashAsOf(events []*Event, effectiveAsOf, knowledgeAsOf time.Time) map[string]map[string]*big.Rat {
+	return VenueAccountCash(sortedFor(events, effectiveAsOf, knowledgeAsOf, true))
 }
 
 // VenueAccounts returns the exchange accounts a journal touched, sorted, so a
