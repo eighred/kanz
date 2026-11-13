@@ -202,6 +202,11 @@ func runFromRecord(payload []byte) (Run, error) {
 		}
 		values := []**big.Rat{&b.IBOR, &b.Custodian, &b.Diff}
 		for i, decimal := range []*commonpb.Decimal{row.GetIbor(), row.GetCustodian(), row.GetDifference()} {
+			// An omitted optional figure in the immutable FACT is unavailable,
+			// including on a retry after the live break queue has changed.
+			if decimal == nil {
+				continue
+			}
 			value, ok := dec.FromProtoChecked(decimal)
 			if !ok {
 				return Run{}, ErrUnverifiedPrecision
