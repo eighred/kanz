@@ -131,6 +131,22 @@ func TestRustFeeTermsCompatibility(t *testing.T) {
 			f.Recovery.FeeApproval.Proposer = "\u0130"
 			f.Recovery.FeeApproval.Approver = " i "
 		}},
+		{"unicode17-cyrillic-actor", func(f *orderpb.Fill) {
+			f.Recovery.FeeApproval.Proposer = "\u1c89"
+			f.Recovery.FeeApproval.Approver = "\u2003\u1c8a\u00a0"
+		}},
+		{"unicode17-latin-actor", func(f *orderpb.Fill) {
+			f.Recovery.FeeApproval.Proposer = "\ua7cb"
+			f.Recovery.FeeApproval.Approver = "\u0264"
+		}},
+		{"unicode17-garay-actor", func(f *orderpb.Fill) {
+			f.Recovery.FeeApproval.Proposer = "\U00010d50"
+			f.Recovery.FeeApproval.Approver = "\U00010d70"
+		}},
+		{"unicode17-beria-actor", func(f *orderpb.Fill) {
+			f.Recovery.FeeApproval.Proposer = "\U00016ebb"
+			f.Recovery.FeeApproval.Approver = "\U00016ea0"
+		}},
 		{"blank-actor", func(f *orderpb.Fill) { f.Recovery.FeeApproval.Approver = "\u2003" }},
 		{"case-binding", func(f *orderpb.Fill) { f.Recovery.CaseId = "other" }},
 		{"malformed-digest", func(f *orderpb.Fill) { f.Recovery.FeeApproval.Digest = "z" + strings.Repeat("a", 63) }},

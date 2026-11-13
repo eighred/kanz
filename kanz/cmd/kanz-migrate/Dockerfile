@@ -14,7 +14,7 @@
 # and selecting with `--dir /migrations/<service>` means one image to build, sign,
 # and pin — instead of ten near-identical ones that can drift apart. The
 # initContainer in each Deployment points at its own subdirectory.
-FROM ghcr.io/eighred/base/golang:1.26.10 AS build
+FROM ghcr.io/eighred/base/golang:1.27.4 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
