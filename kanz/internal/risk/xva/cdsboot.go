@@ -3,6 +3,7 @@ package xva
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -37,7 +38,7 @@ type CDSQuote struct {
 }
 
 // ErrCDSBootstrap is returned when the quote set cannot be bootstrapped
-// (empty/non-ascending quotes, invalid recovery, or a spread curve so inverted
+// (invalid quotes/recovery, unusable model values, or a spread curve so inverted
 // it needs a negative forward hazard — an arbitrageable quote set).
 var ErrCDSBootstrap = errors.New("xva: cannot bootstrap CDS quotes")
 
@@ -48,7 +49,7 @@ func BootstrapCDS(quotes []CDSQuote, recovery float64, df func(t float64) float6
 	if len(quotes) == 0 {
 		return CreditCurve{}, fmt.Errorf("%w: no quotes", ErrCDSBootstrap)
 	}
-	if recovery < 0 || recovery >= 1 {
+	if !finiteCDS(recovery) || recovery < 0 || recovery >= 1 {
 		return CreditCurve{}, fmt.Errorf("%w: recovery %.4g outside [0,1)", ErrCDSBootstrap, recovery)
 	}
 	if df == nil {
@@ -56,6 +57,13 @@ func BootstrapCDS(quotes []CDSQuote, recovery float64, df func(t float64) float6
 	}
 	qs := make([]CDSQuote, len(quotes))
 	copy(qs, quotes)
+	// Check before sorting or evaluating the model: NaN does not order, and an
+	// infinite tenor would never finish forming the quarterly premium grid.
+	for _, q := range qs {
+		if !finiteCDS(q.Tenor) || q.Tenor <= 0 || !finiteCDS(q.Spread) || q.Spread < 0 {
+			return CreditCurve{}, fmt.Errorf("%w: tenor and spread must be finite, with tenor positive and spread nonnegative", ErrCDSBootstrap)
+		}
+	}
 	sort.Slice(qs, func(i, j int) bool { return qs[i].Tenor < qs[j].Tenor })
 
 	c := CreditCurve{Recovery: recovery}
@@ -63,9 +71,6 @@ func BootstrapCDS(quotes []CDSQuote, recovery float64, df func(t float64) float6
 	for _, q := range qs {
 		if q.Tenor <= 0 || q.Tenor <= prev {
 			return CreditCurve{}, fmt.Errorf("%w: tenors must be strictly ascending and positive (%.4g after %.4g)", ErrCDSBootstrap, q.Tenor, prev)
-		}
-		if q.Spread < 0 {
-			return CreditCurve{}, fmt.Errorf("%w: negative spread at %.4gy", ErrCDSBootstrap, q.Tenor)
 		}
 		h, err := solveHazard(c, q, df)
 		if err != nil {
@@ -84,24 +89,46 @@ func BootstrapCDS(quotes []CDSQuote, recovery float64, df func(t float64) float6
 // quote below the zero-hazard model spread needs a negative forward hazard
 // and is rejected.
 func solveHazard(c CreditCurve, q CDSQuote, df func(float64) float64) (float64, error) {
-	trial := func(h float64) float64 {
+	trial := func(h float64) (float64, error) {
 		t := CreditCurve{
 			Tenors:   append(append([]float64{}, c.Tenors...), q.Tenor),
 			Hazards:  append(append([]float64{}, c.Hazards...), h),
 			Recovery: c.Recovery,
 		}
-		return t.ParSpread(q.Tenor, df) - q.Spread
+		residual := t.ParSpread(q.Tenor, df) - q.Spread
+		if !finiteCDS(residual) {
+			return 0, fmt.Errorf("%w: unusable model spread at %.4gy", ErrCDSBootstrap, q.Tenor)
+		}
+		return residual, nil
 	}
 	lo, hi := 0.0, 20.0
-	if trial(lo) > 1e-12 {
+	low, err := trial(lo)
+	if err != nil {
+		return 0, err
+	}
+	if low > 0 {
 		return 0, fmt.Errorf("%w: quote %.6g at %.4gy needs a negative forward hazard", ErrCDSBootstrap, q.Spread, q.Tenor)
 	}
-	if trial(hi) < 0 {
+	if low == 0 {
+		return lo, nil
+	}
+	high, err := trial(hi)
+	if err != nil {
+		return 0, err
+	}
+	if high < 0 {
 		return 0, fmt.Errorf("%w: quote %.6g at %.4gy exceeds the solvable hazard range", ErrCDSBootstrap, q.Spread, q.Tenor)
+	}
+	if high == 0 {
+		return hi, nil
 	}
 	for i := 0; i < 200 && hi-lo > 1e-14; i++ {
 		mid := (lo + hi) / 2
-		if trial(mid) < 0 {
+		value, err := trial(mid)
+		if err != nil {
+			return 0, err
+		}
+		if value < 0 {
 			lo = mid
 		} else {
 			hi = mid
@@ -112,29 +139,51 @@ func solveHazard(c CreditCurve, q CDSQuote, df func(float64) float64) (float64, 
 
 // ParSpread returns the model par spread of a CDS maturing at T priced off the
 // curve: protection leg over risky PV01 on the quarterly grid. df nil means
-// undiscounted. T ≤ 0 returns 0.
+// undiscounted. T ≤ 0 returns 0. An unusable discount factor or numerical leg
+// returns NaN; BootstrapCDS converts it to ErrCDSBootstrap before publication.
 func (c CreditCurve) ParSpread(T float64, df func(t float64) float64) float64 {
 	if T <= 0 {
 		return 0
+	}
+	if !finiteCDS(T) {
+		return math.NaN()
 	}
 	if df == nil {
 		df = func(float64) float64 { return 1 }
 	}
 	var rpv01, prot float64
+	positiveLoss := false
 	prevT, prevQ := 0.0, 1.0
 	for _, t := range premiumGrid(T) {
 		q := c.Survival(t)
 		d := df(t)
 		delta := t - prevT
-		rpv01 += delta * d * (q + (prevQ-q)/2)
-		prot += d * (prevQ - q)
+		if !finiteCDS(q) || q < 0 || q > prevQ || !finiteCDS(d) || d <= 0 {
+			return math.NaN()
+		}
+		loss := prevQ - q
+		averageQ := q + loss/2
+		positiveLoss = positiveLoss || loss > 0
+		rpv01 += delta * d * averageQ
+		prot += d * loss
+		if !finiteCDS(rpv01) || !finiteCDS(prot) {
+			return math.NaN()
+		}
 		prevT, prevQ = t, q
 	}
-	if rpv01 == 0 {
-		return 0
+	// A vanished aggregate leg cannot report a measured zero spread. Tiny tail
+	// contributions may still underflow when the aggregate legs remain usable.
+	if rpv01 <= 0 || positiveLoss && prot == 0 {
+		return math.NaN()
 	}
-	return c.LGD() * prot / rpv01
+	spread := c.LGD() * prot / rpv01
+	if !finiteCDS(spread) || spread < 0 || prot > 0 && spread == 0 {
+		return math.NaN()
+	}
+	return spread
 }
+
+func finiteCDS(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 // premiumGrid is the quarterly payment schedule to maturity, with a final stub
 // at T when T is not a multiple of 0.25.
