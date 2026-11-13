@@ -41,7 +41,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/execution"
-	"math/big"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -198,7 +197,7 @@ func (v *BinanceVenue) withdrawnView(ctx context.Context, st *orderpb.OrderState
 	if binanceStatusToProto(resp.Status) == orderpb.OrderStatus_ORDER_STATUS_EXPIRED {
 		state = OrderViewExpired
 	}
-	traded, ok := new(big.Rat).SetString(resp.ExecutedQty)
+	traded, ok := parseDec(resp.ExecutedQty)
 	if !ok && resp.ExecutedQty != "" {
 		// BINANCE SENT A QUANTITY THIS CONNECTOR CANNOT READ, so it cannot
 		// establish whether the order traded before it was pulled. Answering the
@@ -211,7 +210,7 @@ func (v *BinanceVenue) withdrawnView(ctx context.Context, st *orderpb.OrderState
 				st.GetOrderId(), resp.Status, resp.ExecutedQty),
 		}, nil
 	}
-	if traded == nil || traded.Sign() <= 0 {
+	if traded == nil || traded.GetCoefficient() <= 0 {
 		return OrderView{State: state}, nil
 	}
 	fills, err := v.tradesFor(ctx, st, symbol, resp)

@@ -56,7 +56,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/execution"
-	"math/big"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
@@ -284,7 +283,7 @@ func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fetch func() 
 		// the traded arm above is caught by the empty-fills refusal, and here
 		// would silently adopt a partially traded order as one that traded
 		// nothing.
-		traded, ok := new(big.Rat).SetString(accFillSz)
+		traded, ok := ParseDec(accFillSz)
 		if !ok && accFillSz != "" {
 			return OrderView{
 				State: OrderViewIndeterminate,
@@ -294,7 +293,7 @@ func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fetch func() 
 					st.GetOrderId(), state, accFillSz),
 			}, nil
 		}
-		if traded == nil || traded.Sign() <= 0 {
+		if traded == nil || traded.GetCoefficient() <= 0 {
 			// The ordinary case, and the population #924 was opened for: an order
 			// withdrawn without trading. Nothing to fetch and nothing to carry.
 			return OrderView{State: OrderViewCancelled}, nil
