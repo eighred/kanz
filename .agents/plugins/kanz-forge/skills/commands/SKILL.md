@@ -56,6 +56,16 @@ security and verification. A comment correction needs the owning context and
 a diff check. A pricing fix adds financial verification; it does not require
 the user to know the pricing test command. Choose the smallest sufficient set.
 
+For library APIs, dependency upgrades or toolchain/version questions, use
+[version-specific documentation](references/context-and-evidence.md#check-version-specific-documentation).
+Use the bundled public name/HTTPS repository lookup and official versioned docs/tagged source;
+no Context7 connection is required. Available releases remain candidates until qualified.
+
+For a Forge upgrade or preparation for an audit using imported methodology,
+follow [upstream maintenance](../../DEPENDENCIES.md#review-upstream-changes-during-forge-maintenance).
+Check current upstream evidence separately from local provenance; adopt changes
+only through a reviewed source update and supported installation.
+
 Financial methodology supports implementation choices and their proof; it does
 not turn an ordinary development task into an investment-analysis assignment.
 For policy changes, follow enforcement and audit evidence with engineering and
@@ -115,6 +125,9 @@ issue only when the evidence covers its full acceptance. For a genuine external
 blocker, complete independent in-scope work, record the missing prerequisite
 and leave the issue open. Preserve explicit instructions to keep an issue open.
 
+Only the root coordinator dispatches workers; delegated workers never spawn or
+re-delegate, including writable coding workers. Return missing scope to the root.
+Use one shared worker budget and pass this restriction in every assignment.
 For `/work subagents N [targets]` or an explicit request for parallel agents,
 use the [native parallel-work protocol](references/parallel-work.md). Inspect
 host capacity, assign owned scopes, and collect actual worker evidence.
