@@ -122,12 +122,12 @@ vet: generate | $(GOTMPDIR) ## go vet
 	go vet ./...
 
 .PHONY: fmt
-fmt: ## gofmt-check tracked Go files (fails if any need formatting)
-	@unformatted=$$(git ls-files -z '*.go' | xargs -0 gofmt -l); \
-	if [ -n "$$unformatted" ]; then echo "needs gofmt:"; echo "$$unformatted"; exit 1; fi
+fmt: ## gofmt-check tracked and untracked nonignored Go files
+	@bash -o pipefail -c 'unformatted=$$(git ls-files -z --cached --others --exclude-standard "*.go" | xargs -0 gofmt -l) || exit $$?; \
+	if [ -n "$$unformatted" ]; then echo "needs gofmt:"; echo "$$unformatted"; exit 1; fi'
 
 .PHONY: lint
-lint: vet fmt ## vet + tracked gofmt + golangci-lint
+lint: vet fmt ## vet + nonignored Go formatting + golangci-lint
 	golangci-lint run ./...
 
 .PHONY: tidy
