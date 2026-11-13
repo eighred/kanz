@@ -321,16 +321,18 @@ func (op *Operation) Invoke(ctx context.Context, request *workerpb.WorkerRequest
 			w.onFailure()
 		}
 		joined = false
+		// ErrWorker already owns the terminal result. Join every child before
+		// releasing its operation; late pipe/exit errors cannot replace it.
 		go func() {
-			<-waitDone
+			<-waitDone //nolint:errcheck // ErrWorker already owns the terminal result.
 			if !readJoined {
 				<-readDone
 			}
 			if !pipes.write {
-				<-writeDone
+				<-writeDone //nolint:errcheck // ErrWorker already owns the terminal result.
 			}
 			if !pipes.stderr {
-				<-errorDone
+				<-errorDone //nolint:errcheck // ErrWorker already owns the terminal result.
 			}
 			op.childJoined()
 			op.release()

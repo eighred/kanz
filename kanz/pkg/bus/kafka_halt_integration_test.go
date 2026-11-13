@@ -183,7 +183,7 @@ func TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable(t *t
 	}
 	if !phase1Returned {
 		stop1()
-		<-subErr // let the subscription unwind before phase 2 joins the group
+		phase1Err = <-subErr // retain the outcome while joining before phase 2
 	}
 
 	// NON-VACUITY, and the precondition this test is actually about: the DLQ path

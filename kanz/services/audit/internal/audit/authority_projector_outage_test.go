@@ -80,7 +80,10 @@ func TestAuthorityCentralDatabaseOutageIsRetriedWithoutRedrive(t *testing.T) {
 	defer func() {
 		stop()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("worker shutdown: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("projector failed to stop")
 		}

@@ -103,7 +103,10 @@ func realDiscrepancyReplay(t *testing.T, subject string) {
 	defer func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("worker shutdown: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("subscriber failed to stop")
 		}

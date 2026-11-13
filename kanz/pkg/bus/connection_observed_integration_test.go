@@ -145,13 +145,13 @@ func TestIntegration_OnDisconnectStillFiresAlongsideTheDefaults(t *testing.T) {
 	metrics := bus.NewBusMetrics(reg)
 	scrape := startScrapeEndpoint(t, reg)
 
-	fired := make(chan error, 4)
+	fired := make(chan struct{}, 4)
 	const client = "conn-hook-it"
 	c, err := bus.DialNATS(ctx, bus.NATSConfig{
 		URL:          url,
 		Name:         client,
 		Metrics:      metrics,
-		OnDisconnect: func(err error) { fired <- err },
+		OnDisconnect: func(error) { fired <- struct{}{} },
 	})
 	if err != nil {
 		t.Fatalf("dial: %v", err)

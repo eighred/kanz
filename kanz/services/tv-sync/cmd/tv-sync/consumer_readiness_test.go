@@ -167,8 +167,8 @@ func TestTVReadinessClosesBeforeSiblingDrain(t *testing.T) {
 		t.Fatal("Broker stayed open during sibling drain")
 	}
 	select {
-	case <-done:
-		t.Fatal("fixture did not hold drain")
+	case err := <-done:
+		t.Fatalf("fixture did not hold drain: %v", err)
 	default:
 	}
 	// Parent context is deliberately still live: cancellation alone cannot mask

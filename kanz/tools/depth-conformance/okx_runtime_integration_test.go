@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -138,7 +139,10 @@ func TestRustOKXDepthProcessThroughJetStream(t *testing.T) {
 	t.Cleanup(func() {
 		if !stopped {
 			_ = cmd.Process.Kill()
-			<-done
+			var exit *exec.ExitError
+			if err := <-done; err != nil && !errors.As(err, &exit) {
+				t.Errorf("killed runtime join: %v", err)
+			}
 		}
 	})
 	httpc := &http.Client{Timeout: time.Second}

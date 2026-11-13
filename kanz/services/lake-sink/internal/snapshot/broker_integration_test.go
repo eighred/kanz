@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -187,9 +188,9 @@ func (b *snapshotBroker) start(mapped string) {
 			return
 		}
 		select {
-		case <-b.done:
+		case err := <-b.done:
 			b.process = nil
-			b.t.Fatal("owned broker exited before readiness")
+			b.t.Fatalf("owned broker exited before readiness: %v", err)
 		case <-ctx.Done():
 			b.t.Fatal("authenticated broker readiness unavailable")
 		case <-time.After(25 * time.Millisecond):
@@ -207,8 +208,12 @@ func (b *snapshotBroker) stop() {
 	}
 	_ = b.process.Process.Kill()
 	select {
-	case <-b.done:
+	case err := <-b.done:
 		b.process = nil
+		var exit *exec.ExitError
+		if err != nil && !errors.As(err, &exit) {
+			b.t.Errorf("owned broker join: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		b.t.Fatal("owned broker join unconfirmed")
 	}

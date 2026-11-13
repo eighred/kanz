@@ -50,8 +50,8 @@ func assertNoOwnedSessions(t *testing.T, f *fixture, w *worker) {
 		t.Fatal("recovery SQL session survived response while process alive")
 	}
 	select {
-	case <-w.done:
-		t.Fatal("process exited before independent cleanup observation")
+	case err := <-w.done:
+		t.Fatalf("process exited before independent cleanup observation: %v", err)
 	default:
 	}
 }
@@ -162,8 +162,8 @@ func TestRustRecoveryCumulativeStartupDeadline(t *testing.T) {
 					t.Fatal("failed startup retained transport before process exit")
 				}
 				select {
-				case <-w.done:
-					t.Fatal("failed startup exited before cleanup observation")
+				case err := <-w.done:
+					t.Fatalf("failed startup exited before cleanup observation: %v", err)
 				default:
 				}
 				if w.input.Close() != nil {
