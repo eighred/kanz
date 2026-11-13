@@ -89,6 +89,17 @@ class GitRefsTests(unittest.TestCase):
                 g.request(URL)
             conn.close.assert_called_once()
 
+    def test_response_deadline_closes_connection(self):
+        conn, response = Mock(), Mock()
+        response.status = 200
+        response.getheader.side_effect = lambda name, default="": default
+        conn.getresponse.return_value = response
+        with patch.object(g, "PublicHTTPS", return_value=conn), patch.object(g, "public_address", return_value="8.8.8.8"), patch.object(g.time, "monotonic", side_effect=[0, 21]):
+            with self.assertRaisesRegex(g.RefError, "response_timeout"):
+                g.request(URL)
+            response.read1.assert_not_called()
+            conn.close.assert_called_once()
+
     def test_smart_advertisement_annotated_tag_and_numeric_order(self):
         data = advertisement(f"{A} refs/tags/v1.9.0", f"{B} refs/tags/v1.10.0", f"{C} refs/tags/v1.10.0^{{}}")
         refs, sources = g.read_refs(URL, lambda url: (data, TYPE))
@@ -159,7 +170,8 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, int(reason == "http_404"))
 
     def test_private_or_mismatched_identity_refused(self):
-        for repo in ({"full_name": "publisher/repo", "private": True}, {"full_name": "other/repo", "private": False}):
+        for repo in ({"full_name": "publisher/repo", "private": True}, {"full_name": "other/repo", "private": False},
+                     {"full_name": None, "private": False}):
             read = Mock()
             result = self.discover("publisher/repo", observe=Mock(return_value={"status": "unknown", "reason": "http_404", "sources": []}),
                                    fetch=Mock(return_value=(repo, "d" * 64)), read=read)

@@ -63,7 +63,8 @@ def discover(value, observe, fetch, lookup_error, read=git_refs.read_refs, prefi
             api = "https://api.github.com/repos/" + project
             repo, digest = fetch(api)
             result["sources"].append({"url": api, "sha256": digest})
-            if (not isinstance(repo, dict) or repo.get("full_name", "").lower() != project.lower()
+            if (not isinstance(repo, dict) or not isinstance(repo.get("full_name"), str)
+                    or repo["full_name"].lower() != project.lower()
                     or repo.get("private") is not False):
                 raise lookup_error("repository_identity_mismatch")
             result["publisher_release"] = "not_found"
@@ -80,7 +81,7 @@ def discover(value, observe, fetch, lookup_error, read=git_refs.read_refs, prefi
         if summary["tag_status"] == "observed":
             result["selection"] = "latest_numeric_tag"
         else:
-            result.update(selection="default_branch", revision=summary["head_revision"], revision_kind="commit")
+            result.update(selection="default_branch", revision=summary["head_revision"], revision_kind="git_object")
         result["status"] = "observed"
     except (git_refs.RefError, lookup_error) as exc:
         result["reason"] = str(exc)

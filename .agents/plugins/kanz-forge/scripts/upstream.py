@@ -90,7 +90,8 @@ def observe(provider, project=None, tag=None, default_branch=False, fetch=public
             if default_branch:
                 result["selection"] = "default_branch"
                 repo = get(api)
-                if (not isinstance(repo, dict) or repo.get("full_name", "").lower() != project.lower()
+                if (not isinstance(repo, dict) or not isinstance(repo.get("full_name"), str)
+                        or repo["full_name"].lower() != project.lower()
                         or repo.get("private") is not False):
                     raise LookupError("repository_identity_mismatch")
                 branch = repo.get("default_branch")

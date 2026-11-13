@@ -19,7 +19,7 @@ class RefError(ValueError):
 
 def repository_url(value):
     try:
-        if not isinstance(value, str) or len(value) > 2048 or any(ord(char) <= 32 for char in value):
+        if not isinstance(value, str) or len(value) > 2048 or any(ord(char) <= 32 or ord(char) == 127 for char in value):
             raise RefError("invalid_repository_url")
         url = urlsplit(value)
         host = (url.hostname or "").encode("idna").decode("ascii").lower()
@@ -30,7 +30,7 @@ def repository_url(value):
                 or "." not in host or any(not part or part.startswith("-") or part.endswith("-") for part in host.split("."))
                 or not path.startswith("/") or path == "/"
                 or any(part in ("", ".", "..") for part in path[1:].split("/"))
-                or any(ord(char) < 33 or char == "\\" for char in path)):
+                or any(ord(char) < 33 or ord(char) == 127 or char == "\\" for char in path)):
             raise RefError("invalid_repository_url")
         return urlunsplit(("https", host, quote(path, safe="/._~-"), "", ""))
     except (ValueError, UnicodeError):
@@ -117,6 +117,7 @@ def packets(data):
 
 
 def read_refs(value, fetch=request):
+    # Protocol authority: https://git-scm.com/docs/http-protocol (v0 and dumb).
     url = repository_url(value)
     endpoint = url + "/info/refs?service=git-upload-pack"
     data, content_type = fetch(endpoint)
@@ -194,7 +195,7 @@ def read_refs(value, fetch=request):
 
 
 def ref_name(value):
-    return (len(value) <= 1024 and value.startswith("refs/") and not any(ord(char) <= 32 or char in "~^:?*[\\" for char in value)
+    return (len(value) <= 1024 and value.startswith("refs/") and not any(ord(char) <= 32 or ord(char) == 127 or char in "~^:?*[\\" for char in value)
             and ".." not in value and "//" not in value and "@{" not in value
             and not value.endswith(("/", "."))
             and all(not part.startswith(".") and not part.endswith(".lock") for part in value.split("/")))
