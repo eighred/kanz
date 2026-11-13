@@ -15,12 +15,12 @@ import (
 // fill-7 (+50), and settled an execution the book has never heard of (X9, +50, the
 // same instrument, the same size). The NETTED position and the NETTED cash agree
 // EXACTLY, so the four balance-grain break kinds report the line as fully correct
-// — one wrongly-booked execution, invisible.
+// â€” one wrongly-booked execution, invisible.
 //
 // This is the third of the three costs #1049 names: "a wrongly-booked execution
 // from a missing one, when both touch the same instrument". It is the honest
 // demonstration, and it is worth being precise about why: eleven correct fills do
-// NOT "net away" a twelfth that simply never settled — that one moves the total
+// NOT "net away" a twelfth that simply never settled â€” that one moves the total
 // and the netted pass does catch it, as a QUANTITY break naming the instrument
 // rather than the fill. What the netted pass cannot see is a difference that
 // CANCELS, and one execution replaced by another of the same size on the same
@@ -77,16 +77,16 @@ func custodianLines() []Transaction {
 func TestTransactionReconIsBlindAtTheNettedGrain(t *testing.T) {
 	book, executions, net, cash := twelveFills(t)
 
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		BusinessDate: day(1),
 		Positions:    map[string]*big.Rat{"AAPL": net},
 		Cash:         map[string]*big.Rat{"USD": cash},
-		// No grain asserted — the state every statement written before #1049 is in.
+		// No grain asserted â€” the state every statement written before #1049 is in.
 	}, nil)
 
 	if len(breaks) != 0 {
-		t.Fatalf("the netted comparison found %v, want NONE — this test exists to hold the "+
+		t.Fatalf("the netted comparison found %v, want NONE â€” this test exists to hold the "+
 			"demonstration that the totals agree", breaks)
 	}
 	if leg.Ran() {
@@ -106,7 +106,7 @@ func TestTransactionReconIsBlindAtTheNettedGrain(t *testing.T) {
 func TestTransactionReconNamesTheExecutionTheCustodianNeverSaw(t *testing.T) {
 	book, executions, net, cash := twelveFills(t)
 
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		BusinessDate: day(1),
 		Positions:    map[string]*big.Rat{"AAPL": net},
@@ -125,14 +125,14 @@ func TestTransactionReconNamesTheExecutionTheCustodianNeverSaw(t *testing.T) {
 	missingAtCustodian, ok := byKey["fill-7"]
 	if !ok {
 		t.Fatalf("no break names fill-7. The book holds it, the custodian's trade lines do not, and the "+
-			"netted totals agree — so this is the ONLY signal that an execution was booked against "+
+			"netted totals agree â€” so this is the ONLY signal that an execution was booked against "+
 			"something the custodian never settled. Got %d break(s): %v", len(breaks), breaks)
 	}
 	if missingAtCustodian.Kind != BreakExecutionMissingAtCustodian {
 		t.Errorf("fill-7 broke as %s, want %s", missingAtCustodian.Kind, BreakExecutionMissingAtCustodian)
 	}
 	if missingAtCustodian.IBOR.Cmp(dec.Rat("50")) != 0 {
-		t.Errorf("fill-7 IBOR figure = %s, want 50 — the break must name an amount an operator can act on",
+		t.Errorf("fill-7 IBOR figure = %s, want 50 â€” the break must name an amount an operator can act on",
 			missingAtCustodian.IBOR.FloatString(2))
 	}
 	missingInBook, ok := byKey["X9"]
@@ -176,14 +176,14 @@ func TestTransactionReconEmptyIsNotNone(t *testing.T) {
 		{"nobody asserted a grain", GrainUnknown, LegGrainUnknown, 0},
 		{"the custodian sends balances only", GrainBalancesOnly, LegBalancesOnly, 0},
 		// The ONLY reading under which an empty list is a claim: the custodian
-		// asserts its trade lines are complete, and it reported none — so every
+		// asserts its trade lines are complete, and it reported none â€” so every
 		// execution the book holds in the window is one it never saw.
 		{"the custodian asserts a complete and empty set", GrainTransactions, LegRan, 12},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stmt := base
 			stmt.Grain = tc.grain
-			breaks, leg := Reconcile(book, executions, stmt, nil)
+			breaks, leg := reconcileForTest(t, book, executions, stmt, nil)
 			if leg != tc.wantLeg {
 				t.Errorf("leg = %s, want %s", leg, tc.wantLeg)
 			}
@@ -212,7 +212,7 @@ func TestTransactionReconWindowsTheBookByBusinessDate(t *testing.T) {
 		TradeDate: day(0), SettlementBasis: ledger.SettlementSettled, SettlementDate: day(0),
 	})
 
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		BusinessDate: day(1),
 		Positions:    map[string]*big.Rat{"AAPL": net},
@@ -228,7 +228,7 @@ func TestTransactionReconWindowsTheBookByBusinessDate(t *testing.T) {
 			t.Fatalf("an execution that settled on %s was reported against a statement for %s.\n\n"+
 				"The book side is the whole comparison basis and a statement covers ONE business date. "+
 				"Unwindowed, the first run reports every execution the fund has ever made as one the "+
-				"custodian never saw — the real break buried under the entire trading history.",
+				"custodian never saw â€” the real break buried under the entire trading history.",
 				day(0).Format("2006-01-02"), day(1).Format("2006-01-02"))
 		}
 	}
@@ -239,7 +239,7 @@ func TestTransactionReconWindowsTheBookByBusinessDate(t *testing.T) {
 // not run rather than compare a whole journal against it.
 func TestTransactionReconRefusesAWindowlessStatement(t *testing.T) {
 	book, executions, net, cash := twelveFills(t)
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		Positions:    map[string]*big.Rat{"AAPL": net},
 		Cash:         map[string]*big.Rat{"USD": cash},
@@ -247,7 +247,7 @@ func TestTransactionReconRefusesAWindowlessStatement(t *testing.T) {
 		Grain:        GrainTransactions,
 	}, nil)
 	if leg != LegNoBusinessDate {
-		t.Fatalf("leg = %s, want %s — a statement with no business date has no window, and matching a "+
+		t.Fatalf("leg = %s, want %s â€” a statement with no business date has no window, and matching a "+
 			"whole journal against it reports every execution as missing at the custodian", leg, LegNoBusinessDate)
 	}
 	if len(breaks) != 0 {
@@ -270,11 +270,11 @@ func TestTransactionReconUsesTheTradeDateWhenNoSettlementDateIsAsserted(t *testi
 			"would silently drop it out of every transaction comparison",
 			got.Format("2006-01-02"), day(1).Format("2006-01-02"))
 	}
-	breaks, leg := Reconcile(ledger.NewBook("PF"), []ledger.Execution{unstated}, Statement{
+	breaks, leg := reconcileForTest(t, ledger.NewBook("PF"), []ledger.Execution{unstated}, Statement{
 		PortfolioID: "PF", BusinessDate: day(1), Grain: GrainTransactions,
 	}, nil)
 	if !leg.Ran() || len(breaks) != 1 || breaks[0].Key != "fill-unstated" {
-		t.Fatalf("leg = %s, breaks = %v — the trade-date fallback must put the execution IN the window", leg, breaks)
+		t.Fatalf("leg = %s, breaks = %v â€” the trade-date fallback must put the execution IN the window", leg, breaks)
 	}
 }
 
@@ -289,12 +289,12 @@ func TestBreakKindsCoversTheTransactionGrain(t *testing.T) {
 	for _, k := range []BreakKind{BreakExecutionMissingAtCustodian, BreakExecutionMissingInIBOR} {
 		if !have[k] {
 			t.Errorf("BreakKinds() omits %s. Metrics.SeedCustodian seeds the open-breaks gauge from it, "+
-				"so the kind would export no series until its first occurrence — and a rule over an "+
+				"so the kind would export no series until its first occurrence â€” and a rule over an "+
 				"absent series never fires, which means the alert is silent in exactly the state it "+
 				"exists to detect.", k)
 		}
 		if k.String() == "unknown" {
-			t.Errorf("break kind %d renders as \"unknown\" — that string is the stored kind column and "+
+			t.Errorf("break kind %d renders as \"unknown\" â€” that string is the stored kind column and "+
 				"every metric label", int(k))
 		}
 	}

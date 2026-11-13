@@ -36,7 +36,7 @@ func TestReconcileClean(t *testing.T) {
 		Positions:   map[string]*big.Rat{"AAPL": dec.Rat("100"), "MSFT": dec.Rat("200")},
 		Cash:        map[string]*big.Rat{"USD": b.CashBalance("USD")},
 	}
-	if breaks, _ := Reconcile(b, nil, stmt, nil); len(breaks) != 0 {
+	if breaks, _ := reconcileForTest(t, b, nil, stmt, nil); len(breaks) != 0 {
 		t.Fatalf("expected no breaks, got %v", breaks)
 	}
 }
@@ -52,7 +52,7 @@ func TestReconcileDetectsBreaks(t *testing.T) {
 		},
 		Cash: map[string]*big.Rat{"USD": dec.Rat("49000")}, // cash break
 	}
-	breaks, _ := Reconcile(b, nil, stmt, nil)
+	breaks, _ := reconcileForTest(t, b, nil, stmt, nil)
 	byKey := map[string]Break{}
 	for _, br := range breaks {
 		byKey[br.Key] = br
@@ -78,12 +78,12 @@ func TestReconcileTolerance(t *testing.T) {
 		Positions:   map[string]*big.Rat{"AAPL": dec.Rat("100.5"), "MSFT": dec.Rat("200")},
 		Cash:        map[string]*big.Rat{"USD": b.CashBalance("USD")},
 	}
-	// Within a tolerance of 1 share ⇒ no break.
-	if breaks, _ := Reconcile(b, nil, stmt, dec.Rat("1")); len(breaks) != 0 {
+	// Within a tolerance of 1 share â‡’ no break.
+	if breaks, _ := reconcileForTest(t, b, nil, stmt, dec.Rat("1")); len(breaks) != 0 {
 		t.Fatalf("within tolerance should not break, got %v", breaks)
 	}
-	// Exact match required ⇒ the 0.5 difference breaks.
-	if breaks, _ := Reconcile(b, nil, stmt, nil); len(breaks) != 1 || breaks[0].Kind != BreakQuantity {
+	// Exact match required â‡’ the 0.5 difference breaks.
+	if breaks, _ := reconcileForTest(t, b, nil, stmt, nil); len(breaks) != 1 || breaks[0].Kind != BreakQuantity {
 		t.Fatalf("exact match should detect the 0.5 break, got %v", breaks)
 	}
 }
