@@ -111,8 +111,11 @@ func venueOverFake(f *fakeBinance) *BinanceVenue {
 }
 
 func bdec(v string) *commonpb.Decimal {
-	r, _ := new(big.Rat).SetString(v)
-	return dec.ToProto(r)
+	d, ok := parseDec(v)
+	if !ok {
+		panic("invalid exact Binance decimal fixture")
+	}
+	return d
 }
 
 func marketOrder(id string) *orderpb.OrderState {
