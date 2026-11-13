@@ -17,13 +17,56 @@ func TestShockReturn(t *testing.T) {
 		[][]float64{{0.04, 0}, {0, 0.04}},
 		map[string]float64{"A": 0.01},
 	)
-	// shock Value +5%, Momentum −10% ⇒ 2·0.05 + (−1)·(−0.10) = 0.20.
-	r, ok := m.ShockReturn("A", map[string]float64{"Value": 0.05, "Momentum": -0.10})
-	if !ok || math.Abs(r-0.20) > 1e-12 {
+	// Independent rational oracle: 2*(1/20) + (-1)*(-1/10) = 1/5.
+	r, ok := m.ShockReturn("A", map[string]float64{"Value": 1.0 / 20, "Momentum": -1.0 / 10})
+	if !ok || !finite(r) || math.Abs(r-1.0/5) > 1e-12 {
 		t.Fatalf("shock return: got %.6f ok=%v want 0.20", r, ok)
 	}
 	if _, ok := m.ShockReturn("UNKNOWN", map[string]float64{"Value": 0.05}); ok {
 		t.Fatal("unknown instrument must report ok=false")
+	}
+}
+
+func TestShockReturnRefusesUnknownOrNonfiniteShocks(t *testing.T) {
+	m := oneFactorModel()
+	name := m.Factors[0].Name
+	for key, shocks := range map[string]map[string]float64{
+		"unknown":           {"missing": .1},
+		"unknown zero":      {"missing": 0},
+		"mixed":             {name: .1, "missing": -.1},
+		"NaN":               {name: math.NaN()},
+		"positive infinity": {name: math.Inf(1)},
+		"negative infinity": {name: math.Inf(-1)},
+	} {
+		t.Run(key, func(t *testing.T) {
+			if m.SupportsShocks(shocks) {
+				t.Fatal("unsupported request passed preflight")
+			}
+			if value, ok := m.ShockReturn("A", shocks); ok || value != 0 {
+				t.Fatalf("unsupported shock returned %v, %v", value, ok)
+			}
+		})
+	}
+	if value, ok := (*Model)(nil).ShockReturn("A", map[string]float64{name: .1}); ok || value != 0 {
+		t.Fatal("absent model was assessed")
+	}
+}
+
+func TestShockReturnDistinguishesSupportedZeroAndUnassessedArithmetic(t *testing.T) {
+	m := newModel([]Factor{{Name: "Value"}}, []string{"ZERO", "OVERFLOW", "BROKEN"}, [][]float64{{0}, {2}, {}}, [][]float64{{1}}, nil)
+	if value, ok := m.ShockReturn("ZERO", map[string]float64{"Value": math.MaxFloat64}); !ok || !finite(value) || value != 0 {
+		t.Fatalf("supported zero loading was refused: %v %v", value, ok)
+	}
+	for _, id := range []string{"MISSING", "BROKEN", "OVERFLOW"} {
+		if value, ok := m.ShockReturn(id, map[string]float64{"Value": math.MaxFloat64}); ok || value != 0 {
+			t.Fatalf("unassessed %s returned %v %v", id, value, ok)
+		}
+	}
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		m.Loadings[0][0] = value
+		if _, ok := m.ShockReturn("ZERO", map[string]float64{"Value": .1}); ok {
+			t.Fatal("nonfinite loading was assessed")
+		}
 	}
 }
 
