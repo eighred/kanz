@@ -95,8 +95,10 @@ Codex conversation memory or maintain a separate project-state database.
 [Version-aware documentation](skills/commands/references/context-and-evidence.md#check-version-specific-documentation)
 starts at official releases, versioned documentation and tagged source. The bundled
 [public upstream lookup](scripts/upstream.py) discovers current Go releases and
-GitHub release/default-branch identities without Context7, accounts, API keys or
-third-party packages. Failures remain unknown; a discovered version is not an
+GitHub releases, name-search candidates and refs from public HTTPS Git servers,
+independent of the target language and host, without Context7, accounts, API keys
+or third-party packages. Names require publisher identity verification; tags,
+published releases and unreleased HEAD remain distinct. Failures remain unknown; a discovered version is not an
 approved upgrade. See [dependencies](DEPENDENCIES.md#public-upstream-and-documentation-access).
 
 The optional [receipts utility](scripts/receipts.py) preserves existing pricing
@@ -208,7 +210,8 @@ checkout over current main or edit an installed cache.
 
 The 0.13 line adds repository engineering, branch recovery, changed-input blocker
 re-entry and reviewed continuation ranking. Version 0.13.1 adds direct publisher
-version discovery and root-only worker dispatch. Earlier version tests are
+version discovery and root-only worker dispatch. Version 0.14 adds public name
+discovery and host-independent HTTPS Git ref observations. Earlier version tests are
 historical, not evidence for this candidate. After approval,
 register the exact reviewed
 checkout through `codex plugin marketplace add <reviewed-checkout>` and reinstall
