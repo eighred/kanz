@@ -22,8 +22,8 @@ publish = false
 kanz-decimal-compat = { path = "../.." }
 kanz-order-core = { path = "../order-core" }
 kanz-proto-wire = { path = "../proto-wire" }
-prost = "=0.14.1"
-prost-reflect = "=0.16.2"
+prost = "=0.14.4"
+prost-reflect = "=0.16.5"
 bytes = "=1.12.1"
 http = "=1.5.0"
 tonic = { version = "=0.14.9", default-features = false, features = ["channel", "codegen"] }
@@ -39,7 +39,7 @@ spiffe-rustls = "=0.11.0"
 
 [build-dependencies]
 prost-build = "=0.14.1"
-protoc-bin-vendored = "=3.2.0"
+protoc-bin-vendored = "=3.3.0"
 
 [dev-dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -55,8 +55,8 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
-prost = "=0.14.1"
-prost-reflect = "=0.16.2"
+prost = "=0.14.4"
+prost-reflect = "=0.16.5"
 `
 const rustVenueBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = "../../../kanz-schemas/proto";

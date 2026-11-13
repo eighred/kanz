@@ -48,8 +48,8 @@ publish = false
 
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
 num-traits = "=0.2.19"
@@ -59,11 +59,11 @@ async-nats = { version = "=0.51.0", default-features = false, features = ["ring"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 spiffe = { version = "=0.19.0", features = ["x509-source"] }
 spiffe-rustls = "=0.11.0"
-uuid = { version = "=1.29.0", features = ["v7"] }
+uuid = { version = "=1.29.1", features = ["v7"] }
 
 [build-dependencies]
 prost-build = "=0.14.1"
-protoc-bin-vendored = "=3.2.0"
+protoc-bin-vendored = "=3.3.0"
 
 [dev-dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -78,8 +78,8 @@ publish = false
 [dependencies]
 kanz-market-feed = { path = "../../crates/market-feed" }
 kanz-decimal-compat = { path = "../.." }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "io-util", "sync"] }
@@ -97,7 +97,7 @@ publish = false
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
 kanz-market-feed = { path = "../../crates/market-feed" }
-prost-types = "=0.14.1"
+prost-types = "=0.14.4"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
