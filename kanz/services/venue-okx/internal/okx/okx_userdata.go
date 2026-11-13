@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"strconv"
@@ -241,6 +242,10 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		if !qok || !pok || !aok {
 			return fmt.Errorf("okx: order %s fill is not representable as a Decimal "+
 				"(fillSz=%q fillPx=%q accFillSz=%q)", orderID, d.FillSz, d.FillPx, d.AccFillSz)
+		}
+		if err := execution.ValidateExecutedPrice(qty, px); err != nil {
+			i.refusal.Refuse(orderID, err)
+			continue
 		}
 		// THE BOUND BETWEEN WHAT WAS ORDERED AND WHAT OKX SAYS IT FILLED (#1045).
 		//

@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // BinanceVenue implements the execution.Venue seam against Binance Spot (compiled
@@ -381,6 +382,9 @@ func (v *BinanceVenue) fills(resp *orderResponse, st *orderpb.OrderState) ([]*or
 		if !qok || !pok {
 			return nil, fmt.Errorf("binance: order %s fill %d is not representable as a Decimal (qty=%q price=%q)",
 				st.GetOrderId(), f.TradeID, f.Qty, f.Price)
+		}
+		if err := execution.ValidateExecutedPrice(qty, px); err != nil {
+			return nil, fmt.Errorf("binance: order %s fill %d: %w", st.GetOrderId(), f.TradeID, err)
 		}
 		feeMoney, feeOK := fee(f)
 		if !feeOK {

@@ -163,10 +163,16 @@ func TestOKXUnsupportedFillRefusesWholeReport(t *testing.T) {
 }
 
 func TestOKXFeeSignConversionIsExactOrRefuses(t *testing.T) {
-	for _, text := range []string{"-0.000000003", "0.000000003"} {
-		money, ok := okxFee(text, "USDT")
-		if !ok || money == nil || dec.FromProto(money.Amount).Cmp(big.NewRat(3, 1000000000)) != 0 {
-			t.Fatalf("fee %s = %v, %v", text, money, ok)
+	for _, tc := range []struct {
+		text string
+		want *big.Rat
+	}{
+		{"-0.000000003", big.NewRat(3, 1000000000)},
+		{"0.000000003", big.NewRat(-3, 1000000000)},
+	} {
+		money, ok := okxFee(tc.text, "USDT")
+		if !ok || money == nil || dec.FromProto(money.Amount).Cmp(tc.want) != 0 {
+			t.Fatalf("fee %s = %v, %v", tc.text, money, ok)
 		}
 	}
 	if money, ok := okxFee("-9223372036854775808", "USDT"); ok || money != nil {

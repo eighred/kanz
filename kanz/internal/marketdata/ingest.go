@@ -216,6 +216,9 @@ func knowledgeTime(env *envelopepb.Envelope) (time.Time, error) {
 // currency_code is left empty — market.v1 carries none; a later reference-data
 // join (reference.v1.InstrumentReference.currency_code) fills it.
 func TranslateEvent(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store.Observation, error) {
+	if err := validateEventTimes(ev); err != nil {
+		return store.Observation{}, err
+	}
 	instrument := ev.GetInstrumentId()
 	if instrument == "" {
 		instrument = env.GetPartitionKey()
@@ -280,6 +283,9 @@ func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store
 	d, isBar := ev.GetData().(*marketpb.MarketDataEvent_Bar)
 	if !isBar {
 		return store.Bar{}, false, nil
+	}
+	if err := validateEventTimes(ev); err != nil {
+		return store.Bar{}, false, err
 	}
 	b := d.Bar
 	openTime, closeTime := tsToTime(b.GetOpenTime()), tsToTime(b.GetCloseTime())
@@ -409,6 +415,27 @@ func tsToTime(ts *timestamppb.Timestamp) time.Time {
 	return ts.AsTime()
 }
 
+// AsTime normalizes malformed wire values. Validate present payload fields
+// before conversion; absence alone retains the existing fallback contract.
+func validatePayloadTime(field string, ts *timestamppb.Timestamp) error {
+	if ts != nil {
+		if err := ts.CheckValid(); err != nil {
+			return fmt.Errorf("marketdata: invalid %s: %w", field, err)
+		}
+	}
+	return nil
+}
+
+func validateEventTimes(ev *marketpb.MarketDataEvent) error {
+	if err := validatePayloadTime("event_time", ev.GetEventTime()); err != nil {
+		return err
+	}
+	if err := validatePayloadTime("bar.open_time", ev.GetBar().GetOpenTime()); err != nil {
+		return err
+	}
+	return validatePayloadTime("bar.close_time", ev.GetBar().GetCloseTime())
+}
+
 // TranslateCoverage maps a market.v1.IngestionCoverage FACT onto a stored
 // attestation (#591).
 //
@@ -437,6 +464,12 @@ func TranslateCoverage(env *envelopepb.Envelope, cov *marketpb.IngestionCoverage
 	var out store.Coverage
 	if cov == nil {
 		return out, fmt.Errorf("marketdata: %s carries no coverage payload", env.GetEventType())
+	}
+	if err := validatePayloadTime("bucket_start", cov.GetBucketStart()); err != nil {
+		return out, err
+	}
+	if err := validatePayloadTime("bucket_end", cov.GetBucketEnd()); err != nil {
+		return out, err
 	}
 	start := tsToTime(cov.GetBucketStart())
 	end := tsToTime(cov.GetBucketEnd())

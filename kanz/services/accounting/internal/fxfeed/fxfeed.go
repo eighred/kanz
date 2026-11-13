@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -43,7 +44,13 @@ type LiveFX struct {
 	pairCcy map[string]string
 
 	mu    sync.RWMutex
-	rates map[string]*big.Rat // foreign currency -> reporting per 1 unit
+	rates map[string]rateObservation // foreign currency -> latest observation
+}
+
+type rateObservation struct {
+	at       time.Time
+	rate     *big.Rat // reporting currency per 1 foreign unit
+	conflict bool
 }
 
 // New builds a cache quoting into reporting for the configured pairs (FX
@@ -53,7 +60,7 @@ func New(reporting string, pairs map[string]string) *LiveFX {
 	for k, v := range pairs {
 		cp[k] = v
 	}
-	return &LiveFX{reporting: reporting, pairCcy: cp, rates: map[string]*big.Rat{}}
+	return &LiveFX{reporting: reporting, pairCcy: cp, rates: map[string]rateObservation{}}
 }
 
 // Handler is the bus.EventHandler the composition root subscribes to the market
@@ -71,13 +78,33 @@ func (l *LiveFX) Handler(_ context.Context, env *envelopepb.Envelope, payload []
 	if !ok {
 		return nil
 	}
+	if ev.GetEventTime() == nil || ev.GetEventTime().CheckValid() != nil {
+		return fmt.Errorf("fxfeed: %s requires a valid payload event_time", ev.GetInstrumentId())
+	}
+	at := ev.GetEventTime().AsTime()
 	rate, ok := midRat(&ev)
 	if !ok || rate.Sign() <= 0 {
 		return nil // no usable mid; keep the prior rate serving
 	}
 	l.mu.Lock()
-	l.rates[ccy] = rate
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	if previous, seen := l.rates[ccy]; seen {
+		if at.Before(previous.at) {
+			return nil
+		}
+		if at.Equal(previous.at) {
+			if !previous.conflict && rate.Cmp(previous.rate) == 0 {
+				return nil
+			}
+			// Equal-time contradictory observations provide no ordering evidence.
+			// Retain their watermark while withholding the currency; deleting it
+			// would let an older clean replay revive a valuation already in doubt.
+			previous.conflict = true
+			l.rates[ccy] = previous
+			return fmt.Errorf("fxfeed: conflicting %s rate at %s", ccy, at.Format(time.RFC3339Nano))
+		}
+	}
+	l.rates[ccy] = rateObservation{at: at, rate: rate}
 	return nil
 }
 
@@ -87,7 +114,13 @@ func (l *LiveFX) Handler(_ context.Context, env *envelopepb.Envelope, payload []
 func (l *LiveFX) Converter() accounting.FXConverter {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return accounting.NewFXTable(l.reporting, l.rates)
+	rates := make(map[string]*big.Rat, len(l.rates))
+	for currency, observation := range l.rates {
+		if !observation.conflict {
+			rates[currency] = observation.rate
+		}
+	}
+	return accounting.NewFXTable(l.reporting, rates)
 }
 
 // midRat extracts the exact mid rate from an FX market event: a quote's bid/ask

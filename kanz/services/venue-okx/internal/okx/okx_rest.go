@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
 
 // okxREST is a minimal, dependency-free OKX v5 REST client. OKX signs with
@@ -385,7 +386,7 @@ func (c *okxREST) tickerPrice(ctx context.Context, instID string) (string, error
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v5/market/ticker?instId="+instID, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("okx: create REST request: %w", transporterr.Redact(err))
 	}
 	raw, err := c.do(req)
 	if err != nil {
@@ -410,12 +411,12 @@ func (c *okxREST) tickerPrice(ctx context.Context, instID string) (string, error
 func (c *okxREST) do(req *http.Request) ([]byte, error) {
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("okx: send REST request: %w", transporterr.Redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("okx: read REST response: %w", transporterr.Redact(err))
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("%w: %s status %d", ErrEgressDenied, req.URL.Path, resp.StatusCode)
@@ -454,7 +455,7 @@ func (c *okxREST) signedRequestRaw(ctx context.Context, method, requestPath stri
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+requestPath, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("okx: create REST request: %w", transporterr.Redact(err))
 	}
 	cred := exchangeauth.Credential{APIKey: c.apiKey, APISecret: string(c.apiSecret), Passphrase: c.passphrase}
 	if err := exchangeauth.SignOKX(req.Header, cred, ts, method, requestPath, string(bodyBytes), c.mode); err != nil {
@@ -466,21 +467,21 @@ func (c *okxREST) signedRequestRaw(ctx context.Context, method, requestPath stri
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("okx: send REST request: %w", transporterr.Redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("okx: read REST response: %w", transporterr.Redact(err))
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("%w: %s status %d", ErrEgressDenied, requestPath, resp.StatusCode)
+		return nil, fmt.Errorf("%w: REST request status %d", ErrEgressDenied, resp.StatusCode)
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return nil, ErrRateLimited
 	}
 	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("okx: %s: status %d", requestPath, resp.StatusCode)
+		return nil, fmt.Errorf("okx: REST request status %d", resp.StatusCode)
 	}
 	return raw, nil
 }

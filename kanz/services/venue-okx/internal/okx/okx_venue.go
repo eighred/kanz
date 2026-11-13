@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/orderid"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
@@ -383,6 +384,9 @@ func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string
 			return nil, fmt.Errorf("okx: order %s trade %s is not representable as a Decimal "+
 				"(fillSz=%q fillPx=%q)", st.GetOrderId(), t.TradeID, t.FillSz, t.FillPx)
 		}
+		if err := execution.ValidateExecutedPrice(qty, px); err != nil {
+			return nil, fmt.Errorf("okx: order %s trade %s: %w", st.GetOrderId(), t.TradeID, err)
+		}
 		feeMoney, feeOK := okxFee(t.Fee, t.FeeCcy)
 		if !feeOK {
 			return nil, fmt.Errorf("okx: order %s trade %s fee %q %s is not representable as a Decimal",
@@ -416,7 +420,7 @@ func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string
 	return out, nil
 }
 
-// okxFee reads a fee OKX charged. A nil Money means NO FEE — so ok=false is a
+// okxFee translates an OKX charge or rebate. A nil Money means NO FEE — so ok=false is a
 // separate answer for "there is a fee and it could not be read" (#94). Collapsing
 // the two would drop a real cost silently, which understates what the trade cost.
 //
@@ -432,15 +436,15 @@ func okxFee(fee, ccy string) (*commonpb.Money, bool) {
 	if !ok {
 		return nil, false
 	}
-	// OKX reports fee as a negative number when charged; store its magnitude.
-	if r := dec.FromProto(amt); r.Sign() < 0 {
-		neg, nok := dec.ToProtoExact(r.Neg(r))
-		if !nok {
-			return nil, false
-		}
-		amt = neg
+	// OKX's negative charge / positive rebate is the opposite of canonical
+	// expense. Negate exactly: taking an absolute value would turn rebates into
+	// charges in the ledger and execution-cost measurement.
+	r := dec.FromProto(amt)
+	neg, ok := dec.ToProtoExact(r.Neg(r))
+	if !ok {
+		return nil, false
 	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: ccy}, true
+	return &commonpb.Money{Amount: neg, CurrencyCode: ccy}, true
 }
 
 func okxSide(s orderpb.Side) (string, error) {

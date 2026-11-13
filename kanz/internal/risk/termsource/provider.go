@@ -211,7 +211,9 @@ func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
 	if !ok || coupon < 0 {
 		return compute.BondSpec{}, false
 	}
-	if b.GetIssueDate() == nil || b.GetMaturityDate() == nil {
+	// AsTime normalizes malformed wire dates; a usable schedule requires
+	// canonical timestamps rather than normalized substitutes.
+	if b.GetIssueDate().CheckValid() != nil || b.GetMaturityDate().CheckValid() != nil {
 		return compute.BondSpec{}, false
 	}
 	issue, maturity := b.GetIssueDate().AsTime(), b.GetMaturityDate().AsTime()
