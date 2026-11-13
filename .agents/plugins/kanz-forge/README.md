@@ -63,7 +63,10 @@ or qualify an untested migration by themselves.
 
 The [parallel protocol](skills/commands/references/parallel-work.md) assigns
 ownership, acceptance criteria, dependencies, and a return contract before
-dispatch. Independent edits use disjoint files in a shared checkout or separate
+dispatch. Only the root dispatches; workers never spawn other workers, including
+writable coding workers. The root preserves one shared limit and passes the leaf
+restriction with every assignment. These instructions do not revoke host tools.
+Independent edits use disjoint files in a shared checkout or separate
 worktrees. Shared contracts, generated artifacts, infrastructure state, and
 integration changes are sequenced. Worker failure or incomplete evidence keeps
 the dependent task blocked; it does not become success by omission.
@@ -90,11 +93,11 @@ conclusions must be checked against the current revision. Forge does not copy
 Codex conversation memory or maintain a separate project-state database.
 
 [Version-aware documentation](skills/commands/references/context-and-evidence.md#check-version-specific-documentation)
-uses an available Context7 connection for focused API/version questions and
-checks release or security-fix claims against current primary sources. Missing
-index versions, access or quota fall back to official docs and tagged source.
-Context7 is optional; no package, account or paid plan is added to Forge. Its
-open client and hosted backend are distinct; see [dependencies](DEPENDENCIES.md#optional-documentation-access).
+starts at official releases, versioned documentation and tagged source. The bundled
+[public upstream lookup](scripts/upstream.py) discovers current Go releases and
+GitHub release/default-branch identities without Context7, accounts, API keys or
+third-party packages. Failures remain unknown; a discovered version is not an
+approved upgrade. See [dependencies](DEPENDENCIES.md#public-upstream-and-documentation-access).
 
 The optional [receipts utility](scripts/receipts.py) preserves existing pricing
 test history at `~/.kanz-forge/receipts-v1.sqlite`. It scopes records by the Git
@@ -203,9 +206,10 @@ applicable CI and the disposable installation test. Preserve existing user
 configuration and optional receipt data. Do not copy the whole older dirty
 checkout over current main or edit an installed cache.
 
-The 0.13 candidate extends 0.12 with repository engineering and branch recovery,
-changed-input blocker re-entry, and reviewed continuation ranking. Earlier
-version tests are historical, not evidence for this candidate. After approval,
+The 0.13 line adds repository engineering, branch recovery, changed-input blocker
+re-entry and reviewed continuation ranking. Version 0.13.1 adds direct publisher
+version discovery and root-only worker dispatch. Earlier version tests are
+historical, not evidence for this candidate. After approval,
 register the exact reviewed
 checkout through `codex plugin marketplace add <reviewed-checkout>` and reinstall
 with `codex plugin add kanz-forge@kanz-local`. Verify the reported version/source,
