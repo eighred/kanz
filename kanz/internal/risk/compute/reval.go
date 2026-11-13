@@ -80,6 +80,10 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 	if baseMV == nil {
 		return unassessed(SkipInvalidPricing)
 	}
+	baseAmount, readable := decutil.Float64(baseMV.GetAmount())
+	if !readable {
+		return unassessed(SkipInvalidPricing)
+	}
 	// NIL-GUARDED, like greeks.go. These two were dereferenced unconditionally
 	// and a GreeksProviders with no Spot or Vol panicked on the first option —
 	// the same defect, on the same struct, reached from the scenario path instead
@@ -124,7 +128,7 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 	shockedPrice := pricing.Price(spec.Type, spec.Exercise, shockedSpot, spec.Strike, ttm, r, 0, shockedVol)
 
 	ratio := shockedPrice / basePrice
-	newAmount := decutil.Float64Or(baseMV.GetAmount(), 0) * ratio
+	newAmount := baseAmount * ratio
 	if !representablePricingAmount(newAmount, revalMoneyExp) {
 		return unassessed(SkipInvalidPricing)
 	}

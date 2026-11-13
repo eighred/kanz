@@ -51,6 +51,47 @@ func TestRevaluer_RepricesNonlinearly(t *testing.T) {
 	}
 }
 
+func TestRevalueOptionRejectsUnknownBaseAmount(t *testing.T) {
+	asOf := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	providers := GreeksProviders{
+		Terms: staticTerms{"OPT": {UnderlyingID: "UND", Strike: 100, Expiry: asOf.AddDate(1, 0, 0),
+			Type: pricing.Call, Exercise: pricing.European, Multiplier: 1}},
+		Spot: staticSpot{"UND": 100}, Vol: constVol(0.2),
+	}
+	for _, tc := range []struct {
+		name string
+		base *commonpb.Money
+	}{
+		{"missing money", nil},
+		{"missing amount", &commonpb.Money{CurrencyCode: "USD"}},
+		{"unsupported amount", &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 1, Exponent: 2_147_483_647}, CurrencyCode: "USD"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			skips := 0
+			p := providers
+			p.OnSkip = func(id, reason string) {
+				skips++
+				if id != "OPT" || reason != SkipInvalidPricing {
+					t.Errorf("unexpected exclusion %s/%s", id, reason)
+				}
+			}
+			result := NewRevaluer(p).RevalueOption(context.Background(), "OPT", asOf, tc.base, RevalShocks{})
+			if result.Status != RevalUnassessed || result.Value != nil || result.Reason != SkipInvalidPricing || skips != 1 {
+				t.Fatalf("unknown base became a priced result: %+v, exclusions=%d", result, skips)
+			}
+		})
+	}
+	for _, amount := range []int64{0, 100} {
+		base := &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: amount}, CurrencyCode: "USD"}
+		result := NewRevaluer(providers).RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{})
+		value, ok := decutil.Float64(result.Value.GetAmount())
+		// No shock means a ratio of one, including a genuinely reported zero.
+		if result.Status != RevalPriced || !ok || value != float64(amount) {
+			t.Fatalf("known base %d was not preserved: %+v", amount, result)
+		}
+	}
+}
+
 // THE SCENARIO PATH REPORTS ITS DEGRADATIONS TOO (#509).
 //
 // RevalueOption falling back to the linear path is CORRECT here — a scenario must
