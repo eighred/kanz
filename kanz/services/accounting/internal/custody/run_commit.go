@@ -65,15 +65,17 @@ func NewMemoryStoreWithOutbox(queue *outbox.Memory) (*MemoryStore, error) {
 func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if prior, ok := m.committed[run.RunID]; ok {
+	if ref, ok := m.runIDs[run.RunID]; ok {
+		if !ref.completionCaptured {
+			return Run{}, ErrRunCompletionMissing
+		}
+		prior := m.runs[ref.pair][ref.index]
 		if prior.Subject.Key() != run.Subject.Key() {
 			return Run{}, ErrRunIdentityConflict
 		}
 		return cloneRun(prior), nil
 	}
-	if _, ok := m.runIDs[run.RunID]; ok {
-		return Run{}, ErrRunCompletionMissing
-	}
+	run = cloneRun(run)
 	// Stage into a detached map. Encoding/tenant/outbox refusal must leave the
 	// original lifecycle intact, just as a PostgreSQL rollback does.
 	staged := NewMemoryStore()
@@ -95,9 +97,7 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, err
 	}
 	m.breaks = staged.breaks
-	m.runIDs[run.RunID] = struct{}{}
-	m.runs[pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)] = append(m.runs[pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)], cloneRun(run))
-	m.committed[run.RunID] = cloneRun(run)
+	m.appendRunLocked(run, true)
 	return cloneRun(run), nil
 }
 
