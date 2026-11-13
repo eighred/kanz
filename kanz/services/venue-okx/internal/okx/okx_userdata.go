@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
-	"math/big"
 	"strconv"
 	"time"
 
@@ -163,8 +162,11 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		return nil
 	}
 	for _, d := range msg.Data {
-		fsz, ok := new(big.Rat).SetString(d.FillSz)
-		if !ok || fsz.Sign() <= 0 {
+		if d.FillSz == "" && d.TradeID == "" {
+			continue // order-state notification with no execution fields
+		}
+		fsz, parsed := ParseDec(d.FillSz)
+		if parsed && fsz.GetCoefficient() <= 0 {
 			continue // not a fill (state change only)
 		}
 		// OUR ID, WHICHEVER FIELD CARRIES IT. algoClOrdId when the order was

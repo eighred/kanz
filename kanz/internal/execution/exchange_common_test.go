@@ -90,7 +90,7 @@ func TestParseDecAndFormatDecRoundTrip(t *testing.T) {
 		if !ok {
 			t.Fatalf("ParseDec(%q) refused", s)
 		}
-		if got := FormatDec(d); got != s {
+		if got, err := FormatDec(d); err != nil || got != s {
 			t.Errorf("FormatDec(ParseDec(%q)) = %q — the venue would receive a different "+
 				"number than the one read", s, got)
 		}

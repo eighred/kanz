@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -266,12 +265,16 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 	if err := orderid.Valid(st.GetOrderId()); err != nil {
 		return nil, fmt.Errorf("okx: %w", err)
 	}
+	quantity, err := FormatDec(st.GetOrderedQuantity())
+	if err != nil {
+		return nil, fmt.Errorf("okx: sz: %w", err)
+	}
 	body := map[string]string{
 		"instId":  instID,
 		"tdMode":  "cash", // spot
 		"side":    side,
 		"clOrdId": st.GetOrderId(), // deterministic ⇒ exchange-side idempotency
-		"sz":      FormatDec(st.GetOrderedQuantity()),
+		"sz":      quantity,
 	}
 	switch st.GetOrderType() {
 	case orderpb.OrderType_ORDER_TYPE_MARKET:
@@ -286,7 +289,11 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 			return nil, terr
 		}
 		body["ordType"] = ordType
-		body["px"] = FormatDec(st.GetLimitPrice())
+		price, err := FormatDec(st.GetLimitPrice())
+		if err != nil {
+			return nil, fmt.Errorf("okx: px: %w", err)
+		}
+		body["px"] = price
 	default:
 		return nil, fmt.Errorf("okx: unsupported order type %v", st.GetOrderType())
 	}
@@ -318,8 +325,11 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 // uses, and it mints the id the websocket mints. This is the Binance connector's
 // shape (binance_query.go's tradesFor), one venue over.
 func (v *OKXVenue) tradedFills(ctx context.Context, o *okxOrder, st *orderpb.OrderState, instID string) ([]*orderpb.Fill, error) {
-	acc, ok := new(big.Rat).SetString(o.AccFillSz)
-	if !ok || acc.Sign() <= 0 {
+	acc, ok := ParseDec(o.AccFillSz)
+	if !ok {
+		return nil, fmt.Errorf("okx: order %s has an unreadable cumulative fill size", st.GetOrderId())
+	}
+	if acc.GetCoefficient() <= 0 {
 		// NOTHING TRADED, so nothing is asked. A resting limit is the common case
 		// and it must not spend six units of the weight budget to learn that.
 		return nil, nil
@@ -356,7 +366,7 @@ func (v *OKXVenue) tradedFills(ctx context.Context, o *okxOrder, st *orderpb.Ord
 func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string) ([]*orderpb.Fill, error) {
 	out := make([]*orderpb.Fill, 0, len(trades))
 	for _, t := range trades {
-		if sz, szOK := new(big.Rat).SetString(t.FillSz); szOK && sz.Sign() <= 0 {
+		if sz, szOK := ParseDec(t.FillSz); szOK && sz.GetCoefficient() <= 0 {
 			// NOT AN EXECUTION. OKX reports fee-only rows on this endpoint for
 			// some instrument types; a zero-size row is not a trade and must not
 			// become a zero-quantity fill in the position book.
@@ -424,7 +434,7 @@ func okxFee(fee, ccy string) (*commonpb.Money, bool) {
 	}
 	// OKX reports fee as a negative number when charged; store its magnitude.
 	if r := dec.FromProto(amt); r.Sign() < 0 {
-		neg, nok := dec.ToProtoScaled(r.Neg(r))
+		neg, nok := dec.ToProtoExact(r.Neg(r))
 		if !nok {
 			return nil, false
 		}
@@ -534,6 +544,14 @@ func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, erro
 	if dec.IsZero(st.GetStopPrice()) {
 		return nil, errors.New("okx: a stop order requires a positive trigger price")
 	}
+	triggerPrice, err := FormatDec(st.GetStopPrice())
+	if err != nil {
+		return nil, fmt.Errorf("okx: triggerPx: %w", err)
+	}
+	quantity, err := FormatDec(st.GetOrderedQuantity())
+	if err != nil {
+		return nil, fmt.Errorf("okx: sz: %w", err)
+	}
 	body := map[string]string{
 		"instId": instID,
 		"tdMode": "cash", // spot
@@ -543,8 +561,8 @@ func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, erro
 		// carries ours on, and the field okx_userdata.go reads first.
 		"algoClOrdId": st.GetOrderId(),
 		"ordType":     "trigger",
-		"sz":          FormatDec(st.GetOrderedQuantity()),
-		"triggerPx":   FormatDec(st.GetStopPrice()),
+		"sz":          quantity,
+		"triggerPx":   triggerPrice,
 	}
 	switch st.GetOrderType() {
 	case orderpb.OrderType_ORDER_TYPE_STOP:
@@ -553,7 +571,11 @@ func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, erro
 		if dec.IsZero(st.GetLimitPrice()) {
 			return nil, errors.New("okx: a stop-limit order requires a positive limit price")
 		}
-		body["orderPx"] = FormatDec(st.GetLimitPrice())
+		price, err := FormatDec(st.GetLimitPrice())
+		if err != nil {
+			return nil, fmt.Errorf("okx: orderPx: %w", err)
+		}
+		body["orderPx"] = price
 	default:
 		return nil, fmt.Errorf("okx: %v is not a conditional order type", st.GetOrderType())
 	}
