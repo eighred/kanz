@@ -222,6 +222,12 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 	// dropped it quietly would leave the portfolio reading UNGOVERNED — which
 	// under OMS_REQUIRE_MANDATE=false is admitted with no constraints, not
 	// refused (#243).
+	// Validate the entire retained set before replacing any readable version.
+	for _, m := range ms {
+		if err := validateMandateRuleContracts(m); err != nil {
+			return nil, err
+		}
+	}
 	for _, m := range ms {
 		if err := l.reg.Put(m); err != nil {
 			return nil, err
@@ -372,6 +378,9 @@ func ValidateMandate(m *compliancepb.Mandate) error {
 		// refuses the input.
 		return fmt.Errorf("%w: effective_at is required: it is part of what the approval covers, "+
 			"so it cannot be defaulted per-invocation", ErrMandateIncomplete)
+	}
+	if err := validateMandateRuleContracts(m); err != nil {
+		return err
 	}
 	for _, rule := range m.GetRules() {
 		if _, valid := violationSeverity(rule); !valid {

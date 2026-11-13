@@ -462,20 +462,9 @@ func (r *Registry) Register(t compliancepb.RuleType, fn RuleFunc) { r.funcs[t] =
 // type. Deployments override by constructing this and re-Registering.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
-	r.Register(compliancepb.RuleType_RULE_TYPE_CONCENTRATION, ConcentrationRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_RESTRICTION, RestrictionRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_ISSUER_EXCLUSION, IssuerExclusionRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_GROSS_LEVERAGE, LeverageRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_CURRENCY, CurrencyRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_BUYING_POWER, BuyingPowerRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_RISK_MEASURE, RiskLimitRule)
-	r.Register(compliancepb.RuleType_RULE_TYPE_VENUE_MARGIN, VenueMarginRule)
-	// REGISTERED HERE AND NOT AT A COMPOSITION ROOT (#963). This is the only
-	// registry both the OMS pre-trade gate and the compliance monitor construct,
-	// so a rule wired anywhere else would be armed on one of the two paths and
-	// silently absent on the other — and the path it would be missing from is the
-	// passive sweep, which is the only one that enforces this rule at all.
-	r.Register(compliancepb.RuleType_RULE_TYPE_CASH_BUFFER, CashBufferRule)
+	for typ, contract := range baselineRuleContracts {
+		r.Register(typ, contract.evaluate)
+	}
 	return r
 }
 
@@ -513,6 +502,16 @@ func (e *Engine) Evaluate(ctx context.Context, c *Candidate, m *compliancepb.Man
 				Severity: compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH,
 				Message:  "unsupported violation severity — mandate cannot be evaluated",
 				Evidence: map[string]string{"on_violation": rule.GetOnViolation().String()},
+			})
+			res.Status = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+			continue
+		}
+		if err := validateRuleContract(rule); err != nil {
+			res.Violations = append(res.Violations, &compliancepb.Violation{
+				RuleId: rule.GetRuleId(), RuleType: rule.GetType(),
+				Severity: compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH,
+				Message:  "mandate rule cannot be evaluated: " + err.Error(),
+				Evidence: map[string]string{"contract": "unreadable"},
 			})
 			res.Status = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 			continue
