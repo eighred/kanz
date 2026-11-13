@@ -27,7 +27,7 @@ func TestSIMM_WithDefaultCalibration(t *testing.T) {
 		{RiskClass: "Equity", Bucket: "1", RiskFactor: "AAPL", Amount: 100},
 		{RiskClass: "Equity", Bucket: "1", RiskFactor: "XOM", Amount: -50},
 	}
-	got := SIMM(sens, cal["Equity"])
+	got := mustSIMM(t, sens, cal["Equity"])
 	want := math.Sqrt(2400*2400 + 1200*1200 + 2*0.2*2400*(-1200))
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("calibrated SIMM: got %v want %v", got, want)
