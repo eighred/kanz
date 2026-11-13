@@ -59,8 +59,8 @@ var (
 	ErrCapUnsatisfiable = errors.New("algo: slice count cannot honour the participation cap")
 )
 
-// validate checks the three things every algorithm needs before it can produce a
-// single child, in the order TWAP has always checked them.
+// validate checks the shared inputs every algorithm needs before it can produce
+// a single child, preserving the order of TWAP's existing checks.
 //
 // SHARED SO THE THREE ALGORITHMS REFUSE THE SAME PLAN THE SAME WAY. A second
 // copy of these checks is a second answer to "is this schedule workable", and the
@@ -77,6 +77,10 @@ func (p Plan) validate() error {
 	if !p.End.After(p.Start) {
 		return fmt.Errorf("%w: [%s, %s]", ErrEmptyWindow,
 			p.Start.UTC().Format(time.RFC3339), p.End.UTC().Format(time.RFC3339))
+	}
+	if p.MaxSlice != nil && p.MaxSlice.Sign() < 0 {
+		return fmt.Errorf("%w: max slice quantity must not be negative: %s",
+			ErrCapUnsatisfiable, p.MaxSlice.RatString())
 	}
 	return nil
 }
@@ -195,7 +199,7 @@ type Plan struct {
 	Slices int
 
 	// MaxSlice caps any single child's quantity — the participation cap in its
-	// schedule-time form. Nil means uncapped.
+	// schedule-time form. Nil or zero means uncapped; a negative bound is refused.
 	//
 	// IT IS A SIZE, NOT A FRACTION OF VOLUME, and that is a deliberate limitation
 	// stated rather than hidden. A true participation cap is a fraction of the
