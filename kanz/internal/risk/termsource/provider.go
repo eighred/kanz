@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"strings"
 	"time"
 
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
@@ -111,7 +112,7 @@ func toSpec(o *referencepb.OptionTerms) (compute.OptionSpec, bool) {
 	if !ok || mult <= 0 {
 		return compute.OptionSpec{}, false
 	}
-	if o.GetExpiry() == nil {
+	if o.GetExpiry().CheckValid() != nil || strings.TrimSpace(o.GetUnderlyingId()) == "" {
 		return compute.OptionSpec{}, false
 	}
 	var typ pricing.OptionType
@@ -126,9 +127,15 @@ func toSpec(o *referencepb.OptionTerms) (compute.OptionSpec, bool) {
 		// short book.
 		return compute.OptionSpec{}, false
 	}
-	exercise := pricing.European
-	if o.GetExerciseStyle() == referencepb.ExerciseStyle_EXERCISE_STYLE_AMERICAN {
+	var exercise pricing.Exercise
+	switch o.GetExerciseStyle() {
+	case referencepb.ExerciseStyle_EXERCISE_STYLE_EUROPEAN:
+		exercise = pricing.European
+	case referencepb.ExerciseStyle_EXERCISE_STYLE_AMERICAN:
 		exercise = pricing.American
+	default:
+		// An unknown exercise right cannot silently become expiry-only.
+		return compute.OptionSpec{}, false
 	}
 	return compute.OptionSpec{
 		UnderlyingID: o.GetUnderlyingId(),

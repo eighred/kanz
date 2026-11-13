@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -11,10 +12,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/config"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
+
+func custodyRunContext(ctx context.Context, configuredTenant string) context.Context {
+	if bus.TenantIDFromContext(ctx) == "" {
+		return bus.WithTenantID(ctx, configuredTenant)
+	}
+	return ctx
+}
 
 // custodyPlane is everything #962 adds, assembled once so the composition root
 // wires one thing rather than five.
@@ -242,9 +252,17 @@ func buildCustodyPlane(
 // handed its own instance would show an operator an empty queue while the
 // scheduler filled another one, and every transition they made would be written
 // where nothing reads it.
-func newCustodyStore(pool *pgxpool.Pool) custody.Store {
+func newCustodyStore(pool *pgxpool.Pool, journal ledger.Store) (custody.Store, error) {
 	if pool != nil {
-		return custody.NewPostgres(pool)
+		return custody.NewPostgres(pool), nil
 	}
-	return custody.NewMemoryStore()
+	owner, ok := journal.(*ledger.MemoryStore)
+	if !ok {
+		return nil, fmt.Errorf("accounting: custody needs the journal's outbox relay")
+	}
+	queue, ok := owner.Outbox().(*outbox.Memory)
+	if !ok {
+		return nil, fmt.Errorf("accounting: volatile custody needs the journal's memory outbox")
+	}
+	return custody.NewMemoryStoreWithOutbox(queue)
 }

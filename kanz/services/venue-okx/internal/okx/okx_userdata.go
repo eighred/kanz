@@ -394,6 +394,9 @@ type okxUserDataWS struct {
 	passphrase string
 	now        func() time.Time
 	conn       *websocket.Conn
+	stop       func()
+	pending    []byte
+	session    context.Context
 	// Nil uses the socket's Write. This private seam exercises a failed
 	// subscription write after a real login without changing the transport.
 	writeSubscribe func(context.Context, websocket.MessageType, []byte) error
@@ -451,12 +454,78 @@ func (w *okxUserDataWS) Connect(ctx context.Context) (func(), error) {
 	if err := writeSubscribe(ctx, websocket.MessageText, sub); err != nil {
 		return nil, okxHandshakeError(ctx, "write subscription", err)
 	}
+	// An order push can race the subscription acknowledgement. Retain at most
+	// one read-limit-bounded frame, and require the ACK on the next read. This
+	// cannot turn an unacknowledged channel into a usable session or an unbounded
+	// buffer while the peer keeps sending data instead of confirming the request.
+	ackCtx, cancelACK := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelACK()
+	var pending []byte
+	for {
+		_, raw, err := conn.Read(ackCtx)
+		if err != nil {
+			return nil, okxHandshakeError(ackCtx, "read subscription acknowledgement", err)
+		}
+		frame, err := readOKXOrdersFrame(raw)
+		if err != nil {
+			return nil, err
+		}
+		if frame.subscriptionACK() {
+			break
+		}
+		if pending != nil || !frame.orderPush() {
+			return nil, errors.New("okx: user-data subscription acknowledgement refused")
+		}
+		pending = raw
+	}
 
 	w.conn = conn
+	w.pending = pending
 	connected = true
 	kaCtx, cancel := context.WithCancel(ctx)
-	go w.keepAlive(kaCtx)
-	return cancel, nil
+	w.session = kaCtx
+	stop := func() {
+		cancel()
+		_ = conn.CloseNow()
+	}
+	w.stop = stop
+	go w.keepAlive(kaCtx, conn)
+	return stop, nil
+}
+
+// Only control fields are decoded here; execution parsing remains the ingester's
+// responsibility. Peer-supplied error text is never returned to the reconnect log.
+type okxOrdersFrame struct {
+	Event   string `json:"event"`
+	Code    string `json:"code"`
+	Channel string `json:"channel"`
+	Arg     struct {
+		Channel    string `json:"channel"`
+		InstType   string `json:"instType"`
+		InstID     string `json:"instId"`
+		InstFamily string `json:"instFamily"`
+	} `json:"arg"`
+	Data json.RawMessage `json:"data"`
+}
+
+func readOKXOrdersFrame(raw []byte) (okxOrdersFrame, error) {
+	var frame okxOrdersFrame
+	if json.Unmarshal(raw, &frame) != nil {
+		return frame, errors.New("okx: user-data invalid orders protocol frame")
+	}
+	return frame, nil
+}
+
+func (f okxOrdersFrame) subscriptionACK() bool {
+	return f.Event == "subscribe" && (f.Code == "" || f.Code == "0") &&
+		f.Arg.Channel == "orders" && f.Arg.InstType == "SPOT" && f.Arg.InstID == "" && f.Arg.InstFamily == "" && len(f.Data) == 0
+}
+
+func (f okxOrdersFrame) orderPush() bool {
+	// Empty arrays are harmless updates; a missing/null data field is not an
+	// order push and cannot stand in for an acknowledgement with a missing event.
+	return f.Event == "" && f.Arg.Channel == "orders" &&
+		(f.Arg.InstType == "" || f.Arg.InstType == "SPOT") && len(f.Data) > 0 && f.Data[0] == '['
 }
 
 // WebSocket errors can contain a peer's close reason or a URL. Retain only
@@ -473,24 +542,53 @@ func okxHandshakeError(ctx context.Context, stage string, cause error) error {
 	return fmt.Errorf("okx: user-data %s failed", stage)
 }
 
-// Recv reads the next frame, skipping OKX heartbeat "pong" frames.
+// Recv reads the next orders frame. Channel refusal/termination ends the session
+// so the existing connector loop backs off and reconnects instead of idling on a
+// socket that no longer delivers orders.
 func (w *okxUserDataWS) Recv(ctx context.Context) ([]byte, error) {
 	if w.conn == nil {
 		return nil, errors.New("okx: user-data stream not connected")
 	}
+	end := func(err error) ([]byte, error) {
+		w.stop()
+		w.conn, w.stop, w.pending = nil, nil, nil
+		w.session = nil
+		return nil, err
+	}
+	if err := w.session.Err(); err != nil {
+		return end(okxHandshakeError(w.session, "read orders stream", err))
+	}
+	if err := ctx.Err(); err != nil {
+		return end(okxHandshakeError(ctx, "read orders stream", err))
+	}
+	if w.pending != nil {
+		raw := w.pending
+		w.pending = nil
+		return raw, nil
+	}
 	for {
 		_, data, err := w.conn.Read(ctx)
 		if err != nil {
-			return nil, err
+			return end(okxHandshakeError(ctx, "read orders stream", err))
 		}
 		if string(data) == "pong" {
 			continue
 		}
-		return data, nil
+		frame, err := readOKXOrdersFrame(data)
+		if err != nil {
+			return end(err)
+		}
+		if frame.orderPush() {
+			return data, nil
+		}
+		if frame.subscriptionACK() || (frame.Event == "channel-conn-count" && frame.Channel == "orders" && (frame.Code == "" || frame.Code == "0")) {
+			continue
+		}
+		return end(errors.New("okx: user-data orders channel refused or terminated"))
 	}
 }
 
-func (w *okxUserDataWS) keepAlive(ctx context.Context) {
+func (w *okxUserDataWS) keepAlive(ctx context.Context, conn *websocket.Conn) {
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for {
@@ -498,7 +596,7 @@ func (w *okxUserDataWS) keepAlive(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = w.conn.Write(ctx, websocket.MessageText, []byte("ping"))
+			_ = conn.Write(ctx, websocket.MessageText, []byte("ping"))
 		}
 	}
 }

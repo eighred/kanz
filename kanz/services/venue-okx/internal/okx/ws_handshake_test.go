@@ -133,6 +133,9 @@ func TestOKXHandshakePreservesFirstOrderFrame(t *testing.T) {
 		if err != nil || !containsOp(sub, "subscribe") {
 			return errors.New("fixture did not receive subscription")
 		}
+		if err := conn.Write(ctx, websocket.MessageText, []byte(ordersSubscriptionACK)); err != nil {
+			return errors.New("fixture could not acknowledge subscription")
+		}
 		if err := conn.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
 			return errors.New("fixture could not write order frame")
 		}

@@ -71,7 +71,7 @@ func TestTransactionReconBreakEntersTheSameLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, subject())
+	run, err := r.Reconcile(testRunContext(ctx), subject())
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestTransactionReconRunIsCleanUnderABalancesOnlyFeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, subject())
+	run, err := r.Reconcile(testRunContext(ctx), subject())
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}

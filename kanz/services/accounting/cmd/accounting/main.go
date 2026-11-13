@@ -197,7 +197,11 @@ func run() int {
 	// the server needs the same instance: two stores would show an operator an
 	// empty queue while the scheduler filled another one, and every assignment
 	// they made would be written where nothing reads it.
-	custodyStore := newCustodyStore(ledgerPool)
+	custodyStore, err := newCustodyStore(ledgerPool, store)
+	if err != nil {
+		logger.Error("custody store refused its outbox configuration", "err", err)
+		return 2
+	}
 	// THE CUSTODY DECLARATION IS PARSED HERE, BEFORE EITHER CONSUMER OF IT (#1025).
 	//
 	// The scheduled runs and the server's ad-hoc reconcile endpoint scope the book
@@ -547,6 +551,9 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
 func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, collateralConsumer *collateralops.Consumer, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+	// Scheduled runs have no inbound delivery. Preserve any resolved context
+	// tenant; use this instance's configured scope only when none is present.
+	ctx = custodyRunContext(ctx, cfg.Tenant)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err

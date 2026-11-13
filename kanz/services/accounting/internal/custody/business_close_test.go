@@ -82,7 +82,7 @@ func TestCustodyBookUsesTheStatementBusinessClose(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err := r.Reconcile(ctx, subject())
+			run, err := r.Reconcile(testRunContext(ctx), subject())
 			if err != nil || run.Outcome != OutcomeClean || len(run.Breaks) != 0 {
 				t.Fatalf("D1 reconciliation manufactured breaks from a D2 trade: run=%+v err=%v", run, err)
 			}

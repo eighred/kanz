@@ -12,8 +12,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
-	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
@@ -235,7 +235,7 @@ func stateResidue(logger *slog.Logger, subject Subject, basis string, residue le
 type Reconciler struct {
 	store     Store
 	book      BookLoader
-	publisher Publisher
+	relay     *outbox.Relay
 	tolerance *big.Rat
 	metrics   *Metrics
 	logger    *slog.Logger
@@ -251,6 +251,9 @@ type Reconciler struct {
 func NewReconciler(store Store, book BookLoader, publisher Publisher, tolerance *big.Rat, metrics *Metrics, logger *slog.Logger, now func() time.Time) (*Reconciler, error) {
 	if store == nil {
 		return nil, errors.New("custody: nil store")
+	}
+	if store.Outbox() == nil {
+		return nil, errors.New("custody: missing completion outbox")
 	}
 	if book == nil {
 		return nil, errors.New("custody: nil book loader")
@@ -269,9 +272,17 @@ func NewReconciler(store Store, book BookLoader, publisher Publisher, tolerance 
 			"recorded locally and no ReconciliationRun FACT will reach the estate, so every downstream " +
 			"reader sees an estate that has never reconciled (#962)")
 	}
+	var relay *outbox.Relay
+	if publisher != nil {
+		var err error
+		relay, err = outbox.NewRelay(store.Outbox(), publisher, logger)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Reconciler{
-		store: store, book: book, publisher: publisher,
-		tolerance: tolerance, metrics: metrics, logger: logger, now: now,
+		store: store, book: book,
+		relay: relay, tolerance: tolerance, metrics: metrics, logger: logger, now: now,
 	}, nil
 }
 
@@ -325,11 +336,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	}, r.tolerance)
 	r.stateLeg(subject, stmt, leg, len(executions))
 
-	stored, err := r.store.UpsertBreaks(ctx, subject, FromRecon(subject, detected, now), now)
-	if err != nil {
-		return r.recordFailure(ctx, subject, now, fmt.Sprintf("upsert breaks: %v", err))
-	}
-
 	outcome := OutcomeClean
 	if len(detected) > 0 {
 		outcome = OutcomeBreaks
@@ -339,15 +345,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	// FirstSeenAt an operator has been working against — and publishing the
 	// freshly built ones would announce every break as OPEN and one run old, so
 	// any consumer of the FACT would see an aging problem reset to zero daily.
-	return r.record(ctx, Run{
+	run, err := r.record(ctx, Run{
 		RunID:       runID(subject, now),
 		Subject:     subject,
 		Outcome:     outcome,
 		StatementID: stmt.StatementID,
-		Breaks:      breaksForSubject(stored, subject),
+		Breaks:      FromRecon(subject, detected, now),
 		Tolerance:   r.tolerance,
 		CompletedAt: now,
 	})
+	if err != nil && !errors.Is(err, ErrPublicationPending) {
+		return r.recordFailure(ctx, subject, now, fmt.Sprintf("commit reconciliation: %v", err))
+	}
+	return run, err
 }
 
 // stateLeg says, once per run, whether the TRANSACTION pass actually happened
@@ -401,16 +411,17 @@ func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now tim
 
 // record persists a run, publishes it, and moves the metrics.
 //
-// THE ORDER IS DELIBERATE: persist, then publish, then observe. The store is the
-// local record and must not depend on the broker being up. The metric moves LAST
-// and only on a successful publish, so the staleness gauge and the FACT cannot
-// disagree — a run the estate never heard of must not read as recent evidence
-// that the control is alive, which is precisely the false assurance this issue
-// exists to remove.
+// Run, lifecycle and completion record commit before publishing. A broker error
+// leaves a committed business result and a queued FACT, never a partial rollback.
+// Freshness advances only after a successful inline flush. Background relay
+// recovery can leave this timestamp conservative until the next successful run;
+// a queued completion must never imply that the estate already received it.
 func (r *Reconciler) record(ctx context.Context, run Run) (Run, error) {
-	if err := r.store.SaveRun(ctx, run); err != nil {
-		return run, fmt.Errorf("custody: save run: %w", err)
+	stored, err := r.store.CommitRun(ctx, run)
+	if err != nil {
+		return run, fmt.Errorf("custody: commit run: %w", err)
 	}
+	run = stored
 	if err := r.publish(ctx, run); err != nil {
 		r.metrics.runFailed(run.Subject.CustodianID)
 		return run, err
@@ -422,32 +433,18 @@ func (r *Reconciler) record(ctx context.Context, run Run) (Run, error) {
 	return run, nil
 }
 
-// publish emits the run as a FACT. A nil publisher publishes nothing and says so
-// once at construction rather than on every run.
+// publish drains after commit, including any earlier queued completions for the
+// pair. The service-owned accounting relay provides recovery after a restart.
 func (r *Reconciler) publish(ctx context.Context, run Run) error {
-	if r.publisher == nil {
-		return nil
+	if r.relay == nil {
+		return ErrPublicationPending
 	}
-	msg, err := runToProto(run)
-	if err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := r.relay.Flush(ctx, pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)); err != nil {
+		return fmt.Errorf("%w: %w", ErrPublicationPending, err)
 	}
-	// THE PARTITION KEY IS THE (portfolio, custodian) PAIR, which is the
-	// granularity a consumer folds at and the granularity the staleness gauge is
-	// keyed on. Keying on the run id would order nothing that matters and would
-	// make every run its own key; keying on the portfolio alone would interleave
-	// two custodians' runs for one book and let the older one land last.
-	return r.publisher.Publish(ctx, bus.Event{
-		Subject:          SubjectRun,
-		EventType:        SubjectRun,
-		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
-		SchemaVersion:    1,
-		Domain:           "accounting",
-		EventTime:        run.CompletedAt,
-		PartitionKey:     pairKey(run.Subject.PortfolioID, run.Subject.CustodianID),
-		PayloadSchemaRef: schemaRefRun,
-		Payload:          msg,
-	})
+	return nil
 }
 
 // runToProto renders a run onto the wire.
