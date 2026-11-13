@@ -99,6 +99,8 @@ func (c *StatementConsumer) Handle(ctx context.Context, env *envelopepb.Envelope
 // statement rather than being dropped from it. A statement missing one position
 // because its quantity would not decode is a partial level with no marker saying
 // so — see Handle for why that is the worst available outcome.
+// Timestamp validity must precede AsTime: its normalization can move malformed
+// nanos into a different UTC day or transaction window before storage sees them.
 func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error) {
 	if msg == nil {
 		return Statement{}, errors.New("custody: nil statement")
@@ -109,9 +111,15 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 		PortfolioID: msg.GetPortfolioId(),
 	}
 	if bd := msg.GetBusinessDate(); bd != nil {
+		if err := bd.CheckValid(); err != nil {
+			return Statement{}, fmt.Errorf("custody: statement %s: invalid business_date: %w", stmt.StatementID, err)
+		}
 		stmt.BusinessDate = BusinessDay(bd.AsTime())
 	}
 	if ra := msg.GetReceivedAt(); ra != nil {
+		if err := ra.CheckValid(); err != nil {
+			return Statement{}, fmt.Errorf("custody: statement %s: invalid received_at: %w", stmt.StatementID, err)
+		}
 		stmt.ReceivedAt = ra.AsTime().UTC()
 	}
 	if n := len(msg.GetPositions()); n > 0 {
@@ -181,9 +189,15 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			CurrencyCode: tx.GetCurrencyCode(),
 		}
 		if td := tx.GetTradeDate(); td != nil {
+			if err := td.CheckValid(); err != nil {
+				return Statement{}, fmt.Errorf("custody: statement %s: transaction %s: invalid trade_date: %w", stmt.StatementID, ref, err)
+			}
 			out.TradeDate = td.AsTime().UTC()
 		}
 		if sd := tx.GetSettlementDate(); sd != nil {
+			if err := sd.CheckValid(); err != nil {
+				return Statement{}, fmt.Errorf("custody: statement %s: transaction %s: invalid settlement_date: %w", stmt.StatementID, ref, err)
+			}
 			out.SettlementDate = sd.AsTime().UTC()
 		}
 		stmt.Transactions = append(stmt.Transactions, out)
