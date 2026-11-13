@@ -394,6 +394,9 @@ type okxUserDataWS struct {
 	passphrase string
 	now        func() time.Time
 	conn       *websocket.Conn
+	// Nil uses the socket's Write. This private seam exercises a failed
+	// subscription write after a real login without changing the transport.
+	writeSubscribe func(context.Context, websocket.MessageType, []byte) error
 }
 
 func newOKXUserDataWS(wsURL, apiKey, apiSecret, passphrase string) *okxUserDataWS {
@@ -405,10 +408,15 @@ func newOKXUserDataWS(wsURL, apiKey, apiSecret, passphrase string) *okxUserDataW
 func (w *okxUserDataWS) Connect(ctx context.Context) (func(), error) {
 	conn, _, err := websocket.Dial(ctx, w.wsURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, okxHandshakeError(ctx, "dial", err)
 	}
+	connected := false
+	defer func() {
+		if !connected {
+			_ = conn.CloseNow()
+		}
+	}()
 	conn.SetReadLimit(1 << 20)
-	w.conn = conn
 
 	ts := strconv.FormatInt(w.now().Unix(), 10)
 	mac := hmac.New(sha256.New, w.apiSecret)
@@ -418,21 +426,51 @@ func (w *okxUserDataWS) Connect(ctx context.Context) (func(), error) {
 		{"apiKey": w.apiKey, "passphrase": w.passphrase, "timestamp": ts, "sign": sign},
 	}})
 	if err := conn.Write(ctx, websocket.MessageText, login); err != nil {
-		return nil, err
+		return nil, okxHandshakeError(ctx, "write login", err)
 	}
-	if _, _, err := conn.Read(ctx); err != nil { // login ack
-		return nil, err
+	_, ack, err := conn.Read(ctx)
+	if err != nil {
+		return nil, okxHandshakeError(ctx, "read login acknowledgement", err)
+	}
+	var loginACK struct {
+		Event string `json:"event"`
+		Code  string `json:"code"`
+	}
+	// A readable frame does not establish an authenticated orders feed. Do not
+	// reflect peer-controlled ACK fields in errors, which the reconnect loop logs.
+	if json.Unmarshal(ack, &loginACK) != nil || loginACK.Event != "login" || loginACK.Code != "0" {
+		return nil, errors.New("okx: user-data login acknowledgement refused")
 	}
 	sub, _ := json.Marshal(map[string]any{"op": "subscribe", "args": []map[string]string{
 		{"channel": "orders", "instType": "SPOT"},
 	}})
-	if err := conn.Write(ctx, websocket.MessageText, sub); err != nil {
-		return nil, err
+	writeSubscribe := w.writeSubscribe
+	if writeSubscribe == nil {
+		writeSubscribe = conn.Write
+	}
+	if err := writeSubscribe(ctx, websocket.MessageText, sub); err != nil {
+		return nil, okxHandshakeError(ctx, "write subscription", err)
 	}
 
+	w.conn = conn
+	connected = true
 	kaCtx, cancel := context.WithCancel(ctx)
 	go w.keepAlive(kaCtx)
 	return cancel, nil
+}
+
+// WebSocket errors can contain a peer's close reason or a URL. Retain only
+// local stage context and standard cancellation identity, never those payloads.
+func okxHandshakeError(ctx context.Context, stage string, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("okx: user-data %s: %w", stage, err)
+	}
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(cause, err) {
+			return fmt.Errorf("okx: user-data %s: %w", stage, err)
+		}
+	}
+	return fmt.Errorf("okx: user-data %s failed", stage)
 }
 
 // Recv reads the next frame, skipping OKX heartbeat "pong" frames.
