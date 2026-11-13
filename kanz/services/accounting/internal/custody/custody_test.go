@@ -163,7 +163,7 @@ func TestCleanRunIsRecordedAndPublished(t *testing.T) {
 	pub := &capturePublisher{}
 	r := newReconciler(t, store, bookWith(map[string]int64{"AAPL": 100}, map[string]int64{"USD": 500}), pub, nil, func() time.Time { return t0 })
 
-	run, err := r.Reconcile(ctx, subject())
+	run, err := r.Reconcile(testRunContext(ctx), subject())
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestNoStatementIsAnOutcomeNotSilence(t *testing.T) {
 	pub := &capturePublisher{}
 	r := newReconciler(t, NewMemoryStore(), bookWith(map[string]int64{"AAPL": 100}, nil), pub, nil, func() time.Time { return t0 })
 
-	run, err := r.Reconcile(context.Background(), subject())
+	run, err := r.Reconcile(testRunContext(context.Background()), subject())
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestBreaksAreDetectedAndCarriedOntoTheWire(t *testing.T) {
 	book := bookWith(map[string]int64{"AAPL": 100, "MSFT": 5}, map[string]int64{"USD": 500})
 	r := newReconciler(t, store, book, pub, nil, func() time.Time { return t0 })
 
-	run, err := r.Reconcile(ctx, subject())
+	run, err := r.Reconcile(testRunContext(ctx), subject())
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestFailedRunIsRecordedAndNotClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, subject())
+	run, err := r.Reconcile(testRunContext(ctx), subject())
 	if err == nil {
 		t.Fatal("Reconcile returned nil error for an unmaterializable book")
 	}
@@ -371,7 +371,7 @@ func TestThePublishedRunCarriesTheStoredLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	if _, err := r.Reconcile(ctx, subject()); err != nil {
+	if _, err := r.Reconcile(testRunContext(ctx), subject()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -392,7 +392,7 @@ func TestThePublishedRunCarriesTheStoredLifecycle(t *testing.T) {
 
 	// The next day's run finds the same break.
 	clock = t0.Add(24 * time.Hour)
-	if _, err := r.Reconcile(ctx, subject()); err != nil {
+	if _, err := r.Reconcile(testRunContext(ctx), subject()); err != nil {
 		t.Fatalf("Reconcile day 2: %v", err)
 	}
 	msg := pub.lastRun(t)
@@ -684,7 +684,7 @@ func TestAFailedPublishDoesNotAdvanceTheStalenessGauge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	if _, err := r.Reconcile(ctx, subject()); err == nil {
+	if _, err := r.Reconcile(testRunContext(ctx), subject()); err == nil {
 		t.Fatal("Reconcile returned nil for a failed publish")
 	}
 	v, _ := gaugeValue(t, reg, "kanz_accounting_reconciliation_last_success_timestamp_seconds", map[string]string{"portfolio": "PF1", "custodian": "CUST-A"})
@@ -929,7 +929,7 @@ func TestSchedulerTickEmitsARunWithNoStatement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScheduler: %v", err)
 	}
-	s.Tick(context.Background())
+	s.Tick(testRunContext(context.Background()))
 	if len(pub.events) != 1 {
 		t.Fatalf("published %d runs, want 1 — a scheduled tick produced no evidence", len(pub.events))
 	}
@@ -951,7 +951,7 @@ func TestSchedulerReconcilesThePriorBusinessDayByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScheduler: %v", err)
 	}
-	s.Tick(context.Background())
+	s.Tick(testRunContext(context.Background()))
 	got := pub.lastRun(t).GetBusinessDate().AsTime().UTC()
 	want := BusinessDay(t0.AddDate(0, 0, -1))
 	if !got.Equal(want) {
@@ -990,7 +990,7 @@ func TestOnePairsFailureDoesNotSkipTheOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScheduler: %v", err)
 	}
-	s.Tick(ctx)
+	s.Tick(testRunContext(ctx))
 	if len(pub.events) != 2 {
 		t.Fatalf("published %d runs, want 2 — one portfolio's failure aborted the sweep", len(pub.events))
 	}
