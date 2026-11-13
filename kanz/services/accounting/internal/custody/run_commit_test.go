@@ -207,3 +207,94 @@ func TestCustodyRunCompletionRoundTripAndIdentity(t *testing.T) {
 		t.Fatalf("invented immutable completion for a historical run: %v", err)
 	}
 }
+
+func TestMemoryCustodyRunHistoryRemainsImmutableAfterDelivery(t *testing.T) {
+	st := NewMemoryStore()
+	ctx := testRunContext(t.Context())
+	run := Run{RunID: "original", Subject: subject(), Outcome: OutcomeBreaks, Breaks: detectedQuantityBreak(t0, 100, 90), CompletedAt: t0, Tolerance: new(big.Rat)}
+	first, err := st.CommitRun(ctx, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := runToProto(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &capturePublisher{}
+	relay, err := outbox.NewRelay(st.Outbox(), pub, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := relay.DrainOnce(ctx); err != nil || sent != 1 || st.outbox.PendingCount() != 0 || len(pub.events) != 1 {
+		t.Fatalf("completion was not actually evicted after delivery: sent=%d err=%v", sent, err)
+	}
+	// Neither the input, the commit result nor a read result owns the store's
+	// canonical history. The queue no longer has the published payload to repair it.
+	run.Breaks[0].Diff.SetInt64(999)
+	run.Tolerance.SetInt64(999)
+	first.Breaks[0].IBOR.SetInt64(999)
+	latest, err := st.LatestRun(ctx, "PF1", "CUST-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest.Breaks[0].Diff.SetInt64(777)
+	latest.Breaks[0].Assignee = "caller"
+	latest.Tolerance.SetInt64(777)
+	fresh, err := st.LatestRun(ctx, "PF1", "CUST-A")
+	got, encodeErr := runToProto(fresh)
+	if err != nil || encodeErr != nil || !proto.Equal(got, want) {
+		t.Fatalf("caller changed canonical run history: got=%v want=%v err=%v/%v", got, want, err, encodeErr)
+	}
+	b, err := st.LoadBreak(ctx, run.Breaks[0].BreakID)
+	if err != nil || b.Diff.Cmp(big.NewRat(10, 1)) != 0 {
+		t.Fatalf("commit input changed stored lifecycle: %+v %v", b, err)
+	}
+	// Memory actions remain disabled. The existing lifecycle fixture models an
+	// operator's assignment without granting a volatile store durable authority.
+	if err := b.Assign("alice", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	b.Revision++ // The fixture includes the revision an applied assignment advances.
+	if err := recordFixtureLifecycle(t, st, ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	later := Run{RunID: "later", Subject: subject(), Outcome: OutcomeBreaks, Breaks: detectedQuantityBreak(t0, 100, 80), CompletedAt: t0.Add(time.Hour), Tolerance: new(big.Rat)}
+	if _, err := st.CommitRun(ctx, later); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		repeated, err := st.CommitRun(ctx, run)
+		got, encodeErr := runToProto(repeated)
+		if err != nil || encodeErr != nil || !proto.Equal(got, want) {
+			t.Fatalf("retry lost original immutable completion: got=%v want=%v err=%v/%v", got, want, err, encodeErr)
+		}
+		repeated.Breaks[0].Diff.SetInt64(555)
+		repeated.Tolerance.SetInt64(555)
+	}
+	b, err = st.LoadBreak(ctx, b.BreakID)
+	if err != nil || b.Revision != 3 || b.Status != BreakAssigned || b.Assignee != "alice" || b.Diff.Cmp(big.NewRat(20, 1)) != 0 || st.outbox.PendingCount() != 1 {
+		t.Fatalf("retry repeated lifecycle or queued original again: %+v %v", b, err)
+	}
+}
+
+func TestMemoryCustodyLegacyRunHistoryIsDetachedWithoutCompletion(t *testing.T) {
+	st := NewMemoryStore()
+	run := Run{RunID: "legacy", Subject: subject(), Outcome: OutcomeBreaks, Breaks: detectedQuantityBreak(t0, 100, 90), CompletedAt: t0, Tolerance: new(big.Rat)}
+	if err := st.SaveRun(t.Context(), run); err != nil {
+		t.Fatal(err)
+	}
+	run.Breaks[0].Diff.SetInt64(999)
+	run.Tolerance.SetInt64(999)
+	latest, err := st.LatestRun(t.Context(), "PF1", "CUST-A")
+	if err != nil || latest.Breaks[0].Diff.Cmp(big.NewRat(10, 1)) != 0 || latest.Tolerance.Sign() != 0 {
+		t.Fatalf("legacy input changed saved history: %+v %v", latest, err)
+	}
+	latest.Breaks[0].Diff.SetInt64(777)
+	if _, err := st.CommitRun(testRunContext(t.Context()), run); !errors.Is(err, ErrRunCompletionMissing) {
+		t.Fatalf("legacy identity acquired a fabricated completion: %v", err)
+	}
+	latest, err = st.LatestRun(t.Context(), "PF1", "CUST-A")
+	if err != nil || latest.Breaks[0].Diff.Cmp(big.NewRat(10, 1)) != 0 || st.outbox.PendingCount() != 0 {
+		t.Fatalf("legacy read changed history or enqueued a completion: %+v %v", latest, err)
+	}
+}

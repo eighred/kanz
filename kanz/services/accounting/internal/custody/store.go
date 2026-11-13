@@ -112,10 +112,18 @@ type MemoryStore struct {
 	mu         sync.Mutex
 	statements map[string][]Statement // subject key -> statements, append order
 	runs       map[string][]Run       // portfolio|custodian -> runs, append order
-	runIDs     map[string]struct{}
+	runIDs     map[string]runReference
 	breaks     map[string]Break // break id -> break
 	outbox     *outbox.Memory
-	committed  map[string]Run
+}
+
+// runReference locates the one canonical run in append-only history. Capture
+// provenance survives published-row eviction without retaining a second payload;
+// a legacy SaveRun entry must never acquire a fabricated completion on retry.
+type runReference struct {
+	pair               string
+	index              int
+	completionCaptured bool
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -123,10 +131,9 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		statements: map[string][]Statement{},
 		runs:       map[string][]Run{},
-		runIDs:     map[string]struct{}{},
+		runIDs:     map[string]runReference{},
 		breaks:     map[string]Break{},
 		outbox:     outbox.NewMemory(),
-		committed:  map[string]Run{},
 	}
 }
 
@@ -174,10 +181,16 @@ func (m *MemoryStore) SaveRun(_ context.Context, r Run) error {
 	if _, dup := m.runIDs[r.RunID]; dup {
 		return nil
 	}
-	m.runIDs[r.RunID] = struct{}{}
-	key := pairKey(r.Subject.PortfolioID, r.Subject.CustodianID)
-	m.runs[key] = append(m.runs[key], r)
+	m.appendRunLocked(r, false)
 	return nil
+}
+
+// appendRunLocked is called under m.mu. Both write paths keep the identity
+// index and its immutable history entry together, with no caller-owned rats.
+func (m *MemoryStore) appendRunLocked(run Run, completionCaptured bool) {
+	key := pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)
+	m.runIDs[run.RunID] = runReference{pair: key, index: len(m.runs[key]), completionCaptured: completionCaptured}
+	m.runs[key] = append(m.runs[key], cloneRun(run))
 }
 
 // LatestRun implements Store.
@@ -194,7 +207,7 @@ func (m *MemoryStore) LatestRun(_ context.Context, portfolioID, custodianID stri
 			best = r
 		}
 	}
-	return best, nil
+	return cloneRun(best), nil
 }
 
 // UpsertBreaks implements Store.
