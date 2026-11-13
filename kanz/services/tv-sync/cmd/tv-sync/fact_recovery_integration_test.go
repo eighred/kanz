@@ -227,8 +227,8 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 					defer endDrain()
 					select {
 					case err := <-done:
-						if err != nil {
-							t.Errorf("consumer shutdown: %v", err)
+						if !errors.Is(err, context.Canceled) {
+							t.Errorf("consumer shutdown = %v, want context cancellation", err)
 						}
 					case <-drain.Done():
 						t.Error("consumer failed to drain within independent cleanup budget")
