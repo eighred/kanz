@@ -2,6 +2,8 @@ package performance
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -53,9 +55,9 @@ func NewValuer(s store.Store, positions PositionProvider, kind store.PriceKind) 
 }
 
 // Value marks the portfolio's holdings at observation time `at`, using only
-// prices known by the knowledge horizon `asOf`. An instrument with no point-in-
-// time price contributes 0 (an unpriced lot is not a leak; the response layer
-// can flag coverage). A zero asOf means the live (latest-knowledge) read.
+// prices known by the knowledge horizon `asOf`. Every nonzero holding needs a
+// usable point-in-time mark; missing coverage refuses the whole value. Flat
+// holdings need no mark. A zero asOf means the live (latest-knowledge) read.
 func (v *Valuer) Value(ctx context.Context, portfolioID string, at, asOf time.Time) (float64, error) {
 	holdings, err := v.positions.Holdings(ctx, portfolioID, at, asOf)
 	if err != nil {
@@ -63,14 +65,27 @@ func (v *Valuer) Value(ctx context.Context, portfolioID string, at, asOf time.Ti
 	}
 	var total float64
 	for _, h := range holdings {
+		if math.IsNaN(h.Quantity) || math.IsInf(h.Quantity, 0) {
+			return 0, fmt.Errorf("performance: nonfinite quantity for %q", h.InstrumentID)
+		}
+		if h.Quantity == 0 {
+			continue
+		}
 		px, ok, err := v.priceAt(ctx, h.InstrumentID, at, asOf)
 		if err != nil {
 			return 0, err
 		}
 		if !ok {
-			continue
+			return 0, fmt.Errorf("performance: missing point-in-time mark for nonzero holding %q", h.InstrumentID)
 		}
-		total += h.Quantity * px
+		value := h.Quantity * px
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return 0, fmt.Errorf("performance: nonfinite holding value for %q", h.InstrumentID)
+		}
+		total += value
+		if math.IsNaN(total) || math.IsInf(total, 0) {
+			return 0, fmt.Errorf("performance: nonfinite portfolio value")
+		}
 	}
 	return total, nil
 }
