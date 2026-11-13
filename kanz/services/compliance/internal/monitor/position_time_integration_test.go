@@ -250,16 +250,15 @@ func TestPositionTimeJetStreamACKReplayAndDecisionRecovery(t *testing.T) {
 		}
 	}
 	observed := time.Unix(1700000000, 123456789).UTC()
-	ordinal := 0
 	publish := func(instrument string, qty, value int64, stamp *timestamppb.Timestamp) {
 		t.Helper()
-		ordinal++
 		data := positionTimePayload(t, portfolio, instrument, qty, value, stamp)
 		var payload domainpb.PositionState
 		if err := proto.Unmarshal(data, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if err := inProducer.Publish(ctx, bus.Event{Subject: subject.PositionFor(tenant, portfolio, instrument), EventType: subject.PositionChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "risk", EventTime: observed, PartitionKey: portfolio, CorrelationID: id, TraceContext: "00-" + strings.Repeat("a", 32) + "-" + strings.Repeat("b", 16) + "-01", IdempotencyKey: fmt.Sprintf("%s-%d", id, ordinal), PayloadSchemaRef: "domain.v1.PositionState:1", Payload: &payload}); err != nil {
+		// Producer allocates a UUIDv7 and the matching FACT idempotency key.
+		if err := inProducer.Publish(ctx, bus.Event{Subject: subject.PositionFor(tenant, portfolio, instrument), EventType: subject.PositionChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "risk", EventTime: observed, PartitionKey: portfolio, CorrelationID: id, TraceContext: "00-" + strings.Repeat("a", 32) + "-" + strings.Repeat("b", 16) + "-01", PayloadSchemaRef: "domain.v1.PositionState:1", Payload: &payload}); err != nil {
 			t.Fatal(err)
 		}
 	}
