@@ -176,6 +176,7 @@ func TestOKXUserData_WebsocketTransport(t *testing.T) {
 		if _, sub, err := c.Read(ctx); err != nil || !containsOp(sub, "subscribe") {
 			return
 		}
+		_ = c.Write(ctx, websocket.MessageText, []byte(ordersSubscriptionACK))
 		_ = c.Write(ctx, websocket.MessageText, []byte(frame))
 		time.Sleep(100 * time.Millisecond)
 	})
