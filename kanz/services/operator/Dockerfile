@@ -5,7 +5,7 @@
 # github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, generated
 # (not committed). Build with:
 #   docker build -f kanz/services/operator/Dockerfile .
-FROM ghcr.io/eighred/base/golang:1.26.10 AS build
+FROM ghcr.io/eighred/base/golang:1.27.4 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

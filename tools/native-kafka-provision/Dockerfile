@@ -1,4 +1,4 @@
-FROM ghcr.io/eighred/base/golang:1.26.10@sha256:eb36c1664dd974cde625f736e02c204383deebe03977365caaec5bf49f794348 AS build
+FROM ghcr.io/eighred/base/golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS build
 WORKDIR /src
 COPY kanz/go.mod kanz/go.sum ./kanz/
 COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/
