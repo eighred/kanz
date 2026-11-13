@@ -191,6 +191,15 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 		m.logger.ErrorContext(ctx, "compliance monitor: malformed PositionState", "err", err)
 		return nil
 	}
+	// A present malformed observation must not change even the book or its GC
+	// clock. AsTime normalizes invalid fields; absence and valid legacy times
+	// retain their existing behavior below.
+	if stamp := ps.GetAsOf(); stamp != nil {
+		if err := stamp.CheckValid(); err != nil {
+			m.logger.ErrorContext(ctx, "compliance monitor: malformed PositionState observation time", "err", err, "portfolio_id", ps.GetPortfolioId())
+			return nil
+		}
+	}
 	// An out-of-domain exponent is refused exactly like a malformed payload (#95):
 	// the position's quantity and value are converted downstream with the unbounded
 	// dec.FromProto, and a breach check that never returns is a breach check that
