@@ -28,12 +28,19 @@ import (
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/terms"
+	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/pricing"
 )
 
 var t0 = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 
 func newStore(t *testing.T) *terms.Postgres {
+	t.Helper()
+	store, _ := newStoreWithPool(t)
+	return store
+}
+
+func newStoreWithPool(t *testing.T) (*terms.Postgres, *pgxpool.Pool) {
 	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
@@ -82,7 +89,7 @@ func newStore(t *testing.T) *terms.Postgres {
 	if _, err := pool.Exec(ctx, string(b)); err != nil {
 		t.Fatalf("apply migration: %v", err)
 	}
-	return terms.NewPostgres(pool)
+	return terms.NewPostgres(pool), pool
 }
 
 func dec(coeff int64, exp int32) *commonpb.Decimal {
@@ -130,8 +137,8 @@ func providerWith(t *testing.T, recs ...terms.Record) (*Provider, *missingSpy) {
 func TestOptionTermsResolvesAStoredOption(t *testing.T) {
 	p, spy := providerWith(t, optionRec("BTC-60000-C", "BTC-USD", 60000, t0, 1))
 
-	spec, ok := p.OptionTerms(context.Background(), "BTC-60000-C", t0)
-	if !ok {
+	spec, resolution, err := p.OptionTerms(context.Background(), "BTC-60000-C", t0)
+	if err != nil || resolution != compute.TermsResolved {
 		t.Fatal("a stored option did not resolve — the pricing path would treat it as linear")
 	}
 	if spec.Strike != 60000 {
@@ -155,8 +162,8 @@ func TestOptionTermsConvertsAFractionalStrike(t *testing.T) {
 	rec.Terms.GetOption().Strike = &commonpb.Decimal{Coefficient: 5, Exponent: -2}
 
 	p, _ := providerWith(t, rec)
-	spec, ok := p.OptionTerms(context.Background(), "ETH-0.05-C", t0)
-	if !ok {
+	spec, resolution, err := p.OptionTerms(context.Background(), "ETH-0.05-C", t0)
+	if err != nil || resolution != compute.TermsResolved {
 		t.Fatal("a fractional-strike option did not resolve")
 	}
 	if spec.Strike != 0.05 {
@@ -165,17 +172,15 @@ func TestOptionTermsConvertsAFractionalStrike(t *testing.T) {
 	}
 }
 
-// AN INSTRUMENT WITH NO TERMS IS REPORTED, because the seam cannot report it.
+// AN INSTRUMENT WITH NO TERMS IS UNKNOWN, not a known non-option.
 func TestOptionTermsReportsAnInstrumentWithNoTerms(t *testing.T) {
 	p, spy := providerWith(t)
 
-	if _, ok := p.OptionTerms(context.Background(), "NEVER-LOADED", t0); ok {
-		t.Fatal("an instrument with no terms resolved as an option")
+	if _, resolution, err := p.OptionTerms(context.Background(), "NEVER-LOADED", t0); err != nil || resolution != compute.TermsUnknown {
+		t.Fatal("an instrument with no terms did not remain unknown")
 	}
 	if len(spy.seen) != 1 || spy.seen[0] != "NEVER-LOADED" {
-		t.Fatalf("missing-terms observer saw %v, want [NEVER-LOADED].\n\n"+
-			"compute.TermsProvider returns a bare false here, so this hook is the ONLY way a "+
-			"derivative about to be priced as a share becomes visible.", spy.seen)
+		t.Fatalf("missing-terms observer saw %v, want [NEVER-LOADED]", spy.seen)
 	}
 }
 
@@ -193,8 +198,8 @@ func TestOptionTermsDoesNotReportANonOptionAsMissing(t *testing.T) {
 	}
 	p, spy := providerWith(t, swap)
 
-	if _, ok := p.OptionTerms(context.Background(), "IRS-5Y", t0); ok {
-		t.Fatal("a swap resolved as an option")
+	if _, resolution, err := p.OptionTerms(context.Background(), "IRS-5Y", t0); err != nil || resolution != compute.TermsOtherVariant {
+		t.Fatal("a stored swap did not resolve as a known other variant")
 	}
 	if len(spy.seen) != 0 {
 		t.Fatalf("a swap was reported as missing terms (%v) — it is not missing, it is not an "+
@@ -229,7 +234,7 @@ func TestOptionTermsRefusesUnusableTerms(t *testing.T) {
 			tc.bend(rec.Terms.GetOption())
 			p, spy := providerWith(t, rec)
 
-			if _, ok := p.OptionTerms(context.Background(), "BAD-OPT", t0); ok {
+			if _, resolution, err := p.OptionTerms(context.Background(), "BAD-OPT", t0); err != nil || resolution != compute.TermsUnusable {
 				t.Fatalf("%s resolved as a usable option.\n\n"+
 					"A zero strike prices as a forward and a zero multiplier makes every Greek zero — "+
 					"both look like an option that carries no risk.", tc.name)
@@ -248,8 +253,8 @@ func TestOptionTermsMapsAPut(t *testing.T) {
 	rec.Terms.GetOption().OptionType = referencepb.OptionType_OPTION_TYPE_PUT
 
 	p, _ := providerWith(t, rec)
-	spec, ok := p.OptionTerms(context.Background(), "BTC-60000-P", t0)
-	if !ok {
+	spec, resolution, err := p.OptionTerms(context.Background(), "BTC-60000-P", t0)
+	if err != nil || resolution != compute.TermsResolved {
 		t.Fatal("a put did not resolve")
 	}
 	if spec.Type != pricing.Put {
@@ -266,15 +271,15 @@ func TestOptionTermsIsPointInTime(t *testing.T) {
 		optionRec("BTC-60000-C", "BTC-USD", 30000, later, 2),
 	)
 
-	before, ok := p.OptionTerms(context.Background(), "BTC-60000-C", later.Add(-time.Second))
-	if !ok {
+	before, resolution, err := p.OptionTerms(context.Background(), "BTC-60000-C", later.Add(-time.Second))
+	if err != nil || resolution != compute.TermsResolved {
 		t.Fatal("the pre-amendment option did not resolve")
 	}
 	if before.Strike != 60000 {
 		t.Fatalf("strike as of before the amendment = %v, want 60000", before.Strike)
 	}
-	after, ok := p.OptionTerms(context.Background(), "BTC-60000-C", later)
-	if !ok {
+	after, resolution, err := p.OptionTerms(context.Background(), "BTC-60000-C", later)
+	if err != nil || resolution != compute.TermsResolved {
 		t.Fatal("the post-amendment option did not resolve")
 	}
 	if after.Strike != 30000 || after.Multiplier != 2 {

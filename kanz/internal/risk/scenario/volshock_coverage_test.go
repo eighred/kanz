@@ -31,11 +31,11 @@ import (
 // point — that a Revaluer being present changes the outcome is.
 type vegaRevaluer struct{}
 
-func (vegaRevaluer) RevalueOption(_ context.Context, _ string, _ time.Time, baseMV *commonpb.Money, shocks compute.RevalShocks) (*commonpb.Money, bool) {
+func (vegaRevaluer) RevalueOption(_ context.Context, _ string, _ time.Time, baseMV *commonpb.Money, shocks compute.RevalShocks) compute.RevalResult {
 	if baseMV == nil || shocks.GlobalVolBump == 0 {
-		return nil, false
+		return compute.RevalResult{Status: compute.RevalKnownLinear}
 	}
-	return compute.ShockMoney(baseMV, pct(int64(shocks.GlobalVolBump*100), -2)), true
+	return compute.RevalResult{Status: compute.RevalPriced, Value: compute.ShockMoney(baseMV, pct(int64(shocks.GlobalVolBump*100), -2))}
 }
 
 // TestEvaluate_VolShockWithNoRevaluerIsExcluded is the assertion that makes the

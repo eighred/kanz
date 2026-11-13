@@ -17,9 +17,14 @@ import (
 
 type staticTerms map[string]OptionSpec
 
-func (m staticTerms) OptionTerms(_ context.Context, id string, _ time.Time) (OptionSpec, bool) {
+// This fixture declares a complete classification: unlisted instruments are
+// known linear holdings. Unknown/error classifications use dedicated fixtures.
+func (m staticTerms) OptionTerms(_ context.Context, id string, _ time.Time) (OptionSpec, TermsResolution, error) {
 	s, ok := m[id]
-	return s, ok
+	if !ok {
+		return OptionSpec{}, TermsOtherVariant, nil
+	}
+	return s, TermsResolved, nil
 }
 
 type staticSpot map[string]float64
@@ -81,8 +86,8 @@ func TestRegisterGreeks_PortfolioAggregation(t *testing.T) {
 }
 
 func TestRegisterGreeks_ReplacesPlaceholderDelta(t *testing.T) {
-	// With no option terms, Delta falls back to the linear (net MarketValue)
-	// behavior the placeholder provided — so existing equity books are unchanged.
+	// A complete fixture classification certifies these as non-option holdings,
+	// retaining linear Delta without treating missing classification as proof.
 	r := DefaultRegistry()
 	RegisterGreeks(context.Background(), r, GreeksProviders{Terms: staticTerms{}, Spot: staticSpot{}, Vol: constVol(0.2)})
 

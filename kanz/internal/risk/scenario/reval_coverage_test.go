@@ -29,8 +29,8 @@ import (
 // coverage — a real option pricer would only add arithmetic this is not about.
 type linearOnlyRevaluer struct{}
 
-func (linearOnlyRevaluer) RevalueOption(context.Context, string, time.Time, *commonpb.Money, compute.RevalShocks) (*commonpb.Money, bool) {
-	return nil, false
+func (linearOnlyRevaluer) RevalueOption(context.Context, string, time.Time, *commonpb.Money, compute.RevalShocks) compute.RevalResult {
+	return compute.RevalResult{Status: compute.RevalKnownLinear}
 }
 
 func TestEvaluateReval_SectorShockNoClassifierIsRecorded(t *testing.T) {
@@ -83,5 +83,34 @@ func TestEvaluateReval_PriceOnlyScenarioNeedsNoClassifier(t *testing.T) {
 	}, nil, linearOnlyRevaluer{})
 	if cov.ExcludedCount != 0 {
 		t.Fatalf("coverage=%+v want empty — no shock here resolves a sector", cov)
+	}
+}
+
+type partiallyAssessedRevaluer struct{}
+
+func (partiallyAssessedRevaluer) RevalueOption(_ context.Context, id string, _ time.Time, _ *commonpb.Money, _ compute.RevalShocks) compute.RevalResult {
+	if id == "MYSTERY" {
+		return compute.RevalResult{Reason: compute.SkipNoTerms}
+	}
+	return compute.RevalResult{Status: compute.RevalKnownLinear}
+}
+
+func TestEvaluateReval_UnassessedValuationOverridesResolvedSector(t *testing.T) {
+	p := makePortfolio(
+		domain.Position{InstrumentID: "BANK", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
+		domain.Position{InstrumentID: "MYSTERY", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
+	)
+	for _, knownSector := range []bool{true, false} {
+		sectors := map[string]string{"BANK": "40"}
+		if knownSector {
+			sectors["MYSTERY"] = "40"
+		}
+		_, cov := scenario.EvaluateReval(p, []v1.ScenarioShock{v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-20, -2)}}, nil, partiallyAssessedRevaluer{}, scenario.WithClassifier(classifierFor(sectors)))
+		if cov.ExcludedCount != 1 || cov.Contributed != 1 || len(cov.Exclusions) != 1 || cov.Exclusions[0].InstrumentID != "MYSTERY" {
+			t.Fatalf("sector-known=%v: one position must remain one exclusion: %+v", knownSector, cov)
+		}
+		if knownSector && cov.Exclusions[0].Reason != compute.SkipNoTerms {
+			t.Fatalf("sector resolution hid unavailable terms: %+v", cov)
+		}
 	}
 }

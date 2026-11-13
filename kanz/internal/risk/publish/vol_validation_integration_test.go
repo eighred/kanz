@@ -31,8 +31,8 @@ func (invalidVolInputs) Quotes(context.Context, string, time.Time) ([]volsurface
 	return []volsurface.OptionQuote{{Type: pricing.Call, Strike: 100, Expiry: 1, Price: math.NaN()}}, 100, nil
 }
 func (invalidVolInputs) Spot(context.Context, string, time.Time) (float64, bool) { return 100, true }
-func (invalidVolInputs) OptionTerms(_ context.Context, _ string, asOf time.Time) (compute.OptionSpec, bool) {
-	return compute.OptionSpec{UnderlyingID: "UND", Strike: 100, Expiry: asOf.AddDate(1, 0, 0), Type: pricing.Call, Exercise: pricing.European, Multiplier: 1}, true
+func (invalidVolInputs) OptionTerms(_ context.Context, _ string, asOf time.Time) (compute.OptionSpec, compute.TermsResolution, error) {
+	return compute.OptionSpec{UnderlyingID: "UND", Strike: 100, Expiry: asOf.AddDate(1, 0, 0), Type: pricing.Call, Exercise: pricing.European, Multiplier: 1}, compute.TermsResolved, nil
 }
 
 func TestInvalidVolCoverageSurvivesRealJetStream(t *testing.T) {
