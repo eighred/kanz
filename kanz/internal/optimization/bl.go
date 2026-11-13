@@ -1,6 +1,9 @@
 package optimization
 
-import "errors"
+import (
+	"errors"
+	"math"
+)
 
 // Black-Litterman posterior expected returns (Idzorek / He-Litterman form). BL
 // starts from the market-equilibrium prior Π = δΣw_mkt (the returns that make the
@@ -19,12 +22,15 @@ import "errors"
 var (
 	// ErrBLDims is returned when the BL input dimensions are inconsistent.
 	ErrBLDims = errors.New("optimization: black-litterman input dimensions do not match")
-	// ErrBLRiskAversion is returned when δ ≤ 0.
-	ErrBLRiskAversion = errors.New("optimization: black-litterman risk aversion must be positive")
-	// ErrBLTau is returned when τ ≤ 0.
-	ErrBLTau = errors.New("optimization: black-litterman tau must be positive")
+	// ErrBLRiskAversion is returned when δ is nonfinite or ≤ 0.
+	ErrBLRiskAversion = errors.New("optimization: black-litterman risk aversion must be finite and positive")
+	// ErrBLTau is returned when τ is nonfinite or ≤ 0.
+	ErrBLTau = errors.New("optimization: black-litterman tau must be finite and positive")
 	// ErrBLSingular is returned when the k×k view system M is singular.
-	ErrBLSingular = errors.New("optimization: black-litterman posterior system is singular")
+	ErrBLSingular  = errors.New("optimization: black-litterman posterior system is singular")
+	ErrBLInput     = errors.New("optimization: black-litterman inputs must be finite")
+	ErrBLOmega     = errors.New("optimization: black-litterman view variance must be finite and nonnegative")
+	ErrBLNumerical = errors.New("optimization: black-litterman arithmetic is nonfinite")
 )
 
 // BLInput carries the Black-Litterman prior + views. Matrices are row-major and
@@ -40,7 +46,9 @@ type BLInput struct {
 }
 
 // BlackLitterman returns the posterior expected-returns vector μ_BL (length n).
-// k=0 (no views) ⇒ μ_BL = Π. Never returns a partial or NaN μ.
+// k=0 (no views) ⇒ μ_BL = Π. Invalid inputs and nonfinite arithmetic refuse the
+// entire result; a negative variance must not silently select a different model
+// confidence through the zero-variance default.
 func BlackLitterman(in BLInput) ([]float64, error) {
 	n := len(in.Covariance)
 	if n == 0 {
@@ -49,16 +57,33 @@ func BlackLitterman(in BLInput) ([]float64, error) {
 	if !square(in.Covariance, n) || len(in.MarketWeights) != n {
 		return nil, ErrBLDims
 	}
+	k := len(in.P)
+	if len(in.Q) != k || (len(in.Omega) != 0 && len(in.Omega) != k) {
+		return nil, ErrBLDims
+	}
+	for _, row := range in.P {
+		if len(row) != n {
+			return nil, ErrBLDims
+		}
+	}
+	if !finiteBLMatrix(in.Covariance) || !finiteBLVector(in.MarketWeights) || !finiteBLMatrix(in.P) || !finiteBLVector(in.Q) {
+		return nil, ErrBLInput
+	}
+	for _, omega := range in.Omega {
+		if !finiteBL(omega) || omega < 0 {
+			return nil, ErrBLOmega
+		}
+	}
 	// The rank is not consulted here: BL does not report a risk number, and the
 	// one matrix it inverts (M) is Σ-derived but not Σ, so a singular Σ surfaces
 	// as ErrBLSingular from solveLinear below rather than as a quality flag.
 	if _, err := psdRank(in.Covariance); err != nil {
 		return nil, err
 	}
-	if in.RiskAversion <= 0 {
+	if !finiteBL(in.RiskAversion) || in.RiskAversion <= 0 {
 		return nil, ErrBLRiskAversion
 	}
-	if in.Tau <= 0 {
+	if !finiteBL(in.Tau) || in.Tau <= 0 {
 		return nil, ErrBLTau
 	}
 
@@ -67,26 +92,26 @@ func BlackLitterman(in BLInput) ([]float64, error) {
 	for i := range pi {
 		pi[i] *= in.RiskAversion
 	}
+	if !finiteBLVector(pi) {
+		return nil, ErrBLNumerical
+	}
 
-	k := len(in.P)
 	if k == 0 {
 		return pi, nil // no views ⇒ posterior is the prior
 	}
-	if len(in.Q) != k {
-		return nil, ErrBLDims
-	}
-	for _, row := range in.P {
-		if len(row) != n {
-			return nil, ErrBLDims
-		}
-	}
-	if len(in.Omega) != 0 && len(in.Omega) != k {
-		return nil, ErrBLDims
-	}
 
 	tauSigma := scaleMatrix(in.Covariance, in.Tau) // τΣ  (n×n)
-	tsPt := matMulT(tauSigma, in.P)                // τΣ·Pᵀ  (n×k)
-	pTsPt := matMul(in.P, tsPt)                    // P·τΣ·Pᵀ  (k×k)
+	if !finiteBLMatrix(tauSigma) {
+		return nil, ErrBLNumerical
+	}
+	tsPt := matMulT(tauSigma, in.P) // τΣ·Pᵀ  (n×k)
+	if !finiteBLMatrix(tsPt) {
+		return nil, ErrBLNumerical
+	}
+	pTsPt := matMul(in.P, tsPt) // P·τΣ·Pᵀ  (k×k)
+	if !finiteBLMatrix(pTsPt) {
+		return nil, ErrBLNumerical
+	}
 
 	// M = P·τΣ·Pᵀ + diag(Ω), with per-view He-Litterman defaults where Ω_i is 0.
 	m := make([][]float64, k)
@@ -97,27 +122,65 @@ func BlackLitterman(in BLInput) ([]float64, error) {
 			om = in.Omega[i]
 		}
 		m[i][i] += om
+		if !finiteBL(m[i][i]) {
+			return nil, ErrBLNumerical
+		}
 	}
 
 	// rhs = Q − P·Π
 	pPi := blMatVec(in.P, pi)
+	if !finiteBLVector(pPi) {
+		return nil, ErrBLNumerical
+	}
 	rhs := make([]float64, k)
 	for i := 0; i < k; i++ {
 		rhs[i] = in.Q[i] - pPi[i]
+	}
+	if !finiteBLVector(rhs) {
+		return nil, ErrBLNumerical
 	}
 
 	y, ok := solveLinear(m, rhs)
 	if !ok {
 		return nil, ErrBLSingular
 	}
+	if !finiteBLVector(y) {
+		return nil, ErrBLNumerical
+	}
 
 	// μ_BL = Π + τΣ·Pᵀ·y
 	adj := blMatVec(tsPt, y)
+	if !finiteBLVector(adj) {
+		return nil, ErrBLNumerical
+	}
 	mu := make([]float64, n)
 	for i := 0; i < n; i++ {
 		mu[i] = pi[i] + adj[i]
 	}
+	if !finiteBLVector(mu) {
+		return nil, ErrBLNumerical
+	}
 	return mu, nil
+}
+
+func finiteBL(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+func finiteBLVector(values []float64) bool {
+	for _, v := range values {
+		if !finiteBL(v) {
+			return false
+		}
+	}
+	return true
+}
+
+func finiteBLMatrix(values [][]float64) bool {
+	for _, row := range values {
+		if !finiteBLVector(row) {
+			return false
+		}
+	}
+	return true
 }
 
 // blMatVec computes A·x for a possibly-rectangular A (rows = len(A), cols =
