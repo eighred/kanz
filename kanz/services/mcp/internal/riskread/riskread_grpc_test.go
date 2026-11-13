@@ -13,7 +13,9 @@ package riskread
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +88,59 @@ func measureOf(t *testing.T, set measureread.Set, name string) measureread.Measu
 	t.Fatalf("measure %q never arrived (%d measures) — a measure that cannot be stated must still "+
 		"be reported, never dropped", name, len(set.Measures))
 	return measureread.Measure{}
+}
+
+func TestOverGRPC_ProvenanceReachesAgentJSON(t *testing.T) {
+	c := dialEngine(t, &riskQueryServer{measures: &querypb.MeasuresResponse{
+		PortfolioId: "PF-1", OwnerTenant: "private-owner",
+		Set: &domainpb.RiskMeasureSet{Measures: []*domainpb.RiskMeasure{
+			{Name: "VaR99", Value: dec(125, 0), Provenance: &domainpb.MeasureProvenance{Method: "placeholder_1pct_gross", Params: map[string]string{"private-param": "private-value"}}},
+			{Name: "FactorVaR99", Value: dec(250, 0), Provenance: &domainpb.MeasureProvenance{Method: "factor_model", ModelId: "private-model-id", InputDigest: "private-input-digest"}},
+			{Name: "Legacy", Value: dec(10, 0)},
+		}},
+	}})
+	set, err := c.Measures(context.Background(), "PF-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Measures []struct {
+			Name       string   `json:"name"`
+			Value      *float64 `json:"value"`
+			Provenance struct {
+				Status string `json:"status"`
+				Method string `json:"method"`
+			} `json:"provenance"`
+		} `json:"measures"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		status, method string
+		value          float64
+	}{
+		"VaR99":       {"PLACEHOLDER", "placeholder_1pct_gross", 125},
+		"FactorVaR99": {"DECLARED_MODEL", "factor_model", 250},
+		"Legacy":      {"UNDECLARED", "", 10},
+	}
+	for _, m := range decoded.Measures {
+		expected, ok := want[m.Name]
+		if !ok || m.Provenance.Status != expected.status || m.Provenance.Method != expected.method || m.Value == nil || *m.Value != expected.value {
+			t.Fatalf("wire-to-JSON model label/value mismatch: %s", raw)
+		}
+		delete(want, m.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("risk measures disappeared: %v", want)
+	}
+	if strings.Contains(string(raw), "private-") {
+		t.Fatalf("private metadata reached the agent: %s", raw)
+	}
 }
 
 // THE PRODUCTION SHAPE, OVER THE WIRE: the fixed-income family registered over a

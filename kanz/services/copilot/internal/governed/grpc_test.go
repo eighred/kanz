@@ -117,6 +117,37 @@ func TestGRPCMeasures(t *testing.T) {
 	}
 }
 
+func TestGRPCProvenanceSurvivesMeasuresAndScenario(t *testing.T) {
+	measure := &domainpb.RiskMeasure{Name: "VaR99", Value: dec(125, 0), Provenance: &domainpb.MeasureProvenance{Method: "placeholder_1pct_gross"}}
+	c := NewGRPCClient(fakeQuery{
+		measures: func(*querypb.MeasuresRequest) (*querypb.MeasuresResponse, error) {
+			return &querypb.MeasuresResponse{OwnerTenant: "acme", Set: &domainpb.RiskMeasureSet{Measures: []*domainpb.RiskMeasure{measure}}}, nil
+		},
+		scenario: func(*querypb.EvaluateScenarioRequest) (*querypb.EvaluateScenarioResponse, error) {
+			return &querypb.EvaluateScenarioResponse{Projected: &domainpb.RiskMeasureSet{Measures: []*domainpb.RiskMeasure{measure}}}, nil
+		},
+	})
+	readings := []Reading{}
+	for _, read := range []func() (Reading, error){
+		func() (Reading, error) { return c.Measures(context.Background(), "PF", nil) },
+		func() (Reading, error) { return c.EvaluateScenario(context.Background(), "PF", "-0.05") },
+	} {
+		r, err := read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		readings = append(readings, r)
+	}
+	for _, r := range readings {
+		if len(r.Measures) != 1 || r.Measures[0].Provenance == nil || r.Measures[0].Provenance.Status != measureread.ModelPlaceholder || r.Measures[0].Provenance.Method != "placeholder_1pct_gross" {
+			t.Fatalf("%s reading lost model provenance: %+v", r.Kind, r.Measures)
+		}
+		if values := r.StatedValues(); len(values) != 1 || values[0] != 125 {
+			t.Fatalf("labelling changed citable values: %v", values)
+		}
+	}
+}
+
 // Exposure maps net money per dimension/bucket.
 func TestGRPCExposure(t *testing.T) {
 	c := NewGRPCClient(fakeQuery{exposure: func(*querypb.ExposureRequest) (*querypb.ExposureResponse, error) {
