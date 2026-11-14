@@ -10,7 +10,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -19,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/internal/requestbody"
 	"github.com/eighred/kanz/pkg/auth"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
@@ -257,12 +260,17 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	rates, err := toRatMap(req.FX)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	book, err := s.materialize(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	nav, err := s.computeNAV(book, prices, req)
+	nav, err := s.computeNAV(book, prices, rates, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -298,16 +306,12 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 // holding anything else is refused by name. That is the distinction between
 // "nothing configured" and "checked, and fine": the unconfigured pod now says
 // which currency it cannot value instead of silently leaving it out.
-func (s *Server) computeNAV(book *ledger.Book, prices map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
+func (s *Server) computeNAV(book *ledger.Book, prices, rates map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
 	now := time.Now().UTC()
 
 	var fx accounting.FXConverter
 	switch {
 	case len(req.FX) > 0:
-		rates, err := toRatMap(req.FX)
-		if err != nil {
-			return accounting.NAV{}, err
-		}
 		fx = accounting.NewFXTable(s.baseCcy, rates)
 	case s.fxProvider != nil:
 		fx = s.fxProvider()
@@ -511,24 +515,27 @@ func toRatMap(in map[string]string) (map[string]*big.Rat, error) {
 	return out, nil
 }
 
-func parseRat(s string) (*big.Rat, error) {
-	r, ok := new(big.Rat).SetString(s)
-	if !ok {
-		return nil, &parseError{s}
-	}
-	return r, nil
-}
-
-type parseError struct{ s string }
-
-func (e *parseError) Error() string { return "accounting: invalid decimal " + e.s }
-
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if r.ContentLength > requestbody.MaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 		return false
 	}
-	return true
+	r.Body = http.MaxBytesReader(w, r.Body, requestbody.MaxBytes)
+	d := json.NewDecoder(r.Body)
+	err := d.Decode(v)
+	if err == nil {
+		var trailing json.RawMessage
+		if err = d.Decode(&trailing); err == io.EOF {
+			return true
+		}
+	}
+	var limit *http.MaxBytesError
+	if errors.As(err, &limit) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+	} else {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
