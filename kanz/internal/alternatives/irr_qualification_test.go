@@ -125,26 +125,84 @@ func TestIRRPermutationInvariant(t *testing.T) {
 }
 
 func TestIRRSmallResidualSurvivesDiscountCancellation(t *testing.T) {
-	start := day(2021, 1, 1)
+	start := day(2002, 1, 1)
 	for _, tc := range []struct {
-		name string
-		step time.Duration
-		want float64
+		name                  string
+		step                  time.Duration
+		want                  float64
+		early, secondBoundary bool
 	}{
 		// Independently solved with 100-digit Decimal arithmetic from the exact
 		// binary float eps: x=2/(1+sqrt(1+4eps)), r=exp(-log(x)/years)-1.
-		{"nanosecond", time.Nanosecond, .00031540973119240554039},
-		{"microsecond", time.Microsecond, .00000031536004972597000989},
+		{"nanosecond", time.Nanosecond, .00031540973119240554039, false, false},
+		{"microsecond", time.Microsecond, .00000031536004972597000989, false, false},
+		{"translated_nanosecond", time.Nanosecond, .00031540973119240554039, true, false},
+		{"translated_microsecond", time.Microsecond, .00000031536004972597000989, true, false},
+		{"second_boundary_nanosecond", time.Nanosecond, .00031540973119240554039, false, true},
+		{"second_boundary_microsecond", time.Microsecond, .00000031536004972597000989, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, scale := range []float64{1e-100, 1, 1e100} {
-				base := []CashFlow{{start, -scale}, {start.Add(tc.step), scale}, {start.Add(2 * tc.step), 1e-20 * scale}}
+			for _, scale := range []float64{1, 1e20, 1e100} {
+				at := start
+				if tc.secondBoundary {
+					at = at.Add(time.Second - tc.step)
+				}
+				base := []CashFlow{{at, -scale}, {at.Add(tc.step), scale}, {at.Add(2 * tc.step), 1e-20 * scale}}
+				if tc.early {
+					base = append(base, CashFlow{day(2, 1, 1), -1e-127 * scale})
+				}
 				for _, order := range [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
-					got, err := IRR([]CashFlow{base[order[0]], base[order[1]], base[order[2]]})
+					flows := []CashFlow{base[order[0]], base[order[1]], base[order[2]]}
+					if tc.early {
+						flows = append(flows, base[3])
+					}
+					got, err := IRR(flows)
 					if err != nil || math.Abs(got-tc.want) > 1e-10 {
 						t.Fatalf("scale %g, order %v: IRR %.17g, %v; want %.17g within 1e-10", scale, order, got, err, tc.want)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestIRRDiscountPivotPreservesNegativeRateCluster(t *testing.T) {
+	start := day(2002, 1, 1)
+	for _, tc := range []struct {
+		name string
+		step time.Duration
+		want float64
+	}{{"nanosecond", time.Nanosecond, -.12631417807436529367}, {"microsecond", time.Microsecond, -.12330568412790002188}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Independent 160-digit Decimal root of
+			// -exp(Y*q)-a+a*exp(-d*q)+b*exp(-2*d*q)=0, q=log(1+r),
+			// Y=2000 Gregorian years/365, a=1e-100, b=1e-120.
+			for _, scale := range []float64{1, 1e20, 1e100} {
+				flows := []CashFlow{{day(2, 1, 1), -scale}, {start, -1e-100 * scale}, {start.Add(tc.step), 1e-100 * scale}, {start.Add(2 * tc.step), 1e-120 * scale}}
+				got, err := IRR(flows)
+				if err != nil || math.Abs(got-tc.want) > 1e-10 {
+					t.Fatalf("scale %g: IRR %.17g, %v; want %.17g within 1e-10", scale, got, err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestIRRCrossSecondPositiveAndNegativeReturn(t *testing.T) {
+	start := day(2021, 1, 1).Add(time.Second - time.Nanosecond)
+	for _, tc := range []struct {
+		name  string
+		flows []CashFlow
+		want  float64
+	}{
+		{"positive", []CashFlow{{start, -1}, {start.Add(time.Nanosecond), 1}, {start.Add(2 * time.Nanosecond), 1e-17}}, .37075269311240059960},
+		{"negative", []CashFlow{{start, -1.0000000000000002}, {start.Add(time.Nanosecond), 1}}, -.99909030270888200396},
+		{"near_unity_amounts", []CashFlow{{start, -1.0000000000000001e-100}, {start.Add(time.Nanosecond), 1e-100}}, -.98171778754965481312},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := IRR(tc.flows)
+			if err != nil || math.Abs(got-tc.want) > 1e-10 {
+				t.Fatalf("IRR %.17g, %v; want %.17g within 1e-10", got, err, tc.want)
 			}
 		})
 	}

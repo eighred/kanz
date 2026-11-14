@@ -36,19 +36,22 @@ func irrPositionResponse(t *testing.T, st fund.Store, id string) map[string]any 
 
 func irrServedFixtures(t *testing.T, st fund.Store) {
 	t.Helper()
-	start := day(2021, 1, 1)
+	start := day(2002, 1, 1)
 	for _, tc := range []struct {
 		name, call, nav string
 		end             time.Time
 		want            float64
 		absent          bool
 		distribute      bool
+		earlyCall       string
 	}{
-		{"tiny", "0.000000000001", "0.0000000000011", start.AddDate(1, 0, 0), .1, false, false},
-		{"ordinary", "100", "110", start.AddDate(1, 0, 0), .1, false, false},
-		{"zero", "100", "100", start.AddDate(1, 0, 0), 0, false, false},
-		{"same_instant", "100", "100", start, 0, true, false},
-		{"small_residual", "1", "0.00000000000000000001", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true},
+		{"tiny", "0.000000000001", "0.0000000000011", start.AddDate(1, 0, 0), .1, false, false, ""},
+		{"ordinary", "100", "110", start.AddDate(1, 0, 0), .1, false, false, ""},
+		{"zero", "100", "100", start.AddDate(1, 0, 0), 0, false, false, ""},
+		{"same_instant", "100", "100", start, 0, true, false, ""},
+		{"small_residual", "1", "0.00000000000000000001", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true, ""},
+		{"translated_residual", "1", "1e-20", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true, "1e-127"},
+		{"negative_cluster", "1e-100", "1e-120", start.Add(2 * time.Microsecond), -.12330568412790002188, false, true, "1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call, ok := new(big.Rat).SetString(tc.call)
@@ -64,7 +67,14 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 				{EventID: tc.name + "-nav", CommitmentID: tc.name, Type: alternatives.EventNAVMark, Amount: nav, Date: tc.end},
 			}
 			if tc.distribute {
-				events = append(events, &alternatives.Event{EventID: tc.name + "-distribution", CommitmentID: tc.name, Type: alternatives.EventDistribution, Amount: big.NewRat(1, 1), Date: start.Add(time.Microsecond)})
+				events = append(events, &alternatives.Event{EventID: tc.name + "-distribution", CommitmentID: tc.name, Type: alternatives.EventDistribution, Amount: new(big.Rat).Set(call), Date: start.Add(time.Microsecond)})
+			}
+			if tc.earlyCall != "" {
+				early, ok := new(big.Rat).SetString(tc.earlyCall)
+				if !ok {
+					t.Fatal("invalid early call fixture")
+				}
+				events = append(events, &alternatives.Event{EventID: tc.name + "-early", CommitmentID: tc.name, Type: alternatives.EventCall, Amount: early, Date: day(2, 1, 1)})
 			}
 			for _, e := range events {
 				if err := st.Append(context.Background(), e); err != nil {
@@ -161,7 +171,7 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 	irrServedFixtures(t, st)
 	pool.Close()
 	restarted := fund.NewPostgres(open("irr-owner"))
-	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual"} {
+	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual", "translated_residual", "negative_cluster"} {
 		t.Run("restart_"+id, func(t *testing.T) {
 			result := irrPositionResponse(t, restarted, id)
 			if id == "same_instant" {
@@ -172,8 +182,10 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 				want := .1
 				if id == "zero" {
 					want = 0
-				} else if id == "small_residual" {
+				} else if id == "small_residual" || id == "translated_residual" {
 					want = .00000031536004972597000989
+				} else if id == "negative_cluster" {
+					want = -.12330568412790002188
 				}
 				got, ok := result["irr"].(float64)
 				if !ok || math.Abs(got-want) > 1e-10 {

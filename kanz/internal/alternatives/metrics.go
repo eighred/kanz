@@ -141,8 +141,11 @@ func IRR(flows []CashFlow) (float64, error) {
 	}
 	var pos, neg bool
 	var scale float64
+	reference := netted[0].Date
 	for _, f := range netted {
-		scale = math.Max(scale, math.Abs(f.Amount))
+		if math.Abs(f.Amount) > scale {
+			scale, reference = math.Abs(f.Amount), f.Date
+		}
 		switch {
 		case f.Amount > 0:
 			pos = true
@@ -154,27 +157,57 @@ func IRR(flows []CashFlow) (float64, error) {
 		return 0, errNoIRR
 	}
 
-	t0 := netted[0].Date
-	years := func(d time.Time) float64 {
+	years := func(d, from time.Time) float64 {
 		// Timestamp ranges exceed time.Duration's approximately 292-year range.
-		return (float64(d.Unix()-t0.Unix()) + float64(d.Nanosecond()-t0.Nanosecond())/1e9) / (365 * 24 * 60 * 60)
+		// Borrow before converting so a gap across a second boundary does not
+		// subtract nearly equal floats and lose the short interval.
+		seconds, nanos := d.Unix()-from.Unix(), d.Nanosecond()-from.Nanosecond()
+		if seconds > 0 && nanos < 0 {
+			seconds--
+			nanos += 1e9
+		} else if seconds < 0 && nanos > 0 {
+			seconds++
+			nanos -= 1e9
+		}
+		return (float64(seconds) + float64(nanos)/1e9) / (365 * 24 * 60 * 60)
 	}
-	type term struct{ years, logAmount, sign float64 }
+	logRatio := func(amount, base float64) float64 {
+		ratio := amount / base
+		if ratio >= .5 && ratio <= 2 {
+			// Near unity, dividing first can erase the amount difference. The
+			// subtraction is exact for these comparable binary magnitudes.
+			return math.Log1p((amount - base) / base)
+		}
+		if ratio == 0 || math.IsInf(ratio, 1) {
+			return math.Log(amount) - math.Log(base)
+		}
+		return math.Log(ratio)
+	}
+	type term struct {
+		date                    time.Time
+		amount, logAmount, sign float64
+	}
 	terms := make([]term, 0, len(netted))
 	for _, f := range netted {
-		logAmount := math.Log(math.Abs(f.Amount) / scale)
-		if math.IsInf(logAmount, -1) {
-			logAmount = math.Log(math.Abs(f.Amount)) - math.Log(scale)
-		}
-		terms = append(terms, term{years(f.Date), logAmount, math.Copysign(1, f.Amount)})
+		amount := math.Abs(f.Amount)
+		terms = append(terms, term{f.Date, amount, logRatio(amount, scale), math.Copysign(1, f.Amount)})
 	}
 	npvSign := func(r float64) float64 {
 		// A positive common rescaling preserves the root and its sign. Work in
 		// log space so neither tiny money nor long dated discount factors can
 		// underflow the convergence test or overflow the bracket calculation.
+		logRate, largest, pivot := math.Log1p(r), math.Inf(-1), 0
+		for i, f := range terms {
+			if value := f.logAmount - years(f.date, reference)*logRate; value > largest {
+				largest, pivot = value, i
+			}
+		}
+		// Rebase both dates and amounts near the largest discounted cashflow.
+		// A tiny distant opening leg must not erase microsecond gaps, and a
+		// negative rate can make a small future cluster dominate the equation.
 		positive, negative := make(irrLogHeap, 0, len(terms)), make(irrLogHeap, 0, len(terms))
 		for _, f := range terms {
-			logValue := f.logAmount - f.years*math.Log1p(r)
+			logValue := logRatio(f.amount, terms[pivot].amount) - years(f.date, terms[pivot].date)*logRate
 			if f.sign > 0 {
 				positive = append(positive, logValue)
 			} else {
