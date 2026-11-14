@@ -120,6 +120,23 @@ fn calculate(r: &BondRiskRequest) -> Result<BondRiskValues, Failure> {
         }
         previous = point.tenor_years;
     }
+    let curve = kanz_term_structure::Curve::new_zero(
+        &r.curve_points
+            .iter()
+            .map(|p| p.tenor_years)
+            .collect::<Vec<_>>(),
+        &r.curve_points
+            .iter()
+            .map(|p| p.continuous_zero.unwrap())
+            .collect::<Vec<_>>(),
+        kanz_term_structure::Compounding::Continuous,
+        if r.interpolation == 2 {
+            kanz_term_structure::Interpolation::LogLinearDiscount
+        } else {
+            kanz_term_structure::Interpolation::LinearZero
+        },
+    )
+    .map_err(|_| Failure::NumericalFailure)?;
     if asof >= maturity {
         if !r.payments.is_empty() {
             return Err(Failure::InvalidInput);
@@ -158,7 +175,9 @@ fn calculate(r: &BondRiskRequest) -> Result<BondRiskValues, Failure> {
         let t = hours / 24.0 / 365.0;
         let amount = coupon_amount + if payment.redemption { face } else { 0.0 };
         for (slot, bump) in [0.0, 1e-4, -1e-4].iter().enumerate() {
-            let z = zero(r, t, *bump)?;
+            let z = curve
+                .zero_with_bump(t, *bump)
+                .map_err(|_| Failure::NumericalFailure)?;
             let df = (-z * t).exp();
             if !df.is_finite() || df <= 0.0 {
                 return Err(Failure::NumericalFailure);
@@ -178,32 +197,6 @@ fn calculate(r: &BondRiskRequest) -> Result<BondRiskValues, Failure> {
     )
 }
 
-fn zero(r: &BondRiskRequest, t: f64, bump: f64) -> Result<f64, Failure> {
-    let points = &r.curve_points;
-    let at = points.partition_point(|p| p.tenor_years < t);
-    let value = if at == 0 {
-        points[0].continuous_zero.unwrap() + bump
-    } else if at == points.len() {
-        points[at - 1].continuous_zero.unwrap() + bump
-    } else {
-        let a = &points[at - 1];
-        let b = &points[at];
-        let za = a.continuous_zero.unwrap() + bump;
-        let zb = b.continuous_zero.unwrap() + bump;
-        let w = (t - a.tenor_years) / (b.tenor_years - a.tenor_years);
-        if r.interpolation == 2 {
-            let lo = -za * a.tenor_years;
-            let hi = -zb * b.tenor_years;
-            -(lo + w * (hi - lo)) / t
-        } else {
-            za + w * (zb - za)
-        }
-    };
-    value
-        .is_finite()
-        .then_some(value)
-        .ok_or(Failure::NumericalFailure)
-}
 fn values(price: f64, dv01: f64, duration: f64, convexity: f64) -> Result<BondRiskValues, Failure> {
     if !duration.is_finite() || !convexity.is_finite() {
         return Err(Failure::NumericalFailure);

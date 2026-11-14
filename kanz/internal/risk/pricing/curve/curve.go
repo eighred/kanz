@@ -33,7 +33,8 @@ const (
 	// LinearZero interpolates linearly in the continuously-compounded zero rate.
 	LinearZero Interpolation = iota
 	// LogLinearDF interpolates linearly in ln(discount factor) — equivalently
-	// piecewise-constant instantaneous forward rates, the no-arbitrage default.
+	// piecewise-constant instantaneous forward rates. This alone does not
+	// certify an input strip or impose nonnegative rates/descending discounts.
 	LogLinearDF
 )
 
@@ -113,20 +114,32 @@ var (
 	ErrNoPillars = errors.New("curve: at least one pillar required")
 	// ErrNonAscending is returned when pillar tenors are not strictly ascending
 	// (positive).
-	ErrNonAscending = errors.New("curve: pillar tenors must be strictly ascending and positive")
+	ErrNonAscending          = errors.New("curve: pillar tenors must be strictly ascending and positive")
+	ErrInvalidInput          = errors.New("curve: nonfinite or invalid rate definition")
+	ErrUnsupportedConvention = errors.New("curve: unsupported convention")
 )
 
 // NewZeroCurve builds a curve directly from (tenor, zero-rate) pillars under the
 // given compounding. Pillars need not be pre-sorted; they are sorted and checked
 // for strict ascendancy. Rates are converted to the continuous internal basis.
 func NewZeroCurve(tenors, rates []float64, comp Compounding, interp Interpolation) (*Curve, error) {
+	if !validInterpolation(interp) || (comp != Continuous && comp != Annual && comp != SemiAnnual) {
+		return nil, ErrUnsupportedConvention
+	}
 	if len(tenors) == 0 || len(tenors) != len(rates) {
 		return nil, ErrNoPillars
 	}
 	type pillar struct{ t, r float64 }
 	ps := make([]pillar, len(tenors))
 	for i := range tenors {
-		ps[i] = pillar{tenors[i], toContinuous(rates[i], comp, tenors[i])}
+		if !finite(tenors[i], rates[i]) || (comp == Annual && rates[i] <= -1) || (comp == SemiAnnual && rates[i] <= -2) {
+			return nil, ErrInvalidInput
+		}
+		z := toContinuous(rates[i], comp, tenors[i])
+		if !finite(z) {
+			return nil, ErrInvalidInput
+		}
+		ps[i] = pillar{tenors[i], z}
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].t < ps[j].t })
 	c := &Curve{
@@ -150,9 +163,9 @@ func NewZeroCurve(tenors, rates []float64, comp Compounding, interp Interpolatio
 func toContinuous(r float64, comp Compounding, t float64) float64 {
 	switch comp {
 	case Annual:
-		return math.Log(1 + r)
+		return math.Log1p(r)
 	case SemiAnnual:
-		return 2 * math.Log(1+r/2)
+		return 2 * math.Log1p(r/2)
 	default:
 		return r
 	}
@@ -162,12 +175,15 @@ func toContinuous(r float64, comp Compounding, t float64) float64 {
 // interpolation. Flat extrapolation beyond the pillars (never invents curvature
 // past the data — the volsurface clamp stance).
 func (c *Curve) Zero(t float64) float64 {
+	if !c.usable() || !finite(t) {
+		return math.NaN()
+	}
 	n := len(c.tenors)
 	if t <= c.tenors[0] {
-		return c.zeros[0]
+		return finiteOrNaN(c.zeros[0])
 	}
 	if t >= c.tenors[n-1] {
-		return c.zeros[n-1]
+		return finiteOrNaN(c.zeros[n-1])
 	}
 	i := sort.SearchFloat64s(c.tenors, t) // first index with tenor >= t
 	t0, t1 := c.tenors[i-1], c.tenors[i]
@@ -177,35 +193,84 @@ func (c *Curve) Zero(t float64) float64 {
 		// Linear in ln(DF) = -z·t between the two pillars.
 		l0, l1 := -z0*t0, -z1*t1
 		lnDF := l0 + w*(l1-l0)
-		return -lnDF / t
+		return finiteOrNaN(-lnDF / t)
 	}
-	return z0 + w*(z1-z0) // LinearZero
+	return finiteOrNaN(z0 + w*(z1-z0)) // LinearZero
 }
 
 // Discount returns the discount factor DF(t) = exp(-z(t)·t). t<=0 ⇒ 1.
 func (c *Curve) Discount(t float64) float64 {
+	if !c.usable() || !finite(t) {
+		return math.NaN()
+	}
 	if t <= 0 {
 		return 1
 	}
-	return math.Exp(-c.Zero(t) * t)
+	df := math.Exp(-c.Zero(t) * t)
+	if !finite(df) || df <= 0 {
+		return math.NaN()
+	}
+	return df
 }
 
 // Rate implements pricing.DiscountCurve: the continuously-compounded zero rate
 // for maturity t years. This is the seam DERIV-01b's FlatCurve held open.
 func (c *Curve) Rate(t float64) float64 {
-	if t <= 0 {
-		return c.zeros[0]
-	}
 	return c.Zero(t)
 }
 
 // Forward returns the continuously-compounded forward rate between t1 and t2
 // (t1 < t2): f = (z2·t2 − z1·t1) / (t2 − t1).
 func (c *Curve) Forward(t1, t2 float64) float64 {
-	if t2 <= t1 {
-		return c.Zero(t1)
+	if !c.usable() || !finite(t1, t2, t2-t1) || t2 <= t1 {
+		return math.NaN()
 	}
-	return (c.Zero(t2)*t2 - c.Zero(t1)*t1) / (t2 - t1)
+	// Integrate each segment's forward instead of subtracting nearly equal
+	// z(t)*t values. Adjacent binary64 tenors must not amplify cancellation.
+	total := 0.0
+	for start := t1; start < t2; {
+		i := sort.Search(len(c.tenors), func(i int) bool { return c.tenors[i] > start })
+		end, forward := t2, 0.0
+		if i == 0 {
+			end, forward = math.Min(end, c.tenors[0]), c.zeros[0]
+		} else if i == len(c.tenors) {
+			forward = c.zeros[i-1]
+		} else {
+			end = math.Min(end, c.tenors[i])
+			a, b := c.tenors[i-1], c.tenors[i]
+			za, zb := c.zeros[i-1], c.zeros[i]
+			if c.interp == LogLinearDF {
+				forward = (zb*b - za*a) / (b - a)
+			} else {
+				forward = za + (start+(end-a))*((zb-za)/(b-a))
+			}
+		}
+		if end <= start || !finite(forward) {
+			return math.NaN()
+		}
+		total += forward * ((end - start) / (t2 - t1))
+		start = end
+	}
+	return finiteOrNaN(total)
+}
+
+func validInterpolation(i Interpolation) bool { return i == LinearZero || i == LogLinearDF }
+func (c *Curve) usable() bool {
+	return c != nil && len(c.tenors) > 0 && len(c.tenors) == len(c.zeros) && validInterpolation(c.interp)
+}
+func finite(values ...float64) bool {
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return false
+		}
+	}
+	return true
+}
+func finiteOrNaN(v float64) float64 {
+	if !finite(v) {
+		return math.NaN()
+	}
+	return v
 }
 
 // Tenors returns the pillar tenors (ascending). The returned slice is a copy.

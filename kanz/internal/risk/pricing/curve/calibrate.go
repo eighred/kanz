@@ -55,6 +55,10 @@ func FutureRateFromPrice(price float64) float64 { return (100 - price) / 100 }
 // unsolvable/arbitrageable quote).
 var ErrCalibrate = errors.New("curve: cannot calibrate quotes")
 
+// Bound the annual fixed-leg work, not economic rate signs or maturities of
+// directly supplied zero curves. A malformed swap must not allocate forever.
+const maxCalibrationCoupons = 4096
+
 // end returns the pillar tenor a quote resolves: instrument maturity.
 func (q RateQuote) end() float64 {
 	if q.Kind == Future {
@@ -78,6 +82,16 @@ func (q RateQuote) span() float64 {
 func Calibrate(quotes []RateQuote, interp Interpolation) (*Curve, error) {
 	if len(quotes) == 0 {
 		return nil, fmt.Errorf("%w: no quotes", ErrCalibrate)
+	}
+	if !validInterpolation(interp) {
+		return nil, fmt.Errorf("%w: unsupported interpolation", ErrCalibrate)
+	}
+	for _, q := range quotes {
+		// Validate before sorting or generating annual coupon dates. A malformed
+		// tenor must not turn an unknown input into an unbounded allocation.
+		if !finite(q.Tenor, q.Span, q.Value, q.end()) || q.Tenor < 0 || (q.Kind != Future && q.Tenor == 0) || q.Span < 0 || (q.Kind == Swap && q.Tenor > maxCalibrationCoupons) {
+			return nil, fmt.Errorf("%w: invalid or over-budget quote", ErrCalibrate)
+		}
 	}
 	qs := make([]RateQuote, len(quotes))
 	copy(qs, quotes)
@@ -108,7 +122,7 @@ func Calibrate(quotes []RateQuote, interp Interpolation) (*Curve, error) {
 		default:
 			return nil, fmt.Errorf("%w: unknown quote kind %d", ErrCalibrate, q.Kind)
 		}
-		if df <= 0 || math.IsNaN(df) {
+		if df <= 0 || !finite(df) {
 			return nil, fmt.Errorf("%w: non-positive discount factor at %.4g", ErrCalibrate, end)
 		}
 		b.tenors = append(b.tenors, end)
