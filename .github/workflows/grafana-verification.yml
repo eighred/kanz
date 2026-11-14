@@ -1,0 +1,51 @@
+name: grafana-verification
+on:
+  pull_request:
+    paths:
+      - 'tools/grafana_proof/**'
+      - 'tools/feed-identity/install.sh'
+      - 'tools/feed-identity/proof.py'
+      - 'kanz/infra/observability/**'
+      - '.github/workflows/grafana-verification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/grafana_proof/**'
+      - 'tools/feed-identity/install.sh'
+      - 'tools/feed-identity/proof.py'
+      - 'kanz/infra/observability/**'
+      - '.github/workflows/grafana-verification.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  actual-grafana-kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - name: Check complete evidence and refusal controls
+        run: python3 -B -m unittest discover -s tools/grafana_proof -p 'test_*.py'
+      - name: Install the existing checksum-pinned disposable cluster tools
+        run: bash tools/feed-identity/install.sh
+      - name: Verify committed Grafana mounts, queries, refusals and policy
+        run: python3 -B tools/grafana_proof/proof.py
+      - name: Remove the owned disposable cluster after interruption
+        if: always()
+        run: |
+          if command -v kind >/dev/null; then
+            python3 -B tools/grafana_proof/proof.py --cleanup
+          fi
+      - name: Preserve sanitized source-bound observations
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: grafana-kubernetes
+          path: ${{ runner.temp }}/grafana-kubernetes.json
+          if-no-files-found: error
