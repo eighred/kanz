@@ -100,7 +100,11 @@ func IRR(flows []CashFlow) (float64, error) {
 	// Flows at one instant have the same discount factor. Net them exactly in
 	// the existing float input domain before testing signs: otherwise a journal
 	// whose discounted value is identically zero appears to have every IRR.
-	netted := make([]CashFlow, 0, len(ordered))
+	type datedAmount struct {
+		Date   time.Time
+		Amount *big.Rat
+	}
+	netted := make([]datedAmount, 0, len(ordered))
 	for i := 0; i < len(ordered); {
 		at := ordered[i].Date
 		total := new(big.Rat)
@@ -111,28 +115,26 @@ func IRR(flows []CashFlow) (float64, error) {
 			total.Add(total, new(big.Rat).SetFloat64(ordered[i].Amount))
 			i++
 		}
-		amount, _ := total.Float64()
-		if math.IsInf(amount, 0) {
-			return 0, errNoIRR
-		}
-		if amount != 0 {
-			netted = append(netted, CashFlow{Date: at, Amount: amount})
+		if total.Sign() != 0 {
+			netted = append(netted, datedAmount{Date: at, Amount: total})
 		}
 	}
 	if len(netted) < 2 {
 		return 0, errNoIRR
 	}
 	var pos, neg bool
-	var scale float64
+	scale := new(big.Rat)
 	reference := netted[0].Date
 	for _, f := range netted {
-		if math.Abs(f.Amount) > scale {
-			scale, reference = math.Abs(f.Amount), f.Date
+		magnitude := new(big.Rat).Abs(f.Amount)
+		if magnitude.Cmp(scale) > 0 {
+			scale.Set(magnitude)
+			reference = f.Date
 		}
 		switch {
-		case f.Amount > 0:
+		case f.Amount.Sign() > 0:
 			pos = true
-		case f.Amount < 0:
+		case f.Amount.Sign() < 0:
 			neg = true
 		}
 	}
@@ -159,14 +161,20 @@ func IRR(flows []CashFlow) (float64, error) {
 		logAmount float64
 		money     *big.Rat
 	}
+	logMagnitude := func(amount *big.Rat) float64 {
+		// Approximation only selects a pivot. Keep grouped money rational;
+		// converting an exact sum back to float would discard same-time legs.
+		value := new(big.Float).SetPrec(64).SetRat(amount)
+		mantissa := new(big.Float)
+		exponent := value.MantExp(mantissa)
+		m, _ := mantissa.Float64()
+		return math.Log(m) + float64(exponent)*math.Ln2
+	}
+	logScale := logMagnitude(scale)
 	terms := make([]term, 0, len(netted))
 	for _, f := range netted {
-		amount := math.Abs(f.Amount)
-		logAmount := math.Log(amount / scale)
-		if math.IsInf(logAmount, -1) {
-			logAmount = math.Log(amount) - math.Log(scale)
-		}
-		terms = append(terms, term{f.Date, logAmount, new(big.Rat).SetFloat64(f.Amount)})
+		logAmount := logMagnitude(new(big.Rat).Abs(f.Amount)) - logScale
+		terms = append(terms, term{f.Date, logAmount, f.Amount})
 	}
 	expRat := func(x float64) (*big.Rat, bool) {
 		// Represent exp(x) as a finite mantissa times an exact binary power.

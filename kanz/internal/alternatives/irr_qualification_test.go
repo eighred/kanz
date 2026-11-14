@@ -228,3 +228,21 @@ func TestIRRSplitReturnsPreserveZeroReturn(t *testing.T) {
 		})
 	}
 }
+
+func TestIRRSameInstantAggregationKeepsSmallResidual(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step time.Duration
+		want float64
+	}{{"nanosecond", time.Nanosecond, .00031540973119240554039}, {"microsecond", time.Microsecond, .00000031536004972597000989}} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := day(2021, 1, 1)
+			// Independent equation: (1+r)^years = 1+eps. Keeping the return
+			// legs separate or on the same instant cannot discard that residual.
+			got, err := IRR([]CashFlow{{start, -1}, {start.Add(tc.step), 1}, {start.Add(tc.step), 1e-20}})
+			if err != nil || math.Abs(got-tc.want) > 1e-10 {
+				t.Fatalf("IRR %.17g, %v; want %.17g within 1e-10", got, err, tc.want)
+			}
+		})
+	}
+}

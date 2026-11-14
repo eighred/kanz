@@ -53,6 +53,7 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 		{"translated_residual", "1", "1e-20", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true, "1e-127"},
 		{"negative_cluster", "1e-100", "1e-120", start.Add(2 * time.Microsecond), -.12330568412790002188, false, true, "1"},
 		{"split_zero", "10", "0", start.Add(4 * time.Microsecond), 0, false, false, ""},
+		{"same_date_residual", "1", "1e-20", start.Add(time.Microsecond), .00000031536004972597000989, false, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call, ok := new(big.Rat).SetString(tc.call)
@@ -177,7 +178,7 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 	irrServedFixtures(t, st)
 	pool.Close()
 	restarted := fund.NewPostgres(open("irr-owner"))
-	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual", "translated_residual", "negative_cluster", "split_zero"} {
+	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual", "translated_residual", "negative_cluster", "split_zero", "same_date_residual"} {
 		t.Run("restart_"+id, func(t *testing.T) {
 			result := irrPositionResponse(t, restarted, id)
 			if id == "same_instant" {
@@ -188,7 +189,7 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 				want := .1
 				if id == "zero" || id == "split_zero" {
 					want = 0
-				} else if id == "small_residual" || id == "translated_residual" {
+				} else if id == "small_residual" || id == "translated_residual" || id == "same_date_residual" {
 					want = .00000031536004972597000989
 				} else if id == "negative_cluster" {
 					want = -.12330568412790002188
