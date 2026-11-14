@@ -260,15 +260,15 @@ func withhold(out Measure, reason string) Measure {
 
 // readFlags names every flag and decides whether the response withholds wholesale.
 //
-// TWO FLAGS WITHHOLD AND TWO DO NOT, and which is which is the argument:
+// Only known advisory flags may preserve a value:
 //
 //   - CURRENCY_EXCLUDED withholds. The response was computed over a SUBSET of the
 //     book because the engine has no FX layer (RISK-06), and QUALITY_FLAG_CURRENCY_EXCLUDED
 //     says a caller that must not under-report has to refuse rather than treat it
 //     as a number. No direction claim is available to make instead.
-//   - UNSPECIFIED withholds. grpcsrv emits it for a flag it could not map and says
-//     a caller must not read it as "fine". An unnamed trust signal is an unknown,
-//     and a critical unknown fails closed.
+//   - UNSPECIFIED and unknown enum values withhold. A newer producer can send a
+//     numeric enum this build cannot interpret. Naming it without refusing its
+//     values would treat an unknown trust signal as an all-clear.
 //   - DEGRADED and STALE do NOT withhold. The values are real, just cached or
 //     older than the request's budget; the named flag and as_of say exactly that.
 //     Emptying the plane here would empty it during precisely the incident an
@@ -283,15 +283,19 @@ func readFlags(flags []querypb.QualityFlag) (names []string, withholdAll bool, r
 	for _, f := range flags {
 		names = append(names, strings.TrimPrefix(f.String(), "QUALITY_FLAG_"))
 		switch f {
+		case querypb.QualityFlag_QUALITY_FLAG_DEGRADED,
+			querypb.QualityFlag_QUALITY_FLAG_STALE,
+			querypb.QualityFlag_QUALITY_FLAG_INPUTS_UNRESOLVED:
+			// These advisory signals retain their existing per-measure policy.
 		case querypb.QualityFlag_QUALITY_FLAG_CURRENCY_EXCLUDED:
 			withholdAll = true
 			reason = "the response was computed over a currency subset of the book " +
 				"(CURRENCY_EXCLUDED); every base-currency value on it may move in either direction"
-		case querypb.QualityFlag_QUALITY_FLAG_UNSPECIFIED:
+		default:
 			if !withholdAll {
 				withholdAll = true
 				reason = "the engine attached a trust flag this platform cannot name " +
-					"(QUALITY_FLAG_UNSPECIFIED); an unnamed signal is an unknown, not an all-clear"
+					"(" + f.String() + "); an unnamed signal is an unknown, not an all-clear"
 			}
 		}
 	}
