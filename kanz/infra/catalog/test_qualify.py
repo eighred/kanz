@@ -251,9 +251,9 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": "sha256:" + "2" * 64, "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 21}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 24}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
-        original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
+        original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
         qualify.validate_receipt(original, IDENTITY, images)
         for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"})):

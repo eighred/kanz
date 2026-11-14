@@ -92,6 +92,11 @@ def stop_process(process):
 def failure_category(output, code, scanner):
     if not scanner:
         return "command-exit"
+    if code == image_patch.ADVISORY_EXIT:
+        # The pinned Trivy returns this code only for the requested finding
+        # exit after scan/filter/report. Informational DB logs cannot mask it.
+        # A complete exact-image fixed-CRITICAL report is still mandatory.
+        return "scanner-advisory-exit"
     diagnostic = output.decode("utf-8", errors="replace").lower()
     if code == -signal.SIGXFSZ or "file too large" in diagnostic:
         return "scanner-file-budget"
@@ -278,10 +283,10 @@ def cleanup_owned(path, identity, run):
         if run(["docker", "network", "ls", "--filter", "name=^" + network + "$", "--format", "{{.Name}}"]):
             raise ValueError("owned network cleanup incomplete")
     cleanup_scanner(owner, path, run)
-    image_patch.cleanup(owner["derivedImage"], run)
+    derived_cleanup = image_patch.cleanup(owner["derivedImage"], run)
     if foreign:
         raise ValueError("foreign container cannot authorize cleanup")
-    return owner
+    return {"owner": owner, "derivedImage": derived_cleanup}
 
 
 def validate_receipt(report, identity, images):
@@ -298,18 +303,19 @@ def validate_receipt(report, identity, images):
     if "ingestion" in images:
         item = report["images"]["ingestion"]
         derived = item.get("derived", {})
-        if derived.get("imageID") != item["imageID"] or derived.get("baseReference") != images["ingestion"] or derived.get("originalBehaviorPreserved") is not True or derived.get("labels") != report["owner"]["derivedImage"]["labels"] or any(derived.get(key) != report["owner"]["derivedImage"][key] for key in ("packageSHA256", "dockerfileSHA256", "verifierSHA256", "lockSHA256")) or not re.fullmatch(r"sha256:[0-9a-f]{64}", derived.get("baseImageID", "")) or derived["baseImageID"] == item["imageID"] or not re.fullmatch(r"[0-9a-f]{64}", derived.get("behaviorSHA256", "")):
+        if derived.get("imageID") != item["imageID"] or derived.get("baseReference") != images["ingestion"] or derived.get("originalBehaviorPreserved") is not True or derived.get("labels") != report["owner"]["derivedImage"]["labels"] or any(derived.get(key) != report["owner"]["derivedImage"][key] for key in ("baseImageID", "packageSHA256", "dockerfileSHA256", "renderedDockerfileSHA256", "verifierSHA256", "lockSHA256")) or derived["baseImageID"] == item["imageID"] or not re.fullmatch(r"[0-9a-f]{64}", derived.get("behaviorSHA256", "")):
             raise ValueError("catalog base/derived image distinction incomplete")
+        image_patch.validate_cleanup(report.get("derivedCleanup", {}), derived)
         image_patch.validate_build(derived.get("build"))
         if derived.get("packageInput") != image_patch.lock():
             raise ValueError("catalog package provenance selection differs")
         image_patch.validate_proof(report.get("packagePatch", {}), report.get("dependencies", {}))
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != "1.8.0" or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 21 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 24 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
-    if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": []}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
+    if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
         raise ValueError("scanner resource/database proof incomplete")
     for name, version in (("db", 2), ("java-db", 1)):
         item = scanner["databases"][name]
@@ -350,6 +356,7 @@ class Fixture:
         record = self.owner["derivedImage"]
         if record != image_patch.owned_spec(self.owner, self.owner_path) or record["baseReference"] != self.source_images["ingestion"]:
             raise ValueError("fixed package base/source binding differs")
+        image_patch.validate_base(base, record)
         context = Path(record["context"])
         if os.path.lexists(context):
             raise ValueError("fixed package requires a fresh private build context")
@@ -357,24 +364,34 @@ class Fixture:
         context_info = context.lstat()
         if context.is_symlink() or not stat.S_ISDIR(context_info.st_mode) or context_info.st_uid != os.getuid() or stat.S_IMODE(context_info.st_mode) != 0o700:
             raise ValueError("fixed package context owner/mode differs")
-        for name in ("Dockerfile", "verify_patch.py", "package-lock.json"):
+        for name in ("verify_patch.py", "package-lock.json"):
             (context / name).write_bytes((image_patch.HERE / name).read_bytes())
+        (context / "Dockerfile").write_bytes(image_patch.render_dockerfile(record["labels"]))
         (context / "linux-libc-dev.deb").write_bytes(image_patch.download(image_patch.lock()))
         self.stage = "offline-ingestion-build"
         versions = json.loads(self.run(["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.ApiVersion}},"serverAPI":{{json .Server.ApiVersion}}}']))
         build = dict(image_patch.BUILD, docker=versions)
         image_patch.validate_build(build)
         iid = context / "derived.iid"
-        label_args = [part for key, value in record["labels"].items() for part in ("--label", key + "=" + value)]
-        # Classic builder has no external builder/container or shared BuildKit
-        # cache lifecycle. The base is already pulled and only public inputs
+        # Classic build uses the existing daemon without another builder
+        # service. The base is already pulled and only public inputs
         # enter this fresh context; no tag or dependency network is accepted.
-        self.run(["docker", "build", "--pull=false", "--network=none", "--no-cache", "--force-rm", "--memory", "1g", "--memory-swap", "1g", "--cpu-quota", "200000", "--cpu-period", "100000", "--iidfile", str(iid), *label_args, str(context)], timeout=300, environment=dict(self.environment, DOCKER_BUILDKIT="0"))
+        image_patch.write_marker(record, "started")
+        self.run(["docker", "build", "--pull=false", "--network=none", "--no-cache", "--force-rm", "--memory", "1g", "--memory-swap", "1g", "--cpu-quota", "200000", "--cpu-period", "100000", "--iidfile", str(iid), str(context)], timeout=300, environment=dict(self.environment, DOCKER_BUILDKIT="0"))
         image_id = bounded_file(iid, 128).decode().strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
             raise ValueError("derived ingestion ID absent")
         derived = json.loads(self.run(["docker", "image", "inspect", image_id]))[0]
         evidence = image_patch.validate_derived(base, derived, record)
+        filters = [part for key, value in record["labels"].items() for part in ("--filter", "label=" + key + "=" + value)]
+        ids = set(self.run(["docker", "image", "ls", "--all", "--no-trunc", *filters, "--format", "{{.ID}}"]).splitlines())
+        if len(ids) > 16:
+            raise ValueError("build image chain exceeds bound")
+        chain = image_patch.image_chain({value: json.loads(self.run(["docker", "image", "inspect", value]))[0] for value in ids}, record)
+        if not chain or chain[0] != image_id:
+            raise ValueError("returned build ID differs from exact owned chain")
+        image_patch.write_marker(record, "completed", image_id, chain)
+        evidence["imageChain"] = chain
         evidence["build"] = build
         evidence["packageInput"] = image_patch.lock()
         self.images["ingestion"] = image_id
@@ -439,6 +456,7 @@ class Fixture:
                                  "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT,
                                  "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600,
                                  "referenceObservedLayers": REFERENCE_DB_LAYERS,
+                                 "advisoryExitCode": image_patch.ADVISORY_EXIT,
                                  "releasedBeforeRuntime": False, "postScanUsedBytesMaximum": 0}
         try:
             self.stage = "scanner-workspace"
@@ -464,7 +482,7 @@ class Fixture:
                 output = path / ("scan-" + role + ".json")
                 failure = None
                 try:
-                    self.run(["trivy", "image", *options, "--skip-db-update", "--scanners", "vuln", "--ignore-unfixed", "--severity", "CRITICAL", "--exit-code", "1", "--format", "json", "--output", str(output), image], timeout=600, environment=environment, scanner=True)
+                    self.run(["trivy", "image", *options, "--skip-db-update", "--scanners", "vuln", "--ignore-unfixed", "--severity", "CRITICAL", "--exit-code", str(image_patch.ADVISORY_EXIT), "--format", "json", "--output", str(output), image], timeout=600, environment=environment, scanner=True)
                 except CommandFailure as error:
                     failure = error
                 if output.exists():
@@ -482,7 +500,7 @@ class Fixture:
                     # Only a complete structured fixed-CRITICAL report and
                     # the advisory exit code may continue to the next image.
                     # Network/DB/resource failures still stop immediately.
-                    if advisory and failure and failure.category in {"scanner-command-exit", "scanner-db-download", "scanner-java-db-download"} and failure.code == 1:
+                    if advisory and failure and failure.category == "scanner-advisory-exit" and failure.code == image_patch.ADVISORY_EXIT:
                         failure = None
                     elif advisory and failure is None:
                         raise CommandFailure(self.stage, "scanner-report-exit-mismatch")
@@ -505,7 +523,7 @@ class Fixture:
             self.scanner_evidence["advisoryRoles"] = refused
             if refused:
                 self.stage = "fixed-critical-image-scan:all-six"
-                raise CommandFailure(self.stage, "scanner-advisory", 1)
+                raise CommandFailure(self.stage, "scanner-advisory", image_patch.ADVISORY_EXIT)
             return identities
         finally:
             # Preserve available completed DB observations even when a later
@@ -642,7 +660,7 @@ class Fixture:
 
     def close(self):
         try:
-            cleanup_owned(self.owner_path, self.identity, self.run)
+            self.cleanup_evidence = cleanup_owned(self.owner_path, self.identity, self.run)["derivedImage"]
             return True
         except (ValueError, OSError, KeyError):
             return False
@@ -676,11 +694,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 35 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 38 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 21}
+        report["qualificationControls"] = {"count": 24}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -711,6 +729,7 @@ def qualify(scratch, binary):
         report["scanner"] = getattr(fixture, "scanner_evidence", None)
         report["images"] = getattr(fixture, "image_identities", report.get("images", {}))
         report["cleanupPassed"] = fixture.close()
+        report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)
         if not report["cleanupPassed"]:
             report["status"] = "failed"
         report["scanFindings"] = []

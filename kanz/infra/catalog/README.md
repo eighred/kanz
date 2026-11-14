@@ -74,7 +74,7 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Twenty-one
+stage/category, never subprocess arguments or one-run credentials. Twenty-four
 qualification controls discriminate these failures alongside the 14 projection
 controls.
 The PR/main trigger contract includes the consumed authorization/lineage
@@ -125,9 +125,18 @@ The fresh private build context contains only the tracked Dockerfile, verifier,
 lock and verified public `.deb`, outside credential-bearing runtime scratch.
 The offline legacy Docker build uses `DOCKER_BUILDKIT=0`, no network/pull/tag,
 1 GiB memory/swap, two CPUs, a 300-second deadline and `--force-rm` for its
-intermediate containers. Unsupported legacy builders refuse; no fallback is
+intermediate containers. That flag does not remove intermediate images.
+Unsupported legacy builders refuse; no fallback is
 attempted. The receipt records the actual client/server/API versions, builder
 mode and limits. Hosted compatibility remains unproved until the exact CI run.
+
+The exact base config image ID is pinned and checked against the pulled image.
+Inherited `OnBuild` triggers must be empty: Docker executes them before the
+first explicit instruction. The template renders one complete six-label owner
+instruction immediately after `FROM`, before any `ARG`, `USER`, `COPY` or `RUN`;
+CLI tail labels are not used. Thus every new build image/container inherits the
+complete nonce/source/run/attempt/package identity. Both template and rendered
+Dockerfile hashes enter the owner record and receipt.
 
 Before and after `dpkg -i`, the verifier records the complete installed package
 inventory and Python dependency graph. Exactly `linux-libc-dev:amd64` must change
@@ -140,19 +149,41 @@ The upstream manifest/base image ID and derived local image ID have separate
 receipt fields. Only the actual untagged derived ID is scanned and used for
 CLI/test execution; the base digest is never described as the executed image.
 All six runtime roles retain complete fixed-CRITICAL reports before advisory
-refusal, so one image cannot hide later roles' findings. Infrastructure, report,
-database and resource failures still stop immediately. No service/network starts
+refusal, so one image cannot hide later roles' findings. The scan now requests
+advisory exit 42; only that exact code plus a complete, exact-image report may
+continue to the next role. Infrastructure exit 1, report, database and resource
+failures stop immediately even when advisory JSON exists. Informational DB logs
+cannot mask code 42. This changes the discriminator, not severity, fixed-only or
+Java policy. The historical run above used advisory exit 1. No service/network starts
 if any advisory remains, and Java analysis remains enabled.
 
 The exclusive owner record additionally binds the exact nonce/source/run/attempt,
-package hash, Dockerfile/verifier/lock hashes and derived-image labels. Normal
-and interruption cleanup discover even a completed image whose build client
-failed before returning its ID. Cleanup inspects the unique fully matching ID
-after containers are removed, refuses foreign labels, tags, registry references
-or ambiguous IDs, and removes only that image with `--no-prune`, never the base,
-foreign tags or shared image cache. Eight added controls discriminate package
-tampering, Python/package drift, config/base/owner mismatch, partial-build image
-cleanup, actual offline build selection and complete advisory aggregation.
+package hash, Dockerfile/verifier/lock hashes and all build-image labels. Before
+launch, an exclusive no-follow marker outside the build context records that
+identity. Only a normal successful Docker response, valid returned image ID and
+verified ancestry can create its exclusive completion marker. A killed client
+is not daemon-terminal proof: normal/interruption cleanup performs bounded
+owned-resource rechecks, but unknown completion always prevents a clean pass,
+even after empty inventories. A finite quiet window cannot prove future absence.
+
+Cleanup validates at most 16 fully labeled immutable image IDs as one unbranched
+`Parent` chain ending at the exact pinned base, and inspects at most four owned
+build containers per pass. Missing/unsupported parent metadata, disconnected or
+cyclic ancestry, foreign labels/tags/registry references and unexpected terminal
+IDs refuse. Only verified build containers and child-to-parent image IDs are
+removed, followed by repeated inventories. Image deletion uses `--no-prune`,
+never force, the base, foreign tags or shared cache deletion. The completion ID,
+removed chain/container IDs and rechecks enter the receipt. Eleven added controls
+discriminate package/Python drift, config/OnBuild/owner mismatch, complete chain
+cleanup, late interrupted resources, actual offline build selection and advisory
+versus infrastructure exits.
+
+Relevant pinned source: [Trivy configured finding exit](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/commands/operation/operation.go#L112),
+[fatal exit 1](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/log/logger.go#L78),
+[Moby inherited triggers](https://github.com/moby/moby/blob/v28.5.2/builder/dockerfile/dispatchers.go#L142),
+and [Docker successful stream/IID completion](https://github.com/docker/cli/blob/v28.5.2/cli/command/image/build.go#L334).
+These source references explain the contract; actual recorded runner versions
+must qualify it in CI.
 
 Repository/fixture acceptance is distinct from production catalog activation,
 source rights, complete schema-registry integration or capital approval. Close
