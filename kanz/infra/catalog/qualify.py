@@ -331,10 +331,11 @@ class Fixture:
         def limits():
             resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        process = None
+        process, capture_complete = None, False
         try:
             process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment or self.environment, preexec_fn=limits, start_new_session=True)
             code, output = capture_process(process, timeout)
+            capture_complete = True
             if code:
                 raise CommandFailure(self.stage, failure_category(output, code, scanner), code)
             return output.decode("utf-8", errors="replace")
@@ -347,14 +348,18 @@ class Fixture:
             raise CommandFailure(self.stage, "command-unavailable") from None
         finally:
             if process is not None:
-                if process.poll() is None:
-                    try:
+                try:
+                    # The direct child may have exited while a descendant still
+                    # owns its stdout. A failed capture must kill/reap the owned
+                    # process group regardless of the parent's exit status.
+                    if not capture_complete or process.poll() is None:
                         stop_process(process)
-                    except CommandFailure as error:
-                        self.last_failure = {"stage": self.stage, "category": error.category}
-                        raise CommandFailure(self.stage, error.category) from None
-                if process.stdout is not None:
-                    process.stdout.close()
+                except CommandFailure as error:
+                    self.last_failure = {"stage": self.stage, "category": error.category}
+                    raise CommandFailure(self.stage, error.category) from None
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
 
     def prepare_scanner(self):
         path = Path(self.owner["scannerMount"]["path"])

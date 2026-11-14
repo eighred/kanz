@@ -177,14 +177,19 @@ class QualificationControls(unittest.TestCase):
         fixture = object.__new__(qualify.Fixture)
         fixture.stage, fixture.environment = "bounded-command", {}
         for category in ("output-budget", "timeout"):
-            process = mock.Mock()
-            process.poll.return_value = None
-            with self.subTest(category=category), mock.patch.object(qualify.subprocess, "Popen", return_value=process) as launch, mock.patch.object(qualify, "capture_process", side_effect=qualify.CommandFailure("capture", category)), mock.patch.object(qualify, "stop_process") as stop:
-                with self.assertRaises(qualify.CommandFailure):
-                    fixture.run(["dummy-command"])
-                stop.assert_called_once_with(process)
-                self.assertEqual(launch.call_args.kwargs["stdout"], subprocess.PIPE)
-                self.assertTrue(launch.call_args.kwargs["start_new_session"])
+            for parent_code in (None, 0, 7):
+                for stop_failure in (False, True):
+                    process = mock.Mock()
+                    process.poll.return_value = parent_code
+                    failure = qualify.CommandFailure("reap", "reap-timeout") if stop_failure else None
+                    with self.subTest(category=category, parent_code=parent_code, stop_failure=stop_failure), mock.patch.object(qualify.subprocess, "Popen", return_value=process) as launch, mock.patch.object(qualify, "capture_process", side_effect=qualify.CommandFailure("capture", category)), mock.patch.object(qualify, "stop_process", side_effect=failure) as stop:
+                        with self.assertRaises(qualify.CommandFailure) as refused:
+                            fixture.run(["dummy-command"])
+                        self.assertEqual(refused.exception.category, "reap-timeout" if stop_failure else category)
+                        stop.assert_called_once_with(process)
+                        process.stdout.close.assert_called_once_with()
+                        self.assertEqual(launch.call_args.kwargs["stdout"], subprocess.PIPE)
+                        self.assertTrue(launch.call_args.kwargs["start_new_session"])
         process = mock.Mock(pid=1234)
         with mock.patch.object(qualify.os, "killpg") as terminate:
             qualify.stop_process(process)
