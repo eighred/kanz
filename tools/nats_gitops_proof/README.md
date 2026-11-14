@@ -43,6 +43,17 @@ PVC/PV identity remains. This discriminates persistent recovery from replication
 by a still-running peer. The operator fixture uses only the
 existing bootstrap identity's JetStream management grant.
 
+After replacement, a single 180-second deadline covers read-only stream listing,
+all 18 exact configuration reads and exact retained FACT readback. Every command
+is limited to 15 seconds or the remaining budget. Missing stream names and closed
+timeout/listener categories may converge within that budget; unexpected streams,
+observed configuration differences, changed FACTs and authorization refusals fail.
+No additional Argo sync or bootstrap is used. Pod readiness alone does not attest
+stream recovery. The receipt projects the first complete inventory sample, latest
+observed/missing names, differing field names, attempts, elapsed time and deadline
+expiry. These observations distinguish availability symptoms from proven drift;
+they do not establish that a missing stream was caused by leader election.
+
 `nats-gitops-verification / postsync-pvc` runs the real proof on PR and main.
 Offline `unittest` tests discriminate false receipts and changed source, hook,
 stream, frame, PubAck and cold-storage assertions. The Go owner additionally
@@ -51,3 +62,15 @@ access. Runtime receipts contain synthetic data,
 source/tree hashes, run identity and actual image IDs, but no raw Pod logs, keys,
 tokens or kubeconfig. Cleanup must remove the exact cluster created by the proof.
 This is disposable estate acceptance, not a Tokyo rollout or capital authority.
+
+The mandatory source inventory is 15 Python test methods in `test_proof.py` and
+the two Go tests in `kanz/tools/nats_gitops_proof/main_test.go`. The four recovery
+controls cover missing/transient-then-recovered inventory, permanent missing or
+unavailable inventory/FACT at the deadline, immediate configuration/FACT/auth
+refusal, and one shared deadline across all inventory commands. Receipt mutations
+also refuse missing or forged convergence evidence. The runtime receipt requires
+all 16 ordered cases: canonical-source, first-postsync, canonical-runtime,
+stream-inventory, writer-workload-api-socket, canonical-fact, empty-stream-removed,
+same-revision-postsync, stream-restored, all-brokers-stopped, all-claims-retained,
+all-brokers-replaced, pvc-preserved, post-cold-stream-inventory, fact-preserved,
+cleanup. Unit controls do not establish actual broker recovery.

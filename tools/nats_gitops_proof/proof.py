@@ -26,8 +26,10 @@ ARGO_IMAGES = {
 }
 CASES = ["canonical-source", "first-postsync", "canonical-runtime", "stream-inventory", "writer-workload-api-socket", "canonical-fact",
          "empty-stream-removed", "same-revision-postsync", "stream-restored",
-         "all-brokers-stopped", "all-claims-retained", "all-brokers-replaced", "pvc-preserved", "fact-preserved", "cleanup"]
+         "all-brokers-stopped", "all-claims-retained", "all-brokers-replaced", "pvc-preserved",
+         "post-cold-stream-inventory", "fact-preserved", "cleanup"]
 DELETE_STREAM = "OBSERVABILITY"
+RECOVERY_SECONDS = 180
 
 
 def diagnostic_category(text):
@@ -97,15 +99,39 @@ def expected_streams(script, replicas):
     return result
 
 
+def inventory_observation(expected, actual):
+    """Project names and differing canonical field names, never broker output."""
+    mismatched = {}
+    for name in sorted(set(expected) & set(actual)):
+        found = actual[name].get("config")
+        if not isinstance(found, dict):
+            raise ValueError("observed stream configuration is invalid")
+        fields = []
+        for key, value in expected[name].items():
+            observed = found.get(key)
+            if key == "subjects" and isinstance(observed, list) and all(isinstance(x, str) for x in observed):
+                observed = sorted(observed)
+            if type(observed) is not type(value) or observed != value:
+                fields.append(key)
+        if fields:
+            mismatched[name] = sorted(fields)
+    return {"observedNames": sorted(actual), "missingNames": sorted(set(expected) - set(actual)),
+            "unexpectedNames": sorted(set(actual) - set(expected)), "mismatchedFields": mismatched}
+
+
 def check_inventory(expected, actual):
-    if set(actual) != set(expected):
+    observation = inventory_observation(expected, actual)
+    if observation["missingNames"] or observation["unexpectedNames"]:
         raise ValueError("observed stream inventory differs from canonical source")
-    for name, desired in expected.items():
-        found = actual[name]["config"]
-        for key, value in desired.items():
-            observed = sorted(found[key]) if key == "subjects" else found[key]
-            if observed != value:
-                raise ValueError(f"stream {name} differs at {key}")
+    if observation["mismatchedFields"]:
+        raise ValueError("observed stream configuration differs from canonical source")
+
+
+def recovery_timeout(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("post-cold recovery deadline expired")
+    return min(15, remaining)
 
 
 def check_operation(app, source, token):
@@ -222,6 +248,14 @@ def check_report(report):
         raise ValueError("re-sync reused the previous hook or operation")
     check_puback(report["pubAck"], source)
     check_cold_recovery(report["coldRecovery"])
+    recovery = report["postColdRecovery"]
+    if (recovery.get("passed") is not True or recovery.get("state") != "recovered"
+            or recovery.get("budgetSeconds") != RECOVERY_SECONDS or recovery.get("deadlineExpired") is not False
+            or type(recovery.get("attempts")) is not int or recovery["attempts"] < 1
+            or type(recovery.get("elapsedSeconds")) not in (int, float) or not 0 <= recovery["elapsedSeconds"] <= RECOVERY_SECONDS
+            or len(report["streams"]) != 18 or recovery.get("observedNames") != sorted(report["streams"])
+            or recovery.get("missingNames") != [] or recovery.get("unexpectedNames") != [] or recovery.get("mismatchedFields") != {}):
+        raise ValueError("post-cold exact inventory and FACT convergence is incomplete")
     if report["factBefore"] != report["factAfter"] or not report["canonicalValidated"] or not report["negativeControlPassed"]:
         raise ValueError("canonical FACT durability proof differs")
 
@@ -376,14 +410,79 @@ class Fixture:
             pod = json.loads(self.k("-n", namespace, "get", "pod/" + name, "-o", "json"))
             check_writer_socket(pod["spec"])
 
-    def nats(self, *args, name="nats-inspector", namespace=NAMESPACE, data=None):
-        return self.k("-n", namespace, "exec", "-i", name, "-c", "bootstrap", "--", "nats", *args, data=data)
+    def nats(self, *args, name="nats-inspector", namespace=NAMESPACE, data=None, timeout=300):
+        return self.k("-n", namespace, "exec", "-i", name, "-c", "bootstrap", "--", "nats", *args, data=data, timeout=timeout)
 
-    def inventory(self):
-        names = json.loads(self.nats("stream", "ls", "--json", "--all"))
-        if not isinstance(names, list) or len(names) != len(set(names)) or not all(re.fullmatch(r"[A-Z_]+", x) for x in names):
+    def inventory(self, deadline=None, expected=None, observation=None):
+        def read(*args):
+            return self.nats(*args, timeout=300 if deadline is None else recovery_timeout(deadline))
+        names = json.loads(read("stream", "ls", "--json", "--all"))
+        if (not isinstance(names, list) or len(names) > 64
+                or not all(isinstance(x, str) and re.fullmatch(r"[A-Z_]{1,64}", x) for x in names)
+                or len(names) != len(set(names))):
             raise ValueError("invalid observed stream names")
-        return {name: json.loads(self.nats("stream", "info", name, "--json")) for name in names}
+        if expected is not None:
+            observation.update({"observedNames": sorted(names), "missingNames": sorted(set(expected) - set(names)),
+                                "unexpectedNames": sorted(set(names) - set(expected)), "mismatchedFields": {}})
+            if observation["unexpectedNames"]:
+                observation["state"] = "configuration-refused"
+                raise ValueError("post-cold inventory contains an unexpected stream")
+        actual = {}
+        for name in names:
+            actual[name] = json.loads(read("stream", "info", name, "--json"))
+            if expected is not None:
+                mismatch = inventory_observation({name: expected[name]}, {name: actual[name]})["mismatchedFields"]
+                if mismatch:
+                    observation.update({"mismatchedFields": mismatch, "state": "configuration-refused"})
+                    raise ValueError("post-cold stream configuration differs from canonical source")
+        return actual
+
+    def await_recovery(self, expected, fact, original, observation):
+        # Pod readiness is not a complete JetStream inventory observation. Only
+        # read existing state here: never bootstrap or sync away a recovery loss.
+        started = time.monotonic()
+        deadline = started + RECOVERY_SECONDS
+        observation.update({"budgetSeconds": RECOVERY_SECONDS, "elapsedSeconds": 0, "attempts": 0,
+                            "deadlineExpired": False, "passed": False, "state": "awaiting-inventory",
+                            "observedNames": None, "missingNames": None, "unexpectedNames": None, "mismatchedFields": None})
+        while time.monotonic() < deadline:
+            observation["attempts"] += 1
+            self.last_failure = None
+            self.substage = "await-post-cold-complete-exact-stream-inventory"
+            try:
+                actual = self.inventory(deadline=deadline, expected=expected, observation=observation)
+                sample = inventory_observation(expected, actual)
+                observation.update(sample)
+                if "firstInventory" not in observation:
+                    observation["firstInventory"] = sample
+                if observation["unexpectedNames"] or observation["mismatchedFields"]:
+                    observation["state"] = "configuration-refused"
+                    raise ValueError("post-cold stream configuration differs from canonical source")
+                observation["state"] = "awaiting-missing-streams"
+                if not observation["missingNames"]:
+                    self.substage = "verify-exact-retained-FACT-after-complete-stream-recovery"
+                    observation["state"] = "verifying-exact-FACT"
+                    record = checked_record(json.loads(self.nats("stream", "get", "MARKET", "1", "--json",
+                                                                 timeout=recovery_timeout(deadline))), fact)
+                    if record != original:
+                        raise ValueError("FACT bytes, subject, headers, sequence or timestamp changed after cold recovery")
+                    recovery_timeout(deadline)
+                    observation.update({"passed": True, "state": "recovered"})
+                    return record
+            except TimeoutError:
+                break
+            except RuntimeError:
+                category = (self.last_failure or {}).get("category")
+                if category not in {"dependency-timeout", "listener-unavailable", "command-timeout"}:
+                    raise
+                # These identify availability symptoms, not a proven leader cause.
+                observation.update({"state": "awaiting-broker-response", "lastAvailabilityCategory": category})
+            finally:
+                observation["elapsedSeconds"] = round(time.monotonic() - started, 3)
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        observation.update({"state": "deadline-expired", "deadlineExpired": True,
+                            "elapsedSeconds": round(time.monotonic() - started, 3)})
+        raise TimeoutError("post-cold complete stream and exact FACT recovery did not converge")
 
     def claim(self, claim):
         pvc = json.loads(self.k("-n", NAMESPACE, "get", "pvc", claim, "-o", "json"))
@@ -576,10 +675,9 @@ def main():
             report["stage"] = "cold restart every broker and recover existing FACT from retained claims"
             report["coldRecovery"] = fixture.cold_restart()
             report["cases"].extend(["all-brokers-stopped", "all-claims-retained", "all-brokers-replaced", "pvc-preserved"])
-            report["factAfter"] = checked_record(json.loads(fixture.nats("stream", "get", "MARKET", "1", "--json")), fact)
-            if report["factAfter"] != report["factBefore"]:
-                raise ValueError("FACT bytes, subject, headers or sequence changed after cold recovery")
-            check_inventory(expected, fixture.inventory())
+            report["postColdRecovery"] = {}
+            report["factAfter"] = fixture.await_recovery(expected, fact, report["factBefore"], report["postColdRecovery"])
+            report["cases"].append("post-cold-stream-inventory")
             if fixture.canonical_runtime() != report["runtimeConfigHashes"]:
                 raise ValueError("runtime configuration changed during recovery")
             report["cases"].append("fact-preserved")

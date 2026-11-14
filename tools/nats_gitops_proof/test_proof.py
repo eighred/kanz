@@ -3,8 +3,10 @@ import base64
 import copy
 import fnmatch
 import importlib.util
+import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("nats_gitops_proof", Path(__file__).with_name("proof.py"))
 proof = importlib.util.module_from_spec(SPEC)
@@ -142,15 +144,141 @@ class ProofTests(unittest.TestCase):
                 proof.check_operation(broken, SHA, token)
         self.assertIsNone(proof.check_operation(app, SHA, [{"name": "other"}]))
 
-    def test_exact_record_payload_headers_and_sequence(self):
+    def record_fixture(self):
         fact = {"subject": "market.crypto.quote", "frame": base64.b64encode(b"canonical-fixture").decode(),
                 "headers": {"Nats-Msg-Id": "fixture", "X-Kanz-Fixture": "nats-gitops"}}
         record = {"subject": fact["subject"], "seq": 1, "data": fact["frame"], "time": "2026-11-15T00:00:00Z",
                   "hdrs": base64.b64encode(b"NATS/1.0\r\nNats-Msg-Id:fixture\r\nX-Kanz-Fixture:nats-gitops\r\n\r\n").decode()}
+        return fact, record
+
+    def test_exact_record_payload_headers_and_sequence(self):
+        fact, record = self.record_fixture()
         self.assertEqual(proof.checked_record(record, fact), record)
         for key, value in (("seq", 2), ("subject", "order.order.submit"), ("data", "b3RoZXI="), ("hdrs", "")):
             with self.assertRaises(ValueError):
                 proof.checked_record(record | {key: value}, fact)
+
+    def test_cold_inventory_waits_for_missing_and_transient_responses(self):
+        expected = self.canonical()
+        complete = {name: {"config": value} for name, value in expected.items()}
+        missing = {name: row for name, row in complete.items() if name != "RISK"}
+        fixture = object.__new__(proof.Fixture)
+        fact, record = self.record_fixture()
+        observations, clock = {}, [10.0]
+        responses = iter([missing, None, complete])
+        def inventory(deadline, **kwargs):
+            self.assertEqual(deadline, 10 + proof.RECOVERY_SECONDS)
+            value = next(responses)
+            if value is None:
+                fixture.last_failure = {"category": "dependency-timeout"}
+                raise RuntimeError("raw diagnostic must not be retained")
+            return value
+        with mock.patch.object(fixture, "inventory", side_effect=inventory), \
+                mock.patch.object(fixture, "nats", return_value=json.dumps(record)) as read, \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(proof.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            self.assertEqual(fixture.await_recovery(expected, fact, record, observations), record)
+        read.assert_called_once()
+        self.assertLessEqual(read.call_args.kwargs["timeout"], 15)
+        self.assertEqual(observations["attempts"], 3)
+        self.assertEqual(observations["elapsedSeconds"], 4)
+        self.assertEqual(observations["observedNames"], sorted(expected))
+        self.assertEqual(observations["missingNames"], [])
+        self.assertEqual(observations["firstInventory"]["missingNames"], ["RISK"])
+        self.assertTrue(observations["passed"])
+        self.assertNotIn("raw diagnostic", json.dumps(observations))
+
+    def test_cold_inventory_deadline_refuses_missing_streams_or_unavailable_reads(self):
+        expected = self.canonical()
+        complete = {name: {"config": value} for name, value in expected.items()}
+        fact, record = self.record_fixture()
+        for condition in ("missing", "dependency-timeout", "listener-unavailable", "command-timeout", "fact-unavailable"):
+            with self.subTest(condition=condition):
+                fixture = object.__new__(proof.Fixture)
+                observations, clock = {}, [0.0]
+                def unavailable(*args, **kwargs):
+                    fixture.last_failure = {"category": "dependency-timeout" if condition == "fact-unavailable" else condition}
+                    raise RuntimeError("raw broker detail")
+                def inventory(**kwargs):
+                    if condition == "missing":
+                        return {name: row for name, row in complete.items() if name != "RISK"}
+                    return complete if condition == "fact-unavailable" else unavailable()
+                with mock.patch.object(fixture, "inventory", side_effect=inventory), \
+                        mock.patch.object(fixture, "nats", side_effect=unavailable), \
+                        mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]), \
+                        mock.patch.object(proof.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                    with self.assertRaises(TimeoutError):
+                        fixture.await_recovery(expected, fact, record, observations)
+                self.assertEqual(clock[0], proof.RECOVERY_SECONDS)
+                self.assertEqual(observations["elapsedSeconds"], proof.RECOVERY_SECONDS)
+                self.assertEqual(observations["state"], "deadline-expired")
+                self.assertTrue(observations["deadlineExpired"])
+                self.assertFalse(observations["passed"])
+                self.assertEqual(observations["missingNames"], ["RISK"] if condition == "missing" else [] if condition == "fact-unavailable" else None)
+                self.assertNotIn("raw broker", json.dumps(observations))
+
+    def test_cold_inventory_refuses_configuration_fact_and_auth_drift_without_retry(self):
+        expected = self.canonical()
+        fact, record = self.record_fixture()
+        for mutation in ("extra", "storage", "missing-field", "fact", "timestamp", "auth"):
+            with self.subTest(mutation=mutation):
+                actual = {name: {"config": copy.deepcopy(value)} for name, value in expected.items()}
+                fixture = object.__new__(proof.Fixture)
+                observations = {}
+                if mutation == "extra":
+                    actual["UNTRACKED"] = actual["RISK"]
+                elif mutation == "storage":
+                    actual["RISK"]["config"]["storage"] = "memory"
+                elif mutation == "missing-field":
+                    del actual["RISK"]["config"]["num_replicas"]
+                def inventory(**kwargs):
+                    if mutation == "auth":
+                        fixture.last_failure = {"category": "broker-grant-refused"}
+                        raise RuntimeError("private auth diagnostic")
+                    return actual
+                changed = record | ({"data": "b3RoZXI="} if mutation == "fact" else {"time": "changed"})
+                with mock.patch.object(fixture, "inventory", side_effect=inventory) as probe, \
+                        mock.patch.object(fixture, "nats", return_value=json.dumps(changed)), \
+                        mock.patch.object(proof.time, "sleep") as pause:
+                    with self.assertRaises(RuntimeError if mutation == "auth" else ValueError):
+                        fixture.await_recovery(expected, fact, record, observations)
+                probe.assert_called_once()
+                pause.assert_not_called()
+                self.assertFalse(observations["passed"])
+                if mutation in ("storage", "missing-field"):
+                    self.assertEqual(observations["state"], "configuration-refused")
+                    self.assertEqual(observations["mismatchedFields"], {"RISK": ["storage" if mutation == "storage" else "num_replicas"]})
+
+    def test_inventory_commands_share_one_recovery_deadline(self):
+        fixture = object.__new__(proof.Fixture)
+        expected, clock, budgets = self.canonical(), [0.0], []
+        def read(*args, timeout):
+            budgets.append(timeout)
+            clock[0] += 0.2
+            return json.dumps(sorted(expected) if args[1] == "ls" else {"config": expected[args[2]]})
+        with mock.patch.object(fixture, "nats", side_effect=read), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(TimeoutError):
+                fixture.inventory(deadline=0.5)
+        self.assertEqual(len(budgets), 3)
+        self.assertTrue(all(0 < budget <= 0.5 for budget in budgets))
+        self.assertAlmostEqual(budgets[-1], 0.1)
+        for invalid in (None, ["RISK", "RISK"], [{}], ["risky"], ["RISK" * 30]):
+            with self.subTest(invalid=invalid), mock.patch.object(fixture, "nats", return_value=json.dumps(invalid)):
+                with self.assertRaises(ValueError):
+                    fixture.inventory()
+        for mutation in ("extra", "storage"):
+            with self.subTest(mutation=mutation):
+                observations = {}
+                first = sorted(expected)[0]
+                names = sorted(expected) + (["UNTRACKED"] if mutation == "extra" else [])
+                changed = {"config": expected[first] | {"storage": "memory"}}
+                with mock.patch.object(fixture, "nats", side_effect=[json.dumps(names), json.dumps(changed)]) as probe:
+                    with self.assertRaises(ValueError):
+                        fixture.inventory(expected=expected, observation=observations)
+                self.assertEqual(probe.call_count, 1 if mutation == "extra" else 2)
+                self.assertEqual(observations["state"], "configuration-refused")
+                self.assertEqual(observations["unexpectedNames"], ["UNTRACKED"] if mutation == "extra" else [])
 
     def receipt(self):
         operation = {"revision": SHA, "phase": "Succeeded", "hookPhase": "Succeeded", "syncPhase": "PostSync"}
@@ -160,6 +288,10 @@ class ProofTests(unittest.TestCase):
         return {"source": SHA, "tree": "b" * 40, "passed": True, "cleanupPassed": True, "cases": proof.CASES[:],
                 "syncs": [operation | {"jobUID": "job-one", "operation": "first"}, operation | {"jobUID": "job-two", "operation": "second"}],
                 "coldRecovery": {"before": before, "stopped": stopped, "after": after},
+                "streams": self.canonical(),
+                "postColdRecovery": {"passed": True, "state": "recovered", "budgetSeconds": proof.RECOVERY_SECONDS,
+                    "elapsedSeconds": 2, "deadlineExpired": False, "attempts": 2, "observedNames": sorted(self.canonical()),
+                    "missingNames": [], "unexpectedNames": [], "mismatchedFields": {}},
                 "pubAck": {"source": SHA, "stream": "MARKET", "sequence": 1, "duplicate": False, "acknowledged": True}, "factBefore": {"record": "one"},
                 "factAfter": {"record": "one"}, "canonicalValidated": True, "negativeControlPassed": True}
 
@@ -206,6 +338,14 @@ class ProofTests(unittest.TestCase):
         broken["coldRecovery"]["after"]["nats-0"]["pvcUID"] = "replacement-volume"
         with self.assertRaises(ValueError):
             proof.check_report(broken)
+        for key, value in (("passed", False), ("state", "deadline-expired"), ("budgetSeconds", 999),
+                           ("deadlineExpired", True), ("attempts", 0), ("elapsedSeconds", proof.RECOVERY_SECONDS + 1),
+                           ("observedNames", []), ("missingNames", ["RISK"]), ("unexpectedNames", ["OTHER"]),
+                           ("mismatchedFields", {"RISK": ["storage"]})):
+            broken = self.receipt()
+            broken["postColdRecovery"][key] = value
+            with self.assertRaises(ValueError):
+                proof.check_report(broken)
 
 
 if __name__ == "__main__":
