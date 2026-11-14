@@ -123,17 +123,26 @@ func (l *LiveFX) Converter() accounting.FXConverter {
 	return accounting.NewFXTable(l.reporting, rates)
 }
 
-// midRat extracts the exact mid rate from an FX market event: a quote's bid/ask
-// mid, else a trade's last, else a bar's close. Exactness is preserved via
-// big.Rat (FX rates flow into exact NAV math — no float). ok=false when the
-// event carries no usable price.
+// midRat extracts the exact rate from an FX market event: a quote's bid/ask mid
+// (or its sole present positive side), a trade's last, or a bar's close.
+// Exactness is preserved via big.Rat (FX rates flow into exact NAV math — no
+// float). ok=false when the event carries no usable price.
 func midRat(ev *marketpb.MarketDataEvent) (*big.Rat, bool) {
 	switch d := ev.GetData().(type) {
 	case *marketpb.MarketDataEvent_Quote:
 		bid, bok := ratOf(d.Quote.GetBidPrice())
 		ask, aok := ratOf(d.Quote.GetAskPrice())
+		// A present unusable leg is not an absent side. Substituting its peer
+		// would mint a rate from a tuple the publisher actually contradicted.
+		if (d.Quote.GetBidPrice() != nil && (!bok || bid.Sign() <= 0)) ||
+			(d.Quote.GetAskPrice() != nil && (!aok || ask.Sign() <= 0)) {
+			return nil, false
+		}
 		switch {
 		case bok && aok:
+			if bid.Cmp(ask) > 0 {
+				return nil, false
+			}
 			return new(big.Rat).Quo(new(big.Rat).Add(bid, ask), big.NewRat(2, 1)), true
 		case bok:
 			return bid, true
@@ -150,13 +159,12 @@ func midRat(ev *marketpb.MarketDataEvent) (*big.Rat, bool) {
 	}
 }
 
-// ratOf converts a common.v1.Decimal to an exact rational; ok=false for nil.
+// ratOf converts a common.v1.Decimal to an exact rational; ok=false for absent
+// or out-of-domain input. The quote caller separately checks field presence.
 //
 // CHECKED, because every caller reads a MarketDataEvent off the wire and
-// Decimal.exponent is unvalidated there (#95). An out-of-domain rate is treated
-// exactly like an absent one — ok=false, and the quote is not used — which is
-// already the contract every caller here handles. It must never become zero: a
-// zero FX rate revalues a whole book to nothing.
+// Decimal.exponent is unvalidated there (#95). An out-of-domain rate must never
+// become zero: a zero FX rate revalues a whole book to nothing.
 func ratOf(d *commonpb.Decimal) (*big.Rat, bool) {
 	if d == nil {
 		return nil, false

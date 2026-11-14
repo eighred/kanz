@@ -707,16 +707,21 @@ jobs:
       #
       #   `go test` joined because the openrouter adapter HAS tests behind its tag and
       #   build+vet would never run them. They are fully mocked — httptest fixtures, no
-      #   key, no network — so unlike the redis step below this needs no service, and
-      #   there is no reason not to run them. The anthropic tag has no tests of its own;
-      #   including it here costs nothing and means adding one later is enough.
+      #   provider key or model network access. The shared copilot recording tests
+      #   also use the canonical broker started above, including in tagged builds.
       - name: Build + vet + test the `anthropic,openrouter` tags
         if: matrix.kind == 'quality'
         working-directory: kanz
+        env:
+          TEST_NATS_URL: nats://localhost:4222
         run: |
+          set -o pipefail
           go build -tags anthropic,openrouter ./...
           go vet -tags anthropic,openrouter ./services/copilot/...
           go test -tags anthropic,openrouter -p 1 -count=1 ./services/copilot/...
+          # Keep the complete tagged suite above; record each grounding acceptance
+          # outcome separately so missing or skipped provider-build proof is visible.
+          go test -tags anthropic,openrouter -p 1 -count=1 -json -run '^TestGrounding(WholeNumericClaims|RefusesUnsupportedNumericClaims|FiniteMatchingPreservesPolicy|NumbersReachHTTPAndObservation|NumbersReachCanonicalObservationReplay)$' ./services/copilot/internal/retrieval ./services/copilot/cmd/copilot
 
       # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
       # is only exercised under this tag: idempotency_realredis_test.go stands two

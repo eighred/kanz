@@ -397,12 +397,16 @@ type Break struct {
 	// BreakID is stable ACROSS RUNS, derived from (portfolio, custodian, kind,
 	// key) — see BreakID. The age depends on it: a break given a fresh id every
 	// day would be permanently one day old.
-	BreakID   string
-	Kind      recon.BreakKind
-	Key       string
-	IBOR      *big.Rat
-	Custodian *big.Rat
-	Diff      *big.Rat
+	BreakID string
+	// Ownership comes from the reconciliation subject or stored columns, never
+	// from parsing the opaque working-item ID.
+	PortfolioID string `json:"-"`
+	CustodianID string `json:"-"`
+	Kind        recon.BreakKind
+	Key         string
+	IBOR        *big.Rat
+	Custodian   *big.Rat
+	Diff        *big.Rat
 
 	Status         BreakStatus
 	Assignee       string
@@ -450,6 +454,8 @@ func FromRecon(subject Subject, detected []recon.Break, now time.Time) []Break {
 	for _, b := range detected {
 		out = append(out, Break{
 			BreakID:         BreakID(subject.PortfolioID, subject.CustodianID, b.Kind, b.Key),
+			PortfolioID:     subject.PortfolioID,
+			CustodianID:     subject.CustodianID,
 			Kind:            b.Kind,
 			Key:             b.Key,
 			IBOR:            b.IBOR,

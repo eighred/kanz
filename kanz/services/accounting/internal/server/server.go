@@ -161,6 +161,20 @@ func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) 
 	return auth.RequireCallerTenantIs(w, r, s.tenant, notFoundBody)
 }
 
+// portfolioReader preserves tenant-wide reads for an absent or empty scope,
+// while refusing malformed claims before configuration or financial state is read.
+func (s *Server) portfolioReader(w http.ResponseWriter, r *http.Request, portfolio string) (*auth.Principal, bool) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return nil, false
+	}
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok || (portfolio != "" && !auth.PortfolioInScope(principal.Portfolios, portfolio)) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": notFoundBody})
+		return nil, false
+	}
+	return principal, true
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
@@ -230,7 +244,7 @@ type navRequest struct {
 }
 
 func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
-	if !s.callerOwnsThisInstance(w, r) {
+	if _, ok := s.portfolioReader(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -361,7 +375,7 @@ type reconcileRequest struct {
 // frequent read and still counts; this route is operator-triggered and rare. If
 // that changes, the fix is a reason on the loader, not a second materialize here.
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
-	if !s.callerOwnsThisInstance(w, r) {
+	if _, ok := s.portfolioReader(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	id := r.PathValue("id")

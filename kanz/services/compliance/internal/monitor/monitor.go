@@ -713,10 +713,13 @@ func (m *Monitor) gcBooksLocked() {
 // snapshot. One pass makes them the same value by construction.
 func (m *Monitor) snapshotLocked(key bookKey) *comp.Book {
 	b := m.books[key]
-	var positions map[string]comp.Position
-	if b != nil {
-		positions = b.positions
+	// Eligibility belongs to this capture. A separate held check could observe
+	// a position that closes before we copy, then evaluate an empty book (#1710).
+	// UNKNOWN identity markers remain positions, so they still refuse evaluation.
+	if b == nil || len(b.positions) == 0 {
+		return nil
 	}
+	positions := b.positions
 	out := make([]comp.Position, 0, len(positions))
 	var nav *commonpb.Decimal
 	// THE CURRENCY THE HOLDINGS ARE IN. It was left unset while nothing read it;
@@ -741,7 +744,8 @@ func (m *Monitor) snapshotLocked(key bookKey) *comp.Book {
 	}
 }
 
-// snapshot builds a book and joins its equity, taking and releasing the lock.
+// snapshot captures a held book and joins its equity outside the lock. A nil
+// result means this capture held nothing; no valuation source is consulted.
 func (m *Monitor) snapshot(key bookKey) *comp.Book {
 	m.mu.Lock()
 	book := m.snapshotLocked(key)
@@ -817,23 +821,14 @@ func (m *Monitor) ReevaluateAll(ctx context.Context) error {
 // spine has never described would report it clean (EXEC-M18).
 func (m *Monitor) Reevaluate(ctx context.Context, tenant, portfolio string) error {
 	key := bookKey{tenant: tenant, portfolio: portfolio}
-	m.mu.Lock()
-	b, known := m.books[key]
-	held := known && len(b.positions) > 0
-	m.mu.Unlock()
-	// HOLDS NOTHING IS THE SAME ANSWER AS NEVER DESCRIBED, and since #810 the two
-	// are also the same state: a book whose last holding closed is emptied rather
-	// than left full of zero-weight ghosts, so this test has to read the holdings
-	// and not merely the key. Reading the key alone would have re-admitted exactly
-	// what EXEC-M18 rules out — evaluating an empty book, which passes every
-	// concentration limit there is.
-	if !held {
+	book := m.snapshot(key)
+	if book == nil {
 		return nil
 	}
 	// MARKET_MOVE is the honest trigger for both callers. Nothing traded: the
 	// book's value moved, or the cash behind it did. The schema's other value
 	// (POSITION_CHANGE) would claim a fill that did not happen.
-	return m.evaluate(ctx, key, m.snapshot(key),
+	return m.evaluate(ctx, key, book,
 		compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE, m.now().UTC())
 }
 
