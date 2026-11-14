@@ -214,7 +214,7 @@ func TestMandateMetadataCanonicalReplayGateAndRepair(t *testing.T) {
 						t.Fatal(err)
 					}
 					decisionSequences = append(decisionSequences, meta.Sequence.Stream)
-					if env.GetTenantId() != who || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT || decision.GetAttributes()["allowed"] != fmt.Sprint(allowed) || unreadable && decision.GetAttributes()["not_evaluated"] != comp.CodeMandateUnreadable {
+					if env.GetTenantId() != who || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_OBSERVATION || decision.GetAttributes()["allowed"] != fmt.Sprint(allowed) || unreadable && decision.GetAttributes()["not_evaluated"] != comp.CodeMandateUnreadable {
 						t.Fatalf("decision FACT lost refusal/identity: %v %v", env, &decision)
 					}
 					if err := msg.Ack(); err != nil {
