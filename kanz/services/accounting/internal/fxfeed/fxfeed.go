@@ -26,6 +26,7 @@ import (
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/mark"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 )
 
@@ -130,26 +131,8 @@ func (l *LiveFX) Converter() accounting.FXConverter {
 func midRat(ev *marketpb.MarketDataEvent) (*big.Rat, bool) {
 	switch d := ev.GetData().(type) {
 	case *marketpb.MarketDataEvent_Quote:
-		bid, bok := ratOf(d.Quote.GetBidPrice())
-		ask, aok := ratOf(d.Quote.GetAskPrice())
-		// A present unusable leg is not an absent side. Substituting its peer
-		// would mint a rate from a tuple the publisher actually contradicted.
-		if (d.Quote.GetBidPrice() != nil && (!bok || bid.Sign() <= 0)) ||
-			(d.Quote.GetAskPrice() != nil && (!aok || ask.Sign() <= 0)) {
-			return nil, false
-		}
-		switch {
-		case bok && aok:
-			if bid.Cmp(ask) > 0 {
-				return nil, false
-			}
-			return new(big.Rat).Quo(new(big.Rat).Add(bid, ask), big.NewRat(2, 1)), true
-		case bok:
-			return bid, true
-		case aok:
-			return ask, true
-		}
-		return nil, false
+		prices, ok := mark.QualifyLiveQuote(d.Quote.GetBidPrice(), d.Quote.GetAskPrice())
+		return prices.Mid, ok
 	case *marketpb.MarketDataEvent_Trade:
 		return ratOf(d.Trade.GetPrice())
 	case *marketpb.MarketDataEvent_Bar:
@@ -160,7 +143,7 @@ func midRat(ev *marketpb.MarketDataEvent) (*big.Rat, bool) {
 }
 
 // ratOf converts a common.v1.Decimal to an exact rational; ok=false for absent
-// or out-of-domain input. The quote caller separately checks field presence.
+// or out-of-domain input. Quotes use the shared live qualification above.
 //
 // CHECKED, because every caller reads a MarketDataEvent off the wire and
 // Decimal.exponent is unvalidated there (#95). An out-of-domain rate must never

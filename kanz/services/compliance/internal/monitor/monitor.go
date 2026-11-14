@@ -62,12 +62,36 @@ type book struct {
 	// slot that only a corrected retained-state rebuild can remove.
 	positions  map[string]comp.Position // instrument → position
 	lastStatus compliancepb.ComplianceStatus
+	// Revisions fence position/UNKNOWN changes; capture order fences concurrent
+	// observations of the same revision. The book pointer supplies incarnation
+	// identity across idle eviction and recreation of the same portfolio key.
+	revision, nextCapture, appliedCapture uint64
+	pending                               *statusReservation
 	// warnedUngoverned records that this book has already been named in a "not
 	// being checked" message.
 	warnedUngoverned bool
 	// emptiedAt is when positions last became empty, and the zero time while the
 	// book holds anything. It is what bookIdleRetention is measured from.
 	emptiedAt time.Time
+}
+
+// A capture never acquires authority over a later incarnation or observation.
+// Its financial inputs remain usable for an attributable historical decision.
+type evaluationSnapshot struct {
+	*comp.Book
+	key      bookKey
+	owner    *book
+	revision uint64
+	order    uint64
+}
+
+// Only the publication that reserved the transition may roll it back. A
+// duplicate standing observation shares that reservation rather than replacing
+// it and making the sole failed publication impossible to retry.
+type statusReservation struct {
+	key      bookKey
+	owner    *book
+	revision uint64
 }
 
 func (b *book) identityUnknown() bool {
@@ -252,6 +276,8 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 		}
 		b.positions[instrument] = comp.Position{}
 		b.lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+		b.revision++
+		b.pending = nil
 		b.emptiedAt = time.Time{}
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s/%s carries no instrument_id", errPositionIdentity, key.tenant, pid)
@@ -274,7 +300,7 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	if book == nil {
 		return nil
 	}
-	return m.evaluate(ctx, key, book, trigger, asOf)
+	return m.evaluate(ctx, book, trigger, asOf)
 }
 
 // positionInstrument binds the current OMS entity key before any book mutation.
@@ -368,7 +394,8 @@ func (m *Monitor) positionIdentityError(key bookKey) error {
 // inside it, on every restart, and AUTO-01 halts on that FACT. Asking at now does
 // NOT weaken the refusal: a dimension the master genuinely cannot resolve is
 // unresolved at now too, and still breaches.
-func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, trigger compliancepb.BreachTrigger, observedAt time.Time) error {
+func (m *Monitor) evaluate(ctx context.Context, captured *evaluationSnapshot, trigger compliancepb.BreachTrigger, observedAt time.Time) error {
+	key, book := captured.key, captured.Book
 	// This is a statement about the book, before any policy or cash-drag
 	// measurement. Even a legal zero-rule mandate cannot turn UNKNOWN into PASS.
 	if err := m.positionIdentityError(key); err != nil {
@@ -475,7 +502,7 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 		ClassifyAsOf: m.now().UTC(),
 	}, mandate)
 
-	entered := m.recordStatus(key, res.GetStatus())
+	entered, reservation := m.recordStatus(captured, res.GetStatus())
 	if res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH || !entered {
 		return m.positionIdentityError(key) // not a new breach, or an identity became unreadable
 	}
@@ -506,10 +533,11 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 		if err := m.emitter.EmitBreach(ctx, res, trigger, observedAt); err != nil {
 			// Roll back the status so the next delivery re-emits — a dropped
 			// breach FACT is worse than a duplicate.
-			m.resetStatus(key)
+			m.resetStatus(reservation)
 			return err
 		}
 	}
+	m.completeStatus(reservation)
 	return nil
 }
 
@@ -518,18 +546,18 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 // a candidate Book snapshot, and the event's as-of time. A nil Book means the
 // portfolio holds nothing after the fold — see Handle for why that is not
 // evaluated.
-func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book, time.Time) {
+func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *evaluationSnapshot, time.Time) {
 	trigger, book := m.applyLocked(key, ps)
 	if book == nil {
 		return trigger, nil, ps.GetAsOf().AsTime()
 	}
 	// OUTSIDE THE LOCK. See snapshotLocked: the join reaches into the cash view
 	// and the mark fold, each with its own lock.
-	comp.JoinEquity(book, m.cash, m.marks)
+	comp.JoinEquity(book.Book, m.cash, m.marks)
 	return trigger, book, ps.GetAsOf().AsTime()
 }
 
-func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book) {
+func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *evaluationSnapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -540,6 +568,7 @@ func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (complian
 		b = &book{positions: make(map[string]comp.Position)}
 		m.books[key] = b
 	}
+	b.revision++
 	prev, had := b.positions[ps.GetInstrumentId()]
 	trigger := compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE
 	if !had || !sameQuantity(prev.Quantity, ps.GetQuantity()) {
@@ -577,6 +606,7 @@ func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (complian
 		// and nothing is recorded, the portfolio simply has no verdict because it
 		// has no holdings to have one about.
 		b.lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+		b.pending = nil
 		return trigger, nil
 	}
 	b.emptiedAt = time.Time{}
@@ -711,7 +741,7 @@ func (m *Monitor) gcBooksLocked() {
 // the BaseCurrency and the NAV's currency code were each "the first non-empty one
 // seen" in a DIFFERENT order, and could name different currencies on the same
 // snapshot. One pass makes them the same value by construction.
-func (m *Monitor) snapshotLocked(key bookKey) *comp.Book {
+func (m *Monitor) snapshotLocked(key bookKey) *evaluationSnapshot {
 	b := m.books[key]
 	// Eligibility belongs to this capture. A separate held check could observe
 	// a position that closes before we copy, then evaluate an empty book (#1710).
@@ -735,22 +765,25 @@ func (m *Monitor) snapshotLocked(key bookKey) *comp.Book {
 			currency = p.MarketValue.GetCurrencyCode()
 		}
 	}
-	return &comp.Book{
+	b.nextCapture++
+	return &evaluationSnapshot{key: key, owner: b, revision: b.revision, order: b.nextCapture, Book: &comp.Book{
 		PortfolioID:  key.portfolio,
 		BaseCurrency: currency,
 		NAVBasis:     comp.NAVBasisGrossPositions,
 		Positions:    out,
 		NAV:          &commonpb.Money{Amount: nav, CurrencyCode: currency},
-	}
+	}}
 }
 
 // snapshot captures a held book and joins its equity outside the lock. A nil
 // result means this capture held nothing; no valuation source is consulted.
-func (m *Monitor) snapshot(key bookKey) *comp.Book {
+func (m *Monitor) snapshot(key bookKey) *evaluationSnapshot {
 	m.mu.Lock()
 	book := m.snapshotLocked(key)
 	m.mu.Unlock()
-	comp.JoinEquity(book, m.cash, m.marks)
+	if book != nil {
+		comp.JoinEquity(book.Book, m.cash, m.marks)
+	}
 	return book
 }
 
@@ -828,7 +861,7 @@ func (m *Monitor) Reevaluate(ctx context.Context, tenant, portfolio string) erro
 	// MARKET_MOVE is the honest trigger for both callers. Nothing traded: the
 	// book's value moved, or the cash behind it did. The schema's other value
 	// (POSITION_CHANGE) would claim a fill that did not happen.
-	return m.evaluate(ctx, key, book,
+	return m.evaluate(ctx, book,
 		compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE, m.now().UTC())
 }
 
@@ -838,29 +871,62 @@ func (m *Monitor) Reevaluate(ctx context.Context, tenant, portfolio string) erro
 // SEEN, in whichever direction is safe. Here that is "this IS a transition", so
 // a breach is emitted rather than swallowed: a duplicate breach FACT is the cost
 // EmitBreach's rollback below already accepts, and a dropped one is not.
-func (m *Monitor) recordStatus(key bookKey, status compliancepb.ComplianceStatus) bool {
+func (m *Monitor) recordStatus(captured *evaluationSnapshot, status compliancepb.ComplianceStatus) (bool, *statusReservation) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entering := status == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
-	b := m.books[key]
-	if b == nil {
-		return entering
+	b := m.books[captured.key]
+	if b != nil && b.identityUnknown() {
+		return false, nil // a measured result cannot cover a newer UNKNOWN
 	}
-	if b.identityUnknown() {
-		return false // an evaluation racing an unidentified update cannot restore a measured status
+	if b == nil || b != captured.owner || b.revision != captured.revision || len(b.positions) == 0 {
+		return entering, nil // historical result; never persist into another lifecycle
 	}
+	if captured.order < b.appliedCapture {
+		// Preserve a historical breach without replacing a newer PASS. A newer
+		// standing BREACH already owns that same-revision transition.
+		return entering && b.lastStatus != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH, nil
+	}
+	b.appliedCapture = captured.order
 	prev := b.lastStatus
 	b.lastStatus = status
-	return entering && prev != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+	if !entering {
+		b.pending = nil
+		return false, nil
+	}
+	// A pending publication from a superseded position revision cannot certify
+	// this one. Reserve a new attempt so its failure cannot leave a lost FACT
+	// hidden behind the old revision's BREACH status.
+	if prev == status && (b.pending == nil || b.pending.revision == b.revision) {
+		return false, nil
+	}
+	reservation := &statusReservation{key: captured.key, owner: b, revision: b.revision}
+	b.pending = reservation
+	return true, reservation
 }
 
 // resetStatus clears a book's recorded status so the next evaluation re-emits —
 // used when an emit fails after the status was advanced.
-func (m *Monitor) resetStatus(key bookKey) {
+func (m *Monitor) resetStatus(reservation *statusReservation) {
+	if reservation == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if b := m.books[key]; b != nil {
+	if b := m.books[reservation.key]; b != nil && b == reservation.owner && b.revision == reservation.revision && b.pending == reservation {
 		b.lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+		b.pending = nil
+	}
+}
+
+func (m *Monitor) completeStatus(reservation *statusReservation) {
+	if reservation == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b := m.books[reservation.key]; b != nil && b == reservation.owner && b.revision == reservation.revision && b.pending == reservation {
+		b.pending = nil
 	}
 }
 

@@ -425,9 +425,28 @@ func TestPositionTimeJetStreamACKReplayAndDecisionRecovery(t *testing.T) {
 	positionTimeAwaitACK(t, ctx, replay.c, 4)
 	pair(breachAt, d.eventID, compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE)
 	quiet()
+	// Each accepted position advances its lifecycle fences, including a newer
+	// observation of identical holdings. Every other book field and the standing
+	// breach stay unchanged; malformed frames above still compare the full book.
+	expected := positionTimeBooks(restarted)
+	key := bookKey{tenant, portfolio}
+	standing := expected[key]
+	standing.revision++
+	standing.nextCapture++
+	standing.appliedCapture++
+	expected[key] = standing
+	restarted.mu.Lock()
+	gcBeforeRepeat := restarted.lastBookGC
+	restarted.mu.Unlock()
 	publish("A", 1, 300, timestamppb.New(breachAt.Add(time.Second)))
-	await(replay, false)
+	await(replay, true)
 	positionTimeAwaitACK(t, ctx, replay.c, 5)
+	restarted.mu.Lock()
+	gcUnchanged := restarted.lastBookGC.Equal(gcBeforeRepeat)
+	restarted.mu.Unlock()
+	if !reflect.DeepEqual(expected, positionTimeBooks(restarted)) || !gcUnchanged {
+		t.Fatal("valid repeated position must advance only its lifecycle fences")
+	}
 	quiet()
 	t.Log("real canonical JetStream ACK/retained replay and valid recovery passed; real BusRecorder and Emitter preserved tenant, exact observation nanoseconds and lineage")
 }
