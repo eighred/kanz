@@ -8,9 +8,8 @@ package retrieval
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
-	"strconv"
-	"strings"
 )
 
 // Citation traces a value in a copilot answer back to its source — the governed
@@ -66,17 +65,12 @@ type GroundingResult struct {
 func CheckGrounding(answer string, citedValues []float64) GroundingResult {
 	res := GroundingResult{Grounded: true}
 	for _, tok := range numericTokens(answer) {
-		v, err := strconv.ParseFloat(tok, 64)
-		if err != nil {
+		v, valid := parseNumericClaim(tok)
+		if valid && (isAllowedLiteral(v) || matchesAny(v, citedValues)) {
 			continue
 		}
-		if isAllowedLiteral(v) {
-			continue
-		}
-		if !matchesAny(v, citedValues) {
-			res.Grounded = false
-			res.Ungrounded = append(res.Ungrounded, tok)
-		}
+		res.Grounded = false
+		res.Ungrounded = append(res.Ungrounded, tok)
 	}
 	sort.Strings(res.Ungrounded)
 	return res
@@ -98,6 +92,11 @@ func matchesAny(v float64, cited []float64) bool {
 }
 
 func approxEqual(a, b float64) bool {
+	// A percentage conversion can overflow even when both original values are
+	// finite. Inf <= Inf must not license an unrelated claim as rounded data.
+	if math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) {
+		return false
+	}
 	d := a - b
 	if d < 0 {
 		d = -d
@@ -133,51 +132,4 @@ func isAllowedLiteral(v float64) bool {
 		return true // a year
 	}
 	return false
-}
-
-// numericTokens extracts standalone numeric substrings (handling %, commas) from
-// s. A digit run touching a letter on either side is NOT numeric — it is part of
-// an identifier (e.g. the "99" in the measure name "VaR99"), so it is discarded.
-// This keeps the grounding check from flagging measure names as ungrounded
-// claims.
-func numericTokens(s string) []string {
-	rs := []rune(s)
-	var out []string
-	var cur strings.Builder
-	contaminated := false
-	start := 0
-	flush := func(end int) {
-		defer cur.Reset()
-		if cur.Len() == 0 {
-			return
-		}
-		// A letter immediately before the run or immediately after taints it.
-		before := start > 0 && isLetter(rs[start-1])
-		after := end < len(rs) && isLetter(rs[end])
-		if contaminated || before || after {
-			return
-		}
-		out = append(out, strings.Trim(cur.String(), "."))
-	}
-	for i := 0; i < len(rs); i++ {
-		r := rs[i]
-		switch {
-		case r >= '0' && r <= '9' || r == '.':
-			if cur.Len() == 0 {
-				start = i
-				contaminated = false
-			}
-			cur.WriteRune(r)
-		case r == ',':
-			// thousands separator inside a number — drop it, keep the run going
-		default:
-			flush(i)
-		}
-	}
-	flush(len(rs))
-	return out
-}
-
-func isLetter(r rune) bool {
-	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }
