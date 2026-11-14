@@ -35,7 +35,7 @@ func TestAnUnreadableMandateIsAckedRatherThanRedeliveredForever(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := comp.NewMandateConsumer(reg, nil).Handle(testCtx(), nil, ccBytes); err != nil {
+	if err := comp.NewMandateConsumer(reg, nil).Handle(testCtx(), &envelopepb.Envelope{TenantId: "t1"}, ccBytes); err != nil {
 		t.Fatal(err)
 	}
 

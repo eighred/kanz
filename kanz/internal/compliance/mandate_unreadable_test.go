@@ -7,6 +7,7 @@ import (
 	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -44,7 +45,7 @@ func TestAMandateThatCannotBeAppliedLeavesThatPortfolioUnreadable(t *testing.T) 
 	c := NewMandateConsumer(reg, nil)
 
 	key := MandateConfigKey("acme", "pf-1")
-	if err := c.Handle(context.Background(), nil, configChanged(t, key, "{not json")); err != nil {
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"}, configChanged(t, key, "{not json")); err != nil {
 		t.Fatalf("the handler must still ACK poison, got %v", err)
 	}
 
@@ -64,7 +65,7 @@ func TestAMandateThatCannotBeAppliedLeavesThatPortfolioUnreadable(t *testing.T) 
 func TestAnUnreadableMandateIsRefusedEvenWhenMandatesAreNotRequired(t *testing.T) {
 	reg := NewMandateRegistry()
 	c := NewMandateConsumer(reg, nil)
-	if err := c.Handle(context.Background(), nil, configChanged(t, MandateConfigKey("t1", "p1"), "{}}")); err != nil {
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "t1"}, configChanged(t, MandateConfigKey("t1", "p1"), "{}}")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,7 +108,7 @@ func TestAnUnreadableMandateIsDistinguishableFromAnAbsentOne(t *testing.T) {
 		t.Fatalf("a portfolio nobody has put under mandate should be Ungoverned only: %+v", absent)
 	}
 
-	if err := NewMandateConsumer(reg, nil).Handle(context.Background(), nil,
+	if err := NewMandateConsumer(reg, nil).Handle(context.Background(), &envelopepb.Envelope{TenantId: "t1"},
 		configChanged(t, MandateConfigKey("t1", "p1"), "not-json")); err != nil {
 		t.Fatal(err)
 	}
@@ -128,10 +129,10 @@ func TestARepublishedMandateClearsTheRejection(t *testing.T) {
 	c := NewMandateConsumer(reg, nil)
 	key := MandateConfigKey("acme", "pf-1")
 
-	if err := c.Handle(context.Background(), nil, configChanged(t, key, "{broken")); err != nil {
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"}, configChanged(t, key, "{broken")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Handle(context.Background(), nil, configChanged(t, key, goodMandateValue(t, "acme", "pf-1"))); err != nil {
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"}, configChanged(t, key, goodMandateValue(t, "acme", "pf-1"))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +156,7 @@ func TestADroppedMandateIsCountedAndNamed(t *testing.T) {
 		gotTenant, gotPortfolio = tenantID, portfolioID
 	}))
 
-	if err := c.Handle(context.Background(), nil,
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"},
 		configChanged(t, MandateConfigKey("acme", "pf-9"), "{bad")); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestAnUndecodableEnvelopeIsRecordedEvenThoughNoPortfolioCanBeNamed(t *testi
 func TestACompleteRegistrySaysSoAndAnEmptyRulesetIsNotADrop(t *testing.T) {
 	reg := NewMandateRegistry()
 	c := NewMandateConsumer(reg, nil)
-	if err := c.Handle(context.Background(), nil,
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"},
 		configChanged(t, MandateConfigKey("acme", "pf-1"), goodMandateValue(t, "acme", "pf-1"))); err != nil {
 		t.Fatal(err)
 	}
@@ -214,14 +215,14 @@ func TestABrokenMandateSupersedesAValidOneAlreadyHeld(t *testing.T) {
 	c := NewMandateConsumer(reg, nil)
 	key := MandateConfigKey("acme", "pf-1")
 
-	if err := c.Handle(context.Background(), nil, configChanged(t, key, goodMandateValue(t, "acme", "pf-1"))); err != nil {
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"}, configChanged(t, key, goodMandateValue(t, "acme", "pf-1"))); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := reg.Mandate(context.Background(), "acme", "pf-1", time.Now()); ok.NoMandate() || err != nil {
 		t.Fatalf("premise broken: the good mandate did not arm (ok=%v err=%v)", ok, err)
 	}
 
-	if err := c.Handle(context.Background(), nil, configChanged(t, key, "{superseded-but-broken")); err != nil {
+	if err := c.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme"}, configChanged(t, key, "{superseded-but-broken")); err != nil {
 		t.Fatal(err)
 	}
 	_, ok, err := reg.Mandate(context.Background(), "acme", "pf-1", time.Now())
