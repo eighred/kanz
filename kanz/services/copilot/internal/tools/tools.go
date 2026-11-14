@@ -101,7 +101,7 @@ func NewRegistry(authz auth.Authorizer, client governed.Client, catalog retrieva
 	r.register(Tool{
 		Def: llm.ToolDef{
 			Name:        "evaluate_scenario",
-			Description: "Evaluate a named stress scenario against a portfolio and return the projected measures. Call this for what-if / stress questions.",
+			Description: "Evaluate an exact decimal parallel-shift fraction against a portfolio and return the projected measures. Call this for what-if / stress questions.",
 			InputSchema: scenarioSchema(),
 		},
 		invoke: r.evaluateScenario,
@@ -319,7 +319,7 @@ func scenarioSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"portfolio_id": map[string]any{"type": "string", "description": "The portfolio to stress."},
-			"scenario":     map[string]any{"type": "string", "description": "The named scenario, e.g. \"GFC\" or \"RATES_+100BP\"."},
+			"scenario":     map[string]any{"type": "string", "description": "A signed decimal fraction for a parallel shift, e.g. \"-0.05\" for a 5% drop or \"1e-7\". Values must be exactly representable; named scenarios are unsupported."},
 		},
 		"required":             []any{"portfolio_id", "scenario"},
 		"additionalProperties": false,
