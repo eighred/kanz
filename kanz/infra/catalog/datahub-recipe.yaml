@@ -1,47 +1,13 @@
-# DataHub ingestion recipe for the Kanz data catalog (LIN-01b).
-#
-# Template for catalog facets on one dataset entity
-# per Kanz dataset (namespace `kanz.{domain}`, name = payload message type):
-#
-#   1. Lineage      — from the OpenLineage events the lineage service emits
-#                     (LIN-01a), via Marquez or DataHub's OpenLineage endpoint.
-#   2. Schemas      — intended EVT-16 registry join via payloadSchemaRef;
-#                     no separate registry ingestion source is configured here.
-#   3. Ownership    — explicit DataHub steward mapping below (deployment template).
-#   4. Classification — static PII tag below; not a governance-config import.
-#
-# Run with: `datahub ingest -c datahub-recipe.yaml`. Secrets (GMS token, registry
-# URL) come from the environment, never inline.
-
+# Optional metadata-only catalog. projection.py validates exact dataset mappings
+# before writing this supported DataHub source. No default steward or PII tag.
 source:
-  type: openlineage
+  type: file
   config:
-    # Marquez / DataHub OpenLineage receiver the lineage service POSTs RunEvents
-    # to (LINEAGE_OPENLINEAGE_URL). Lineage edges + dataset nodes flow from here.
-    platform: kanz
-    api_url: "${OPENLINEAGE_API_URL}"
-
-transformers:
-  # Deployment template: this assigns the same DataHub group to every dataset.
-  # It does not read .github/CODEOWNERS or map domain responsibilities. Validate
-  # the steward group and domain mapping before relying on catalog ownership.
-  - type: simple_add_dataset_ownership
-    config:
-      owner_urns:
-        - "urn:li:corpGroup:event-platform"
-      ownership_type: DATAOWNER
-      replace_existing: false
-
-  # Deployment template: applies PII to every dataset. This does not load
-  # services/lineage governance.json or establish correct classification.
-  - type: simple_add_dataset_tags
-    config:
-      tag_urns:
-        - "urn:li:tag:PII"
-      # Replace with a validated per-dataset mapping before operational use.
-
+    path: "${KANZ_CATALOG_METADATA_FILE}"
 sink:
   type: datahub-rest
   config:
     server: "${DATAHUB_GMS_URL}"
-    token: "${DATAHUB_GMS_TOKEN}"
+    mode: SYNC
+    extra_headers:
+      Authorization: "${DATAHUB_GMS_AUTHORIZATION}"

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "environment": "DEV",
+  "datasets": [
+    {"namespace": "kanz.customer", "name": "PersonProfile", "schema_ref": "customer.v1.PersonProfile:1", "steward": "fixture-customer", "sensitivity": "pii", "fields": [{"name": "profile_id", "type": "string"}]},
+    {"namespace": "kanz.risk", "name": "CustomerExposure", "schema_ref": "risk.v1.CustomerExposure:1", "steward": "fixture-risk", "sensitivity": "public", "fields": [{"name": "exposure_id", "type": "string"}]}
+  ]
+}

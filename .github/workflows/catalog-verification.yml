@@ -1,0 +1,65 @@
+name: catalog-verification
+
+on:
+  pull_request:
+    paths:
+      - 'kanz/infra/catalog/**'
+      - 'kanz/services/lineage/**'
+      - '.github/workflows/catalog-verification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz/infra/catalog/**'
+      - 'kanz/services/lineage/**'
+      - '.github/workflows/catalog-verification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actual-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOFLAGS: -mod=mod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical contracts and compile the actual lineage test
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+          cd kanz
+          go test -c -race -p 1 -o "$RUNNER_TEMP/catalog.test" ./services/lineage/internal/server
+          go vet ./services/lineage/...
+          go test -p 1 ./test/arch -run 'Test(WorkflowActionsArePinnedToSHA|NoWorkflowRunsAFloatingImageTag|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo|Upstream)' -count=1
+      - name: Install reviewed checksum-pinned advisory tools
+        run: bash kanz-jl/qualification/install-audit.sh
+      - name: Qualify real catalog metadata and independent lineage authorization
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/catalog-fixture"
+          python3 -B kanz/infra/catalog/qualify.py --scratch "$RUNNER_TEMP/catalog-fixture" --test-binary "$RUNNER_TEMP/catalog.test"
+      - name: Preserve projected qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalog-verification
+          path: |
+            ${{ runner.temp }}/catalog-fixture/catalog-receipt.json
+            ${{ runner.temp }}/catalog-fixture/export-tests.jsonl
+            ${{ runner.temp }}/catalog-fixture/server-tests.jsonl
+            ${{ runner.temp }}/catalog-fixture/projection-tests.txt
+            ${{ runner.temp }}/catalog-fixture/readback.json
+          if-no-files-found: error
+          retention-days: 7

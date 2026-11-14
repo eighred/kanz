@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "platform": "linux/amd64",
+  "selected_on": "2026-11-15",
+  "datahub_version": "v1.8.0",
+  "source": "https://github.com/datahub-project/datahub/tree/v1.8.0",
+  "images": {
+    "gms": "acryldata/datahub-gms:v1.8.0@sha256:73f24aab74fe8342523b5f920bc9013e1e6891b92a23e9fc019da36f419b9e0a",
+    "upgrade": "acryldata/datahub-upgrade:v1.8.0@sha256:560d9fb91f9cf99cddbc4ed285442f9072358687ffdbcdeea54c04d17bc17e1a",
+    "ingestion": "acryldata/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
+    "mysql": "mysql:8.2@sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
+    "search": "opensearchproject/opensearch:2.19.3@sha256:acc1f30665727eb5d186fd15f40079615e1c9a0ee9fd3db3a8180f41d9982f51",
+    "broker": "redpandadata/redpanda:v26.2.6@sha256:204f917c509123bd3add132b8d4c15f1279ff5487b646a383e980740a164d314"
+  }
+}
