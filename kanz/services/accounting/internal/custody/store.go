@@ -238,6 +238,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 
 	seen := make(map[string]struct{}, len(detected))
 	for _, d := range detected {
+		d.PortfolioID, d.CustodianID = subject.PortfolioID, subject.CustodianID
 		seen[d.BreakID] = struct{}{}
 		if prior, ok := m.breaks[d.BreakID]; ok && prior.Status != BreakResolved {
 			// KNOWN AND STILL OUTSTANDING: the figures and LastSeenAt advance;
@@ -261,6 +262,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 		fresh.Revision = 1
 		if prior, ok := m.breaks[d.BreakID]; ok {
 			fresh.Revision = prior.Revision + 1
+			fresh.PortfolioID, fresh.CustodianID = prior.PortfolioID, prior.CustodianID
 		}
 		fresh.Assignee, fresh.Explanation = "", ""
 		m.breaks[d.BreakID] = fresh
@@ -288,11 +290,9 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 	return m.outstandingLocked(), nil
 }
 
-// sameSubject reports whether a stored break belongs to subject. The break id
-// carries the pair, which is why it can be answered without a second field.
+// sameSubject uses stored ownership, including when a working-item ID is opaque.
 func sameSubject(b Break, subject Subject) bool {
-	prefix := subject.PortfolioID + "|" + subject.CustodianID + "|"
-	return len(b.BreakID) >= len(prefix) && b.BreakID[:len(prefix)] == prefix
+	return b.PortfolioID == subject.PortfolioID && b.CustodianID == subject.CustodianID
 }
 
 // OutstandingBreaks implements Store.

@@ -43,6 +43,7 @@ func cloneRun(run Run) Run {
 	run.Breaks = append([]Break(nil), run.Breaks...)
 	for i := range run.Breaks {
 		b := &run.Breaks[i]
+		b.PortfolioID, b.CustodianID = run.Subject.PortfolioID, run.Subject.CustodianID
 		b.IBOR, b.Custodian, b.Diff = cloneRat(b.IBOR), cloneRat(b.Custodian), cloneRat(b.Diff)
 	}
 	return run
@@ -189,7 +190,7 @@ func runFromRecord(payload []byte) (Run, error) {
 		return Run{}, ErrUnverifiedPrecision
 	}
 	for _, row := range msg.GetBreaks() {
-		b := Break{BreakID: row.GetBreakId(), Key: row.GetKey(), Status: parseStatus(strings.ToLower(strings.TrimPrefix(row.GetStatus().String(), "BREAK_STATUS_"))), Assignee: row.GetAssignee(), Explanation: row.GetExplanation(),
+		b := Break{BreakID: row.GetBreakId(), PortfolioID: run.Subject.PortfolioID, CustodianID: run.Subject.CustodianID, Key: row.GetKey(), Status: parseStatus(strings.ToLower(strings.TrimPrefix(row.GetStatus().String(), "BREAK_STATUS_"))), Assignee: row.GetAssignee(), Explanation: row.GetExplanation(),
 			Kind: recon.BreakKind(-1), FirstSeenAt: row.GetFirstSeenAt().AsTime(), LastSeenAt: row.GetLastSeenAt().AsTime(), StatusChangedAt: row.GetStatusChangedAt().AsTime(), ValuesVerified: true}
 		for _, kind := range recon.BreakKinds() {
 			wire, _ := wireKind(kind)

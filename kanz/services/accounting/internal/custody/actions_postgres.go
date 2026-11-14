@@ -31,10 +31,22 @@ func (p *Postgres) ApplyAction(ctx context.Context, a Action) (ActionEvidence, e
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(app_current_tenant() || ':' || $1, 0))`, a.RequestID); err != nil {
 		return ActionEvidence{}, err
 	}
-	var digest string
+	// Reauthorize before even looking up a receipt: retries can outlive a
+	// principal's portfolio grant. Ownership columns are immutable in this store.
+	if err = authorizeActionBreak(ctx, tx, a, a.BreakID); err != nil {
+		return ActionEvidence{}, err
+	}
+	var digest, receiptBreakID string
 	var blob []byte
-	err = tx.QueryRow(ctx, `SELECT request_digest, evidence FROM custody_actions WHERE request_id=$1`, a.RequestID).Scan(&digest, &blob)
+	err = tx.QueryRow(ctx, `SELECT request_digest, evidence, break_id FROM custody_actions WHERE request_id=$1`, a.RequestID).Scan(&digest, &blob, &receiptBreakID)
 	if err == nil {
+		// A reused request ID must not disclose whether another portfolio has a
+		// receipt, or return its reviewed financial values.
+		if receiptBreakID != a.BreakID {
+			if err = authorizeActionBreak(ctx, tx, a, receiptBreakID); err != nil {
+				return ActionEvidence{}, err
+			}
+		}
 		if digest != a.digest() {
 			return ActionEvidence{}, ErrActionConflict
 		}
@@ -51,12 +63,15 @@ func (p *Postgres) ApplyAction(ctx context.Context, a Action) (ActionEvidence, e
 	var status string
 	var ibor, custodian, difference string
 	b.BreakID = a.BreakID
-	err = tx.QueryRow(ctx, `SELECT status, assignee, explanation, revision, values_verified, ibor, custodian, difference FROM custody_breaks WHERE break_id=$1 FOR UPDATE`, a.BreakID).Scan(&status, &b.Assignee, &b.Explanation, &b.Revision, &b.ValuesVerified, &ibor, &custodian, &difference)
+	err = tx.QueryRow(ctx, `SELECT portfolio_id, custodian_id, status, assignee, explanation, revision, values_verified, ibor, custodian, difference FROM custody_breaks WHERE break_id=$1 FOR UPDATE`, a.BreakID).Scan(&b.PortfolioID, &b.CustodianID, &status, &b.Assignee, &b.Explanation, &b.Revision, &b.ValuesVerified, &ibor, &custodian, &difference)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActionEvidence{}, ErrNoBreak
 	}
 	if err != nil {
 		return ActionEvidence{}, err
+	}
+	if !a.permits(b.PortfolioID) {
+		return ActionEvidence{}, ErrNoBreak
 	}
 	b.Status = parseStatus(status)
 	if !b.ValuesVerified {
@@ -104,4 +119,13 @@ func (p *Postgres) ApplyAction(ctx context.Context, a Action) (ActionEvidence, e
 		return ActionEvidence{}, err
 	}
 	return e, tx.Commit(ctx)
+}
+
+func authorizeActionBreak(ctx context.Context, tx pgx.Tx, a Action, breakID string) error {
+	var portfolio string
+	err := tx.QueryRow(ctx, `SELECT portfolio_id FROM custody_breaks WHERE break_id=$1`, breakID).Scan(&portfolio)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !a.permits(portfolio)) {
+		return ErrNoBreak
+	}
+	return err
 }

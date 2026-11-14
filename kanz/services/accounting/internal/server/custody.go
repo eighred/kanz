@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 )
 
@@ -119,7 +120,8 @@ func toBreakView(b custody.Break, now time.Time) breakView {
 }
 
 func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
-	if !s.callerOwnsThisInstance(w, r) {
+	principal, ok := s.portfolioReader(w, r, "")
+	if !ok {
 		return
 	}
 	breaks, err := s.breaks.OutstandingBreaks(r.Context())
@@ -131,6 +133,9 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	out := make([]breakView, 0, len(breaks))
 	for _, b := range breaks {
+		if b.PortfolioID == "" || !auth.PortfolioInScope(principal.Portfolios, b.PortfolioID) {
+			continue
+		}
 		out = append(out, toBreakView(b, now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "actions_enabled": s.breaks.ActionsEnabled()})

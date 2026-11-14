@@ -298,7 +298,7 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 // OutstandingBreaks implements Store.
 func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
 	const q = `
-SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
+SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
        first_seen_at, last_seen_at, status_changed_at, revision, values_verified
 FROM custody_breaks
 WHERE status IN ('open', 'assigned', 'explained')
@@ -320,7 +320,7 @@ ORDER BY break_id`
 // LoadBreak implements Store.
 func (p *Postgres) LoadBreak(ctx context.Context, breakID string) (Break, error) {
 	const q = `
-SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
+SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
        first_seen_at, last_seen_at, status_changed_at, revision, values_verified
 FROM custody_breaks
 WHERE break_id = $1`
@@ -370,7 +370,7 @@ func scanBreaks(rows pgx.Rows) ([]Break, error) {
 			ibor, custodian, difference        string
 			firstSeen, lastSeen, statusChanged time.Time
 		)
-		if err := rows.Scan(&b.BreakID, &kind, &b.Key, &ibor, &custodian, &difference,
+		if err := rows.Scan(&b.BreakID, &b.PortfolioID, &b.CustodianID, &kind, &b.Key, &ibor, &custodian, &difference,
 			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified); err != nil {
 			return nil, fmt.Errorf("custody: scan break: %w", err)
 		}
