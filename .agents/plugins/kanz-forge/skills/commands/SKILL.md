@@ -107,6 +107,14 @@ from source, existing branches, PRs and Issues:
 4. Report the completed outcome and its verification, or the specific reasons
    no remaining candidate can proceed. Keep pending and partial work explicit.
 
+For a requested set of outcomes, freeze the initial issue identities and full
+acceptance after discovery. Follow
+[related-finding delivery](references/delivery-coordination.md#finish-related-discoveries)
+to repair eligible discoveries in this session, while keeping original outcomes,
+additional repairs and evidenced deferrals separate. A new finding, PR or test
+cannot replace an unfinished initial target. Report unfilled slots when fewer
+feasible existing issues satisfy the request; do not manufacture replacement work.
+
 State the outcome and material assumptions briefly, then do the authorized
 work. Carry existing permission forward; do not request it again because a
 later stage uses another skill. Resolve routine implementation choices from

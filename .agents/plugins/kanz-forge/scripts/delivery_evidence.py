@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from statistics import median
 from issue_backlog import summarize as summarize_backlog
 from validation_graph import assess_graph
+from work_session import assess_session
 
 PATHS = {
     "code": ["Fix the owning code and run its narrow regression", "Use an isolated baseline comparison"],
@@ -219,6 +220,9 @@ def assess(snapshot):
         result["plan"]["next_actionable"] = None
         result["plan"]["validation_aware"] = False
         result["plan"]["limitation"] = "legacy ownership advice only; validation dependencies unverified"
+    if "work_session" in snapshot:
+        result["work_session"] = assess_session(snapshot["work_session"], result.get("validation"),
+                                              snapshot.get("validation_graph"), result["main"])
     return result
 
 

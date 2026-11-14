@@ -39,6 +39,80 @@ before treating it as delivered. Use the existing canonical release verifier
 when release qualification is the claim. Scope main health to the observed
 revision and inventory; name missing, failing, pending and conditional checks.
 
+## Finish related discoveries
+
+At selection, retain the requested outcome count, initial issue identities and
+their full acceptance in the chat or a disposable evidence snapshot. Respect a
+request for existing open work: newly discovered defects are additional work,
+never substitutes for those targets. If the feasible set is smaller, report the
+unfilled count and missing inputs rather than claiming that a new set was done.
+
+For each confirmed discovery, search existing Issues, preserve its source and
+link its authoritative tracker. The root reviews owner, connected contracts,
+full natural paths, cleanup, applicable gates and authority before disposition:
+
+- **Required:** a defect that blocks an accepted target must be repaired in this
+  session. An external prerequisite or explicit hold leaves that target's
+  acceptance open, with a concrete changed-input re-entry condition.
+- **Related:** a bounded repair in the same owner may join this session when
+  inputs, decisions, complete verification and authority are available. Finish
+  it through reviewed CI, protected merge and its own actual-main acceptance.
+- **Independent:** record the distinct owner and re-entry/selection condition;
+  keep the original outcomes moving. It needs a separately selected scope.
+
+Adopt one wave of related findings rooted in the initial targets. Required fixes
+of an adopted repair remain in scope; further optional discoveries do not expand
+the wave recursively. Do not split away guards, migrations or consumers to make
+a finding appear eligible. OpenSSL, capital and other explicit holds remain binding.
+
+Use the current scoped PR where coherent; a separate issue or PR is useful when
+it preserves independent review and ownership. Creating that PR is not the repair.
+Keep an in-CI head fixed: stage a newly adopted repair on an owned branch and
+sequence its PR against fresh main. Only an acceptance-blocking repair justifies
+changing the fixed head, followed by fresh applicable checks. Workers return new
+scope to the root instead of dispatching or expanding their assignment.
+
+Before ending, reconcile every confirmed finding as verified on actual main or
+deferred with source, reason and re-entry input. An adopted unfinished repair
+keeps the session incomplete; a recorded deferral cannot make an unmet original
+acceptance pass. Report initial outcomes verified/requested, additional repairs
+verified/adopted, unfilled slots and remaining blockers. This is bounded delivery,
+not permission to hunt unrelated defects until no bugs remain.
+
+### Optional session accounting
+
+The existing `delivery_evidence.py` reducer accepts `work_session` alongside its
+reviewed `validation_graph`. This is a transient evidence contract, not a task
+database, scheduler, GitHub writer or inference of safety from file proximity.
+
+- `requested_count`: positive integer; `selection_evidence`: reviewed initial
+  inventory/source locator; `targets`: unique `{id, acceptance_evidence}` records.
+  An empty or smaller target set reports unfilled slots and cannot complete.
+- `findings`: unique `{id, parent, relation, disposition, evidence, tracker}`.
+  `relation` is `required`, `related` or `independent`; `disposition` is `repair`
+  or `defer`. Parents lead to initial targets. A deferred record also supplies
+  `reason` and `reentry`; independent work cannot silently become a repair.
+- A repair uses the same ID in the reviewed validation graph. Missing evidence,
+  holds or unavailable execution inputs keep it blocked. Only direct related
+  findings and required descendants of adopted repairs enter the same wave.
+- `main_acceptance`: unique `{id, merge_sha, validation_node, verified_on_main,
+  all_acceptance_passed, evidence}` records for known targets/findings. Supply
+  observed full acceptance on the actual merged revision, never a local/PR pass.
+  `validation_node` names a current DELIVERABLE main gate in the reviewed graph:
+  `kind: gate`, `subject: main`, and both its revision and `main_revision` equal
+  `merge_sha`. Missing, mismatched, failed or pending evidence cannot complete.
+  A known target's failed/pending validation also vetoes its positive receipt.
+  The adapter additionally requires the independently collected `main.sha` and
+  verified complete main check inventory to agree; an old internally consistent
+  graph cannot establish acceptance beside a newer or unverified current main.
+
+The result keeps initial and repair counts separate, propagates unmet required
+findings to their parent acceptance, and refuses completion with unfilled goals,
+unfinished adopted repairs or holds. Pending repairs are obligations, not advice
+to edit a fixed in-CI head; existing graph states still determine the next action.
+It trusts reviewed full-acceptance observations rather than
+fetching or authorizing anything. Missing `work_session` preserves existing output.
+
 ## Optional offline evidence check
 
 `python -B .agents/plugins/kanz-forge/scripts/delivery_evidence.py` reads a

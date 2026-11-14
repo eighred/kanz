@@ -59,3 +59,8 @@ step in the chat or existing PR.
 ## Consolidate
 
 Collect each worker's diff, tested SHA, commands, dependencies, skips and remaining risks. Compare every branch with current main and resolve overlaps in dependency order. The parent reviews and coordinates integration; workers do not merge each other's PRs. Apply the current permission rules and carry existing specific authorization forward. Merge only after the exact head has the applicable required checks and reviews, then verify the merged main revision and the issue's remaining acceptance. Keep partial or externally blocked work in the existing Issue and draft PR. Report completed and unverified work separately.
+
+Return new findings with their parent acceptance, source and authoritative issue.
+The root applies [related-finding delivery](delivery-coordination.md#finish-related-discoveries)
+before adopting another writer or branch. A filed issue does not finish an adopted
+repair, and discovered work does not count toward the initial outcome target.
