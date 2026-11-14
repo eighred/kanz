@@ -2083,6 +2083,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanz-ledger-replay"
+version = "0.1.0"
+dependencies = [
+ "kanz-order-core",
+ "num-bigint 0.4.6",
+ "num-rational",
+ "num-traits",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kanz-market-feed"
 version = "0.1.0"
 dependencies = [
