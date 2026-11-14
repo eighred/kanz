@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -74,6 +75,43 @@ class OwnershipControls(unittest.TestCase):
             link.symlink_to(path)
             with self.assertRaises(OSError):
                 proof.read_owner(link)
+
+
+class ProbeProvenanceControls(unittest.TestCase):
+    NONCE = "a" * 32
+
+    def result(self, outcome, code=0, stderr=""):
+        prefix = "KANZ_GRAFANA_PROBE_V1:" + self.NONCE + ":"
+        return subprocess.CompletedProcess([], code, prefix + "START\n" + prefix + "RESULT:" + outcome + "\n", stderr)
+
+    def test_only_completed_target_network_timeout_means_denied(self):
+        self.assertFalse(proof.probe_result(self.result("NETWORK_TIMEOUT"), self.NONCE))
+        self.assertTrue(proof.probe_result(self.result("ALLOWED"), self.NONCE))
+        for result in (subprocess.CompletedProcess([], 1, "", "error: timed out waiting for the condition"),
+                       self.result("NETWORK_TIMEOUT", 1, "error: timed out waiting for the condition"),
+                       subprocess.CompletedProcess([], 1, "", "wget: download timed out"),
+                       self.result("TOOL_MISSING"), self.result("TOOL_FAILURE"),
+                       self.result("NETWORK_TIMEOUT", stderr="exec container unavailable")):
+            with self.subTest(result=result), self.assertRaises(proof.ProofError):
+                proof.probe_result(result, self.NONCE)
+
+    def test_wrong_or_incomplete_nonce_cannot_credit_a_denial(self):
+        for result, nonce in ((self.result("NETWORK_TIMEOUT"), "b" * 32),
+                              (subprocess.CompletedProcess([], 0, "", ""), self.NONCE),
+                              (subprocess.CompletedProcess([], 0, "timed out\n", ""), self.NONCE)):
+            with self.subTest(result=result), self.assertRaises(proof.ProofError):
+                proof.probe_result(result, nonce)
+
+    def test_exec_names_the_container_and_carries_target_markers(self):
+        with mock.patch.object(proof.uuid, "uuid4") as identity, mock.patch.object(proof.subprocess, "run") as run:
+            identity.return_value.hex = self.NONCE
+            run.return_value = self.result("NETWORK_TIMEOUT")
+            self.assertFalse(proof.probe_http(["kubectl", "--kubeconfig", "/owned/config"], "owned", "pod", "grafana", "http://other:9090/"))
+            args = run.call_args.args[0]
+            self.assertEqual(args[args.index("exec") + 1:args.index("--")], ["pod", "-c", "grafana"])
+            self.assertEqual(args[-2:], ["http://other:9090/", self.NONCE])
+            self.assertIn("'wget: download timed out'", proof.HTTP_PROBE)
+            self.assertEqual(run.call_args.kwargs["timeout"], 12)
 
 
 class QueryControls(unittest.TestCase):

@@ -42,6 +42,12 @@ The source policy selects Grafana only. The proof checks:
 - Removing that exact policy makes both refused paths work; restoring it refuses
   them again, while Cilium reports its loaded enforcing mode.
 
+Network refusal requires a nonce-bound start/result marker from a completed
+`wget` probe in the explicitly selected container. Only the target tool's exact
+timeout is a denial; kubectl/API/container failures, missing tools, unexpected
+diagnostics and incomplete markers refuse the proof. In particular an API-side
+"timed out waiting for the condition" cannot count as CNI enforcement.
+
 These observations do not claim global Prometheus ingress isolation. KEDA,
 Rollouts and GameDay readers retain their existing paths. The broader namespace
 audit remains #232; the existing real-container dashboard proof remains valid.

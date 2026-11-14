@@ -252,6 +252,49 @@ def eventually(operation, timeout=120):
             time.sleep(3)
 
 
+HTTP_PROBE = r'''printf 'KANZ_GRAFANA_PROBE_V1:%s:START\n' "$2"
+if ! command -v wget >/dev/null 2>&1; then
+  outcome=TOOL_MISSING
+else
+  diagnostic=$(LC_ALL=C wget -q -T 3 -O /dev/null "$1" 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    outcome=ALLOWED
+  elif [ "$diagnostic" = 'wget: download timed out' ]; then
+    outcome=NETWORK_TIMEOUT
+  else
+    outcome=TOOL_FAILURE
+  fi
+fi
+printf 'KANZ_GRAFANA_PROBE_V1:%s:RESULT:%s\n' "$2" "$outcome"
+exit 0
+'''
+
+
+def probe_result(result, nonce):
+    # A refused network connection is an observation from a completed target
+    # tool. kubectl/API/container timeouts are unavailable evidence, even when
+    # their diagnostics contain the same words as wget's timeout.
+    require(result.returncode == 0, "probe_exec_transport_failed:exit=" + str(result.returncode))
+    require(not result.stderr.strip(), "probe_exec_reported_stderr")
+    lines = result.stdout.splitlines()
+    prefix = "KANZ_GRAFANA_PROBE_V1:" + nonce + ":"
+    require(len(lines) == 2 and lines[0] == prefix + "START" and
+            lines[1].startswith(prefix + "RESULT:"), "probe_exec_provenance_missing")
+    outcome = lines[1][len(prefix + "RESULT:"):]
+    require(outcome in {"ALLOWED", "NETWORK_TIMEOUT"}, "probe_target_" +
+            ({"TOOL_MISSING": "tool_missing", "TOOL_FAILURE": "tool_failed"}.get(outcome, "unknown_outcome")))
+    return outcome == "ALLOWED"
+
+
+def probe_http(kargs, namespace, pod, container, url):
+    nonce = uuid.uuid4().hex
+    result = subprocess.run([*kargs, "-n", namespace, "exec", pod, "-c", container, "--", "sh", "-c",
+                             HTTP_PROBE, "probe", url, nonce],
+                            capture_output=True, text=True, timeout=12)
+    return probe_result(result, nonce)
+
+
 @contextlib.contextmanager
 def forward(kargs, service, remote, scratch):
     with socket.socket() as sock:
@@ -515,13 +558,7 @@ def main():
                 passed("nonempty_panel_queries_match_prometheus_and_oracle")
                 passed("grafana_to_prometheus_allowed")
             def reachable(source_pod, url):
-                result = subprocess.run([*kargs, "-n", NS, "exec", source_pod, "--", "sh", "-c",
-                    'wget -q -T 3 -O /dev/null "$1"', "probe", url], capture_output=True, text=True, timeout=12)
-                if result.returncode == 0:
-                    return True
-                # Require a network-level timeout, not a missing tool or exec failure.
-                require("timed out" in result.stderr.lower(), "probe_failed_without_network_timeout")
-                return False
+                return probe_http(kargs, NS, source_pod, "grafana" if source_pod == pod else "fixture", url)
             other_url = "http://other." + NS + ".svc:9090/"
             grafana_url = "http://grafana." + NS + ".svc:3000/api/health"
             eventually(lambda: require(not reachable(pod, other_url), "grafana_egress_not_denied"), 40)
