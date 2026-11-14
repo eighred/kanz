@@ -60,13 +60,23 @@ Redpanda, not an additional authoritative Kanz writer or JVM Kafka runtime.
 The fixture exports OpenLineage events through the actual Go harvester, runs
 `datahub ingest -c /catalog/datahub-recipe.yaml`, and reads actual GMS aspects.
 Two dummy datasets must retain distinct stewards, distinct sensitivity tags,
-exact schema references/fields and their lineage edge. An unauthenticated catalog
+exact schema references/fields and both edges of a legitimate bounded dataset
+cycle produced by the Go harvester. An unauthenticated catalog
 read must refuse. A second real ingestion changes catalog ownership to a viewer
 and tags to PUBLIC. Actual lineage HTTP handlers must still refuse anonymous
 and viewer PII reads, allow the governed steward and redact upstream PII.
 
 The receipt binds source/tree SHA, GitHub run/attempt, actual image IDs/digests,
 CLI/Python dependencies, scanner outcomes, mandatory cases and test hashes.
+The clean source must match independent `GITHUB_SHA` before resource creation and
+after proof. An exclusive no-follow owner record binds nonce labels and exact
+resource names to that source/run/attempt. Normal and interrupted cleanup inspect
+those labels and delete verified IDs, including a container created before a
+failed start; foreign names/owners cannot authorize deletion. Cleanup or final
+receipt refusal fails acceptance. Timeout diagnostics contain only a closed
+stage/category, never subprocess arguments or one-run credentials. Eight
+qualification controls discriminate these failures alongside the 14 projection
+controls.
 Required runtime cases cannot skip. Normal runs without the disposable catalog
 skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.

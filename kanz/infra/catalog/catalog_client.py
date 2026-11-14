@@ -65,6 +65,10 @@ def readback():
             time.sleep(2)
     else:
         raise ValueError("actual catalog readback did not converge")
+    profile = "urn:li:dataset:(urn:li:dataPlatform:kanz,kanz.customer/PersonProfile,DEV)"
+    exposure = "urn:li:dataset:(urn:li:dataPlatform:kanz,kanz.risk/CustomerExposure,DEV)"
+    if not contains(result[profile]["upstreamLineage"]["upstreams"], [{"dataset": exposure, "type": "TRANSFORMED"}]) or not contains(result[exposure]["upstreamLineage"]["upstreams"], [{"dataset": profile, "type": "TRANSFORMED"}]):
+        raise ValueError("actual catalog lost a legitimate cyclic dataset edge")
     try:
         request("/aspects/" + urllib.parse.quote(next(iter(result)), safe="") + "?aspect=ownership&version=0", authorization=False)
     except urllib.error.HTTPError as error:
@@ -83,7 +87,7 @@ def readback():
             proposal["aspect"]["json"]["tags"] = [{"tag": "urn:li:tag:PUBLIC"}]
             altered.append(proposal)
     Path("/scratch/altered.json").write_text(json.dumps(altered))
-    Path("/scratch/readback.json").write_text(json.dumps({"datasets": result, "cases": ["distinct-stewards", "distinct-sensitivity", "schema-references", "lineage-edges", "catalog-authentication"]}, sort_keys=True))
+    Path("/scratch/readback.json").write_text(json.dumps({"datasets": result, "cases": ["distinct-stewards", "distinct-sensitivity", "schema-references", "lineage-edges", "cyclic-lineage-retained", "catalog-authentication"]}, sort_keys=True))
 
 
 def altered_readback():

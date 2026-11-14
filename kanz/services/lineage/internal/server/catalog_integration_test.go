@@ -39,6 +39,7 @@ func catalogFixture(t *testing.T) (*server.Server, []openlineage.RunEvent) {
 	for _, env := range []*envelopepb.Envelope{
 		{EventId: "profile-event", Domain: "customer", PayloadSchemaRef: "customer.v1.PersonProfile:1", CorrelationId: "00000000-0000-4000-8000-000000000001", EventTime: timestamppb.New(now)},
 		{EventId: "exposure-event", Domain: "risk", PayloadSchemaRef: "risk.v1.CustomerExposure:1", CorrelationId: "00000000-0000-4000-8000-000000000002", CausationId: "profile-event", EventTime: timestamppb.New(now)},
+		{EventId: "later-profile-event", Domain: "customer", PayloadSchemaRef: "customer.v1.PersonProfile:1", CorrelationId: "00000000-0000-4000-8000-000000000003", CausationId: "exposure-event", EventTime: timestamppb.New(now.Add(time.Second))},
 	} {
 		if err := h.Handle(context.Background(), env, nil); err != nil {
 			t.Fatal(err)
@@ -88,7 +89,7 @@ func TestCatalogMetadataCannotGrantLineageAccess(t *testing.T) {
 	if err := json.Unmarshal(body, &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Datasets) != 2 || len(report.Cases) != 6 {
+	if len(report.Datasets) != 2 || len(report.Cases) != 7 {
 		t.Fatal("complete actual catalog proof and alteration are required")
 	}
 	for _, identity := range []string{

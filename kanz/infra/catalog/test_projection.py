@@ -49,6 +49,15 @@ class ProjectionTest(unittest.TestCase):
         result = [p for p in values if p["aspectName"] == "upstreamLineage"][1]
         self.assertEqual(result["aspect"]["json"]["upstreams"], [{"dataset": "urn:li:dataset:(urn:li:dataPlatform:kanz,kanz.customer/PersonProfile,DEV)", "type": "TRANSFORMED"}])
 
+    def test_bounded_dataset_cycles_preserve_all_observed_edges(self):
+        later = copy.deepcopy(self.events[0])
+        later["inputs"] = [{"namespace": "kanz.risk", "name": "CustomerExposure"}]
+        self.events.append(later)
+        result = {p["entityUrn"]: p["aspect"]["json"]["upstreams"] for p in projection.project(self.mapping, self.events) if p["aspectName"] == "upstreamLineage"}
+        profile = "urn:li:dataset:(urn:li:dataPlatform:kanz,kanz.customer/PersonProfile,DEV)"
+        exposure = "urn:li:dataset:(urn:li:dataPlatform:kanz,kanz.risk/CustomerExposure,DEV)"
+        self.assertEqual(result, {profile: [{"dataset": exposure, "type": "TRANSFORMED"}], exposure: [{"dataset": profile, "type": "TRANSFORMED"}]})
+
     def test_unknown_dataset_has_no_default(self):
         self.events[1]["outputs"][0]["name"] = "Unmapped"
         with self.assertRaises(ValueError):
