@@ -58,6 +58,9 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 			defer cancel()
 			id := strings.ReplaceAll(uuid.NewString(), "-", "")
 			tenant, fund := "close-"+id, "fund-"+id
+			// Command IDs depend on strategy and nonce, not tenant or fund. Keep
+			// independent fixtures outside each other's broker dedup window.
+			retryNonce, flatNonce := "same-close-"+id, "flat-close-"+id
 			nc, err := nats.Connect(url)
 			if err != nil {
 				t.Fatal(err)
@@ -239,7 +242,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 				}
 				return p
 			}
-			raw := strings.ReplaceAll(body("close", "1", "absolute_qty", "same-close"), "fund-alpha", fund)
+			raw := strings.ReplaceAll(body("close", "1", "absolute_qty", retryNonce), "fund-alpha", fund)
 			process := func(p *Pipeline, raw string) (*Result, error) {
 				return p.Process(ctx, []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 			}
@@ -342,7 +345,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 					}
 					return d
 				case <-ctx.Done():
-					t.Fatal("expected canonical output never reached consumer")
+					t.Fatalf("expected canonical output for %s never reached consumer", topic)
 				}
 				return closeSpineDelivery{}
 			}
@@ -381,7 +384,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 					t.Fatalf("successful alert nonce was not committed: %v", err)
 				}
 			}
-			assertClose(restarted, raw, "same-close", 2)
+			assertClose(restarted, raw, retryNonce, 2)
 			if pub.events != 3 {
 				t.Fatalf("unknown retry produced partial/duplicate publications: %d", pub.events)
 			}
@@ -391,8 +394,8 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 			_, flatReady, _, flatSince := startPositions(flat)
 			waitReady(flatReady)
 			waitAck(findConsumer(positionStreamName, subject.VenuePositionAll, "", flatSince))
-			flatRaw := strings.ReplaceAll(body("close", "1", "absolute_qty", "flat-close"), "fund-alpha", fund)
-			assertClose(flat, flatRaw, "flat-close", 1)
+			flatRaw := strings.ReplaceAll(body("close", "1", "absolute_qty", flatNonce), "fund-alpha", fund)
+			assertClose(flat, flatRaw, flatNonce, 1)
 			if pub.events != 5 {
 				t.Fatalf("explicit zero recovery effects=%d want5", pub.events)
 			}
