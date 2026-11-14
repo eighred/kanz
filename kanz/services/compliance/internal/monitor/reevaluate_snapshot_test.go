@@ -121,7 +121,7 @@ func TestReevaluationHeldSnapshotRemainsEligibleAfterLaterFlat(t *testing.T) {
 		t.Fatal(err)
 	}
 	observed := t0.Add(123456789)
-	if err := l.mon.evaluate(bus.WithTenantID(context.Background(), "foreign-context"), evictionKey, captured,
+	if err := l.mon.evaluate(bus.WithTenantID(context.Background(), "foreign-context"), captured,
 		compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE, observed); err != nil {
 		t.Fatal(err)
 	}
