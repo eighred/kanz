@@ -13,7 +13,7 @@ func TestIRRScaleInvariant(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		scale float64
-	}{{"smallest_wire_scale", 1e-128}, {"small", 1e-12}, {"unit", 1}, {"large", 1e128}} {
+	}{{"smallest_wire_pair", 1e-127}, {"small", 1e-12}, {"unit", 1}, {"large_wire_pair", 1e146}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := IRR([]CashFlow{{start, -tc.scale}, {start.AddDate(1, 0, 0), 1.1 * tc.scale}})
 			if err != nil || math.Abs(got-0.1) > 1e-10 {
