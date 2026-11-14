@@ -7,9 +7,11 @@ authority. The owner still performs authorization, execution deduplication,
 transactional version checks and recovery terminal-status restoration.
 
 The numerical oracle specifies filled quantity, remaining quantity and VWAP
-independently. Decimal text rounding at eight places followed by repeated
-decimal digit rounding checks the existing half-away-from-zero representation,
-including large-coefficient rescaling. Comparison is exact protobuf equality,
+independently. Quantities use an independent finite-scale search over the exact
+Decimal domain (normalized int64 coefficient, exponent [-60,60]); unsupported
+results refuse rather than round. Only average prices retain decimal text
+rounding at eight places followed by repeated decimal digit rounding, including
+large-coefficient rescaling. Comparison is exact protobuf equality,
 with **zero numerical tolerance**, including all untouched state fields and
 optional-value presence. Time is an explicit fixture input, never wall time.
 Sequential fixtures deliberately use the previously rounded stored average.

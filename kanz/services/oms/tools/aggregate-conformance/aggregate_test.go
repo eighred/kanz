@@ -51,6 +51,7 @@ type sample struct {
 	quantity             *commonpb.Decimal
 	code, action, reason string
 	terminal             bool
+	numerical            bool
 }
 
 var eventTime = time.Date(2026, 2, 3, 4, 5, 6, 123456789, time.UTC)
@@ -157,6 +158,9 @@ func goResult(s sample) result {
 func assertIndependent(t *testing.T, s sample, r result) {
 	t.Helper()
 	wantStatus := "ok"
+	if s.numerical {
+		wantStatus = "numerical"
+	}
 	if s.code != "" {
 		wantStatus = "rejected"
 	}
