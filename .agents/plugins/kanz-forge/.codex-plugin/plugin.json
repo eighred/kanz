@@ -1,6 +1,6 @@
 {
   "name": "kanz-forge",
-  "version": "0.14.0+codex.20261113",
+  "version": "0.15.0+codex.20261115",
   "description": "Repository-owned workflows for Kanz investigation, implementation, verification, and delivery.",
   "author": {
     "name": "Eighred"

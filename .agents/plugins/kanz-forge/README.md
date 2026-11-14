@@ -80,6 +80,13 @@ determine whether parallel execution is possible.
 
 [Delivery coordination](skills/commands/references/delivery-coordination.md)
 uses live evidence to separate blockers from independent work. The optional
+session accounting keeps initial outcomes separate from discovered repairs.
+Eligible related findings finish in the same session through actual-main
+acceptance; required unresolved findings block their parent, while independent
+or held work retains a reason and re-entry input. One related-finding wave and
+explicit unfilled counts prevent replacing requested work or expanding forever.
+This is an evidence reducer and workflow, without dispatch or merge authority.
+The optional
 offline reducer checks a reviewed snapshot for stale CI evidence, queue holds,
 ownership conflicts and missing local builder proof. It does not orchestrate
 workers or authorize delivery.
@@ -211,7 +218,8 @@ checkout over current main or edit an installed cache.
 The 0.13 line adds repository engineering, branch recovery, changed-input blocker
 re-entry and reviewed continuation ranking. Version 0.13.1 adds direct publisher
 version discovery and root-only worker dispatch. Version 0.14 adds public name
-discovery and host-independent HTTPS Git ref observations. Earlier version tests are
+discovery and host-independent HTTPS Git ref observations. Version 0.15 adds bounded same-session
+discovered repairs and fixed-target progress accounting. Earlier version tests are
 historical, not evidence for this candidate. After approval,
 register the exact reviewed
 checkout through `codex plugin marketplace add <reviewed-checkout>` and reinstall
