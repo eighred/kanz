@@ -97,3 +97,29 @@ func TestIRRDatedIntervalAndInputPreservation(t *testing.T) {
 		})
 	}
 }
+
+func TestIRRPermutationInvariant(t *testing.T) {
+	start := day(2021, 1, 1)
+	flows := []CashFlow{{start, -125}, {start, 25}, {day(2022, 1, 1), 110}, {day(2023, 1, 1), 7}, {day(2023, 1, 1), -7}}
+	checked := 0
+	var permutations func(int)
+	permutations = func(first int) {
+		if first == len(flows) {
+			checked++
+			got, err := IRR(flows)
+			if err != nil || math.Abs(got-.1) > 1e-10 {
+				t.Fatalf("permutation %d IRR = %.17g, %v; want .1", checked, got, err)
+			}
+			return
+		}
+		for i := first; i < len(flows); i++ {
+			flows[first], flows[i] = flows[i], flows[first]
+			permutations(first + 1)
+			flows[first], flows[i] = flows[i], flows[first]
+		}
+	}
+	permutations(0)
+	if checked != 120 {
+		t.Fatalf("checked %d permutations, want 5! = 120", checked)
+	}
+}
