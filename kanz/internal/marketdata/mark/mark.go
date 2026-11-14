@@ -285,17 +285,11 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 		}
 		price = p
 	case ev.GetQuote() != nil && ev.GetQuote().GetBidPrice() != nil && ev.GetQuote().GetAskPrice() != nil:
-		bid, ok := decutil.FromProtoChecked(ev.GetQuote().GetBidPrice())
+		prices, ok := QualifyLiveQuote(ev.GetQuote().GetBidPrice(), ev.GetQuote().GetAskPrice())
 		if !ok {
 			return nil
 		}
-		ask, ok := decutil.FromProtoChecked(ev.GetQuote().GetAskPrice())
-		if !ok {
-			return nil
-		}
-		qBid, qAsk = bid, ask
-		mid := new(big.Rat).Add(bid, ask)
-		price = mid.Quo(mid, big.NewRat(2, 1))
+		qBid, qAsk, price = prices.Bid, prices.Ask, prices.Mid
 	default:
 		return nil
 	}
