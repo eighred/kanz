@@ -43,7 +43,7 @@ func rustAuditConsumerBoundary(c, installer, workflow string) error {
 	if strings.Contains(c, `os.environ["GITHUB_SHA"] =`) || strings.Contains(c, "cargo install") || strings.Contains(installer, "cargo ") || strings.Contains(installer, "||") {
 		return fmt.Errorf("source spoof/fallback")
 	}
-	for _, token := range []string{"  contents: read\n  packages: read", "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6", "test_consume.py", "tools/rust-audit-tools/**", "rust-audit-tools-installed.json"} {
+	for _, token := range []string{"  contents: read\n  packages: read", "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532", "test_consume.py", "tools/rust-audit-tools/**", "rust-audit-tools-installed.json"} {
 		if !strings.Contains(workflow, token) {
 			return fmt.Errorf("readonly consumer qualification missing")
 		}
@@ -56,11 +56,12 @@ func rustAuditConsumerBoundary(c, installer, workflow string) error {
 			If       any `yaml:"if"`
 			Continue any `yaml:"continue-on-error"`
 			Steps    []struct {
-				Name     string `yaml:"name"`
-				Uses     string `yaml:"uses"`
-				Run      string `yaml:"run"`
-				If       any    `yaml:"if"`
-				Continue any    `yaml:"continue-on-error"`
+				Name     string            `yaml:"name"`
+				Uses     string            `yaml:"uses"`
+				Run      string            `yaml:"run"`
+				If       any               `yaml:"if"`
+				Continue any               `yaml:"continue-on-error"`
+				With     map[string]string `yaml:"with"`
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
@@ -74,7 +75,7 @@ func rustAuditConsumerBoundary(c, installer, workflow string) error {
 	setup, consumer := -1, -1
 	for i, step := range job.Steps {
 		if strings.HasPrefix(step.Uses, "sigstore/cosign-installer@") {
-			if setup != -1 || step.Uses != "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6" || step.If != nil || step.Continue != nil || step.Run != "" {
+			if setup != -1 || step.Uses != "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532" || step.If != nil || step.Continue != nil || step.Run != "" || step.With["cosign-release"] != "v3.0.6" {
 				return fmt.Errorf("compatibility cosign setup differs")
 			}
 			setup = i
@@ -164,7 +165,7 @@ func TestRustAuditConsumerJobComposition(t *testing.T) {
 		t.Fatal("compatibility missing")
 	}
 	prefix, job := workflow[:start], workflow[start:]
-	setup := "      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+	setup := "      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3\n        with:\n          cosign-release: v3.0.6\n"
 	consumer := "      - name: Install pinned Rust evidence tools\n        run: bash .github/scripts/install-rust-audit.sh\n"
 	if strings.Count(job, setup) != 1 || strings.Count(job, consumer) != 1 {
 		t.Fatal("mutation anchors differ")
@@ -175,6 +176,7 @@ func TestRustAuditConsumerJobComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutations := map[string]string{
+		"unreviewed-verifier-version":   strings.Replace(job, "cosign-release: v3.0.6", "cosign-release: v3.1.4", 1),
 		"removed-with-second-installer": strings.Replace(job, setup, "", 1),
 		"reordered":                     strings.Replace(strings.Replace(job, setup, "", 1), consumer, consumer+setup, 1),
 		"setup-if":                      strings.Replace(job, setup, setup+"        if: false\n", 1),
