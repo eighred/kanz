@@ -42,6 +42,10 @@ func TestHouseholdIdentityCanonicalDLQAckRestartAndRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storedMessages, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
 	stream, err := js.Stream(ctx, "WEALTH")
 	if err != nil {
 		t.Fatal(err)
@@ -233,10 +237,15 @@ func TestHouseholdIdentityCanonicalDLQAckRestartAndRepair(t *testing.T) {
 			t.Fatal(err)
 		}
 		d := next(t, s)
-		raw, err := stream.GetLastMsgForSubject(ctx, topic)
+		// The management read returns stored wire headers. A direct get adds
+		// response-only Nats-Stream/Sequence/Subject/Time-Stamp headers, which
+		// never traveled through the consumer and must not be expected in DLQ.
+		stored, err := storedMessages.GetLastMsg("WEALTH", topic, nats.Context(ctx))
 		if err != nil {
 			t.Fatal(err)
 		}
+		raw := &jetstream.RawStreamMsg{Subject: stored.Subject, Sequence: stored.Sequence,
+			Header: stored.Header, Data: stored.Data, Time: stored.Time}
 		env, payload, err := bus.Unframe(raw.Data)
 		if err != nil || !proto.Equal(env, d.env) || !bytes.Equal(payload, d.payload) || !bytes.Equal(payload, identityPayload(t, h)) {
 			t.Fatal("canonical retained original differs from delivered frame", err)
