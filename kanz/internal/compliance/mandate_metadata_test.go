@@ -169,7 +169,7 @@ func TestMandateMetadataLegalBoundariesStillGovern(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := identityMandate("a", "shared", 1)
 			if name == "year_one" {
-				m.EffectiveAt = timestamppb.New(time.Date(1, 1, 1, 0, 0, 0, 1, time.UTC))
+				m.EffectiveAt = timestamppb.New(time.Time{})
 			}
 			if name == "max_version" {
 				m.Version = math.MaxUint64
