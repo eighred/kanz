@@ -133,7 +133,7 @@ def validate_receipt(report, identity, images):
             raise ValueError("catalog executed image binding incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != "1.8.0" or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 8 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 9 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     for key in ("testsSHA256", "projectionSHA256", "testBinarySHA256"):
         if not re.fullmatch(r"[0-9a-f]{64}", report.get(key, "")):
@@ -202,9 +202,11 @@ class Fixture:
                 "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128",
                 "--memory", "1g", "--memory-swap", "1g", "--cpus", "2", "--user", f"{os.getuid()}:{os.getgid()}",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m", "--mount", f"type=bind,src={HERE},dst=/catalog,readonly",
+                "--mount", f"type=bind,src={ROOT / '.github/workflows/catalog-verification.yml'},dst=/catalog-workflow.yml,readonly",
                 "--mount", f"type=bind,src={self.scratch},dst=/scratch", "--workdir", "/scratch",
                 "--env", "HOME=/scratch/home", "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "DATAHUB_TELEMETRY_ENABLED=false",
                 "--env", "DATAHUB_GMS_URL=http://gms:8080", "--env", "DATAHUB_GMS_AUTHORIZATION",
+                "--env", "KANZ_CATALOG_WORKFLOW=/catalog-workflow.yml",
                 "--env", "KANZ_CATALOG_METADATA_FILE=/scratch/" + metadata,
                 "--entrypoint", command[0], self.images["ingestion"], *command[1:]]
         return self.run(args, timeout=240, environment=child)
@@ -323,11 +325,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 22 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 23 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 8}
+        report["qualificationControls"] = {"count": 9}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"

@@ -74,9 +74,13 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Eight
+stage/category, never subprocess arguments or one-run credentials. Nine
 qualification controls discriminate these failures alongside the 14 projection
 controls.
+The PR/main trigger contract includes the consumed authorization/lineage
+dependencies, canonical generation inputs, Go runtime pins, setup action and
+reviewed advisory installer. A control reads the real workflow through a
+read-only mount and rejects omitted scanner/auth/schema selectors.
 Required runtime cases cannot skip. Normal runs without the disposable catalog
 skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.

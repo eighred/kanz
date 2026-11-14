@@ -1,6 +1,8 @@
 """Discriminate source, partial-create cleanup and non-secret failure evidence."""
 import copy
+import fnmatch
 import json
+import os
 import subprocess
 import tempfile
 import traceback
@@ -9,12 +11,44 @@ from pathlib import Path
 from unittest import mock
 
 import qualify
+import yaml
 
 IDENTITY = {"sourceSHA": "a" * 40, "treeSHA": "b" * 40, "runID": "123", "runAttempt": "1"}
 OWNER = dict(IDENTITY, schema=1, kind="catalog-qualification", nonce="0123456789abcdef", network="kanz-catalog-0123456789abcdef")
 
 
 class QualificationControls(unittest.TestCase):
+    def test_consumed_inputs_select_both_pr_and_main_qualification(self):
+        path = Path(os.environ.get("KANZ_CATALOG_WORKFLOW", qualify.ROOT / ".github/workflows/catalog-verification.yml"))
+        # BaseLoader retains the Actions `on` key rather than YAML 1.1's bool.
+        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+        consumed = ("kanz-jl/qualification/install-audit.sh", "kanz/pkg/auth/audit.go",
+                    "kanz/pkg/authbus/recorder.go", "kanz/pkg/bus/validate.go",
+                    "kanz/pkg/decisionq/queue.go", "kanz/pkg/observability/observability.go",
+                    "kanz/pkg/transport/tls.go", "kanz/internal/bustest/bustest.go",
+                    "kanz/internal/env/env.go", "kanz/internal/lifecycle/fatal.go",
+                    "kanz/internal/platform/httpserver/httpserver.go", "kanz/internal/version/version.go",
+                    "kanz/test/arch/upstream_principal_reconstruction_test.go",
+                    "kanz-schemas/proto/envelope/v1/envelope.proto",
+                    "kanz-schemas/proto/observation/v1/observation.proto",
+                    "kanz-schemas/proto/common/v1/decimal.proto", "kanz/go.mod", "kanz/go.sum",
+                    "kanz/Makefile", "kanz-schemas/buf.yaml", "kanz-schemas/buf.gen.yaml",
+                    "kanz-schemas/bootstrap-go-sdk.sh", ".github/actions/setup-buf/action.yml")
+        def validate(document):
+            for event in ("pull_request", "push"):
+                patterns = document["on"][event]["paths"]
+                if any(not any(fnmatch.fnmatchcase(source, pattern) for pattern in patterns) for source in consumed):
+                    raise ValueError("consumed qualification input is unselected")
+                if any(any(fnmatch.fnmatchcase(source, pattern) for pattern in patterns) for source in ("README.md", "tools/grafana_proof/proof.py")):
+                    raise ValueError("unrelated source unnecessarily selects catalog runtime")
+        validate(workflow)
+        for event in ("pull_request", "push"):
+            for source in (consumed[0], consumed[1], "kanz-schemas/proto/envelope/v1/envelope.proto"):
+                changed = copy.deepcopy(workflow)
+                changed["on"][event]["paths"] = [pattern for pattern in changed["on"][event]["paths"] if not fnmatch.fnmatchcase(source, pattern)]
+                with self.subTest(event=event, source=source), self.assertRaises(ValueError):
+                    validate(changed)
+
     def test_independent_source_and_clean_tree_are_required(self):
         expected = {key: value for key, value in IDENTITY.items() if key != "treeSHA"}
         run = mock.Mock(side_effect=[IDENTITY["sourceSHA"], IDENTITY["treeSHA"], ""])
@@ -139,7 +173,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": "sha256:" + "2" * 64, "scanSHA256": "3" * 64}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 8}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 9}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         qualify.validate_receipt(original, IDENTITY, images)
         for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {})):
