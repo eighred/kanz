@@ -80,6 +80,7 @@ func TestIRRDatedIntervalAndInputPreservation(t *testing.T) {
 	}{
 		{"year_one_to_2001", []CashFlow{{end, 1.1}, {start, -1}}, want},
 		{"one_nanosecond_zero_return", []CashFlow{{start, -1}, {start.Add(time.Nanosecond), 1}}, 0},
+		{"one_nanosecond_zero_return_scaled", []CashFlow{{start, -100}, {start.Add(time.Nanosecond), 100}}, 0},
 		{"negative_return", []CashFlow{{day(2022, 1, 1), 80}, {day(2021, 1, 1), -100}}, -.2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

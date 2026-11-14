@@ -123,7 +123,9 @@ func IRR(flows []CashFlow) (float64, error) {
 		return 0, errNoIRR
 	}
 	var pos, neg bool
+	var scale float64
 	for _, f := range netted {
+		scale = math.Max(scale, math.Abs(f.Amount))
 		switch {
 		case f.Amount > 0:
 			pos = true
@@ -140,21 +142,29 @@ func IRR(flows []CashFlow) (float64, error) {
 		// Timestamp ranges exceed time.Duration's approximately 292-year range.
 		return (float64(d.Unix()-t0.Unix()) + float64(d.Nanosecond()-t0.Nanosecond())/1e9) / (365 * 24 * 60 * 60)
 	}
+	type term struct{ years, logAmount, sign float64 }
+	terms := make([]term, 0, len(netted))
+	for _, f := range netted {
+		logAmount := math.Log(math.Abs(f.Amount) / scale)
+		if math.IsInf(logAmount, -1) {
+			logAmount = math.Log(math.Abs(f.Amount)) - math.Log(scale)
+		}
+		terms = append(terms, term{years(f.Date), logAmount, math.Copysign(1, f.Amount)})
+	}
 	npv := func(r float64) float64 {
 		// A positive common rescaling preserves the root and its sign. Work in
 		// log space so neither tiny money nor long dated discount factors can
 		// underflow the convergence test or overflow the bracket calculation.
 		maxLog := math.Inf(-1)
-		for _, f := range netted {
-			maxLog = math.Max(maxLog, math.Log(math.Abs(f.Amount))-years(f.Date)*math.Log1p(r))
+		for _, f := range terms {
+			maxLog = math.Max(maxLog, f.logAmount-f.years*math.Log1p(r))
 		}
 		var base, v, correction float64
-		for _, f := range netted {
-			sign := math.Copysign(1, f.Amount)
-			base += sign
+		for _, f := range terms {
+			base += f.sign
 			// Keeping exp(x)-1 separate preserves near-cancelling terms at
 			// very short intervals, including a genuine zero annual return.
-			term := sign*math.Expm1(math.Log(math.Abs(f.Amount))-years(f.Date)*math.Log1p(r)-maxLog) - correction
+			term := f.sign*math.Expm1(f.logAmount-f.years*math.Log1p(r)-maxLog) - correction
 			next := v + term
 			correction = (next - v) - term
 			v = next
