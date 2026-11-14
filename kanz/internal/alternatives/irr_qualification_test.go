@@ -207,3 +207,24 @@ func TestIRRCrossSecondPositiveAndNegativeReturn(t *testing.T) {
 		})
 	}
 }
+
+func TestIRRSplitReturnsPreserveZeroReturn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step time.Duration
+	}{{"nanosecond", time.Nanosecond}, {"microsecond", time.Microsecond}} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := day(2021, 1, 1)
+			flows := []CashFlow{{start, -10}}
+			for i := 1; i <= 4; i++ {
+				flows = append(flows, CashFlow{start.Add(time.Duration(i) * tc.step), float64(i)})
+			}
+			// All positive returns follow one contribution and total exactly ten;
+			// the discounted sum is strictly decreasing and has its unique root 0.
+			got, err := IRR(flows)
+			if err != nil || math.Abs(got) > 1e-10 {
+				t.Fatalf("IRR %.17g, %v; want unique zero within 1e-10", got, err)
+			}
+		})
+	}
+}

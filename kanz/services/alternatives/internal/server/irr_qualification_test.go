@@ -52,6 +52,7 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 		{"small_residual", "1", "0.00000000000000000001", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true, ""},
 		{"translated_residual", "1", "1e-20", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true, "1e-127"},
 		{"negative_cluster", "1e-100", "1e-120", start.Add(2 * time.Microsecond), -.12330568412790002188, false, true, "1"},
+		{"split_zero", "10", "0", start.Add(4 * time.Microsecond), 0, false, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call, ok := new(big.Rat).SetString(tc.call)
@@ -75,6 +76,11 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 					t.Fatal("invalid early call fixture")
 				}
 				events = append(events, &alternatives.Event{EventID: tc.name + "-early", CommitmentID: tc.name, Type: alternatives.EventCall, Amount: early, Date: day(2, 1, 1)})
+			}
+			if tc.name == "split_zero" {
+				for i := int64(1); i <= 4; i++ {
+					events = append(events, &alternatives.Event{EventID: tc.name + "-distribution-" + big.NewInt(i).String(), CommitmentID: tc.name, Type: alternatives.EventDistribution, Amount: big.NewRat(i, 1), Date: start.Add(time.Duration(i) * time.Microsecond)})
+				}
 			}
 			for _, e := range events {
 				if err := st.Append(context.Background(), e); err != nil {
@@ -171,7 +177,7 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 	irrServedFixtures(t, st)
 	pool.Close()
 	restarted := fund.NewPostgres(open("irr-owner"))
-	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual", "translated_residual", "negative_cluster"} {
+	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual", "translated_residual", "negative_cluster", "split_zero"} {
 		t.Run("restart_"+id, func(t *testing.T) {
 			result := irrPositionResponse(t, restarted, id)
 			if id == "same_instant" {
@@ -180,7 +186,7 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 				}
 			} else {
 				want := .1
-				if id == "zero" {
+				if id == "zero" || id == "split_zero" {
 					want = 0
 				} else if id == "small_residual" || id == "translated_residual" {
 					want = .00000031536004972597000989

@@ -1,7 +1,6 @@
 package alternatives
 
 import (
-	"container/heap"
 	"errors"
 	"math"
 	"math/big"
@@ -83,22 +82,6 @@ func IRRFlows(p *Position) []CashFlow {
 	return flows
 }
 
-// irrLogHeap keeps the largest discounted term available for cancellation.
-// Pairing opposite signs before adding small terms avoids losing a residual
-// that determines the return of an almost offsetting short-dated cashflow.
-type irrLogHeap []float64
-
-func (h irrLogHeap) Len() int           { return len(h) }
-func (h irrLogHeap) Less(i, j int) bool { return h[i] > h[j] }
-func (h irrLogHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *irrLogHeap) Push(v any)        { *h = append(*h, v.(float64)) }
-func (h *irrLogHeap) Pop() any {
-	last := len(*h) - 1
-	v := (*h)[last]
-	*h = (*h)[:last]
-	return v
-}
-
 // errNoIRR distinguishes an unavailable return from a measured zero return.
 var errNoIRR = errors.New("alternatives: IRR undefined (need flows of both signs)")
 
@@ -171,90 +154,96 @@ func IRR(flows []CashFlow) (float64, error) {
 		}
 		return (float64(seconds) + float64(nanos)/1e9) / (365 * 24 * 60 * 60)
 	}
-	logRatio := func(amount, base float64) float64 {
-		ratio := amount / base
-		if ratio >= .5 && ratio <= 2 {
-			// Near unity, dividing first can erase the amount difference. The
-			// subtraction is exact for these comparable binary magnitudes.
-			return math.Log1p((amount - base) / base)
-		}
-		if ratio == 0 || math.IsInf(ratio, 1) {
-			return math.Log(amount) - math.Log(base)
-		}
-		return math.Log(ratio)
-	}
 	type term struct {
-		date                    time.Time
-		amount, logAmount, sign float64
+		date      time.Time
+		logAmount float64
+		money     *big.Rat
 	}
 	terms := make([]term, 0, len(netted))
 	for _, f := range netted {
 		amount := math.Abs(f.Amount)
-		terms = append(terms, term{f.Date, amount, logRatio(amount, scale), math.Copysign(1, f.Amount)})
+		logAmount := math.Log(amount / scale)
+		if math.IsInf(logAmount, -1) {
+			logAmount = math.Log(amount) - math.Log(scale)
+		}
+		terms = append(terms, term{f.Date, logAmount, new(big.Rat).SetFloat64(f.Amount)})
 	}
-	npvSign := func(r float64) float64 {
-		// A positive common rescaling preserves the root and its sign. Work in
-		// log space so neither tiny money nor long dated discount factors can
-		// underflow the convergence test or overflow the bracket calculation.
+	expRat := func(x float64) (*big.Rat, bool) {
+		// Represent exp(x) as a finite mantissa times an exact binary power.
+		// Range-reduce before even a nonzero subnormal loses relative accuracy.
+		// This bound covers the complete canonical Timestamp range throughout
+		// the fixed rate bracket, while arbitrary Go dates cannot allocate an
+		// unbounded integer. It is a numerical refusal, never a default rate.
+		k := math.Floor(x / math.Ln2)
+		if math.IsNaN(k) || math.Abs(k) > 262144 {
+			return nil, false
+		}
+		result := new(big.Rat).SetFloat64(math.Exp(x - k*math.Ln2))
+		power := new(big.Int).Lsh(big.NewInt(1), uint(math.Abs(k)))
+		if k < 0 {
+			result.Quo(result, new(big.Rat).SetInt(power))
+		} else {
+			result.Mul(result, new(big.Rat).SetInt(power))
+		}
+		return result, true
+	}
+	npvSign := func(r float64) (int, bool) {
 		logRate, largest, pivot := math.Log1p(r), math.Inf(-1), 0
 		for i, f := range terms {
 			if value := f.logAmount - years(f.date, reference)*logRate; value > largest {
 				largest, pivot = value, i
 			}
 		}
-		// Rebase both dates and amounts near the largest discounted cashflow.
-		// A tiny distant opening leg must not erase microsecond gaps, and a
-		// negative rate can make a small future cluster dominate the equation.
-		positive, negative := make(irrLogHeap, 0, len(terms)), make(irrLogHeap, 0, len(terms))
+		// A common discount reference preserves the root. Keep short intervals
+		// near the dominant cashflow, including small future flows amplified by
+		// a negative rate. Logs only choose that reference; they never decide NPV.
+		total := new(big.Rat)
 		for _, f := range terms {
-			logValue := logRatio(f.amount, terms[pivot].amount) - years(f.date, terms[pivot].date)*logRate
-			if f.sign > 0 {
-				positive = append(positive, logValue)
+			x := -years(f.date, terms[pivot].date) * logRate
+			if math.Abs(x) < .5 {
+				// Resolve principal cancellation exactly in the existing float
+				// input domain BEFORE adding the small discount increment. This
+				// preserves both tiny residuals and returns split into many legs.
+				total.Add(total, f.money)
+				total.Add(total, new(big.Rat).Mul(f.money, new(big.Rat).SetFloat64(math.Expm1(x))))
 			} else {
-				negative = append(negative, logValue)
+				factor, ok := expRat(x)
+				if !ok {
+					return 0, false
+				}
+				total.Add(total, new(big.Rat).Mul(f.money, factor))
 			}
 		}
-		heap.Init(&positive)
-		heap.Init(&negative)
-		for len(positive) > 0 && len(negative) > 0 {
-			p, n := heap.Pop(&positive).(float64), heap.Pop(&negative).(float64)
-			if p > n {
-				heap.Push(&positive, p+math.Log(-math.Expm1(n-p)))
-			} else if n > p {
-				heap.Push(&negative, n+math.Log(-math.Expm1(p-n)))
-			}
-			// Equal log terms cancel exactly. Every pairing removes at least
-			// one term, bounding work by O(n log n) and memory by O(n).
-		}
-		if len(positive) > 0 {
-			return 1
-		}
-		if len(negative) > 0 {
-			return -1
-		}
-		return 0
+		return total.Sign(), true
 	}
 
 	// Bracket: NPV is monotone decreasing in r over a normal profile. Search for a
 	// sign change between -0.9999 and a large upper rate.
 	lo, hi := -0.9999, 10.0
-	fLo, fHi := npvSign(lo), npvSign(hi)
+	fLo, loOK := npvSign(lo)
+	fHi, hiOK := npvSign(hi)
+	if !loOK || !hiOK {
+		return 0, errNoIRR
+	}
 	if fLo == 0 {
 		return lo, nil
 	}
 	if fHi == 0 {
 		return hi, nil
 	}
-	if math.Signbit(fLo) == math.Signbit(fHi) {
+	if fLo == fHi {
 		return 0, errNoIRR // no root in the bracket
 	}
 	for i := 0; i < 200; i++ {
 		mid := (lo + hi) / 2
-		fMid := npvSign(mid)
+		fMid, ok := npvSign(mid)
+		if !ok {
+			return 0, errNoIRR
+		}
 		if fMid == 0 || hi-lo <= 1e-12*math.Max(1, math.Abs(mid)) {
 			return mid, nil
 		}
-		if math.Signbit(fLo) != math.Signbit(fMid) {
+		if fLo != fMid {
 			hi = mid // fHi is never read again: the loop brackets on fLo's sign
 		} else {
 			lo, fLo = mid, fMid
