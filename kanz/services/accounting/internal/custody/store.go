@@ -23,6 +23,10 @@ import (
 // OutcomeNoStatement, and this error is what routes to it.
 var ErrNoStatement = errors.New("custody: no statement for subject")
 
+// ErrAmbiguousStatement refuses a comparison when distinct statement identities
+// share the newest receipt time. Arrival order cannot establish precedence.
+var ErrAmbiguousStatement = errors.New("custody: ambiguous newest statement")
+
 // Store is the durable home of statements, runs and the break lifecycle.
 //
 // THE BREAK STATE IS THE PART THAT MUST BE DURABLE. Statements and runs could in
@@ -40,8 +44,8 @@ type Store interface {
 	// history must reconstruct what was known and when.
 	SaveStatement(ctx context.Context, s Statement) error
 
-	// LatestStatement returns the newest statement for a subject by ReceivedAt,
-	// or ErrNoStatement.
+	// LatestStatement returns the unique newest statement for a subject by
+	// ReceivedAt, ErrNoStatement, or ErrAmbiguousStatement when precedence is unknown.
 	LatestStatement(ctx context.Context, subject Subject) (Statement, error)
 
 	// SaveRun records a completed run. Idempotent on RunID.
@@ -166,10 +170,17 @@ func (m *MemoryStore) LatestStatement(_ context.Context, subject Subject) (State
 		return Statement{}, ErrNoStatement
 	}
 	best := list[0]
+	newest := 1
 	for _, s := range list[1:] {
 		if s.ReceivedAt.After(best.ReceivedAt) {
 			best = s
+			newest = 1
+		} else if s.ReceivedAt.Equal(best.ReceivedAt) {
+			newest++
 		}
+	}
+	if newest > 1 {
+		return Statement{}, ErrAmbiguousStatement
 	}
 	return cloneStatement(best), nil
 }

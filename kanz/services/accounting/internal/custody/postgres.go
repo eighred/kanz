@@ -95,10 +95,14 @@ ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
 // LatestStatement implements Store.
 func (p *Postgres) LatestStatement(ctx context.Context, subject Subject) (Statement, error) {
 	const q = `
+WITH newest AS (
 SELECT statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain, values_verified
 FROM custody_statements
 WHERE portfolio_id = $1 AND custodian_id = $2 AND business_date = $3
 ORDER BY received_at DESC
+FETCH FIRST 1 ROW WITH TIES
+)
+SELECT newest.*, count(*) OVER () FROM newest
 LIMIT 1`
 	var (
 		s                  Statement
@@ -106,16 +110,22 @@ LIMIT 1`
 		transactions       []byte
 		grain              string
 		verified           bool
+		newest             int64
 		businessDate, recv time.Time
 	)
 	err := p.pool.QueryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
 		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv,
-			&transactions, &grain, &verified)
+			&transactions, &grain, &verified, &newest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Statement{}, ErrNoStatement
 	}
 	if err != nil {
 		return Statement{}, fmt.Errorf("custody: latest statement: %w", err)
+	}
+	// Count in the same tenant-scoped query snapshot. A second query could miss
+	// a competing receipt, and ordering by an ID would invent source precedence.
+	if newest > 1 {
+		return Statement{}, ErrAmbiguousStatement
 	}
 	if !verified {
 		return Statement{}, ErrUnverifiedPrecision
