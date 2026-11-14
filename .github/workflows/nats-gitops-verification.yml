@@ -11,6 +11,7 @@ on:
       - 'kanz-schemas/proto/envelope/**'
       - 'kanz-schemas/proto/market/**'
       - 'kanz-schemas/proto/common/**'
+      - 'kanz-schemas/proto/command/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
       - 'kanz-schemas/bootstrap-go-sdk.sh'
@@ -19,6 +20,7 @@ on:
       - 'kanz/go.sum'
       - 'kanz/pkg/bus/**'
       - 'kanz/pkg/transport/**'
+      - 'kanz/pkg/observability/**'
       - '.github/actions/setup-buf/**'
       - '.github/workflows/nats-gitops-verification.yml'
   push:
@@ -33,6 +35,7 @@ on:
       - 'kanz-schemas/proto/envelope/**'
       - 'kanz-schemas/proto/market/**'
       - 'kanz-schemas/proto/common/**'
+      - 'kanz-schemas/proto/command/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
       - 'kanz-schemas/bootstrap-go-sdk.sh'
@@ -41,6 +44,7 @@ on:
       - 'kanz/go.sum'
       - 'kanz/pkg/bus/**'
       - 'kanz/pkg/transport/**'
+      - 'kanz/pkg/observability/**'
       - '.github/actions/setup-buf/**'
       - '.github/workflows/nats-gitops-verification.yml'
 permissions:

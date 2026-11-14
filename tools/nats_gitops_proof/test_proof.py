@@ -1,6 +1,7 @@
 """Refusal controls for the receipt and source-derived assertions; no cluster."""
 import base64
 import copy
+import fnmatch
 import importlib.util
 from pathlib import Path
 import unittest
@@ -12,6 +13,32 @@ SHA = "a" * 40
 
 
 class ProofTests(unittest.TestCase):
+    def test_workflow_selects_resolved_canonical_publisher_inputs(self):
+        workflow = proof.documents(".github/workflows/nats-gitops-verification.yml")[0]
+        # PyYAML's YAML 1.1 resolver represents the workflow `on` key as True.
+        triggers = workflow.get("on", workflow.get(True))
+        # These edges are code and generated-SDK consumers, even though the
+        # diagnostic publishes a FACT. bus/command.go still compiles with bus;
+        # consumer.go and producer.go call the observability trace helpers.
+        inputs = ("kanz/tools/nats_gitops_proof/main.go", "kanz/pkg/bus/consumer.go",
+                  "kanz/pkg/transport/tls.go", "kanz/pkg/observability/trace.go",
+                  "kanz-schemas/proto/command/v1/command.proto", "kanz-schemas/proto/common/v1/decimal.proto",
+                  "kanz/go.mod", "kanz/go.sum")
+        for event in ("pull_request", "push"):
+            patterns = triggers[event]["paths"]
+            def selected(values):
+                return {path for path in inputs if any(fnmatch.fnmatchcase(path, pattern) for pattern in values)}
+            for path in inputs:
+                with self.subTest(event=event, path=path):
+                    self.assertTrue((proof.ROOT / path).is_file())
+            self.assertEqual(selected(patterns), set(inputs), "a resolved publisher input does not select its actual proof")
+            for selector in ("kanz/pkg/observability/**", "kanz-schemas/proto/command/**"):
+                # Delete only the reviewed edge, keeping every other filter.
+                # The original missing-consumer defect must become observable.
+                narrowed = [pattern for pattern in patterns if pattern != selector]
+                self.assertNotEqual(selected(narrowed), set(inputs))
+            self.assertFalse(any(fnmatch.fnmatchcase("kanz/internal/risk/pricing/curve/curve.go", pattern) for pattern in patterns))
+
     def test_diagnostics_keep_categories_without_raw_content(self):
         for raw, category in (("lookup secret-host: no such host", "dns-unavailable"),
                               ("unknown flag: credential-example", "unsupported-cli-flag"),
