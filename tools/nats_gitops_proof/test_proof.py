@@ -15,6 +15,8 @@ class ProofTests(unittest.TestCase):
     def test_diagnostics_keep_categories_without_raw_content(self):
         for raw, category in (("lookup secret-host: no such host", "dns-unavailable"),
                               ("unknown flag: credential-example", "unsupported-cli-flag"),
+                              ("unknown long flag '--jetstream'", "unsupported-cli-flag"),
+                              ('{"fixtureError":"fixture-publish-ack-refused"}', "fixture-publish-ack-refused"),
                               ("ImagePullBackOff private-registry", "image-pull-unavailable"),
                               ("opaque token-looking diagnostic", "unclassified-refusal")):
             self.assertEqual(proof.diagnostic_category(raw), category)
@@ -102,11 +104,42 @@ class ProofTests(unittest.TestCase):
 
     def receipt(self):
         operation = {"revision": SHA, "phase": "Succeeded", "hookPhase": "Succeeded", "syncPhase": "PostSync"}
-        claim = {"podUID": "pod-one", "pvc": "data-nats-0", "pvcUID": "pvc", "pv": "pv", "pvUID": "pv-uid"}
+        before = {f"nats-{i}": {"podUID": f"pod-{i}", "pvc": f"data-nats-{i}", "pvcUID": f"pvc-{i}", "pv": f"pv-{i}", "pvUID": f"pv-uid-{i}"} for i in range(3)}
+        stopped = {"replicas": 0, "pods": [], "claims": {row["pvc"]: {key: value for key, value in row.items() if key != "podUID"} for row in before.values()}}
+        after = {name: row | {"podUID": row["podUID"] + "-new"} for name, row in before.items()}
         return {"source": SHA, "tree": "b" * 40, "passed": True, "cleanupPassed": True, "cases": proof.CASES[:],
                 "syncs": [operation | {"jobUID": "job-one", "operation": "first"}, operation | {"jobUID": "job-two", "operation": "second"}],
-                "storage": [claim, claim | {"podUID": "pod-two"}], "factBefore": {"record": "one"},
+                "coldRecovery": {"before": before, "stopped": stopped, "after": after},
+                "pubAck": {"source": SHA, "stream": "MARKET", "sequence": 1, "duplicate": False, "acknowledged": True}, "factBefore": {"record": "one"},
                 "factAfter": {"record": "one"}, "canonicalValidated": True, "negativeControlPassed": True}
+
+    def test_actual_puback_cannot_be_substituted_by_a_publish_exit(self):
+        ack = self.receipt()["pubAck"]
+        proof.check_puback(ack, SHA)
+        for key, value in (("acknowledged", False), ("stream", "EXECUTION"), ("sequence", True),
+                           ("sequence", 2), ("duplicate", True), ("source", "b" * 40)):
+            with self.assertRaises(ValueError):
+                proof.check_puback(ack | {key: value}, SHA)
+
+    def test_cold_recovery_rejects_a_live_replica_or_replaced_claim(self):
+        proof.check_cold_recovery(self.receipt()["coldRecovery"])
+        for mutation in ("surviving-process", "observed-live-pod", "replicas-not-zero", "missing-claim", "new-pvc", "new-pv", "missing-replica"):
+            with self.subTest(mutation=mutation):
+                recovery = self.receipt()["coldRecovery"]
+                if mutation == "surviving-process":
+                    recovery["after"]["nats-1"]["podUID"] = recovery["before"]["nats-1"]["podUID"]
+                elif mutation == "observed-live-pod":
+                    recovery["stopped"]["pods"] = ["nats-2"]
+                elif mutation == "replicas-not-zero":
+                    recovery["stopped"]["replicas"] = 1
+                elif mutation == "missing-claim":
+                    del recovery["stopped"]["claims"]["data-nats-0"]
+                elif mutation in ("new-pvc", "new-pv"):
+                    recovery["after"]["nats-0"]["pvcUID" if mutation == "new-pvc" else "pvUID"] = "replacement"
+                else:
+                    del recovery["before"]["nats-2"]
+                with self.assertRaises(ValueError):
+                    proof.check_cold_recovery(recovery)
 
     def test_receipt_refuses_partial_skipped_or_reused_proof(self):
         proof.check_report(self.receipt())
@@ -114,13 +147,13 @@ class ProofTests(unittest.TestCase):
                            ("negativeControlPassed", False), ("passed", False), ("factAfter", {"record": "other"})):
             with self.assertRaises(ValueError):
                 proof.check_report(self.receipt() | {key: value})
-        for group, key in (("syncs", "jobUID"), ("syncs", "operation"), ("storage", "podUID")):
+        for group, key in (("syncs", "jobUID"), ("syncs", "operation")):
             broken = self.receipt()
             broken[group][1][key] = broken[group][0][key]
             with self.assertRaises(ValueError):
                 proof.check_report(broken)
         broken = self.receipt()
-        broken["storage"][1]["pvcUID"] = "replacement-volume"
+        broken["coldRecovery"]["after"]["nats-0"]["pvcUID"] = "replacement-volume"
         with self.assertRaises(ValueError):
             proof.check_report(broken)
 

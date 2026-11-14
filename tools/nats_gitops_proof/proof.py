@@ -26,7 +26,7 @@ ARGO_IMAGES = {
 }
 CASES = ["canonical-source", "first-postsync", "canonical-runtime", "stream-inventory", "canonical-fact",
          "empty-stream-removed", "same-revision-postsync", "stream-restored",
-         "pod-replaced", "pvc-preserved", "fact-preserved", "cleanup"]
+         "all-brokers-stopped", "all-claims-retained", "all-brokers-replaced", "pvc-preserved", "fact-preserved", "cleanup"]
 DELETE_STREAM = "OBSERVABILITY"
 
 
@@ -35,11 +35,20 @@ def diagnostic_category(text):
     value = text.lower()
     categories = (("no such host", "dns-unavailable"), ("manifest unknown", "registry-manifest-unavailable"),
                   ("unauthorized", "authentication-refused"), ("permission violation", "broker-grant-refused"),
-                  ("unknown flag", "unsupported-cli-flag"), ("x509:", "certificate-refused"),
+                  ("unknown flag", "unsupported-cli-flag"), ("unknown long flag", "unsupported-cli-flag"),
+                  ("flag provided but not defined", "unsupported-cli-flag"), ("x509:", "certificate-refused"),
                   ("certificate", "certificate-refused"), ("failedscheduling", "pod-unschedulable"),
                   ("failedmount", "volume-mount-refused"), ("imagepullbackoff", "image-pull-unavailable"),
                   ("errimagepull", "image-pull-unavailable"), ("context deadline exceeded", "dependency-timeout"),
                   ("timed out", "dependency-timeout"), ("connection refused", "listener-unavailable"))
+    helper_errors = ("fixture-document-refused", "fixture-source-or-subject-refused", "fixture-frame-refused",
+                     "fixture-frame-digest-refused", "fixture-envelope-refused", "fixture-payload-refused",
+                     "fixture-headers-refused", "fixture-svid-unavailable", "fixture-publisher-identity-refused",
+                     "fixture-broker-identity-refused", "fixture-broker-connect-refused", "fixture-jetstream-client-refused",
+                     "fixture-publish-ack-refused", "fixture-ack-output-refused")
+    for error in helper_errors:
+        if '"fixtureerror":"' + error + '"' in value:
+            return error
     return next((category for fragment, category in categories if fragment in value), "unclassified-refusal")
 
 
@@ -145,6 +154,32 @@ def checked_record(value, fact):
     return value
 
 
+def check_puback(ack, source):
+    if (not isinstance(ack, dict) or ack.get("source") != source or ack.get("acknowledged") is not True
+            or ack.get("stream") != "MARKET" or type(ack.get("sequence")) is not int or ack["sequence"] != 1
+            or ack.get("duplicate") is not False):
+        raise ValueError("canonical FACT did not receive its expected actual stream PubAck")
+
+
+def check_cold_recovery(recovery):
+    expected = {f"nats-{ordinal}" for ordinal in range(3)}
+    before, stopped, after = recovery["before"], recovery["stopped"], recovery["after"]
+    if set(before) != expected or set(after) != expected or stopped["replicas"] != 0 or stopped["pods"] != []:
+        raise ValueError("cold recovery did not stop and replace the complete broker set")
+    claims = {row["pvc"] for row in before.values()}
+    if len(claims) != 3 or set(stopped["claims"]) != claims:
+        raise ValueError("cold recovery did not retain all three existing claims")
+    old_uids, new_uids = {row["podUID"] for row in before.values()}, {row["podUID"] for row in after.values()}
+    if len(old_uids) != 3 or len(new_uids) != 3 or old_uids & new_uids:
+        raise ValueError("a broker process survived the supposed cold restart")
+    for name in expected:
+        original, restored = before[name], after[name]
+        retained = stopped["claims"][original["pvc"]]
+        for key in ("pvc", "pvcUID", "pv", "pvUID"):
+            if original[key] != retained[key] or original[key] != restored[key]:
+                raise ValueError("cold recovery replaced a claim or persistent volume")
+
+
 def check_report(report):
     if report.get("passed") is not True or report.get("cleanupPassed") is not True or report.get("cases") != CASES:
         raise ValueError("incomplete GitOps/PVC proof")
@@ -157,9 +192,8 @@ def check_report(report):
         raise ValueError("source-bound hook evidence differs")
     if first["jobUID"] == second["jobUID"] or first["operation"] == second["operation"]:
         raise ValueError("re-sync reused the previous hook or operation")
-    before, after = report["storage"]
-    if before["podUID"] == after["podUID"] or any(before[key] != after[key] for key in ("pvc", "pvcUID", "pv", "pvUID")):
-        raise ValueError("Pod replacement or persistent claim continuity differs")
+    check_puback(report["pubAck"], source)
+    check_cold_recovery(report["coldRecovery"])
     if report["factBefore"] != report["factAfter"] or not report["canonicalValidated"] or not report["negativeControlPassed"]:
         raise ValueError("canonical FACT durability proof differs")
 
@@ -325,16 +359,18 @@ class Fixture:
             raise ValueError("invalid observed stream names")
         return {name: json.loads(self.nats("stream", "info", name, "--json")) for name in names}
 
-    def storage(self):
-        pod = json.loads(self.k("-n", NAMESPACE, "get", "pod/nats-0", "-o", "json"))
-        data = next(v for v in pod["spec"]["volumes"] if v["name"] == "data")
-        claim = data["persistentVolumeClaim"]["claimName"]
+    def claim(self, claim):
         pvc = json.loads(self.k("-n", NAMESPACE, "get", "pvc", claim, "-o", "json"))
         pv = json.loads(self.k("get", "pv", pvc["spec"]["volumeName"], "-o", "json"))
         if pvc["status"]["phase"] != "Bound" or pv["spec"]["claimRef"]["uid"] != pvc["metadata"]["uid"]:
             raise ValueError("NATS data claim is not bound to the observed PV")
-        return {"podUID": pod["metadata"]["uid"], "pvc": claim, "pvcUID": pvc["metadata"]["uid"],
+        return {"pvc": claim, "pvcUID": pvc["metadata"]["uid"],
                 "pv": pv["metadata"]["name"], "pvUID": pv["metadata"]["uid"]}
+
+    def storage(self, ordinal):
+        pod = json.loads(self.k("-n", NAMESPACE, "get", f"pod/nats-{ordinal}", "-o", "json"))
+        data = next(v for v in pod["spec"]["volumes"] if v["name"] == "data")
+        return {"podUID": pod["metadata"]["uid"], **self.claim(data["persistentVolumeClaim"]["claimName"])}
 
     def canonical_runtime(self):
         desired = documents("kanz/infra/nats/nats.yaml")
@@ -364,19 +400,30 @@ class Fixture:
                 raise ValueError("canonical broker identity or persistent data mount differs")
         return hashes
 
-    def replace_broker(self, previous_uid):
-        self.substage = "replace-broker-Pod-preserving-claim"
-        self.k("-n", NAMESPACE, "delete", "pod/nats-0", "--wait=true", "--timeout=120s")
+    def cold_restart(self):
+        self.substage = "stop-all-three-broker-processes-preserving-claims"
+        before = {f"nats-{ordinal}": self.storage(ordinal) for ordinal in range(3)}
+        self.k("-n", NAMESPACE, "scale", "statefulset/nats", "--replicas=0")
         deadline = time.monotonic() + 240
         while time.monotonic() < deadline:
-            raw = self.k("-n", NAMESPACE, "get", "pod/nats-0", "--ignore-not-found", "-o", "json")
-            if raw and json.loads(raw)["metadata"]["uid"] != previous_uid:
+            pods = json.loads(self.k("-n", NAMESPACE, "get", "pods", "-l", "app=nats", "-o", "json"))["items"]
+            if not pods:
                 break
             time.sleep(2)
         else:
-            raise TimeoutError("StatefulSet did not create a replacement broker Pod")
-        self.k("-n", NAMESPACE, "wait", "--for=condition=Ready", "pod/nats-0", "--timeout=240s")
-        self.k("-n", NAMESPACE, "rollout", "status", "statefulset/nats", "--timeout=240s")
+            raise TimeoutError("cold restart did not stop every NATS broker Pod")
+        sts = json.loads(self.k("-n", NAMESPACE, "get", "statefulset/nats", "-o", "json"))
+        pvc_names = {p["metadata"]["name"] for p in json.loads(self.k("-n", NAMESPACE, "get", "pvc", "-o", "json"))["items"]}
+        wanted = {row["pvc"] for row in before.values()}
+        if sts["spec"]["replicas"] != 0 or pvc_names != wanted:
+            raise ValueError("stopped brokers did not retain exactly the canonical existing claims")
+        stopped = {"replicas": 0, "pods": [], "claims": {name: self.claim(name) for name in sorted(pvc_names)}}
+        self.substage = "restore-canonical-three-brokers-from-retained-PVCs"
+        self.k("-n", NAMESPACE, "scale", "statefulset/nats", "--replicas=3")
+        self.k("-n", NAMESPACE, "rollout", "status", "statefulset/nats", "--timeout=300s")
+        recovery = {"before": before, "stopped": stopped, "after": {f"nats-{ordinal}": self.storage(ordinal) for ordinal in range(3)}}
+        check_cold_recovery(recovery)
+        return recovery
 
     def status_diagnostics(self):
         """Project bounded object statuses, never Pod specs, Secrets or raw logs."""
@@ -465,11 +512,18 @@ def main():
             if hashlib.sha256(frame).hexdigest() != fact["sha256"]:
                 raise ValueError("canonical FACT frame digest differs")
             fixture.client("nats-fact-writer", "kanz-services", "market-ingest")
-            # Binary stdin is decoded inside the owned client Pod, not interpolated
-            # as a shell expression or published through a privileged account.
-            headers = [arg for key, value in fact["headers"].items() for arg in ("--header", key + ":" + value)]
-            fixture.k("-n", "kanz-services", "exec", "-i", "nats-fact-writer", "-c", "bootstrap", "--", "sh", "-ceu",
-                      "base64 -d > /tmp/fixture.frame; nats pub --jetstream \"$@\" < /tmp/fixture.frame", "fixture", *headers, fact["subject"], data=fact["frame"])
+            fixture.substage = "copy-exact-source-canonical-publisher-to-owned-Pod"
+            binary = Path(os.environ["RUNNER_TEMP"]) / "nats-gitops-fact"
+            report["factHelperSHA256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+            fixture.k("-n", "kanz-services", "cp", str(binary), "nats-fact-writer:/tmp/nats-gitops-fact", "-c", "bootstrap")
+            fixture.substage = "publish-canonical-FACT-await-actual-PubAck"
+            # CLI v0.1.5 has no publish --jetstream option and its captured-output
+            # stdin semantics differ. Use the existing Go JetStream/SPIFFE path,
+            # with unchanged grants, to carry binary bytes and inspect the PubAck.
+            ack = json.loads(fixture.k("-n", "kanz-services", "exec", "-i", "nats-fact-writer", "-c", "bootstrap", "--",
+                                      "/tmp/nats-gitops-fact", "-publish", source, data=json.dumps(fact)))
+            check_puback(ack, source)
+            report["pubAck"] = ack
             record = checked_record(json.loads(fixture.nats("stream", "get", "MARKET", "1", "--json")), fact)
             report["factBefore"] = record
             report["canonicalValidated"], report["negativeControlPassed"] = True, True
@@ -492,14 +546,12 @@ def main():
             if restored[DELETE_STREAM]["config"] != before[DELETE_STREAM]["config"]:
                 raise ValueError("restored test stream configuration differs")
             report["cases"].append("stream-restored")
-            report["stage"] = "replace NATS Pod and recover existing FACT"
-            report["storage"] = [fixture.storage()]
-            fixture.replace_broker(report["storage"][0]["podUID"])
-            report["storage"].append(fixture.storage())
-            report["cases"].extend(["pod-replaced", "pvc-preserved"])
+            report["stage"] = "cold restart every broker and recover existing FACT from retained claims"
+            report["coldRecovery"] = fixture.cold_restart()
+            report["cases"].extend(["all-brokers-stopped", "all-claims-retained", "all-brokers-replaced", "pvc-preserved"])
             report["factAfter"] = checked_record(json.loads(fixture.nats("stream", "get", "MARKET", "1", "--json")), fact)
             if report["factAfter"] != report["factBefore"]:
-                raise ValueError("FACT bytes, subject, headers or sequence changed after replacement")
+                raise ValueError("FACT bytes, subject, headers or sequence changed after cold recovery")
             check_inventory(expected, fixture.inventory())
             if fixture.canonical_runtime() != report["runtimeConfigHashes"]:
                 raise ValueError("runtime configuration changed during recovery")

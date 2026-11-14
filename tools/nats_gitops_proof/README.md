@@ -19,17 +19,32 @@ OBSERVABILITY stream. All 18 stream configurations are derived from the canonica
 script and checked after creation, restoration and broker replacement. There is
 no fallback stream list, storage override or single-replica substitute.
 
-The Go diagnostic builds a generated `market.v1.MarketDataEvent` inside the
+The module-owned Go diagnostic, `kanz/tools/nats_gitops_proof`, builds a generated `market.v1.MarketDataEvent` inside the
 canonical `EventFrame`, calls the shared live envelope validator, rejects a
 conflicting FACT idempotency key, and checks the generated protobuf round trip.
-The actual SPIRE-issued market-ingest identity publishes that synthetic quote.
-The broker's bytes, subject, headers, sequence and timestamp must survive a new
-NATS Pod UID with unchanged PVC/PV identity. The operator fixture uses only the
+The actual SPIRE-issued market-ingest identity publishes that synthetic quote
+using the existing Go SPIFFE/JetStream client and must receive the exact first
+MARKET PubAck. The source-bound static diagnostic runs inside the owned writer
+Pod; it never exports an SVID and can publish only the validated prepared fixture.
+Its command errors use closed categories. The canonical CLI v0.1.5 has no
+publish `--jetstream` flag and reads captured-output stdin only with a specific
+publish flag; a core publish exit alone therefore cannot be an acknowledgement.
+The exact [pinned CLI source](https://github.com/nats-io/natscli/blob/v0.1.5/cli/pub_command.go)
+defines that distinction. No broker image or permission change supplies the repair.
+
+The broker's bytes, subject, headers, sequence and timestamp must survive a cold
+restart of every NATS process. The fixture scales the unchanged StatefulSet to
+zero, observes zero broker Pods and all three original bound claims, then
+restores its canonical three replicas. Every Pod UID must change while every
+PVC/PV identity remains. This discriminates persistent recovery from replication
+by a still-running peer. The operator fixture uses only the
 existing bootstrap identity's JetStream management grant.
 
 `nats-gitops-verification / postsync-pvc` runs the real proof on PR and main.
 Offline `unittest` tests discriminate false receipts and changed source, hook,
-stream, frame and storage assertions. Runtime receipts contain synthetic data,
+stream, frame, PubAck and cold-storage assertions. The Go owner additionally
+refuses a changed checksum, source, header or resigned non-FACT before broker
+access. Runtime receipts contain synthetic data,
 source/tree hashes, run identity and actual image IDs, but no raw Pod logs, keys,
 tokens or kubeconfig. Cleanup must remove the exact cluster created by the proof.
 This is disposable estate acceptance, not a Tokyo rollout or capital authority.

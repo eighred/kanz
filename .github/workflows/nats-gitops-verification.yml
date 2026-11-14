@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'tools/nats_gitops_proof/**'
+      - 'kanz/tools/nats_gitops_proof/**'
       - 'tools/feed-identity/**'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
@@ -12,15 +13,19 @@ on:
       - 'kanz-schemas/proto/common/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
+      - 'kanz-schemas/bootstrap-go-sdk.sh'
+      - 'kanz/Makefile'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - 'kanz/pkg/bus/**'
+      - 'kanz/pkg/transport/**'
       - '.github/actions/setup-buf/**'
       - '.github/workflows/nats-gitops-verification.yml'
   push:
     branches: [main]
     paths:
       - 'tools/nats_gitops_proof/**'
+      - 'kanz/tools/nats_gitops_proof/**'
       - 'tools/feed-identity/**'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
@@ -30,9 +35,12 @@ on:
       - 'kanz-schemas/proto/common/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
+      - 'kanz-schemas/bootstrap-go-sdk.sh'
+      - 'kanz/Makefile'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - 'kanz/pkg/bus/**'
+      - 'kanz/pkg/transport/**'
       - '.github/actions/setup-buf/**'
       - '.github/workflows/nats-gitops-verification.yml'
 permissions:
@@ -68,7 +76,9 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
           make -C kanz generate
           cd kanz
-          go run ../tools/nats_gitops_proof/fact.go "$GITHUB_SHA" > "$RUNNER_TEMP/nats-gitops-fact.json"
+          go test -p 1 ./tools/nats_gitops_proof -count=1
+          go run ./tools/nats_gitops_proof "$GITHUB_SHA" > "$RUNNER_TEMP/nats-gitops-fact.json"
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/nats-gitops-fact" ./tools/nats_gitops_proof
       - run: bash tools/feed-identity/install.sh
       - name: Prove actual Argo PostSync and retained FACT through PVC
         run: python3 -B tools/nats_gitops_proof/proof.py
@@ -76,7 +86,7 @@ jobs:
         if: always()
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, subprocess
+          import json, os, pathlib, re, subprocess, tempfile
           owner = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nats-gitops-owner.json'
           if owner.exists():
               identity = json.loads(owner.read_text())
@@ -86,7 +96,11 @@ jobs:
                   or identity.get('runID') != os.environ['GITHUB_RUN_ID']
                   or identity.get('runAttempt') != os.environ['GITHUB_RUN_ATTEMPT']):
                   raise SystemExit('invalid owned cleanup identity')
-              subprocess.run(['kind', 'delete', 'cluster', '--name', name], check=True, timeout=180)
+              with tempfile.TemporaryDirectory(prefix='nats-gitops-cleanup-', dir=os.environ['RUNNER_TEMP']) as scratch:
+                  config = str(pathlib.Path(scratch) / 'kubeconfig')
+                  child = {'PATH': os.environ['PATH'], 'HOME': scratch, 'KUBECONFIG': config}
+                  subprocess.run(['kind', 'delete', 'cluster', '--name', name, '--kubeconfig', config],
+                                 env=child, check=True, timeout=180)
           PY
       - name: Preserve sanitized exact-source acceptance receipt
         if: always()
