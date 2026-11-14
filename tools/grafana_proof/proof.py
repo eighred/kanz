@@ -16,7 +16,9 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -65,9 +67,90 @@ def require(condition, reason):
 
 def command(args, data=None, timeout=120):
     result = subprocess.run(args, input=data, text=True, capture_output=True, timeout=timeout, cwd=ROOT)
-    require(result.returncode == 0, "command_failed:" + Path(args[0]).name)
+    verb = next((a for a in args[1:] if a in {"apply", "get", "exec", "rollout", "wait", "delete", "create", "install"}), "command")
+    require(result.returncode == 0, "command_failed:" + Path(args[0]).name + ":" + verb + ":exit=" + str(result.returncode))
     require(len(result.stdout) <= 2 * 1024 * 1024, "command_output_exceeded_bound")
     return result.stdout.strip()
+
+
+def expected_identity():
+    source, run, attempt = (os.environ[name] for name in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
+    require(re.fullmatch(r"[0-9a-f]{40}", source) and re.fullmatch(r"[1-9][0-9]*", run) and
+            re.fullmatch(r"[1-9][0-9]*", attempt), "invalid_independent_actions_identity")
+    return source, run, attempt
+
+
+def validate_source(head, status, expected):
+    require(re.fullmatch(r"[0-9a-f]{40}", expected) and head == expected, "head_differs_from_github_sha")
+    require(not status, "dirty_source")
+
+
+def validate_owner(owner, source, tree, run, attempt):
+    require(isinstance(owner, dict) and set(owner) == {
+        "schema", "kind", "nonce", "cluster", "source", "tree", "run", "attempt"}, "invalid_owner_record_shape")
+    require(owner["schema"] == 1 and owner["kind"] == "grafana-kubernetes" and
+            isinstance(owner["nonce"], str) and re.fullmatch(r"[0-9a-f]{12}", owner["nonce"]) and
+            owner["cluster"] == "cni-proof-" + owner["nonce"], "invalid_owned_cluster_identity")
+    require(owner["source"] == source and owner["tree"] == tree and owner["run"] == run and
+            owner["attempt"] == attempt, "owner_does_not_match_actions_identity")
+
+
+def write_owner(path, owner):
+    # Exclusive creation prevents a stale record from silently authorizing this
+    # run. The record is durable before kind can create even a partial cluster.
+    require(os.name == "posix", "ownership_record_requires_posix")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        output.write(json.dumps(owner, sort_keys=True) + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def read_owner(path):
+    require(os.name == "posix", "ownership_record_requires_posix")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+        info = os.fstat(source.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid() and
+                0 < info.st_size <= 4096, "unsafe_owner_record")
+        raw = source.read(4097)
+        require(len(raw.encode()) <= 4096, "owner_record_exceeds_bound")
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                require(key not in result, "duplicate_owner_key")
+                result[key] = value
+            return result
+        return json.loads(raw, object_pairs_hook=unique)
+
+
+def cleanup_owned(path, source, tree, run, attempt, execute=command):
+    owner = read_owner(path)
+    validate_owner(owner, source, tree, run, attempt)
+    before = set(execute(["kind", "get", "clusters"]).splitlines())
+    if owner["cluster"] in before:
+        # kind also edits kubeconfig during deletion. Give it a fresh private
+        # path so even cleanup cannot inspect or modify an ambient context.
+        with tempfile.TemporaryDirectory(prefix="kanz-grafana-cleanup-") as directory:
+            execute(["kind", "delete", "cluster", "--name", owner["cluster"],
+                     "--kubeconfig", str(Path(directory) / "kubeconfig")], timeout=180)
+    after = set(execute(["kind", "get", "clusters"]).splitlines())
+    require(owner["cluster"] not in after and before - {owner["cluster"]} <= after,
+            "owned_cleanup_incomplete_or_foreign_cluster_removed")
+    return owner
+
+
+def cleanup_main():
+    path = Path(os.environ["RUNNER_TEMP"]) / "grafana-owner.json"
+    if not path.exists():
+        print(json.dumps({"cleanup": "no_owner_record"}))
+        return 0
+    source, run, attempt = expected_identity()
+    require(command(["git", "rev-parse", "HEAD"]) == source, "cleanup_head_differs_from_github_sha")
+    tree = command(["git", "rev-parse", "HEAD^{tree}"])
+    owner = cleanup_owned(path, source, tree, run, attempt)
+    print(json.dumps({"cleanup": "verified_absent", "cluster": owner["cluster"]}))
+    return 0
 
 
 def docs(path):
@@ -268,11 +351,13 @@ def image_identity(pod, container_name, expected):
     return {"podUID": pod["metadata"]["uid"], "declaredImage": expected, "loadedImageID": status["imageID"]}
 
 
-def validate_report(report, source, tree):
+def validate_report(report, source, tree, run, attempt):
     require(report.get("schema") == 1 and report.get("source") == source and report.get("tree") == tree,
             "receipt_source_mismatch")
     require(report.get("verdict") == "PASS" and report.get("cleanup") == "verified_absent", "incomplete_receipt")
     require(re.fullmatch(r"cni-proof-[0-9a-f]{12}", report.get("cluster", "")), "unowned_cluster")
+    validate_owner(report.get("owner"), source, tree, run, attempt)
+    require(report["owner"]["cluster"] == report["cluster"], "receipt_owner_differs_from_cluster")
     require(report.get("cases") == [{"id": name, "verdict": "PASS"} for name in CASES], "incomplete_case_inventory")
     require(report.get("inputs") == input_hashes() and report.get("panels") and len(report["panels"]) == 11,
             "receipt_input_or_panel_inventory")
@@ -290,17 +375,24 @@ def validate_report(report, source, tree):
         values = {(item.get("service"), item.get("slo")): item["value"] for item in actual.get("values", [])}
         require(len(values) == len(actual.get("values", [])) and actual.get("oracle") == oracle(expr, values),
                 "receipt_oracle_changed")
-    require(str(report.get("run", "")).isdigit() and str(report.get("attempt", "")).isdigit() and
+    require(report.get("run") == run and report.get("attempt") == attempt and
             report.get("missingSecretPodUID"), "receipt_run_or_missing_secret_identity")
 
 
 def main():
-    source = command(["git", "rev-parse", "HEAD"])
+    source, run, attempt = expected_identity()
+    validate_source(command(["git", "rev-parse", "HEAD"]),
+                    command(["git", "status", "--porcelain", "--untracked-files=all"]), source)
     tree = command(["git", "rev-parse", "HEAD^{tree}"])
-    require(not command(["git", "status", "--porcelain", "--untracked-files=all"]), "dirty_source")
-    name = "cni-proof-" + uuid.uuid4().hex[:12]
+    nonce = uuid.uuid4().hex[:12]
+    name = "cni-proof-" + nonce
+    require(name not in command(["kind", "get", "clusters"]).splitlines(), "chosen_cluster_already_exists")
+    owner = {"schema": 1, "kind": "grafana-kubernetes", "nonce": nonce, "cluster": name,
+             "source": source, "tree": tree, "run": run, "attempt": attempt}
+    owner_path = Path(os.environ["RUNNER_TEMP"]) / "grafana-owner.json"
+    write_owner(owner_path, owner)
     report = {"schema": 1, "source": source, "tree": tree, "cluster": name,
-              "run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "run": run, "attempt": attempt, "owner": owner,
               "inputs": input_hashes(), "dependencies": {"node": SETUP.NODE, "probe": BUSYBOX,
                   "exporter": PYTHON,
                   "installerSHA256": hashlib.sha256((ROOT / "tools/feed-identity/install.sh").read_bytes()).hexdigest()},
@@ -443,6 +535,8 @@ def main():
             apply([policy])
             eventually(lambda: require(not reachable(pod, other_url) and not reachable("untrusted", grafana_url), "restored_policy_not_enforced"), 50)
             passed("restored_policy_refuses_again")
+            validate_source(command(["git", "rev-parse", "HEAD"]),
+                            command(["git", "status", "--porcelain", "--untracked-files=all"]), source)
             report["verdict"] = "PASS"
         except (ProofError, OSError, subprocess.TimeoutExpired, KeyError, StopIteration, urllib.error.URLError) as exc:
             report["failure"] = str(exc) if isinstance(exc, ProofError) else type(exc).__name__
@@ -450,14 +544,13 @@ def main():
             report["verdict"] = "FAIL"
         finally:
             try:
-                command(["kind", "delete", "cluster", "--name", name, "--kubeconfig", str(scratch / "kubeconfig")], timeout=180)
-                require(name not in command(["kind", "get", "clusters"]).splitlines(), "cluster_still_present")
+                cleanup_owned(owner_path, source, tree, run, attempt)
                 report["cleanup"] = "verified_absent"
             except (ProofError, OSError, subprocess.TimeoutExpired):
                 report["verdict"] = "FAIL"
             if report["verdict"] == "PASS":
                 try:
-                    validate_report(report, source, tree)
+                    validate_report(report, source, tree, run, attempt)
                 except (ProofError, KeyError, TypeError):
                     report["verdict"] = "FAIL"
                     report["failure"] = "receipt_validation_failed"
@@ -467,4 +560,5 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    require(len(sys.argv) == 1 or sys.argv[1:] == ["--cleanup"], "unsupported_arguments")
+    raise SystemExit(cleanup_main() if len(sys.argv) == 2 else main())

@@ -8,6 +8,15 @@ run/attempt, public input hashes, declared and loaded images, Pod identities,
 all 11 dashboard targets, every required case and verified cluster deletion.
 No production endpoint, credential or existing cluster is an input.
 
+The proof requires a clean Git HEAD equal to the independently supplied
+`GITHUB_SHA`, with the Actions run and attempt bound into its receipt. Before
+creation it checks the chosen cluster name is absent and exclusively writes a
+nonce/source/tree/run/attempt owner record in `RUNNER_TEMP`. Normal and interrupted
+cleanup validate that record against the Actions identity and delete only its
+exact cluster name. Another cluster with the same prefix must remain present;
+neither cleanup path enumerates matching names as deletion targets. Owner-record
+I/O requires Linux no-follow, regular-file and exclusive-create semantics.
+
 The harness applies the committed Grafana and Prometheus manifests, generated
 rules ConfigMap and dashboard. It creates a random dummy admin Secret separately
 at runtime through stdin. It never prints the password, authorization headers,
@@ -37,7 +46,7 @@ These observations do not claim global Prometheus ingress isolation. KEDA,
 Rollouts and GameDay readers retain their existing paths. The broader namespace
 audit remains #232; the existing real-container dashboard proof remains valid.
 
-Offline controls are:
+Offline controls run on Linux, including the real no-follow owner-record check:
 
 ```sh
 python3 -B -m unittest discover -s tools/grafana_proof -p 'test_*.py'

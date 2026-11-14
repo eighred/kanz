@@ -40,11 +40,7 @@ jobs:
         if: always()
         run: |
           if command -v kind >/dev/null; then
-            while IFS= read -r cluster; do
-              if [[ "$cluster" =~ ^cni-proof-[0-9a-f]{12}$ ]]; then
-                kind delete cluster --name "$cluster"
-              fi
-            done < <(kind get clusters)
+            python3 -B tools/grafana_proof/proof.py --cleanup
           fi
       - name: Preserve sanitized source-bound observations
         if: always()

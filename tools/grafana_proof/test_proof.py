@@ -2,9 +2,78 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 import proof
+
+
+def owner_record():
+    return {"schema": 1, "kind": "grafana-kubernetes", "nonce": "123456abcdef",
+            "cluster": "cni-proof-123456abcdef", "source": "a" * 40, "tree": "b" * 40,
+            "run": "123", "attempt": "1"}
+
+
+class OwnershipControls(unittest.TestCase):
+    def test_only_a_clean_independently_selected_source_can_start(self):
+        proof.validate_source("a" * 40, "", "a" * 40)
+        for head, status, expected in (("b" * 40, "", "a" * 40),
+                                       ("a" * 40, " M source.py", "a" * 40),
+                                       ("main", "", "main")):
+            with self.subTest(head=head, status=status), self.assertRaises(proof.ProofError):
+                proof.validate_source(head, status, expected)
+        with mock.patch.dict(proof.os.environ, {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}):
+            self.assertEqual(proof.expected_identity(), ("a" * 40, "123", "1"))
+            with mock.patch.dict(proof.os.environ, {"GITHUB_RUN_ATTEMPT": "0"}), self.assertRaises(proof.ProofError):
+                proof.expected_identity()
+
+    def test_cleanup_preserves_another_matching_prefix_cluster(self):
+        clusters = {"cni-proof-123456abcdef", "cni-proof-fedcba654321", "other-task"}
+        deleted = []
+        def execute(args, timeout=120):
+            if args == ["kind", "get", "clusters"]:
+                return "\n".join(sorted(clusters))
+            self.assertEqual(args[:4], ["kind", "delete", "cluster", "--name"])
+            self.assertEqual(args[4], "cni-proof-123456abcdef")
+            self.assertEqual(args[5], "--kubeconfig")
+            self.assertTrue(Path(args[6]).is_absolute())
+            deleted.append(args[4])
+            clusters.remove(args[4])
+            return ""
+        with mock.patch.object(proof, "read_owner", return_value=owner_record()):
+            proof.cleanup_owned(Path("unused"), "a" * 40, "b" * 40, "123", "1", execute)
+        self.assertEqual(deleted, ["cni-proof-123456abcdef"])
+        self.assertEqual(clusters, {"cni-proof-fedcba654321", "other-task"})
+
+    def test_a_stale_or_mismatched_owner_cannot_authorize_any_command(self):
+        for field, value in (("source", "c" * 40), ("tree", "c" * 40), ("run", "999"),
+                             ("attempt", "2"), ("nonce", "fedcba654321"), ("kind", "other-task")):
+            owner = owner_record()
+            owner[field] = value
+            execute = mock.Mock()
+            with self.subTest(field=field), mock.patch.object(proof, "read_owner", return_value=owner):
+                with self.assertRaises(proof.ProofError):
+                    proof.cleanup_owned(Path("unused"), "a" * 40, "b" * 40, "123", "1", execute)
+            execute.assert_not_called()
+
+    def test_cleanup_cannot_report_success_after_removing_a_foreign_cluster(self):
+        execute = mock.Mock(side_effect=["cni-proof-123456abcdef\ncni-proof-fedcba654321", "", ""])
+        with mock.patch.object(proof, "read_owner", return_value=owner_record()), self.assertRaises(proof.ProofError):
+            proof.cleanup_owned(Path("unused"), "a" * 40, "b" * 40, "123", "1", execute)
+
+    def test_owner_creation_is_exclusive_and_reader_refuses_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "owner.json"
+            proof.write_owner(path, owner_record())
+            self.assertEqual(proof.read_owner(path), owner_record())
+            with self.assertRaises(FileExistsError):
+                proof.write_owner(path, owner_record())
+            link = Path(directory) / "link.json"
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                proof.read_owner(link)
 
 
 class QueryControls(unittest.TestCase):
@@ -123,6 +192,7 @@ class ReceiptControls(unittest.TestCase):
                            "series": len(values), "oracle": proof.oracle(expr, values),
                            "values": [{"service": key[0], "slo": key[1], "value": value} for key, value in values.items()]})
         return {"schema": 1, "source": "a" * 40, "tree": "b" * 40, "cluster": "cni-proof-123456abcdef",
+                "owner": owner_record(),
                 "run": "123", "attempt": "1", "missingSecretPodUID": "missing-pod",
                 "inputs": proof.input_hashes(), "images": images,
                 "cases": [{"id": name, "verdict": "PASS"} for name in proof.CASES],
@@ -131,31 +201,32 @@ class ReceiptControls(unittest.TestCase):
 
     def test_full_receipt_cannot_omit_or_relabel_a_required_case(self):
         original = self.receipt()
-        proof.validate_report(original, "a" * 40, "b" * 40)
+        proof.validate_report(original, "a" * 40, "b" * 40, "123", "1")
         changes = []
         for index in range(len(proof.CASES)):
             changed = copy.deepcopy(original)
             changed["cases"].pop(index)
             changes.append(changed)
         for key, value in (("source", "c" * 40), ("tree", "c" * 40), ("cleanup", "unknown"),
-                           ("verdict", "SKIP"), ("images", {}), ("inputs", {}), ("panels", [])):
+                           ("verdict", "SKIP"), ("images", {}), ("inputs", {}), ("panels", []),
+                           ("run", "999"), ("attempt", "2"), ("owner", None)):
             changed = copy.deepcopy(original)
             changed[key] = value
             changes.append(changed)
         for changed in changes:
             with self.subTest(changed=changed), self.assertRaises(proof.ProofError):
-                proof.validate_report(changed, "a" * 40, "b" * 40)
+                proof.validate_report(changed, "a" * 40, "b" * 40, "123", "1")
 
     def test_panel_expression_image_and_series_are_bound(self):
         for key, value in (("expressionSHA256", "c" * 64), ("series", 0), ("panel", 999)):
             changed = self.receipt()
             changed["panels"][0][key] = value
             with self.subTest(key=key), self.assertRaises(proof.ProofError):
-                proof.validate_report(changed, "a" * 40, "b" * 40)
+                proof.validate_report(changed, "a" * 40, "b" * 40, "123", "1")
         changed = self.receipt()
         changed["images"]["grafana"]["declaredImage"] = "grafana:latest"
         with self.assertRaises(proof.ProofError):
-            proof.validate_report(changed, "a" * 40, "b" * 40)
+            proof.validate_report(changed, "a" * 40, "b" * 40, "123", "1")
 
 
 if __name__ == "__main__":
