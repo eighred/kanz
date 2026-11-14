@@ -123,3 +123,29 @@ func TestIRRPermutationInvariant(t *testing.T) {
 		t.Fatalf("checked %d permutations, want 5! = 120", checked)
 	}
 }
+
+func TestIRRSmallResidualSurvivesDiscountCancellation(t *testing.T) {
+	start := day(2021, 1, 1)
+	for _, tc := range []struct {
+		name string
+		step time.Duration
+		want float64
+	}{
+		// Independently solved with 100-digit Decimal arithmetic from the exact
+		// binary float eps: x=2/(1+sqrt(1+4eps)), r=exp(-log(x)/years)-1.
+		{"nanosecond", time.Nanosecond, .00031540973119240554039},
+		{"microsecond", time.Microsecond, .00000031536004972597000989},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, scale := range []float64{1e-100, 1, 1e100} {
+				base := []CashFlow{{start, -scale}, {start.Add(tc.step), scale}, {start.Add(2 * tc.step), 1e-20 * scale}}
+				for _, order := range [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
+					got, err := IRR([]CashFlow{base[order[0]], base[order[1]], base[order[2]]})
+					if err != nil || math.Abs(got-tc.want) > 1e-10 {
+						t.Fatalf("scale %g, order %v: IRR %.17g, %v; want %.17g within 1e-10", scale, order, got, err, tc.want)
+					}
+				}
+			}
+		})
+	}
+}

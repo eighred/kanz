@@ -1,6 +1,7 @@
 package alternatives
 
 import (
+	"container/heap"
 	"errors"
 	"math"
 	"math/big"
@@ -82,6 +83,22 @@ func IRRFlows(p *Position) []CashFlow {
 	return flows
 }
 
+// irrLogHeap keeps the largest discounted term available for cancellation.
+// Pairing opposite signs before adding small terms avoids losing a residual
+// that determines the return of an almost offsetting short-dated cashflow.
+type irrLogHeap []float64
+
+func (h irrLogHeap) Len() int           { return len(h) }
+func (h irrLogHeap) Less(i, j int) bool { return h[i] > h[j] }
+func (h irrLogHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *irrLogHeap) Push(v any)        { *h = append(*h, v.(float64)) }
+func (h *irrLogHeap) Pop() any {
+	last := len(*h) - 1
+	v := (*h)[last]
+	*h = (*h)[:last]
+	return v
+}
+
 // errNoIRR distinguishes an unavailable return from a measured zero return.
 var errNoIRR = errors.New("alternatives: IRR undefined (need flows of both signs)")
 
@@ -151,31 +168,44 @@ func IRR(flows []CashFlow) (float64, error) {
 		}
 		terms = append(terms, term{years(f.Date), logAmount, math.Copysign(1, f.Amount)})
 	}
-	npv := func(r float64) float64 {
+	npvSign := func(r float64) float64 {
 		// A positive common rescaling preserves the root and its sign. Work in
 		// log space so neither tiny money nor long dated discount factors can
 		// underflow the convergence test or overflow the bracket calculation.
-		maxLog := math.Inf(-1)
+		positive, negative := make(irrLogHeap, 0, len(terms)), make(irrLogHeap, 0, len(terms))
 		for _, f := range terms {
-			maxLog = math.Max(maxLog, f.logAmount-f.years*math.Log1p(r))
+			logValue := f.logAmount - f.years*math.Log1p(r)
+			if f.sign > 0 {
+				positive = append(positive, logValue)
+			} else {
+				negative = append(negative, logValue)
+			}
 		}
-		var base, v, correction float64
-		for _, f := range terms {
-			base += f.sign
-			// Keeping exp(x)-1 separate preserves near-cancelling terms at
-			// very short intervals, including a genuine zero annual return.
-			term := f.sign*math.Expm1(f.logAmount-f.years*math.Log1p(r)-maxLog) - correction
-			next := v + term
-			correction = (next - v) - term
-			v = next
+		heap.Init(&positive)
+		heap.Init(&negative)
+		for len(positive) > 0 && len(negative) > 0 {
+			p, n := heap.Pop(&positive).(float64), heap.Pop(&negative).(float64)
+			if p > n {
+				heap.Push(&positive, p+math.Log(-math.Expm1(n-p)))
+			} else if n > p {
+				heap.Push(&negative, n+math.Log(-math.Expm1(p-n)))
+			}
+			// Equal log terms cancel exactly. Every pairing removes at least
+			// one term, bounding work by O(n log n) and memory by O(n).
 		}
-		return base + v
+		if len(positive) > 0 {
+			return 1
+		}
+		if len(negative) > 0 {
+			return -1
+		}
+		return 0
 	}
 
 	// Bracket: NPV is monotone decreasing in r over a normal profile. Search for a
 	// sign change between -0.9999 and a large upper rate.
 	lo, hi := -0.9999, 10.0
-	fLo, fHi := npv(lo), npv(hi)
+	fLo, fHi := npvSign(lo), npvSign(hi)
 	if fLo == 0 {
 		return lo, nil
 	}
@@ -187,7 +217,7 @@ func IRR(flows []CashFlow) (float64, error) {
 	}
 	for i := 0; i < 200; i++ {
 		mid := (lo + hi) / 2
-		fMid := npv(mid)
+		fMid := npvSign(mid)
 		if fMid == 0 || hi-lo <= 1e-12*math.Max(1, math.Abs(mid)) {
 			return mid, nil
 		}
