@@ -17,6 +17,7 @@ IDENTITY = {"sourceSHA": "a" * 40, "treeSHA": "b" * 40, "runID": "123", "runAtte
 OWNER_PATH = Path("/owned/run/catalog-owner.json")
 OWNER = dict(IDENTITY, schema=1, kind="catalog-qualification", nonce="0123456789abcdef", network="kanz-catalog-0123456789abcdef",
              scannerMount={"path": "/owned/run/catalog-fixture/scanner-state", "source": "kanz-catalog-0123456789abcdef-scanner", "filesystem": "tmpfs", "bytes": qualify.SCANNER_DISK_LIMIT, "options": ["nosuid", "nodev", "noexec"], "uid": os.getuid(), "gid": os.getgid()})
+OWNER["derivedImage"] = qualify.image_patch.owned_spec(OWNER, OWNER_PATH)
 
 
 class QualificationControls(unittest.TestCase):
@@ -99,7 +100,7 @@ class QualificationControls(unittest.TestCase):
                 deleted.append(args[-1])
                 state.clear()
                 return ""
-            if args[:3] == ["docker", "network", "ls"]:
+            if args[:3] in (["docker", "network", "ls"], ["docker", "image", "ls"]):
                 return ""
             raise AssertionError("unexpected cleanup command")
         fixture = object.__new__(qualify.Fixture)
@@ -122,7 +123,7 @@ class QualificationControls(unittest.TestCase):
                 return name if "name=^/" + name + "$" in args else ""
             if args[:3] == ["docker", "inspect", "--type"]:
                 return json.dumps([{"Id": "1" * 64, "Config": {"Labels": {"kanz.catalog.owner": "foreign"}}}])
-            if args[:3] == ["docker", "network", "ls"]:
+            if args[:3] in (["docker", "network", "ls"], ["docker", "image", "ls"]):
                 return ""
             raise AssertionError("foreign container must not authorize mutation")
         with mock.patch.object(qualify, "read_owner", return_value=OWNER), self.assertRaises(ValueError):
@@ -144,6 +145,8 @@ class QualificationControls(unittest.TestCase):
             if args[:3] == ["docker", "network", "rm"]:
                 deleted.append(args[-1])
                 existing = False
+                return ""
+            if args[:3] == ["docker", "image", "ls"]:
                 return ""
             raise AssertionError("unexpected cleanup command")
         with mock.patch.object(qualify, "read_owner", return_value=OWNER):
@@ -246,11 +249,11 @@ class QualificationControls(unittest.TestCase):
         images = {"gms": "gms:v1@sha256:" + "1" * 64}
         original = dict(IDENTITY, owner=OWNER, status="passed", cleanupPassed=True,
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
-                        images={"gms": {"reference": images["gms"], "imageID": "sha256:" + "2" * 64, "scanSHA256": "3" * 64}},
+                        images={"gms": {"reference": images["gms"], "imageID": "sha256:" + "2" * 64, "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 13}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 21}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
-        original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
+        original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
         qualify.validate_receipt(original, IDENTITY, images)
         for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"})):

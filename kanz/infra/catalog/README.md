@@ -54,7 +54,7 @@ one-run system authentication; MySQL credentials and signing inputs are generate
 in memory. Containers have read-only roots, bounded tmpfs/state, dropped
 capabilities and no host credentials/socket. Source and test binaries are mounted
 read-only. Containers cannot download dependencies; the locked official ingestion
-image pins the CLI and its transitive environment. The broker is disposable
+base pins the CLI and its transitive environment. The broker is disposable
 Redpanda, not an additional authoritative Kanz writer or JVM Kafka runtime.
 
 The fixture exports OpenLineage events through the actual Go harvester, runs
@@ -74,7 +74,7 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirteen
+stage/category, never subprocess arguments or one-run credentials. Twenty-one
 qualification controls discriminate these failures alongside the 14 projection
 controls.
 The PR/main trigger contract includes the consumed authorization/lineage
@@ -107,6 +107,52 @@ Required runtime cases cannot skip. Normal runs without the disposable catalog
 skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.
 Containers and their ephemeral state are removed on exit.
+
+### Fixture-only ingestion package correction
+
+The official 1.8.0 locked CLI manifest selected in `images.json` was unchanged
+when checked on 2026-11-15. Actual run 43652444758 refused its 25 fixed-CRITICAL
+`linux-libc-dev` findings (installed 6.8.0-147.147, fixed 6.8.0-149.149) before
+service startup. `ingestion_patch/package-lock.json` pins the official Ubuntu
+amd64 replacement: 1,698,546 bytes, SHA256
+`e4b7b9c5023ba727908868661e1113d28ed9b68e47aed00e314723dad4b2b31d`.
+The reviewed publisher HTTPS package indexes and exact downloaded bytes agreed;
+GPG verification was not executed. This is an explicit retrieval limitation,
+not a signature-validation claim. No package resolver or advisory exception is
+introduced, and this fixture correction does not promote a production image.
+
+The fresh private build context contains only the tracked Dockerfile, verifier,
+lock and verified public `.deb`, outside credential-bearing runtime scratch.
+The offline legacy Docker build uses `DOCKER_BUILDKIT=0`, no network/pull/tag,
+1 GiB memory/swap, two CPUs, a 300-second deadline and `--force-rm` for its
+intermediate containers. Unsupported legacy builders refuse; no fallback is
+attempted. The receipt records the actual client/server/API versions, builder
+mode and limits. Hosted compatibility remains unproved until the exact CI run.
+
+Before and after `dpkg -i`, the verifier records the complete installed package
+inventory and Python dependency graph. Exactly `linux-libc-dev:amd64` must change
+to the pinned version; the Python graph/version and `acryl-datahub` 1.8.0 must
+remain identical. Image inspection also requires the exact base layer prefix
+and unchanged user, entrypoint, command, environment and other execution config.
+The executed CLI rereads this build proof and must match its dependency hash.
+
+The upstream manifest/base image ID and derived local image ID have separate
+receipt fields. Only the actual untagged derived ID is scanned and used for
+CLI/test execution; the base digest is never described as the executed image.
+All six runtime roles retain complete fixed-CRITICAL reports before advisory
+refusal, so one image cannot hide later roles' findings. Infrastructure, report,
+database and resource failures still stop immediately. No service/network starts
+if any advisory remains, and Java analysis remains enabled.
+
+The exclusive owner record additionally binds the exact nonce/source/run/attempt,
+package hash, Dockerfile/verifier/lock hashes and derived-image labels. Normal
+and interruption cleanup discover even a completed image whose build client
+failed before returning its ID. Cleanup inspects the unique fully matching ID
+after containers are removed, refuses foreign labels, tags, registry references
+or ambiguous IDs, and removes only that image with `--no-prune`, never the base,
+foreign tags or shared image cache. Eight added controls discriminate package
+tampering, Python/package drift, config/base/owner mismatch, partial-build image
+cleanup, actual offline build selection and complete advisory aggregation.
 
 Repository/fixture acceptance is distinct from production catalog activation,
 source rights, complete schema-registry integration or capital approval. Close
