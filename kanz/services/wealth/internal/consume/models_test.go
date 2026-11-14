@@ -163,7 +163,7 @@ func TestFolderObservesDriftAfterTheBookIsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, PartitionKey: hv.HouseholdId}
 	if err := f.Handle(context.Background(), env, b); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestFolderWithNoObserverStillFolds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, PartitionKey: hv.HouseholdId}
 	if err := f.Handle(context.Background(), env, b); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
