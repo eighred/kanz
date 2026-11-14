@@ -15,8 +15,10 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/internal/treasury"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -54,6 +57,9 @@ type bookKey struct{ tenant, portfolio string }
 // AFTER the fold that would have dropped it. One struct means one lifetime and
 // one delete, and the three cannot drift.
 type book struct {
+	// A zero Position is an unreadable identity, never a measured holding. The
+	// map key is its canonical instrument, or empty for an unidentified legacy
+	// slot that only a corrected retained-state rebuild can remove.
 	positions  map[string]comp.Position // instrument → position
 	lastStatus compliancepb.ComplianceStatus
 	// warnedUngoverned records that this book has already been named in a "not
@@ -63,6 +69,17 @@ type book struct {
 	// book holds anything. It is what bookIdleRetention is measured from.
 	emptiedAt time.Time
 }
+
+func (b *book) identityUnknown() bool {
+	for _, p := range b.positions {
+		if p.InstrumentID == "" {
+			return true
+		}
+	}
+	return false
+}
+
+var errPositionIdentity = errors.New("compliance monitor: position identity is unreadable")
 
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
 type Monitor struct {
@@ -219,6 +236,26 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	// __system__ for the whole estate, which the registry resolves through its
 	// shared-bucket branch; see comp.MandateRegistry.Mandate.
 	key := bookKey{tenant: env.GetTenantId(), portfolio: pid}
+	instrument, err := positionInstrument(env, &ps)
+	if err != nil {
+		return err
+	}
+	if ps.GetInstrumentId() == "" {
+		// Preserve UNKNOWN without putting anonymous money in a denominator. A
+		// canonical key identifies the repairable slot; the legacy key identifies
+		// only this portfolio, so no individual valid holding can repair it.
+		m.mu.Lock()
+		b := m.books[key]
+		if b == nil {
+			b = &book{positions: make(map[string]comp.Position)}
+			m.books[key] = b
+		}
+		b.positions[instrument] = comp.Position{}
+		b.lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+		b.emptiedAt = time.Time{}
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s/%s carries no instrument_id", errPositionIdentity, key.tenant, pid)
+	}
 
 	trigger, book, asOf := m.applyAndSnapshot(key, &ps)
 	// A PORTFOLIO THAT NOW HOLDS NOTHING IS NOT EVALUATED, which is EXEC-M18's
@@ -238,6 +275,45 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 		return nil
 	}
 	return m.evaluate(ctx, key, book, trigger, asOf)
+}
+
+// positionInstrument binds the current OMS entity key before any book mutation.
+// Legacy publishers used a portfolio-only (or absent) partition key. Keep valid
+// legacy holdings, but do not infer an unidentified legacy holding's instrument.
+func positionInstrument(env *envelopepb.Envelope, ps *domainpb.PositionState) (string, error) {
+	key := env.GetPartitionKey()
+	if key == "" || key == ps.GetPortfolioId() {
+		if ps.GetInstrumentId() == "" && env.GetTenantId() == "" {
+			return "", fmt.Errorf("%w: unidentified holding has no tenant", errPositionIdentity)
+		}
+		return ps.GetInstrumentId(), nil
+	}
+	parts := strings.Split(strings.TrimPrefix(key, subject.PositionChanged+"."), ".")
+	if !strings.HasPrefix(key, subject.PositionChanged+".") || len(parts) != 3 {
+		return "", fmt.Errorf("%w: invalid position entity key", errPositionIdentity)
+	}
+	ids := [3]string{}
+	for i, token := range parts {
+		id, err := subject.Detoken(token)
+		if err != nil || id == "" {
+			return "", fmt.Errorf("%w: invalid position entity token", errPositionIdentity)
+		}
+		ids[i] = id
+	}
+	if key != subject.PositionFor(ids[0], ids[1], ids[2]) || ids[0] != env.GetTenantId() || ids[1] != ps.GetPortfolioId() ||
+		(ps.GetInstrumentId() != "" && ids[2] != ps.GetInstrumentId()) {
+		return "", fmt.Errorf("%w: position entity conflicts with envelope or payload", errPositionIdentity)
+	}
+	return ids[2], nil
+}
+
+func (m *Monitor) positionIdentityError(key bookKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b := m.books[key]; b != nil && b.identityUnknown() {
+		return fmt.Errorf("%w: %s/%s requires an identified position repair", errPositionIdentity, key.tenant, key.portfolio)
+	}
+	return nil
 }
 
 // evaluate runs one book against its mandate and emits the transition into
@@ -293,6 +369,11 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 // NOT weaken the refusal: a dimension the master genuinely cannot resolve is
 // unresolved at now too, and still breaches.
 func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, trigger compliancepb.BreachTrigger, observedAt time.Time) error {
+	// This is a statement about the book, before any policy or cash-drag
+	// measurement. Even a legal zero-rule mandate cannot turn UNKNOWN into PASS.
+	if err := m.positionIdentityError(key); err != nil {
+		return err
+	}
 	// THE TENANT COMES FROM THE BOOK, NOT FROM THE CALLER'S CONTEXT (#787).
 	//
 	// Emitter.EmitBreach sets no Event.TenantID and compliance configures no
@@ -396,7 +477,7 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 
 	entered := m.recordStatus(key, res.GetStatus())
 	if res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH || !entered {
-		return nil // not a new breach
+		return m.positionIdentityError(key) // not a new breach, or an identity became unreadable
 	}
 
 	if m.recorder != nil {
@@ -769,6 +850,9 @@ func (m *Monitor) recordStatus(key bookKey, status compliancepb.ComplianceStatus
 	b := m.books[key]
 	if b == nil {
 		return entering
+	}
+	if b.identityUnknown() {
+		return false // an evaluation racing an unidentified update cannot restore a measured status
 	}
 	prev := b.lastStatus
 	b.lastStatus = status

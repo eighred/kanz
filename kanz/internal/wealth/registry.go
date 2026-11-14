@@ -162,7 +162,7 @@ func (r *ModelRegistry) Count() int {
 
 // Put admits one model portfolio, replacing any previous model with the same id.
 // It returns the validation error rather than swallowing it, so the bus handler
-// can DLQ the delivery — and it also RECORDS the rejection, because on a compacted
+// can refuse the delivery — and it also RECORDS the rejection, because on a compacted
 // subject a refused message is re-delivered on every boot and the catalogue must
 // be able to say "this model exists and is unreadable" rather than "no model".
 func (r *ModelRegistry) Put(tenantID string, m ModelPortfolio) error {
@@ -170,23 +170,41 @@ func (r *ModelRegistry) Put(tenantID string, m ModelPortfolio) error {
 		return errors.New("wealth: model portfolio has no tenant; the catalogue is keyed per tenant and an " +
 			"untenanted model would be served to every one of them")
 	}
-	key := modelKey{tenant: tenantID, modelID: m.ModelID}
 	if err := m.Validate(); err != nil {
-		r.mu.Lock()
-		r.rejected[key] = err
-		r.rejectedProfiles[key] = m.Profile
-		delete(r.byKey, key)
-		r.mu.Unlock()
-		r.logger.Error("model portfolio REFUSED — no household on this profile has a target allocation",
-			"tenant", tenantID, "model_id", m.ModelID, "err", err)
-		return fmt.Errorf("wealth: model %s: %w", m.ModelID, err)
+		return r.Reject(tenantID, m, err)
 	}
+	key := modelKey{tenant: tenantID, modelID: m.ModelID}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.rejected, key)
 	delete(r.rejectedProfiles, key)
 	r.byKey[key] = m.Clone()
 	return nil
+}
+
+// Reject invalidates attributable replacement policy without admitting it.
+// Wire callers must bind tenant/model identity before calling. Preserve the last
+// known profile even when a replacement cannot identify a usable profile, so its
+// households remain explicitly unreadable rather than becoming "no model".
+func (r *ModelRegistry) Reject(tenantID string, m ModelPortfolio, cause error) error {
+	if tenantID == "" || cause == nil {
+		return errors.New("wealth: model rejection requires a tenant and a cause")
+	}
+	key := modelKey{tenant: tenantID, modelID: m.ModelID}
+	r.mu.Lock()
+	profile := m.Profile
+	if prior, ok := r.byKey[key]; ok {
+		profile = prior.Profile
+	} else if prior := r.rejectedProfiles[key]; prior >= ProfileConservative && prior <= ProfileAggressive {
+		profile = prior
+	}
+	r.rejected[key] = cause
+	r.rejectedProfiles[key] = profile
+	delete(r.byKey, key)
+	r.mu.Unlock()
+	r.logger.Error("model portfolio REFUSED — no household on this profile has a target allocation",
+		"tenant", tenantID, "model_id", m.ModelID, "profile", profile, "err", cause)
+	return fmt.Errorf("wealth: model %s: %w", m.ModelID, cause)
 }
 
 // Rejections lists the models that arrived and were refused, in deterministic

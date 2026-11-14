@@ -2,7 +2,6 @@ package consume
 
 import (
 	"fmt"
-	"math/big"
 
 	altpb "github.com/eighred/kanz/kanz-schemas-go/alternatives/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -80,6 +79,15 @@ func event(id, commitmentID string, typ alt.EventType, amt *commonpb.Decimal, at
 	if commitmentID == "" {
 		return nil, fmt.Errorf("consume: event %s names no commitment", id)
 	}
+	// Presence belongs to this lifecycle contract, not the shared Decimal
+	// converter. Neither unknown money nor a missing/normalized business date
+	// may enter the append-only journal and claim the event's identity.
+	if amt == nil {
+		return nil, fmt.Errorf("consume: event %s amount is required", id)
+	}
+	if err := at.CheckValid(); err != nil {
+		return nil, fmt.Errorf("consume: event %s date is required and must be a valid Timestamp: %w", id, err)
+	}
 	// FromProtoChecked, not FromProto: this is untrusted wire input. An exponent
 	// outside the representable range is not a small number — it is one this
 	// platform cannot hold, and coercing it to zero would record a capital call
@@ -88,9 +96,6 @@ func event(id, commitmentID string, typ alt.EventType, amt *commonpb.Decimal, at
 	if !ok {
 		return nil, fmt.Errorf("consume: event %s carries an amount this platform "+
 			"cannot represent exactly; refusing rather than rounding it", id)
-	}
-	if r == nil {
-		r = new(big.Rat)
 	}
 	return &alt.Event{
 		EventID:      id,
