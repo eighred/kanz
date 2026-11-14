@@ -62,7 +62,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer nc.Close()
+			t.Cleanup(nc.Close)
 			js, err := jetstream.New(nc)
 			if err != nil {
 				t.Fatal(err)
@@ -84,7 +84,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = client.Close() }()
+			t.Cleanup(func() { _ = client.Close() })
 			producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "close-unknown/test", ProducerVersion: "test", Tenant: tenant})
 			if err != nil {
 				t.Fatal(err)
@@ -99,6 +99,19 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			type ownedConsumer struct{ stream, name string }
+			var ownedConsumers []ownedConsumer
+			// Cleanup runs in reverse registration order: stop and join subscriptions,
+			// delete their consumers, then close the control and bus connections.
+			t.Cleanup(func() {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cleanupCancel()
+				for _, consumer := range ownedConsumers {
+					if err := js.DeleteConsumer(cleanupCtx, consumer.stream, consumer.name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+						t.Errorf("delete test consumer %s/%s: %v", consumer.stream, consumer.name, err)
+					}
+				}
+			})
 			findConsumer := func(streamName, filter, group string, since time.Time) jetstream.Consumer {
 				t.Helper()
 				stream, err := js.Stream(ctx, streamName)
@@ -116,7 +129,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						t.Cleanup(func() { _ = js.DeleteConsumer(context.Background(), streamName, info.Name) })
+						ownedConsumers = append(ownedConsumers, ownedConsumer{streamName, info.Name})
 						return consumer
 					}
 				}
@@ -206,8 +219,9 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 			publishPosition("BINANCE", &commonpb.Decimal{Coefficient: 6, Exponent: -1})
 			publishPosition("OKX", &commonpb.Decimal{Coefficient: -4, Exponent: -1})
 			live := NewPositionCache()
-			seen, ready, stop, _ := startPositions(live)
+			seen, ready, stop, liveSince := startPositions(live)
 			waitReady(ready)
+			waitAck(findConsumer(positionStreamName, subject.VenuePositionAll, "", liveSince))
 			nonces := NewMemoryNonces(time.Minute, 1000)
 			pub := &closeSpinePublisher{producer: producer}
 			authority, err := translate.NewFundAuthority(map[string]string{fund: tenant}, map[string][]string{"momentum": {fund}})
