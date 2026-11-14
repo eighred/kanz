@@ -70,24 +70,29 @@ INSERT INTO custody_statements
     (statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain, values_verified)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
 ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
-    custodian_id  = EXCLUDED.custodian_id,
-    portfolio_id  = EXCLUDED.portfolio_id,
-    business_date = EXCLUDED.business_date,
     positions     = EXCLUDED.positions,
     cash          = EXCLUDED.cash,
     received_at   = EXCLUDED.received_at,
     transactions  = EXCLUDED.transactions,
-    grain         = EXCLUDED.grain, values_verified = true`
+    grain         = EXCLUDED.grain, values_verified = true
+WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
+  AND custody_statements.portfolio_id = EXCLUDED.portfolio_id
+  AND custody_statements.business_date = EXCLUDED.business_date`
 	tx, err := p.exactTransaction(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, q,
+	result, err := tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
 	if err != nil {
 		return fmt.Errorf("custody: save statement %s: %w", s.StatementID, err)
+	}
+	// The unique index arbitrates concurrent writers before this condition is
+	// evaluated. Checking identity in a separate read would race another insert.
+	if result.RowsAffected() == 0 {
+		return ErrStatementIdentityConflict
 	}
 	return tx.Commit(ctx)
 }

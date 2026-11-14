@@ -204,15 +204,15 @@ func TestPositionCacheRefusesAnOutOfDomainQuantity(t *testing.T) {
 		t.Fatal("Handle did not return within 4s — the domain check is not in front of the conversion")
 	}
 
-	// AND THE OLD HOLDING SURVIVES. The refusal must not half-apply: this cache
-	// SETS rather than adds, so a partial fold would leave the fund's size at
-	// whatever the refused message implied — and zero here reads as "flat", which
-	// is the value a CLOSE would size from.
+	// The unreadable current level invalidates the earlier holding. Neither the
+	// old size nor an invented zero is safe to use for a CLOSE.
 	got, err := c.Position(context.Background(), "FUND", "XBIN", "BTC-USD")
-	if err != nil {
-		t.Fatalf("Position after a refused update: %v", err)
+	if err == nil || got != nil {
+		t.Fatalf("Position after a refused update remained readable: %v %v", got, err)
 	}
-	if got.Cmp(big.NewRat(1, 1)) != 0 {
-		t.Fatalf("holding is now %s, want 1 — the refused update overwrote a known-good position", got)
+	feed(t, c, "FUND", "XBIN", "BTC-USD", 1)
+	got, err = c.Position(context.Background(), "FUND", "XBIN", "BTC-USD")
+	if err != nil || got.Cmp(big.NewRat(1, 1)) != 0 {
+		t.Fatalf("valid repair did not restore holding: %v %v", got, err)
 	}
 }

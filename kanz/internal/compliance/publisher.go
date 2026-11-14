@@ -169,7 +169,7 @@ func (p *Publisher) Publish(ctx context.Context, m *compliancepb.Mandate, approv
 	}
 
 	subject := SubjectMandateFor(m.GetTenantId(), m.GetPortfolioId())
-	held, prevValue, expect, err := p.retained(ctx, subject)
+	held, prevValue, expect, err := p.retained(ctx, m.GetTenantId(), m.GetPortfolioId())
 	if err != nil {
 		return fmt.Errorf("mandate %s/%s: %w", m.GetTenantId(), m.GetPortfolioId(), err)
 	}
@@ -231,7 +231,8 @@ func (p *Publisher) Publish(ctx context.Context, m *compliancepb.Mandate, approv
 // value still travels on previous_value when the ConfigChanged around it decoded
 // and only the mandate inside did not — when the FRAME itself is unreadable there
 // is no config value to carry, and the sequence is all that survives.
-func (p *Publisher) retained(ctx context.Context, subject string) (held []*compliancepb.Mandate, prevValue string, expect uint64, err error) {
+func (p *Publisher) retained(ctx context.Context, tenantID, portfolioID string) (held []*compliancepb.Mandate, prevValue string, expect uint64, err error) {
+	subject := SubjectMandateFor(tenantID, portfolioID)
 	_, payload, seq, err := p.state.LastOnSubject(ctx, subject)
 	if errors.Is(err, bus.ErrNoRetainedMessage) {
 		return nil, "", 0, nil
@@ -249,7 +250,17 @@ func (p *Publisher) retained(ctx context.Context, subject string) (held []*compl
 	if dErr != nil {
 		return nil, prevValue, seq, nil
 	}
-	return held, prevValue, seq, nil
+	// Foreign members cannot govern this retained key. Carrying even a future
+	// one into the repair would make every consumer reject the new value again.
+	// Preserve all matching scheduled versions and the exact prior value/sequence;
+	// only the new change is authorized by this publish's approval.
+	scoped := make([]*compliancepb.Mandate, 0, len(held))
+	for _, m := range held {
+		if mandateMatchesIdentity(m, tenantID, portfolioID) {
+			scoped = append(scoped, m)
+		}
+	}
+	return scoped, prevValue, seq, nil
 }
 
 // mergeIntoSet folds m into the mandates a subject already holds and returns what

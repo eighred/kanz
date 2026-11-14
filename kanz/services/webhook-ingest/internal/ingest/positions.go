@@ -41,7 +41,7 @@ var ErrPositionsNotArmed = errors.New("ingest: position book not armed — the f
 type PositionCache struct {
 	mu     sync.RWMutex
 	armed  bool
-	byKey  map[string]*big.Rat // fund/venue/instrument → signed quantity
+	byKey  map[string]*big.Rat // fund/venue/instrument → signed quantity; nil means unreadable
 	onceOn sync.Once
 }
 
@@ -89,11 +89,25 @@ func (c *PositionCache) Handle(_ context.Context, _ *envelopepb.Envelope, payloa
 	// out of domain is a holding this cache cannot read. Folding it is strictly worse
 	// than nacking — dec.FromProto would materialise 10^abs(exponent) and never return,
 	// stalling the position subscription every CLOSE is sized from.
-	if field, in := dec.InDomainDeep(&ps); !in {
-		return fmt.Errorf("position %s/%s/%s carries an out-of-domain exponent at %s",
-			ps.GetPortfolioId(), ps.GetVenue(), ps.GetInstrumentId(), field)
+	field, in := dec.InDomainDeep(&ps)
+	attributed := ps.GetPortfolioId() != "" && ps.GetVenue() != "" && ps.GetInstrumentId() != ""
+	if !in || ps.GetQuantity() == nil {
+		if attributed {
+			// The latest level cannot establish a quantity. Retaining a readable
+			// earlier size could oversell; deleting the key would invent a flat book.
+			c.mu.Lock()
+			c.byKey[positionKey(ps.GetPortfolioId(), ps.GetVenue(), ps.GetInstrumentId())] = nil
+			c.mu.Unlock()
+		}
+		if !in {
+			return fmt.Errorf("position %s/%s/%s carries an out-of-domain exponent at %s",
+				ps.GetPortfolioId(), ps.GetVenue(), ps.GetInstrumentId(), field)
+		}
+		if attributed {
+			return fmt.Errorf("position %s/%s/%s carries no quantity", ps.GetPortfolioId(), ps.GetVenue(), ps.GetInstrumentId())
+		}
 	}
-	if ps.GetPortfolioId() == "" || ps.GetVenue() == "" || ps.GetInstrumentId() == "" {
+	if !attributed {
 		// A holding that cannot say whose it is, where it sits, or what it is, is not a
 		// holding this cache can ever answer a CLOSE from.
 		return nil
@@ -113,6 +127,9 @@ func (c *PositionCache) Position(_ context.Context, fundID, venue, instrumentID 
 		return nil, ErrPositionsNotArmed
 	}
 	if q, ok := c.byKey[positionKey(fundID, venue, instrumentID)]; ok {
+		if q == nil {
+			return nil, fmt.Errorf("%w: latest position %s/%s/%s is unreadable", translate.ErrUnresolvable, fundID, venue, instrumentID)
+		}
 		return new(big.Rat).Set(q), nil
 	}
 	// Armed, and no entry: the compacted stream carries every holding, so this one does not

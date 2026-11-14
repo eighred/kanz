@@ -27,6 +27,10 @@ var ErrNoStatement = errors.New("custody: no statement for subject")
 // share the newest receipt time. Arrival order cannot establish precedence.
 var ErrAmbiguousStatement = errors.New("custody: ambiguous newest statement")
 
+// ErrStatementIdentityConflict refuses reuse of a tenant-wide source identity
+// for a different comparison subject. A redelivery cannot relocate evidence.
+var ErrStatementIdentityConflict = errors.New("custody: statement ID belongs to another subject")
+
 // Store is the durable home of statements, runs and the break lifecycle.
 //
 // THE BREAK STATE IS THE PART THAT MUST BE DURABLE. Statements and runs could in
@@ -42,6 +46,7 @@ type Store interface {
 	// restatement for a subject already reconciled REPLACES the latest statement;
 	// it does not mutate the runs that reconciled the earlier one, because the
 	// history must reconstruct what was known and when.
+	// Reusing an ID for a different subject returns ErrStatementIdentityConflict.
 	SaveStatement(ctx context.Context, s Statement) error
 
 	// LatestStatement returns the unique newest statement for a subject by
@@ -151,10 +156,15 @@ func (m *MemoryStore) SaveStatement(_ context.Context, s Statement) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := s.Subject().Key()
-	for i, existing := range m.statements[key] {
-		if existing.StatementID == s.StatementID {
-			m.statements[key][i] = cloneStatement(s)
-			return nil
+	for storedKey, statements := range m.statements {
+		for i, existing := range statements {
+			if existing.StatementID == s.StatementID {
+				if storedKey != key {
+					return ErrStatementIdentityConflict
+				}
+				m.statements[key][i] = cloneStatement(s)
+				return nil
+			}
 		}
 	}
 	m.statements[key] = append(m.statements[key], cloneStatement(s))

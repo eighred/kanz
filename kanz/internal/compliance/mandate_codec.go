@@ -209,6 +209,10 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 	if !strings.HasPrefix(cc.GetConfigKey(), MandateConfigKeyPrefix) {
 		return nil, nil
 	}
+	tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
+	if !ok {
+		return nil, errors.New("compliance: malformed mandate config_key")
+	}
 	ms, err := DecodeMandateValue(cc.GetNewValue())
 	if err != nil {
 		return nil, err
@@ -224,6 +228,9 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 	// refused (#243).
 	// Validate the entire retained set before replacing any readable version.
 	for _, m := range ms {
+		if !mandateMatchesIdentity(m, tenantID, portfolioID) {
+			return nil, errors.New("compliance: retained mandate identity does not match config_key")
+		}
 		if err := validateMandateRuleContracts(m); err != nil {
 			return nil, err
 		}
@@ -234,6 +241,10 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 		}
 	}
 	return ms, nil
+}
+
+func mandateMatchesIdentity(m *compliancepb.Mandate, tenantID, portfolioID string) bool {
+	return m.GetTenantId() == tenantID && m.GetPortfolioId() == portfolioID
 }
 
 // MandateConsumer is the bus handler that feeds a MandateRegistry from the
@@ -290,7 +301,7 @@ func NewMandateConsumer(reg *MandateRegistry, logger *slog.Logger, opts ...Manda
 // fails the same way, so the portfolio is not un-mandated until someone notices —
 // it is un-governable until someone REPUBLISHES. That state is now recorded
 // against the portfolio, which makes its orders refuse rather than pass (#619).
-func (c *MandateConsumer) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []byte) error {
+func (c *MandateConsumer) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var cc lifecyclepb.ConfigChanged
 	if err := proto.Unmarshal(payload, &cc); err != nil {
 		// NO config_key SURVIVES A PAYLOAD THAT DID NOT DECODE, so there is no
@@ -303,17 +314,20 @@ func (c *MandateConsumer) Handle(ctx context.Context, _ *envelopepb.Envelope, pa
 		c.reg.Drop()
 		return nil
 	}
+	if !strings.HasPrefix(cc.GetConfigKey(), MandateConfigKeyPrefix) {
+		return nil
+	}
+	tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
+	if !ok || env.GetTenantId() == "" || env.GetTenantId() != tenantID {
+		// A body cannot select a different tenant's governance or rejection mark.
+		// Without an attributable key in the authenticated envelope's tenant,
+		// count the loss; do not make an innocent portfolio unreadable.
+		c.logger.ErrorContext(ctx, "compliance: mandate config_key is not attributable to envelope tenant",
+			"config_key", cc.GetConfigKey(), "tenant_id", env.GetTenantId())
+		c.reg.Drop()
+		return nil
+	}
 	if _, err := c.loader.Apply(&cc); err != nil {
-		tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
-		if !ok {
-			// The key is outside the mandate namespace or malformed. Apply only
-			// errors on a mandate key, so this means the key itself is corrupt.
-			c.logger.ErrorContext(ctx, "compliance: a mandate could not be applied and its config_key "+
-				"does not name a (tenant, portfolio), so the portfolio it governs cannot be marked",
-				"err", err, "config_key", cc.GetConfigKey())
-			c.reg.Drop()
-			return nil
-		}
 		c.logger.ErrorContext(ctx, "UNGOVERNABLE: a published mandate could not be applied, and the "+
 			"mandate stream is compacted — this portfolio has no readable mandate until one is "+
 			"republished, and its orders are now REFUSED rather than admitted",

@@ -321,11 +321,15 @@ func (t *Translator) Emit(ctx context.Context, in Intent) (*Result, error) {
 			return nil, err
 		}
 	}
+	orders, err := t.resolveOrders(ctx, in, venues, baseQty)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := t.publishSignal(ctx, in, tenant); err != nil {
 		return nil, fmt.Errorf("publish signal: %w", err)
 	}
-	orderIDs, err := t.fanOut(ctx, in, tenant, venues, baseQty)
+	orderIDs, err := t.fanOut(ctx, tenant, orders)
 	if err != nil {
 		return nil, err
 	}
@@ -493,16 +497,17 @@ func (t *Translator) publishSignal(ctx context.Context, in Intent, tenant string
 	})
 }
 
-// fanOut emits one SubmitOrder per venue in the fund's allocation policy. The
-// venues and the resolved base quantity are resolved by Emit — everything that can
-// REFUSE the signal runs before the audit FACT is written.
-func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string, venues []VenueAllocation, baseQty Qty) ([]string, error) {
+// resolveOrders resolves every position and validates each command before the
+// audit root or any leg is published. A later UNKNOWN CLOSE must not leave an
+// earlier venue trading, and publication must use these quantities without a
+// second lookup against state that may have changed in the meantime.
+func (t *Translator) resolveOrders(ctx context.Context, in Intent, venues []VenueAllocation, baseQty Qty) ([]*orderpb.SubmitOrder, error) {
 	tif := in.TimeInForce
 	if tif == orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED {
 		tif = orderpb.TimeInForce_TIME_IN_FORCE_DAY
 	}
 
-	orderIDs := make([]string, 0, len(venues))
+	orders := make([]*orderpb.SubmitOrder, 0, len(venues))
 	for _, v := range venues {
 		side, qty, err := t.legSizeAndSide(ctx, in, baseQty, v)
 		if err != nil {
@@ -551,10 +556,19 @@ func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string, venue
 			Leverage:   levD,
 			MarginMode: marginMode,
 		}
-		if err := t.publishCommand(ctx, cmd, orderID, tenant); err != nil {
-			return nil, fmt.Errorf("publish order %s: %w", orderID, err)
+		orders = append(orders, cmd)
+	}
+	return orders, nil
+}
+
+// fanOut publishes the already-resolved commands through the mandatory OMS route.
+func (t *Translator) fanOut(ctx context.Context, tenant string, orders []*orderpb.SubmitOrder) ([]string, error) {
+	orderIDs := make([]string, 0, len(orders))
+	for _, cmd := range orders {
+		if err := t.publishCommand(ctx, cmd, cmd.OrderId, tenant); err != nil {
+			return nil, fmt.Errorf("publish order %s: %w", cmd.OrderId, err)
 		}
-		orderIDs = append(orderIDs, orderID)
+		orderIDs = append(orderIDs, cmd.OrderId)
 	}
 	return orderIDs, nil
 }
@@ -645,6 +659,9 @@ func (t *Translator) legSizeAndSide(ctx context.Context, in Intent, baseQty Qty,
 		pos, err := t.opt.Positions.Position(ctx, in.FundID, v.Venue, in.InstrumentID)
 		if err != nil {
 			return orderpb.Side_SIDE_UNSPECIFIED, Qty{}, err
+		}
+		if pos == nil {
+			return orderpb.Side_SIDE_UNSPECIFIED, Qty{}, fmt.Errorf("%w: no position quantity for %s/%s/%s", ErrUnresolvable, in.FundID, v.Venue, in.InstrumentID)
 		}
 		if pos.Sign() == 0 {
 			return orderpb.Side_SIDE_UNSPECIFIED, Qty{}, nil // flat — skip
