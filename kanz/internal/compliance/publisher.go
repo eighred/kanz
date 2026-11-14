@@ -250,13 +250,14 @@ func (p *Publisher) retained(ctx context.Context, tenantID, portfolioID string) 
 	if dErr != nil {
 		return nil, prevValue, seq, nil
 	}
-	// Foreign members cannot govern this retained key. Carrying even a future
-	// one into the repair would make every consumer reject the new value again.
-	// Preserve all matching scheduled versions and the exact prior value/sequence;
+	// Foreign or incomplete members cannot govern this retained key. Carrying a
+	// future invalid member into the repair would make every consumer reject the
+	// new value again, even though the replacement itself passed validation.
+	// Preserve valid matching scheduled versions and the exact prior value/sequence;
 	// only the new change is authorized by this publish's approval.
 	scoped := make([]*compliancepb.Mandate, 0, len(held))
 	for _, m := range held {
-		if mandateMatchesIdentity(m, tenantID, portfolioID) {
+		if mandateMatchesIdentity(m, tenantID, portfolioID) && ValidateMandate(m) == nil {
 			scoped = append(scoped, m)
 		}
 	}

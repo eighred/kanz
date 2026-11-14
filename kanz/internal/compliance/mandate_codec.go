@@ -231,7 +231,7 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 		if !mandateMatchesIdentity(m, tenantID, portfolioID) {
 			return nil, errors.New("compliance: retained mandate identity does not match config_key")
 		}
-		if err := validateMandateRuleContracts(m); err != nil {
+		if err := ValidateMandate(m); err != nil {
 			return nil, err
 		}
 	}
