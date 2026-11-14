@@ -228,7 +228,7 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 	// refused (#243).
 	// Validate the entire retained set before replacing any readable version.
 	for _, m := range ms {
-		if m.GetTenantId() != tenantID || m.GetPortfolioId() != portfolioID {
+		if !mandateMatchesIdentity(m, tenantID, portfolioID) {
 			return nil, errors.New("compliance: retained mandate identity does not match config_key")
 		}
 		if err := validateMandateRuleContracts(m); err != nil {
@@ -241,6 +241,10 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 		}
 	}
 	return ms, nil
+}
+
+func mandateMatchesIdentity(m *compliancepb.Mandate, tenantID, portfolioID string) bool {
+	return m.GetTenantId() == tenantID && m.GetPortfolioId() == portfolioID
 }
 
 // MandateConsumer is the bus handler that feeds a MandateRegistry from the

@@ -136,7 +136,12 @@ func TestMandateIdentityCanonicalReplayGateAndRepair(t *testing.T) {
 	}
 	approved(first)
 	approved(victim)
-	setValue, err := comp.MarshalMandateSetValue([]*compliancepb.Mandate{mandate(tenantA, 2), mandate(tenantB, 9)})
+	scheduled := mandate(tenantA, 20)
+	scheduled.EffectiveAt = timestamppb.New(time.Now().UTC().Add(48 * time.Hour))
+	approved(scheduled)
+	foreignFuture := mandate(tenantB, 9)
+	foreignFuture.EffectiveAt = timestamppb.New(time.Now().UTC().Add(24 * time.Hour))
+	setValue, err := comp.MarshalMandateSetValue([]*compliancepb.Mandate{mandate(tenantA, 2), foreignFuture, scheduled})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,10 +277,31 @@ func TestMandateIdentityCanonicalReplayGateAndRepair(t *testing.T) {
 	awaitACK(restarted, 3)
 	gate(restarted.reg, tenantA, id+"-repair", true, false)
 	gate(restarted.reg, tenantB, id+"-repair-victim", false, false)
+	assertScheduled := func(reg *comp.MandateRegistry) {
+		t.Helper()
+		got, gov, err := reg.Mandate(ctx, tenantA, portfolio, scheduled.EffectiveAt.AsTime())
+		if err != nil || gov != comp.Governed || !proto.Equal(got, scheduled) {
+			t.Fatalf("repair dropped the already-approved own future: %v %v", got, err)
+		}
+	}
+	assertScheduled(restarted.reg)
+	_, repairedPayload, _, err := client.LastOnSubject(ctx, topicA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repairedValue lifecyclepb.ConfigChanged
+	if err := proto.Unmarshal(repairedPayload, &repairedValue); err != nil || repairedValue.PreviousValue != setValue {
+		t.Fatalf("repair lost exact poisoned previous_value: %v", err)
+	}
+	members, err := comp.DecodeMandateValue(repairedValue.NewValue)
+	if err != nil || len(members) != 2 || !proto.Equal(members[0], repair) || !proto.Equal(members[1], scheduled) {
+		t.Fatalf("retained repaired value did not preserve exactly its own current/future: %v %v", members, err)
+	}
 	restarted.stop()
 	repairedBoot := start()
 	awaitACK(repairedBoot, 2)
 	gate(repairedBoot.reg, tenantA, id+"-repaired-restart", true, false)
 	gate(repairedBoot.reg, tenantB, id+"-repaired-restart-victim", false, false)
+	assertScheduled(repairedBoot.reg)
 	repairedBoot.stop()
 }
