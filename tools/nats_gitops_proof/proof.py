@@ -24,7 +24,7 @@ ARGO_IMAGES = {
     "quay.io/argoproj/argocd:v3.6.1": "quay.io/argoproj/argocd:v3.6.1@sha256:296e3d74f449b2ce45265613fcb68c18ed7366488360c8ea32f5f2a93d2e5c54",
     "public.ecr.aws/docker/library/redis:8.10.1-alpine": "docker.io/library/redis:8.10.1-alpine@sha256:ef216d85ec44f4fdf7c0e6df2d1757a4734ed32fbb278cabd3181b5a27353b79",
 }
-CASES = ["canonical-source", "first-postsync", "canonical-runtime", "stream-inventory", "canonical-fact",
+CASES = ["canonical-source", "first-postsync", "canonical-runtime", "stream-inventory", "writer-workload-api-socket", "canonical-fact",
          "empty-stream-removed", "same-revision-postsync", "stream-restored",
          "all-brokers-stopped", "all-claims-retained", "all-brokers-replaced", "pvc-preserved", "fact-preserved", "cleanup"]
 DELETE_STREAM = "OBSERVABILITY"
@@ -159,6 +159,34 @@ def check_puback(ack, source):
             or ack.get("stream") != "MARKET" or type(ack.get("sequence")) is not int or ack["sequence"] != 1
             or ack.get("duplicate") is not False):
         raise ValueError("canonical FACT did not receive its expected actual stream PubAck")
+
+
+def check_writer_socket(spec):
+    main = next(c for c in spec["containers"] if c["name"] == "bootstrap")
+    mounts = [m for m in main["volumeMounts"] if m.get("mountPath") == "/run/spiffe"]
+    volume = next(v for v in spec["volumes"] if v["name"] == "spiffe")
+    if (spec["serviceAccountName"] != "market-ingest" or len(mounts) != 1
+            or mounts[0].get("name") != "spiffe" or mounts[0].get("readOnly") is not True
+            or volume.get("csi", {}).get("driver") != "csi.spiffe.io" or volume["csi"].get("readOnly") is not True):
+        raise ValueError("owned Go writer cannot access its read-only SPIFFE Workload API")
+
+
+def client_spec(job, service_account, workload_api=False):
+    spec = copy.deepcopy(job["spec"]["template"]["spec"])
+    spec["serviceAccountName"] = service_account
+    spec["restartPolicy"] = "Never"
+    spec["containers"][0]["command"] = ["sleep", "1800"]
+    spec["containers"][0]["args"] = []
+    spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "scripts"]
+    mounts = spec["containers"][0]["volumeMounts"]
+    spec["containers"][0]["volumeMounts"] = [m for m in mounts if m["name"] != "scripts"]
+    if workload_api:
+        # The canonical CLI main container uses init-materialized PEM files.
+        # The owned Go writer uses transport.NewSource and needs the existing
+        # CSI socket in its own container, under the same unchanged Pod KSA.
+        spec["containers"][0]["volumeMounts"].append({"name": "spiffe", "mountPath": "/run/spiffe", "readOnly": True})
+        check_writer_socket(spec)
+    return spec
 
 
 def check_cold_recovery(recovery):
@@ -332,23 +360,21 @@ class Fixture:
             time.sleep(2)
         raise TimeoutError("source-bound Argo PostSync operation expired")
 
-    def client(self, name, namespace, service_account):
+    def client(self, name, namespace, service_account, workload_api=False):
         self.substage = "issue-client-SVID-" + name
         bootstrap = documents("kanz/infra/nats/bootstrap-job.yaml")
         job = next(d for d in bootstrap if d["kind"] == "Job")
-        spec = copy.deepcopy(job["spec"]["template"]["spec"])
-        spec["serviceAccountName"] = service_account
-        spec["restartPolicy"] = "Never"
-        spec["containers"][0]["command"] = ["sleep", "1800"]
-        spec["containers"][0]["args"] = []
-        spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "scripts"]
-        spec["containers"][0]["volumeMounts"] = [v for v in spec["containers"][0]["volumeMounts"] if v["name"] != "scripts"]
+        spec = client_spec(job, service_account, workload_api)
         helper = copy.deepcopy(next(d for d in bootstrap if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nats-bootstrap-spiffe-helper"))
         helper["metadata"]["namespace"] = namespace
         self.apply([{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace, "labels": {"kanz.internal/spiffe": "enabled"}}},
                     {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": service_account, "namespace": namespace}}, helper,
                     {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": namespace}, "spec": spec}])
         self.k("-n", namespace, "wait", "--for=condition=Ready", "pod/" + name, "--timeout=180s")
+        if workload_api:
+            self.substage = "verify-owned-Go-writer-read-only-Workload-API-mount"
+            pod = json.loads(self.k("-n", namespace, "get", "pod/" + name, "-o", "json"))
+            check_writer_socket(pod["spec"])
 
     def nats(self, *args, name="nats-inspector", namespace=NAMESPACE, data=None):
         return self.k("-n", namespace, "exec", "-i", name, "-c", "bootstrap", "--", "nats", *args, data=data)
@@ -511,7 +537,8 @@ def main():
             frame = base64.b64decode(fact["frame"], validate=True)
             if hashlib.sha256(frame).hexdigest() != fact["sha256"]:
                 raise ValueError("canonical FACT frame digest differs")
-            fixture.client("nats-fact-writer", "kanz-services", "market-ingest")
+            fixture.client("nats-fact-writer", "kanz-services", "market-ingest", workload_api=True)
+            report["cases"].append("writer-workload-api-socket")
             fixture.substage = "copy-exact-source-canonical-publisher-to-owned-Pod"
             binary = Path(os.environ["RUNNER_TEMP"]) / "nats-gitops-fact"
             report["factHelperSHA256"] = hashlib.sha256(binary.read_bytes()).hexdigest()

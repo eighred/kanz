@@ -13,6 +13,29 @@ SHA = "a" * 40
 
 
 class ProofTests(unittest.TestCase):
+    def test_go_writer_uses_readonly_socket_while_cli_keeps_canonical_pem_path(self):
+        job = next(d for d in proof.documents("kanz/infra/nats/bootstrap-job.yaml") if d["kind"] == "Job")
+        inspector = proof.client_spec(job, "nats-bootstrap")
+        writer = proof.client_spec(job, "market-ingest", workload_api=True)
+        proof.check_writer_socket(writer)
+        self.assertFalse(any(m["mountPath"] == "/run/spiffe" for m in inspector["containers"][0]["volumeMounts"]))
+        self.assertTrue(any(m["mountPath"] == "/etc/nats-certs" for m in inspector["containers"][0]["volumeMounts"]))
+        for mutation in ("missing", "writable", "wrong-path", "wrong-identity"):
+            with self.subTest(mutation=mutation):
+                broken = copy.deepcopy(writer)
+                mounts = broken["containers"][0]["volumeMounts"]
+                socket = next(m for m in mounts if m["mountPath"] == "/run/spiffe")
+                if mutation == "missing":
+                    mounts.remove(socket)
+                elif mutation == "writable":
+                    socket["readOnly"] = False
+                elif mutation == "wrong-path":
+                    socket["mountPath"] = "/run/other"
+                else:
+                    broken["serviceAccountName"] = "nats-bootstrap"
+                with self.assertRaises(ValueError):
+                    proof.check_writer_socket(broken)
+
     def test_workflow_selects_resolved_canonical_publisher_inputs(self):
         workflow = proof.documents(".github/workflows/nats-gitops-verification.yml")[0]
         # PyYAML's YAML 1.1 resolver represents the workflow `on` key as True.

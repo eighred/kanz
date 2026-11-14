@@ -26,6 +26,9 @@ The actual SPIRE-issued market-ingest identity publishes that synthetic quote
 using the existing Go SPIFFE/JetStream client and must receive the exact first
 MARKET PubAck. The source-bound static diagnostic runs inside the owned writer
 Pod; it never exports an SVID and can publish only the validated prepared fixture.
+Its main container receives the existing SPIFFE CSI socket as a read-only mount;
+the canonical bootstrap/inspector CLI continues to use init-materialized PEM files.
+The observed writer Pod spec must prove that mount before publication is attempted.
 Its command errors use closed categories. The canonical CLI v0.1.5 has no
 publish `--jetstream` flag and reads captured-output stdin only with a specific
 publish flag; a core publish exit alone therefore cannot be an acknowledgement.
