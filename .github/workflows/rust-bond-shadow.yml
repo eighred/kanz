@@ -89,3 +89,58 @@ jobs:
           name: bond-shadow-evidence
           path: ${{ runner.temp }}/bond-shadow.jsonl
           if-no-files-found: warn
+
+  option-pricing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical Go contracts
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Capture actual Go option analytics
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/option-pricing-evidence"
+          go test -p 1 ./internal/risk/pricing ./internal/risk/benchmarks ./services/risk-engine/tools/option_pricing_reference -count=1
+          go run ./services/risk-engine/tools/option_pricing_reference -source "$GITHUB_SHA" > "$RUNNER_TEMP/option-pricing-evidence/go-reference.json"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/option-pricing-evidence/source.txt"
+          go version > "$RUNNER_TEMP/option-pricing-evidence/go-version.txt"
+          sha256sum ../kanz-rs/Cargo.lock > "$RUNNER_TEMP/option-pricing-evidence/lock.sha256"
+          sha256sum "$RUNNER_TEMP/option-pricing-evidence/go-reference.json" > "$RUNNER_TEMP/option-pricing-evidence/corpus.sha256"
+      - name: Verify independent option mathematics and fresh Go parity
+        working-directory: kanz-rs
+        env:
+          KANZ_OPTION_PRICING_CORPUS: ${{ runner.temp }}/option-pricing-evidence/go-reference.json
+          KANZ_OPTION_PRICING_SOURCE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          rustc --version > "$RUNNER_TEMP/option-pricing-evidence/rust-version.txt"
+          cargo fmt --all -- --check
+          cargo clippy --locked -p kanz-option-pricing --all-targets -- -D warnings
+          cargo test --locked -p kanz-option-pricing --test numerical 2>&1 | tee "$RUNNER_TEMP/option-pricing-evidence/numerical.log"
+          cargo test --locked -p kanz-option-pricing --test go_conformance missing_or_malformed_capture_refuses -- --exact 2>&1 | tee "$RUNNER_TEMP/option-pricing-evidence/capture-refusal.log"
+          cargo test --locked -p kanz-option-pricing --test go_conformance fresh_go_oracle_is_required -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/option-pricing-evidence/conformance.log"
+      - name: Verify pure option ownership and mandatory evidence gates
+        working-directory: kanz
+        run: |
+          go test -p 1 ./test/arch -run 'Test(RustOptionPricing|RustMigration|RiskBoundary|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+      - name: Preserve source-bound option evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: option-pricing-evidence
+          path: ${{ runner.temp }}/option-pricing-evidence/
+          if-no-files-found: warn

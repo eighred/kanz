@@ -115,6 +115,10 @@ func rustBoundaryFixtureFiles() []string {
 			out = append(out, name+"/"+file)
 		}
 	}
+	out = append(out, rustOptionPricingPath+"/Cargo.toml")
+	for _, file := range rustOptionPricingSources {
+		out = append(out, rustOptionPricingPath+"/"+file)
+	}
 	out = append(out, rustBondShadowPath+"/Cargo.toml")
 	for _, file := range rustBondShadowSources {
 		out = append(out, rustBondShadowPath+"/"+file)
