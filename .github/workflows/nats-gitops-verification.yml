@@ -1,0 +1,97 @@
+name: nats-gitops-verification
+on:
+  pull_request:
+    paths:
+      - 'tools/nats_gitops_proof/**'
+      - 'tools/feed-identity/**'
+      - 'kanz/infra/nats/**'
+      - 'kanz/infra/security/spire/**'
+      - 'kanz/infra/gitops/applicationset.yaml'
+      - 'kanz-schemas/proto/envelope/**'
+      - 'kanz-schemas/proto/market/**'
+      - 'kanz-schemas/proto/common/**'
+      - 'kanz-schemas/buf.yaml'
+      - 'kanz-schemas/buf.gen.yaml'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'kanz/pkg/bus/**'
+      - '.github/actions/setup-buf/**'
+      - '.github/workflows/nats-gitops-verification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/nats_gitops_proof/**'
+      - 'tools/feed-identity/**'
+      - 'kanz/infra/nats/**'
+      - 'kanz/infra/security/spire/**'
+      - 'kanz/infra/gitops/applicationset.yaml'
+      - 'kanz-schemas/proto/envelope/**'
+      - 'kanz-schemas/proto/market/**'
+      - 'kanz-schemas/proto/common/**'
+      - 'kanz-schemas/buf.yaml'
+      - 'kanz-schemas/buf.gen.yaml'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'kanz/pkg/bus/**'
+      - '.github/actions/setup-buf/**'
+      - '.github/workflows/nats-gitops-verification.yml'
+permissions:
+  contents: read
+jobs:
+  postsync-pvc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - name: Verify source, hook, storage and receipt refusal controls
+        run: python3 -B -m unittest discover -s tools/nats_gitops_proof -p 'test_*.py' -v
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical contracts and validate synthetic FACT
+        env:
+          GOFLAGS: -mod=mod
+        run: |
+          set -euo pipefail
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+          cd kanz
+          go run ../tools/nats_gitops_proof/fact.go "$GITHUB_SHA" > "$RUNNER_TEMP/nats-gitops-fact.json"
+      - run: bash tools/feed-identity/install.sh
+      - name: Prove actual Argo PostSync and retained FACT through PVC
+        run: python3 -B tools/nats_gitops_proof/proof.py
+      - name: Remove only this interrupted proof cluster
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          owner = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nats-gitops-owner.json'
+          if owner.exists():
+              identity = json.loads(owner.read_text())
+              name = identity.get('cluster', '')
+              if (not re.fullmatch(r'messaging-proof-[0-9a-f]{12}', name)
+                  or identity.get('source') != os.environ['GITHUB_SHA']
+                  or identity.get('runID') != os.environ['GITHUB_RUN_ID']
+                  or identity.get('runAttempt') != os.environ['GITHUB_RUN_ATTEMPT']):
+                  raise SystemExit('invalid owned cleanup identity')
+              subprocess.run(['kind', 'delete', 'cluster', '--name', name], check=True, timeout=180)
+          PY
+      - name: Preserve sanitized exact-source acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nats-gitops-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nats-gitops.json
+          if-no-files-found: error
