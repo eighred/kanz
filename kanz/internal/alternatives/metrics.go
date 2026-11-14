@@ -3,6 +3,7 @@ package alternatives
 import (
 	"errors"
 	"math"
+	"math/big"
 	"sort"
 	"time"
 )
@@ -81,8 +82,7 @@ func IRRFlows(p *Position) []CashFlow {
 	return flows
 }
 
-// errNoIRR is returned when an IRR cannot be solved (no sign change in the
-// cashflows, or fewer than two flows).
+// errNoIRR distinguishes an unavailable return from a measured zero return.
 var errNoIRR = errors.New("alternatives: IRR undefined (need flows of both signs)")
 
 // IRR is the annualized money-weighted return that sets the net present value of
@@ -97,8 +97,33 @@ func IRR(flows []CashFlow) (float64, error) {
 	ordered := append([]CashFlow(nil), flows...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Date.Before(ordered[j].Date) })
 
+	// Flows at one instant have the same discount factor. Net them exactly in
+	// the existing float input domain before testing signs: otherwise a journal
+	// whose discounted value is identically zero appears to have every IRR.
+	netted := make([]CashFlow, 0, len(ordered))
+	for i := 0; i < len(ordered); {
+		at := ordered[i].Date
+		total := new(big.Rat)
+		for i < len(ordered) && ordered[i].Date.Equal(at) {
+			if math.IsNaN(ordered[i].Amount) || math.IsInf(ordered[i].Amount, 0) {
+				return 0, errNoIRR
+			}
+			total.Add(total, new(big.Rat).SetFloat64(ordered[i].Amount))
+			i++
+		}
+		amount, _ := total.Float64()
+		if math.IsInf(amount, 0) {
+			return 0, errNoIRR
+		}
+		if amount != 0 {
+			netted = append(netted, CashFlow{Date: at, Amount: amount})
+		}
+	}
+	if len(netted) < 2 {
+		return 0, errNoIRR
+	}
 	var pos, neg bool
-	for _, f := range ordered {
+	for _, f := range netted {
 		switch {
 		case f.Amount > 0:
 			pos = true
@@ -110,36 +135,59 @@ func IRR(flows []CashFlow) (float64, error) {
 		return 0, errNoIRR
 	}
 
-	t0 := ordered[0].Date
-	years := func(d time.Time) float64 { return d.Sub(t0).Hours() / 24 / 365 }
+	t0 := netted[0].Date
+	years := func(d time.Time) float64 {
+		// Timestamp ranges exceed time.Duration's approximately 292-year range.
+		return (float64(d.Unix()-t0.Unix()) + float64(d.Nanosecond()-t0.Nanosecond())/1e9) / (365 * 24 * 60 * 60)
+	}
 	npv := func(r float64) float64 {
-		var v float64
-		for _, f := range ordered {
-			v += f.Amount / math.Pow(1+r, years(f.Date))
+		// A positive common rescaling preserves the root and its sign. Work in
+		// log space so neither tiny money nor long dated discount factors can
+		// underflow the convergence test or overflow the bracket calculation.
+		maxLog := math.Inf(-1)
+		for _, f := range netted {
+			maxLog = math.Max(maxLog, math.Log(math.Abs(f.Amount))-years(f.Date)*math.Log1p(r))
 		}
-		return v
+		var base, v, correction float64
+		for _, f := range netted {
+			sign := math.Copysign(1, f.Amount)
+			base += sign
+			// Keeping exp(x)-1 separate preserves near-cancelling terms at
+			// very short intervals, including a genuine zero annual return.
+			term := sign*math.Expm1(math.Log(math.Abs(f.Amount))-years(f.Date)*math.Log1p(r)-maxLog) - correction
+			next := v + term
+			correction = (next - v) - term
+			v = next
+		}
+		return base + v
 	}
 
 	// Bracket: NPV is monotone decreasing in r over a normal profile. Search for a
 	// sign change between -0.9999 and a large upper rate.
 	lo, hi := -0.9999, 10.0
 	fLo, fHi := npv(lo), npv(hi)
-	if fLo*fHi > 0 {
+	if fLo == 0 {
+		return lo, nil
+	}
+	if fHi == 0 {
+		return hi, nil
+	}
+	if math.Signbit(fLo) == math.Signbit(fHi) {
 		return 0, errNoIRR // no root in the bracket
 	}
 	for i := 0; i < 200; i++ {
 		mid := (lo + hi) / 2
 		fMid := npv(mid)
-		if math.Abs(fMid) < 1e-9 {
+		if fMid == 0 || hi-lo <= 1e-12*math.Max(1, math.Abs(mid)) {
 			return mid, nil
 		}
-		if fLo*fMid < 0 {
+		if math.Signbit(fLo) != math.Signbit(fMid) {
 			hi = mid // fHi is never read again: the loop brackets on fLo's sign
 		} else {
 			lo, fLo = mid, fMid
 		}
 	}
-	return (lo + hi) / 2, nil
+	return 0, errNoIRR
 }
 
 // PME is the Kaplan-Schoar public-market-equivalent: it scales every cashflow by
