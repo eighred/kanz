@@ -42,11 +42,13 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 		end             time.Time
 		want            float64
 		absent          bool
+		distribute      bool
 	}{
-		{"tiny", "0.000000000001", "0.0000000000011", start.AddDate(1, 0, 0), .1, false},
-		{"ordinary", "100", "110", start.AddDate(1, 0, 0), .1, false},
-		{"zero", "100", "100", start.AddDate(1, 0, 0), 0, false},
-		{"same_instant", "100", "100", start, 0, true},
+		{"tiny", "0.000000000001", "0.0000000000011", start.AddDate(1, 0, 0), .1, false, false},
+		{"ordinary", "100", "110", start.AddDate(1, 0, 0), .1, false, false},
+		{"zero", "100", "100", start.AddDate(1, 0, 0), 0, false, false},
+		{"same_instant", "100", "100", start, 0, true, false},
+		{"small_residual", "1", "0.00000000000000000001", start.Add(2 * time.Microsecond), .00000031536004972597000989, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call, ok := new(big.Rat).SetString(tc.call)
@@ -57,10 +59,14 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 			if !ok {
 				t.Fatal("invalid NAV fixture")
 			}
-			for _, e := range []*alternatives.Event{
+			events := []*alternatives.Event{
 				{EventID: tc.name + "-call", CommitmentID: tc.name, Type: alternatives.EventCall, Amount: call, Date: start},
 				{EventID: tc.name + "-nav", CommitmentID: tc.name, Type: alternatives.EventNAVMark, Amount: nav, Date: tc.end},
-			} {
+			}
+			if tc.distribute {
+				events = append(events, &alternatives.Event{EventID: tc.name + "-distribution", CommitmentID: tc.name, Type: alternatives.EventDistribution, Amount: big.NewRat(1, 1), Date: start.Add(time.Microsecond)})
+			}
+			for _, e := range events {
 				if err := st.Append(context.Background(), e); err != nil {
 					t.Fatal(err)
 				}
@@ -69,8 +75,8 @@ func irrServedFixtures(t *testing.T, st fund.Store) {
 				}
 			}
 			rows, err := st.Journal(context.Background(), tc.name)
-			if err != nil || len(rows) != 2 {
-				t.Fatalf("journal rows = %d, %v; want two idempotent records", len(rows), err)
+			if err != nil || len(rows) != len(events) {
+				t.Fatalf("journal rows = %d, %v; want %d idempotent records", len(rows), err, len(events))
 			}
 			result := irrPositionResponse(t, st, tc.name)
 			value, present := result["irr"]
@@ -155,7 +161,7 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 	irrServedFixtures(t, st)
 	pool.Close()
 	restarted := fund.NewPostgres(open("irr-owner"))
-	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant"} {
+	for _, id := range []string{"tiny", "ordinary", "zero", "same_instant", "small_residual"} {
 		t.Run("restart_"+id, func(t *testing.T) {
 			result := irrPositionResponse(t, restarted, id)
 			if id == "same_instant" {
@@ -166,6 +172,8 @@ func TestIRRPostgresServedRestartAndIsolation(t *testing.T) {
 				want := .1
 				if id == "zero" {
 					want = 0
+				} else if id == "small_residual" {
+					want = .00000031536004972597000989
 				}
 				got, ok := result["irr"].(float64)
 				if !ok || math.Abs(got-want) > 1e-10 {
