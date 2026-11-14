@@ -74,13 +74,35 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Nine
+stage/category, never subprocess arguments or one-run credentials. Thirteen
 qualification controls discriminate these failures alongside the 14 projection
 controls.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
 reviewed advisory installer. A control reads the real workflow through a
 read-only mount and rejects omitted scanner/auth/schema selectors.
+
+Trivy's [pinned OCI implementation](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/oci/artifact.go#L188)
+writes the compressed database layer to a temporary
+file before extraction. The reference main/Java DB layers observed during this
+repair were 140,857,902 and 999,527,167 bytes; an 8 MiB file ceiling cannot admit
+those legitimate inputs. Scanner commands now have an 8 GiB per-file ceiling
+and an independently enforced 12 GiB private tmpfs for cache plus temporary
+files. Ordinary command file limits and all target-container caps remain unchanged.
+The tmpfs uses nosuid/nodev/noexec, the runner's uid/gid and an exact source/nonce
+mount identity in the exclusive owner record. Normal/interrupted cleanup verifies
+that identity before unmounting. Scans preserve the existing fixed-CRITICAL
+policy and Java analysis; no advisory exception is added. The database hashes,
+sizes, safe metadata and limits enter the receipt. The cache is released before
+GMS/stores start. The 12 GiB ceiling is not a capacity or extracted-size pass;
+the actual hosted Linux run must qualify available memory and the complete scan.
+
+An independent 8 MiB stdout/stderr pipe budget kills and reaps the process group
+at overflow, with a separate deadline. Scanner storage, database download,
+network diagnostics and actual structured advisory refusal have closed error
+categories. No raw command arguments/logs or credentials enter diagnostics.
+The earlier CI stopped before per-image scans; its exact errno was not retained
+and is not relabelled as an observed EFBIG or advisory result.
 Required runtime cases cannot skip. Normal runs without the disposable catalog
 skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.

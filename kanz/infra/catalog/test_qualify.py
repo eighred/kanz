@@ -14,7 +14,9 @@ import qualify
 import yaml
 
 IDENTITY = {"sourceSHA": "a" * 40, "treeSHA": "b" * 40, "runID": "123", "runAttempt": "1"}
-OWNER = dict(IDENTITY, schema=1, kind="catalog-qualification", nonce="0123456789abcdef", network="kanz-catalog-0123456789abcdef")
+OWNER_PATH = Path("/owned/run/catalog-owner.json")
+OWNER = dict(IDENTITY, schema=1, kind="catalog-qualification", nonce="0123456789abcdef", network="kanz-catalog-0123456789abcdef",
+             scannerMount={"path": "/owned/run/catalog-fixture/scanner-state", "source": "kanz-catalog-0123456789abcdef-scanner", "filesystem": "tmpfs", "bytes": qualify.SCANNER_DISK_LIMIT, "options": ["nosuid", "nodev", "noexec"], "uid": os.getuid(), "gid": os.getgid()})
 
 
 class QualificationControls(unittest.TestCase):
@@ -74,7 +76,7 @@ class QualificationControls(unittest.TestCase):
             owner = dict(OWNER, **{key: value})
             execute = mock.Mock()
             with self.subTest(key=key), mock.patch.object(qualify, "read_owner", return_value=owner), self.assertRaises(ValueError):
-                qualify.cleanup_owned(Path("unused"), IDENTITY, execute)
+                qualify.cleanup_owned(OWNER_PATH, IDENTITY, execute)
             execute.assert_not_called()
 
     def test_failed_start_still_removes_the_created_owned_container_by_id(self):
@@ -107,7 +109,7 @@ class QualificationControls(unittest.TestCase):
             fixture.start("gms", [])
         self.assertIn(name, state)
         with mock.patch.object(qualify, "read_owner", return_value=OWNER):
-            qualify.cleanup_owned(Path("unused"), IDENTITY, execute)
+            qualify.cleanup_owned(OWNER_PATH, IDENTITY, execute)
         self.assertFalse(state)
         self.assertEqual(deleted, [container_id])
 
@@ -124,7 +126,7 @@ class QualificationControls(unittest.TestCase):
                 return ""
             raise AssertionError("foreign container must not authorize mutation")
         with mock.patch.object(qualify, "read_owner", return_value=OWNER), self.assertRaises(ValueError):
-            qualify.cleanup_owned(Path("unused"), IDENTITY, execute)
+            qualify.cleanup_owned(OWNER_PATH, IDENTITY, execute)
         self.assertFalse(any(args[:2] == ["docker", "rm"] for args in calls))
 
     def test_partial_network_create_is_cleaned_using_the_same_owner(self):
@@ -145,7 +147,7 @@ class QualificationControls(unittest.TestCase):
                 return ""
             raise AssertionError("unexpected cleanup command")
         with mock.patch.object(qualify, "read_owner", return_value=OWNER):
-            qualify.cleanup_owned(Path("unused"), IDENTITY, execute)
+            qualify.cleanup_owned(OWNER_PATH, IDENTITY, execute)
         self.assertEqual(deleted, [network_id])
         self.assertFalse(existing)
 
@@ -155,7 +157,7 @@ class QualificationControls(unittest.TestCase):
         marker = "one-run-credential-marker"
         command = ["docker", "run", "--env", "PASSWORD=" + marker]
         timeout = subprocess.TimeoutExpired(command, 1)
-        with mock.patch.object(qualify.subprocess, "run", side_effect=timeout):
+        with mock.patch.object(qualify.subprocess, "Popen", side_effect=timeout):
             try:
                 fixture.run(command)
             except ValueError as error:
@@ -167,16 +169,86 @@ class QualificationControls(unittest.TestCase):
         self.assertNotIn("PASSWORD=", diagnostic)
         self.assertNotIn(str(command), diagnostic)
 
+    def test_output_overflow_is_bounded_and_terminates_the_process_group(self):
+        output = bytearray(b"a" * qualify.OUTPUT_LIMIT)
+        with self.assertRaises(qualify.CommandFailure):
+            qualify.append_output(output, b"x")
+        self.assertEqual(len(output), qualify.OUTPUT_LIMIT)
+        fixture = object.__new__(qualify.Fixture)
+        fixture.stage, fixture.environment = "bounded-command", {}
+        for category in ("output-budget", "timeout"):
+            process = mock.Mock()
+            process.poll.return_value = None
+            with self.subTest(category=category), mock.patch.object(qualify.subprocess, "Popen", return_value=process) as launch, mock.patch.object(qualify, "capture_process", side_effect=qualify.CommandFailure("capture", category)), mock.patch.object(qualify, "stop_process") as stop:
+                with self.assertRaises(qualify.CommandFailure):
+                    fixture.run(["dummy-command"])
+                stop.assert_called_once_with(process)
+                self.assertEqual(launch.call_args.kwargs["stdout"], subprocess.PIPE)
+                self.assertTrue(launch.call_args.kwargs["start_new_session"])
+        process = mock.Mock(pid=1234)
+        with mock.patch.object(qualify.os, "killpg") as terminate:
+            qualify.stop_process(process)
+        terminate.assert_called_once_with(1234, qualify.signal.SIGKILL)
+        process.wait.assert_called_once_with(timeout=10)
+
+    def test_scanner_profile_preserves_finite_default_command_limits(self):
+        self.assertEqual(qualify.command_limits(["trivy"], True), 8 << 30)
+        self.assertEqual(qualify.command_limits(["docker"], False), 8 << 20)
+        with self.assertRaises(ValueError):
+            qualify.command_limits(["docker"], True)
+        self.assertEqual(qualify.SCANNER_DISK_LIMIT, 12 << 30)
+        for layer in qualify.REFERENCE_DB_LAYERS:
+            self.assertGreater(layer["compressedBytes"], qualify.DEFAULT_FILE_LIMIT)
+            self.assertLess(layer["compressedBytes"], qualify.SCANNER_FILE_LIMIT)
+        fixture = object.__new__(qualify.Fixture)
+        fixture.stage, fixture.environment = "resource-profile", {}
+        for args, scanner, expected in ((["trivy"], True, 8 << 30), (["docker"], False, 8 << 20)):
+            process = mock.Mock()
+            process.poll.return_value = 0
+            with mock.patch.object(qualify.subprocess, "Popen", return_value=process) as launch, mock.patch.object(qualify, "capture_process", return_value=(0, b"")), mock.patch.object(qualify.resource, "setrlimit") as limits:
+                fixture.run(args, scanner=scanner)
+                launch.call_args.kwargs["preexec_fn"]()
+                limits.assert_any_call(qualify.resource.RLIMIT_FSIZE, (expected, expected))
+
+    def test_scanner_failure_categories_keep_refusals_distinct(self):
+        cases = ((b"copy error: file too large", 1, "scanner-file-budget"),
+                 (b"no space left on device", 1, "scanner-disk-budget"),
+                 (b"dial tcp: no such host", 1, "scanner-network"),
+                 (b"Java DB download failed", 1, "scanner-java-db-download"),
+                 (b"vulnerability database download failed", 1, "scanner-db-download"),
+                 (b"unknown refusal", 1, "scanner-command-exit"))
+        for body, code, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(qualify.failure_category(body, code, True), expected)
+
+    def test_scanner_cleanup_requires_exact_owned_mount_identity(self):
+        mount = {"filesystem": "tmpfs", "source": OWNER["scannerMount"]["source"], "options": ["rw", "nosuid", "nodev", "noexec"]}
+        execute = mock.Mock()
+        with mock.patch.object(qualify, "mount_record", side_effect=[mount, None]), mock.patch.object(qualify.Path, "stat", return_value=mock.Mock(st_uid=os.getuid(), st_gid=os.getgid())), mock.patch.object(qualify.os, "statvfs", return_value=mock.Mock(f_frsize=4096, f_blocks=qualify.SCANNER_DISK_LIMIT // 4096)):
+            qualify.cleanup_scanner(OWNER, OWNER_PATH, execute)
+        execute.assert_called_once_with(["sudo", "-n", "umount", "--", OWNER["scannerMount"]["path"]])
+        execute.reset_mock()
+        with mock.patch.object(qualify, "mount_record", return_value=dict(mount, source="foreign")), self.assertRaises(ValueError):
+            qualify.cleanup_scanner(OWNER, OWNER_PATH, execute)
+        execute.assert_not_called()
+        changed = copy.deepcopy(OWNER)
+        changed["scannerMount"]["path"] = "/foreign/path"
+        with self.assertRaises(ValueError):
+            qualify.cleanup_scanner(changed, OWNER_PATH, execute)
+        execute.assert_not_called()
+
     def test_receipt_cannot_pass_with_missing_cases_or_foreign_revision(self):
         images = {"gms": "gms:v1@sha256:" + "1" * 64}
         original = dict(IDENTITY, owner=OWNER, status="passed", cleanupPassed=True,
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": "sha256:" + "2" * 64, "scanSHA256": "3" * 64}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 9}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 13}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
+        original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
+                               "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
         qualify.validate_receipt(original, IDENTITY, images)
-        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {})):
+        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"})):
             report = copy.deepcopy(original)
             report[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
