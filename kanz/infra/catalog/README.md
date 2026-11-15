@@ -111,12 +111,29 @@ Containers and their ephemeral state are removed on exit.
 
 ### Fixture maintenance images
 
-The disposable search and broker select official maintenance releases
-[OpenSearch 2.19.7](https://github.com/opensearch-project/OpenSearch/releases/tag/2.19.7)
-and Redpanda 26.2.7. `images.json` selects their exact linux/amd64 platform
+The disposable fixture selects official releases
+[OpenSearch 3.9.0](https://github.com/opensearch-project/OpenSearch/releases/tag/3.9.0)
+and Redpanda 26.2.7, plus Canonical's maintained MySQL distribution described
+below. `images.json` selects their exact linux/amd64 platform
 manifests; `image-descriptors.json` binds the independently read raw manifest and
-config hashes, byte counts, media types and ordered rootfs DiffIDs. The other
-four image selections remain unchanged.
+config hashes, byte counts, media types and ordered rootfs DiffIDs. The three
+DataHub image selections remain unchanged.
+
+The previous OpenSearch 2.19.7 candidate still reported two fixed-CRITICAL
+`bcprov-jdk15to18` 1.79 findings in
+[run 43671955287](https://github.com/eighred/kanz/actions/runs/43671955287).
+DataHub 1.8.0's immutable
+[shim factory](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/metadata-service/factories/src/main/java/com/linkedin/gms/factory/search/SearchClientShimFactory.java)
+uses engine autodetection by default; its
+[dispatch and detection](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/metadata-io/src/main/java/com/linkedin/metadata/search/elasticsearch/client/shim/SearchClientShimUtil.java)
+recognize `3.*` as `OPENSEARCH_3` and select the unified OpenSearch client consumed
+by search, index and graph factories. The fixture retains that default. The
+older 2.x-only shim guide is stale; upstream's 3.2.0 integration target does not
+prove this 3.9.0 image. OpenSearch's
+[versioned breaking changes](https://docs.opensearch.org/3.9/breaking-changes/#performance-analyzer-plugin)
+record RCA removal in 3.0 while retaining the Performance Analyzer plugin.
+Actual clean-scan and DataHub runtime compatibility still require the full workflow.
+No jar or plugin is removed or replaced to obtain a scanner pass.
 
 The selected Redpanda image records `libbrotli1:amd64` version
 `1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)
@@ -127,8 +144,8 @@ Redpanda's [patch-release policy](https://docs.redpanda.com/streaming/current/up
 preserves user-facing behavior. These source and package checks do not establish
 a clean scanner verdict or DataHub runtime compatibility. The unchanged full
 six-image fixed-CRITICAL/Java scan and actual catalog workflow must qualify the
-selected bytes before acceptance. OpenSearch 2.19.7 still has unresolved scanner
-findings; source maintenance selection does not override that refusal.
+selected bytes before acceptance. The earlier 2.19.7 refusal remains failed
+evidence and does not qualify the new 3.9.0 bytes.
 
 The disposable SQL store selects Canonical's maintained stable
 [`ubuntu/mysql:8.4-26.04_stable`](https://hub.docker.com/r/ubuntu/mysql), pinned to

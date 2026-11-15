@@ -138,27 +138,27 @@
       ]
     },
     "search": {
-      "reference": "opensearchproject/opensearch:2.19.7@sha256:19615b2c40f322830527fbd4a15bf87d53677a438c1159fdbba8e3fb916f5c51",
-      "publisherReference": "opensearchproject/opensearch:2.19.7@sha256:19615b2c40f322830527fbd4a15bf87d53677a438c1159fdbba8e3fb916f5c51",
+      "reference": "opensearchproject/opensearch:3.9.0@sha256:5c20af6b5cb472a74ba99f663bee3dd03afbeced14b3897b220a87fc75278445",
+      "publisherReference": "opensearchproject/opensearch:3.9.0@sha256:5c20af6b5cb472a74ba99f663bee3dd03afbeced14b3897b220a87fc75278445",
       "executionRepository": "docker.io/opensearchproject/opensearch",
       "repository": "opensearchproject/opensearch",
-      "manifestDigest": "sha256:19615b2c40f322830527fbd4a15bf87d53677a438c1159fdbba8e3fb916f5c51",
-      "manifestBytes": 1621,
+      "manifestDigest": "sha256:5c20af6b5cb472a74ba99f663bee3dd03afbeced14b3897b220a87fc75278445",
+      "manifestBytes": 1622,
       "manifestMediaType": "application/vnd.oci.image.manifest.v1+json",
-      "configDigest": "sha256:1545de2b30ca70766d8e753d814edcd092599edbda1c6dfa3dc5d8a743cc3981",
-      "configBytes": 6549,
+      "configDigest": "sha256:f546dde21473d6d15f4fe4e76e10a5da3fc09f6a0799721642344f9abab0737d",
+      "configBytes": 6546,
       "configMediaType": "application/vnd.oci.image.config.v1+json",
       "os": "linux",
       "architecture": "amd64",
       "rootFSType": "layers",
       "rootFSDiffIDs": [
         "sha256:b3e768b0bc67bd3fc23d71c328ed23deae8abcade8ec908831a08bb45dff5bea",
-        "sha256:e23f10a67c16bfdd49fb6f4f23354612b3e2dd750658d95d193ba05e2c56bf6f",
-        "sha256:281a7752f00e63f2bf1dcc3762205eff78c7a888de231d2066be41b16630f1fc",
-        "sha256:d28bd8bcf5cbca381e9f7cb6a7de692eb3a8c6acd0fed95abb6b628a0938ac17",
+        "sha256:97ac137c66970343b3a3ad878f958aff012d9119d3870e06a20e3179cb16b006",
+        "sha256:429ebd488953fb4450509efcf7d9d4b4203d781699227af291d43532ce04f720",
+        "sha256:2d6c9b3d44a99d044b94288a48e5b8a3c01e6b5ffe33d9707391f53017f05ad8",
         "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
-        "sha256:d40a98aaf658530e7b3754e346c9092ed413293a59072506e89a5499b2f0945a",
-        "sha256:4c30e04118406c43ebb3947e82595a1743e6dca3449d7d3654feb0f2818ba89a"
+        "sha256:d856a07a64d2e71d0deca459646eb17d01c89531fba1d6acf2464d2ca325c5e6",
+        "sha256:162feec6ef398797cf6e6ddaa171941e92763821aa388e666eb234e22597e880"
       ]
     },
     "broker": {
