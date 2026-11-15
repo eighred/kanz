@@ -350,7 +350,79 @@ class BuildDiagnosticControls(unittest.TestCase):
         limited = qualify.runtime_output("\n".join("ERROR: " + secret + str(index) for index in range(17)).encode(), 1, "search-startup-log")["lineContext"]
         self.assertEqual((len(limited["records"]), limited["signalLines"], limited["omittedSignalLines"], limited["truncated"]), (16, 17, 1, True))
         self.assertNotIn(secret, json.dumps((cli, ordinary, abnormal, distinct, limited)))
-        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
+        unknown = qualify.runtime_output(("\t " + secret + " \t").encode(), 1, "search-startup-log")
+        context = unknown["lineContext"]
+        self.assertEqual(unknown["format"], {"utf8Roundtrip": True, "nulByteCount": 0, "escByteCount": 0})
+        self.assertEqual(context["records"], [])
+        self.assertEqual(context["samples"], [{"lineOrdinal": 1, "lineBytes": len(secret.encode()), "lineSHA256": hashlib.sha256(secret.encode()).hexdigest()}])
+        self.assertEqual(context["unknownProjection"], {"lineLimitBytes": 4096, "ordinalBasis": "capture-one-based", "trim": "ascii-whitespace", "selection": "first-ceiling-half-last-floor-half", "consideredLines": 1, "eligibleLines": 1, "refusedLines": 0, "refusalCounts": {"invalid-utf8": 0, "empty-line": 0, "line-budget": 0}, "sampledLines": 1, "omittedEligibleLines": 0})
+        self.assertFalse(context["truncated"])
+        self.assertNotIn(secret, json.dumps(unknown))
+        exact = qualify.runtime_output((secret + "\u00a0").encode(), 1, "search-startup-log")["lineContext"]["samples"][0]
+        self.assertEqual((exact["lineBytes"], exact["lineSHA256"]), (len((secret + "\u00a0").encode()), hashlib.sha256((secret + "\u00a0").encode()).hexdigest()))
+        edge = qualify.runtime_output(b"x" * 4096, 1, "search-startup-log")["lineContext"]["samples"][0]
+        self.assertEqual((edge["lineBytes"], edge["lineSHA256"]), (4096, hashlib.sha256(b"x" * 4096).hexdigest()))
+        multibyte = ("\u00e9" * 2048).encode()
+        unicode_edge = qualify.runtime_output(b" \t" + multibyte + b" \t", 1, "search-startup-log")["lineContext"]["samples"][0]
+        self.assertEqual((unicode_edge["lineBytes"], unicode_edge["lineSHA256"]), (4096, hashlib.sha256(multibyte).hexdigest()))
+        for body, category in ((b"x" * 4097, "line-budget"), (("\u00e9" * 2049).encode(), "line-budget"), (b" \t ", "empty-line"), (b"\xff" + secret.encode(), "invalid-utf8")):
+            refused = qualify.runtime_output(body, 1, "search-startup-log")
+            self.assertEqual(refused["lineContext"]["samples"], [])
+            projection = refused["lineContext"]["unknownProjection"]
+            self.assertEqual((projection["consideredLines"], projection["eligibleLines"], projection["refusedLines"], projection["refusalCounts"][category]), (1, 0, 1, 1))
+            self.assertTrue(refused["lineContext"]["truncated"])
+            self.assertNotIn(secret, json.dumps(refused))
+        for invalid_body in (secret.encode() + b"\n\xff", b"\xff\n" + secret.encode()):
+            capture_invalid = qualify.runtime_output(invalid_body, 1, "search-startup-log")
+            self.assertFalse(capture_invalid["format"]["utf8Roundtrip"])
+            self.assertEqual(capture_invalid["lineContext"]["samples"], [])
+            self.assertEqual(capture_invalid["lineContext"]["unknownProjection"]["refusalCounts"]["invalid-utf8"], 2)
+            self.assertNotIn(secret, json.dumps(capture_invalid))
+        empty = qualify.runtime_output(b"", 1, "search-startup-log")
+        self.assertEqual(empty["lineContext"]["samples"], [])
+        self.assertEqual(empty["lineContext"]["unknownProjection"]["consideredLines"], 0)
+        self.assertFalse(empty["lineContext"]["truncated"])
+        represented = b"\x00\x1b" + secret.encode() + b"\\x00\\x1b"
+        raw_format = qualify.runtime_output(represented, 1, "search-startup-log")
+        self.assertEqual(raw_format["format"], {"utf8Roundtrip": True, "nulByteCount": 1, "escByteCount": 1})
+        self.assertEqual(raw_format["lineContext"]["samples"][0]["lineSHA256"], hashlib.sha256(represented).hexdigest())
+        escaped_prefix = b"\x1bERROR: " + secret.encode()
+        not_normalized = qualify.runtime_output(escaped_prefix, 1, "search-startup-log")
+        self.assertEqual(not_normalized["matchedSignals"], [])
+        self.assertEqual(not_normalized["lineContext"]["samples"][0]["lineSHA256"], hashlib.sha256(escaped_prefix).hexdigest())
+        self.assertNotIn(secret, json.dumps((raw_format, not_normalized)))
+        tail = qualify.runtime_output("\n".join(secret + str(index) for index in range(50)).encode(), 1, "search-startup-log")["lineContext"]
+        self.assertEqual([sample["lineOrdinal"] for sample in tail["samples"]], list(range(11, 19)) + list(range(43, 51)))
+        self.assertEqual((tail["omittedEarlierLines"], tail["unknownProjection"]["eligibleLines"], tail["unknownProjection"]["omittedEligibleLines"]), (10, 40, 24))
+        self.assertTrue(tail["truncated"])
+        known = ["Likely root cause: public", "node validation exception", "uncaught exception in thread", "can not run opensearch as root", "failed to obtain node locks", "failed to test writes in data directory", "unable to create temporary keystore at", "Failed to read keystore password on console", "OPENSEARCH_PATH_CONF must be set to the configuration path", "encountered improperly formatted JVM option in", "bootstrap checks failed", "Error occurred during initialization of VM", "Could not create the Java Virtual Machine.", "Error opening log file", "Invalid -Xlog option", "Unrecognized VM option"]
+        for retained_known, expected_ordinals in ((3, list(range(1, 8)) + list(range(15, 21))), (15, [1]), (16, [])):
+            mixed = qualify.runtime_output("\n".join([secret + str(index) for index in range(20)] + known[:retained_known]).encode(), 1, "search-startup-log")["lineContext"]
+            self.assertEqual(len(mixed["records"]), retained_known)
+            self.assertEqual([sample["lineOrdinal"] for sample in mixed["samples"]], expected_ordinals)
+            self.assertEqual(len(mixed["records"]) + len(mixed["samples"]), 16)
+            self.assertEqual(mixed["unknownProjection"]["omittedEligibleLines"], 20 - len(expected_ordinals))
+            self.assertTrue(mixed["truncated"])
+            self.assertNotIn(secret, json.dumps(mixed))
+        short = qualify.runtime_output("\n".join([secret + str(index) for index in range(5)] + known[:3]).encode(), 1, "search-startup-log")["lineContext"]
+        self.assertEqual([sample["lineOrdinal"] for sample in short["samples"]], [1, 2, 3, 4, 5])
+        self.assertEqual(short["unknownProjection"]["omittedEligibleLines"], 0)
+        self.assertFalse(short["truncated"])
+        for projected in (context, capture_invalid["lineContext"], empty["lineContext"], raw_format["lineContext"], tail, mixed, short):
+            counts = projected["unknownProjection"]
+            self.assertEqual(counts["consideredLines"], counts["eligibleLines"] + counts["refusedLines"])
+            self.assertEqual(counts["refusedLines"], sum(counts["refusalCounts"].values()))
+            self.assertEqual(counts["sampledLines"], len(projected["samples"]))
+            self.assertEqual(counts["eligibleLines"], counts["sampledLines"] + counts["omittedEligibleLines"])
+            self.assertLessEqual(len(projected["records"]) + len(projected["samples"]), 16)
+            for sample in projected["samples"]:
+                self.assertEqual(set(sample), {"lineOrdinal", "lineBytes", "lineSHA256"})
+        for source in ("broker-startup-log", "readiness-command"):
+            other = qualify.runtime_output(secret.encode(), 1, source)
+            self.assertNotIn("format", other)
+            self.assertNotIn("samples", other["lineContext"])
+            self.assertNotIn("unknownProjection", other["lineContext"])
+        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (runtime, 1, "mysql-startup-log"), (runtime, 1, "gms-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)
             except ValueError as error:

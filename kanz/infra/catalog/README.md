@@ -158,9 +158,9 @@ and [JvmOptionsParser](https://github.com/opensearch-project/OpenSearch/blob/4ee
 neither arbitrary exception names, JVM options nor message tails are retained.
 Search resource co-occurrence classes cover only its packaged config tree,
 selected data/log trees and shared temporary/proc/sys classes. Stage, level and
-causal attribution remain unknown. Individual search suffix fingerprints follow
-only the CLI source-frame contract below; other search output retains the
-bounded whole-capture byte count/hash. Conditional
+causal attribution remain unknown. Search suffix fingerprints follow the CLI
+source-frame contract below; unclassified lines have a separate bounded sample
+contract. Conditional
 vendor keystore creation/upgrades do not establish the selected image's state
 or justify a writable-config repair without observed evidence. Search startup
 arguments, image pins and the entire isolation/resource profile are unchanged.
@@ -193,10 +193,27 @@ one prefix, a valid UTF-8 round trip and a nonempty body of at most 4096 bytes
 after explicit ASCII whitespace trimming. Malformed/repeated prefix, invalid
 encoding, empty body and overflow retain closed refusal metadata with no body
 size/hash. It never joins lines. This field is distinct from the broker-only
-`startupMessage`; non-CLI search lines receive no individual fingerprint. Both
+`startupMessage`. Both
 use the same existing 16-record aggregation/omission budget, 40-line tail,
-64 KiB capture ceiling and eight-attempt retention. No generic unknown-line
-fallback is enabled. An exact public-message digest match remains informational.
+64 KiB capture ceiling and eight-attempt retention. An exact public-message
+digest match remains informational.
+
+Completed search-log captures additionally report only UTF-8 round-trip validity
+and raw NUL/ESC byte counts as format metadata. They do not strip ANSI escapes,
+normalize content or guess an encoding. After finishing all known context
+records, unclassified search lines may fill only the remaining record slots:
+`len(records) + len(samples) <= 16`. Eligible unknown lines require capture-wide
+valid UTF-8 and 1–4096 bytes after explicit ASCII whitespace trimming. Each
+sample contains only its one-based logical-line ordinal in the full capture,
+trimmed byte length and SHA-256, never text, exception names, paths or a cause.
+If eligible lines exceed capacity, selection takes the first ceiling-half and
+last floor-half of that capacity in ordinal order. If they fit, each is retained
+once. The 40-line tail remains mandatory; earlier line ordinals are not reset.
+Closed counts distinguish considered, eligible, sampled, refused and omitted
+lines, with separate invalid-UTF-8, empty-line and line-budget refusals. Refused
+or omitted samples mark truncation along with the existing tail/known-record
+omissions. Invalid UTF-8 anywhere refuses every individual unknown-line hash.
+Broker, readiness-command, MySQL and GMS sources receive no such fallback.
 Only a broker line containing the exact case-sensitive compiled prefix
 `Failure during startup: ` once may retain `startupMessage` byte length and
 SHA-256 of its suffix. The capture must round-trip as valid UTF-8; trimming is

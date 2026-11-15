@@ -366,10 +366,13 @@ def runtime_output(output, code, source):
                "omittedEarlierLines": max(0, len(lines) - READINESS_CONTEXT_LINES),
                "signalLines": 0, "omittedSignalLines": 0, "records": []}
     records = {}
-    for line in lines[-READINESS_CONTEXT_LINES:]:
+    unknown_lines = []
+    for ordinal, line in enumerate(lines[-READINESS_CONTEXT_LINES:], max(0, len(lines) - READINESS_CONTEXT_LINES) + 1):
         lowered = line.lower()
         line_signals = signal_classes(line)
         if not line_signals:
+            if source == "search-startup-log":
+                unknown_lines.append((ordinal, line))
             continue
         context["signalLines"] += 1
         bindings = [(match["operation"], resource_class(match["path"]), match["error"].replace(" ", "-")) for match in path_error.finditer(line)]
@@ -406,11 +409,42 @@ def runtime_output(output, code, source):
             context["records"].append(records[key])
         records[key]["count"] += 1
     context["truncated"] = bool(context["omittedEarlierLines"] or context["omittedSignalLines"])
-    return {"informationalOnly": True, "source": source, "captureComplete": True,
-            "outputLimitBytes": READINESS_OUTPUT_LIMIT, "capturedBytes": len(output),
-            "capturedSHA256": hashlib.sha256(output).hexdigest(), "exitCode": code,
-            "category": "multiple-signals" if len(signals) > 1 else "signal-observed" if signals else "unclassified-output",
-            "matchedSignals": signals, "lineContext": context}
+    result = {"informationalOnly": True, "source": source, "captureComplete": True,
+              "outputLimitBytes": READINESS_OUTPUT_LIMIT, "capturedBytes": len(output),
+              "capturedSHA256": hashlib.sha256(output).hexdigest(), "exitCode": code,
+              "category": "multiple-signals" if len(signals) > 1 else "signal-observed" if signals else "unclassified-output",
+              "matchedSignals": signals, "lineContext": context}
+    if source == "search-startup-log":
+        # No decoding/ANSI guesses: invalid UTF-8 refuses individual hashes;
+        # NUL/ESC are counted only, and valid lines preserve their exact bytes.
+        result["format"] = {"utf8Roundtrip": utf8_roundtrip, "nulByteCount": output.count(b"\x00"), "escByteCount": output.count(b"\x1b")}
+        refusals = {"invalid-utf8": 0, "empty-line": 0, "line-budget": 0}
+        eligible = []
+        for ordinal, line in unknown_lines:
+            if not utf8_roundtrip:
+                refusals["invalid-utf8"] += 1
+                continue
+            body = line.encode("utf-8").strip(b" \t\r\n\v\f")
+            if not body:
+                refusals["empty-line"] += 1
+            elif len(body) > STARTUP_MESSAGE_LIMIT:
+                refusals["line-budget"] += 1
+            else:
+                eligible.append({"lineOrdinal": ordinal, "lineBytes": len(body), "lineSHA256": hashlib.sha256(body).hexdigest()})
+        # Finish known records first. Unknowns may use only remaining slots,
+        # taking the first ceiling-half and last floor-half in ordinal order.
+        slots = READINESS_CONTEXT_RECORDS - len(context["records"])
+        samples = eligible if len(eligible) <= slots else eligible[:(slots + 1) // 2] + (eligible[-(slots // 2):] if slots // 2 else [])
+        refused = sum(refusals.values())
+        omitted = len(eligible) - len(samples)
+        context["samples"] = samples
+        context["unknownProjection"] = {"lineLimitBytes": STARTUP_MESSAGE_LIMIT, "ordinalBasis": "capture-one-based",
+                                        "trim": "ascii-whitespace", "selection": "first-ceiling-half-last-floor-half",
+                                        "consideredLines": len(unknown_lines), "eligibleLines": len(eligible),
+                                        "refusedLines": refused, "refusalCounts": refusals,
+                                        "sampledLines": len(samples), "omittedEligibleLines": omitted}
+        context["truncated"] = context["truncated"] or bool(refused or omitted)
+    return result
 
 
 def runtime_refusal(category, source, code=None):
