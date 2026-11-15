@@ -47,6 +47,23 @@ REFERENCE_DB_LAYERS = [
 MYSQL_USER = "584788:584788"
 MYSQL_VERSION = "8.4.11-0ubuntu0.26.04.1"
 BROKER_PROPERTY = "auto_create_topics_enabled"
+SEARCH_CONFIG_SOURCE = "/usr/share/opensearch/config"
+SEARCH_CONFIG_COPY = "/tmp/kanz-catalog-search-config"
+SEARCH_LAUNCHER = "/usr/share/opensearch/bin/opensearch"
+SEARCH_CONFIG_PREPARE = r'''set -eu
+umask 077
+config_source=$1
+config_copy=$2
+shift 2
+test -d "$config_source"
+test ! -L "$config_source"
+invalid_entry=$(find -P "$config_source" -xdev ! -type d ! -type f -print -quit)
+test -z "$invalid_entry"
+mkdir -m 700 -- "$config_copy"
+cp -R -P -- "$config_source"/. "$config_copy"/
+export OPENSEARCH_PATH_CONF="$config_copy"
+exec "$@"
+'''
 MYSQL_TMPFS = {"/tmp": "rw,nosuid,nodev,size=512m",
                "/var/lib/mysql": "rw,nosuid,nodev,size=1g,uid=584788,gid=584788",
                "/run/mysqld": "rw,nosuid,nodev,size=16m,uid=584788,gid=584788"}
@@ -749,7 +766,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 37 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 38 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1068,8 +1085,12 @@ class Fixture:
         # OpenSearch 4ee42a94 main:93–104 flushes buffered startup errors when
         # base_path is seeded; LogConfigurator:167 replaces it before logging.
         # This observes Docker output, not the existence of any suggested file.
+        # The vendor launcher consumes OPENSEARCH_PATH_CONF before Java starts;
+        # keystore creation/upgrades need adjacent temporary files in that tree.
+        # Copy only immutable regular files/directories into fresh private tmpfs.
         return self.start("search", ["--user", "1000:1000", "--tmpfs", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "--tmpfs", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000", "--env", "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java -Dopensearch.logs.base_path=/usr/share/opensearch/logs"],
-                          ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/usr/share/opensearch/bin/opensearch")
+                          ["-c", SEARCH_CONFIG_PREPARE, "catalog-search-config", SEARCH_CONFIG_SOURCE, SEARCH_CONFIG_COPY, SEARCH_LAUNCHER,
+                           "-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/bin/bash")
 
     def configure_broker(self, container):
         self.broker_evidence = None
@@ -1304,11 +1325,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 51 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 52 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 37}
+        report["qualificationControls"] = {"count": 38}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"

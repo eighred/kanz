@@ -4,6 +4,7 @@ import fnmatch
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import traceback
 import unittest
@@ -38,12 +39,12 @@ class QualificationControls(unittest.TestCase):
         args = fixture.run.call_args.args[0]
         image_index = args.index(reference)
         self.assertEqual(qualify.image_identity.selections()["search"]["reference"], reference)
-        self.assertEqual(args[image_index + 1:], ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"])
+        self.assertEqual(args[image_index + 1:], ["-c", qualify.SEARCH_CONFIG_PREPARE, "catalog-search-config", "/usr/share/opensearch/config", "/tmp/kanz-catalog-search-config", "/usr/share/opensearch/bin/opensearch", "-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"])
         options = args[:image_index]
         def values(flag):
             return [options[index + 1] for index, value in enumerate(options[:-1]) if value == flag]
         self.assertEqual(values("--env"), ["OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java -Dopensearch.logs.base_path=/usr/share/opensearch/logs"])
-        self.assertEqual(values("--entrypoint"), ["/usr/share/opensearch/bin/opensearch"])
+        self.assertEqual(values("--entrypoint"), ["/bin/bash"])
         self.assertEqual(values("--user"), ["1000:1000"])
         self.assertEqual(values("--tmpfs"), ["/tmp:rw,nosuid,nodev,size=512m", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000"])
         for flag, expected in (("--cap-drop", "ALL"), ("--security-opt", "no-new-privileges"), ("--network", OWNER["network"]), ("--memory", "2g"), ("--memory-swap", "2g"), ("--cpus", "2"), ("--pids-limit", "256"), ("--platform", "linux/amd64")):
@@ -53,6 +54,69 @@ class QualificationControls(unittest.TestCase):
             self.assertNotIn(flag, options)
         self.assertNotIn(OWNER["registryProfile"], " ".join(args))
         self.assertFalse(any("approved_only" in value or "enable-native-access" in value or "java.security.properties" in value for value in args))
+
+    def test_search_config_preparation_is_exclusive_and_preserves_relative_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "vendor-config"
+            source.mkdir()
+            (source / "jvm.options.d").mkdir()
+            contents = {"opensearch.yml": b"cluster.name: fixture\n", ".fixture": b"hidden\n", "jvm.options.d/fixture.options": b"-Xms512m\n"}
+            for name, body in contents.items():
+                (source / name).write_bytes(body)
+            stub = 'import json,os,sys; print(json.dumps({"config":os.environ["OPENSEARCH_PATH_CONF"],"args":sys.argv[1:]}))'
+            arguments = ["-Ediscovery.type=single-node", "literal *", "one argument with spaces"]
+            def prepare(destination, selected_source=source, tools="/usr/bin:/bin"):
+                return subprocess.run(["/bin/bash", "-c", qualify.SEARCH_CONFIG_PREPARE, "catalog-search-config", str(selected_source), str(destination), sys.executable, "-c", stub, *arguments], env={"PATH": tools}, capture_output=True, text=True, timeout=5)
+            destination = root / "fresh"
+            result = prepare(destination)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), {"config": str(destination), "args": arguments})
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+            for name, body in contents.items():
+                self.assertEqual((destination / name).read_bytes(), body)
+                self.assertEqual((source / name).read_bytes(), body)
+            stale = destination / "stale"
+            stale.write_bytes(b"preserve")
+            result = prepare(destination)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(stale.read_bytes(), b"preserve")
+            linked_destination = root / "linked-destination"
+            linked_destination.symlink_to(destination, target_is_directory=True)
+            linked_source = root / "linked-source"
+            linked_source.symlink_to(source, target_is_directory=True)
+            for copy, original in ((linked_destination, source), (root / "copy-linked-source", linked_source), (root / "copy-missing-source", root / "missing-source"), (root / "copy-file-source", source / "opensearch.yml")):
+                result = prepare(copy, original)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+            self.assertFalse((root / "copy-linked-source").exists())
+            self.assertFalse((root / "copy-missing-source").exists())
+            self.assertFalse((root / "copy-file-source").exists())
+            for target in (source / "opensearch.yml", source / "jvm.options.d"):
+                link = source / "linked-entry"
+                link.symlink_to(target, target_is_directory=target.is_dir())
+                refused = root / "copy-linked-entry"
+                result = prepare(refused)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(refused.exists())
+                link.unlink()
+            fifo = source / "special-entry"
+            os.mkfifo(fifo)
+            result = prepare(root / "copy-special")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertFalse((root / "copy-special").exists())
+            fifo.unlink()
+            for command in ("find", "cp"):
+                tools = root / (command + "-failure")
+                tools.mkdir()
+                (tools / command).symlink_to("/bin/false")
+                result = prepare(root / (command + "-copy"), tools=str(tools) + ":/usr/bin:/bin")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+            self.assertFalse((root / "find-copy").exists())
 
     def test_broker_rpc_and_live_property_require_the_same_owned_container(self):
         fixture = object.__new__(qualify.Fixture)
@@ -583,7 +647,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 37}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 38}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}

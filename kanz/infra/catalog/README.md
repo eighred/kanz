@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-seven
+stage/category, never subprocess arguments or one-run credentials. Thirty-eight
 qualification controls discriminate these failures alongside the 14 projection
-controls: 51 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 52 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -160,9 +160,10 @@ Search resource co-occurrence classes cover only its packaged config tree,
 selected data/log trees and shared temporary/proc/sys classes. Stage, level and
 causal attribution remain unknown. Search suffix fingerprints follow the CLI
 source-frame contract below; unclassified lines have a separate bounded sample
-contract. Conditional
-vendor keystore creation/upgrades do not establish the selected image's state
-or justify a writable-config repair without observed evidence. Search retains
+contract. Conditional vendor keystore creation/upgrades do not establish the
+selected image's exact file state. The config relocation below supports the
+documented write flow without assuming a particular missing or stale file.
+Search retains
 the four `-E` arguments, image pins and isolation/resource profile; its explicit
 BC-FIPS Java-variant property is documented below.
 The [JvmErgonomics options probe](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/distribution/tools/launchers/src/main/java/org/opensearch/tools/launchers/JvmErgonomics.java#L108)
@@ -295,7 +296,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 51 catalog controls, seven shared
+and capture overflow. The inventory contains 52 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -370,8 +371,32 @@ and [LogConfigurator](https://github.com/opensearch-project/OpenSearch/blob/4ee4
 overwrites the property before configuring logging. This observation setting is
 neither a CLI switch nor a startup repair. An early suggested filename can be
 misleading and proves no file exists or is readable; the fixture collects no
-logfiles. It changes no parser, diagnostic budget or isolation limit, and the
-actual startup failure cause remains unknown.
+logfiles. It changes no parser, diagnostic budget or isolation limit and alone
+identifies no startup failure cause.
+
+Before the vendor launcher, a fixed Bash prelude copies the complete packaged
+config tree into `/tmp/kanz-catalog-search-config` as UID 1000 under the existing
+512 MiB temporary filesystem. It rejects a linked source root, symlinks or
+special entries below it, creates the private directory exclusively with mode
+0700 and refuses any existing destination. The copy never dereferences links;
+failed validation, discovery or copying aborts before Java. It preserves
+relative files, exports `OPENSEARCH_PATH_CONF` and finally execs the original
+vendor launcher with the same four `-E` arguments and JVM properties. No new
+mount or executable temporary file is introduced; the image configuration stays
+immutable and the existing read-only root, noexec tmpfs, caps and limits remain.
+
+The pinned public [environment script](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/distribution/src/bin/opensearch-env#L103)
+respects an existing config-directory override, and the
+[launcher](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/distribution/src/bin/opensearch#L59)
+passes it to both JVM-option parsing and Java. `Bootstrap.loadSecureSettings`
+uses that directory for missing-key creation or an existing-key upgrade;
+[KeyStoreWrapper.save](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java#L529)
+writes an adjacent temporary file before atomic replacement. A sandbox control
+exercises the exact prelude on synthetic trees, including stale state, linked
+entries, discovery/copy failure and quoted argument forwarding. This supported
+relocation does not identify the precise refused file, operation or original
+keystore state. Actual startup and full catalog acceptance still require Linux
+runtime proof.
 
 The selected Redpanda image records `libbrotli1:amd64` version
 `1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)
