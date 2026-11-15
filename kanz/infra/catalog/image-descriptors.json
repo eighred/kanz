@@ -116,30 +116,25 @@
       ]
     },
     "mysql": {
-      "reference": "mysql:8.2@sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
-      "publisherReference": "mysql:8.2@sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
-      "executionRepository": "docker.io/library/mysql",
-      "repository": "library/mysql",
-      "manifestDigest": "sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
-      "manifestBytes": 2558,
+      "reference": "ubuntu/mysql:8.4-26.04_stable@sha256:b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e",
+      "publisherReference": "ubuntu/mysql:8.4-26.04_stable@sha256:b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e",
+      "executionRepository": "docker.io/ubuntu/mysql",
+      "repository": "ubuntu/mysql",
+      "manifestDigest": "sha256:b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e",
+      "manifestBytes": 1921,
       "manifestMediaType": "application/vnd.oci.image.manifest.v1+json",
-      "configDigest": "sha256:bc861cf238f24a71398f27b6eb77051fe60b834e003f33e4a36e3e19c37df1d1",
-      "configBytes": 6517,
+      "configDigest": "sha256:73b12c45d61f5005fe5252c2bbb65d75d5f0e5c3725ff0f97d25a35fa9169d4f",
+      "configBytes": 7241,
       "configMediaType": "application/vnd.oci.image.config.v1+json",
       "os": "linux",
       "architecture": "amd64",
       "rootFSType": "layers",
       "rootFSDiffIDs": [
-        "sha256:39d129b028b4ace2c0e701d43ea9027677dc12650379615b53ae90c53f2f502c",
-        "sha256:b7965978114e00f12848a7ef936728c2d5c5f110f269ee1fd3611ca44c57b264",
-        "sha256:4a34d6439ce24c0f4d404bba82f53838f79a06b8ba13597e63831564b547cf97",
-        "sha256:224ac9c87da486717018ac97730df2dbeab6093f7474f453021ad5c148ec64f0",
-        "sha256:2dab0bcf65eabcb0cfc43f65829f0a9ffcef41bee243c80b0c75af2cddbe36d9",
-        "sha256:2aa45e746b24c4e5178ba3af4dfd1717801b8dd757ba2c20aa434d4846f7b852",
-        "sha256:5ecc0cccbf1db30480090995231f896bfa4919feb11be0d2b0da269830a4a05c",
-        "sha256:089a545dd35ee49dfc1b443861e9256a27199fd319a5b8ff9510a864216fe9ca",
-        "sha256:5299ab6ac25ec67cc1aceeebd71a65330005664944d56f27459151113f80b363",
-        "sha256:29b39adf36dbc9b0e799c4e37205ce45a85edd8d54bf79d9f19c997b3ef930f9"
+        "sha256:f6e0e88dd8e11c81dba77d657b271e1ed7c33882e8f4dfaa7768cbaee94d94fc",
+        "sha256:f98d83061adc18abc1ffea46400be62b16d3da85c4e28563a97b3ff4cf7cca14",
+        "sha256:91bf3db70c9315d8e381205458865dd43268cd8318297b532f429a967db3713a",
+        "sha256:0e648d7eba9d4c47214405400ccf4342c0d6916574d5cee78f7e9ffbf6749783",
+        "sha256:f97ee8b575f92077275658887696b4adc675fae914f2d908f47422c6659e75fd"
       ]
     },
     "search": {

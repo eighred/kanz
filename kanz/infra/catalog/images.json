@@ -8,7 +8,7 @@
     "gms": "acryldata/datahub-gms:v1.8.0@sha256:73f24aab74fe8342523b5f920bc9013e1e6891b92a23e9fc019da36f419b9e0a",
     "upgrade": "acryldata/datahub-upgrade:v1.8.0@sha256:560d9fb91f9cf99cddbc4ed285442f9072358687ffdbcdeea54c04d17bc17e1a",
     "ingestion": "ghcr.io/eighred/base/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
-    "mysql": "mysql:8.2@sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
+    "mysql": "ubuntu/mysql:8.4-26.04_stable@sha256:b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e",
     "search": "opensearchproject/opensearch:2.19.7@sha256:19615b2c40f322830527fbd4a15bf87d53677a438c1159fdbba8e3fb916f5c51",
     "broker": "redpandadata/redpanda:v26.2.7@sha256:d5cc5fa94b1caf1cee182f4ab6305d73e7ba89ad58ed806bb31f7ae0ae038442"
   }

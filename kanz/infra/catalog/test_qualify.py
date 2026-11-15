@@ -22,6 +22,72 @@ OWNER.update(registryProfile="/owned/run/catalog-registry-" + IDENTITY["sourceSH
 
 
 class QualificationControls(unittest.TestCase):
+    def test_mysql_startup_preserves_vendor_plan_and_bounded_nonroot_profile(self):
+        fixture = object.__new__(qualify.Fixture)
+        reference = "ubuntu/mysql:8.4-26.04_stable@sha256:b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e"
+        fixture.owner, fixture.network = OWNER, OWNER["network"]
+        fixture.images, fixture.secret = {"mysql": reference}, "one-run-mysql-control-marker"
+        fixture.run = mock.Mock(return_value="")
+        self.assertEqual(fixture.start_mysql(), OWNER["network"] + "-mysql")
+        args = fixture.run.call_args.args[0]
+        self.assertEqual(args[-1], reference)
+        self.assertEqual(qualify.image_identity.selections()["mysql"]["reference"], reference)
+        self.assertEqual(qualify.image_identity.selections()["mysql"]["configDigest"], "sha256:73b12c45d61f5005fe5252c2bbb65d75d5f0e5c3725ff0f97d25a35fa9169d4f")
+        def values(flag):
+            return [args[index + 1] for index, value in enumerate(args[:-1]) if value == flag]
+        self.assertEqual(values("--user"), ["584788:584788"])
+        self.assertEqual(values("--tmpfs"), ["/tmp:rw,nosuid,nodev,size=512m", "/var/lib/mysql:rw,nosuid,nodev,size=1g,uid=584788,gid=584788", "/run/mysqld:rw,nosuid,nodev,size=16m,uid=584788,gid=584788"])
+        self.assertEqual(values("--env"), ["PEBBLE=/tmp/catalog-pebble", "PEBBLE_COPY_ONCE=/var/lib/pebble/default", "PEBBLE_PERSIST=never", "XDG_CONFIG_HOME=/tmp/catalog-xdg", "MYSQL_ROOT_PASSWORD=one-run-mysql-control-marker", "MYSQL_ROOT_HOST=%", "MYSQL_DATABASE=datahub"])
+        for flag, expected in (("--cap-drop", "ALL"), ("--security-opt", "no-new-privileges"), ("--network", OWNER["network"]), ("--memory", "1g"), ("--memory-swap", "1g"), ("--cpus", "2"), ("--pids-limit", "256")):
+            self.assertEqual(values(flag), [expected])
+        self.assertIn("--read-only", args)
+        for flag in ("--entrypoint", "--cap-add", "--privileged", "--publish", "-p", "--mount", "--volume"):
+            self.assertNotIn(flag, args)
+        self.assertNotIn(OWNER["registryProfile"], " ".join(args))
+        # Actual process inspection and SQL networking distinguish the final
+        # authenticated server from mysqladmin's temporary-init readiness.
+        for expected in ("/proc/1/status", "= pebble", "= mysqld", "/run/mysqld/mysqld.pid", "@@GLOBAL.skip_networking", "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"", "pebbleUID=", "mysqlUID="):
+            self.assertIn(expected, qualify.MYSQL_PROBE)
+        wait = object.__new__(qualify.Fixture)
+        wait.run = mock.Mock(return_value="public-observation")
+        self.assertEqual(wait.wait_exec("owned-mysql", ["bash", "-ec", qualify.MYSQL_PROBE]), "public-observation")
+
+    def test_mysql_runtime_refuses_foreign_privileges_identity_and_secret_output(self):
+        image_id = qualify.image_identity.selections()["mysql"]["manifestDigest"]
+        info = {"Image": image_id, "Config": {"User": "584788:584788", "Entrypoint": ["/usr/bin/pebble", "enter"], "Cmd": None, "Labels": qualify.labels(OWNER),
+                "Env": ["PEBBLE=/tmp/catalog-pebble", "PEBBLE_COPY_ONCE=/var/lib/pebble/default", "PEBBLE_PERSIST=never", "XDG_CONFIG_HOME=/tmp/catalog-xdg", "MYSQL_ROOT_HOST=%", "MYSQL_DATABASE=datahub", "MYSQL_ROOT_PASSWORD=one-run-secret-marker"]},
+                "HostConfig": {"ReadonlyRootfs": True, "CapDrop": ["ALL"], "CapAdd": None, "Privileged": False, "SecurityOpt": ["no-new-privileges"], "NetworkMode": OWNER["network"], "PortBindings": {}, "PublishAllPorts": False, "Memory": 1073741824, "MemorySwap": 1073741824, "NanoCpus": 2000000000, "PidsLimit": 256,
+                "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=512m", "/var/lib/mysql": "rw,nosuid,nodev,size=1g,uid=584788,gid=584788", "/run/mysqld": "rw,nosuid,nodev,size=16m,uid=584788,gid=584788"}, "Binds": None, "Mounts": None}, "Mounts": []}
+        profile = qualify.mysql_container_profile(info, image_id, OWNER["network"], qualify.labels(OWNER))
+        self.assertNotIn("one-run-secret-marker", json.dumps(profile))
+        changes = [("Config", "User", "999:999"), ("Config", "Entrypoint", ["/bin/sh"]), ("Config", "Cmd", ["mysqld"]), ("Config", "Labels", {}), ("Config", "Env", info["Config"]["Env"] + ["DOCKER_CONFIG=" + OWNER["registryProfile"]]), ("Config", "Env", info["Config"]["Env"] + ["PEBBLE=/foreign"]),
+                   ("HostConfig", "ReadonlyRootfs", False), ("HostConfig", "CapDrop", []), ("HostConfig", "CapAdd", ["SYS_ADMIN"]), ("HostConfig", "Privileged", True), ("HostConfig", "SecurityOpt", []), ("HostConfig", "NetworkMode", "host"), ("HostConfig", "PortBindings", {"3306/tcp": [{"HostPort": "3306"}]}), ("HostConfig", "Memory", 0), ("HostConfig", "MemorySwap", -1), ("HostConfig", "NanoCpus", 0), ("HostConfig", "PidsLimit", 0), ("HostConfig", "Tmpfs", dict(info["HostConfig"]["Tmpfs"], **{"/etc/mysql": "rw"})), ("HostConfig", "Tmpfs", dict(info["HostConfig"]["Tmpfs"], **{"/run/mysqld": "rw,uid=999,gid=999"})), ("HostConfig", "Binds", ["/host:/target:rw"])]
+        for group, key, value in changes:
+            changed = copy.deepcopy(info)
+            changed[group][key] = value
+            with self.subTest(group=group, key=key), self.assertRaises(ValueError):
+                qualify.mysql_container_profile(changed, image_id, OWNER["network"], qualify.labels(OWNER))
+        with self.assertRaises(ValueError):
+            qualify.mysql_container_profile(dict(info, Image="sha256:" + "f" * 64), image_id, OWNER["network"], qualify.labels(OWNER))
+        output = "pebbleUID=584788\npebbleGID=584788\nmysqlUID=584788\nmysqlGID=584788\nsql=8.4.11-0ubuntu0.26.04.1\t0\n"
+        observation = qualify.mysql_observation(output)
+        qualify.validate_mysql_runtime({"container": profile, "observation": observation}, image_id)
+        for changed in (output.replace("mysqlUID=584788", "mysqlUID=0"), output.replace("\t0", "\t1"), output.replace("8.4.11-0ubuntu0.26.04.1", "8.4.13"), output.replace("8.4.11-0ubuntu0.26.04.1", "one-run-secret-marker"), output + "one-run-secret-marker\n"):
+            observed = {}
+            try:
+                observed = qualify.mysql_observation(changed)
+                qualify.validate_mysql_runtime({"container": profile, "observation": observed}, image_id)
+            except ValueError as error:
+                diagnostic = json.dumps(observed) + str(error) + traceback.format_exc()
+            else:
+                self.fail("changed public runtime evidence must refuse")
+            self.assertNotIn("one-run-secret-marker", diagnostic)
+        for evidence in (None, {}, {"container": profile}, {"container": profile, "observation": None}, {"container": dict(profile, imageID="sha256:" + "f" * 64), "observation": observation}):
+            with self.assertRaises(ValueError):
+                qualify.validate_mysql_runtime(evidence, image_id)
+        with self.assertRaises(ValueError):
+            qualify.mysql_observation("one-run-secret-marker" * 4096)
+
     def test_consumed_inputs_select_both_pr_and_main_qualification(self):
         path = Path(os.environ.get("KANZ_CATALOG_WORKFLOW", qualify.ROOT / ".github/workflows/catalog-verification.yml"))
         # BaseLoader retains the Actions `on` key rather than YAML 1.1's bool.
@@ -256,7 +322,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 32}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 34}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}

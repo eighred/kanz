@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-two
+stage/category, never subprocess arguments or one-run credentials. Thirty-four
 qualification controls discriminate these failures alongside the 14 projection
-controls: 46 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 48 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -127,8 +127,57 @@ Redpanda's [patch-release policy](https://docs.redpanda.com/streaming/current/up
 preserves user-facing behavior. These source and package checks do not establish
 a clean scanner verdict or DataHub runtime compatibility. The unchanged full
 six-image fixed-CRITICAL/Java scan and actual catalog workflow must qualify the
-selected bytes before acceptance. MySQL 8.2 retains its existing pin and
-descriptor; its advisory findings remain unresolved and still prevent acceptance.
+selected bytes before acceptance. OpenSearch 2.19.7 still has unresolved scanner
+findings; source maintenance selection does not override that refusal.
+
+The disposable SQL store selects Canonical's maintained stable
+[`ubuntu/mysql:8.4-26.04_stable`](https://hub.docker.com/r/ubuntu/mysql), pinned to
+amd64 manifest `b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e`
+and config `73b12c45d61f5005fe5252c2bbb65d75d5f0e5c3725ff0f97d25a35fa9169d4f`.
+Read-only data inspection verified all five compressed layer hashes/sizes:
+124,184,162 bytes and 7,668 entries. There were no gosu or certifi paths and no
+`.whl`, `.egg` or `.zip` entries. The final Pebble binary's Go build metadata reports
+1.27.1; the MySQL packages report `8.4.11-0ubuntu0.26.04.1`. The mysqld binary
+contains that full version literal; its actual SQL response remains unproved.
+These observations address the old payload selection and do not establish a
+clean scan, vulnerability absence or DataHub runtime compatibility.
+
+The embedded vendor initialization helper and MySQL configuration match
+[Canonical source revision 2436b6a2](https://github.com/canonical/mysql-rock/tree/2436b6a2b44249d4a8f80fa80e8a60b857e62330).
+The selected image's actual mysql UID/GID is `584788:584788`. Its unchanged
+`/usr/bin/pebble enter` entrypoint starts the vendor service plan as that user.
+The fixture sets the same explicit user, retains the 1 GiB data and 16 MiB
+socket tmpfs ceilings with that owner, and uses the existing bounded `/tmp` for
+Pebble state. Documented
+[`PEBBLE_COPY_ONCE` and `PEBBLE_PERSIST`](https://ubuntu.com/docs/pebble/reference/environment-variables/)
+seed the immutable vendor plan into `/tmp/catalog-pebble` and keep daemon state
+in memory. The root filesystem, configuration and binaries remain read-only;
+capabilities remain dropped, no-new-privileges remains enabled, and all CPU,
+memory, process, network and host-credential boundaries remain unchanged. No
+helper package is replaced or removed, and no new image is built for MySQL.
+
+The source helper initializes an empty data directory, configures the provided
+one-run password and `datahub` database through a temporary socket-only server,
+then executes the final server. The fixture inspects the actual image/user,
+vendor entrypoint and isolation/resource profile before trusting readiness. A
+bounded internal probe requires the final network-enabled server, checks the
+actual Pebble/mysqld effective UID/GID and reads SQL `VERSION()`. Only matching
+public version data, numeric identities, output length/hash and verified profile
+flags enter the receipt. Missing/wrong identities, changed mounts/privileges or
+an unexpected version refuse; raw output, environment and credentials do not
+enter receipts or exceptions. These checks still require hosted Linux proof.
+
+DataHub 1.8's
+[pinned Connector/J 9.4.0](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/build.gradle#L364)
+supports MySQL 8.0 and later according to the
+[vendor release notes](https://dev.mysql.com/doc/relnotes/connector-j/en/news-9-4-0.html).
+That supports this disposable maintenance choice; all six unchanged scanner
+checks and all eight actual catalog cases remain mandatory. Pebble's embedded
+VCS revision was not retrievable from the public source/module endpoints during
+inspection. The publisher image bytes and matching helper/configuration are
+verified, but the installed Pebble's exact nonroot/copy-once behavior remains a
+runtime qualification boundary. This fixture does not change Kanz PostgreSQL,
+broker authority or any held production/native runtime.
 
 ### Fixture-only ingestion package correction
 

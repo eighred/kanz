@@ -37,6 +37,70 @@ REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
 ]
+MYSQL_USER = "584788:584788"
+MYSQL_VERSION = "8.4.11-0ubuntu0.26.04.1"
+MYSQL_TMPFS = {"/tmp": "rw,nosuid,nodev,size=512m",
+               "/var/lib/mysql": "rw,nosuid,nodev,size=1g,uid=584788,gid=584788",
+               "/run/mysqld": "rw,nosuid,nodev,size=16m,uid=584788,gid=584788"}
+MYSQL_PUBLIC_ENV = {"PEBBLE": "/tmp/catalog-pebble", "PEBBLE_COPY_ONCE": "/var/lib/pebble/default",
+                    "PEBBLE_PERSIST": "never", "XDG_CONFIG_HOME": "/tmp/catalog-xdg"}
+MYSQL_PROBE = r'''set -eu
+test "$(awk '/^Name:/{print $2}' /proc/1/status)" = pebble
+pid="$(cat /run/mysqld/mysqld.pid)"
+case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+test "$(awk '/^Name:/{print $2}' /proc/"$pid"/status)" = mysqld
+sql="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --batch --skip-column-names --user=root --socket=/run/mysqld/mysqld.sock --execute='SELECT VERSION(), @@GLOBAL.skip_networking')"
+tab="$(printf '\t')"
+case "$sql" in *"${tab}0") ;; *) exit 1 ;; esac
+awk '/^Uid:/{print "pebbleUID=" $3}/^Gid:/{print "pebbleGID=" $3}' /proc/1/status
+awk '/^Uid:/{print "mysqlUID=" $3}/^Gid:/{print "mysqlGID=" $3}' /proc/"$pid"/status
+printf 'sql=%s\n' "$sql"
+'''
+
+
+def mysql_container_profile(info, image_id, network, required_labels):
+    """Project only the verified disposable profile, never inspect.Env values."""
+    if not isinstance(info, dict) or not isinstance(info.get("Config"), dict) or not isinstance(info.get("HostConfig"), dict) or not isinstance(info["Config"].get("Labels"), dict):
+        raise ValueError("catalog MySQL container shape refused")
+    config, host = info.get("Config", {}), info.get("HostConfig", {})
+    expected_env = dict(MYSQL_PUBLIC_ENV, MYSQL_ROOT_HOST="%", MYSQL_DATABASE="datahub")
+    environment = config.get("Env", [])
+    if not isinstance(environment, list) or any(not isinstance(value, str) for value in environment):
+        raise ValueError("catalog MySQL environment shape refused")
+    env_matches = all([value for value in environment if value.startswith(key + "=")] == [key + "=" + expected] for key, expected in expected_env.items())
+    if info.get("Image") != image_id or config.get("User") != MYSQL_USER or config.get("Entrypoint") != ["/usr/bin/pebble", "enter"] or config.get("Cmd") not in (None, []) or any(config.get("Labels", {}).get(key) != value for key, value in required_labels.items()):
+        raise ValueError("catalog MySQL image/user/vendor entrypoint refused")
+    if host.get("ReadonlyRootfs") is not True or host.get("CapDrop") != ["ALL"] or host.get("CapAdd") or host.get("Privileged") is not False or host.get("SecurityOpt") != ["no-new-privileges"] or host.get("NetworkMode") != network or host.get("PortBindings") or host.get("PublishAllPorts") is not False:
+        raise ValueError("catalog MySQL isolation profile refused")
+    if host.get("Memory") != (1 << 30) or host.get("MemorySwap") != (1 << 30) or host.get("NanoCpus") != 2_000_000_000 or host.get("PidsLimit") != 256 or host.get("Tmpfs") != MYSQL_TMPFS or host.get("Binds") or host.get("Mounts") or any(not isinstance(mount, dict) or mount.get("Type") != "tmpfs" for mount in info.get("Mounts", [])):
+        raise ValueError("catalog MySQL resources/mounts refused")
+    if not env_matches or any(value.split("=", 1)[0] in {"DOCKER_CONFIG", "GITHUB_TOKEN", "GH_TOKEN", "MYSQL_RANDOM_ROOT_PASSWORD", "MYSQL_ALLOW_EMPTY_PASSWORD"} for value in environment):
+        raise ValueError("catalog MySQL environment contract refused")
+    return {"imageID": image_id, "user": MYSQL_USER, "vendorEntrypoint": True,
+            "isolationVerified": True, "resourceLimitsVerified": True, "publicEnvironmentVerified": True}
+
+
+def mysql_observation(output):
+    # Closed projections retain only known public literals and effective UIDs.
+    # Unrecognised output (including credentials) never enters a receipt/error.
+    if not isinstance(output, str) or len(output) > 4096:
+        raise ValueError("catalog MySQL public observation bound refused")
+    lines = output.splitlines()
+    result = {"capturedBytes": len(output.encode()), "capturedSHA256": hashlib.sha256(output.encode()).hexdigest()}
+    if len(lines) != 5 or any(not re.fullmatch(key + r"=[0-9]{1,10}", line) for key, line in zip(("pebbleUID", "pebbleGID", "mysqlUID", "mysqlGID"), lines[:4])) or not lines[4].startswith("sql="):
+        raise ValueError("catalog MySQL public observation shape refused")
+    result.update({line.split("=", 1)[0]: int(line.split("=", 1)[1]) for line in lines[:4]})
+    sql_matches = lines[4] == "sql=" + MYSQL_VERSION + "\t0"
+    result.update(sqlVersion=MYSQL_VERSION if sql_matches else None, sqlVersionMatches=sql_matches, networkingEnabled=sql_matches)
+    return result
+
+
+def validate_mysql_runtime(evidence, image_id):
+    if not isinstance(evidence, dict) or evidence.get("container") != {"imageID": image_id, "user": MYSQL_USER, "vendorEntrypoint": True, "isolationVerified": True, "resourceLimitsVerified": True, "publicEnvironmentVerified": True}:
+        raise ValueError("catalog MySQL container evidence incomplete")
+    observed = evidence.get("observation", {})
+    if not isinstance(observed, dict) or any(observed.get(key) != 584788 for key in ("pebbleUID", "pebbleGID", "mysqlUID", "mysqlGID")) or observed.get("sqlVersion") != MYSQL_VERSION or observed.get("sqlVersionMatches") is not True or observed.get("networkingEnabled") is not True or not isinstance(observed.get("capturedBytes"), int) or not 0 < observed["capturedBytes"] <= 4096 or not re.fullmatch(r"[0-9a-f]{64}", observed.get("capturedSHA256", "")):
+        raise ValueError("catalog MySQL effective identity/version evidence incomplete")
 
 
 def load_registry_auth():
@@ -329,6 +393,8 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("registry credential absence/cleanup proof incomplete")
     if report.get("cases") != list(CASES) or report.get("selectedImages") != images or set(report.get("images", {})) != set(images) or report.get("scanFindings"):
         raise ValueError("catalog case/image/scan inventory incomplete")
+    if "mysql" in images:
+        validate_mysql_runtime(report.get("mysqlRuntime", {}), report["images"]["mysql"].get("imageID"))
     for role, reference in images.items():
         item = report["images"][role]
         selected = image_identity.selections()[role]
@@ -361,7 +427,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 32 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 34 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -646,6 +712,18 @@ class Fixture:
     def label_options(self):
         return [item for key, value in labels(self.owner).items() for item in ("--label", key + "=" + value)]
 
+    def start_mysql(self):
+        # Keep Canonical's generated Pebble plan and vendor initialization.
+        # COPY_ONCE seeds that read-only plan into the existing bounded /tmp;
+        # neither the image configuration nor its package graph is changed.
+        options = ["--user", MYSQL_USER]
+        for path in ("/var/lib/mysql", "/run/mysqld"):
+            options += ["--tmpfs", path + ":" + MYSQL_TMPFS[path]]
+        for key, value in MYSQL_PUBLIC_ENV.items():
+            options += ["--env", key + "=" + value]
+        options += ["--env", "MYSQL_ROOT_PASSWORD=" + self.secret, "--env", "MYSQL_ROOT_HOST=%", "--env", "MYSQL_DATABASE=datahub"]
+        return self.start("mysql", options, memory="1g")
+
     def cli(self, command, metadata="metadata.json", network=True):
         child = dict(self.environment, DATAHUB_GMS_AUTHORIZATION=self.auth)
         args = ["docker", "run", "--rm", "--name", self.network + "-cli", *self.label_options(), "--platform", "linux/amd64", "--network", self.network if network else "none",
@@ -686,13 +764,20 @@ class Fixture:
         broker = self.start("broker", ["--tmpfs", "/var/lib/redpanda/data:rw,nosuid,nodev,size=1g,uid=101,gid=101"],
                             ["redpanda", "start", "--config", "/tmp/redpanda.yaml", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "broker:9092", "--set", "redpanda.auto_create_topics_enabled=true"])
         self.stage = "mysql"
-        mysql = self.start("mysql", ["--user", "999:999", "--tmpfs", "/var/lib/mysql:rw,nosuid,nodev,size=1g,uid=999,gid=999", "--tmpfs", "/var/run/mysqld:rw,nosuid,nodev,size=16m,uid=999,gid=999", "--env", "MYSQL_ROOT_PASSWORD=" + self.secret, "--env", "MYSQL_ROOT_HOST=%", "--env", "MYSQL_DATABASE=datahub"], memory="1g")
+        mysql = self.start_mysql()
+        self.mysql_evidence = {"container": mysql_container_profile(json.loads(self.run(["docker", "inspect", mysql]))[0], identities["mysql"]["imageID"], self.network, labels(self.owner))}
         self.stage = "search"
         search = self.start("search", ["--user", "1000:1000", "--tmpfs", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "--tmpfs", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000", "--env", "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"],
                             ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/usr/share/opensearch/bin/opensearch")
         self.stage = "storage-readiness"
         self.wait_exec(broker, ["rpk", "cluster", "info", "-X", "brokers=broker:9092"])
-        self.wait_exec(mysql, ["mysqladmin", "ping", "--silent"])
+        # mysqladmin can pass for the temporary socket-only init server. Wait
+        # for the authenticated final server, then verify both effective users.
+        self.stage = "mysql-runtime"
+        observed = self.wait_exec(mysql, ["bash", "-ec", MYSQL_PROBE])
+        self.mysql_evidence["observation"] = mysql_observation(observed)
+        validate_mysql_runtime(self.mysql_evidence, identities["mysql"]["imageID"])
+        self.stage = "storage-readiness"
         self.wait_exec(search, ["curl", "--fail", "--silent", "http://search:9200/_cluster/health"])
         common = {
             "EBEAN_DATASOURCE_DRIVER": "com.mysql.jdbc.Driver", "EBEAN_DATASOURCE_HOST": "mysql:3306",
@@ -734,8 +819,7 @@ class Fixture:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                self.run(["docker", "exec", container, *args], timeout=15)
-                return
+                return self.run(["docker", "exec", container, *args], timeout=15)
             except ValueError:
                 state = json.loads(self.run(["docker", "inspect", "--format", "{{json .State}}", container]))
                 if not state["Running"]:
@@ -782,11 +866,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 46 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 48 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 32}
+        report["qualificationControls"] = {"count": 34}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -818,6 +902,7 @@ def qualify(scratch, binary):
         report["scanner"] = getattr(fixture, "scanner_evidence", None)
         report["images"] = getattr(fixture, "image_identities", report.get("images", {}))
         report["preparation"] = getattr(fixture, "preparation_evidence", None)
+        report["mysqlRuntime"] = getattr(fixture, "mysql_evidence", None)
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)
         if not report["cleanupPassed"]:
