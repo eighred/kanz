@@ -369,7 +369,7 @@ class Fixture:
         (context / "Dockerfile").write_bytes(image_patch.render_dockerfile(record["labels"]))
         (context / "linux-libc-dev.deb").write_bytes(image_patch.download(image_patch.lock()))
         self.stage = "offline-ingestion-build"
-        versions = json.loads(self.run(["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.ApiVersion}},"serverAPI":{{json .Server.ApiVersion}}}']))
+        versions = json.loads(self.run(["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.APIVersion}},"serverAPI":{{json .Server.APIVersion}}}']))
         build = dict(image_patch.BUILD, docker=versions)
         image_patch.validate_build(build)
         iid = context / "derived.iid"

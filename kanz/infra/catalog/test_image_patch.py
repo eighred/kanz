@@ -169,6 +169,8 @@ class ImagePatchControls(unittest.TestCase):
             def execute(args, **kwargs):
                 commands.append(args)
                 if args[:2] == ["docker", "version"]:
+                    # Go-template exported fields differ from JSON's ApiVersion tag.
+                    self.assertEqual(args, ["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.APIVersion}},"serverAPI":{{json .Server.APIVersion}}}'])
                     return json.dumps({"client": "29.0.0", "server": "29.0.0", "clientAPI": "1.52", "serverAPI": "1.52"})
                 if args[:2] == ["docker", "build"]:
                     self.assertIn("--network=none", args)
