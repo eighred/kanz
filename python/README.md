@@ -34,6 +34,11 @@ locks are separate; `requirements-codegen.txt` builds the image SDK in its own
 Python environment. CI also checks that generated stubs import under the pinned
 runtime. The `kanz-schemas` distribution name remains unchanged.
 
+For cross-language serialization parity, generate the synthetic Go corpus from
+`kanz/` before pytest: `go run ./test/contract/serialization/cmd/genfixtures
+-out ./test/contract/serialization/fixtures` (one command). See
+[the fixture guide](../kanz/test/contract/serialization/fixtures/README.md).
+
 Unit tests use local fixtures. `TEST_NATS_URL` and `TEST_KAFKA_BROKERS` enable
 real broker suites; unset values skip those integrations. Use disposable brokers
 and report skips. Python dependency and image tests are in
