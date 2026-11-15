@@ -1,0 +1,262 @@
+name: agent-read-plane
+on:
+  pull_request:
+    paths:
+      - 'kanz/test/agent_boundary/**'
+      - 'tools/agent_identity/**'
+      - 'tools/feed-identity/**'
+      - '.github/scripts/check_agent_boundary_evidence.py'
+      - '.github/scripts/test_agent_boundary_evidence.py'
+      - '.github/scripts/test_agent_boundary_workflow.py'
+      - '.github/workflows/agent-read-plane.yml'
+      - '.github/workflows/kanz-ci.yml'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/mcp/**'
+      - 'kanz/services/copilot/**'
+      - 'kanz/services/optimization/**'
+      - 'kanz/services/identity/**'
+      - 'kanz/internal/agentgate/**'
+      - 'kanz/internal/measureread/**'
+      - 'kanz/internal/identity/**'
+      - 'kanz/internal/optimization/**'
+      - 'kanz/pkg/auth/**'
+      - 'kanz/pkg/authbus/**'
+      - 'kanz/pkg/bus/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/infra/nats/**'
+      - 'kanz/infra/security/spire/**'
+      - 'kanz-schemas/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz/test/agent_boundary/**'
+      - 'tools/agent_identity/**'
+      - 'tools/feed-identity/**'
+      - '.github/scripts/check_agent_boundary_evidence.py'
+      - '.github/scripts/test_agent_boundary_evidence.py'
+      - '.github/scripts/test_agent_boundary_workflow.py'
+      - '.github/workflows/agent-read-plane.yml'
+      - '.github/workflows/kanz-ci.yml'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/mcp/**'
+      - 'kanz/services/copilot/**'
+      - 'kanz/services/optimization/**'
+      - 'kanz/services/identity/**'
+      - 'kanz/internal/agentgate/**'
+      - 'kanz/internal/measureread/**'
+      - 'kanz/internal/identity/**'
+      - 'kanz/internal/optimization/**'
+      - 'kanz/pkg/auth/**'
+      - 'kanz/pkg/authbus/**'
+      - 'kanz/pkg/bus/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/infra/nats/**'
+      - 'kanz/infra/security/spire/**'
+      - 'kanz-schemas/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+env:
+  GOFLAGS: -mod=mod
+  AGENT_HTTP_RUNTIME: ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+jobs:
+  agent-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - name: Verify source-bound evidence refusals
+        run: |
+          python3 -B .github/scripts/test_agent_boundary_evidence.py
+          python3 -B .github/scripts/test_agent_boundary_workflow.py
+          python3 -B -m unittest discover -s tools/agent_identity -p 'test_*.py'
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: '1.69.0'
+      - name: Generate existing canonical contracts and warm build dependencies
+        run: |
+          set -euo pipefail
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+          cd kanz
+          go mod download
+      - name: Build actual transports and bounded test fixtures
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-boundary-bin/source/kanz/services/api-gateway/internal/authz" "$RUNNER_TEMP/agent-boundary-bin/source/kanz/services/api-gateway/internal/proxy" "$RUNNER_TEMP/agent-boundary-evidence/identity"
+          echo "AGENT_BOUNDARY_EVIDENCE_DIR=$RUNNER_TEMP/agent-boundary-evidence" >> "$GITHUB_ENV"
+          echo "AGENT_IDENTITY_EVIDENCE_DIR=$RUNNER_TEMP/agent-boundary-evidence/identity" >> "$GITHUB_ENV"
+          for service in api-gateway mcp optimization; do
+            target="$service"
+            if [[ "$service" == api-gateway ]]; then target=gateway; fi
+            go build -race -trimpath -o "$RUNNER_TEMP/agent-boundary-bin/$target" "./services/$service/cmd/$service"
+          done
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path.cwd()
+          output = Path(os.environ['RUNNER_TEMP']) / 'agent-boundary-bin'
+          original = root / 'services/api-gateway/cmd/api-gateway/main.go'
+          text = original.read_text()
+          anchor = 'cfg.RequiredRole: {authz.Read},'
+          if text.count(anchor) != 1:
+              raise ValueError('gateway capability mutation anchor changed')
+          mutant = output / 'gateway-mutant.go'
+          mutant.write_text(text.replace(anchor, 'cfg.RequiredRole: {authz.Read, authz.Trade},'), newline='\n')
+          (output / 'gateway-overlay.json').write_text(json.dumps({'Replace': {str(original): str(mutant)}}))
+          for relative in (Path('kanz/services/api-gateway/internal/authz/arch_test.go'), Path('kanz/services/api-gateway/internal/proxy/proxy.go')):
+              (output / 'source' / relative).write_bytes((root.parent / relative).read_bytes())
+          PY
+          go build -race -trimpath -overlay "$RUNNER_TEMP/agent-boundary-bin/gateway-overlay.json" -o "$RUNNER_TEMP/agent-boundary-bin/mutant-gateway" ./services/api-gateway/cmd/api-gateway
+          go test -race -p 1 -c -o "$RUNNER_TEMP/agent-boundary-bin/http.test" ./test/agent_boundary
+          python3 -B - <<'PY' > "$RUNNER_TEMP/agent-projection-tests.tsv"
+          import re, sys
+          sys.path.insert(0, '../.github/scripts')
+          from check_agent_boundary_evidence import PROJECTION_TESTS
+          for package, names in sorted(PROJECTION_TESTS.items()):
+              print(package + '\t^(' + '|'.join(re.escape(n) for n in sorted(names)) + ')$')
+          PY
+          while IFS=$'\t' read -r package pattern; do
+            binary="${package//\//_}.test"
+            go test -race -p 1 -c -o "$RUNNER_TEMP/agent-boundary-bin/$binary" "./$package"
+          done < "$RUNNER_TEMP/agent-projection-tests.tsv"
+      - run: bash tools/feed-identity/install.sh
+      - name: Authenticate reviewed private runtime reads
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare isolated runtime and bind executable identities
+        run: |
+          set -euo pipefail
+          docker pull "$AGENT_HTTP_RUNTIME"
+          python3 -B - <<'PY'
+          import hashlib, json, os, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from check_agent_boundary_evidence import BUILD_NAMES, RUNTIME, SOURCE_INVENTORY
+          root = Path(os.environ['RUNNER_TEMP']) / 'agent-boundary-bin'
+          receipt = {'binaries': {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(BUILD_NAMES)},
+                     'runtime_reference': RUNTIME,
+                     'runtime_image_id': subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', RUNTIME], text=True).strip(),
+                     'gateway_overlay_sha256': hashlib.sha256((root / 'gateway-mutant.go').read_bytes()).hexdigest(),
+                     'source_inventory': {name: hashlib.sha256((root / 'source' / name).read_bytes()).hexdigest() for name in SOURCE_INVENTORY}}
+          (Path(os.environ['AGENT_BOUNDARY_EVIDENCE_DIR']) / 'builds.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+          cat > "$RUNNER_TEMP/run-agent-test.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          binary="$1"
+          pattern="$2"
+          container="agent-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${binary//_/-}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            remaining=$(docker ps -aq --filter "name=^/${container}$")
+            test -z "$remaining"
+          }
+          trap cleanup EXIT
+          timeout --kill-after=10s 7m docker run --rm --network none --read-only \
+            --name "$container" --label "io.kanz.agent-boundary.owner=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 \
+            --pids-limit 128 --cpus 2 --memory 1536m --memory-swap 1536m \
+            --ulimit nofile=512:512 --ulimit fsize=67108864:67108864 \
+            --tmpfs /scratch:rw,nosuid,nodev,noexec,size=134217728,mode=1777 \
+            --mount "type=bind,source=$RUNNER_TEMP/agent-boundary-bin,destination=/proof,readonly" \
+            --env HOME=/scratch --env TMPDIR=/scratch --env PATH=/nonexistent \
+            --env TEST_AGENT_BOUNDARY=1 --env TEST_AGENT_SOURCE_ROOT=/proof/source \
+            --env TEST_AGENT_GATEWAY_BINARY=/proof/gateway --env TEST_AGENT_MCP_BINARY=/proof/mcp \
+            --env TEST_AGENT_OPTIMIZATION_BINARY=/proof/optimization --env TEST_AGENT_MUTANT_GATEWAY_BINARY=/proof/mutant-gateway \
+            --entrypoint "/proof/$binary" "$AGENT_HTTP_RUNTIME" \
+            -test.v=test2json -test.count=1 -test.timeout=5m "-test.run=$pattern"
+          SH
+          chmod 700 "$RUNNER_TEMP/run-agent-test.sh"
+      - name: Qualify actual isolated HTTP transports
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/run-agent-test.sh" http.test '^TestRealAgentBoundary$' \
+            | go tool test2json -t -p github.com/eighred/kanz/test/agent_boundary \
+            | head -c 16777217 \
+            | tee "$AGENT_BOUNDARY_EVIDENCE_DIR/http.jsonl"
+      - name: Reexecute governed tenant projections and revocation
+        run: |
+          set -euo pipefail
+          : > "$AGENT_BOUNDARY_EVIDENCE_DIR/projections.jsonl"
+          while IFS=$'\t' read -r package pattern; do
+            binary="${package//\//_}.test"
+            bash "$RUNNER_TEMP/run-agent-test.sh" "$binary" "$pattern" \
+              | go tool test2json -t -p "github.com/eighred/kanz/$package" \
+              | head -c 16777217 \
+              | tee -a "$AGENT_BOUNDARY_EVIDENCE_DIR/projections.jsonl"
+          done < "$RUNNER_TEMP/agent-projection-tests.tsv"
+      - name: Prove actual SPIRE and NATS agent identity
+        run: |
+          python3 -B tools/agent_identity/proof.py
+      - name: Prove owned HTTP container cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          owner="io.kanz.agent-boundary.owner=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          found=$(docker ps -aq --filter "label=$owner")
+          if [[ -n "$found" ]]; then
+            mapfile -t containers <<< "$found"
+            docker rm -f "${containers[@]}" >/dev/null
+          fi
+          remaining=$(docker ps -aq --filter "label=$owner")
+          test -z "$remaining"
+          python3 -B - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'agent-boundary-evidence'
+          root.mkdir(exist_ok=True)
+          value = {'schema': 1, 'passed': True, 'source': os.environ['GITHUB_SHA'],
+                   'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                   'run': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                   'owned_containers_absent': True}
+          (root / 'http-cleanup.json').write_text(json.dumps(value, sort_keys=True) + '\n')
+          PY
+      - name: Prove owned identity cleanup after interruption
+        if: always()
+        run: |
+          python3 -B tools/agent_identity/proof.py --cleanup-owned
+      - name: Seal and independently reread complete qualification
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/check_agent_boundary_evidence.py --directory "$AGENT_BOUNDARY_EVIDENCE_DIR" --create --source "$GITHUB_SHA" --tree "$(git rev-parse HEAD^{tree})" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          python3 -B .github/scripts/check_agent_boundary_evidence.py --directory "$AGENT_BOUNDARY_EVIDENCE_DIR" --source "$GITHUB_SHA" --tree "$(git rev-parse HEAD^{tree})" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
+      - name: Preserve source-bound sanitized qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-boundary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/agent-boundary-evidence/http.jsonl
+            ${{ runner.temp }}/agent-boundary-evidence/projections.jsonl
+            ${{ runner.temp }}/agent-boundary-evidence/builds.json
+            ${{ runner.temp }}/agent-boundary-evidence/http-cleanup.json
+            ${{ runner.temp }}/agent-boundary-evidence/identity/identity.json
+            ${{ runner.temp }}/agent-boundary-evidence/identity/cleanup.json
+            ${{ runner.temp }}/agent-boundary-evidence/proof.json
+          if-no-files-found: error
+          retention-days: 7

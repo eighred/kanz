@@ -1299,7 +1299,9 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/", chain(gwMux))
+	versioned := chain(gwMux)
+	mux.Handle("/v1/", versioned)
+	mux.Handle("/v2/", versioned)
 	mux.Handle("GET /metrics", obs.MetricsHandler())
 	mux.HandleFunc("GET /openapi.json", gateway.OpenAPIHandler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {

@@ -275,6 +275,16 @@ func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheu
 		return nil, nil, func() {}, err
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
+	if mesh.Enabled() {
+		// A trusted workload is not necessarily the broker. Keep the recorder's
+		// audit connection bound to NATS even when another mesh SVID is valid.
+		brokerID, idErr := transport.ServiceID("kanz-messaging", "nats")
+		if idErr != nil {
+			_ = mesh.Close()
+			return nil, nil, func() {}, idErr
+		}
+		mesh.Client = transport.ClientTLSConfig(mesh.Source, transport.AuthorizeServices(brokerID))
+	}
 	busMetrics := bus.NewBusMetrics(reg)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: "copilot", TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
