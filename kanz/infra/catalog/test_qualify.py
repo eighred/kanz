@@ -72,6 +72,7 @@ class QualificationControls(unittest.TestCase):
             self.assertEqual(env["DATAHUB_TOKEN_SERVICE_SALT"], "b" * 64)
             self.assertEqual(env["JAVA_OPTS"], "-Xms512m -Xmx1g")
             self.assertEqual(env["EXTRACT_JAR_ENABLED"], "false")
+            self.assertEqual(env["ENTITY_VERSIONING_ENABLED"], "false")
             self.assertEqual({key: env[key] for key in extras[role]}, extras[role])
             shared.append({key: value for key, value in env.items() if key not in extras[role]})
             self.assertFalse(any(any(marker in key for marker in ("ACKS", "RETRIES", "IDEMPOTENCE", "MAX_REQUEST")) for key in env))

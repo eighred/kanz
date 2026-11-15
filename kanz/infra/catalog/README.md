@@ -70,6 +70,14 @@ request limits and isolation. It changes neither decoding nor any global native
 policy and does not establish Snappy as the earlier failure's cause. Actual
 startup, delivery and all acceptance cases still require the Linux workflow.
 
+Both DataHub processes explicitly use `ENTITY_VERSIONING_ENABLED=false`, matching
+the pinned application configuration's default mode. Optional entity versioning
+is outside this fixture's scope: dataset schema references remain in
+`schemaMetadata` and custom properties. Mandatory validators remain registered
+unconditionally. Authentication/existence settings, bootstrap configuration and
+mandatory steps are preserved. This scope correction establishes neither the
+cause nor a fix for an observed rejection. Full runtime acceptance remains required.
+
 The fixture exports OpenLineage events through the actual Go harvester, runs
 `datahub ingest -c /catalog/datahub-recipe.yaml`, and reads actual GMS aspects.
 Two dummy datasets must retain distinct stewards, distinct sensitivity tags,

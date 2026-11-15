@@ -1759,7 +1759,7 @@ class Fixture:
             "DATAHUB_SYSTEM_CLIENT_SECRET": self.secret, "DATAHUB_TOKEN_SERVICE_SIGNING_KEY": secrets.token_hex(32),
             "DATAHUB_TOKEN_SERVICE_SALT": secrets.token_hex(32), "DATAHUB_TELEMETRY_ENABLED": "false",
             "ENTITY_REGISTRY_CONFIG_PATH": "/datahub/datahub-gms/resources/entity-registry.yml",
-            "JAVA_OPTS": "-Xms512m -Xmx1g", "EXTRACT_JAR_ENABLED": "false", "ENTITY_VERSIONING_ENABLED": "true",
+            "JAVA_OPTS": "-Xms512m -Xmx1g", "EXTRACT_JAR_ENABLED": "false", "ENTITY_VERSIONING_ENABLED": "false",
         }
         options = [item for key, value in common.items() for item in ("--env", key + "=" + value)]
         def launch(role):
