@@ -40,6 +40,23 @@ READINESS_CONTEXT_RECORDS = 16
 STARTUP_MESSAGE_LIMIT = 4096
 READINESS_ROLES = frozenset({"broker", "mysql", "search", "gms"})
 READINESS_SOURCES = frozenset({"readiness-command", "broker-startup-log", "search-startup-log"})
+FAILED_UPGRADE_LITERALS = {
+    "java-runtime-error": ("java.lang.RuntimeException",),
+    "java-argument-error": ("java.lang.IllegalArgumentException",),
+    "java-state-error": ("java.lang.IllegalStateException",),
+    "java-null-error": ("java.lang.NullPointerException",),
+    "java-memory-error": ("java.lang.OutOfMemoryError",),
+    "native-link-error": ("java.lang.UnsatisfiedLinkError",),
+    "snappy-initialization-error": ("org.xerial.snappy.SnappyError", "Could not initialize class org.xerial.snappy.Snappy"),
+    "spring-bean-error": ("org.springframework.beans.factory.BeanCreationException",),
+    "kafka-timeout-error": ("org.apache.kafka.common.errors.TimeoutException",),
+    "search-status-error": ("org.opensearch.OpenSearchStatusException",),
+    "sql-error": ("java.sql.SQLException",),
+    "sql-syntax-error": ("java.sql.SQLSyntaxErrorException",),
+    "sql-setup-failure": ("SQL Setup failed, exiting", "Error during SQL setup upgrade", "SQL setup upgrade failed:"),
+    "ebean-connection-failure": ("Failed to create SqlSetup database connection:",),
+    "search-index-build-failure": ("BuildIndicesStep failed.", "BuildIndicesPostStep failed."),
+}
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
@@ -628,6 +645,49 @@ def validate_upgrade_outcome(evidence, image_id, identity):
         raise ValueError("catalog upgrade terminal state differs")
 
 
+def failed_upgrade_id(evidence, image_id, identity):
+    keys = {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "before", "after", "waitCategory", "waitExitCode", "outcome"}
+    if not isinstance(evidence, dict) or set(evidence) != keys or evidence.get("informationalOnly") is not True or any(evidence.get(key) != identity[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")) or evidence.get("waitCategory") != "completed" or type(evidence.get("waitExitCode")) is not int or not 1 <= evidence["waitExitCode"] <= 255 or evidence.get("outcome") != "refused":
+        raise ValueError("failed upgrade scope refused")
+    state_keys = {"containerID", "imageID", "ownerVerified", "status", "Running", "Paused", "Restarting", "OOMKilled", "Dead", "exitCode", "errorPresent", "healthStatus"}
+    for key in ("before", "after"):
+        state = evidence.get(key)
+        if not isinstance(state, dict) or set(state) != state_keys or not isinstance(state.get("containerID"), str) or not re.fullmatch(r"[0-9a-f]{64}", state["containerID"]) or state.get("imageID") != image_id or state.get("ownerVerified") is not True or state.get("status") not in {"running", "exited"} or any(type(state.get(flag)) is not bool for flag in ("Running", "Paused", "Restarting", "OOMKilled", "Dead", "errorPresent")) or state["Running"] != (state["status"] == "running") or any(state[flag] for flag in ("Paused", "Restarting", "Dead")) or type(state.get("exitCode")) is not int or not -255 <= state["exitCode"] <= 255 or state.get("healthStatus") not in {"not-configured", "starting", "healthy", "unhealthy"}:
+            raise ValueError("failed upgrade state refused")
+    before, after = evidence["before"], evidence["after"]
+    if before["containerID"] != after["containerID"] or after["status"] != "exited" or after["exitCode"] != evidence["waitExitCode"] or before["status"] == "exited" and before["exitCode"] != evidence["waitExitCode"]:
+        raise ValueError("failed upgrade terminal binding refused")
+    return after["containerID"]
+
+
+def reduce_failed_upgrade(output):
+    """Fixed literal presence only; no hashes, bodies, groups or unknown fallback."""
+    refused = lambda outcome: {"outcome": outcome, "signals": []}
+    if not isinstance(output, bytes):
+        return refused("malformed-output")
+    if len(output) > READINESS_OUTPUT_LIMIT:
+        return refused("output-budget")
+    try:
+        text = output.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return refused("malformed-output")
+    if "\x00" in text or "\x1b" in text:
+        return refused("malformed-output")
+    lines = text.splitlines()
+    if len(lines) > READINESS_CONTEXT_LINES:
+        return refused("line-budget")
+    signals = []
+    boundary = r"A-Za-z0-9_.$/\\"
+    for code, literals in FAILED_UPGRADE_LITERALS.items():
+        patterns = [re.compile(r"(?<![" + boundary + r"])" + re.escape(literal) + r"(?![" + boundary + r"])") for literal in literals]
+        count = sum(any(pattern.search(line) for pattern in patterns) for line in lines)
+        if count:
+            signals.append({"code": code, "count": count})
+    if len(signals) > READINESS_CONTEXT_RECORDS:
+        return refused("record-budget")
+    return {"outcome": "reduced", "signals": signals} if signals else refused("unclassified-output")
+
+
 def retain_readiness(evidence, role, record):
     if role not in READINESS_ROLES:
         raise ValueError("unselected readiness role refused")
@@ -872,7 +932,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 42 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 43 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1241,6 +1301,89 @@ class Fixture:
             raise ValueError("catalog system update refused") from None
         return evidence
 
+    def observe_failed_upgrade(self, container):
+        # Separate capability: generic run/runtime log permissions stay closed.
+        missing = object()
+        saved = {key: getattr(self, key, missing) for key in ("stage", "last_failure", "last_runtime_result")}
+        evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
+                        informationalOnly=True, before=None, after=None, outcome="scope-refused", signals=[])
+        self.failed_upgrade_evidence = evidence
+        try:
+            selected = self.image_identities["upgrade"]
+            if container != self.network + "-upgrade" or selected["reference"] != image_identity.selections()["upgrade"]["reference"]:
+                return evidence
+            try:
+                container_id = failed_upgrade_id(getattr(self, "upgrade_evidence", None), selected["imageID"], self.owner)
+            except (ValueError, KeyError, TypeError):
+                return evidence
+            expected = self.upgrade_evidence["after"]
+            def inspect():
+                rows = json.loads(self.run(["docker", "inspect", container_id], timeout=10, output_limit=READINESS_OUTPUT_LIMIT))
+                if not isinstance(rows, list) or len(rows) != 1:
+                    raise ValueError("failed upgrade inspection refused")
+                state = owned_runtime_state(rows[0], container, selected["imageID"], self.network, labels(self.owner))
+                if state != expected:
+                    raise ValueError("failed upgrade fresh terminal state differs")
+                return state
+            evidence["outcome"] = "binding-refused"
+            try:
+                evidence["before"] = inspect()
+            except (ValueError, KeyError, TypeError, OSError):
+                return evidence
+            def capture_and_reduce():
+                # Raw bytes never leave this capture/reducer boundary.
+                process, complete, raw = None, False, None
+                result = {"outcome": "capture-refused", "signals": []}
+                def limits():
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (DEFAULT_FILE_LIMIT, DEFAULT_FILE_LIMIT))
+                    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+                try:
+                    process = subprocess.Popen(["docker", "logs", "--tail", "40", container_id], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=self.environment, preexec_fn=limits, start_new_session=True)
+                    code, raw = capture_process(process, 10, READINESS_OUTPUT_LIMIT)
+                    complete = True
+                    result = reduce_failed_upgrade(raw) if type(code) is int and code == 0 else {"outcome": "command-refused", "signals": []}
+                except CommandFailure as error:
+                    result = {"outcome": error.category if error.category in {"timeout", "output-budget"} else "capture-refused", "signals": []}
+                except Exception:
+                    result = {"outcome": "capture-refused", "signals": []}
+                finally:
+                    if process is not None:
+                        try:
+                            must_stop = not complete or process.poll() is None
+                        except Exception:
+                            must_stop = True
+                        if must_stop:
+                            try:
+                                stop_process(process)
+                                if complete:
+                                    result = {"outcome": "capture-refused", "signals": []}
+                            except Exception:
+                                result = {"outcome": "reap-refused", "signals": []}
+                        try:
+                            if process.stdout is not None:
+                                process.stdout.close()
+                        except Exception:
+                            result = {"outcome": "capture-refused", "signals": []}
+                    raw = None
+                return result
+            reduced = capture_and_reduce()
+            evidence["outcome"] = "observation-refused"
+            try:
+                evidence["after"] = inspect()
+            except (ValueError, KeyError, TypeError, OSError):
+                return evidence
+            evidence.update(reduced)
+            return evidence
+        except Exception:
+            evidence.update(outcome="observation-refused", signals=[])
+            return evidence
+        finally:
+            for key, value in saved.items():
+                if value is missing:
+                    self.__dict__.pop(key, None)
+                else:
+                    setattr(self, key, value)
+
     def _bootstrap_query(self, container_id, command, parser, limit=READINESS_OUTPUT_LIMIT):
         try:
             output = self.run(["docker", "exec", container_id, *command], timeout=10, output_limit=limit)
@@ -1426,6 +1569,7 @@ class Fixture:
         try:
             self.wait_upgrade(upgrade)
         finally:
+            self.observe_failed_upgrade(upgrade)
             self.observe_bootstrap_snapshot(mysql, broker, search)
         self.stage = "gms"
         gms = self.start("gms", options + ["--env", "METADATA_SERVICE_AUTH_ENABLED=true", "--env", "MAE_CONSUMER_ENABLED=true", "--env", "MCE_CONSUMER_ENABLED=true", "--env", "PE_CONSUMER_ENABLED=true", "--env", "DEV_TOOLING_ENABLED=false"], memory="2g")
@@ -1560,11 +1704,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 56 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 57 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 42}
+        report["qualificationControls"] = {"count": 43}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -1599,6 +1743,7 @@ def qualify(scratch, binary):
         report["mysqlRuntime"] = getattr(fixture, "mysql_evidence", None)
         report["brokerRuntime"] = getattr(fixture, "broker_evidence", None)
         report["upgradeOutcome"] = getattr(fixture, "upgrade_evidence", None)
+        report["failedUpgrade"] = getattr(fixture, "failed_upgrade_evidence", None)
         report["mysqlBootstrap"] = getattr(fixture, "mysql_bootstrap_evidence", None)
         report["brokerBootstrap"] = getattr(fixture, "broker_bootstrap_evidence", None)
         report["searchBootstrap"] = getattr(fixture, "search_bootstrap_evidence", None)

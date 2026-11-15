@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Forty-two
+stage/category, never subprocess arguments or one-run credentials. Forty-three
 qualification controls discriminate these failures alongside the 14 projection
-controls: 56 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 57 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -296,7 +296,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 56 catalog controls, seven shared
+and capture overflow. The inventory contains 57 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -392,6 +392,39 @@ scalar storage query. All values remain withheld if the final container
 binding or running state fails. The shared observation wrapper restores the
 prior stage/failure/runtime evidence, preserves the original upgrade exception
 and gives no metadata value acceptance or cleanup authority.
+
+A separate failed-upgrade reducer is narrowly scoped to the selected upgrade
+image after a validated, completed, nonzero `upgradeOutcome`. It freshly binds
+the exact source/run/nonce/network and full terminal container ID before and
+after a dedicated `docker logs --tail 40` capture. It does not extend generic
+`run`, readiness roles, log sources or the GMS/MySQL log permissions. Raw bytes
+remain transient inside this trusted capture/reducer boundary; they never
+return to its caller, print, persist, hash or enter retained exceptions.
+Only fixed literal enum codes and per-line counts may leave the reducer.
+
+The process has a 10-second/64-KiB capture bound and process-group kill/reap on
+timeout or overflow, including when the immediate parent has already exited.
+The reducer permits at most 40 logical lines and 16 enum records. Incomplete,
+nonzero-client, malformed UTF-8, ANSI/NUL, unknown, over-budget or refused
+observations retain no signals. Source-specific public literals cover compact
+Java, native-link/Snappy, Spring, Kafka, Search, SQL/Ebean and confirmed index
+step-failure categories. Matching retains no class/step names, paths, arbitrary
+captures, bodies or unknown fingerprints. A match proves only public-literal
+presence, not a caller, dependency version, fatal cause or supported capacity.
+The configured Snappy default is not evidence of a native-codec failure.
+
+Public token provenance includes the existing DataHub source revision
+`faab576d96cbdb27b8344a755e0bc0f42fdc9c15`, expected-bundle JDK sources above,
+[Spring's bean exception](https://github.com/spring-projects/spring-framework/blob/v6.2.15/spring-beans/src/main/java/org/springframework/beans/factory/BeanCreationException.java),
+[Kafka's timeout exception](https://github.com/apache/kafka/blob/3.9.0/clients/src/main/java/org/apache/kafka/common/errors/TimeoutException.java)
+and [OpenSearch's status exception](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/OpenSearchStatusException.java).
+These references define finite text categories, without establishing the loaded
+versions in the upgrade image. The existing source-free host diagnostic method
+checks secret-bearing, classlike, path, ANSI, invalid-encoding, duplicate and
+budget vectors before registry authentication. A companion lifecycle control
+denies wrong roles, zero/unknown outcomes and foreign IDs and checks capture
+cleanup and original-failure preservation. The reducer cannot alter upgrade,
+admission or cleanup decisions; the combined metadata snapshot remains in place.
 
 ### Fixture maintenance images
 

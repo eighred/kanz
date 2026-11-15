@@ -537,7 +537,32 @@ class BuildDiagnosticControls(unittest.TestCase):
             self.assertNotIn("format", other)
             self.assertNotIn("samples", other["lineContext"])
             self.assertNotIn("unknownProjection", other["lineContext"])
-        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (runtime, 1, "mysql-startup-log"), (runtime, 1, "gms-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
+        # This reducer is source-free and runs before registry authentication.
+        # It has no body/symbol/unknown fingerprint or generic runtime-log seam.
+        public = b"Caused by: java.sql.SQLException: " + secret.encode()
+        reduced = qualify.reduce_failed_upgrade(public + b"\n" + public)
+        self.assertEqual(reduced, {"outcome": "reduced", "signals": [{"code": "sql-error", "count": 2}]})
+        self.assertNotIn(secret, json.dumps(reduced))
+        self.assertNotIn("java.sql.SQLException", json.dumps(reduced))
+        for category, literals in qualify.FAILED_UPGRADE_LITERALS.items():
+            for literal in literals:
+                one = qualify.reduce_failed_upgrade((literal + ": " + secret).encode())
+                self.assertEqual(set(one), {"outcome", "signals"})
+                self.assertEqual(one["outcome"], "reduced")
+                self.assertTrue(all(set(signal) == {"code", "count"} for signal in one["signals"]))
+                self.assertIn({"code": category, "count": 1}, one["signals"])
+                self.assertNotIn(secret, json.dumps(one))
+                self.assertNotIn(literal, json.dumps(one))
+        private_class = "com.private.credentials.TokenAlphaException"
+        for body in (b"", private_class.encode(), b"java.sql.SQLExceptionToken", b"private.java.sql.SQLException", b"/private/" + secret.encode() + b"/java.sql.SQLException", b"C:\\private\\java.sql.SQLException", b"java.sql.SQLException/private", b"JAVA.SQL.SQLEXCEPTION", secret.encode()):
+            self.assertEqual(qualify.reduce_failed_upgrade(body), {"outcome": "unclassified-output", "signals": []})
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            self.assertEqual(qualify.reduce_failed_upgrade(("java.sql.SQL" + separator + "Exception").encode())["signals"], [])
+        for body, outcome in ((b"\xff\n" + public, "malformed-output"), (b"\x1b[31m" + public + b"\x1b[0m", "malformed-output"), (public + b"\x00", "malformed-output"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), "output-budget"), (b"\n".join([public] * 41), "line-budget"), (secret, "malformed-output")):
+            self.assertEqual(qualify.reduce_failed_upgrade(body), {"outcome": outcome, "signals": []})
+        with mock.patch.object(qualify, "FAILED_UPGRADE_LITERALS", {"fixed-" + str(index): ("PublicToken" + str(index),) for index in range(17)}):
+            self.assertEqual(qualify.reduce_failed_upgrade("\n".join("PublicToken" + str(index) for index in range(17)).encode()), {"outcome": "record-budget", "signals": []})
+        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (runtime, 1, "mysql-startup-log"), (runtime, 1, "gms-startup-log"), (runtime, 1, "upgrade-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)
             except ValueError as error:

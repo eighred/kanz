@@ -134,6 +134,104 @@ class QualificationControls(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
 
+    def test_failed_upgrade_reducer_guards_scope_cid_capture_and_credentials(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network, fixture.stage = OWNER, OWNER["network"], "system-update"
+        fixture.environment = {"PATH": "/public/bin", "HOME": "/owned/controller"}
+        image_id = "sha256:" + "7" * 64
+        fixture.image_identities = {"upgrade": {"imageID": image_id, "reference": qualify.image_identity.selections()["upgrade"]["reference"]}}
+        name, container_id = OWNER["network"] + "-upgrade", "6" * 64
+        before = qualify.owned_runtime_state(runtime_state_info("upgrade"), name, image_id, OWNER["network"], qualify.labels(OWNER))
+        terminal = runtime_state_info("upgrade", "exited")
+        after = qualify.owned_runtime_state(terminal, name, image_id, OWNER["network"], qualify.labels(OWNER))
+        proof = dict(IDENTITY, informationalOnly=True, before=before, after=after, waitCategory="completed", waitExitCode=1, outcome="refused")
+        fixture.upgrade_evidence = copy.deepcopy(proof)
+        prior_failure, prior_runtime = {"category": "prior"}, {"category": "prior-runtime"}
+        fixture.last_failure, fixture.last_runtime_result = prior_failure, prior_runtime
+        secret, calls, foreign_at = "upgrade-reducer-credential-must-not-leak", [], None
+        def execute(command, **options):
+            calls.append(command)
+            self.assertEqual(command, ["docker", "inspect", container_id])
+            self.assertEqual(options, {"timeout": 10, "output_limit": qualify.READINESS_OUTPUT_LIMIT})
+            fixture.stage, fixture.last_failure, fixture.last_runtime_result = "observer", {}, {}
+            info = copy.deepcopy(terminal)
+            if foreign_at == len(calls):
+                info["Config"]["Labels"] = {"foreign": secret}
+            return json.dumps([info])
+        fixture.run = execute
+        raw = ("java.sql.SQLException: " + secret).encode()
+        def collect(selected=name, capture_failure=None, parent_code=0, stop_failure=None, launch_failure=None, capture_code=0):
+            calls.clear()
+            process = mock.Mock()
+            process.poll.return_value = parent_code
+            with mock.patch.object(qualify.subprocess, "Popen", side_effect=launch_failure, return_value=process) as launch, mock.patch.object(qualify, "capture_process", side_effect=capture_failure, return_value=(capture_code, raw)) as capture, mock.patch.object(qualify, "stop_process", side_effect=stop_failure) as stop:
+                result = fixture.observe_failed_upgrade(selected)
+            self.assertEqual(fixture.stage, "system-update")
+            self.assertIs(fixture.last_failure, prior_failure)
+            self.assertIs(fixture.last_runtime_result, prior_runtime)
+            self.assertNotIn(secret, json.dumps(result))
+            self.assertEqual(set(result), {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "before", "after", "outcome", "signals"})
+            return result, process, launch, capture, stop
+        result, process, launch, capture, stop = collect()
+        self.assertEqual(result["signals"], [{"code": "sql-error", "count": 1}])
+        self.assertEqual(calls, [["docker", "inspect", container_id]] * 2)
+        self.assertEqual(launch.call_args.args[0], ["docker", "logs", "--tail", "40", container_id])
+        self.assertTrue(launch.call_args.kwargs["start_new_session"])
+        capture.assert_called_once_with(process, 10, qualify.READINESS_OUTPUT_LIMIT)
+        process.stdout.close.assert_called_once()
+        stop.assert_not_called()
+        with mock.patch.object(qualify.resource, "setrlimit") as limits:
+            launch.call_args.kwargs["preexec_fn"]()
+            limits.assert_any_call(qualify.resource.RLIMIT_FSIZE, (qualify.DEFAULT_FILE_LIMIT, qualify.DEFAULT_FILE_LIMIT))
+            limits.assert_any_call(qualify.resource.RLIMIT_CORE, (0, 0))
+        guards = (("wrong-role", name.replace("upgrade", "gms"), proof), ("zero-exit", name, dict(proof, waitExitCode=0, outcome="exit-zero")), ("unknown-outcome", name, dict(proof, outcome="unknown")), ("foreign-source", name, dict(proof, sourceSHA="c" * 40)), ("foreign-cid", name, dict(proof, after=dict(after, containerID="8" * 64))), ("malformed-code", name, dict(proof, waitExitCode=True)))
+        for guard, selected, changed in guards:
+            with self.subTest(guard=guard):
+                fixture.upgrade_evidence = copy.deepcopy(changed)
+                result, _, launch, capture, _ = collect(selected)
+                self.assertEqual(result["outcome"], "scope-refused")
+                self.assertEqual(result["signals"], [])
+                self.assertEqual(calls, [])
+                launch.assert_not_called()
+                capture.assert_not_called()
+        fixture.upgrade_evidence = copy.deepcopy(proof)
+        for foreign_at in (1, 2):
+            result, _, launch, _, _ = collect()
+            self.assertEqual(result["outcome"], "binding-refused" if foreign_at == 1 else "observation-refused")
+            self.assertEqual(result["signals"], [])
+            if foreign_at == 1:
+                launch.assert_not_called()
+        foreign_at = None
+        result, process, _, _, _ = collect(capture_code=1, parent_code=1)
+        self.assertEqual(result["outcome"], "command-refused")
+        self.assertEqual(result["signals"], [])
+        self.assertEqual(calls, [["docker", "inspect", container_id]] * 2)
+        process.stdout.close.assert_called_once()
+        for category in ("timeout", "output-budget"):
+            for parent_code in (None, 0, 1):
+                result, process, _, _, stop = collect(capture_failure=qualify.CommandFailure("capture", category), parent_code=parent_code)
+                self.assertEqual(result["outcome"], category)
+                self.assertEqual(result["signals"], [])
+                stop.assert_called_once_with(process)
+                process.stdout.close.assert_called_once()
+        result, _, _, _, _ = collect(capture_failure=qualify.CommandFailure("capture", "timeout"), stop_failure=qualify.CommandFailure("reap", "reap-timeout"))
+        self.assertEqual(result["outcome"], "reap-refused")
+        self.assertEqual(result["signals"], [])
+        result, _, _, _, _ = collect(launch_failure=OSError(secret))
+        self.assertEqual(result["outcome"], "capture-refused")
+        self.assertEqual(result["signals"], [])
+        refusal = ValueError("original upgrade refusal")
+        with self.assertRaises(ValueError) as stopped:
+            try:
+                raise refusal
+            finally:
+                collect(capture_failure=RuntimeError(secret))
+        self.assertIs(stopped.exception, refusal)
+        fixture.run = qualify.Fixture.run.__get__(fixture)
+        with mock.patch.object(qualify.subprocess, "Popen") as launch, self.assertRaises(ValueError):
+            fixture.run(["docker", "logs", "--tail", "40", container_id], output_limit=qualify.READINESS_OUTPUT_LIMIT, runtime_source="upgrade-startup-log")
+        launch.assert_not_called()
+
     def test_bootstrap_metadata_parsers_refuse_ambiguity_and_project_only_fixed_fields(self):
         secret = "unselected-secret-name-must-not-survive"
         absent = qualify.broker_topic_values("[]")
@@ -986,7 +1084,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images=observed,
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 42}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 43}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
