@@ -376,8 +376,11 @@ identifies no startup failure cause.
 
 Before the vendor launcher, a fixed Bash prelude copies the complete packaged
 config tree into `/tmp/kanz-catalog-search-config` as UID 1000 under the existing
-512 MiB temporary filesystem. It rejects a linked source root, symlinks or
-special entries below it, creates the private directory exclusively with mode
+512 MiB temporary filesystem. Bash built-ins traverse explicit child entries,
+including hidden entries, checking for links before descending and refusing
+unreadable or unsearchable directories. No `find` or globstar traversal is used.
+It rejects a linked source root, symlinks or special entries below it,
+creates the private directory exclusively with mode
 0700 and refuses any existing destination. The copy never dereferences links;
 failed validation, discovery or copying aborts before Java. It preserves
 relative files, exports `OPENSEARCH_PATH_CONF` and finally execs the original
@@ -393,7 +396,9 @@ uses that directory for missing-key creation or an existing-key upgrade;
 [KeyStoreWrapper.save](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java#L529)
 writes an adjacent temporary file before atomic replacement. A sandbox control
 exercises the exact prelude on synthetic trees, including stale state, linked
-entries, discovery/copy failure and quoted argument forwarding. This supported
+entries, directory-validation/copy failure and quoted argument forwarding.
+The synthetic control exposes only `mkdir` and `cp` as external preparation
+tools. This supported
 relocation does not identify the precise refused file, operation or original
 keystore state. Actual startup and full catalog acceptance still require Linux
 runtime proof.

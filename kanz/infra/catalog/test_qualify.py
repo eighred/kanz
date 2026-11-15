@@ -61,18 +61,24 @@ class QualificationControls(unittest.TestCase):
             source = root / "vendor-config"
             source.mkdir()
             (source / "jvm.options.d").mkdir()
+            (source / ".empty").mkdir()
+            copy_tools = root / "copy-tools"
+            copy_tools.mkdir()
+            for command in ("mkdir", "cp"):
+                (copy_tools / command).symlink_to("/bin/" + command)
             contents = {"opensearch.yml": b"cluster.name: fixture\n", ".fixture": b"hidden\n", "jvm.options.d/fixture.options": b"-Xms512m\n"}
             for name, body in contents.items():
                 (source / name).write_bytes(body)
             stub = 'import json,os,sys; print(json.dumps({"config":os.environ["OPENSEARCH_PATH_CONF"],"args":sys.argv[1:]}))'
             arguments = ["-Ediscovery.type=single-node", "literal *", "one argument with spaces"]
-            def prepare(destination, selected_source=source, tools="/usr/bin:/bin"):
-                return subprocess.run(["/bin/bash", "-c", qualify.SEARCH_CONFIG_PREPARE, "catalog-search-config", str(selected_source), str(destination), sys.executable, "-c", stub, *arguments], env={"PATH": tools}, capture_output=True, text=True, timeout=5)
+            def prepare(destination, selected_source=source, tools=copy_tools):
+                return subprocess.run(["/bin/bash", "-c", qualify.SEARCH_CONFIG_PREPARE, "catalog-search-config", str(selected_source), str(destination), sys.executable, "-c", stub, *arguments], env={"PATH": str(tools)}, capture_output=True, text=True, timeout=5)
             destination = root / "fresh"
             result = prepare(destination)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(json.loads(result.stdout), {"config": str(destination), "args": arguments})
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+            self.assertTrue((destination / ".empty").is_dir())
             for name, body in contents.items():
                 self.assertEqual((destination / name).read_bytes(), body)
                 self.assertEqual((source / name).read_bytes(), body)
@@ -93,7 +99,7 @@ class QualificationControls(unittest.TestCase):
             self.assertFalse((root / "copy-linked-source").exists())
             self.assertFalse((root / "copy-missing-source").exists())
             self.assertFalse((root / "copy-file-source").exists())
-            for name, target in (("linked-file", source / "opensearch.yml"), ("linked-directory", source / "jvm.options.d"), ("\n\n", source / "opensearch.yml")):
+            for name, target in (("linked-file", source / "opensearch.yml"), ("linked-directory", source / "jvm.options.d"), ("\n\n", source / "opensearch.yml"), ("jvm.options.d/.linked", source / "opensearch.yml")):
                 link = source / name
                 link.symlink_to(target, target_is_directory=target.is_dir())
                 refused = root / "copy-linked-entry"
@@ -110,14 +116,23 @@ class QualificationControls(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertFalse((root / "copy-special").exists())
                 fifo.unlink()
-            for command in ("find", "cp"):
-                tools = root / (command + "-failure")
-                tools.mkdir()
-                (tools / command).symlink_to("/bin/false")
-                result = prepare(root / (command + "-copy"), tools=str(tools) + ":/usr/bin:/bin")
+            unreadable = source / "jvm.options.d/unreadable"
+            unreadable.mkdir()
+            unreadable.chmod(0)
+            try:
+                result = prepare(root / "unreadable-copy")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
-            self.assertFalse((root / "find-copy").exists())
+                self.assertFalse((root / "unreadable-copy").exists())
+            finally:
+                unreadable.chmod(0o700)
+                unreadable.rmdir()
+            tools = root / "cp-failure"
+            tools.mkdir()
+            (tools / "cp").symlink_to("/bin/false")
+            result = prepare(root / "cp-copy", tools=str(tools) + ":" + str(copy_tools))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
 
     def test_broker_rpc_and_live_property_require_the_same_owned_container(self):
         fixture = object.__new__(qualify.Fixture)

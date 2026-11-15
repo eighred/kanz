@@ -55,10 +55,25 @@ umask 077
 config_source=$1
 config_copy=$2
 shift 2
-test -d "$config_source"
-test ! -L "$config_source"
-invalid_entry=$(find -P "$config_source" -xdev ! -type d ! -type f -printf 'invalid' -quit)
-test -z "$invalid_entry"
+shopt -s dotglob nullglob
+validate_config_tree() {
+    local directory="$1" entry
+    test ! -L "$directory" || return 1
+    test -d "$directory" || return 1
+    test -r "$directory" && test -x "$directory" || return 1
+    for entry in "$directory"/*; do
+        if test -L "$entry"; then
+            return 1
+        elif test -d "$entry"; then
+            validate_config_tree "$entry" || return 1
+        elif test -f "$entry" && test -r "$entry"; then
+            :
+        else
+            return 1
+        fi
+    done
+}
+validate_config_tree "$config_source"
 mkdir -m 700 -- "$config_copy"
 cp -R -P -- "$config_source"/. "$config_copy"/
 export OPENSEARCH_PATH_CONF="$config_copy"
