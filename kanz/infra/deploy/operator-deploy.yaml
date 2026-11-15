@@ -95,11 +95,8 @@ spec:
       # is acceptable during a server upgrade and is not acceptable by surprise. Written
       # here so it is known BEFORE the next upgrade rather than during it.
       #
-      # THE LABEL VALUE IS AN ASSUMPTION, STATED HERE RATHER THAN LEFT SILENT. Nothing
-      # in infra/ used this label before, so there was no in-repo precedent to copy.
-      # Every existing reader of it is value-agnostic — estate.go's roles() matches the
-      # KEY prefix, and test/e2e/tui/oracle.go's jsonpath tests key presence — so neither
-      # pins the value. "true" is the k3s convention (k3s labels server nodes
+      # This nodeSelector requires an exact label value. "true" is the k3s
+      # convention (k3s labels server nodes
       # node-role.kubernetes.io/control-plane=true), and this estate is k3s. Note that
       # kubeadm and kind use an EMPTY value instead, and a nodeSelector is an exact
       # string match: on such a cluster this pod sits Pending with "0/N nodes are
