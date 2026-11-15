@@ -45,7 +45,7 @@ import (
 // internal/marketdata/rollup landed the day this guard was written, so
 // Resolution1h and Resolution1d resolve to a producer and carry NO exemption
 // below. The producers are the two named Resolution constants in the rollup job
-// table at services/market-data/cmd/market-data/rollup.go — the composition
+// table at services/market_data/cmd/market_data/rollup.go — the composition
 // root's target table — and NOT the rollup package itself, which stamps
 // `Resolution: req.Target` from a variable (rollup/driver.go, rollup/rollup.go).
 // That distinction is the whole reason this file
@@ -723,7 +723,7 @@ func storedSeriesProducers(
 // enumerates a family rather than labelling a record.
 //
 // A nil literal type is an elided inner element (`[]struct{...}{{Resolution1h,
-// lag}}` at services/market-data/cmd/market-data/rollup.go) and is NOT a
+// lag}}` at services/market_data/cmd/market_data/rollup.go) and is NOT a
 // catalogue: the outer literal already answered that question, and treating it as
 // one would lose the composition root that names both coarse resolutions.
 func storedSeriesIsCatalogue(

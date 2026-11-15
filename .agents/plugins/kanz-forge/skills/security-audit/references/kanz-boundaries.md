@@ -17,7 +17,7 @@ the refusal. A framework name or an unused validation function is not a control.
 
 | Boundary | Follow in current source | Failure to investigate |
 |---|---|---|
-| Gateway identity | `kanz/services/api-gateway/internal/middleware/`, `kanz/services/api-gateway/internal/authz/`, upstream proxy and NetworkPolicy | Forged principal headers, route registered outside auth, missing resource/tenant scope, revocation not checked |
+| Gateway identity | `kanz/services/api_gateway/internal/middleware/`, `kanz/services/api_gateway/internal/authz/`, upstream proxy and NetworkPolicy | Forged principal headers, route registered outside auth, missing resource/tenant scope, revocation not checked |
 | Tenant data | Service query/store, migration/RLS, pool transaction setup; `kanz/test/arch/tenant_rls_coverage_test.go` | Cross-tenant lookup, missing FORCE RLS, privileged test role bypass, pooled-session leakage |
 | Commands/events | Producer, envelope validator, consumer, outbox and durable idempotency key | Tenant mismatch, replayed effect, commit/publish gap, conflicting duplicate accepted as new |
 | Admission/execution | Risk/compliance/mandate → OMS → typed venue adapter; `kanz/test/arch/every_admission_leaves_a_record_test.go` | Unaccounted permit, critical unknown coerced to success, ambiguous remote outcome blindly retried |

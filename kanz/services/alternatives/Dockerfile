@@ -11,7 +11,7 @@
 # refuses to start unless ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL says otherwise (#261).
 #
 # Build context is the repo ROOT, not kanz/: the module's go.mod replaces
-# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# github.com/eighred/kanz/kanz-schemas-go => ../schemas/gen/go, which is
 # generated-not-committed (EVT-15a). The build workflow runs `buf generate`
 # first, so both trees sit side by side in the context. Build with:
 #   docker build -f kanz/services/alternatives/Dockerfile .
@@ -21,7 +21,7 @@ ENV GOFLAGS=-mod=mod
 
 # Dependency layer: consumer and generated SDK module metadata only,
 # so schema source changes preserve the verified dependency download layer.
-COPY kanz-schemas/gen/go/go.mod kanz-schemas/gen/go/go.sum ./kanz-schemas/gen/go/
+COPY schemas/gen/go/go.mod schemas/gen/go/go.sum ./schemas/gen/go/
 COPY kanz/go.mod kanz/go.sum ./kanz/
 WORKDIR /src/kanz
 # The download is retried (#776): the module proxy and checksum database drop
@@ -31,7 +31,7 @@ WORKDIR /src/kanz
 COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh
 RUN sh /usr/local/bin/go-mod-download.sh
 
-COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/
+COPY schemas/gen/go/ /src/schemas/gen/go/
 COPY kanz/ ./
 # CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
 # is pure Go), which is what distroless/static requires. -trimpath strips local

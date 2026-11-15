@@ -19,7 +19,7 @@ import (
 // API_GATEWAY_SIGNING_SECRET_FILE is set, which every deployment manifest does.
 // THREE CALLERS SHIPPED WITHOUT IT, one after another — the Copilot REPL's
 // client (#198), provision-tenant.sh's isolation probes (#774), and
-// services/web-bff (#777) — and each was repaired by re-deriving the signature
+// services/web_bff (#777) — and each was repaired by re-deriving the signature
 // at the call site, which is why there was a next one.
 //
 // WHY IT RECURS RATHER THAN BEING LEARNED. The failure presents as an
@@ -74,7 +74,7 @@ func TestTheGatewaySignatureHasOneImplementation(t *testing.T) {
 	// somebody owes; the dead-entry check below is what keeps it honest if
 	// webhook-ingest ever stops naming the header.
 	exempt := map[string]string{
-		"services/webhook-ingest/internal/server/server.go": "reads an INBOUND webhook signature " +
+		"services/webhook_ingest/internal/server/server.go": "reads an INBOUND webhook signature " +
 			"from an external producer, not this platform's signature TO the gateway",
 	}
 	matched := map[string]bool{}
@@ -270,7 +270,7 @@ func signArgsFunc(t *testing.T, src string) string {
 // CALLED on the request that goes out. A binary can import gatewaysig and still
 // forget one code path. That residue is what the first guard covers from the
 // other side — a caller that forgot AND re-derived is caught there — and what
-// services/web-bff/internal/server/proxy_signing_test.go covers for the one
+// services/web_bff/internal/server/proxy_signing_test.go covers for the one
 // component whose whole job is proxying. Between the three, the shape that
 // shipped three times is closed.
 func TestEveryGatewayDialingBinaryCanSign(t *testing.T) {
@@ -285,7 +285,7 @@ func TestEveryGatewayDialingBinaryCanSign(t *testing.T) {
 	// path it becomes the fourth instance, and deleting this entry is the change
 	// that makes it sign.
 	exempt := map[string]string{
-		"github.com/eighred/kanz/cmd/kanz-monitor": "polls /readyz only, which is mounted " +
+		"github.com/eighred/kanz/cmd/kanz_monitor": "polls /readyz only, which is mounted " +
 			"outside the signed /v1/ chain",
 	}
 	matched := map[string]bool{}

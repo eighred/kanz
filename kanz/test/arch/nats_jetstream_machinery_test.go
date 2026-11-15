@@ -164,7 +164,7 @@ func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 	}
 
 	for name, svid := range operatorSVIDs {
-		dirs := []string{filepath.Join(root, "cmd", name)}
+		dirs := []string{filepath.Join(root, "cmd", sourceDirectoryName(name))}
 		for _, extra := range operatorCrossPackagePublishSurfaces[name] {
 			dirs = append(dirs, filepath.Join(root, filepath.FromSlash(extra)))
 		}
@@ -273,13 +273,13 @@ var natsClientSubscribeMethodArity = map[string]int{
 // METHODS THIS MODULE ACTUALLY DEFINES (checked by grepping every `func (...)
 // Subscribe` in the module before choosing this rule, not assumed):
 //
-//   - services/tv-sync/internal/projection.Projection.Subscribe(tenant,
+//   - services/tv_sync/internal/projection.Projection.Subscribe(tenant,
 //     accountID string) (<-chan Delta, func()) is an in-process fan-out for
 //     the TradingView delta feed — nothing to do with NATS or JetStream. Its
-//     one non-test call site (services/tv-sync/internal/brokerapi/brokerapi.go)
+//     one non-test call site (services/tv_sync/internal/brokerapi/brokerapi.go)
 //     passes exactly 2 arguments; the 4-arg requirement for "Subscribe" above
 //     excludes it without needing to know anything about its receiver's type.
-//   - services/market-data/internal/feed's fakeBloomberg.Subscribe(ctx,
+//   - services/market_data/internal/feed's fakeBloomberg.Subscribe(ctx,
 //     []string) (<-chan BloombergTick, error) is a test double and lives in a
 //     _test.go file, which this scanner — like busConsumerCalls — skips
 //     entirely regardless of arity.
@@ -361,7 +361,7 @@ func directNATSClientSubscribeCalls(t *testing.T, root string) []busConsumerCall
 // (nats_service_permissions_test.go) for the operator plane: kanz-mandate's
 // ConfigChanged FACT (compliance.mandate.changed.>) is emitted by
 // internal/compliance/publisher.go's Publisher, constructed and called from
-// cmd/kanz-mandate's composition root, not literally inside its main.go. The
+// cmd/kanz_mandate's composition root, not literally inside its main.go. The
 // other three operator CLIs (kanz-halt, kanz-altevent, kanz-household)
 // construct their bus.Event directly in their own cmd/ main.go — grep-
 // verified — and need no entry here.

@@ -22,7 +22,8 @@ var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
 
 // Data is the template context derived from a service name.
 type Data struct {
-	Name      string // foo-bar (dir, binary, package main consumes)
+	Name      string // foo-bar (binary and deployed service identity)
+	Directory string // foo_bar (source directory and import path)
 	EnvPrefix string // FOO_BAR (env var prefix)
 	Title     string // Foo-bar (doc prose)
 }
@@ -33,7 +34,7 @@ func newData(name string) (Data, error) {
 		return Data{}, fmt.Errorf("scaffold: invalid service name %q (want lowercase letters, digits, dashes; e.g. risk-engine)", name)
 	}
 	env := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
-	return Data{Name: name, EnvPrefix: env, Title: strings.ToUpper(name[:1]) + name[1:]}, nil
+	return Data{Name: name, Directory: strings.ReplaceAll(name, "-", "_"), EnvPrefix: env, Title: strings.ToUpper(name[:1]) + name[1:]}, nil
 }
 
 // file is one templated output relative to the service directory.
@@ -43,13 +44,13 @@ type file struct {
 }
 
 var files = []file{
-	{"cmd/{{.Name}}/main.go", mainTmpl},
+	{"cmd/{{.Directory}}/main.go", mainTmpl},
 	{"internal/config/config.go", configTmpl},
 	{"internal/server/server.go", serverTmpl},
 	{"README.md", readmeTmpl},
 }
 
-// Generate writes a new service skeleton under root/services/<name>/. It refuses
+// Generate writes a new service skeleton under root/services/<snake_case_name>/. It refuses
 // to overwrite: if any target file already exists, nothing is written and an
 // error is returned (a half-scaffolded service is worse than none). Returns the
 // created paths, relative to root.
@@ -58,7 +59,7 @@ func Generate(root, name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	svcDir := filepath.Join(root, "services", name)
+	svcDir := filepath.Join(root, "services", data.Directory)
 
 	// Render everything first, and pre-check for collisions, so we don't write a
 	// partial tree on the first failure.
@@ -86,7 +87,7 @@ func Generate(root, name string) ([]string, error) {
 			}
 			content = formatted
 		}
-		out = append(out, rendered{abs: abs, rel: filepath.Join("services", name, rel), content: content})
+		out = append(out, rendered{abs: abs, rel: filepath.Join("services", data.Directory, rel), content: content})
 	}
 
 	var created []string

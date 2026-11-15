@@ -1,19 +1,23 @@
-# Infra — cluster bring-up notes
+# Infrastructure and operational runbooks
 
 This directory holds the platform's per-component manifests (`nats/`,
 `security/`, `tenancy/`, `deploy/`, ...). It does not own cluster
 provisioning: production clusters come from `terraform/` (EKS), and the
-local dev loop comes from `kanz/dev/` (docker compose). The notes below are
+local dev loop comes from `kanz/dev/` (Docker Compose). Start at the component
+README before applying manifests. These commands require an explicitly selected
+non-production environment and operator authority. The notes below are
 for a single-node **k3s** cluster stood up by hand — used when standing up
 the full manifest set (SPIRE + NATS + the trading loop) outside both of
 those paths.
 
 ## Driving a local gateway with a pre-minted bearer
 
-The `kanz` terminal client is **retired** (owner decision, 2026-08-11 — the
-platform is exclusively web-focused). This section used to explain how to point
-it at a local stack; what remains useful is the token, because `kanz-monitor`
-and the load-test tooling still take one.
+The TUI remains available until the web interface has verified operational
+parity and deliberate retirement. `internal/tui/universe` still calls gateway
+node-provisioning routes. `kanz-monitor` and the load-test tools also accept a
+gateway bearer. A route unused by the web is not thereby unused. Run the
+following local-fixture example from `kanz/`; never use its development signing
+configuration for a production gateway.
 
 The load stack's gateway validates **HS256 JWTs** (`API_GATEWAY_JWT_SECRET`,
 together with the explicit `API_GATEWAY_ALLOW_DEV_HS256=true` that arm now
@@ -21,7 +25,7 @@ requires) and is not an OpenID provider, so it serves no discovery document:
 
 ```sh
 export KANZ_GATEWAY_URL=http://localhost:8080
-export KANZ_TOKEN="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
+export KANZ_TOKEN="$(go run ./cmd/kanz_devtoken --secret load-secret --tenant load-test --role kanz-user)"
 ```
 
 For the WEB app, sign-in is a credential exchange against the identity service
@@ -40,7 +44,7 @@ failed to solve: ghcr.io/eighred/base/golang:1.26.5: unexpected status: 403 Forb
 ```
 
 That message names the registry and not the reason, so it reads like a broken
-Dockerfile rather than a missing login. Before `make dev-up`, the load stack,
+Dockerfile rather than a missing login. Before `make up` from `kanz/`, the load stack,
 or any `docker build` in this repository:
 
 ```sh

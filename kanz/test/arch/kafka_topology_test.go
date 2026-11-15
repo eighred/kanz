@@ -20,12 +20,12 @@ import (
 // actually publishes on had a topic. Nine PROVISIONED topics had no publisher at
 // all: they were written from the taxonomy doc's EXAMPLES rather than from the code.
 //
-// CROSS-LANGUAGE ON PURPOSE. kanz-py publishes inference.prediction.scored and
+// CROSS-LANGUAGE ON PURPOSE. python publishes inference.prediction.scored and
 // data.feature.drift_detected. A guard that walked only the Go AST would pronounce
 // the topology safe while being structurally blind to every subject the Python side
 // publishes — which is the identical failure mode AI-M1 found, where Go required
 // tenant_id on the live path and the Python producer had no tenant concept at all,
-// so nothing kanz-py published had ever been consumable by any Go service.
+// so nothing python published had ever been consumable by any Go service.
 //
 // The reverse direction is deliberately NOT asserted: a provisioned topic with no
 // publisher is dead weight, not a fault, and failing on one would block
@@ -40,7 +40,7 @@ func TestEverySubjectHasAKafkaTopic(t *testing.T) {
 	}
 
 	subjects := declaredSubjects(t, root)                                             // Go
-	subjects = append(subjects, pythonSubjects(t, filepath.Join(repo, "kanz-py"))...) // Python
+	subjects = append(subjects, pythonSubjects(t, filepath.Join(repo, "python"))...) // Python
 	if len(subjects) == 0 {
 		t.Fatal("no subjects found — this test would pass vacuously")
 	}
@@ -97,7 +97,7 @@ func provisionedTopics(t *testing.T, path string) map[string]bool {
 
 // pySubjectAssign matches a line-anchored assignment of a string literal to an
 // identifier — the same shape as a Go `const Foo = "..."` — mirroring the Go side's
-// own convention: every real subject in kanz-py is a module-level constant like
+// own convention: every real subject in python is a module-level constant like
 // `SUBJECT_DRIFT_DETECTED = "data.feature.drift_detected"`. Anchoring on the
 // assignment statement (not a bare string-literal scan) means prose can never
 // match: a docstring line such as `subject="market.equity.trade"` inside a call
@@ -140,7 +140,7 @@ func pythonSubjects(t *testing.T, root string) []string {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk kanz-py: %v", err)
+		t.Fatalf("walk python: %v", err)
 	}
 	return out
 }

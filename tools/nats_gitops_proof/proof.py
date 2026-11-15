@@ -297,7 +297,7 @@ class Fixture:
         self.k("apply", "--server-side", "-f", "-", data=yaml.safe_dump_all(objects))
 
     def install(self, target):
-        feed = load_module("feed_identity_fixture", "tools/feed-identity/proof.py")
+        feed = load_module("feed_identity_fixture", "tools/feed_identity/proof.py")
         # The shared cluster constructor accepts a bounded existing prefix. Its
         # command seam is scoped to this disposable fixture's empty environment.
         feed.command = self.command

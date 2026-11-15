@@ -135,7 +135,7 @@ func TestTheWebhookIngressCarriesTheClientIPPerimeter(t *testing.T) {
 //
 // The proxy.Service constants are the pod `app` labels, so this is exact.
 func TestEveryProxiedUpstreamIsReachable(t *testing.T) {
-	src := read(t, "../../services/api-gateway/internal/proxy/proxy.go")
+	src := read(t, "../../services/api_gateway/internal/proxy/proxy.go")
 	constRe := regexp.MustCompile(`Service\s*=\s*"([a-z0-9-]+)"`)
 	upstreams := constRe.FindAllStringSubmatch(src, -1)
 	if len(upstreams) == 0 {

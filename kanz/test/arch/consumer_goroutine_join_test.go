@@ -70,7 +70,7 @@ import (
 //     about shutdown ordering, and nothing more.
 
 // mainPkg is one `package main` composition root, parsed whole (the package,
-// not one file: services/risk-engine/cmd/risk-engine spreads across several,
+// not one file: services/risk_engine/cmd/risk_engine spreads across several,
 // and a helper that reaches bus.NewConsumer may live in any of them).
 type mainPkg struct {
 	dir      string // module-relative, e.g. "services/accounting/cmd/accounting"
@@ -625,6 +625,6 @@ func TestEveryConsumerGoroutineInMainIsJoined(t *testing.T) {
 		"handler that ignores context cancellation cannot hold the pod past its "+
 		"terminationGracePeriodSeconds. See "+
 		"services/accounting/cmd/accounting/main.go for the shape and "+
-		"services/risk-engine/internal/app/lifecycle.go for the ordering it follows.",
+		"services/risk_engine/internal/app/lifecycle.go for the ordering it follows.",
 		len(unjoined), strings.Join(lines, "\n  "))
 }

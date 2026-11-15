@@ -4,8 +4,8 @@ This directory holds the generator output consumed by all three EVT-21b
 parity test suites:
 
 - Go:    `kanz/test/contract/serialization/parity_test.go`
-- Python: `kanz-py/tests/test_serialization_parity.py`
-- TS:    `kanz/ts/kanz-bus/test/serialization-parity.test.ts`
+- Python: `python/tests/test_serialization_parity.py`
+- TS:    `kanz/ts/kanz_bus/test/serialization-parity.test.ts`
 
 ## Layout
 

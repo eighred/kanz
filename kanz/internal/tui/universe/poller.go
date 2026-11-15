@@ -11,7 +11,7 @@ import (
 // magnitude larger than Config.CallTimeout because it is not a read at all: the operator
 // runs the reachability dial in an ephemeral Kubernetes Job, so this wait covers Job
 // create, pod scheduling, possibly an image pull, and then up to the probe binary's
-// own 10s dial (cmd/kanz-provisioner/probe.go).
+// own 10s dial (cmd/kanz_provisioner/probe.go).
 //
 // It must strictly EXCEED the gateway's own budget for this route
 // (control.testConnectionTimeout), which must in turn exceed the operator's

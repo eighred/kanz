@@ -43,7 +43,7 @@ import (
 //   - A WHERE that is not selective (`WHERE 1=1`, or a predicate matching every
 //     row) satisfies it. There is no cheap syntactic test for selectivity, and a
 //     guard claiming one would be worse than this one: the behavioural half is
-//     services/risk-engine/internal/app's TestRestoreFootprintDoesNotGrowWithThe
+//     services/risk_engine/internal/app's TestRestoreFootprintDoesNotGrowWithThe
 //     Estate, which measures the heap during a 100,000-record restore.
 //   - SQL built by concatenation rather than written as a literal. None exists
 //     here, and this package's queries are all constant strings by convention.

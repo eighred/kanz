@@ -69,7 +69,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Install protoc plugins
@@ -77,8 +77,8 @@ jobs:
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
+      - name: Generate schemas Go SDK
+        working-directory: schemas
         run: |
           buf generate
           bash bootstrap-go-sdk.sh

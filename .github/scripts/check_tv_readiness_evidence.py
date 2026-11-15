@@ -10,7 +10,7 @@ REQUIRED = {
                 "TestRetainedRetryValidatesEffectiveDurableProfile",
                 "TestRetainedProfilePreservesExistingDurableCursor",
                 "TestRetainedAuthorityRetriesReleaseClaimsAndKeepTerminalDLQ"},
-    "services/tv-sync/cmd/tv-sync": {"TestTVReadinessWaitsForEverySubscription",
+    "services/tv_sync/cmd/tv_sync": {"TestTVReadinessWaitsForEverySubscription",
                                       "TestTVReadinessRefusesSubscriptionFailureAndEmptySet",
                                       "TestTVReadinessClosesBeforeSiblingDrain",
                                       "TestTVRefusesOverlappingPriceFilters",
@@ -21,14 +21,14 @@ REQUIRED = {
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/ambiguous-committed-response",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/database-timeout",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/restart-unacked"},
-    "services/tv-sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
+    "services/tv_sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
                                                  "TestServingGenerationRejectsOldLeasesAfterRecovery",
                                                  "TestServingRevocationOrdersBoundedInflightWrite",
                                                  "TestEstablishedStreamClosesOnFailureAndRequiresNewGeneration",
                                                  "TestStreamHeaderAdmissionCannotRaceRevocation",
                                                  "TestFoldReadinessRequiresMatchingRecovery",
                                                  "TestFoldReadinessOverflowAndMissingIdentityStayClosed"},
-    "services/tv-sync/internal/brokerapi": {"TestStreamRefusesUnwiredServingGate", "TestStream_DeliversDeltas", "TestStream_SurvivesTheServerWriteTimeout"},
+    "services/tv_sync/internal/brokerapi": {"TestStreamRefusesUnwiredServingGate", "TestStream_DeliversDeltas", "TestStream_SurvivesTheServerWriteTimeout"},
 }
 if __name__ == "__main__":
     if sys.argv[1] == "--pattern":

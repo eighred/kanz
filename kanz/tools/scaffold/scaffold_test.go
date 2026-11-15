@@ -20,10 +20,10 @@ func TestGenerateProducesValidOnConventionService(t *testing.T) {
 
 	// EVT-16a layout: cmd/<name>/main.go + per-service internal packages.
 	wantRel := []string{
-		"services/widget-svc/cmd/widget-svc/main.go",
-		"services/widget-svc/internal/config/config.go",
-		"services/widget-svc/internal/server/server.go",
-		"services/widget-svc/README.md",
+		"services/widget_svc/cmd/widget_svc/main.go",
+		"services/widget_svc/internal/config/config.go",
+		"services/widget_svc/internal/server/server.go",
+		"services/widget_svc/README.md",
 	}
 	if len(created) != len(wantRel) {
 		t.Fatalf("created %v, want %d files", created, len(wantRel))
@@ -46,12 +46,19 @@ func TestGenerateProducesValidOnConventionService(t *testing.T) {
 		}
 	}
 
+	if _, err := os.Stat(filepath.Join(root, "services/widget-svc")); !os.IsNotExist(err) {
+		t.Fatal("scaffold recreated a hyphenated source directory")
+	}
+
 	// Name substitution reached the env prefix + import paths.
-	main, _ := os.ReadFile(filepath.Join(root, "services/widget-svc/cmd/widget-svc/main.go"))
-	if !strings.Contains(string(main), "github.com/eighred/kanz/services/widget-svc/internal/config") {
+	main, _ := os.ReadFile(filepath.Join(root, "services/widget_svc/cmd/widget_svc/main.go"))
+	if !strings.Contains(string(main), "github.com/eighred/kanz/services/widget_svc/internal/config") {
 		t.Error("main.go missing the service's internal import path")
 	}
-	cfg, _ := os.ReadFile(filepath.Join(root, "services/widget-svc/internal/config/config.go"))
+	cfg, _ := os.ReadFile(filepath.Join(root, "services/widget_svc/internal/config/config.go"))
+	if !strings.Contains(string(cfg), `env.Or("WIDGET_SVC_SOURCE", "widget-svc")`) {
+		t.Error("source directory spelling changed the deployed service identity")
+	}
 	if !strings.Contains(string(cfg), "WIDGET_SVC_LISTEN") {
 		t.Error("config.go missing the derived env prefix WIDGET_SVC_")
 	}

@@ -64,7 +64,7 @@ func KnownNonPrice(eventType string) bool {
 
 // Of classifies eventType against the taxonomy the producer stamps.
 //
-// services/market-data/internal/feed/bussink.go emits every MarketDataEvent as
+// services/market_data/internal/feed/bussink.go emits every MarketDataEvent as
 // `market.<assetClass>.<variant>`, where the variant token is chosen from the
 // oneof arm actually set — so the token set here is that oneof's, and
 // TestEveryOneofArmHasAVariant derives it from the descriptor rather than

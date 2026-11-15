@@ -137,7 +137,7 @@ type Service struct {
 	// first refuses the tenant's orders under a control nobody can satisfy.
 	SetEnv []SetEnvVar
 	// Why states what the tenant loses without this service. It is printed by
-	// cmd/kanz-tenantgen and quoted by the guards, so an operator reading a
+	// cmd/kanz_tenantgen and quoted by the guards, so an operator reading a
 	// failure learns the consequence rather than the rule.
 	Why string
 }
@@ -145,7 +145,7 @@ type Service struct {
 // DropEnvVar is one env var removed from a per-tenant render, and why.
 type DropEnvVar struct {
 	Name string
-	// Why is printed by cmd/kanz-tenantgen beside the rendered file, so the
+	// Why is printed by cmd/kanz_tenantgen beside the rendered file, so the
 	// operator learns which capability the tenant does NOT have.
 	Why string
 }
@@ -156,7 +156,7 @@ type SetEnvVar struct {
 	// Value is what the rendered manifest sets. It must differ from the base's
 	// value, or the entry is recording a decision the base already makes.
 	Value string
-	// Why is printed by cmd/kanz-tenantgen beside the rendered file, so the
+	// Why is printed by cmd/kanz_tenantgen beside the rendered file, so the
 	// operator learns which posture this tenant runs that the platform does not.
 	Why string
 }
@@ -249,7 +249,7 @@ var Services = []Service{
 				"admits it under either posture — the two states are distinct there and this " +
 				"value does not collapse them. " +
 				"NOTHING HERE SEEDS A MANDATE, deliberately. Publishing one on the tenant's " +
-				"behalf would need two named approvers (cmd/kanz-mandate propose/approve, " +
+				"behalf would need two named approvers (cmd/kanz_mandate propose/approve, " +
 				"#410), and a script fabricating both would write \"somebody decided\" into " +
 				"the audit trail for a decision no human made — trading the loud gap for a " +
 				"silent one. The mandate is an operator act before go-live; " +
@@ -343,7 +343,7 @@ func validateTenant(tenant string) error { return ValidateTenant(tenant) }
 // multi-document manifest, in declared order.
 //
 // ONE READER, because there are two callers and they must not disagree: the
-// generator (cmd/kanz-tenantgen) and the drift guard
+// generator (cmd/kanz_tenantgen) and the drift guard
 // (test/arch/tenant_compute_test.go), which re-renders from the live bases and
 // compares the result against what is committed. A guard reading only Base
 // while the generator reads Base+Extra reports permanent drift on every

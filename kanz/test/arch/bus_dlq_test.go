@@ -220,7 +220,7 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 // its own justification. Listing cannot silently widen — only enumerating a
 // specific file:line can, and that requires a reviewed edit to this file.
 var dlqExemptBroadcastOnlyConsumers = map[string]string{
-	"cmd/kanz-monitor/busreader.go:runBusReader": "kanz-monitor: this Consumer is used " +
+	"cmd/kanz_monitor/busreader.go:runBusReader": "kanz-monitor: this Consumer is used " +
 		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go and " +
 		"risk.position.changed.> at busreader.go) — there is no Subscribe call anywhere " +
 		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
@@ -329,7 +329,7 @@ func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 // and quietly false a year later, when the tool is renamed, moved under a build
 // tag, or deleted as unused because nothing imports it. So it is a guard: the
 // module must contain a non-test subscription to a subject in the `dlq.`
-// namespace. Deleting cmd/kanz-redrive fails this test.
+// namespace. Deleting cmd/kanz_redrive fails this test.
 //
 // It checks TWO things, because either alone is satisfiable by something an
 // operator cannot actually use:
@@ -353,7 +353,7 @@ func TestTheDLQNamespaceHasAReader(t *testing.T) {
 		"holds its 202, no ORDER_REJECTED FACT is emitted, kanz-replay refuses dlq. subjects by " +
 		"design (it republishes into the isolated replay namespace, which is the wrong " +
 		"destination), and recovery needs a human to hand-write a republisher.\n\n" +
-		"pkg/bus.Redriver is the engine and cmd/kanz-redrive is the entry point (#220). If one " +
+		"pkg/bus.Redriver is the engine and cmd/kanz_redrive is the entry point (#220). If one " +
 		"was removed, restore it or replace it with something that reads the namespace."
 
 	if len(engines) == 0 {
@@ -453,7 +453,7 @@ func dlqDrainSites(t *testing.T, root string) (engines, entryPoints []string) {
 }
 
 // dlqNamespace is the reserved DLQ subject prefix (bus.dlqSubjectPrefix, and
-// kanz-schemas/README.md § Subject Taxonomy §6). Spelled here rather than
+// schemas/README.md § Subject Taxonomy §6). Spelled here rather than
 // imported because test/arch is deliberately dependency-free over the module it
 // scans.
 const dlqNamespace = "dlq."
@@ -505,16 +505,16 @@ func usesRedriver(f *ast.File) bool {
 // either), so a call site whose every subscription runs through one of those
 // two has nothing here to certify — WithRetry there would be inert, not
 // dangerous, and is deliberately left OFF this list rather than certified for
-// a decision that cannot arise (services/compliance, services/webhook-ingest).
+// a decision that cannot arise (services/compliance, services/webhook_ingest).
 //
 // Keyed on "file:line" — busConsumerCall.where(), the same identity the guard
 // already reports failures against. An edit that moves the call site
 // un-certifies it until this entry is updated to match; that fails CLOSED,
 // which is the safe direction for a capital-path guard.
 var retryCertifiedConsumers = map[string]string{
-	"services/tv-sync/cmd/tv-sync/main.go:run": "tv-sync: the sole handler is " +
+	"services/tv_sync/cmd/tv_sync/main.go:run": "tv-sync: the sole handler is " +
 		"projection.Projection.Handle. Its only error return before the fold is " +
-		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go), " +
+		"PostgresLog.Append itself failing (services/tv_sync/internal/projection/postgres.go), " +
 		"which means nothing committed. fold() never returns an error and Handle " +
 		"unconditionally returns nil once it runs, so there is no error path between a " +
 		"successful Append and the fold that a retry could trigger — a retry can only " +
@@ -540,7 +540,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:runEngine": "risk-engine (state ingest): dispatches " +
+	"services/risk_engine/cmd/risk_engine/main.go:runEngine": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
 		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
@@ -551,7 +551,7 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
+	"services/risk_engine/cmd/risk_engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go) " +
 		"— a last-value cache write, same shape as accounting's live FX feed. Nothing to skip. " +
 		"Since #894 the write is admitted only for an instrument in the calibration strip parsed at " +
@@ -560,7 +560,7 @@ var retryCertifiedConsumers = map[string]string{
 		"branch as the first. The dropped branch returns nil for an event this subscriber never had " +
 		"work for, not for work an earlier attempt left unfinished.",
 
-	"services/market-data/cmd/market-data/main.go:runIngest": "market-data: the sole handler is " +
+	"services/market_data/cmd/market_data/main.go:runIngest": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
@@ -581,10 +581,10 @@ var retryCertifiedConsumers = map[string]string{
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
 		"it never skips the observe that a first attempt already made.",
 
-	"services/lake-sink/cmd/lake-sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+	"services/lake_sink/cmd/lake_sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
-		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go). A retry " +
+		"resolved by downstream compaction (services/lake_sink/internal/cdc/sink.go). A retry " +
 		"redoes the row; it cannot skip it.",
 
 	"services/alternatives/cmd/alternatives/main.go:runConsumer": "alternatives: the sole handler is " +

@@ -44,7 +44,7 @@ name: base-image-mirror
 on:
   pull_request:
     paths:
-      - 'tools/rust-audit-tools/**'
+      - 'tools/rust_audit_tools/**'
       - '.github/workflows/base-image-mirror.yml'
       - '.github/scripts/catalog_registry_auth.py'
       - '.github/scripts/test_catalog_registry_auth.py'
@@ -74,7 +74,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/base-image-mirror.yml'
-      - 'tools/rust-audit-tools/**'
+      - 'tools/rust_audit_tools/**'
       - '.github/scripts/catalog_registry_auth.py'
       - '.github/scripts/test_catalog_registry_auth.py'
 
@@ -122,9 +122,9 @@ jobs:
             target: ghcr.io/eighred/base/rust:1.90.0-bookworm
           - source: gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
             target: ghcr.io/eighred/base/distroless-cc-debian12:nonroot
-          # kanz-py's base. OUTSIDE issue #55's original scope — its acceptance
+          # python's base. OUTSIDE issue #55's original scope — its acceptance
           # grep is `grep -rE '^FROM ' kanz`, which never reaches
-          # kanz-py/Dockerfile — but ghcr.io/eighred/inference is built and
+          # python/Dockerfile — but ghcr.io/eighred/inference is built and
           # deployed like any other image and carries exactly the same Docker Hub
           # exposure. Mirroring it here rather than leaving it to be noticed
           # later. See test/arch/baseimage_mirror_test.go, which flags it.
@@ -446,7 +446,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Test source-free producer refusals
-        run: python3 -B -m unittest discover -s tools/rust-audit-tools -p 'test_*.py'
+        run: python3 -B -m unittest discover -s tools/rust_audit_tools -p 'test_*.py'
       - name: Warm existing mirrored builder for OCI exporter
         run: .github/scripts/warm-builder.sh ghcr.io/eighred/base/buildkit:buildx-stable-1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -454,7 +454,7 @@ jobs:
           version: v0.37.1
           driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
       - name: Build empty-context tools and qualify actual behavior
-        run: python3 -B tools/rust-audit-tools/qualify.py build "$RUNNER_TEMP/rust-audit-tools"
+        run: python3 -B tools/rust_audit_tools/qualify.py build "$RUNNER_TEMP/rust-audit-tools"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-audit-tools-${{ github.run_id }}-${{ github.run_attempt }}
@@ -484,7 +484,7 @@ jobs:
       - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Publish only qualified bytes and verify registry readback
-        run: python3 -B tools/rust-audit-tools/qualify.py publish "$RUNNER_TEMP/rust-audit-tools"
+        run: python3 -B tools/rust_audit_tools/qualify.py publish "$RUNNER_TEMP/rust-audit-tools"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-audit-tools-published-${{ github.run_id }}-${{ github.run_attempt }}

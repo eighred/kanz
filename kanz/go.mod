@@ -144,8 +144,8 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
 )
 
-// Local replace until the first kanz-schemas release. After `cd
-// ../kanz-schemas && buf generate && (cd gen/go && go mod init
+// Local replace until the first schemas release. After `cd
+// ../schemas && buf generate && (cd gen/go && go mod init
 // github.com/eighred/kanz/kanz-schemas-go && go mod tidy)`, this resolves
 // against the locally-generated SDK. Removed once a tagged release exists.
-replace github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go
+replace github.com/eighred/kanz/kanz-schemas-go => ../schemas/gen/go

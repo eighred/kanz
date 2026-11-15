@@ -1,6 +1,6 @@
 ---
 # Topic provisioning script. Idempotent — re-run after taxonomy changes. Topic
-# layout follows kanz-schemas/README.md § Subject Taxonomy §5:
+# layout follows schemas/README.md § Subject Taxonomy §5:
 # topic = {domain}.
 # {entity}; event_type is discriminated within the topic. STATE_SNAPSHOT events
 # use a separate compacted {domain}.{entity}.snapshot topic. Every delete-policy
@@ -151,7 +151,7 @@ data:
     platform.mode              3   delete   2592000000  yes
 
     # INFERENCE / DATA QUALITY. inference.prediction and data.feature are published
-    # by kanz-py, not Go — see the arch test's cross-language note.
+    # by python, not Go — see the arch test's cross-language note.
     inference.feature          6   delete   604800000   yes
     inference.prediction       6   delete   2592000000  yes
     data.feature               3   delete   2592000000  yes
@@ -168,7 +168,7 @@ data:
     data.exception             3   delete   2592000000  yes
     # THE MODEL REGISTRY'S APPEND LOG (DEBT-02b, #112). It was removed from this
     # table when the cleanup found "NOT ONE of which is published by any
-    # service" — correctly, at the time. kanz-py's BusRegistryPublisher now
+    # service" — correctly, at the time. python's BusRegistryPublisher now
     # publishes it, so the reason for its absence has gone.
     #
     # INFINITE RETENTION, AND NOT COMPACTED. Both halves matter and they pull in
@@ -198,7 +198,7 @@ data:
     # the `dlq` column above: that column pairs a DLQ with a real topic, and
     # dlq.archiver has no real-topic sibling.
     #
-    # NOTHING DRAINS THIS TOPIC (#285). cmd/kanz-redrive is NATS-only, and no
+    # NOTHING DRAINS THIS TOPIC (#285). cmd/kanz_redrive is NATS-only, and no
     # consumer subscribes here, so the 30 days below is the window in which a
     # HUMAN can extract a parked event — after that it is deleted, and an event
     # parked here has no other copy once its NATS stream ages out. The retention

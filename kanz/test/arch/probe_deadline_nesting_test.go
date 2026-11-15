@@ -22,9 +22,9 @@ import (
 // four packages that do not import each other:
 //
 //	universe TUI          testConnTimeout        internal/tui/universe/poller.go
-//	api-gateway route     testConnectionTimeout  services/api-gateway/internal/control
+//	api-gateway route     testConnectionTimeout  services/api_gateway/internal/control
 //	operator probe wait   probeTimeout           services/operator/internal/provision
-//	provisioner dial      probeDialTimeout       cmd/kanz-provisioner/probe.go
+//	provisioner dial      probeDialTimeout       cmd/kanz_provisioner/probe.go
 //
 // Each must strictly exceed the one beneath it, so the INNERMOST bound is the one that
 // fires. That ordering is not tidiness — it decides what a human is told. Only the
@@ -68,11 +68,11 @@ type deadlineLayer struct {
 var testConnDeadlineChain = []deadlineLayer{
 	{name: "testConnTimeout", file: "internal/tui/universe/poller.go",
 		label: "the TUI's wait on the gateway"},
-	{name: "testConnectionTimeout", file: "services/api-gateway/internal/control/control.go",
+	{name: "testConnectionTimeout", file: "services/api_gateway/internal/control/control.go",
 		label: "the gateway's wait on the operator"},
 	{name: "probeTimeout", file: "services/operator/internal/provision/provision.go",
 		label: "the operator's wait on the probe Job"},
-	{name: "probeDialTimeout", file: "cmd/kanz-provisioner/probe.go",
+	{name: "probeDialTimeout", file: "cmd/kanz_provisioner/probe.go",
 		label: "the probe's own TCP dial"},
 }
 
@@ -151,7 +151,7 @@ func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
 
 // gatewayProxyClientFile builds the client every PROXIED request travels on: the
 // api-gateway's forwarder to wealth, datamaster, tv-sync and copilot.
-const gatewayProxyClientFile = "services/api-gateway/cmd/api-gateway/main.go"
+const gatewayProxyClientFile = "services/api_gateway/cmd/api_gateway/main.go"
 
 // TestGatewayProxyClientCarriesNoTimeoutOfItsOwn is the rule above, applied where it had
 // ALREADY been broken.
@@ -371,18 +371,18 @@ func apiGatewayIngressAnnotations(t *testing.T, root string) map[string]string {
 // (#235). What this file still owns is the two OVERRIDES: the gateway is the only
 // server with an ingress in front of it and per-route budgets of its own, so
 // Write and Idle are its own consts and the ordering below is still its problem.
-const gatewayServerFile = "services/api-gateway/cmd/api-gateway/main.go"
+const gatewayServerFile = "services/api_gateway/cmd/api_gateway/main.go"
 
 // gatewayHandlerBudgets are every per-request deadline a handler on that server can set.
 // WriteTimeout is a bound on ALL of them at once, so it has to clear the largest.
 var gatewayHandlerBudgets = []deadlineLayer{
-	{name: "testConnectionTimeout", file: "services/api-gateway/internal/control/control.go",
+	{name: "testConnectionTimeout", file: "services/api_gateway/internal/control/control.go",
 		label: "POST /v1/control/test-connection"},
-	{name: "callTimeout", file: "services/api-gateway/internal/control/control.go",
+	{name: "callTimeout", file: "services/api_gateway/internal/control/control.go",
 		label: "every other control-plane RPC"},
-	{name: "copilotForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+	{name: "copilotForwardTimeout", file: "services/api_gateway/internal/proxy/proxy.go",
 		label: "a proxied POST /v1/ask"},
-	{name: "readForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+	{name: "readForwardTimeout", file: "services/api_gateway/internal/proxy/proxy.go",
 		label: "a proxied wealth/datamaster/tv-sync read"},
 }
 

@@ -45,7 +45,7 @@ func attributionPrimitiveBoundary(files map[string]string) bool {
 }
 
 func TestRustAttributionPrimitiveBoundary(t *testing.T) {
-	root := filepath.Join("..", "..", "..", "kanz-rs", "crates", "order-core")
+	root := filepath.Join("..", "..", "..", "rust", "crates", "order_core")
 	files := map[string]string{}
 	for _, path := range []string{"src/arithmetic.rs", "src/attribution.rs", "src/attribution_projection.rs", "src/schedule_identity.rs", "examples/order-attribution-fixture.rs"} {
 		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))

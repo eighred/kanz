@@ -4,48 +4,48 @@ on:
     paths:
       - 'tools/nats_gitops_proof/**'
       - 'kanz/tools/nats_gitops_proof/**'
-      - 'tools/feed-identity/**'
+      - 'tools/feed_identity/**'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/gitops/applicationset.yaml'
-      - 'kanz-schemas/proto/envelope/**'
-      - 'kanz-schemas/proto/market/**'
-      - 'kanz-schemas/proto/common/**'
-      - 'kanz-schemas/proto/command/**'
-      - 'kanz-schemas/buf.yaml'
-      - 'kanz-schemas/buf.gen.yaml'
-      - 'kanz-schemas/bootstrap-go-sdk.sh'
+      - 'schemas/proto/envelope/**'
+      - 'schemas/proto/market/**'
+      - 'schemas/proto/common/**'
+      - 'schemas/proto/command/**'
+      - 'schemas/buf.yaml'
+      - 'schemas/buf.gen.yaml'
+      - 'schemas/bootstrap-go-sdk.sh'
       - 'kanz/Makefile'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - 'kanz/pkg/bus/**'
       - 'kanz/pkg/transport/**'
       - 'kanz/pkg/observability/**'
-      - '.github/actions/setup-buf/**'
+      - '.github/actions/setup_buf/**'
       - '.github/workflows/nats-gitops-verification.yml'
   push:
     branches: [main]
     paths:
       - 'tools/nats_gitops_proof/**'
       - 'kanz/tools/nats_gitops_proof/**'
-      - 'tools/feed-identity/**'
+      - 'tools/feed_identity/**'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/gitops/applicationset.yaml'
-      - 'kanz-schemas/proto/envelope/**'
-      - 'kanz-schemas/proto/market/**'
-      - 'kanz-schemas/proto/common/**'
-      - 'kanz-schemas/proto/command/**'
-      - 'kanz-schemas/buf.yaml'
-      - 'kanz-schemas/buf.gen.yaml'
-      - 'kanz-schemas/bootstrap-go-sdk.sh'
+      - 'schemas/proto/envelope/**'
+      - 'schemas/proto/market/**'
+      - 'schemas/proto/common/**'
+      - 'schemas/proto/command/**'
+      - 'schemas/buf.yaml'
+      - 'schemas/buf.gen.yaml'
+      - 'schemas/bootstrap-go-sdk.sh'
       - 'kanz/Makefile'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - 'kanz/pkg/bus/**'
       - 'kanz/pkg/transport/**'
       - 'kanz/pkg/observability/**'
-      - '.github/actions/setup-buf/**'
+      - '.github/actions/setup_buf/**'
       - '.github/workflows/nats-gitops-verification.yml'
 permissions:
   contents: read
@@ -83,7 +83,7 @@ jobs:
           go test -p 1 ./tools/nats_gitops_proof -count=1
           go run ./tools/nats_gitops_proof "$GITHUB_SHA" > "$RUNNER_TEMP/nats-gitops-fact.json"
           CGO_ENABLED=0 go build -o "$RUNNER_TEMP/nats-gitops-fact" ./tools/nats_gitops_proof
-      - run: bash tools/feed-identity/install.sh
+      - run: bash tools/feed_identity/install.sh
       - name: Prove actual Argo PostSync and retained FACT through PVC
         run: python3 -B tools/nats_gitops_proof/proof.py
       - name: Remove only this interrupted proof cluster

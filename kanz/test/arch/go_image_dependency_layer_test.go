@@ -14,7 +14,7 @@ import (
 func checkGoImageDependencyLayer(raw string) error {
 	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
 	start, download, sdk, source, compile := -1, -1, -1, -1, -1
-	const metadata = "COPY kanz-schemas/gen/go/go.mod kanz-schemas/gen/go/go.sum ./kanz-schemas/gen/go/"
+	const metadata = "COPY schemas/gen/go/go.mod schemas/gen/go/go.sum ./schemas/gen/go/"
 	allowed := map[string]bool{metadata: true, "COPY kanz/go.mod kanz/go.sum ./kanz/": true, "COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh": true}
 	seen := map[string]int{}
 	for i, rawLine := range lines {
@@ -44,7 +44,7 @@ func checkGoImageDependencyLayer(raw string) error {
 			}
 			seen[line]++
 		}
-		if line == "COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/" {
+		if line == "COPY schemas/gen/go/ /src/schemas/gen/go/" {
 			sdk = i
 		}
 		if line == "COPY kanz/ ./" {
@@ -100,13 +100,13 @@ func TestGoImageDependencyLayersPreserveCompleteSDK(t *testing.T) {
 	if count < 30 {
 		t.Fatalf("incomplete Go image inventory: %d", count)
 	}
-	fixture := read(t, filepath.Join(root, "services/api-gateway/Dockerfile"))
+	fixture := read(t, filepath.Join(root, "services/api_gateway/Dockerfile"))
 	for _, mutation := range [][2]string{
-		{"COPY kanz-schemas/gen/go/go.mod kanz-schemas/gen/go/go.sum ./kanz-schemas/gen/go/", "COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/"},
-		{"kanz-schemas/gen/go/go.sum ", ""},
+		{"COPY schemas/gen/go/go.mod schemas/gen/go/go.sum ./schemas/gen/go/", "COPY schemas/gen/go/ ./schemas/gen/go/"},
+		{"schemas/gen/go/go.sum ", ""},
 		{"COPY kanz/go.mod kanz/go.sum ./kanz/", "COPY kanz/ ./kanz/"},
-		{"COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/", "# no generated source"},
-		{"COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/", "COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/"},
+		{"COPY schemas/gen/go/ /src/schemas/gen/go/", "# no generated source"},
+		{"COPY schemas/gen/go/ /src/schemas/gen/go/", "COPY schemas/gen/go/ ./schemas/gen/go/"},
 		{"RUN sh /usr/local/bin/go-mod-download.sh", "RUN go mod download"},
 		{"COPY kanz/build/go-mod-download.sh", "COPY kanz/services/ /src/services/\nCOPY kanz/build/go-mod-download.sh"},
 	} {
@@ -119,8 +119,8 @@ func TestGoImageDependencyLayersPreserveCompleteSDK(t *testing.T) {
 		}
 	}
 	// Full SDK before download still rebuilds consumers, but destroys reuse.
-	before := strings.Replace(fixture, "COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/\n", "", 1)
-	before = strings.Replace(before, "RUN sh /usr/local/bin/go-mod-download.sh", "COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/\nRUN sh /usr/local/bin/go-mod-download.sh", 1)
+	before := strings.Replace(fixture, "COPY schemas/gen/go/ /src/schemas/gen/go/\n", "", 1)
+	before = strings.Replace(before, "RUN sh /usr/local/bin/go-mod-download.sh", "COPY schemas/gen/go/ /src/schemas/gen/go/\nRUN sh /usr/local/bin/go-mod-download.sh", 1)
 	if checkGoImageDependencyLayer(before) == nil {
 		t.Fatal("early SDK source accepted")
 	}

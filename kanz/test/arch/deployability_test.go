@@ -57,7 +57,7 @@ func TestEveryServiceIsDeployableOrExempt(t *testing.T) {
 			continue
 		}
 		var missing []string
-		if _, err := os.Stat(filepath.Join(root, "services", svc, "Dockerfile")); err != nil {
+		if _, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc), "Dockerfile")); err != nil {
 			missing = append(missing, "Dockerfile")
 		}
 		if !strings.Contains(matrix, "- service: "+svc+"\n") {
@@ -92,11 +92,11 @@ func TestEveryServiceIsDeployableOrExempt(t *testing.T) {
 	// place is how it becomes the reason nobody re-examined it.
 	var stale []string
 	for svc, reason := range notDeployed {
-		if _, err := os.Stat(filepath.Join(root, "services", svc)); err != nil {
+		if _, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc))); err != nil {
 			stale = append(stale, svc+": no such service under services/")
 			continue
 		}
-		_, dockerErr := os.Stat(filepath.Join(root, "services", svc, "Dockerfile"))
+		_, dockerErr := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc), "Dockerfile"))
 		if dockerErr == nil && strings.Contains(matrix, "- service: "+svc+"\n") && manifestExists(root, svc) {
 			stale = append(stale, svc+": has a Dockerfile, a build-matrix entry AND a manifest, so the "+
 				"exemption is a false claim ("+firstSentence(reason)+")")
@@ -190,7 +190,7 @@ func servicesWithEntrypoints(t *testing.T, root string) []string {
 		if _, err := os.Stat(filepath.Join(root, "services", e.Name(), "cmd")); err != nil {
 			continue // a library-only service directory builds no image
 		}
-		out = append(out, e.Name())
+		out = append(out, deployedServiceName(e.Name()))
 	}
 	sort.Strings(out)
 	return out
@@ -265,7 +265,7 @@ func TestEveryProbePointsAtARouteTheServiceServes(t *testing.T) {
 	for _, m := range manifests {
 		base := filepath.Base(m)
 		svc := strings.TrimSuffix(strings.TrimSuffix(base, "-deploy.yaml"), "-rollout.yaml")
-		if _, err := os.Stat(filepath.Join(root, "services", svc)); err != nil {
+		if _, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc))); err != nil {
 			continue // not a service workload (scaling policy, analysis template, …)
 		}
 		body, err := os.ReadFile(m)
@@ -515,7 +515,7 @@ type volumeCheckContainer struct {
 func servesPath(t *testing.T, root, svc, path string) bool {
 	t.Helper()
 	for _, dir := range []string{
-		filepath.Join(root, "services", svc),
+		filepath.Join(root, "services", sourceDirectoryName(svc)),
 		filepath.Join(root, "internal", "venueadapter"), // the shared adapter probe surface
 	} {
 		found := false

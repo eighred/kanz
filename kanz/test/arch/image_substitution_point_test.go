@@ -39,8 +39,8 @@ func TestExactlyOneImageSubstitutionPoint(t *testing.T) {
 	//    guard keeps passing on whatever digests were last written and slowly
 	//    becomes an assertion about history rather than about releases.
 	release := readFile(t, filepath.Join(root, "..", ".github", "workflows", "release.yml"))
-	if !strings.Contains(release, "kanz-pin-digests") {
-		t.Error("release.yml no longer runs cmd/kanz-pin-digests\n\n" +
+	if !strings.Contains(release, "go run ./cmd/kanz_pin_digests ") {
+		t.Error("release.yml no longer runs cmd/kanz_pin_digests\n\n" +
 			"That binary IS the substitution point: it rewrites every manifest from the tag it was " +
 			"authored with to the digest the release published. Without it the manifests keep whatever " +
 			"digests they already had, TestProductionManifestsPinImagesByDigest keeps passing on those " +

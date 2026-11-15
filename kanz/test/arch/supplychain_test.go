@@ -136,7 +136,7 @@ var pinExempt = map[string]string{}
 
 // workflowFiles walks the repo root for every *.yml / *.yaml under a
 // .github/workflows directory — both the root .github/workflows and
-// kanz-schemas/.github/workflows, and any future one, without hardcoding the
+// schemas/.github/workflows, and any future one, without hardcoding the
 // path list. A ninth workflow file, or a workflows directory in a new
 // sub-repo, is picked up automatically; only .git is skipped (irrelevant and
 // large).
@@ -696,7 +696,7 @@ func TestImageOrgIsCanonical(t *testing.T) {
 // This test holds the two matrices identical. It compares (service, dockerfile)
 // PAIRS, not just names, because the Dockerfile path is where the old
 // release.yml was actually wrong: it hardcoded kanz/services/<service>/Dockerfile,
-// which is false for inference (kanz-py/) and for kanz-migrate, kanz-halt and
+// which is false for inference (python/) and for kanz-migrate, kanz-halt and
 // kanz-provisioner (kanz/cmd/). A name-only check would have called that correct.
 func TestReleaseMatrixCoversEveryBuiltService(t *testing.T) {
 	repoRoot := filepath.Dir(moduleRoot(t))
@@ -836,7 +836,7 @@ var productionImageRef = regexp.MustCompile(
 // nothing parsed" alarm because the file genuinely has nothing pinnable in it
 // — a policy glob, not an image.
 var coverageGapExempt = map[string]string{
-	"infra/overlays/testnet-tokyo/kustomization.yaml": "Kustomize image transforms carry each " +
+	"infra/overlays/testnet_tokyo/kustomization.yaml": "Kustomize image transforms carry each " +
 		"canonical ghcr.io/eighred source name separately from its mandatory ECR digest; " +
 		"TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR parses and cross-checks that structure (#1098)",
 	"infra/security/admission/cluster-image-policy.yaml": "carries the sigstore glob `ghcr.io/eighred/**`, " +

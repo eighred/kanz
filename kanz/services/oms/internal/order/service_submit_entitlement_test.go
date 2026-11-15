@@ -41,7 +41,7 @@ func (c *countingStore) Create(ctx context.Context, st *orderpb.OrderState, anno
 }
 
 // submitAs builds the "o1"/"pf1" limit order carrying a DELEGATED issuer — the
-// shape services/api-gateway/internal/orders/orders.go's bindMetadata mints for
+// shape services/api_gateway/internal/orders/orders.go's bindMetadata mints for
 // an authenticated human, where Issuer and PrincipalPortfolios both come from
 // the verified principal.
 func submitAs(portfolios ...string) *orderpb.SubmitOrder {

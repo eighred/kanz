@@ -30,7 +30,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/state/persist"
 )
 
-const pgMigrationDir = "../../../services/risk-engine/migrations"
+const pgMigrationDir = "../../../services/risk_engine/migrations"
 
 // pgPool returns a pool whose every connection pins app.tenant_id to tenant —
 // the authenticated-session GUC pattern the composition root uses, and the

@@ -33,7 +33,7 @@ func rustContainerVersionBoundary(service, docker, source, runtime string) error
 		return fmt.Errorf("Rust bases must be the reviewed mirrored digest pair")
 	}
 	joined := "\n" + strings.Join(instructions, "\n") + "\n"
-	if !strings.Contains(joined, "\nARG VERSION\n") || !strings.Contains(joined, `RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-`+service) {
+	if !strings.Contains(joined, "\nARG VERSION\n") || !strings.Contains(joined, `RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path rust/Cargo.toml -p kanz-`+service) {
 		return fmt.Errorf("Rust release build must require and compile VERSION")
 	}
 	if !strings.Contains(joined, "\nRUN cargo install --locked --version 0.7.7 cargo-auditable\n") {
@@ -79,7 +79,7 @@ func rustContainerVersionBoundary(service, docker, source, runtime string) error
 	if !strings.Contains(compact(source), compact(wrapper)) || !strings.Contains(compact(source), `runtime::run(config,`) {
 		return fmt.Errorf("binary must pass its compiled stamp to the shared runtime")
 	}
-	if !strings.Contains(joined, "\nCOPY kanz-rs/ kanz-rs/\n") || !strings.Contains(joined, `ENTRYPOINT ["/kanz-`+service+`"]`) {
+	if !strings.Contains(joined, "\nCOPY rust/ rust/\n") || !strings.Contains(joined, `ENTRYPOINT ["/kanz-`+service+`"]`) {
 		return fmt.Errorf("build must include complete workspace and launch its own binary")
 	}
 	return nil
@@ -95,7 +95,7 @@ func rustBoundaryInputs(t *testing.T, service string) (string, string, string) {
 		}
 		return string(b)
 	}
-	return read("kanz-rs/services/" + service + "/Dockerfile"), read("kanz-rs/services/" + service + "/src/main.rs"), read("kanz-rs/crates/market-feed/src/runtime.rs")
+	return read("rust/services/" + sourceDirectoryName(service) + "/Dockerfile"), read("rust/services/" + sourceDirectoryName(service) + "/src/main.rs"), read("rust/crates/market_feed/src/runtime.rs")
 }
 func TestRustContainerVersionBoundary(t *testing.T) {
 	for _, service := range []string{"binance-depth", "okx-depth"} {
@@ -129,7 +129,7 @@ func TestRustContainerVersionMutationReach(t *testing.T) {
 			{"nondevelopment-fallback", "None if development =>", "None =>", 2},
 			{"stamp-ignored", "Some(value) => Ok(value.to_owned())", "Some(value) => Ok(fallback.unwrap())", 2},
 			{"binary-stamp-missing", `option_env!("KANZ_BUILD_VERSION")`, `None`, 1},
-			{"incomplete-workspace", "COPY kanz-rs/ kanz-rs/", "COPY kanz-rs/src/ kanz-rs/src/", 0},
+			{"incomplete-workspace", "COPY rust/ rust/", "COPY rust/src/ rust/src/", 0},
 		} {
 			t.Run(service+"/"+tc.name, func(t *testing.T) {
 				values := []string{d, s, r}

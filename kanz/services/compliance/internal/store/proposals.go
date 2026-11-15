@@ -3,7 +3,7 @@
 //
 // # Why a mandate proposal has to live on a server at all
 //
-// cmd/kanz-mandate already took two invocations, and it carried the proposal
+// cmd/kanz_mandate already took two invocations, and it carried the proposal
 // between them in a FILE. That made a unilateral change DETECTABLE — the FACT
 // records four eyes and the digest covers the exact mandate — and it could never
 // make one PREVENTABLE: both invocations run on one operator's machine under one

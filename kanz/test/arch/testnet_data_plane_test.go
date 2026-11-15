@@ -36,7 +36,7 @@ type testnetDataCluster struct {
 
 func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
+	dir := filepath.Join(root, "infra", "overlays", "testnet_tokyo", "data")
 	clusterRaw, err := os.ReadFile(filepath.Join(dir, "postgres.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 
 func TestTokyoDatabaseMigrationsRunBeforeCapitalPathAdmission(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
+	dir := filepath.Join(root, "infra", "overlays", "testnet_tokyo", "data")
 	raw := string(mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml")))
 	for _, service := range []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"} {
 		if !strings.Contains(raw, "name: migrate-"+service) || !strings.Contains(raw, `"/migrations/`+service+`"`) {
@@ -138,7 +138,7 @@ func TestTokyoDatabaseMigrationsRunBeforeCapitalPathAdmission(t *testing.T) {
 
 func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
+	dir := filepath.Join(root, "infra", "overlays", "testnet_tokyo", "data")
 	raw := mustReadArchFile(t, filepath.Join(dir, "postgres-provisioner.yaml"))
 	text := string(raw)
 	secretProviders := string(mustReadArchFile(t, filepath.Join(dir, "secret-provider-classes.yaml")))
@@ -179,7 +179,7 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 
 func TestCloudNativePGReleaseIsChecksumAndDigestLocked(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, "infra", "controllers", "cloudnative-pg")
+	dir := filepath.Join(root, "infra", "controllers", "cloudnative_pg")
 	raw := mustReadArchFile(t, filepath.Join(dir, "release-lock.json"))
 	var lock struct {
 		Version         string `json:"version"`
@@ -204,7 +204,7 @@ func TestCloudNativePGReleaseIsChecksumAndDigestLocked(t *testing.T) {
 
 func TestCloudNativePGControllerTargetsTheRealTokyoAPIServerEndpoint(t *testing.T) {
 	root := moduleRoot(t)
-	raw := string(mustReadArchFile(t, filepath.Join(root, "infra", "controllers", "cloudnative-pg", "network-policy.yaml")))
+	raw := string(mustReadArchFile(t, filepath.Join(root, "infra", "controllers", "cloudnative_pg", "network-policy.yaml")))
 	if strings.Contains(raw, "cidr: 10.43.0.1/32") || !regexp.MustCompile(`(?s)cidr: 10\.71\.0\.15/32.*port: 6443`).MatchString(raw) {
 		t.Fatal("CloudNativePG controller egress must target the post-DNAT Tokyo API endpoint 10.71.0.15:6443")
 	}

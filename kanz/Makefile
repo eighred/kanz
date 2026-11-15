@@ -14,7 +14,7 @@ export GOFLAGS := -mod=mod
 # per-target) so it holds for an ad-hoc `go test` run from this directory too.
 export GOTMPDIR := $(CURDIR)/.gotmp
 
-SCHEMAS_DIR := ../kanz-schemas
+SCHEMAS_DIR := ../schemas
 PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
@@ -32,7 +32,7 @@ bootstrap: | $(GOTMPDIR) ## Install the protoc plugins and check for buf
 	@command -v buf >/dev/null || { echo "install buf: https://buf.build/docs/installation" >&2; exit 1; }
 
 .PHONY: generate
-generate: | $(GOTMPDIR) ## Regenerate and initialize the kanz-schemas Go SDK
+generate: | $(GOTMPDIR) ## Regenerate and initialize the schemas Go SDK
 	cd $(SCHEMAS_DIR) && buf generate && bash bootstrap-go-sdk.sh
 
 .PHONY: build
@@ -55,7 +55,7 @@ generate: | $(GOTMPDIR) ## Regenerate and initialize the kanz-schemas Go SDK
 # things that can be run can be found. bin/ is already gitignored.
 build: generate | $(GOTMPDIR) ## Build every package, emitting the binaries into bin/
 	@mkdir -p bin
-	go build -ldflags="$(VERSION_LDFLAGS)" -o bin/ ./...
+	$(call build_commands,./...,)
 
 # Production release build (IP-security mandate). -ldflags="-s -w" strips the
 # symbol table (-s) and DWARF debug info (-w) so the shipped binary resists
@@ -81,10 +81,23 @@ VERSION_LDFLAGS := $(if $(VERSION),-X github.com/eighred/kanz/internal/version.s
 GO_RELEASE_LDFLAGS := -s -w $(VERSION_LDFLAGS)
 TAGS ?=
 
+# Both developer and release output preserve the command names used by the TUI
+# and operators even when source directory names use underscores.
+define build_commands
+@set -e; \
+	packages="$$(go list -tags "$(2)" -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' $(1))"; \
+	test -n "$$packages"; \
+	for package in $$packages; do \
+		binary=$$(printf '%s' "$${package##*/}" | tr '_' '-'); \
+		go build $(3) -ldflags="$(if $(3),$(GO_RELEASE_LDFLAGS),$(VERSION_LDFLAGS))" -tags "$(2)" -o "bin/$$binary" "$$package"; \
+	done
+endef
+
+# Source paths use snake_case; released command filenames retain their deployed names.
 .PHONY: release
 release: generate | $(GOTMPDIR) ## Build stripped, trimpath production binaries into bin/ (TAGS selects optional integrations)
 	@mkdir -p bin
-	go build -trimpath -ldflags="$(GO_RELEASE_LDFLAGS)" -tags "$(TAGS)" -o bin/ ./services/...
+	$(call build_commands,./services/...,$(TAGS),-trimpath)
 
 # NOTE: -race requires cgo (CGO_ENABLED=1). On a box without a C toolchain it
 # fails with "-race requires cgo"; run `make test` there and `make test-race`

@@ -47,7 +47,7 @@ import (
 // somebody writing a rule id into `venue`. The names are the tractable half, and
 // they are the half that gets added absent-mindedly.
 
-const tvSyncOutboundDir = "services/tv-sync/internal"
+const tvSyncOutboundDir = "services/tv_sync/internal"
 
 var (
 	// jsonTagRe captures the serialised name from a struct tag, without its
@@ -149,7 +149,7 @@ func TestNoStrategyDetailLeavesOnTheTradingViewSurface(t *testing.T) {
 // this test and say so.
 func TestTheProjectionStillHoldsAReasonThatMustNotShip(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join(moduleRoot(t),
-		filepath.FromSlash("services/tv-sync/internal/projection/model.go")))
+		filepath.FromSlash("services/tv_sync/internal/projection/model.go")))
 	if err != nil {
 		t.Fatalf("read model.go: %v", err)
 	}
