@@ -12,7 +12,7 @@ func diagnosticBoundary(files map[string]string) bool {
 		"rust/crates/oms_store/Cargo.toml":                                  {"default = []", "qualification-diagnostics = []"},
 		"rust/crates/oms_recovery/Cargo.toml":                               {"default = []", "qualification-diagnostics = [\"kanz-oms-store/qualification-diagnostics\"]"},
 		"rust/crates/oms_store/src/diagnostics.rs":                          {"pub const STAGES: usize = 14;", "pub counts: [u64; STAGES]", "pub nanoseconds: [u64; STAGES]", "saturating_add(1)", "saturating_add(elapsed)", "#[cfg(feature = \"qualification-diagnostics\")]", "CURRENT", "Snapshot::default()"},
-		"kanz/services/oms/tools/recovery_conformance/worker_test.go":          {"const stageCount = 14", "profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true", "qualification diagnostics feature required", "w.profile.add(result.Diagnostics)", "TestWorkerProfileBoundedFailureOnly", `case "Observation", "Ack", "Parked", "FeeCorrection":`},
+		"kanz/services/oms/tools/recovery_conformance/worker_test.go":       {"const stageCount = 14", "profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true", "qualification diagnostics feature required", "w.profile.add(result.Diagnostics)", "TestWorkerProfileBoundedFailureOnly", `case "Observation", "Ack", "Parked", "FeeCorrection":`},
 		"rust/crates/oms_recovery/examples/recovery-coordinator-fixture.rs": {"cfg!(feature=\"qualification-diagnostics\")", "diagnostics::capture", "Stage::Total"},
 	}
 	for path, markers := range required {
