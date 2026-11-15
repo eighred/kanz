@@ -315,6 +315,33 @@ class ImagePatchControls(unittest.TestCase):
             self.assertEqual(removed, [container_id, image_id])
             self.assertFalse(images or containers)
             self.assertGreaterEqual(snapshots, 4)
+            # The first LABEL commit can be interrupted while its fully owned
+            # temporary container still references the exact untouched base.
+            for owned in (True, False):
+                first_step, deleted = True, []
+                def first_label(args, **_kwargs):
+                    nonlocal first_step
+                    if args[:3] == ["docker", "image", "inspect"]:
+                        self.assertEqual(args[-1], record["baseImageID"])
+                        return json.dumps([base_info(record)])
+                    if args[:3] == ["docker", "image", "ls"]:
+                        return ""
+                    if args[:3] == ["docker", "ps", "--all"]:
+                        return container_id if first_step else ""
+                    if args[:3] == ["docker", "inspect", "--type"]:
+                        return json.dumps([{"Id": container_id, "Image": record["baseImageID"], "Config": {"Labels": record["labels"] if owned else {"kanz.catalog.owner": "foreign"}}}])
+                    if args[:3] == ["docker", "rm", "--force"]:
+                        self.assertEqual(args[-1], container_id)
+                        deleted.append(args[-1])
+                        first_step = False
+                        return ""
+                    raise AssertionError("the base image must never be deleted")
+                with self.subTest(owned=owned), mock.patch.object(image_patch, "read_marker", side_effect=lambda _record, phase: image_patch.marker_body(record, phase) if phase == "started" else None), mock.patch.object(image_patch.time, "sleep"), self.assertRaises(ValueError) as refused:
+                    image_patch.cleanup(record, first_label)
+                self.assertEqual(deleted, [container_id] if owned else [])
+                self.assertEqual(first_step, not owned)
+                if owned:
+                    self.assertIn("completion remains unknown", str(refused.exception))
 
     def test_advisory_json_never_clears_an_infrastructure_exit(self):
         self.assertEqual(qualify.failure_category(b"INFO Java DB downloaded", image_patch.ADVISORY_EXIT, True), "scanner-advisory-exit")

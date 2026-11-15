@@ -192,7 +192,7 @@ def cleanup(record, run):
         owned_containers = []
         for container_id in containers:
             info = json.loads(run(["docker", "inspect", "--type", "container", container_id], timeout=15))[0]
-            if info.get("Id") != container_id or info.get("Image") not in images or not has_owner(info, record):
+            if info.get("Id") != container_id or info.get("Image") not in (set(images) | {record["baseImageID"]}) or not has_owner(info, record):
                 raise ValueError("foreign build container cannot authorize cleanup")
             owned_containers.append(container_id)
         if not ids and not containers:
