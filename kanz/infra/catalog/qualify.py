@@ -57,7 +57,7 @@ config_copy=$2
 shift 2
 test -d "$config_source"
 test ! -L "$config_source"
-invalid_entry=$(find -P "$config_source" -xdev ! -type d ! -type f -print -quit)
+invalid_entry=$(find -P "$config_source" -xdev ! -type d ! -type f -printf 'invalid' -quit)
 test -z "$invalid_entry"
 mkdir -m 700 -- "$config_copy"
 cp -R -P -- "$config_source"/. "$config_copy"/

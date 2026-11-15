@@ -93,8 +93,8 @@ class QualificationControls(unittest.TestCase):
             self.assertFalse((root / "copy-linked-source").exists())
             self.assertFalse((root / "copy-missing-source").exists())
             self.assertFalse((root / "copy-file-source").exists())
-            for target in (source / "opensearch.yml", source / "jvm.options.d"):
-                link = source / "linked-entry"
+            for name, target in (("linked-file", source / "opensearch.yml"), ("linked-directory", source / "jvm.options.d"), ("\n\n", source / "opensearch.yml")):
+                link = source / name
                 link.symlink_to(target, target_is_directory=target.is_dir())
                 refused = root / "copy-linked-entry"
                 result = prepare(refused)
@@ -102,13 +102,14 @@ class QualificationControls(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertFalse(refused.exists())
                 link.unlink()
-            fifo = source / "special-entry"
-            os.mkfifo(fifo)
-            result = prepare(root / "copy-special")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, "")
-            self.assertFalse((root / "copy-special").exists())
-            fifo.unlink()
+            for name in ("special-entry", "\n"):
+                fifo = source / name
+                os.mkfifo(fifo)
+                result = prepare(root / "copy-special")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse((root / "copy-special").exists())
+                fifo.unlink()
             for command in ("find", "cp"):
                 tools = root / (command + "-failure")
                 tools.mkdir()
