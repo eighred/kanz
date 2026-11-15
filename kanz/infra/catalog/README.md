@@ -111,12 +111,20 @@ Containers and their ephemeral state are removed on exit.
 
 ### Fixture maintenance images
 
-The disposable search and broker select official maintenance releases
-[OpenSearch 2.19.7](https://github.com/opensearch-project/OpenSearch/releases/tag/2.19.7)
+The disposable search and broker select official releases
+[OpenSearch 3.9.0](https://github.com/opensearch-project/OpenSearch/releases/tag/3.9.0)
 and Redpanda 26.2.7. `images.json` selects their exact linux/amd64 platform
 manifests; `image-descriptors.json` binds the independently read raw manifest and
 config hashes, byte counts, media types and ordered rootfs DiffIDs. The other
 four image selections remain unchanged.
+
+The previous OpenSearch 2.19.7 candidate still reported two fixed-CRITICAL
+`bcprov-jdk15to18` 1.79 findings in
+[run 43671955287](https://github.com/eighred/kanz/actions/runs/43671955287).
+OpenSearch 3.9.0 is a new, unproved fixture candidate. DataHub 1.8.0 compatibility
+and any required version-detection/configuration contract remain unresolved
+until release-specific source and the unchanged full workflow qualify them.
+No jar or plugin is removed or replaced to obtain a scanner pass.
 
 The selected Redpanda image records `libbrotli1:amd64` version
 `1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)
