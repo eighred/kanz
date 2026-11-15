@@ -1065,7 +1065,10 @@ class Fixture:
                           ["redpanda", "start", "--config", "/tmp/redpanda.yaml", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "broker:9092", "--advertise-rpc-addr", "broker:33145", "--set", "redpanda.auto_create_topics_enabled=true"])
 
     def start_search(self):
-        return self.start("search", ["--user", "1000:1000", "--tmpfs", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "--tmpfs", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000", "--env", "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java"],
+        # OpenSearch 4ee42a94 main:93–104 flushes buffered startup errors when
+        # base_path is seeded; LogConfigurator:167 replaces it before logging.
+        # This observes Docker output, not the existence of any suggested file.
+        return self.start("search", ["--user", "1000:1000", "--tmpfs", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "--tmpfs", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000", "--env", "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java -Dopensearch.logs.base_path=/usr/share/opensearch/logs"],
                           ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/usr/share/opensearch/bin/opensearch")
 
     def configure_broker(self, container):

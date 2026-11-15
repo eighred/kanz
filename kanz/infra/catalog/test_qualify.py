@@ -42,7 +42,7 @@ class QualificationControls(unittest.TestCase):
         options = args[:image_index]
         def values(flag):
             return [options[index + 1] for index, value in enumerate(options[:-1]) if value == flag]
-        self.assertEqual(values("--env"), ["OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java"])
+        self.assertEqual(values("--env"), ["OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java -Dopensearch.logs.base_path=/usr/share/opensearch/logs"])
         self.assertEqual(values("--entrypoint"), ["/usr/share/opensearch/bin/opensearch"])
         self.assertEqual(values("--user"), ["1000:1000"])
         self.assertEqual(values("--tmpfs"), ["/tmp:rw,nosuid,nodev,size=512m", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000"])

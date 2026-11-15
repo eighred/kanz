@@ -359,6 +359,20 @@ Public source establishes the option contract; the effective loaded setting,
 startup compatibility and full catalog acceptance require the Linux workflow.
 It establishes no cause for a prior startup failure or FIPS qualification.
 
+Search also seeds `-Dopensearch.logs.base_path=/usr/share/opensearch/logs`
+solely to flush buffered startup diagnostics to the existing Docker-log capture.
+In the pinned public source, [OpenSearch.main](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/bootstrap/OpenSearch.java#L93)
+calls `errorPrintln` when that property is present;
+[Terminal](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/libs/cli/src/main/java/org/opensearch/cli/Terminal.java#L172)
+flushes the otherwise buffered error writer. The actual log directory comes
+from [Environment](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/env/Environment.java#L180),
+and [LogConfigurator](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/common/logging/LogConfigurator.java#L162)
+overwrites the property before configuring logging. This observation setting is
+neither a CLI switch nor a startup repair. An early suggested filename can be
+misleading and proves no file exists or is readable; the fixture collects no
+logfiles. It changes no parser, diagnostic budget or isolation limit, and the
+actual startup failure cause remains unknown.
+
 The selected Redpanda image records `libbrotli1:amd64` version
 `1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)
 identifies as fixing CVE-2026-111497. Its three Brotli library binaries and three
