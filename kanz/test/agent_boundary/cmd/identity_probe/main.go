@@ -281,12 +281,18 @@ func expectPublishDenial(nc *nats.Conn, asyncErrors <-chan error, subject string
 	return permissionError(asyncErrors, subject)
 }
 
-func expectSubscribeDenial(nc *nats.Conn, asyncErrors <-chan error, subject string) error {
+func expectSubscribeDenial(nc *nats.Conn, asyncErrors <-chan error, subject string) (resultErr error) {
 	sub, err := nc.SubscribeSync(subject)
 	if err != nil {
 		return err
 	}
-	defer sub.Unsubscribe()
+	defer func() {
+		// An already-invalid subscription cannot be unsubscribed again; the
+		// enclosing connection also closes. Preserve other cleanup failures.
+		if err := sub.Unsubscribe(); err != nil && !errors.Is(err, nats.ErrBadSubscription) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("subscription cleanup failed: %w", err))
+		}
+	}()
 	if err := nc.FlushTimeout(4 * time.Second); err != nil {
 		return err
 	}
