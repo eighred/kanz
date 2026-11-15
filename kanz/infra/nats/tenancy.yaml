@@ -275,7 +275,7 @@ data:
           # bootstrap-job.yaml runs `nats stream info|add|edit|ls` and nothing
           # else, and every one of those is JetStream's management API with the
           # reply on an inbox. So these two grants are the whole job, and with an
-          # allow-list present every other subject is denied — the same argument
+          # allow-list present every other subject is denied by default.
           #
           # NO $JS.ACK.>, deliberately: this Job never consumes a message, so it
           # never acks one. Granting it would be copying a shape rather than

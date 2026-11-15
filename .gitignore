@@ -7,6 +7,10 @@
 # freshly built test binaries in %TEMP%, so the Makefile points GOTMPDIR here.
 .gotmp/
 
+# Python interpreter caches are generated on every host, including CI.
+__pycache__/
+*.py[cod]
+
 # Rust migration build output; canonical schemas remain tracked in schemas.
 /rust/target/
 
