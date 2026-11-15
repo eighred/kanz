@@ -146,14 +146,39 @@ coredump tree, standard proc/sys classes, or unclassified. Exact config names
 and directory boundaries matter; case changes, traversal components and
 appended filename suffixes are not
 normalised into selected resources. Multiple sequences remain ambiguous.
+Fixed standard errno literals are also retained independently of that format
+binding. An unclassified C++ or other caller can therefore report an
+`operation-not-permitted` text signal while its attributed operation/resource/
+error fields remain unclassified. Explicit `coOccurrence` lists retain only
+fixed resource, API and template classes from the same line; they do not bind an
+API to a resource or an errno, and they never join separate lines.
+The selected compiled broker payload supplies distinct perf-event stall and
+CPU-profiler fallback templates, a startup-failure wrapper, filesystem/API
+wrappers and bounded storage, memory, diskstats, disk-read and PID message
+classes. A fallback is not a startup-failure wrapper; either may coexist with
+other signals. PID unlink text may concern cleanup. These template matches
+assert neither severity nor reachability nor a fatal cause. Storage-alert
+configuration descriptions are not classified as refusal messages. Projection
+is deliberately non-exhaustive, so an absent match proves no global absence.
+The compiled-template provenance is the selected broker manifest
+`sha256:d5cc5fa94b1caf1cee182f4ab6305d73e7ba89ad58ed806bb31f7ae0ae038442`,
+whose verified final layer is 84,020,836 compressed bytes with SHA-256
+`f264d70df1666110d3f1dc3340a432d07dc258651331f052c646dad07c42bf71`
+and 264,802,304 uncompressed bytes with DiffID
+`sha256:341dad0a981197b2fb3c23a22853ec1c57417c489c9233bd4faf65916fba738a`.
+The layer's broker ELF is 132,123,312 bytes with SHA-256
+`d979b88bb0dc20dfbae899f317f0ece73b3688827afcc9ffe4019e062e1fa65f`.
+This binds literal presence in the selected binary, without establishing its
+exact public vendor-source revision or which message was emitted at runtime.
 Selected config/data paths come from the committed launch; packaged paths come
 from the selected image payload, which establishes presence rather than writes.
 The selected broker's exact public startup-source join remains unresolved;
 vendor stage and log level therefore remain explicitly unclassified. No raw
 line, path, environment, argument or arbitrary capture enters these records.
 The existing pre-authentication synthetic diagnostic control also exercises
-secret-bearing runtime projection, same-line binding, unknown path/operation/
-level refusal, ambiguity and both context limits; target-side controls
+secret-bearing runtime projection, same-line binding/co-occurrence, independent
+errno text, fallback/wrapper discrimination, unknown path/operation/level
+refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, non-broker log refusal, retention
 and capture overflow. The inventory remains 49 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.

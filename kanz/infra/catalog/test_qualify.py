@@ -76,6 +76,8 @@ class QualificationControls(unittest.TestCase):
         self.assertEqual((context["signalLines"], context["omittedSignalLines"]), (2, 0))
         selected = next(record for record in context["records"] if record["resource"] == "selected-broker-config")
         self.assertEqual((selected["operation"], selected["error"], selected["count"]), ("write", "permission-denied", 1))
+        self.assertEqual(selected["errnoSignals"], ["permission-denied"])
+        self.assertEqual(selected["coOccurrence"], {"resourceSignals": ["selected-broker-config"], "apiSignals": [], "templateSignals": []})
         self.assertEqual(entry["recent"][0]["binding"]["containerID"], container_id)
         self.assertEqual([args[-1] for args, _ in calls if args[:2] == ["docker", "inspect"]], [name, container_id])
         self.assertNotIn(secret, json.dumps(fixture.readiness_evidence))

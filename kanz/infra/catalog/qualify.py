@@ -215,7 +215,31 @@ def runtime_output(output, code, source):
         "address-conflict": ("address already in use",),
         "startup-fatal": ("startup aborted", "startup failed", "fatal error"),
     }
-    signals = sorted(key for key, markers in patterns.items() if any(marker in diagnostic for marker in markers))
+    # These strings are present in the selected compiled broker payload. They
+    # identify wrapper/fallback text only, not severity, a caller or a cause.
+    templates = {
+        "startup-failure-wrapper": "failure during startup:",
+        "filesystem-error-wrapper": "filesystem error:",
+        "perf-event-stall-fallback": "creation of perf_event based stall detector failed: falling back to posix timer:",
+        "perf-event-cpu-profiler-fallback": "creation of perf_event based cpu profiler failed: falling back to posix timer:",
+        "storage-space-message": "not enough space",
+        "storage-free-threshold-message": "no disk space; bytes free less than configurable threshold",
+        "diskstats-read-message": "error reading diskstats:",
+        "disk-read-message": "i/o error during read!  disk failure?",
+        "pid-read-message": "failed to read pid file",
+        "pid-unlink-message": "failed to unlink pid file",
+    }
+    template_shapes = {"memory-below-required-message": r"(?<![\w-])memory: '[^'\r\n]*' below required: '[^'\r\n]*'(?![\w-])"}
+    apis = {"perf-event-open-failed": "perf_event_open() failed", "chmod-failed": "chmod failed", "open-failed": "open failed"}
+    literals = {**templates, **apis}
+    def signal_classes(value):
+        result = {key for key, markers in patterns.items() if any(marker in value for marker in markers)}
+        result.update(key for key, marker in literals.items() if re.search(r"(?<![\w-])" + re.escape(marker) + r"(?![\w-])", value))
+        result.update(key for key, pattern in template_shapes.items() if re.search(pattern, value))
+        return tuple(sorted(result))
+    signals = list(signal_classes(diagnostic))
+    errno_literals = ("permission denied", "operation not permitted", "read-only file system", "no space left on device",
+                      "file too large", "cannot allocate memory", "connection refused", "address already in use")
     # Go 1.27.3 io/fs.PathError formats Op + " " + Path + ": " + Err.
     # Match only that adjacent sequence, never an operation on another line.
     # Resource classes come from this fixture's literal launch paths, selected
@@ -246,7 +270,7 @@ def runtime_output(output, code, source):
     records = {}
     for line in lines[-READINESS_CONTEXT_LINES:]:
         lowered = line.lower()
-        line_signals = tuple(sorted(key for key, markers in patterns.items() if any(marker in lowered for marker in markers)))
+        line_signals = signal_classes(lowered)
         if not line_signals:
             continue
         context["signalLines"] += 1
@@ -256,15 +280,22 @@ def runtime_output(output, code, source):
             items = {value[index] for value in bindings}
             if items:
                 values[index] = next(iter(items)) if len(items) == 1 else "multiple"
+        errno_signals = tuple(sorted(marker.replace(" ", "-") for marker in errno_literals if re.search(r"(?<![\w-])" + re.escape(marker) + r"(?![\w-])", lowered)))
+        resource_tokens = re.finditer(r'''"(?P<double>/[^"\r\n]*)"|'(?P<single>/[^'\r\n]*)'|(?:^|[\s\[(=:,])(?P<bare>/[A-Za-z0-9_./@+,-]+)(?=$|[\s\]),;}:])''', line)
+        resource_signals = tuple(sorted({resource_class(next(value for value in match.groups() if value is not None)) for match in resource_tokens} - {"unclassified"}))
+        api_signals = tuple(key for key in line_signals if key in apis)
+        template_signals = tuple(key for key in line_signals if key in templates or key in template_shapes)
         # No selected vendor stage/level format is established yet. Keep both
         # explicitly unknown rather than turning a warning token into a cause.
-        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals)
+        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals, errno_signals, resource_signals, api_signals, template_signals)
         if key not in records:
             if len(records) == READINESS_CONTEXT_RECORDS:
                 context["omittedSignalLines"] += 1
                 continue
             records[key] = {"stage": key[0], "level": key[1], "binding": key[2], "operation": key[3],
-                            "resource": key[4], "error": key[5], "signals": list(line_signals), "count": 0}
+                            "resource": key[4], "error": key[5], "signals": list(line_signals), "count": 0,
+                            "errnoSignals": list(errno_signals),
+                            "coOccurrence": {"resourceSignals": list(resource_signals), "apiSignals": list(api_signals), "templateSignals": list(template_signals)}}
             context["records"].append(records[key])
         records[key]["count"] += 1
     context["truncated"] = bool(context["omittedEarlierLines"] or context["omittedSignalLines"])
