@@ -67,6 +67,18 @@ class GitScopeTests(unittest.TestCase):
                 self.assertEqual(selected, {"application": True, "forge": True})
                 self.git("reset", "--hard", self.base)
 
+    def test_component_guides_checker_and_discovery_config_select_forge(self):
+        for name in ("docs/deep/README.md", "kanz/services/owner/README.md",
+                     "rust/README.md", "docs/readme.md", "CONTRIBUTING.md",
+                     "tools/check_readmes.py", "tools/test_check_readmes.py",
+                     ".codex/config.toml"):
+            with self.subTest(name=name):
+                self.write(name, "reviewed documentation input")
+                head = self.save()
+                selected, _ = policy.scope(self.repo, "push", {"before": self.base, "after": head}, head)
+                self.assertTrue(selected["forge"], name)
+                self.git("reset", "--hard", self.base)
+
     def test_plugin_exemption_does_not_hide_unknown_or_deleted_runtime(self):
         for name in (".agents/new-runtime.py", "plugins/kanz-forge/commands.py", ".agents/plugins/kanz-forge_other/app.py"):
             with self.subTest(name=name):

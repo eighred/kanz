@@ -43,7 +43,10 @@ def commit(repo, value):
 
 def forge_path(path):
     return (path.startswith((b".agents/", b"plugins/kanz-forge/"))
-            or path in {b"AGENTS.md", b"README.md", b".github/workflows/kanz-forge.yml",
+            or path.rsplit(b"/", 1)[-1].lower() == b"readme.md"
+            or path in {b"AGENTS.md", b"CONTRIBUTING.md", b".codex/config.toml",
+                        b"tools/check_readmes.py", b"tools/test_check_readmes.py",
+                        b".github/workflows/kanz-forge.yml",
                         b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py",
                         b".github/scripts/test_required_ci.py"})
 
