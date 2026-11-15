@@ -314,6 +314,102 @@ jobs:
             echo "- ✅ \`${{ matrix.target }}\` unchanged (\`$after\`)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  # The writer's readback cannot establish the future consumer's read-only access.
+  # Authenticate only on this host; no target process receives registry credentials.
+  catalog-base-readback:
+    needs: mirror
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !inputs.dry_run && github.repository == 'eighred/kanz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Authenticate the read-only host
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+      - name: Verify private reader access and end the host registry session
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+
+          target = 'ghcr.io/eighred/base/datahub-ingestion:v1.8.0-locked'
+          expected = 'sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23'
+          report = {'source': None, 'tree': None, 'run': os.environ['GITHUB_RUN_ID'],
+                    'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'event': os.environ['GITHUB_EVENT_NAME'],
+                    'repository': os.environ['GITHUB_REPOSITORY'], 'target': target,
+                    'expectedDigest': expected, 'actualDigest': None, 'visibility': None,
+                    'readerPermission': 'packages:read', 'passed': False, 'stage': 'source'}
+
+          def read(args):
+              result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                      text=True, encoding='utf-8', timeout=45, check=False)
+              if result.returncode or len(result.stdout) > 256:
+                  report['commandFailure'] = {'executable': pathlib.Path(args[0]).name, 'exitCode': result.returncode}
+                  raise ValueError('reader command refused')
+              return result.stdout.strip()
+
+          try:
+              report['source'] = read(['git', 'rev-parse', 'HEAD'])
+              report['tree'] = read(['git', 'rev-parse', 'HEAD^{tree}'])
+              if (report['source'] != os.environ['GITHUB_SHA'] or not re.fullmatch('[0-9a-f]{40}', report['source'])
+                  or not re.fullmatch('[0-9a-f]{40}', report['tree']) or report['repository'] != 'eighred/kanz'
+                  or os.environ['GITHUB_REF'] != 'refs/heads/main' or report['event'] not in {'push', 'schedule', 'workflow_dispatch'}):
+                  raise ValueError('reader source identity refused')
+              report['stage'] = 'reader-digest'
+              actual = read(['crane', 'digest', target])
+              if re.fullmatch('sha256:[0-9a-f]{64}', actual):
+                  report['actualDigest'] = actual
+              if actual != expected:
+                  raise ValueError('reader digest differs')
+              report['stage'] = 'private-package-visibility'
+              visibility = read(['gh', 'api', '--method', 'GET', 'orgs/eighred/packages/container/base%2Fdatahub-ingestion', '--jq', '.visibility'])
+              if visibility in {'private', 'public', 'internal'}:
+                  report['visibility'] = visibility
+              if visibility != 'private':
+                  raise ValueError('package is not private')
+              report['passed'] = True
+          except Exception as error:
+              report['failureType'] = type(error).__name__
+          finally:
+              # Record only the actual logout result; retain no token, config or logs.
+              report['logout'] = {'attempted': True, 'exitCode': None, 'passed': False}
+              try:
+                  result = subprocess.run(['docker', 'logout', 'ghcr.io'], stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, timeout=30, check=False)
+                  report['logout'].update(exitCode=result.returncode, passed=result.returncode == 0)
+              except Exception as error:
+                  report['logout']['errorType'] = type(error).__name__
+              report['passed'] &= report['logout']['passed']
+              payload = json.dumps(report, sort_keys=True, indent=2) + '\n'
+              if len(payload.encode('utf-8')) > 4096:
+                  raise SystemExit('reader receipt budget exceeded')
+              path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'catalog-base-readback.json'
+              with path.open('x', encoding='utf-8') as output:
+                  output.write(payload)
+              path.chmod(0o444)
+          if not report['passed']:
+              raise SystemExit('catalog base reader verification refused')
+          PY
+      - name: Preserve projected read-only registry proof
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalog-base-reader-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/catalog-base-readback.json
+          if-no-files-found: error
+
   rust-audit-tools:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
