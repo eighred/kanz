@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // mirrorPrefix is where every base image this estate builds on must come from.
@@ -18,6 +21,79 @@ import (
 // image is one we mirrored and can serve, not one a third party can withdraw,
 // rate-limit or fail to answer.
 const mirrorPrefix = "ghcr.io/eighred/base/"
+
+// A digest overrides the tag in FROM. Check the producer as well as the
+// displayed version so an upgrade cannot keep compiling in the old base.
+func checkPinnedGoBases(producer []byte, froms []dockerfileFrom) error {
+	var workflow struct {
+		Jobs map[string]struct {
+			Strategy struct {
+				Matrix struct {
+					Include []struct{ Source, Target string }
+				}
+			}
+		}
+	}
+	if err := yaml.Unmarshal(producer, &workflow); err != nil {
+		return err
+	}
+	const prefix = mirrorPrefix + "golang:"
+	pins := map[string]string{}
+	digestFormat := regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	for _, entry := range workflow.Jobs["mirror"].Strategy.Matrix.Include {
+		if !strings.HasPrefix(entry.Target, prefix) {
+			continue
+		}
+		source, digest, pinned := strings.Cut(entry.Source, "@")
+		if source != "docker.io/library/golang:"+strings.TrimPrefix(entry.Target, prefix) || (pinned && !digestFormat.MatchString(digest)) {
+			return fmt.Errorf("invalid Go mirror source for %s", entry.Target)
+		}
+		if _, exists := pins[entry.Target]; exists {
+			return fmt.Errorf("ambiguous Go mirror source for %s", entry.Target)
+		}
+		pins[entry.Target] = digest
+	}
+	seen := 0
+	for _, from := range froms {
+		if !strings.HasPrefix(from.image, prefix) {
+			continue
+		}
+		seen++
+		tag, digest, pinned := strings.Cut(from.image, "@")
+		if pinned && (!digestFormat.MatchString(digest) || pins[tag] != digest) {
+			return fmt.Errorf("%s:%d: Go FROM digest differs from the reviewed mirror producer: %s", from.file, from.line, from.image)
+		}
+	}
+	if seen == 0 || len(pins) == 0 {
+		return fmt.Errorf("Go consumer or mirror inventory is empty")
+	}
+	return nil
+}
+
+func TestPinnedGolangBasesMatchReviewedMirror(t *testing.T) {
+	root := filepath.Dir(moduleRoot(t))
+	producer := mustReadArchFile(t, filepath.Join(root, ".github/workflows/base-image-mirror.yml"))
+	froms := dockerfileFroms(t, root)
+	if err := checkPinnedGoBases(producer, froms); err != nil {
+		t.Fatal(err)
+	}
+	for index, from := range froms {
+		if !strings.HasPrefix(from.image, mirrorPrefix+"golang:") {
+			continue
+		}
+		t.Run(from.file, func(t *testing.T) {
+			changed := append([]dockerfileFrom(nil), froms...)
+			tag, _, _ := strings.Cut(from.image, "@")
+			changed[index].image = tag + "@sha256:" + strings.Repeat("0", 64)
+			if checkPinnedGoBases(producer, changed) == nil {
+				t.Fatal("a stale digest was accepted despite a matching version tag")
+			}
+		})
+	}
+	if checkPinnedGoBases(producer, nil) == nil {
+		t.Fatal("an empty consumer inventory was accepted")
+	}
+}
 
 // EVERY DOCKERFILE FROM MUST RESOLVE INSIDE THE MIRROR.
 //

@@ -7,7 +7,7 @@
 # generated-not-committed (EVT-15a). The build workflow runs `buf generate`
 # first, so both trees sit side by side in the context. Build with:
 #   docker build -f kanz/services/regulatory/Dockerfile .
-FROM ghcr.io/eighred/base/golang:1.26.10 AS build
+FROM ghcr.io/eighred/base/golang:1.26.11@sha256:7af425da11f4fc1a9308eb704369e3f6d1c44e35bac0f874a59ade3f20fdc07e AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
