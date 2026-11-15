@@ -350,6 +350,30 @@ class BuildDiagnosticControls(unittest.TestCase):
         limited = qualify.runtime_output("\n".join("ERROR: " + secret + str(index) for index in range(17)).encode(), 1, "search-startup-log")["lineContext"]
         self.assertEqual((len(limited["records"]), limited["signalLines"], limited["omittedSignalLines"], limited["truncated"]), (16, 17, 1, True))
         self.assertNotIn(secret, json.dumps((cli, ordinary, abnormal, distinct, limited)))
+        warning_body = ("WARNING: " + secret + "-one\nWARNING: " + secret + "-two").encode()
+        warnings = qualify.runtime_output(warning_body, 1, "search-startup-log")
+        self.assertEqual(warnings["matchedSignals"], ["search-warning-wrapper"])
+        self.assertEqual((warnings["lineContext"]["signalLines"], len(warnings["lineContext"]["records"])), (2, 1))
+        warning = warnings["lineContext"]["records"][0]
+        self.assertEqual(warning["count"], 2)
+        self.assertEqual((warning["stage"], warning["level"], warning["binding"]), ("unclassified",) * 3)
+        self.assertIsNone(warning["startupMessage"])
+        self.assertIsNone(warning["cliErrorMessage"])
+        self.assertEqual(warnings["lineContext"]["samples"], [])
+        self.assertNotIn(secret, json.dumps(warnings))
+        for source in ("broker-startup-log", "readiness-command"):
+            self.assertEqual(qualify.runtime_output(warning_body, 1, source)["matchedSignals"], [])
+        for lookalike in ("warning: " + secret, " WARNING: " + secret, "INFO WARNING: " + secret, "WARNING:" + secret, "WARNING:\t" + secret, "WARNING:\u00a0" + secret, "\x1bWARNING: " + secret):
+            self.assertEqual(qualify.runtime_output(lookalike.encode(), 1, "search-startup-log")["matchedSignals"], [])
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            self.assertEqual(qualify.runtime_output(("WARN" + separator + "ING: " + secret).encode(), 1, "search-startup-log")["matchedSignals"], [])
+        warning_mixed = qualify.runtime_output("\n".join([secret + str(index) for index in range(20)] + ["WARNING: " + secret + str(index) for index in range(10)]).encode(), 1, "search-startup-log")["lineContext"]
+        self.assertEqual((len(warning_mixed["records"]), warning_mixed["records"][0]["count"]), (1, 10))
+        self.assertEqual([sample["lineOrdinal"] for sample in warning_mixed["samples"]], list(range(1, 9)) + list(range(14, 21)))
+        self.assertEqual((warning_mixed["unknownProjection"]["eligibleLines"], warning_mixed["unknownProjection"]["sampledLines"], warning_mixed["unknownProjection"]["omittedEligibleLines"]), (20, 15, 5))
+        self.assertEqual(len(warning_mixed["records"]) + len(warning_mixed["samples"]), 16)
+        self.assertTrue(warning_mixed["truncated"])
+        self.assertNotIn(secret, json.dumps(warning_mixed))
         unknown = qualify.runtime_output(("\t " + secret + " \t").encode(), 1, "search-startup-log")
         context = unknown["lineContext"]
         self.assertEqual(unknown["format"], {"utf8Roundtrip": True, "nulByteCount": 0, "escByteCount": 0})

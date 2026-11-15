@@ -304,7 +304,8 @@ def runtime_output(output, code, source):
         template_shapes = {"search-java-start-message": r"(?<![\w-])starting java failed with \[-?[1-9][0-9]{0,9}\](?![\w-])"}
         line_templates = {"search-cli-help-description": ("exact", "Starts OpenSearch"),
                           "search-cli-columns-frame": ("columns", r"Option[ \t]+Description[ \t]*"),
-                          "search-cli-error-wrapper": ("prefix", "ERROR:")}
+                          "search-cli-error-wrapper": ("prefix", "ERROR:"),
+                          "search-warning-wrapper": ("prefix", "WARNING: ")}
         apis = {"search-access-denied-exception": "java.nio.file.accessdeniedexception",
                 "search-bootstrap-exception": "org.opensearch.bootstrap.bootstrapexception",
                 "search-node-validation-exception": "org.opensearch.node.nodevalidationexception",

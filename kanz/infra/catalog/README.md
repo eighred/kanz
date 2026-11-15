@@ -198,6 +198,16 @@ use the same existing 16-record aggregation/omission budget, 40-line tail,
 64 KiB capture ceiling and eight-attempt retention. An exact public-message
 digest match remains informational.
 
+Search lines beginning with exact case-sensitive `WARNING: ` receive one fixed
+wrapper class. Repeated equal contexts aggregate before unknown sampling; no
+individual warning-body fingerprint is added, and stage, level and cause remain
+unclassified. This prefix is public in the expected-bundle source's
+[ModuleBootstrap](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/jdk/internal/module/ModuleBootstrap.java#L1018),
+[Unsafe](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/jdk.unsupported/share/classes/sun/misc/Unsafe.java#L1891)
+and [Module](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/Module.java#L323).
+These public text identities do not identify an actual caller, JDK version or
+fatal cause. JVM/native-access flags and the isolation profile stay unchanged.
+
 Completed search-log captures additionally report only UTF-8 round-trip validity
 and raw NUL/ESC byte counts as format metadata. They do not strip ANSI escapes,
 normalize content or guess an encoding. After finishing all known context
