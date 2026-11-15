@@ -321,7 +321,20 @@ def runtime_output(output, code, source):
         line_templates = {"search-cli-help-description": ("exact", "Starts OpenSearch"),
                           "search-cli-columns-frame": ("columns", r"Option[ \t]+Description[ \t]*"),
                           "search-cli-error-wrapper": ("prefix", "ERROR:"),
-                          "search-warning-wrapper": ("prefix", "WARNING: ")}
+                          "search-warning-wrapper": ("prefix", "WARNING: "),
+                          "search-native-loader-forwarding-frame": ("prefix", (
+                              "at java.base/jdk.internal.loader.NativeLibraries.load(",
+                              "at java.base/jdk.internal.loader.NativeLibraries$NativeLibraryImpl.open(",
+                              "at java.base/jdk.internal.loader.NativeLibraries.loadLibrary(",
+                              "at java.base/java.lang.ClassLoader.loadLibrary(",
+                              "at java.base/java.lang.Runtime.load0(",
+                              "at java.base/java.lang.System.load(",
+                              "\tat java.base/jdk.internal.loader.NativeLibraries.load(",
+                              "\tat java.base/jdk.internal.loader.NativeLibraries$NativeLibraryImpl.open(",
+                              "\tat java.base/jdk.internal.loader.NativeLibraries.loadLibrary(",
+                              "\tat java.base/java.lang.ClassLoader.loadLibrary(",
+                              "\tat java.base/java.lang.Runtime.load0(",
+                              "\tat java.base/java.lang.System.load("))}
         apis = {"search-access-denied-exception": "java.nio.file.accessdeniedexception",
                 "search-bootstrap-exception": "org.opensearch.bootstrap.bootstrapexception",
                 "search-node-validation-exception": "org.opensearch.node.nodevalidationexception",

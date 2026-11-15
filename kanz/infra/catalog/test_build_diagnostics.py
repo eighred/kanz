@@ -374,6 +374,34 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertEqual(len(warning_mixed["records"]) + len(warning_mixed["samples"]), 16)
         self.assertTrue(warning_mixed["truncated"])
         self.assertNotIn(secret, json.dumps(warning_mixed))
+        forwarding_methods = ("jdk.internal.loader.NativeLibraries.load", "jdk.internal.loader.NativeLibraries$NativeLibraryImpl.open", "jdk.internal.loader.NativeLibraries.loadLibrary", "java.lang.ClassLoader.loadLibrary", "java.lang.Runtime.load0", "java.lang.System.load")
+        for indent in ("", "\t"):
+            forwarding_body = "\n".join(indent + "at java.base/" + method + "(" + secret + ")" for method in forwarding_methods).encode()
+            forwarding = qualify.runtime_output(forwarding_body, 1, "search-startup-log")
+            self.assertEqual(forwarding["matchedSignals"], ["search-native-loader-forwarding-frame"])
+            self.assertEqual((len(forwarding["lineContext"]["records"]), forwarding["lineContext"]["records"][0]["count"]), (1, 6))
+            record = forwarding["lineContext"]["records"][0]
+            self.assertEqual((record["stage"], record["level"], record["binding"]), ("unclassified",) * 3)
+            self.assertIsNone(record["startupMessage"])
+            self.assertIsNone(record["cliErrorMessage"])
+            self.assertEqual(forwarding["lineContext"]["samples"], [])
+            self.assertNotIn(secret, json.dumps(forwarding))
+            for source in ("broker-startup-log", "readiness-command"):
+                self.assertEqual(qualify.runtime_output(forwarding_body, 1, source)["matchedSignals"], [])
+        for prefix in (" at java.base/", "\t\tat java.base/", "INFO at java.base/", "At java.base/", "at JAVA.BASE/", "at java.base@25.0.4.1/", "at app//java.base/", "at "):
+            self.assertEqual(qualify.runtime_output((prefix + forwarding_methods[0] + "(" + secret + ")").encode(), 1, "search-startup-log")["matchedSignals"], [])
+        for method in (forwarding_methods[0] + "Suffix", "jdk.internal.loader.NativeLibrariesX.load", "jdk.internal.loader.NativeLibraries.find", "jdk.internal.loader.nativelibraries.load"):
+            self.assertEqual(qualify.runtime_output(("at java.base/" + method + "(" + secret + ")").encode(), 1, "search-startup-log")["matchedSignals"], [])
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            broken_forwarding = "at java.base/jdk.internal.loader.NativeLibraries." + separator + "load(" + secret + ")"
+            self.assertEqual(qualify.runtime_output(broken_forwarding.encode(), 1, "search-startup-log")["matchedSignals"], [])
+        forwarding_mixed = qualify.runtime_output("\n".join([secret + str(index) for index in range(20)] + ["at java.base/" + method + "(" + secret + ")" for method in forwarding_methods] + ["WARNING: " + secret]).encode(), 1, "search-startup-log")["lineContext"]
+        self.assertEqual((len(forwarding_mixed["records"]), [record["count"] for record in forwarding_mixed["records"]]), (2, [6, 1]))
+        self.assertEqual([sample["lineOrdinal"] for sample in forwarding_mixed["samples"]], list(range(1, 8)) + list(range(14, 21)))
+        self.assertEqual(len(forwarding_mixed["records"]) + len(forwarding_mixed["samples"]), 16)
+        self.assertEqual(forwarding_mixed["unknownProjection"]["omittedEligibleLines"], 6)
+        self.assertTrue(forwarding_mixed["truncated"])
+        self.assertNotIn(secret, json.dumps(forwarding_mixed))
         unknown = qualify.runtime_output(("\t " + secret + " \t").encode(), 1, "search-startup-log")
         context = unknown["lineContext"]
         self.assertEqual(unknown["format"], {"utf8Roundtrip": True, "nulByteCount": 0, "escByteCount": 0})

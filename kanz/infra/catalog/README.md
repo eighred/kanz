@@ -208,6 +208,21 @@ and [Module](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85
 These public text identities do not identify an actual caller, JDK version or
 fatal cause. JVM/native-access flags and the isolation profile stay unchanged.
 
+One search-only forwarding-prefix class groups six public method openings:
+`NativeLibraries.load`, `NativeLibraries.loadLibrary`,
+`NativeLibraries$NativeLibraryImpl.open`, `ClassLoader.loadLibrary`,
+`Runtime.load0` and `System.load`. The immutable declarations are in
+[NativeLibraries](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/jdk/internal/loader/NativeLibraries.java#L527),
+[ClassLoader](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/ClassLoader.java#L2242),
+[Runtime](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/Runtime.java#L761)
+and [System](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/System.java#L1644).
+The allowlist requires raw line-start `at java.base/` or the documented one-TAB
+form, exact class/method case and the opening parenthesis. It performs no
+whitespace, loader or module-version normalization. Equal contexts aggregate
+before unknown sampling and receive no individual body fingerprint. These are
+forwarding text identities; stage, level, caller, library and cause remain
+unclassified. The existing frame parser, sampling budgets and profiles remain.
+
 Completed search-log captures additionally report only UTF-8 round-trip validity
 and raw NUL/ESC byte counts as format metadata. They do not strip ANSI escapes,
 normalize content or guess an encoding. After finishing all known context
