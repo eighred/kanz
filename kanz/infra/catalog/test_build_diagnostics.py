@@ -378,7 +378,7 @@ class BuildDiagnosticControls(unittest.TestCase):
         context = unknown["lineContext"]
         self.assertEqual(unknown["format"], {"utf8Roundtrip": True, "nulByteCount": 0, "escByteCount": 0})
         self.assertEqual(context["records"], [])
-        self.assertEqual(context["samples"], [{"lineOrdinal": 1, "lineBytes": len(secret.encode()), "lineSHA256": hashlib.sha256(secret.encode()).hexdigest()}])
+        self.assertEqual(context["samples"], [{"lineOrdinal": 1, "lineBytes": len(secret.encode()), "lineSHA256": hashlib.sha256(secret.encode()).hexdigest(), "frame": None}])
         self.assertEqual(context["unknownProjection"], {"lineLimitBytes": 4096, "ordinalBasis": "capture-one-based", "trim": "ascii-whitespace", "selection": "first-ceiling-half-last-floor-half", "consideredLines": 1, "eligibleLines": 1, "refusedLines": 0, "refusalCounts": {"invalid-utf8": 0, "empty-line": 0, "line-budget": 0}, "sampledLines": 1, "omittedEligibleLines": 0})
         self.assertFalse(context["truncated"])
         self.assertNotIn(secret, json.dumps(unknown))
@@ -440,7 +440,70 @@ class BuildDiagnosticControls(unittest.TestCase):
             self.assertEqual(counts["eligibleLines"], counts["sampledLines"] + counts["omittedEligibleLines"])
             self.assertLessEqual(len(projected["records"]) + len(projected["samples"]), 16)
             for sample in projected["samples"]:
-                self.assertEqual(set(sample), {"lineOrdinal", "lineBytes", "lineSHA256"})
+                self.assertEqual(set(sample), {"lineOrdinal", "lineBytes", "lineSHA256", "frame"})
+                self.assertIsNone(sample["frame"])
+        private_class, private_method = b"com.example.PrivateCredentialMarker", b"secretMethodMarker"
+        expected_frame = {"framing": "jdk-at-frame-v1", "classBytes": len(private_class), "classSHA256": hashlib.sha256(private_class).hexdigest(), "methodBytes": len(private_method), "methodSHA256": hashlib.sha256(private_method).hexdigest()}
+        frame_body = b"at " + private_class + b"." + private_method + b"(Source.java:123)"
+        framed = qualify.runtime_output(b"\t " + frame_body + b" \t", 1, "search-startup-log")
+        sample = framed["lineContext"]["samples"][0]
+        self.assertEqual(sample, {"lineOrdinal": 1, "lineBytes": len(frame_body), "lineSHA256": hashlib.sha256(frame_body).hexdigest(), "frame": expected_frame})
+        for private in (private_class.decode(), private_method.decode(), "Source.java"):
+            self.assertNotIn(private, json.dumps(framed))
+        for module in (b"", b"java.base/"):
+            for method in (private_method, b"<init>", b"<clinit>"):
+                for location in (b"Source.java:0", b"Source.java:2147483647", b"Native Method", b"Unknown Source"):
+                    body = b"at " + module + private_class + b"." + method + b"(" + location + b")"
+                    frame = qualify.runtime_output(body, 1, "search-startup-log")["lineContext"]["samples"][0]["frame"]
+                    self.assertEqual(frame, dict(expected_frame, methodBytes=len(method), methodSHA256=hashlib.sha256(method).hexdigest()))
+        maximum_class = b".".join([b"a" * 100] * 4 + [b"Z" * 108])
+        maximum_method = b"m" * 128
+        maximum_file = b"F" * 123 + b".java"
+        maximum_frame = qualify.runtime_output(b"at " + maximum_class + b"." + maximum_method + b"(" + maximum_file + b":1)", 1, "search-startup-log")["lineContext"]["samples"][0]["frame"]
+        self.assertEqual((maximum_frame["classBytes"], maximum_frame["methodBytes"]), (512, 128))
+        for bounded_class in (b"a." + b"C" * 128, b"a." * 31 + b"Z"):
+            bounded_frame = qualify.runtime_output(b"at " + bounded_class + b".m(Source.java:1)", 1, "search-startup-log")["lineContext"]["samples"][0]["frame"]
+            self.assertEqual(bounded_frame, dict(expected_frame, classBytes=len(bounded_class), classSHA256=hashlib.sha256(bounded_class).hexdigest(), methodBytes=1, methodSHA256=hashlib.sha256(b"m").hexdigest()))
+        invalid_frames = [b"At " + private_class + b".method(Source.java:1)",
+                          b"at  " + private_class + b".method(Source.java:1)",
+                          b"at java.logging/" + private_class + b".method(Source.java:1)",
+                          b"at java.base@25.0.4.1/" + private_class + b".method(Source.java:1)",
+                          b"at app//" + private_class + b".method(Source.java:1)",
+                          b"at " + private_class + b".method(Source.java)",
+                          b"at " + private_class + b".method(/tmp/Source.java:1)",
+                          b"at " + private_class + b".method(Source.java:01)",
+                          b"at " + private_class + b".method(Source.java:-1)",
+                          b"at " + private_class + b".method(Source.java:2147483648)",
+                          b"at " + private_class + b".method(Source.java:12345678901)",
+                          b"at " + private_class + b".method(Source.java:1) trailing",
+                          b"at " + private_class + b".method(Source.java:1) at other.pkg.Type.method(Other.java:2)",
+                          b"at com..Private.method(Source.java:1)",
+                          b"at Private.method(Source.java:1)",
+                          "at com.example.Priv\u0430te.method(Source.java:1)".encode(),
+                          b"at " + private_class + b".<unknown>(Source.java:1)",
+                          b"at " + private_class + b".1method(Source.java:1)",
+                          b"at " + private_class + b"." + b"m" * 129 + b"(Source.java:1)",
+                          b"at a." + b"C" * 129 + b".m(Source.java:1)",
+                          b"at " + maximum_class + b"Z.method(Source.java:1)",
+                          b"at " + b"a." * 32 + b"Z.method(Source.java:1)",
+                          b"at " + private_class + b".method(" + b"F" * 124 + b".java:1)",
+                          b"at " + private_class + b".method(Source.java:1)\x00"]
+        for body in invalid_frames:
+            refused_frame = qualify.runtime_output(body, 1, "search-startup-log")["lineContext"]["samples"][0]["frame"]
+            self.assertIsNone(refused_frame)
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            split_frame = qualify.runtime_output(b"at " + private_class + separator.encode() + b"." + private_method + b"(Source.java:1)", 1, "search-startup-log")
+            self.assertTrue(all(sample["frame"] is None for sample in split_frame["lineContext"]["samples"]))
+        bodies = [b"at " + private_class + b"." + private_method + b"(Source.java:" + str(index).encode() + b")" for index in range(20)]
+        with mock.patch.object(qualify, "runtime_stackframe", wraps=qualify.runtime_stackframe) as parse:
+            selected = qualify.runtime_output(b"\n".join(bodies), 1, "search-startup-log")["lineContext"]
+            self.assertEqual(parse.call_count, len(selected["samples"]))
+            self.assertEqual(parse.call_count, 16)
+            self.assertEqual([sample["lineOrdinal"] for sample in selected["samples"]], list(range(1, 9)) + list(range(13, 21)))
+        for body, source in ((frame_body, "broker-startup-log"), (frame_body, "readiness-command"), (b"\xff\n" + frame_body, "search-startup-log"), (b"x" * 4097, "search-startup-log"), ("\n".join(known).encode() + b"\n" + frame_body, "search-startup-log")):
+            with mock.patch.object(qualify, "runtime_stackframe") as parse:
+                qualify.runtime_output(body, 1, source)
+                parse.assert_not_called()
         for source in ("broker-startup-log", "readiness-command"):
             other = qualify.runtime_output(secret.encode(), 1, source)
             self.assertNotIn("format", other)

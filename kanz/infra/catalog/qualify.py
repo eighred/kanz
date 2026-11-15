@@ -237,6 +237,22 @@ def runtime_message(line, prefix, utf8_roundtrip, anchored=False):
     return result
 
 
+def runtime_stackframe(body):
+    """Optional source-shaped symbol digests, never a caller/cause assertion."""
+    if not isinstance(body, bytes) or not 0 < len(body) <= STARTUP_MESSAGE_LIMIT or not body.startswith(b"at "):
+        return None
+    identifier = rb"[A-Za-z_$][A-Za-z0-9_$]{0,127}"
+    pattern = (rb"at (?:java\.base/)?(?P<class>(?:" + identifier + rb"\.){1,31}" + identifier +
+               rb")\.(?P<method>" + identifier + rb"|<init>|<clinit>)\((?:"
+               rb"[A-Za-z_$][A-Za-z0-9_$]{0,122}\.java:(?P<line>0|[1-9][0-9]{0,9})|Native Method|Unknown Source)\)")
+    matched = re.fullmatch(pattern, body)
+    if not matched or len(matched["class"]) > 512 or len(matched["method"]) > 128 or matched["line"] is not None and int(matched["line"]) > 2147483647:
+        return None
+    return {"framing": "jdk-at-frame-v1", "classBytes": len(matched["class"]),
+            "classSHA256": hashlib.sha256(matched["class"]).hexdigest(), "methodBytes": len(matched["method"]),
+            "methodSHA256": hashlib.sha256(matched["method"]).hexdigest()}
+
+
 def runtime_output(output, code, source):
     """Informational closed signals; no text can authorise readiness/cleanup."""
     if source not in READINESS_SOURCES or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
@@ -436,6 +452,12 @@ def runtime_output(output, code, source):
         # taking the first ceiling-half and last floor-half in ordinal order.
         slots = READINESS_CONTEXT_RECORDS - len(context["records"])
         samples = eligible if len(eligible) <= slots else eligible[:(slots + 1) // 2] + (eligible[-(slots // 2):] if slots // 2 else [])
+        # Parse only retained search samples, not every candidate or log line.
+        # The input is already round-trip verified and ASCII-trimmed for its
+        # whole-line hash. Unsupported formatter forms keep frame=None.
+        selected_lines = dict(unknown_lines)
+        for sample in samples:
+            sample["frame"] = runtime_stackframe(selected_lines[sample["lineOrdinal"]].encode("utf-8").strip(b" \t\r\n\v\f"))
         refused = sum(refusals.values())
         omitted = len(eligible) - len(samples)
         context["samples"] = samples

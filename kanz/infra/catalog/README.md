@@ -214,8 +214,9 @@ normalize content or guess an encoding. After finishing all known context
 records, unclassified search lines may fill only the remaining record slots:
 `len(records) + len(samples) <= 16`. Eligible unknown lines require capture-wide
 valid UTF-8 and 1–4096 bytes after explicit ASCII whitespace trimming. Each
-sample contains only its one-based logical-line ordinal in the full capture,
-trimmed byte length and SHA-256, never text, exception names, paths or a cause.
+sample contains its one-based logical-line ordinal in the full capture,
+trimmed byte length/SHA-256 and optional frame digests, never raw text,
+exception names, paths or a cause.
 If eligible lines exceed capacity, selection takes the first ceiling-half and
 last floor-half of that capacity in ordinal order. If they fit, each is retained
 once. The 40-line tail remains mandatory; earlier line ordinals are not reset.
@@ -224,6 +225,29 @@ lines, with separate invalid-UTF-8, empty-line and line-budget refusals. Refused
 or omitted samples mark truncation along with the existing tail/known-record
 omissions. Invalid UTF-8 anywhere refuses every individual unknown-line hash.
 Broker, readiness-command, MySQL and GMS sources receive no such fallback.
+
+Only already-retained search samples may receive non-null `frame` metadata:
+the fixed `jdk-at-frame-v1` enum and original ASCII class/method byte lengths
+and SHA-256 digests. Parsing occurs after selection and consumes no extra
+sample slots. It recognises only an ASCII-trimmed logical line beginning
+`at `, optionally followed by exact `java.base/`, then a fully qualified ASCII
+class and method. Identifiers are bounded to 128 bytes, class names to 512 bytes
+and 2–32 dot-separated components; methods may also be `<init>` or `<clinit>`.
+The ending must be a source-like `.java` basename of at most 128 bytes with a
+canonical decimal line number in 0–2147483647, or exact `Native Method` or
+`Unknown Source`, inside one final pair of parentheses. No filename, path,
+line number, loader, module or version is retained. The existing 4096-byte,
+capture-wide UTF-8 and all sampling/source limits still apply.
+
+The public formatter provenance is expected-bundle OpenJDK 25u
+[StackTraceElement](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/StackTraceElement.java#L360)
+and [Throwable](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/Throwable.java#L700).
+Filename-without-line, other modules, module versions, loader prefixes, Unicode
+identifiers, malformed/ambiguous/trailing and over-budget forms intentionally
+retain `frame: null`, with no partial symbol metadata. That result establishes
+neither frame absence nor a cause. A valid shape or a public symbol-digest
+match establishes neither an actual caller nor the image's JDK version.
+
 Only a broker line containing the exact case-sensitive compiled prefix
 `Failure during startup: ` once may retain `startupMessage` byte length and
 SHA-256 of its suffix. The capture must round-trip as valid UTF-8; trimming is
