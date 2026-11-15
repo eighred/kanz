@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-six
+stage/category, never subprocess arguments or one-run credentials. Thirty-seven
 qualification controls discriminate these failures alongside the 14 projection
-controls: 50 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 51 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -162,8 +162,9 @@ causal attribution remain unknown. Search suffix fingerprints follow the CLI
 source-frame contract below; unclassified lines have a separate bounded sample
 contract. Conditional
 vendor keystore creation/upgrades do not establish the selected image's state
-or justify a writable-config repair without observed evidence. Search startup
-arguments, image pins and the entire isolation/resource profile are unchanged.
+or justify a writable-config repair without observed evidence. Search retains
+the four `-E` arguments, image pins and isolation/resource profile; its explicit
+BC-FIPS Java-variant property is documented below.
 The [JvmErgonomics options probe](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/distribution/tools/launchers/src/main/java/org/opensearch/tools/launchers/JvmErgonomics.java#L108)
 starts a separate Java process before OpenSearch and wraps a nonzero result in
 a RuntimeException. Only its fixed nonzero-integer wrapper and known frame
@@ -206,7 +207,7 @@ unclassified. This prefix is public in the expected-bundle source's
 [Unsafe](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/jdk.unsupported/share/classes/sun/misc/Unsafe.java#L1891)
 and [Module](https://github.com/openjdk/jdk25u/blob/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a/src/java.base/share/classes/java/lang/Module.java#L323).
 These public text identities do not identify an actual caller, JDK version or
-fatal cause. JVM/native-access flags and the isolation profile stay unchanged.
+fatal cause. JDK native-access flags and the isolation profile stay unchanged.
 
 One search-only forwarding-prefix class groups six public method openings:
 `NativeLibraries.load`, `NativeLibraries.loadLibrary`,
@@ -294,7 +295,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 50 catalog controls, seven shared
+and capture overflow. The inventory contains 51 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -339,6 +340,24 @@ prove this 3.9.0 image. OpenSearch's
 record RCA removal in 3.0 while retaining the Performance Analyzer plugin.
 Clean-scan and DataHub runtime compatibility require the full workflow.
 No jar or plugin is removed or replaced to obtain a scanner pass.
+
+The disposable Search JVM supplies
+`-Dorg.bouncycastle.native.cpu_variant=java` in `OPENSEARCH_JAVA_OPTS` before
+provider initialization. The [official BC-FIPS publisher page](https://www.bouncycastle.org/download/bouncy-castle-java-fips/)
+links the [2.1.3 source archive](https://repo1.maven.org/maven2/org/bouncycastle/bc-fips/2.1.3/bc-fips-2.1.3-sources.jar),
+whose verified SHA-256 is
+`9da8a0fa619d5e46ea321e2abf6b9e2c88d9aaa04cf8dbf80c4fec6943a40aad`.
+`NativeLoader.java` lines 147–161 select the Java variant before temporary-file
+setup, extraction or `System.load`. `Properties.java` lines 88–101 give a Java
+Security property precedence over the System property; there is no environment
+property lookup. `FipsStatus.java` lines 63–100 retain `Loader.run`, checksum
+validation and error-state refusal, while `CryptoServicesRegistrar.java` lines
+114–126 separately handle `approved_only`. This fixture setting changes neither
+that policy nor any provider bytes, native production path or isolation limit.
+The focused startup control checks the exact JVM option and Docker profile.
+Public source establishes the option contract; the effective loaded setting,
+startup compatibility and full catalog acceptance require the Linux workflow.
+It establishes no cause for a prior startup failure or FIPS qualification.
 
 The selected Redpanda image records `libbrotli1:amd64` version
 `1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)

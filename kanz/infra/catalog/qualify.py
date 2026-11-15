@@ -749,7 +749,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 36 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 37 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1064,6 +1064,10 @@ class Fixture:
         return self.start("broker", ["--tmpfs", "/var/lib/redpanda/data:rw,nosuid,nodev,size=1g,uid=101,gid=101"],
                           ["redpanda", "start", "--config", "/tmp/redpanda.yaml", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "broker:9092", "--advertise-rpc-addr", "broker:33145", "--set", "redpanda.auto_create_topics_enabled=true"])
 
+    def start_search(self):
+        return self.start("search", ["--user", "1000:1000", "--tmpfs", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "--tmpfs", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000", "--env", "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java"],
+                          ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/usr/share/opensearch/bin/opensearch")
+
     def configure_broker(self, container):
         self.broker_evidence = None
         try:
@@ -1132,8 +1136,7 @@ class Fixture:
         mysql = self.start_mysql()
         self.mysql_evidence = {"container": mysql_container_profile(json.loads(self.run(["docker", "inspect", mysql]))[0], identities["mysql"]["imageID"], self.network, labels(self.owner))}
         self.stage = "search"
-        search = self.start("search", ["--user", "1000:1000", "--tmpfs", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "--tmpfs", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000", "--env", "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"],
-                            ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/usr/share/opensearch/bin/opensearch")
+        search = self.start_search()
         self.stage = "storage-readiness"
         self.wait_exec(broker, ["rpk", "cluster", "info", "-X", "brokers=broker:9092"])
         self.stage = "broker-live-configuration"
@@ -1298,11 +1301,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 50 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 51 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 36}
+        report["qualificationControls"] = {"count": 37}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"

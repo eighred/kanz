@@ -29,6 +29,31 @@ def runtime_state_info(role, status="running"):
 
 
 class QualificationControls(unittest.TestCase):
+    def test_search_java_variant_preserves_provider_and_isolation_contract(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network = OWNER, OWNER["network"]
+        reference = "opensearchproject/opensearch:3.9.0@sha256:5c20af6b5cb472a74ba99f663bee3dd03afbeced14b3897b220a87fc75278445"
+        fixture.images, fixture.run = {"search": reference}, mock.Mock(return_value="")
+        self.assertEqual(fixture.start_search(), OWNER["network"] + "-search")
+        args = fixture.run.call_args.args[0]
+        image_index = args.index(reference)
+        self.assertEqual(qualify.image_identity.selections()["search"]["reference"], reference)
+        self.assertEqual(args[image_index + 1:], ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"])
+        options = args[:image_index]
+        def values(flag):
+            return [options[index + 1] for index, value in enumerate(options[:-1]) if value == flag]
+        self.assertEqual(values("--env"), ["OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dorg.bouncycastle.native.cpu_variant=java"])
+        self.assertEqual(values("--entrypoint"), ["/usr/share/opensearch/bin/opensearch"])
+        self.assertEqual(values("--user"), ["1000:1000"])
+        self.assertEqual(values("--tmpfs"), ["/tmp:rw,nosuid,nodev,size=512m", "/usr/share/opensearch/data:rw,nosuid,nodev,size=1g,uid=1000,gid=1000", "/usr/share/opensearch/logs:rw,nosuid,nodev,size=64m,uid=1000,gid=1000"])
+        for flag, expected in (("--cap-drop", "ALL"), ("--security-opt", "no-new-privileges"), ("--network", OWNER["network"]), ("--memory", "2g"), ("--memory-swap", "2g"), ("--cpus", "2"), ("--pids-limit", "256"), ("--platform", "linux/amd64")):
+            self.assertEqual(values(flag), [expected])
+        self.assertIn("--read-only", options)
+        for flag in ("--privileged", "--cap-add", "--mount", "--volume", "--publish", "-p"):
+            self.assertNotIn(flag, options)
+        self.assertNotIn(OWNER["registryProfile"], " ".join(args))
+        self.assertFalse(any("approved_only" in value or "enable-native-access" in value or "java.security.properties" in value for value in args))
+
     def test_broker_rpc_and_live_property_require_the_same_owned_container(self):
         fixture = object.__new__(qualify.Fixture)
         fixture.owner, fixture.network = OWNER, OWNER["network"]
@@ -558,7 +583,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 36}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 37}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
