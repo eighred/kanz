@@ -17,10 +17,10 @@ status = read("/proc/self/status", String)
 @test occursin(r"(?m)^CapEff:\s+0000000000000000$", status)
 @test occursin(r"(?m)^NoNewPrivs:\s+1$", status)
 println(stderr, "KANZ_OCI_STAGE=write-refusal")
-for path in ("/opt/julia/refuse-write", "/opt/julia-depot/refuse-write", "/refuse-write")
+for path in ("/opt/kanz-jl/refuse-write", "/opt/julia-depot/refuse-write", "/refuse-write")
     @test_throws SystemError open(path, "w")
 end
-@test isfile("/opt/julia/source.sha")
+@test isfile("/opt/kanz-jl/source.sha")
 println(stderr, "KANZ_OCI_STAGE=installed-packages")
 excluded_environments = ["base/JuliaSyntax/docs", "stdlib/v1.13/TOML/docs",
     "stdlib/v1.13/TOML/benchmark", "stdlib/v1.13/Tar/test", "test"]
@@ -28,7 +28,7 @@ for path in excluded_environments
     @test !ispath(joinpath("/opt/julia/share/julia", path))
     @test !islink(joinpath("/opt/julia/share/julia", path))
 end
-manifest = TOML.parsefile("/opt/julia/Manifest.toml")
+manifest = TOML.parsefile("/opt/kanz-jl/Manifest.toml")
 packages = Dict{String,Any}()
 # Pkg.dependencies() constructs EnvCache and writes depot usage locks. Resolve
 # installed code through Julia's loader without making the read-only depot writable.
@@ -226,10 +226,10 @@ Libdl.dlclose(ssl)
 Libdl.dlclose(crypto)
 println(stderr, "KANZ_OCI_STAGE=inventory")
 generated = Dict{String,String}()
-for (dir, _, files) in walkdir("/opt/julia/gen")
+for (dir, _, files) in walkdir("/opt/kanz-jl/gen")
     for file in files
         path = joinpath(dir,file)
-        generated[relpath(path,"/opt/julia/gen")] = bytes2hex(sha256(read(path)))
+        generated[relpath(path,"/opt/kanz-jl/gen")] = bytes2hex(sha256(read(path)))
     end
 end
 @test !isempty(generated)

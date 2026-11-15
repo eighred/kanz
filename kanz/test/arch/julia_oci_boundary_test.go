@@ -3,12 +3,53 @@ package arch
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+// The native inventory covers the Julia installation. Application sources must
+// not become extra runtime files merely because a repository root was renamed.
+func juliaWorkdirBoundary(body string) error {
+	workdirs := 0
+	for _, line := range strings.Split(body, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "WORKDIR" {
+			continue
+		}
+		if len(fields) != 2 || !path.IsAbs(fields[1]) {
+			return fmt.Errorf("unresolved Julia application workdir")
+		}
+		workdirs++
+		directory := path.Clean(fields[1])
+		if directory == "/opt/julia" || strings.HasPrefix(directory, "/opt/julia/") {
+			return fmt.Errorf("application workdir overlaps the Julia installation: %s", directory)
+		}
+	}
+	if workdirs == 0 {
+		return fmt.Errorf("missing Julia application workdir")
+	}
+	return nil
+}
+
+func TestJuliaApplicationStaysOutsideNativeRuntime(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(moduleRoot(t), "../julia/Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := juliaWorkdirBoundary(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{"/opt/julia", "/opt/julia/worker", "/opt/julia/worker/.."} {
+		mutant := strings.ReplaceAll(string(body), "WORKDIR /opt/kanz-jl", "WORKDIR "+directory)
+		if mutant == string(body) || juliaWorkdirBoundary(mutant) == nil {
+			t.Fatalf("runtime/application collision escaped: %s", directory)
+		}
+	}
+}
 
 // #1413: scoped recipe/qualification checks, not a Julia semantic audit or proof
 // of OS isolation. The mandatory actual-image Linux lane owns those assertions.
@@ -26,7 +67,7 @@ var juliaOCIMarkers = map[string][]string{
 		"/opt/julia/share/julia/test; do", `test -d "$path" && test ! -L "$path" && rm -rf -- "$path" && test ! -e "$path" || exit 1`,
 		"JULIA_PKG_OFFLINE=true", "USER 65532:65532",
 		"printf '%s' \"$VERSION\" | grep -Eq '^[0-9a-f]{40}$'",
-		`ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/julia", "/opt/julia/bin/curve_worker.jl"]`,
+		`ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/kanz-jl", "/opt/kanz-jl/bin/curve_worker.jl"]`,
 	},
 	"julia/qualification/proof.py": {
 		"'--network', 'none', '--read-only', '--user', '65532:65532'",

@@ -9,7 +9,7 @@ RUN curl --disable --fail --location --proto '=https' --proto-redir '=https' --r
  && curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/libcurl.tar.gz https://github.com/JuliaBinaryWrappers/LibCURL_jll.jl/releases/download/LibCURL-v8.23.0%2B0/LibCURL.v8.23.0.x86_64-linux-gnu.tar.gz \
  && bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz
 ENV JULIA_DEPOT_PATH=/opt/julia-depot JULIA_LOAD_PATH=@:@stdlib JULIA_CPU_TARGET=generic JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-WORKDIR /opt/julia
+WORKDIR /opt/kanz-jl
 COPY julia/Project.toml julia/Manifest.toml ./
 RUN sha256sum Project.toml Manifest.toml > /tmp/locked.sha256 \
  && /opt/julia/bin/julia --startup-file=no --history-file=no --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()' \
@@ -38,8 +38,8 @@ ARG VERSION
 LABEL org.opencontainers.image.revision=$VERSION
 COPY --from=build /opt/julia /opt/julia
 COPY --from=build /opt/julia-depot /opt/julia-depot
-COPY --from=build /opt/julia /opt/julia
+COPY --from=build /opt/kanz-jl /opt/kanz-jl
 ENV JULIA_DEPOT_PATH=/opt/julia-depot JULIA_LOAD_PATH=@:@stdlib JULIA_PKG_OFFLINE=true JULIA_CPU_TARGET=generic JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 HOME=/tmp
-WORKDIR /opt/julia
+WORKDIR /opt/kanz-jl
 USER 65532:65532
-ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/julia", "/opt/julia/bin/curve_worker.jl"]
+ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/kanz-jl", "/opt/kanz-jl/bin/curve_worker.jl"]

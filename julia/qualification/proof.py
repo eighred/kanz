@@ -18,7 +18,7 @@ import curl_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 FLAGS = ['--startup-file=no', '--history-file=no', '--compiled-modules=existing',
-         '--pkgimages=existing', '--project=/opt/julia']
+         '--pkgimages=existing', '--project=/opt/kanz-jl']
 CASES = {'deposit', 'forward', 'swap', 'negative', 'stub', 'missing', 'zero',
          'unsupported', 'invalid', 'numerical', 'empty', 'malformed', 'oversize'}
 ARCHIVE_SHA256 = '5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4'
@@ -236,7 +236,7 @@ def main():
                 code, wire = command(['docker', 'start', '--attach', '--interactive', name], data=data,
                                      timeout=2 if timeout_control else 90,
                                      diagnostic=report.setdefault('isolationDiagnostic', {})
-                                     if script == '/opt/julia/qualification/isolation.jl' else None)
+                                     if script == '/opt/kanz-jl/qualification/isolation.jl' else None)
                 info = json.loads(required(['docker', 'inspect', name]))[0]
                 container_boundary(info, image, source)
                 if info['State']['Running'] or info['State']['OOMKilled'] or info['State']['ExitCode'] != code:
@@ -244,7 +244,7 @@ def main():
                 return code, wire
 
             stage = 'isolation-and-installed-dependencies'
-            code, wire = run(script='/opt/julia/qualification/isolation.jl')
+            code, wire = run(script='/opt/kanz-jl/qualification/isolation.jl')
             if code:
                 raise ValueError('actual isolation test refused')
             inventory = tomllib.loads(wire.decode())
@@ -252,7 +252,7 @@ def main():
             report['inventory'] = inventory
             report['isolationPassed'] = True
             stage = 'existing-independent-goldens'
-            code, wire = run(script='/opt/julia/test/runtests.jl')
+            code, wire = run(script='/opt/kanz-jl/test/runtests.jl')
             if code or b'Generated wire boundary' not in wire or b'Independent rational discount factors' not in wire:
                 raise ValueError('existing Julia goldens did not complete')
             report['goldensPassed'] = True
