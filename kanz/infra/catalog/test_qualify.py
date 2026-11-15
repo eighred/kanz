@@ -175,7 +175,7 @@ class QualificationControls(unittest.TestCase):
         result, process, launch, capture, stop = collect()
         self.assertEqual(result["signals"], [{"code": "sql-error", "count": 1}])
         self.assertEqual(calls, [["docker", "inspect", container_id]] * 2)
-        self.assertEqual(launch.call_args.args[0], ["docker", "logs", "--tail", "40", container_id])
+        self.assertEqual(launch.call_args.args[0], ["docker", "logs", "--tail", "256", container_id])
         self.assertTrue(launch.call_args.kwargs["start_new_session"])
         capture.assert_called_once_with(process, 10, qualify.READINESS_OUTPUT_LIMIT)
         process.stdout.close.assert_called_once()

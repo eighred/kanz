@@ -396,7 +396,7 @@ and gives no metadata value acceptance or cleanup authority.
 A separate failed-upgrade reducer is narrowly scoped to the selected upgrade
 image after a validated, completed, nonzero `upgradeOutcome`. It freshly binds
 the exact source/run/nonce/network and full terminal container ID before and
-after a dedicated `docker logs --tail 40` capture. It does not extend generic
+after a dedicated `docker logs --tail 256` capture. It does not extend generic
 `run`, readiness roles, log sources or the GMS/MySQL log permissions. Raw bytes
 remain transient inside this trusted capture/reducer boundary; they never
 return to its caller, print, persist, hash or enter retained exceptions.
@@ -404,7 +404,8 @@ Only fixed literal enum codes and per-line counts may leave the reducer.
 
 The process has a 10-second/64-KiB capture bound and process-group kill/reap on
 timeout or overflow, including when the immediate parent has already exited.
-The reducer permits at most 40 logical lines and 16 enum records. Incomplete,
+The separate `FAILED_UPGRADE_LINE_LIMIT=256` permits at most 256 logical lines
+and 16 enum records; the readiness window remains 40 lines. Incomplete,
 nonzero-client, malformed UTF-8, ANSI/NUL, unknown, over-budget or refused
 observations retain no signals. Source-specific public literals cover compact
 Java, native-link/Snappy, Spring, Kafka, Search, SQL/Ebean and confirmed index
@@ -412,6 +413,14 @@ step-failure categories. Matching retains no class/step names, paths, arbitrary
 captures, bodies or unknown fingerprints. A match proves only public-literal
 presence, not a caller, dependency version, fatal cause or supported capacity.
 The configured Snappy default is not evidence of a native-codec failure.
+The pinned upgrade Logback console format is plain text. Public failure reports
+precede cleanup whose source loop is unbounded, so the source provides no
+last-40-line failure guarantee. This does not establish that the earlier window
+actually displaced a failure message. The fixed `upgrade-failure-report` enum
+recognizes only the public `Failed Step` and `Caught exception during attempt`
+fragments; no dynamic step IDs or details survive. Generic `Exiting upgrade`
+does not match because it also appears on the success path. Empty output has a
+distinct refusal from nonempty unclassified output.
 
 Public token provenance includes the existing DataHub source revision
 `faab576d96cbdb27b8344a755e0bc0f42fdc9c15`, expected-bundle JDK sources above,

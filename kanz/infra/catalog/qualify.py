@@ -40,6 +40,7 @@ READINESS_CONTEXT_RECORDS = 16
 STARTUP_MESSAGE_LIMIT = 4096
 READINESS_ROLES = frozenset({"broker", "mysql", "search", "gms"})
 READINESS_SOURCES = frozenset({"readiness-command", "broker-startup-log", "search-startup-log"})
+FAILED_UPGRADE_LINE_LIMIT = 256
 FAILED_UPGRADE_LITERALS = {
     "java-runtime-error": ("java.lang.RuntimeException",),
     "java-argument-error": ("java.lang.IllegalArgumentException",),
@@ -56,6 +57,7 @@ FAILED_UPGRADE_LITERALS = {
     "sql-setup-failure": ("SQL Setup failed, exiting", "Error during SQL setup upgrade", "SQL setup upgrade failed:"),
     "ebean-connection-failure": ("Failed to create SqlSetup database connection:",),
     "search-index-build-failure": ("BuildIndicesStep failed.", "BuildIndicesPostStep failed."),
+    "upgrade-failure-report": ("Failed Step", "Caught exception during attempt"),
 }
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
@@ -667,6 +669,8 @@ def reduce_failed_upgrade(output):
         return refused("malformed-output")
     if len(output) > READINESS_OUTPUT_LIMIT:
         return refused("output-budget")
+    if not output:
+        return refused("empty-output")
     try:
         text = output.decode("utf-8", errors="strict")
     except UnicodeError:
@@ -674,7 +678,7 @@ def reduce_failed_upgrade(output):
     if "\x00" in text or "\x1b" in text:
         return refused("malformed-output")
     lines = text.splitlines()
-    if len(lines) > READINESS_CONTEXT_LINES:
+    if len(lines) > FAILED_UPGRADE_LINE_LIMIT:
         return refused("line-budget")
     signals = []
     boundary = r"A-Za-z0-9_.$/\\"
@@ -1338,7 +1342,7 @@ class Fixture:
                     resource.setrlimit(resource.RLIMIT_FSIZE, (DEFAULT_FILE_LIMIT, DEFAULT_FILE_LIMIT))
                     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
                 try:
-                    process = subprocess.Popen(["docker", "logs", "--tail", "40", container_id], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=self.environment, preexec_fn=limits, start_new_session=True)
+                    process = subprocess.Popen(["docker", "logs", "--tail", str(FAILED_UPGRADE_LINE_LIMIT), container_id], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=self.environment, preexec_fn=limits, start_new_session=True)
                     code, raw = capture_process(process, 10, READINESS_OUTPUT_LIMIT)
                     complete = True
                     result = reduce_failed_upgrade(raw) if type(code) is int and code == 0 else {"outcome": "command-refused", "signals": []}

@@ -544,6 +544,13 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertEqual(reduced, {"outcome": "reduced", "signals": [{"code": "sql-error", "count": 2}]})
         self.assertNotIn(secret, json.dumps(reduced))
         self.assertNotIn("java.sql.SQLException", json.dumps(reduced))
+        plain_report = ("2026-11-15 12:00:00,000 [main] ERROR c.l.d.u.DefaultUpgradeReport - Failed Step " + secret + "\n"
+                        "2026-11-15 12:00:00,001 [main] ERROR c.l.d.u.DefaultUpgradeReport - Caught exception during attempt " + secret).encode()
+        self.assertEqual(qualify.reduce_failed_upgrade(plain_report), {"outcome": "reduced", "signals": [{"code": "upgrade-failure-report", "count": 2}]})
+        maximum = qualify.reduce_failed_upgrade(b"\n".join([public] * 256))
+        self.assertEqual(maximum, {"outcome": "reduced", "signals": [{"code": "sql-error", "count": 256}]})
+        self.assertEqual(qualify.reduce_failed_upgrade(b""), {"outcome": "empty-output", "signals": []})
+        self.assertEqual(qualify.reduce_failed_upgrade(b"Exiting upgrade"), {"outcome": "unclassified-output", "signals": []})
         for category, literals in qualify.FAILED_UPGRADE_LITERALS.items():
             for literal in literals:
                 one = qualify.reduce_failed_upgrade((literal + ": " + secret).encode())
@@ -554,11 +561,11 @@ class BuildDiagnosticControls(unittest.TestCase):
                 self.assertNotIn(secret, json.dumps(one))
                 self.assertNotIn(literal, json.dumps(one))
         private_class = "com.private.credentials.TokenAlphaException"
-        for body in (b"", private_class.encode(), b"java.sql.SQLExceptionToken", b"private.java.sql.SQLException", b"/private/" + secret.encode() + b"/java.sql.SQLException", b"C:\\private\\java.sql.SQLException", b"java.sql.SQLException/private", b"JAVA.SQL.SQLEXCEPTION", secret.encode()):
+        for body in (private_class.encode(), b"java.sql.SQLExceptionToken", b"private.java.sql.SQLException", b"/private/" + secret.encode() + b"/java.sql.SQLException", b"C:\\private\\java.sql.SQLException", b"java.sql.SQLException/private", b"JAVA.SQL.SQLEXCEPTION", secret.encode()):
             self.assertEqual(qualify.reduce_failed_upgrade(body), {"outcome": "unclassified-output", "signals": []})
         for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
             self.assertEqual(qualify.reduce_failed_upgrade(("java.sql.SQL" + separator + "Exception").encode())["signals"], [])
-        for body, outcome in ((b"\xff\n" + public, "malformed-output"), (b"\x1b[31m" + public + b"\x1b[0m", "malformed-output"), (public + b"\x00", "malformed-output"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), "output-budget"), (b"\n".join([public] * 41), "line-budget"), (secret, "malformed-output")):
+        for body, outcome in ((b"\xff\n" + public, "malformed-output"), (b"\x1b[31m" + public + b"\x1b[0m", "malformed-output"), (public + b"\x00", "malformed-output"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), "output-budget"), (b"\n".join([public] * 257), "line-budget"), (secret, "malformed-output")):
             self.assertEqual(qualify.reduce_failed_upgrade(body), {"outcome": outcome, "signals": []})
         with mock.patch.object(qualify, "FAILED_UPGRADE_LITERALS", {"fixed-" + str(index): ("PublicToken" + str(index),) for index in range(17)}):
             self.assertEqual(qualify.reduce_failed_upgrade("\n".join("PublicToken" + str(index) for index in range(17)).encode()), {"outcome": "record-budget", "signals": []})
