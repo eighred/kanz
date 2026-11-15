@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
@@ -29,6 +30,8 @@ type Config struct {
 	// HTTP-only (probes up, no ingestion) — useful for a bare scaffold
 	// deploy or local boot without a broker.
 	NATSURL string
+	// NATSCredentialsFile points to a mounted NATS account JWT and user seed.
+	NATSCredentialsFile string
 	// Source is the producer identity stamped on emitted FACTs (EVT-17b).
 	Source string
 	// RefData wires the instrument classifier every named stress scenario's
@@ -375,19 +378,26 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("RISK_ENGINE_VENUE_ACCOUNTS is not a safe binding set: %w", err)
 	}
 
+	natsURL := os.Getenv("RISK_ENGINE_NATS_URL")
+	natsCredentialsFile := os.Getenv("RISK_ENGINE_NATS_CREDS_FILE")
+	if natsCredentialsFile != "" && strings.TrimSpace(natsURL) == "" {
+		return Config{}, errors.New("RISK_ENGINE_NATS_CREDS_FILE requires RISK_ENGINE_NATS_URL")
+	}
+
 	return Config{
-		JuliaShadow:      shadow,
-		RustBondShadow:   bondShadow,
-		Listen:           env.Or("RISK_ENGINE_LISTEN", ":8081"),
-		LogLevel:         env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
-		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),
-		Source:           env.Or("RISK_ENGINE_SOURCE", "risk-engine"),
-		Tenant:           env.Or("RISK_ENGINE_TENANT", "__system__"),
-		RefData:          refData,
-		DatabaseURL:      databaseURL,
-		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
-		KafkaBrokers:     env.SplitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
-		MarketDataURL:    marketDataURL,
+		JuliaShadow:         shadow,
+		RustBondShadow:      bondShadow,
+		Listen:              env.Or("RISK_ENGINE_LISTEN", ":8081"),
+		LogLevel:            env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
+		NATSURL:             natsURL,
+		NATSCredentialsFile: natsCredentialsFile,
+		Source:              env.Or("RISK_ENGINE_SOURCE", "risk-engine"),
+		Tenant:              env.Or("RISK_ENGINE_TENANT", "__system__"),
+		RefData:             refData,
+		DatabaseURL:         databaseURL,
+		SnapshotInterval:    parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
+		KafkaBrokers:        env.SplitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
+		MarketDataURL:       marketDataURL,
 
 		RequireValidatedAnalytics: requireValidated,
 

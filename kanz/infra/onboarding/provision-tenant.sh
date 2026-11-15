@@ -500,15 +500,27 @@ if step verify; then
   else
     set --
   fi
-  code_self="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer $VERIFY_TOKEN" "$@" \
-    "$GW$PROBE_PATH")" \
-    || { echo "FATAL: gateway unreachable at $GW (self probe) — cannot verify isolation" >&2; exit 1; }
-  code_other="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer $VERIFY_TOKEN_OTHER" "$@" \
-    "$GW$PROBE_PATH")" \
-    || { echo "FATAL: gateway unreachable at $GW (cross probe) — cannot verify isolation" >&2; exit 1; }
-  echo "   self=$code_self other=$code_other"
+  # The seed is acknowledged by NATS before the risk projection consumes it.
+  # Retry only a missing projection after an all-step seed; auth and other
+  # errors fail immediately. Verify-only retains its single-probe behavior.
+  attempt=1
+  while :; do
+    code_self="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer $VERIFY_TOKEN" "$@" \
+      "$GW$PROBE_PATH")" \
+      || { echo "FATAL: gateway unreachable at $GW (self probe) — cannot verify isolation" >&2; exit 1; }
+    [ "$STEP" = "all" ] && [ "$code_self" = "404" ] && [ "$attempt" -lt 15 ] || break
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  # A cross-tenant status is only meaningful once the target is queryable.
+  if [ "$code_self" = "200" ]; then
+    code_other="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer $VERIFY_TOKEN_OTHER" "$@" \
+      "$GW$PROBE_PATH")" \
+      || { echo "FATAL: gateway unreachable at $GW (cross probe) — cannot verify isolation" >&2; exit 1; }
+    echo "   self=$code_self other=$code_other"
+  fi
 
   if [ "$code_self" != "200" ]; then
     if [ "$code_self" = "401" ]; then

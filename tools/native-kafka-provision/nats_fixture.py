@@ -43,11 +43,11 @@ class Resolver:
         self.observe(tenant, 'create' if create_probe else 'read')
         return public_key
 
-    def observe(self, tenant, mode):
+    def observe(self, tenant, mode, portfolio='PF1'):
         result = run([str(self.probe), '-test.v', '-test.run=^TestOnboardingProbe$'],
                      dict(self.env, ONBOARDING_PROBE_URL=self.url, ONBOARDING_PROBE_TENANT=tenant,
                           ONBOARDING_PROBE_CREDS=str(self.scratch / (tenant + '.creds')),
-                          ONBOARDING_PROBE_MODE=mode), self.scratch)
+                          ONBOARDING_PROBE_MODE=mode, ONBOARDING_PROBE_PORTFOLIO=portfolio), self.scratch)
         if not any(line.startswith('--- PASS: TestOnboardingProbe (') for line in result.splitlines()):
             raise ValueError('NATS onboarding probe did not run')
 
@@ -70,6 +70,15 @@ class Resolver:
         for tenant in tenants:
             self.observe(tenant, 'seed-read')
         return list(tenants)
+
+    def publisher(self, tenant):
+        credentials = self.scratch / (tenant + '-composed-seed.creds')
+        run(['nsc', 'add', 'user', '-a', tenant, '-n', 'composed-seed',
+             '--allow-pub', 'risk.portfolio.snapshot', '--allow-sub', '_INBOX.>'],
+            self.env, self.scratch)
+        run(['nsc', 'generate', 'creds', '-a', tenant, '-n', 'composed-seed',
+             '-o', str(credentials)], self.env, self.scratch)
+        return credentials
 
 
 @contextmanager

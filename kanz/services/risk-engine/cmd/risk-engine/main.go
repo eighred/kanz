@@ -239,7 +239,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// says why. mesh.Client is nil when disabled — the dev/plaintext path.
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics, CredentialsFile: cfg.NATSCredentialsFile})
 	if err != nil {
 		return err
 	}

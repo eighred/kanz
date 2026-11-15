@@ -6,10 +6,25 @@ import qualify
 import owned_cleanup as cleanup
 import copy
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from test_lifecycle import evidence as lifecycle_evidence
 
 
 class TopologyTest(unittest.TestCase):
+    def test_onboarding_failure_preserves_phase_without_error_text(self):
+        diagnostic = {}
+
+        def fail(*args, **kwargs):
+            raise ValueError("fixture secret must not appear in evidence")
+
+        with TemporaryDirectory() as scratch:
+            with self.assertRaises(ValueError):
+                qualify.onboarding_all.qualify(
+                    topology.ROOT, Path(scratch), None, None, 'fixture', None,
+                    {}, 'source', fail, diagnostic)
+        self.assertEqual(diagnostic, {'phase': 'source-staging'})
+
     def test_full_inventory_fits_finite_fixture(self):
         raw=(topology.ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
         _,count,partitions=qualify.canonical_inventory(raw)
@@ -192,7 +207,9 @@ class TopologyTest(unittest.TestCase):
         value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2], qualify.canonical_inventory(manifest, True)[2])
         value['lifecycle']=lifecycle_evidence(count)
         value['natsVersions']={'nsc':'v2.15.0','nats-server':'v2.14.5'}
-        value['natsSeedTenants']=['acme','bravo']
+        value['onboardingAll'] = dict(step='all', tenant='acme', postgresRestartCount=1,
+            riskProjection=True, postgresBefore=True, postgresAfterRestart=True,
+            signedSelf=True, signedCrossRejected=True)
         value['argoSyncs'] = [
             {'case': case, 'revision': digit*40, 'phase': phase, 'hookPhase': phase,
              'jobUID': str(i)+'2345678-1234-1234-1234-123456789abc',
@@ -238,7 +255,7 @@ class TopologyTest(unittest.TestCase):
                 'probe':{'version':'a'*40,'mode':case,'expected_identity':observation['identity'],'phase':'complete','category':'ok'} if probe else {'state':'UNKNOWN'},
                 'image':{'verified':True,'dockerIdentityType':'index','podIdentityType':'manifest','dockerIdentity':value['probeImage' if probe else 'adminImage'],'podIdentity':'sha256:'+'e'*64,'config':'sha256:'+'f'*64,'platformManifest':'sha256:'+'e'*64,'contentCount':3}})
         qualify.validate_report(value,'a'*40,'b'*40,'1','1',manifest)
-        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle','natsVersions','natsSeedTenants','argoSyncs'):
+        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle','natsVersions','onboardingAll','argoSyncs'):
             bad=copy.deepcopy(value);bad.pop(key)
             with self.assertRaises(ValueError):qualify.validate_report(bad,'a'*40,'b'*40,'1','1',manifest)
         for mutate in (lambda x:x['argoHookDiagnostics'][2].update(configDigest='0'*64),

@@ -218,4 +218,4 @@ os.execv(cmd[0],cmd)
     diagnostic['phase']='validation'
     validate(result,source,built,topic_count)
     diagnostic['phase']='complete'
-    return result
+    return result, env
