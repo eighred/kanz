@@ -32,16 +32,29 @@ def compare(before, after, lock):
             "beforePackagesSHA256": digest(before["packages"]), "afterPackagesSHA256": digest(after["packages"]), "pythonPackagesSHA256": digest(after["python"])}
 
 
+def observation(phase, snapshot, lock):
+    version = snapshot["packages"].get(lock["package"] + ":" + lock["architecture"])
+    expected = lock["before"] if phase == "before" else lock["after"]
+    return {"phase": phase, "targetVersionState": "expected" if version == expected else "missing" if version is None else "unexpected",
+            "datahubVersionMatches": snapshot["python"].get("acryl-datahub") == "1.8.0", "pythonVersion": snapshot["pythonVersion"],
+            "packageCount": len(snapshot["packages"]), "pythonPackageCount": len(snapshot["python"])}
+
+
 if __name__ == "__main__":
     lock = json.loads((HERE / "package-lock.json").read_text())
     if sys.argv[1:] == ["before"]:
         body = (HERE / "linux-libc-dev.deb").read_bytes()
         if len(body) != lock["bytes"] or hashlib.sha256(body).hexdigest() != lock["sha256"]:
             raise ValueError("fixed package bytes differ")
-        (HERE / "before.json").write_text(json.dumps(inventory()))
+        snapshot = inventory()
+        print("KANZ_CATALOG_PATCH_OBSERVATION=" + json.dumps(observation("before", snapshot, lock), sort_keys=True), flush=True)
+        (HERE / "before.json").write_text(json.dumps(snapshot))
     elif sys.argv[1:] == ["after"]:
         before = json.loads((HERE / "before.json").read_text())
-        proof = compare(before, inventory(), lock)
+        snapshot = inventory()
+        print("KANZ_CATALOG_PATCH_OBSERVATION=" + json.dumps(observation("after", snapshot, lock), sort_keys=True), flush=True)
+        proof = compare(before, snapshot, lock)
         Path("/opt/kanz-catalog-patch.json").write_text(json.dumps(proof, sort_keys=True))
+        print("KANZ_CATALOG_PATCH_PROOF=passed", flush=True)
     else:
         raise ValueError("unknown patch proof phase")

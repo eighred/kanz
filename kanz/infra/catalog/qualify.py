@@ -217,7 +217,7 @@ def source_identity(run, expected):
 
 
 def validate_owner(owner, identity, owner_path=None):
-    if not isinstance(owner, dict) or set(owner) != {"schema", "kind", "nonce", "network", "sourceSHA", "treeSHA", "runID", "runAttempt", "scannerMount", "derivedImage", "registryProfile", "registryHelperSHA256", "registryControlsSHA256"}:
+    if not isinstance(owner, dict) or set(owner) != {"schema", "kind", "nonce", "network", "sourceSHA", "treeSHA", "runID", "runAttempt", "scannerMount", "derivedImage", "registryProfile", "registryHelperSHA256", "registryControlsSHA256", "buildDiagnosticControlsSHA256"}:
         raise ValueError("invalid catalog owner record")
     if owner["schema"] != 1 or owner["kind"] != "catalog-qualification" or not re.fullmatch(r"[0-9a-f]{16}", owner["nonce"]) or owner["network"] != "kanz-catalog-" + owner["nonce"]:
         raise ValueError("invalid catalog resource ownership")
@@ -237,7 +237,7 @@ def validate_owner(owner, identity, owner_path=None):
         raise ValueError("derived image source/package/owner differs")
     profile = Path(owner["registryProfile"])
     prefix = "catalog-registry-" + identity["sourceSHA"][:12] + "-" + identity["runID"] + "-" + identity["runAttempt"] + "-"
-    if profile.parent != expected_path.parent or not profile.name.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{16}", profile.name[len(prefix):]) or any(not re.fullmatch(r"[0-9a-f]{64}", owner[key]) for key in ("registryHelperSHA256", "registryControlsSHA256")):
+    if profile.parent != expected_path.parent or not profile.name.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{16}", profile.name[len(prefix):]) or any(not re.fullmatch(r"[0-9a-f]{64}", owner[key]) for key in ("registryHelperSHA256", "registryControlsSHA256", "buildDiagnosticControlsSHA256")):
         raise ValueError("registry source/run ownership differs")
 
 
@@ -320,6 +320,8 @@ def validate_receipt(report, identity, images, registry_pending=False):
     registry = report.get("registryAuth", {})
     if registry.get("verifiedBeforeTargets") is not True or registry.get("helperSHA256") != report["owner"]["registryHelperSHA256"] or registry.get("controlsSHA256") != report["owner"]["registryControlsSHA256"] or registry.get("controlsCount") != 7:
         raise ValueError("registry isolation/control evidence incomplete")
+    if report.get("buildDiagnosticControls") != {"count": 1, "sha256": report["owner"]["buildDiagnosticControlsSHA256"]}:
+        raise ValueError("pre-authentication diagnostic control evidence incomplete")
     if not registry_pending:
         cleanup = report.get("registryCleanup", {})
         result = cleanup.get("cleanup", {})
@@ -359,7 +361,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != "1.8.0" or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 31 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 32 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -393,6 +395,10 @@ class Fixture:
         if not re.search(rb"Ran 7 tests in", controls) or b"skipped" in controls or not re.search(rb"(?m)^OK\s*$", controls):
             raise ValueError("complete shared registry control inventory required")
         self.owner.update(registryProfile=str(profile), registryHelperSHA256=hashlib.sha256((ROOT / ".github/scripts/catalog_registry_auth.py").read_bytes()).hexdigest(), registryControlsSHA256=hashlib.sha256(controls).hexdigest())
+        diagnostic_controls = bounded_file(self.owner_path.parent / "catalog-build-diagnostics.txt", OUTPUT_LIMIT)
+        if not re.search(rb"Ran 1 test in", diagnostic_controls) or b"skipped" in diagnostic_controls or not re.search(rb"(?m)^OK\s*$", diagnostic_controls):
+            raise ValueError("pre-authentication build diagnostic control required")
+        self.owner["buildDiagnosticControlsSHA256"] = hashlib.sha256(diagnostic_controls).hexdigest()
         self.environment = {"PATH": os.environ["PATH"], "HOME": str(scratch / "host-home"), "DOCKER_CONFIG": str(profile), "LANG": "C.UTF-8"}
         for path in ("host-home", "home"):
             (scratch / path).mkdir()
@@ -436,6 +442,7 @@ class Fixture:
         versions = json.loads(self.run(["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.APIVersion}},"serverAPI":{{json .Server.APIVersion}}}']))
         build = dict(image_patch.BUILD, docker=versions)
         image_patch.validate_build(build)
+        self.preparation_evidence["build"] = build
         iid = context / "derived.iid"
         # Classic build uses the existing daemon without another builder
         # service. The base is already pulled and only public inputs
@@ -443,7 +450,7 @@ class Fixture:
         self.stage = "fixed-ingestion-launch-record"
         image_patch.write_marker(record, "started", base=base_identity)
         self.stage = "offline-ingestion-build"
-        self.run(["docker", "build", "--pull=false", "--network=none", "--no-cache", "--force-rm", "--memory", "1g", "--memory-swap", "1g", "--cpu-quota", "200000", "--cpu-period", "100000", "--iidfile", str(iid), str(context)], timeout=300, environment=dict(self.environment, DOCKER_BUILDKIT="0"))
+        self.run(["docker", "build", "--pull=false", "--network=none", "--no-cache", "--force-rm", "--memory", "1g", "--memory-swap", "1g", "--cpu-quota", "200000", "--cpu-period", "100000", "--iidfile", str(iid), str(context)], timeout=300, environment=dict(self.environment, DOCKER_BUILDKIT="0"), build=True)
         image_id = bounded_file(iid, 128).decode().strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
             raise ValueError("derived ingestion ID absent")
@@ -463,7 +470,9 @@ class Fixture:
         self.images["ingestion"] = image_id
         return {"reference": image_id, "imageID": image_id, "identity": image_identity.derived_engine(derived), "derived": evidence}
 
-    def run(self, args, timeout=180, environment=None, scanner=False):
+    def run(self, args, timeout=180, environment=None, scanner=False, build=False):
+        if build and (args[:2] != ["docker", "build"] or scanner):
+            raise ValueError("build diagnostics require the fixed Docker build seam")
         file_limit = command_limits(args, scanner)
         def limits():
             resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
@@ -473,14 +482,20 @@ class Fixture:
             process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment or self.environment, preexec_fn=limits, start_new_session=True)
             code, output = capture_process(process, timeout)
             capture_complete = True
+            if build:
+                self.preparation_evidence["build"]["diagnostic"] = image_patch.build_diagnostic(output, code)
             if code:
-                raise CommandFailure(self.stage, failure_category(output, code, scanner), code)
+                raise CommandFailure(self.stage, self.preparation_evidence["build"]["diagnostic"]["category"] if build else failure_category(output, code, scanner), code)
             return output.decode("utf-8", errors="replace")
         except (CommandFailure, subprocess.TimeoutExpired) as error:
             category = error.category if isinstance(error, CommandFailure) else "timeout"
+            if build and not capture_complete:
+                self.preparation_evidence["build"]["diagnostic"] = {"category": category, "informationalOnly": True, "processCaptureComplete": False, "capturedBytes": None, "capturedSHA256": None, "exitCode": None}
             self.last_failure = {"stage": self.stage, "category": category, "exitCode": getattr(error, "code", None)}
             raise CommandFailure(self.stage, category, getattr(error, "code", None)) from None
         except (OSError, subprocess.SubprocessError):
+            if build:
+                self.preparation_evidence["build"]["diagnostic"] = {"category": "command-unavailable", "informationalOnly": True, "processCaptureComplete": False, "capturedBytes": None, "capturedSHA256": None, "exitCode": None}
             self.last_failure = {"stage": self.stage, "category": "command-unavailable"}
             raise CommandFailure(self.stage, "command-unavailable") from None
         finally:
@@ -751,6 +766,7 @@ def qualify(scratch, binary):
               "status": "failed", "cases": [], "selectedImages": fixture.source_images,
               "acceptanceComplete": False,
               "registryAuth": {"verifiedBeforeTargets": True, "helperSHA256": fixture.owner["registryHelperSHA256"], "controlsSHA256": fixture.owner["registryControlsSHA256"], "controlsCount": 7},
+              "buildDiagnosticControls": {"count": 1, "sha256": fixture.owner["buildDiagnosticControlsSHA256"]},
               "testBinarySHA256": hashlib.sha256(binary.read_bytes()).hexdigest()})
     fatal_failure = None
     try:
@@ -766,11 +782,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 45 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 46 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 31}
+        report["qualificationControls"] = {"count": 32}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"

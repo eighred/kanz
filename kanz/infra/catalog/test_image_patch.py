@@ -217,6 +217,7 @@ class ImagePatchControls(unittest.TestCase):
                     self.assertEqual(args, ["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.APIVersion}},"serverAPI":{{json .Server.APIVersion}}}'])
                     return json.dumps({"client": "29.0.0", "server": "29.0.0", "clientAPI": "1.52", "serverAPI": "1.52"})
                 if args[:2] == ["docker", "build"]:
+                    self.assertEqual(fixture.preparation_evidence["build"]["docker"]["server"], "29.0.0")
                     self.assertIn("--network=none", args)
                     self.assertIn("--pull=false", args)
                     self.assertNotIn("--tag", args)
@@ -426,6 +427,7 @@ class ImagePatchControls(unittest.TestCase):
                     fixture.scan_images(identities)
                 self.assertEqual(refused.exception.category, category)
                 self.assertEqual(len(scanned), 1)
+
 
 
 if __name__ == "__main__":

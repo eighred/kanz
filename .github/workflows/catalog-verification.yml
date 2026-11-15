@@ -97,6 +97,10 @@ jobs:
         run: |
           umask 077
           python3 -B -m unittest discover -s .github/scripts -p test_catalog_registry_auth.py -v > "$RUNNER_TEMP/catalog-registry-controls.txt" 2>&1
+      - name: Verify source-free closed build diagnostics
+        run: |
+          umask 077
+          python3 -B -m unittest discover -s kanz/infra/catalog -p test_build_diagnostics.py -v > "$RUNNER_TEMP/catalog-build-diagnostics.txt" 2>&1
       - name: Verify clean source before introducing registry credentials
         run: python3 -B kanz/infra/catalog/qualify.py --verify-source
       - name: Prepare exclusive host-only registry profile
@@ -139,5 +143,6 @@ jobs:
             ${{ runner.temp }}/catalog-fixture/readback.json
             ${{ runner.temp }}/catalog-registry-controls.txt
             ${{ runner.temp }}/catalog-registry-cleanup.json
+            ${{ runner.temp }}/catalog-build-diagnostics.txt
           if-no-files-found: error
           retention-days: 7

@@ -18,7 +18,7 @@ OWNER_PATH = Path("/owned/run/catalog-owner.json")
 OWNER = dict(IDENTITY, schema=1, kind="catalog-qualification", nonce="0123456789abcdef", network="kanz-catalog-0123456789abcdef",
              scannerMount={"path": "/owned/run/catalog-fixture/scanner-state", "source": "kanz-catalog-0123456789abcdef-scanner", "filesystem": "tmpfs", "bytes": qualify.SCANNER_DISK_LIMIT, "options": ["nosuid", "nodev", "noexec"], "uid": os.getuid(), "gid": os.getgid()})
 OWNER["derivedImage"] = qualify.image_patch.owned_spec(OWNER, OWNER_PATH)
-OWNER.update(registryProfile="/owned/run/catalog-registry-" + IDENTITY["sourceSHA"][:12] + "-123-1-0123456789abcdef", registryHelperSHA256="7" * 64, registryControlsSHA256="8" * 64)
+OWNER.update(registryProfile="/owned/run/catalog-registry-" + IDENTITY["sourceSHA"][:12] + "-123-1-0123456789abcdef", registryHelperSHA256="7" * 64, registryControlsSHA256="8" * 64, buildDiagnosticControlsSHA256="9" * 64)
 
 
 class QualificationControls(unittest.TestCase):
@@ -256,11 +256,12 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 31}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 32}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
         original["registryAuth"] = {"verifiedBeforeTargets": True, "helperSHA256": OWNER["registryHelperSHA256"], "controlsSHA256": OWNER["registryControlsSHA256"], "controlsCount": 7}
+        original["buildDiagnosticControls"] = {"count": 1, "sha256": OWNER["buildDiagnosticControlsSHA256"]}
         cleanup = {"ownershipVerified": True, "fileBackend": True, "credentialsAbsent": True, "directoryRemoved": True, "passed": True, "logout": {"attempted": True, "exitCode": 0}}
         original.update(acceptanceComplete=True, registryCleanup=dict(IDENTITY, sourceVerified=True, profile=OWNER["registryProfile"], cleanup=cleanup))
         qualify.validate_receipt(original, IDENTITY, images)
@@ -308,11 +309,11 @@ class QualificationControls(unittest.TestCase):
                 raise ValueError("registry lifecycle workflow contract differs")
             before = "\n".join(step.get("run", "") for step in steps[:profile])
             after = "\n".join(step.get("run", "") for step in steps[profile:])
-            required = ("go test -c", "make -C kanz generate", "install-audit.sh", "test_catalog_registry_auth.py", "--verify-source", "EveryDockerfileBaseImageComesFromTheMirror", "WorkflowsBuildingMirrorImagesAuthenticateFirst")
+            required = ("go test -c", "make -C kanz generate", "install-audit.sh", "test_catalog_registry_auth.py", "test_build_diagnostics.py", "--verify-source", "EveryDockerfileBaseImageComesFromTheMirror", "WorkflowsBuildingMirrorImagesAuthenticateFirst")
             if any(value not in before for value in required) or any(value in after for value in ("go test -c", "make -C kanz generate", "install-audit.sh")):
                 raise ValueError("host build or required guard crosses credential introduction")
         validate(workflow)
-        for mutation in ("permission", "logout", "cleanup", "ordering", "guard"):
+        for mutation in ("permission", "logout", "cleanup", "ordering", "diagnostics", "guard"):
             changed = copy.deepcopy(workflow)
             steps = changed["jobs"]["actual-catalog"]["steps"]
             if mutation == "permission":
@@ -325,6 +326,10 @@ class QualificationControls(unittest.TestCase):
                 selected = next(step for step in steps if step.get("id") == "registry-profile")
                 steps.remove(selected)
                 steps.insert(0, selected)
+            elif mutation == "diagnostics":
+                selected = next(step for step in steps if "test_build_diagnostics.py" in step.get("run", ""))
+                steps.remove(selected)
+                steps.append(selected)
             else:
                 for step in steps:
                     step["run"] = step.get("run", "").replace("EveryDockerfileBaseImageComesFromTheMirror", "MissingGuard")

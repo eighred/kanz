@@ -74,10 +74,10 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-one
+stage/category, never subprocess arguments or one-run credentials. Thirty-two
 qualification controls discriminate these failures alongside the 14 projection
-controls: 45 cases inside the CLI sandbox, plus seven shared registry lifecycle
-controls on the host before registry authentication.
+controls: 46 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
 reviewed advisory installer. A control reads the real workflow through a
@@ -130,6 +130,19 @@ intermediate containers. That flag does not remove intermediate images.
 Unsupported legacy builders refuse; no fallback is
 attempted. The receipt records the actual client/server/API versions, builder
 mode and limits. Hosted compatibility remains unproved until the exact CI run.
+Those validated public Docker/client/API and builder-limit fields are preserved
+before launch, including on failure. A bounded parser records only output length
+and SHA, closed signal categories, exact recipe phases and projected package/Python
+observations. It retains multiple matching signals as ambiguity; none is promoted
+to a proven root cause. Raw output, commands, environment and credential values
+are never retained. The synthetic redaction control runs before authentication
+and its count/output hash enter the source-bound receipt.
+
+These diagnostics are informational. Process capture completion and printed
+recipe-completed/proof markers cannot acknowledge daemon completion. Only the
+unchanged successful Docker response, actual returned IID and verified full
+Parent/ownership chain can create the exclusive completion marker. Unknown
+completion still refuses cleanup even if diagnostic markers report progress.
 
 `image-descriptors.json` pins all six selected platform manifests, their config
 descriptors and ordered rootfs diff IDs. Before pull acceptance, the controller
@@ -201,7 +214,7 @@ cyclic ancestry, foreign labels/tags/registry references and unexpected terminal
 IDs refuse. Only verified build containers and child-to-parent image IDs are
 removed, followed by repeated inventories. Image deletion uses `--no-prune`,
 never force, the base, foreign tags or shared cache deletion. The completion ID,
-removed chain/container IDs and rechecks enter the receipt. Eighteen added controls
+removed chain/container IDs and rechecks enter the receipt. Nineteen added controls
 discriminate package/Python drift, config/OnBuild/owner mismatch, complete chain
 cleanup, late interrupted resources, actual offline build selection and advisory
 versus infrastructure exits, raw descriptor tampering, engine kind, canonical

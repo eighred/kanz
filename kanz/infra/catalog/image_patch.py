@@ -300,6 +300,49 @@ def validate_build(build):
         raise ValueError("actual Docker/builder resource identity absent")
 
 
+def build_diagnostic(output, code):
+    text = output.decode("utf-8", errors="replace")
+    phases = {"before-inventory", "package-install", "after-inventory", "completed"}
+    phase, observations, refused, proof = None, {}, False, False
+    for line in text.splitlines():
+        if line.startswith("KANZ_CATALOG_PATCH_PHASE=") and line.removeprefix("KANZ_CATALOG_PATCH_PHASE=") in phases:
+            phase = line.removeprefix("KANZ_CATALOG_PATCH_PHASE=")
+        elif line == "KANZ_CATALOG_PATCH_PROOF=passed":
+            proof = True
+        elif line.startswith("KANZ_CATALOG_PATCH_OBSERVATION="):
+            try:
+                if len(line) > 1024:
+                    raise ValueError("observation exceeds bound")
+                item = json.loads(line.removeprefix("KANZ_CATALOG_PATCH_OBSERVATION="))
+                if set(item) != {"phase", "targetVersionState", "datahubVersionMatches", "pythonVersion", "packageCount", "pythonPackageCount"} or item["phase"] not in {"before", "after"} or item["targetVersionState"] not in {"expected", "missing", "unexpected"} or type(item["datahubVersionMatches"]) is not bool or not isinstance(item["pythonVersion"], str) or not re.fullmatch(r"[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,3}", item["pythonVersion"]) or any(type(item[key]) is not int or not 1 <= item[key] <= 10000 for key in ("packageCount", "pythonPackageCount")):
+                    raise ValueError("observation shape refused")
+                observations[item["phase"]] = item
+            except (ValueError, KeyError, TypeError):
+                refused = True
+    lower = text.lower()
+    signals = (
+        ("build-disk-budget", ("no space left on device", "disk quota exceeded")),
+        ("build-memory-budget", ("out of memory", "cannot allocate memory", "oomkilled")),
+        ("build-legacy-unavailable", ("legacy builder is not supported", "legacy builder is no longer supported", "legacy builder has been removed")),
+        ("build-profile-unsupported", ("unknown flag:", "requires buildkit", "unsupported build option")),
+        ("build-registry-access-refused", ("unauthorized:", "authentication required", "pull access denied", "403 forbidden")),
+        ("build-daemon-unavailable", ("cannot connect to the docker daemon", "error during connect:")),
+        ("build-permission-refused", ("operation not permitted", "permission denied")),
+        ("build-tool-unavailable", ("python: not found", "dpkg: not found", "dpkg-query: not found")),
+        ("build-package-version-refused", ("fixed package versions differ",)),
+        ("build-python-package-proof-refused", ("single-package/python compatibility proof refused",)),
+        ("build-package-integrity-refused", ("fixed package bytes differ",)),
+        ("build-inventory-budget", ("package inventory exceeded bound",)),
+    )
+    matched = [category for category, markers in signals if any(marker in lower for marker in markers)]
+    category = "passed" if code == 0 else "build-multiple-signals" if len(matched) > 1 else matched[0] if matched else "build-recipe-" + phase + "-refused" if phase in phases - {"completed"} else "build-command-exit"
+    return {"category": category, "exitCode": code, "informationalOnly": True, "processCaptureComplete": True,
+            "capturedBytes": len(output), "capturedSHA256": hashlib.sha256(output).hexdigest(),
+            "matchedSignals": matched, "lastRecipePhase": phase,
+            "observations": [observations[key] for key in ("before", "after") if key in observations],
+            "observationRefused": refused, "packageProofObserved": proof}
+
+
 def scan_verdicts(identities, roles):
     if set(identities) != set(roles) or any(item.get("scanVerdict") not in {"passed", "advisory"} or not re.fullmatch(r"[0-9a-f]{64}", item.get("scanSHA256", "")) for item in identities.values()):
         raise ValueError("six-image scanner inventory incomplete")
