@@ -390,7 +390,7 @@ func TestRustAttributionScheduleEdges(t *testing.T) {
 	for _, s := range []struct {
 		name, from, to string
 		slices, index  int64
-	}{{"floor", "0", "10", 3, 1}, {"negative-epoch", "-10", "0", 3, 1}, {"duration-saturation", "-62135596800000000000", "253402300799999999999", 3, 2}, {"zero-count", "0", "10", 0, 0}, {"last-index", "0", "10", 3, 2}, {"outside-index", "0", "10", 3, 3}, {"negative-index", "0", "10", 3, -1}, {"empty-window", "10", "10", 3, 0}} {
+	}{{"floor", "0", "10", 3, 1}, {"negative-epoch", "-10", "0", 3, 1}, {"duration-max-minus-one", "0", "9223372036854775806", 3, 2}, {"duration-max", "0", "9223372036854775807", 3, 2}, {"duration-max-plus-one", "0", "9223372036854775808", 3, 2}, {"duration-saturation", "-62135596800000000000", "253402300799999999999", 3, 2}, {"zero-count", "0", "10", 0, 0}, {"last-index", "0", "10", 3, 2}, {"outside-index", "0", "10", 3, 3}, {"negative-index", "0", "10", 3, -1}, {"empty-window", "10", "10", 3, 0}} {
 		t.Run(s.name, func(t *testing.T) {
 			q := attrRequest{Operation: "Schedule", Parent: "parent:unicode-α", Index: s.index, Slices: s.slices, From: &s.from, To: &s.to}
 			want := attrGo(t, q)

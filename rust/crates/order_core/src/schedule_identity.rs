@@ -35,12 +35,17 @@ fn hex_child(sum: &[u8]) -> String {
 }
 
 /// Epoch nanoseconds permit canonical Timestamp endpoints without truncation.
-/// Go time.Sub saturates to Duration's positive maximum before the floor division.
+/// Match Go Plan.Interval: reject a span that cannot fit time.Duration rather
+/// than measuring a shorter window after time.Sub saturates.
 pub fn interval(start: i128, end: i128, slices: i64, index: i64) -> Option<(i128, i128)> {
     if slices <= 0 || index < 0 || index >= slices || end <= start {
         return None;
     }
-    let span = end.checked_sub(start)?.min(i64::MAX as i128) as u128;
+    let span = end.checked_sub(start)?;
+    if span > i64::MAX as i128 {
+        return None;
+    }
+    let span = span as u128;
     let boundary = |i: i64| start.checked_add((span * i as u128 / slices as u128) as i128);
     Some((boundary(index)?, boundary(index + 1)?))
 }
@@ -63,14 +68,17 @@ mod tests {
         }
     }
     #[test]
-    fn boundaries_floor_once_and_keep_duration_saturation() {
+    fn boundaries_floor_once_and_refuse_unrepresentable_duration() {
         assert_eq!(interval(0, 10, 3, 0), Some((0, 3)));
         assert_eq!(interval(0, 10, 3, 1), Some((3, 6)));
         assert_eq!(interval(0, 10, 3, 2), Some((6, 10)));
         assert_eq!(
-            interval(-1, i128::from(i64::MAX) + 20, 2, 1),
+            interval(-1, i128::from(i64::MAX) - 1, 2, 1),
             Some((4_611_686_018_427_387_902, 9_223_372_036_854_775_806))
         );
+        assert_eq!(interval(-1, i128::from(i64::MAX), 2, 1), None);
+        assert_eq!(interval(-1, i128::from(i64::MAX) + 20, 2, 1), None);
+        assert_eq!(interval(i128::MIN, i128::MAX, 2, 1), None);
         assert_eq!(interval(0, 10, 3, 3), None);
         assert_eq!(interval(0, 0, 3, 0), None);
     }
