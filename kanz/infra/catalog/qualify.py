@@ -45,6 +45,7 @@ REFERENCE_DB_LAYERS = [
 ]
 MYSQL_USER = "584788:584788"
 MYSQL_VERSION = "8.4.11-0ubuntu0.26.04.1"
+BROKER_PROPERTY = "auto_create_topics_enabled"
 MYSQL_TMPFS = {"/tmp": "rw,nosuid,nodev,size=512m",
                "/var/lib/mysql": "rw,nosuid,nodev,size=1g,uid=584788,gid=584788",
                "/run/mysqld": "rw,nosuid,nodev,size=16m,uid=584788,gid=584788"}
@@ -107,6 +108,17 @@ def validate_mysql_runtime(evidence, image_id):
     observed = evidence.get("observation", {})
     if not isinstance(observed, dict) or any(observed.get(key) != 584788 for key in ("pebbleUID", "pebbleGID", "mysqlUID", "mysqlGID")) or observed.get("sqlVersion") != MYSQL_VERSION or observed.get("sqlVersionMatches") is not True or observed.get("networkingEnabled") is not True or not isinstance(observed.get("capturedBytes"), int) or not 0 < observed["capturedBytes"] <= 4096 or not re.fullmatch(r"[0-9a-f]{64}", observed.get("capturedSHA256", "")):
         raise ValueError("catalog MySQL effective identity/version evidence incomplete")
+
+
+def validate_broker_runtime(evidence, image_id, source_sha):
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("containerID"), str) or not re.fullmatch(r"[0-9a-f]{64}", evidence["containerID"]):
+        raise ValueError("catalog broker runtime binding incomplete")
+    expected = {"containerID": evidence["containerID"], "imageID": image_id, "sourceSHA": source_sha,
+                "property": BROKER_PROPERTY, "value": True, "ownerVerified": True,
+                "setSucceeded": True, "getSucceeded": True, "readbackBytes": 5,
+                "readbackSHA256": hashlib.sha256(b"true\n").hexdigest()}
+    if evidence != expected or any(evidence.get(key) is not True for key in ("value", "ownerVerified", "setSucceeded", "getSucceeded")):
+        raise ValueError("catalog broker live property evidence incomplete")
 
 
 def load_registry_auth():
@@ -566,6 +578,8 @@ def validate_receipt(report, identity, images, registry_pending=False):
         raise ValueError("catalog case/image/scan inventory incomplete")
     if "mysql" in images:
         validate_mysql_runtime(report.get("mysqlRuntime", {}), report["images"]["mysql"].get("imageID"))
+    if "broker" in images:
+        validate_broker_runtime(report.get("brokerRuntime"), report["images"]["broker"].get("imageID"), identity["sourceSHA"])
     for role, reference in images.items():
         item = report["images"][role]
         selected = image_identity.selections()[role]
@@ -598,7 +612,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 35 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 36 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -909,6 +923,36 @@ class Fixture:
         options += ["--env", "MYSQL_ROOT_PASSWORD=" + self.secret, "--env", "MYSQL_ROOT_HOST=%", "--env", "MYSQL_DATABASE=datahub"]
         return self.start("mysql", options, memory="1g")
 
+    def start_broker(self):
+        return self.start("broker", ["--tmpfs", "/var/lib/redpanda/data:rw,nosuid,nodev,size=1g,uid=101,gid=101"],
+                          ["redpanda", "start", "--config", "/tmp/redpanda.yaml", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "broker:9092", "--advertise-rpc-addr", "broker:33145", "--set", "redpanda.auto_create_topics_enabled=true"])
+
+    def configure_broker(self, container):
+        self.broker_evidence = None
+        try:
+            if container != self.network + "-broker":
+                raise ValueError("unselected broker refused")
+            binding = self.readiness_state(container, container)
+            for operation in ("set", "get"):
+                state = binding if operation == "set" else self.readiness_state(container, binding["containerID"])
+                if state["status"] != "running" or state["Running"] is not True or any(state[key] for key in ("Paused", "Restarting", "Dead")):
+                    raise ValueError("broker is not running")
+                command = ["docker", "exec", binding["containerID"], "rpk", "cluster", "config", operation, BROKER_PROPERTY]
+                if operation == "set":
+                    command += ["true"]
+                output = self.run(command + ["--ignore-profile", "-X", "admin.hosts=127.0.0.1:9644"], timeout=30, output_limit=4096 if operation == "set" else 64)
+            final = self.readiness_state(container, binding["containerID"])
+            if final["status"] != "running" or final["Running"] is not True or any(final[key] for key in ("Paused", "Restarting", "Dead")) or output != "true\n":
+                raise ValueError("broker property readback refused")
+            observed = {"containerID": binding["containerID"], "imageID": binding["imageID"], "sourceSHA": self.owner["sourceSHA"],
+                        "property": BROKER_PROPERTY, "value": True, "ownerVerified": True,
+                        "setSucceeded": True, "getSucceeded": True, "readbackBytes": len(output),
+                        "readbackSHA256": hashlib.sha256(output.encode("ascii")).hexdigest()}
+            validate_broker_runtime(observed, self.image_identities["broker"]["imageID"], self.owner["sourceSHA"])
+        except (ValueError, KeyError, TypeError, OSError):
+            raise ValueError("catalog broker live configuration refused") from None
+        self.broker_evidence = observed
+
     def cli(self, command, metadata="metadata.json", network=True):
         child = dict(self.environment, DATAHUB_GMS_AUTHORIZATION=self.auth)
         args = ["docker", "run", "--rm", "--name", self.network + "-cli", *self.label_options(), "--platform", "linux/amd64", "--network", self.network if network else "none",
@@ -946,8 +990,7 @@ class Fixture:
             raise ValueError("catalog network name already exists")
         self.run(["docker", "network", "create", "--internal", *self.label_options(), self.network])
         self.stage = "broker"
-        broker = self.start("broker", ["--tmpfs", "/var/lib/redpanda/data:rw,nosuid,nodev,size=1g,uid=101,gid=101"],
-                            ["redpanda", "start", "--config", "/tmp/redpanda.yaml", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "broker:9092", "--set", "redpanda.auto_create_topics_enabled=true"])
+        broker = self.start_broker()
         self.stage = "mysql"
         mysql = self.start_mysql()
         self.mysql_evidence = {"container": mysql_container_profile(json.loads(self.run(["docker", "inspect", mysql]))[0], identities["mysql"]["imageID"], self.network, labels(self.owner))}
@@ -956,6 +999,8 @@ class Fixture:
                             ["-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/usr/share/opensearch/bin/opensearch")
         self.stage = "storage-readiness"
         self.wait_exec(broker, ["rpk", "cluster", "info", "-X", "brokers=broker:9092"])
+        self.stage = "broker-live-configuration"
+        self.configure_broker(broker)
         # mysqladmin can pass for the temporary socket-only init server. Wait
         # for the authenticated final server, then verify both effective users.
         self.stage = "mysql-runtime"
@@ -1116,11 +1161,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 49 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 50 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 35}
+        report["qualificationControls"] = {"count": 36}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -1153,6 +1198,7 @@ def qualify(scratch, binary):
         report["images"] = getattr(fixture, "image_identities", report.get("images", {}))
         report["preparation"] = getattr(fixture, "preparation_evidence", None)
         report["mysqlRuntime"] = getattr(fixture, "mysql_evidence", None)
+        report["brokerRuntime"] = getattr(fixture, "broker_evidence", None)
         report["readiness"] = getattr(fixture, "readiness_evidence", {})
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)

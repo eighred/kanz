@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-five
+stage/category, never subprocess arguments or one-run credentials. Thirty-six
 qualification controls discriminate these failures alongside the 14 projection
-controls: 49 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 50 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -191,10 +191,29 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, non-broker log refusal, retention
-and capture overflow. The inventory remains 49 catalog controls, seven shared
+and capture overflow. The inventory contains 50 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
-No guessed broker configuration fix or weakened default follows from the earlier
-generic refusal. The changed controller still requires a fresh full Linux run.
+
+The disposable broker explicitly advertises `broker:33145` for RPC while
+preserving its existing bind address, bootstrap setting and resource/isolation
+profile. The [published v26.2 listener contract](https://docs.redpanda.com/streaming/current/manage/security/listener-configuration/#advertise-a-listener)
+rejects wildcard advertised addresses. The public v26.2.2 source
+[falls back to the bound RPC address when advertisement is omitted](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/v/config/node_config.h#L163)
+and [validates that advertised RPC address at startup](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/v/config/node_config.cc#L326).
+This is a published-contract repair candidate for the pinned image; the actual
+failed field remains unobserved until runtime verification.
+
+After broker readiness and before SystemUpdate, the controller binds the exact
+source/run/nonce/image/network/name to its immutable container ID, sets only
+`auto_create_topics_enabled=true` through localhost Admin API, then reinspects
+that ID before reading the same single property and after the read. Both rpk
+commands ignore profiles and explicitly select `127.0.0.1:9644`.
+[The get command queries SingleKeyConfig and prints only its YAML value](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/go/rpk/pkg/cli/cluster/config/get.go#L55).
+Only exact ASCII `true` followed by one LF passes; missing, false, malformed,
+failed or foreign-owner results refuse setup. The mandatory receipt retains
+only the fixed property/value, source/image/container identities, success flags
+and readback length/hash. It retains no command output, arguments or profiles.
+The changed controller still requires a fresh full Linux run and all cases.
 
 ### Fixture maintenance images
 

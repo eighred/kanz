@@ -29,6 +29,98 @@ def runtime_state_info(role, status="running"):
 
 
 class QualificationControls(unittest.TestCase):
+    def test_broker_rpc_and_live_property_require_the_same_owned_container(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network = OWNER, OWNER["network"]
+        fixture.images = {"broker": qualify.image_identity.selections()["broker"]["reference"]}
+        fixture.run = mock.Mock(return_value="")
+        name = fixture.start_broker()
+        self.assertEqual(name, OWNER["network"] + "-broker")
+        args = fixture.run.call_args.args[0]
+        image_index = args.index(fixture.images["broker"])
+        self.assertEqual(args[image_index + 1:], ["redpanda", "start", "--config", "/tmp/redpanda.yaml", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "broker:9092", "--advertise-rpc-addr", "broker:33145", "--set", "redpanda.auto_create_topics_enabled=true"])
+        docker_options = args[:image_index]
+        for flag, expected in (("--cap-drop", "ALL"), ("--security-opt", "no-new-privileges"), ("--network", OWNER["network"]), ("--memory", "1g"), ("--memory-swap", "1g"), ("--cpus", "2"), ("--pids-limit", "256")):
+            self.assertEqual(docker_options[docker_options.index(flag) + 1], expected)
+        self.assertIn("--read-only", docker_options)
+        self.assertEqual([docker_options[index + 1] for index, value in enumerate(docker_options[:-1]) if value == "--tmpfs"], ["/tmp:rw,nosuid,nodev,size=512m", "/var/lib/redpanda/data:rw,nosuid,nodev,size=1g,uid=101,gid=101"])
+        self.assertNotIn(OWNER["registryProfile"], " ".join(args))
+        secret, container_id = "one-run-broker-control-marker", "6" * 64
+        fixture.stage = "broker-live-configuration"
+        fixture.image_identities = {"broker": {"imageID": "sha256:" + "7" * 64}}
+        calls, inspections, output, failure = [], [], "true\n", None
+        def execute(command, **kwargs):
+            calls.append(command)
+            if command[:2] == ["docker", "inspect"]:
+                selected = inspections.pop(0) if len(inspections) > 1 else inspections[0]
+                return json.dumps([selected])
+            self.assertEqual(command[:6], ["docker", "exec", container_id, "rpk", "cluster", "config"])
+            self.assertEqual(command[7], "auto_create_topics_enabled")
+            self.assertEqual(command[-3:], ["--ignore-profile", "-X", "admin.hosts=127.0.0.1:9644"])
+            operation = command[6]
+            self.assertEqual(command, ["docker", "exec", container_id, "rpk", "cluster", "config", operation, "auto_create_topics_enabled"] + (["true"] if operation == "set" else []) + ["--ignore-profile", "-X", "admin.hosts=127.0.0.1:9644"])
+            self.assertEqual(kwargs, {"timeout": 30, "output_limit": 4096 if operation == "set" else 64})
+            if failure == operation:
+                raise ValueError(secret)
+            if operation == "set":
+                self.assertEqual(command[8], "true")
+                return secret
+            self.assertEqual(operation, "get")
+            return output
+        fixture.run = execute
+        inspections[:] = [runtime_state_info("broker")]
+        fixture.configure_broker(name)
+        passed = copy.deepcopy(fixture.broker_evidence)
+        qualify.validate_broker_runtime(passed, fixture.image_identities["broker"]["imageID"], OWNER["sourceSHA"])
+        self.assertEqual([command[-1] for command in calls if command[:2] == ["docker", "inspect"]], [name, container_id, container_id])
+        self.assertEqual([command[6] for command in calls if command[:2] == ["docker", "exec"]], ["set", "get"])
+        self.assertNotIn(secret, json.dumps(passed))
+        for output in ("", "false\n", "true", "true\r\n", "true\n\n", " true\n", "True\n", '"true"\n', "true\n" + secret):
+            calls.clear()
+            with self.assertRaises(ValueError):
+                fixture.configure_broker(name)
+            self.assertIsNone(fixture.broker_evidence)
+        output = "true\n"
+        for failure in ("set", "get"):
+            calls.clear()
+            try:
+                fixture.configure_broker(name)
+            except ValueError as error:
+                self.assertNotIn(secret, str(error) + traceback.format_exc())
+            else:
+                self.fail("failed broker Admin API command must refuse")
+            self.assertIsNone(fixture.broker_evidence)
+            if failure == "set":
+                self.assertFalse(any(command[:2] == ["docker", "exec"] and command[6] == "get" for command in calls))
+        failure = None
+        for field, value in (("Image", "sha256:" + "f" * 64), ("Name", "/foreign"), ("Id", secret), ("Config", {"Labels": {"foreign": secret}}), ("HostConfig", {"NetworkMode": "foreign"}), ("State", runtime_state_info("broker", "exited")["State"])):
+            calls.clear()
+            inspections[:] = [dict(runtime_state_info("broker"), **{field: value})]
+            with self.assertRaises(ValueError):
+                fixture.configure_broker(name)
+            self.assertFalse(any(command[:2] == ["docker", "exec"] for command in calls))
+            self.assertIsNone(fixture.broker_evidence)
+        for replacement in (dict(runtime_state_info("broker"), Id="8" * 64), dict(runtime_state_info("broker"), Config={"Labels": {"foreign": secret}}), dict(runtime_state_info("broker"), Name="/foreign")):
+            calls.clear()
+            inspections[:] = [runtime_state_info("broker"), replacement]
+            with self.assertRaises(ValueError):
+                fixture.configure_broker(name)
+            self.assertEqual([command[6] for command in calls if command[:2] == ["docker", "exec"]], ["set"])
+            self.assertIsNone(fixture.broker_evidence)
+        calls.clear()
+        inspections[:] = [runtime_state_info("broker"), runtime_state_info("broker"), dict(runtime_state_info("broker"), Name="/foreign")]
+        with self.assertRaises(ValueError):
+            fixture.configure_broker(name)
+        self.assertEqual([command[6] for command in calls if command[:2] == ["docker", "exec"]], ["set", "get"])
+        self.assertIsNone(fixture.broker_evidence)
+        calls.clear()
+        with self.assertRaises(ValueError):
+            fixture.configure_broker(OWNER["network"] + "-mysql")
+        self.assertEqual(calls, [])
+        for evidence in (None, {}, *(dict(passed, **{key: value}) for key, value in (("value", False), ("value", 1), ("sourceSHA", "c" * 40), ("imageID", "sha256:" + "f" * 64), ("containerID", "foreign"), ("readbackBytes", 0), ("readbackSHA256", "f" * 64), ("setSucceeded", False), ("getSucceeded", False), ("ownerVerified", False), ("private", secret)))):
+            with self.assertRaises(ValueError):
+                qualify.validate_broker_runtime(evidence, fixture.image_identities["broker"]["imageID"], OWNER["sourceSHA"])
+
     def test_readiness_diagnostics_bind_owner_limit_retention_and_preserve_refusal(self):
         fixture = object.__new__(qualify.Fixture)
         fixture.owner, fixture.network, fixture.stage = OWNER, OWNER["network"], "storage-readiness"
@@ -428,7 +520,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 35}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 36}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
