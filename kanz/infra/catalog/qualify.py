@@ -738,6 +738,93 @@ def reduce_failed_upgrade(output):
     return {"outcome": "reduced", "signals": signals} if signals else refused("unclassified-output")
 
 
+def datahub_frame_inventory():
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate source inventory field")
+            result[key] = value
+        return result
+    value = json.loads(bounded_file(HERE / "datahub-source-frames.json", 1 << 20).decode("utf-8"), object_pairs_hook=unique)
+    if not isinstance(value, dict) or set(value) != {"version", "repository", "commit", "components", "provenance", "sources"} or type(value["version"]) is not int or value["version"] != 1 or value["repository"] != "datahub-project/datahub" or value["commit"] != "faab576d96cbdb27b8344a755e0bc0f42fdc9c15":
+        raise ValueError("public source inventory identity refused")
+    roots = {"datahub-upgrade/src/main/java", "metadata-service/factories/src/main/java", "metadata-io/src/main/java"}
+    components, counts = {}, {}
+    if not isinstance(value["components"], list) or len(value["components"]) != 3:
+        raise ValueError("public source component inventory refused")
+    for item in value["components"]:
+        if not isinstance(item, dict) or set(item) != {"root", "treeSHA", "sourceCount", "treeEntryCount", "metadataBytes", "truncated"} or not isinstance(item["root"], str) or item["root"] not in roots or item["root"] in components or not isinstance(item["treeSHA"], str) or not re.fullmatch(r"[0-9a-f]{40}", item["treeSHA"]) or item["truncated"] is not False or any(type(item[key]) is not int or not 1 <= item[key] <= 1 << 20 for key in ("sourceCount", "treeEntryCount", "metadataBytes")) or item["sourceCount"] > item["treeEntryCount"]:
+            raise ValueError("public source component shape refused")
+        components[item["root"]], counts[item["root"]] = item, 0
+    if value["provenance"] != {"metadataBytes": 392539, "metadataLimitBytes": 1048576, "nonrecursiveResponses": 11, "recursiveResponses": 3, "allUntruncated": True} or value["provenance"].get("allUntruncated") is not True or any(type(value["provenance"].get(key)) is not int for key in ("metadataBytes", "metadataLimitBytes", "nonrecursiveResponses", "recursiveResponses")) or not isinstance(value["sources"], list) or len(value["sources"]) != 1028:
+        raise ValueError("public source provenance refused")
+    lookup, previous, paths = {}, "", set()
+    for source_id, item in enumerate(value["sources"], 1):
+        if not isinstance(item, dict) or set(item) != {"id", "className", "path", "blobSHA", "bytes"} or type(item["id"]) is not int or item["id"] != source_id or not isinstance(item["className"], str) or not previous < item["className"] or not isinstance(item["path"], str) or item["path"] in paths or not isinstance(item["blobSHA"], str) or not re.fullmatch(r"[0-9a-f]{40}", item["blobSHA"]) or type(item["bytes"]) is not int or not 1 <= item["bytes"] <= 2**63 - 1:
+            raise ValueError("public source row refused")
+        root = next((root for root in roots if item["path"].startswith(root + "/")), None)
+        if root is None:
+            raise ValueError("public source root refused")
+        relative = item["path"][len(root) + 1:]
+        if not re.fullmatch(r"[A-Za-z0-9_$/-]+\.java", relative) or any(part in {"", ".", ".."} for part in relative.split("/")) or relative[:-5].replace("/", ".") != item["className"]:
+            raise ValueError("public source class/path disagreement")
+        key = (item["className"], relative.rsplit("/", 1)[-1])
+        if key in lookup:
+            raise ValueError("public source membership ambiguous")
+        lookup[key] = (source_id, min(item["bytes"] + 1, 2**31 - 1))
+        previous = item["className"]
+        paths.add(item["path"])
+        counts[root] += 1
+    if any(counts[root] != components[root]["sourceCount"] for root in roots):
+        raise ValueError("public source component count differs")
+    return lookup
+
+
+def reduce_failed_upgrade_frames(output):
+    refused = lambda outcome: {"outcome": outcome, "frames": [], "truncated": False}
+    if not isinstance(output, bytes):
+        return refused("malformed-output")
+    if len(output) > READINESS_OUTPUT_LIMIT:
+        return refused("output-budget")
+    if not output:
+        return refused("empty-output")
+    try:
+        text = output.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return refused("malformed-output")
+    if "\x00" in text or "\x1b" in text:
+        return refused("malformed-output")
+    lines = text.splitlines()
+    if len(lines) > FAILED_UPGRADE_LINE_LIMIT:
+        return refused("line-budget")
+    try:
+        lookup = datahub_frame_inventory()
+    except Exception:
+        return refused("source-inventory-refused")
+    identifier = r"[A-Za-z_][A-Za-z0-9_]{0,127}"
+    packaging = r"(?:[ \t]{1,8}~?\[[^\[\]\x00-\x1f\x7f-\uffff]{1,127}:[^\[\]\x00-\x1f\x7f-\uffff]{1,127}\])?"
+    frame = re.compile(r"[ \t]{0,16}at (?:app//)?(?P<outer>(?:" + identifier + r"\.){1,31}" + identifier + r")(?P<nested>(?:\$[A-Za-z0-9_]{1,128}){0,8})\.(?:[A-Za-z_$][A-Za-z0-9_$]{0,127}|<init>|<clinit>)\((?P<file>[A-Za-z_$][A-Za-z0-9_$]{0,122}\.java):(?P<line>[1-9][0-9]{0,9})\)" + packaging)
+    frames, seen, truncated = [], set(), False
+    for line in lines:
+        matched = frame.fullmatch(line)
+        if not matched or len(matched["outer"]) > 512 or len(matched["nested"]) > 256:
+            continue
+        selected = lookup.get((matched["outer"], matched["file"]))
+        claimed_line = int(matched["line"])
+        if selected is None or not 1 <= claimed_line <= selected[1]:
+            continue
+        pair = (selected[0], claimed_line)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        if len(frames) < 16:
+            frames.append({"sourceID": pair[0], "claimedLine": pair[1]})
+        else:
+            truncated = True
+    return {"outcome": "projected" if frames else "no-known-frame", "frames": frames, "truncated": truncated}
+
+
 def retain_readiness(evidence, role, record):
     if role not in READINESS_ROLES:
         raise ValueError("unselected readiness role refused")
@@ -1358,6 +1445,10 @@ class Fixture:
         evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
                         informationalOnly=True, before=None, after=None, outcome="scope-refused", signals=[])
         self.failed_upgrade_evidence = evidence
+        frame_evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
+                              informationalOnly=True, containerID=None, imageID=None, outcome="scope-refused", frames=[], truncated=False)
+        self.failed_upgrade_frame_evidence = frame_evidence
+        frames_published = False
         try:
             selected = self.image_identities["upgrade"]
             if container != self.network + "-upgrade" or selected["reference"] != image_identity.selections()["upgrade"]["reference"]:
@@ -1384,6 +1475,7 @@ class Fixture:
                 # Raw bytes never leave this capture/reducer boundary.
                 process, complete, raw = None, False, None
                 result = {"outcome": "capture-refused", "signals": []}
+                frame_result = {"outcome": "capture-refused", "frames": [], "truncated": False}
                 def limits():
                     resource.setrlimit(resource.RLIMIT_FSIZE, (DEFAULT_FILE_LIMIT, DEFAULT_FILE_LIMIT))
                     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -1391,7 +1483,11 @@ class Fixture:
                     process = subprocess.Popen(["docker", "logs", "--tail", str(FAILED_UPGRADE_LINE_LIMIT), container_id], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=self.environment, preexec_fn=limits, start_new_session=True)
                     code, raw = capture_process(process, 10, READINESS_OUTPUT_LIMIT)
                     complete = True
-                    result = reduce_failed_upgrade(raw) if type(code) is int and code == 0 else {"outcome": "command-refused", "signals": []}
+                    if type(code) is int and code == 0:
+                        result = reduce_failed_upgrade(raw)
+                        frame_result = reduce_failed_upgrade_frames(raw)
+                    else:
+                        result = {"outcome": "command-refused", "signals": []}
                 except CommandFailure as error:
                     result = {"outcome": error.category if error.category in {"timeout", "output-budget"} else "capture-refused", "signals": []}
                 except Exception:
@@ -1415,19 +1511,25 @@ class Fixture:
                         except Exception:
                             result = {"outcome": "capture-refused", "signals": []}
                     raw = None
-                return result
-            reduced = capture_and_reduce()
+                    if result["outcome"] in {"capture-refused", "reap-refused", "command-refused", "timeout", "output-budget"}:
+                        frame_result = {"outcome": result["outcome"], "frames": [], "truncated": False}
+                return result, frame_result
+            reduced, projected_frames = capture_and_reduce()
             evidence["outcome"] = "observation-refused"
             try:
                 evidence["after"] = inspect()
             except (ValueError, KeyError, TypeError, OSError):
                 return evidence
             evidence.update(reduced)
+            frame_evidence.update(projected_frames, containerID=container_id, imageID=selected["imageID"])
+            frames_published = True
             return evidence
         except Exception:
             evidence.update(outcome="observation-refused", signals=[])
             return evidence
         finally:
+            if not frames_published:
+                frame_evidence.update(containerID=None, imageID=None, outcome=evidence["outcome"], frames=[], truncated=False)
             for key, value in saved.items():
                 if value is missing:
                     self.__dict__.pop(key, None)
@@ -1808,6 +1910,7 @@ def qualify(scratch, binary):
         report["brokerRuntime"] = getattr(fixture, "broker_evidence", None)
         report["upgradeOutcome"] = getattr(fixture, "upgrade_evidence", None)
         report["failedUpgrade"] = getattr(fixture, "failed_upgrade_evidence", None)
+        report["failedUpgradeFrames"] = getattr(fixture, "failed_upgrade_frame_evidence", None)
         report["mysqlBootstrap"] = getattr(fixture, "mysql_bootstrap_evidence", None)
         report["brokerBootstrap"] = getattr(fixture, "broker_bootstrap_evidence", None)
         report["searchBootstrap"] = getattr(fixture, "search_bootstrap_evidence", None)

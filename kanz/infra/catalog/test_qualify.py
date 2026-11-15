@@ -214,7 +214,8 @@ class QualificationControls(unittest.TestCase):
                 info["Config"]["Labels"] = {"foreign": secret}
             return json.dumps([info])
         fixture.run = execute
-        raw = ("java.sql.SQLException: " + secret).encode()
+        (frame_outer, frame_file), (source_id, _) = next(iter(qualify.datahub_frame_inventory().items()))
+        raw = ("java.sql.SQLException: " + secret + "\n\tat " + frame_outer + ".CredentialMarker(" + frame_file + ":1)").encode()
         def collect(selected=name, capture_failure=None, parent_code=0, stop_failure=None, launch_failure=None, capture_code=0):
             calls.clear()
             process = mock.Mock()
@@ -226,9 +227,16 @@ class QualificationControls(unittest.TestCase):
             self.assertIs(fixture.last_runtime_result, prior_runtime)
             self.assertNotIn(secret, json.dumps(result))
             self.assertEqual(set(result), {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "before", "after", "outcome", "signals"})
+            frame_result = fixture.failed_upgrade_frame_evidence
+            self.assertEqual(set(frame_result), {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "containerID", "imageID", "outcome", "frames", "truncated"})
+            self.assertNotIn(secret, json.dumps(frame_result))
+            self.assertNotIn("CredentialMarker", json.dumps(frame_result))
             return result, process, launch, capture, stop
         result, process, launch, capture, stop = collect()
         self.assertEqual(result["signals"], [{"code": "sql-error", "count": 1}])
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [{"sourceID": source_id, "claimedLine": 1}])
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["containerID"], container_id)
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["imageID"], image_id)
         self.assertEqual(calls, [["docker", "inspect", container_id]] * 2)
         self.assertEqual(launch.call_args.args[0], ["docker", "logs", "--tail", "256", container_id])
         self.assertTrue(launch.call_args.kwargs["start_new_session"])
@@ -246,6 +254,7 @@ class QualificationControls(unittest.TestCase):
                 result, _, launch, capture, _ = collect(selected)
                 self.assertEqual(result["outcome"], "scope-refused")
                 self.assertEqual(result["signals"], [])
+                self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [])
                 self.assertEqual(calls, [])
                 launch.assert_not_called()
                 capture.assert_not_called()
@@ -254,12 +263,14 @@ class QualificationControls(unittest.TestCase):
             result, _, launch, _, _ = collect()
             self.assertEqual(result["outcome"], "binding-refused" if foreign_at == 1 else "observation-refused")
             self.assertEqual(result["signals"], [])
+            self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [])
             if foreign_at == 1:
                 launch.assert_not_called()
         foreign_at = None
         result, process, _, _, _ = collect(capture_code=1, parent_code=1)
         self.assertEqual(result["outcome"], "command-refused")
         self.assertEqual(result["signals"], [])
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [])
         self.assertEqual(calls, [["docker", "inspect", container_id]] * 2)
         process.stdout.close.assert_called_once()
         for category in ("timeout", "output-budget"):
@@ -267,6 +278,7 @@ class QualificationControls(unittest.TestCase):
                 result, process, _, _, stop = collect(capture_failure=qualify.CommandFailure("capture", category), parent_code=parent_code)
                 self.assertEqual(result["outcome"], category)
                 self.assertEqual(result["signals"], [])
+                self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [])
                 stop.assert_called_once_with(process)
                 process.stdout.close.assert_called_once()
         result, _, _, _, _ = collect(capture_failure=qualify.CommandFailure("capture", "timeout"), stop_failure=qualify.CommandFailure("reap", "reap-timeout"))
@@ -275,6 +287,12 @@ class QualificationControls(unittest.TestCase):
         result, _, _, _, _ = collect(launch_failure=OSError(secret))
         self.assertEqual(result["outcome"], "capture-refused")
         self.assertEqual(result["signals"], [])
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [])
+        with mock.patch.object(qualify, "datahub_frame_inventory", side_effect=ValueError(secret)):
+            result, _, _, _, _ = collect()
+        self.assertEqual(result["signals"], [{"code": "sql-error", "count": 1}])
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["outcome"], "source-inventory-refused")
+        self.assertEqual(fixture.failed_upgrade_frame_evidence["frames"], [])
         refusal = ValueError("original upgrade refusal")
         with self.assertRaises(ValueError) as stopped:
             try:

@@ -595,6 +595,55 @@ class BuildDiagnosticControls(unittest.TestCase):
             self.assertEqual(qualify.reduce_failed_upgrade(body), {"outcome": outcome, "signals": []})
         with mock.patch.object(qualify, "FAILED_UPGRADE_LITERALS", {"fixed-" + str(index): ("PublicToken" + str(index),) for index in range(17)}):
             self.assertEqual(qualify.reduce_failed_upgrade("\n".join("PublicToken" + str(index) for index in range(17)).encode()), {"outcome": "record-budget", "signals": []})
+        public_sources = qualify.datahub_frame_inventory()
+        (outer, filename), (source_id, line_bound) = next((key, value) for key, value in public_sources.items() if value[1] >= 32)
+        private_identifier = "CredentialMarkerAlpha"
+        def source_frames(body):
+            with mock.patch.object(qualify, "datahub_frame_inventory", return_value=public_sources):
+                projected = qualify.reduce_failed_upgrade_frames(body)
+            self.assertEqual(set(projected), {"outcome", "frames", "truncated"})
+            self.assertTrue(all(set(frame) == {"sourceID", "claimedLine"} for frame in projected["frames"]))
+            for private in (secret, private_identifier, outer, filename):
+                self.assertNotIn(private, json.dumps(projected))
+            return projected
+        def public_frame(number=1, prefix="", nested=""):
+            return (prefix + "at " + outer + nested + "." + private_identifier + "(" + filename + ":" + str(number) + ")").encode()
+        expected_frame = {"sourceID": source_id, "claimedLine": 1}
+        for body in (public_frame(), public_frame(prefix="\t"), public_frame(prefix=" \t  "), public_frame().replace(b"at ", b"at app//", 1), public_frame(nested="$" + private_identifier + "$1"), public_frame() + (" [" + private_identifier + ":" + private_identifier + "]").encode(), public_frame() + (" ~[" + private_identifier + ":" + private_identifier + "]").encode()):
+            self.assertEqual(source_frames(body), {"outcome": "projected", "frames": [expected_frame], "truncated": False})
+        self.assertEqual(source_frames(public_frame() + b"\n" + public_frame())["frames"], [expected_frame])
+        sixteen = b"\n".join(public_frame(number) for number in range(1, 17))
+        self.assertEqual(len(source_frames(sixteen)["frames"]), 16)
+        self.assertFalse(source_frames(sixteen)["truncated"])
+        seventeen = source_frames(sixteen + b"\n" + public_frame(17))
+        self.assertEqual(len(seventeen["frames"]), 16)
+        self.assertTrue(seventeen["truncated"])
+        self.assertEqual([frame["claimedLine"] for frame in seventeen["frames"]], list(range(1, 17)))
+        wrong_frames = [public_frame().replace(outer.encode(), b"private.ValidCredentialClass"), public_frame().replace(filename.encode(), b"Private.java"), public_frame().replace(filename.encode(), b"private/" + filename.encode()), public_frame().replace(b"at ", b"at java.base/", 1), public_frame().replace(b"at ", b"at loader/app//", 1), b" " * 17 + public_frame(), public_frame() + private_identifier.encode(), public_frame().replace(b":1)", b":01)"), public_frame(0), public_frame(-1), public_frame(2147483648), public_frame(line_bound + 1), public_frame().replace((filename + ":1").encode(), b"Native Method"), public_frame().replace((filename + ":1").encode(), b"Unknown Source"), public_frame() + b" [private:version", public_frame() + b" [private:version]trailing", public_frame() + b" [private]", public_frame() + b" [[private:version]]"]
+        for body in wrong_frames:
+            self.assertEqual(source_frames(body), {"outcome": "no-known-frame", "frames": [], "truncated": False})
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            self.assertEqual(source_frames(public_frame().replace(b"(" + filename.encode(), separator.encode() + b"(" + filename.encode()))["frames"], [])
+        for body, outcome in ((b"", "empty-output"), (b"\xff" + public_frame(), "malformed-output"), (b"\x1b[31m" + public_frame(), "malformed-output"), (public_frame() + b"\x00", "malformed-output"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), "output-budget"), (b"\n".join([public_frame()] * 257), "line-budget")):
+            self.assertEqual(source_frames(body), {"outcome": outcome, "frames": [], "truncated": False})
+        manifest = json.loads((qualify.HERE / "datahub-source-frames.json").read_text())
+        for mutation in ("identity", "row-id", "class", "path", "blob", "size", "count", "provenance", "duplicate", "extra"):
+            changed = json.loads(json.dumps(manifest))
+            row = changed["sources"][0]
+            if mutation == "identity": changed["commit"] = "c" * 40
+            elif mutation == "row-id": row["id"] = True
+            elif mutation == "class": row["className"] = "private." + private_identifier
+            elif mutation == "path": row["path"] = "datahub-upgrade/src/main/java/../Private.java"
+            elif mutation == "blob": row["blobSHA"] = secret
+            elif mutation == "size": row["bytes"] = 0
+            elif mutation == "count": changed["components"][0]["sourceCount"] += 1
+            elif mutation == "provenance": changed["provenance"]["allUntruncated"] = 1
+            elif mutation == "duplicate": changed["sources"][1] = row
+            else: row["private"] = secret
+            with mock.patch.object(qualify, "bounded_file", return_value=json.dumps(changed).encode()):
+                refused_frames = qualify.reduce_failed_upgrade_frames(public_frame())
+            self.assertEqual(refused_frames, {"outcome": "source-inventory-refused", "frames": [], "truncated": False})
+            self.assertNotIn(secret, json.dumps(refused_frames))
         for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (runtime, 1, "mysql-startup-log"), (runtime, 1, "gms-startup-log"), (runtime, 1, "upgrade-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)

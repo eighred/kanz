@@ -454,6 +454,35 @@ runtime overrides, optional/nonblocking and migration-specific IDs remain
 unknown. This catalogue identifies public wrapper text, not the complete step
 inventory, a loaded implementation or the precise failure cause.
 
+An adjacent `failedUpgradeFrames` projection consumes the same transient capture
+before discard; `failedUpgrade` keeps its existing nine fields. The separate
+ten-field frame receipt joins the source/run/container/image and returns only
+deduplicated `{sourceID, claimedLine}` pairs plus a truncation flag. It publishes
+only after the same fresh terminal post-binding succeeds. Capture/process cleanup,
+ownership or source-inventory refusal leaves no frames. The frame budget is
+independently limited to the first 16 unique eligible pairs, with truthful
+truncation for further unique pairs; the existing 16-signal budget is unchanged.
+
+`datahub-source-frames.json` contains 1,028 path-derived public outer classes
+from the pinned upgrade, factories and metadata-io main Java trees, with opaque
+integer IDs and Git-reported paths, blob identities and byte sizes. Membership
+requires an exact outer FQN and source basename. Standard Java `at` frames and
+the fixed `app//` form permit bounded horizontal indentation, nested/method
+identifiers and the [Logback packaging suffix](https://logback.qos.ch/manual/layouts.html)
+`[jar:version]` or `~[jar:version]`; those strings are discarded completely.
+Unknown classes/files, other module/loader forms, paths, malformed suffixes and
+arbitrary trailing text are dropped. No raw class, method, nested/module/loader,
+filename, path, message or hash enters this receipt.
+
+`claimedLine` is canonical and positive, bounded only by the public blob's
+reported bytes plus one and the Java integer range. It is preliminary, not an
+actual line-count or location verification. Before any matched location reaches
+the agent, the trusted parent must verify that immutable public blob, its package
+declaration and actual line count. The inventory covers only those three source
+trees and establishes neither a complete dependency inventory, an actual caller,
+a loaded version nor a failure cause. Existing source-free host privacy and
+lifecycle controls exercise this projection without adding a capture or role.
+
 Public token provenance includes the existing DataHub source revision
 `faab576d96cbdb27b8344a755e0bc0f42fdc9c15`, expected-bundle JDK sources above,
 [Spring's bean exception](https://github.com/spring-projects/spring-framework/blob/v6.2.15/spring-beans/src/main/java/org/springframework/beans/factory/BeanCreationException.java),
