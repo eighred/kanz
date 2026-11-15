@@ -1,4 +1,4 @@
-FROM acryldata/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23
+FROM ghcr.io/eighred/base/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23
 LABEL __KANZ_CATALOG_OWNERSHIP__
 USER root
 COPY package-lock.json verify_patch.py linux-libc-dev.deb /tmp/kanz-catalog-patch/

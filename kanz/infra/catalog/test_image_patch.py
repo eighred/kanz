@@ -19,7 +19,7 @@ spec.loader.exec_module(verify_patch)
 
 
 def base_info(record):
-    return {"Id": record["baseConfigDigest"], "RepoDigests": [record["baseReference"]],
+    return {"Id": record["baseConfigDigest"], "RepoDigests": [image_identity.selections()["ingestion"]["executionRepository"] + "@" + record["baseManifestDigest"]],
             "Os": "linux", "Architecture": "amd64",
             "Config": {"User": "datahub", "Entrypoint": ["datahub"], "Env": ["PUBLIC=setting"]},
             "RootFS": {"Type": "layers", "Layers": image_identity.selections()["ingestion"]["rootFSDiffIDs"]}}

@@ -81,9 +81,9 @@
       ]
     },
     "ingestion": {
-      "reference": "acryldata/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
+      "reference": "ghcr.io/eighred/base/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
       "publisherReference": "acryldata/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
-      "executionRepository": "docker.io/acryldata/datahub-ingestion",
+      "executionRepository": "ghcr.io/eighred/base/datahub-ingestion",
       "repository": "acryldata/datahub-ingestion",
       "manifestDigest": "sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
       "manifestBytes": 3709,
