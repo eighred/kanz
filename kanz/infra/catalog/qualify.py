@@ -214,13 +214,35 @@ def failure_category(output, code, scanner):
     return "scanner-command-exit"
 
 
+def runtime_message(line, prefix, utf8_roundtrip, anchored=False):
+    raw_line = line.encode("utf-8")
+    prefix_count = raw_line.count(prefix)
+    result = {"informationalOnly": True, "framing": "single-logical-line", "trim": "ascii-whitespace",
+              "prefixCount": prefix_count, "bodyLimitBytes": STARTUP_MESSAGE_LIMIT,
+              "status": "refused", "category": "unknown-prefix", "bodyBytes": None, "bodySHA256": None}
+    if not utf8_roundtrip:
+        result["category"] = "invalid-utf8"
+    elif prefix_count > 1:
+        result["category"] = "multiple-prefixes"
+    elif prefix_count == 1 and (not anchored or raw_line.startswith(prefix)):
+        # Re-encoding valid UTF-8 preserves exact suffix bytes. No suffix is
+        # retained or interpolated, including on refusal.
+        body = raw_line.split(prefix, 1)[1].strip(b" \t\r\n\v\f")
+        if not body:
+            result["category"] = "empty-body"
+        elif len(body) > STARTUP_MESSAGE_LIMIT:
+            result["category"] = "body-budget"
+        else:
+            result.update(status="hashed", category="bounded-body", bodyBytes=len(body), bodySHA256=hashlib.sha256(body).hexdigest())
+    return result
+
+
 def runtime_output(output, code, source):
     """Informational closed signals; no text can authorise readiness/cleanup."""
     if source not in READINESS_SOURCES or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
         raise ValueError("runtime diagnostic source/size refused")
     text = output.decode("utf-8", errors="replace")
     utf8_roundtrip = text.encode("utf-8") == output
-    diagnostic = text.lower()
     patterns = {
         "configuration-refused": ("unable to load config", "unable to decode config", "yaml: unmarshal", "yaml: line", "unknown configuration property"),
         "permission-refused": ("permission denied", "operation not permitted", "read-only file system"),
@@ -247,6 +269,7 @@ def runtime_output(output, code, source):
     # Exclude every str.splitlines separator in either substituted value so
     # full-capture signals and per-line context agree on the same-line rule.
     template_shapes = {"memory-below-required-message": r"(?<![\w-])memory: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*' below required: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*'(?![\w-])"}
+    line_templates = {}
     apis = {"perf-event-open-failed": "perf_event_open() failed", "chmod-failed": "chmod failed", "open-failed": "open failed"}
     if source == "search-startup-log":
         # OpenSearch launcher source 4ee42a94 and its expected bundle's public
@@ -273,10 +296,15 @@ def runtime_output(output, code, source):
             "search-jvm-maximum-heap-message": "invalid maximum heap size:",
             "search-jvm-thread-start-message": "failed to start thread",
             "search-jvm-thread-resource-message": "cannot create vm thread. out of system resources.",
+            "search-cli-positional-message": "positional arguments not allowed, found",
+            "search-cli-abnormal-exit-message": "error: opensearch did not exit normally - check the logs at",
         }
         # This source template substitutes only a nonzero integer exit status;
         # the regex cannot span any splitlines separator or retain a suffix.
         template_shapes = {"search-java-start-message": r"(?<![\w-])starting java failed with \[-?[1-9][0-9]{0,9}\](?![\w-])"}
+        line_templates = {"search-cli-help-description": ("exact", "Starts OpenSearch"),
+                          "search-cli-columns-frame": ("columns", r"Option[ \t]+Description[ \t]*"),
+                          "search-cli-error-wrapper": ("prefix", "ERROR:")}
         apis = {"search-access-denied-exception": "java.nio.file.accessdeniedexception",
                 "search-bootstrap-exception": "org.opensearch.bootstrap.bootstrapexception",
                 "search-node-validation-exception": "org.opensearch.node.nodevalidationexception",
@@ -292,11 +320,17 @@ def runtime_output(output, code, source):
                 "search-jdk-os-metrics-frame": "com.sun.management.internal.operatingsystemimpl"}
     literals = {**templates, **apis}
     def signal_classes(value):
-        result = {key for key, markers in patterns.items() if any(marker in value for marker in markers)}
-        result.update(key for key, marker in literals.items() if re.search(r"(?<![\w-])" + re.escape(marker) + r"(?![\w-])", value))
-        result.update(key for key, pattern in template_shapes.items() if re.search(pattern, value))
+        folded = value.lower()
+        result = {key for key, markers in patterns.items() if any(marker in folded for marker in markers)}
+        result.update(key for key, marker in literals.items() if re.search(r"(?<![\w-])" + re.escape(marker) + r"(?![\w-])", folded))
+        result.update(key for key, pattern in template_shapes.items() if re.search(pattern, folded))
+        if line_templates:
+            for line in value.splitlines():
+                result.update(key for key, (kind, marker) in line_templates.items() if
+                              (kind == "exact" and line == marker) or (kind == "prefix" and line.startswith(marker)) or
+                              (kind == "columns" and re.fullmatch(marker, line)))
         return tuple(sorted(result))
-    signals = list(signal_classes(diagnostic))
+    signals = list(signal_classes(text))
     errno_literals = ("permission denied", "operation not permitted", "read-only file system", "no space left on device",
                       "file too large", "cannot allocate memory", "connection refused", "address already in use")
     # Go 1.27.3 io/fs.PathError formats Op + " " + Path + ": " + Err.
@@ -334,7 +368,7 @@ def runtime_output(output, code, source):
     records = {}
     for line in lines[-READINESS_CONTEXT_LINES:]:
         lowered = line.lower()
-        line_signals = signal_classes(lowered)
+        line_signals = signal_classes(line)
         if not line_signals:
             continue
         context["signalLines"] += 1
@@ -348,33 +382,18 @@ def runtime_output(output, code, source):
         resource_tokens = re.finditer(r'''"(?P<double>/[^"\r\n]*)"|'(?P<single>/[^'\r\n]*)'|(?:^|[\s\[(=:,])(?P<bare>/[A-Za-z0-9_./@+,-]+)(?=$|[\s\]),;}:])''', line)
         resource_signals = tuple(sorted({resource_class(next(value for value in match.groups() if value is not None)) for match in resource_tokens} - {"unclassified"}))
         api_signals = tuple(key for key in line_signals if key in apis)
-        template_signals = tuple(key for key in line_signals if key in templates or key in template_shapes)
+        template_signals = tuple(key for key in line_signals if key in templates or key in template_shapes or key in line_templates)
         startup_message = None
         if source == "broker-startup-log" and "startup-failure-wrapper" in line_signals:
-            prefix = b"Failure during startup: "
-            raw_line = line.encode("utf-8")
-            prefix_count = raw_line.count(prefix)
-            startup_message = {"informationalOnly": True, "framing": "single-logical-line", "trim": "ascii-whitespace",
-                               "prefixCount": prefix_count, "bodyLimitBytes": STARTUP_MESSAGE_LIMIT,
-                               "status": "refused", "category": "unknown-prefix", "bodyBytes": None, "bodySHA256": None}
-            if not utf8_roundtrip:
-                startup_message["category"] = "invalid-utf8"
-            elif prefix_count > 1:
-                startup_message["category"] = "multiple-prefixes"
-            elif prefix_count == 1:
-                # Re-encoding valid UTF-8 preserves the exact raw suffix bytes.
-                # Never retain or interpolate that suffix, including on refusal.
-                body = raw_line.split(prefix, 1)[1].strip(b" \t\r\n\v\f")
-                if not body:
-                    startup_message["category"] = "empty-body"
-                elif len(body) > STARTUP_MESSAGE_LIMIT:
-                    startup_message["category"] = "body-budget"
-                else:
-                    startup_message.update(status="hashed", category="bounded-body", bodyBytes=len(body), bodySHA256=hashlib.sha256(body).hexdigest())
+            startup_message = runtime_message(line, b"Failure during startup: ", utf8_roundtrip)
         startup_key = tuple(sorted(startup_message.items())) if startup_message is not None else None
+        cli_error = None
+        if source == "search-startup-log" and "search-cli-error-wrapper" in line_signals:
+            cli_error = runtime_message(line, b"ERROR: ", utf8_roundtrip, anchored=True)
+        cli_key = tuple(sorted(cli_error.items())) if cli_error is not None else None
         # No selected vendor stage/level format is established yet. Keep both
         # explicitly unknown rather than turning a warning token into a cause.
-        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals, errno_signals, resource_signals, api_signals, template_signals, startup_key)
+        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals, errno_signals, resource_signals, api_signals, template_signals, startup_key, cli_key)
         if key not in records:
             if len(records) == READINESS_CONTEXT_RECORDS:
                 context["omittedSignalLines"] += 1
@@ -383,7 +402,7 @@ def runtime_output(output, code, source):
                             "resource": key[4], "error": key[5], "signals": list(line_signals), "count": 0,
                             "errnoSignals": list(errno_signals),
                             "coOccurrence": {"resourceSignals": list(resource_signals), "apiSignals": list(api_signals), "templateSignals": list(template_signals)},
-                            "startupMessage": startup_message}
+                            "startupMessage": startup_message, "cliErrorMessage": cli_error}
             context["records"].append(records[key])
         records[key]["count"] += 1
     context["truncated"] = bool(context["omittedEarlierLines"] or context["omittedSignalLines"])

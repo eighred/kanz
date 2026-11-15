@@ -158,8 +158,9 @@ and [JvmOptionsParser](https://github.com/opensearch-project/OpenSearch/blob/4ee
 neither arbitrary exception names, JVM options nor message tails are retained.
 Search resource co-occurrence classes cover only its packaged config tree,
 selected data/log trees and shared temporary/proc/sys classes. Stage, level and
-causal attribution remain unknown. Search logs receive no suffix fingerprint;
-only the existing bounded whole-capture byte count/hash is retained. Conditional
+causal attribution remain unknown. Search exception bodies retain only the
+bounded whole-capture byte count/hash; CLI suffix metadata follows the separate
+source-frame contract below. Conditional
 vendor keystore creation/upgrades do not establish the selected image's state
 or justify a writable-config repair without observed evidence. Search startup
 arguments, image pins and the entire isolation/resource profile are unchanged.
@@ -178,6 +179,24 @@ memory or other cause. The public bundle selection is not proof of the selected
 image's actual JDK contents/version. No large payload read or execution is
 substituted for that unresolved source-to-image join. The wrapper regex cannot
 cross any `splitlines()` separator and retains no numeric status or suffix.
+The [public CLI error/help path](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/libs/cli/src/main/java/org/opensearch/cli/Command.java#L92)
+supplies separate whole-line `Starts OpenSearch`, Option/Description column and
+line-start `ERROR:` classes. Positional-argument and abnormal-exit messages have
+fixed prefix classes. These text frames do not identify an actual CLI caller,
+help request or cause; public help/usage exit codes do not assign meaning to an
+observed container exit code.
+
+Only search lines beginning with the exact case-sensitive bytes `ERROR: ` may
+retain `cliErrorMessage` suffix byte length/SHA-256. There is no leading-space
+or arbitrary-prefix allowance. The shared fingerprint implementation requires
+one prefix, a valid UTF-8 round trip and a nonempty body of at most 4096 bytes
+after explicit ASCII whitespace trimming. Malformed/repeated prefix, invalid
+encoding, empty body and overflow retain closed refusal metadata with no body
+size/hash. It never joins lines. This field is distinct from the broker-only
+`startupMessage`; non-CLI search lines receive no individual fingerprint. Both
+use the same existing 16-record aggregation/omission budget, 40-line tail,
+64 KiB capture ceiling and eight-attempt retention. No generic unknown-line
+fallback is enabled. An exact public-message digest match remains informational.
 Only a broker line containing the exact case-sensitive compiled prefix
 `Failure during startup: ` once may retain `startupMessage` byte length and
 SHA-256 of its suffix. The capture must round-trip as valid UTF-8; trimming is

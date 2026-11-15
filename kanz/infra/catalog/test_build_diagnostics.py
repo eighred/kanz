@@ -303,6 +303,53 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertEqual(qualify.runtime_output(search_body, 1, "broker-startup-log")["matchedSignals"], [])
         self.assertNotIn(secret, json.dumps(search))
         self.assertNotIn("/usr/share/opensearch", json.dumps(search))
+        for text, expected in (("Starts OpenSearch", "search-cli-help-description"),
+                               ("Option        Description", "search-cli-columns-frame"),
+                               ("Positional arguments not allowed, found " + secret, "search-cli-positional-message")):
+            observed = qualify.runtime_output(text.encode(), 1, "search-startup-log")
+            self.assertEqual(observed["matchedSignals"], [expected])
+            self.assertNotIn(secret, json.dumps(observed))
+        cli = qualify.runtime_output(("ERROR: " + secret).encode(), 1, "search-startup-log")
+        row = cli["lineContext"]["records"][0]
+        message = row["cliErrorMessage"]
+        self.assertEqual(cli["matchedSignals"], ["search-cli-error-wrapper"])
+        self.assertIsNone(row["startupMessage"])
+        self.assertEqual((message["status"], message["prefixCount"], message["bodyBytes"], message["bodySHA256"]), ("hashed", 1, len(secret.encode()), hashlib.sha256(secret.encode()).hexdigest()))
+        self.assertEqual(qualify.runtime_output(("ERROR: \t" + secret + " \t").encode(), 1, "search-startup-log")["lineContext"]["records"][0]["cliErrorMessage"], message)
+        for body, category, count in ((b"ERROR:\t" + secret.encode(), "unknown-prefix", 0),
+                                      (b"ERROR:malformed ERROR: " + secret.encode(), "unknown-prefix", 1),
+                                      (b"ERROR: ERROR: " + secret.encode(), "multiple-prefixes", 2),
+                                      (b"ERROR: \t ", "empty-body", 1),
+                                      (b"ERROR: " + b"x" * 4097, "body-budget", 1),
+                                      (b"ERROR: " + secret.encode() + b"\xff", "invalid-utf8", 1)):
+            refused = qualify.runtime_output(body, 1, "search-startup-log")["lineContext"]["records"][0]["cliErrorMessage"]
+            self.assertEqual((refused["status"], refused["category"], refused["prefixCount"]), ("refused", category, count))
+            self.assertIsNone(refused["bodyBytes"])
+            self.assertIsNone(refused["bodySHA256"])
+            self.assertNotIn(secret, json.dumps(refused))
+        maximum = qualify.runtime_output(b"ERROR: " + b"x" * 4096, 1, "search-startup-log")["lineContext"]["records"][0]["cliErrorMessage"]
+        self.assertEqual((maximum["bodyBytes"], maximum["bodySHA256"]), (4096, hashlib.sha256(b"x" * 4096).hexdigest()))
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            for broken in ("ER" + separator + "ROR: " + secret, "Starts" + separator + "OpenSearch", "Option" + separator + "Description"):
+                self.assertEqual(qualify.runtime_output(broken.encode(), 1, "search-startup-log")["matchedSignals"], [])
+            split_error = qualify.runtime_output(("ERROR: " + separator + secret).encode(), 1, "search-startup-log")["lineContext"]["records"][0]["cliErrorMessage"]
+            self.assertEqual(split_error["category"], "empty-body")
+            self.assertIsNone(split_error["bodySHA256"])
+            self.assertIsNone(split_error["bodyBytes"])
+        for lookalike in ("error: " + secret, " ERROR: " + secret, "INFO ERROR: " + secret, "Starts OpenSearch " + secret, "Option", "Description"):
+            self.assertEqual(qualify.runtime_output(lookalike.encode(), 1, "search-startup-log")["matchedSignals"], [])
+        ordinary = qualify.runtime_output(("Likely root cause: ERROR: " + secret).encode(), 1, "search-startup-log")["lineContext"]["records"][0]
+        self.assertIsNone(ordinary["cliErrorMessage"])
+        self.assertEqual(ordinary["signals"], ["search-root-cause-wrapper"])
+        self.assertEqual(qualify.runtime_output(("ERROR: " + secret).encode(), 1, "broker-startup-log")["matchedSignals"], [])
+        abnormal = qualify.runtime_output(("ERROR: OpenSearch did not exit normally - check the logs at " + secret).encode(), 1, "search-startup-log")
+        self.assertEqual(abnormal["matchedSignals"], ["search-cli-abnormal-exit-message", "search-cli-error-wrapper"])
+        distinct = qualify.runtime_output(("ERROR: " + secret + "-one\nERROR: " + secret + "-two\nERROR: " + secret + "-one").encode(), 1, "search-startup-log")["lineContext"]
+        self.assertEqual((len(distinct["records"]), [item["count"] for item in distinct["records"]]), (2, [2, 1]))
+        self.assertEqual([item["cliErrorMessage"]["bodySHA256"] for item in distinct["records"]], [hashlib.sha256((secret + suffix).encode()).hexdigest() for suffix in ("-one", "-two")])
+        limited = qualify.runtime_output("\n".join("ERROR: " + secret + str(index) for index in range(17)).encode(), 1, "search-startup-log")["lineContext"]
+        self.assertEqual((len(limited["records"]), limited["signalLines"], limited["omittedSignalLines"], limited["truncated"]), (16, 17, 1, True))
+        self.assertNotIn(secret, json.dumps((cli, ordinary, abnormal, distinct, limited)))
         for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)
