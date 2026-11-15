@@ -1,7 +1,9 @@
 import copy
+import io
 import os
 from pathlib import Path
 import struct
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -196,6 +198,24 @@ class BoundaryTests(unittest.TestCase):
     def test_archive_hash_tamper_refused_before_parsing(self):
         with self.assertRaises(ValueError):
             p.source_archive(b'not the source')
+
+    def test_source_member_limit_accepts_boundary_and_refuses_one_more_byte(self):
+        for size in (32 << 20, (32 << 20) + 1):
+            buffer = io.BytesIO()
+            prefix = 'openssl-' + p.PINS['source'] + '/'
+            with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+                for name, data in [('Configure', bytes(size)), ('LICENSE.txt', b'fixture'),
+                                   ('VERSION.dat', (p.HERE / 'VERSION.dat').read_bytes())]:
+                    member = tarfile.TarInfo(prefix + name)
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+            raw = buffer.getvalue()
+            with patch.dict(p.PINS, {'size': len(raw), 'sha256': p.digest(raw)}):
+                if size == 32 << 20:
+                    p.source_archive(raw)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'unsafe source archive member'):
+                        p.source_archive(raw)
 
 
 if __name__ == '__main__':

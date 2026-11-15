@@ -24,6 +24,7 @@ FILES = {'native.tar.gz': 16 << 20, 'libcrypto.so.3': 16 << 20,
          'regression_tests.log': 32 << 20, 'version.txt': 64 << 10,
          'toolchain.txt': 1 << 20, 'configure.txt': 1 << 20}
 SAFE_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'}
+SOURCE_MEMBER_MAX = 32 << 20  # The pinned source includes two 20 MiB SLH-DSA vector files.
 
 
 def digest(data):
@@ -62,7 +63,7 @@ def source_archive(data):
             if (member.name in found or name.is_absolute() or '..' in name.parts
                     or not name.parts or name.parts[0] != prefix
                     or not (member.isdir() or member.isfile())
-                    or member.size > 16 << 20 or len(found) >= 10000):
+                    or member.size > SOURCE_MEMBER_MAX or len(found) >= 10000):
                 raise ValueError('unsafe source archive member')
             found.add(member.name)
             total += member.size
