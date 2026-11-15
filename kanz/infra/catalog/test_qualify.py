@@ -255,7 +255,7 @@ class QualificationControls(unittest.TestCase):
         original = dict(IDENTITY, owner=OWNER, status="passed", cleanupPassed=True,
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
-                        dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
+                        dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
                         qualificationControls={"count": 32}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
@@ -265,7 +265,7 @@ class QualificationControls(unittest.TestCase):
         cleanup = {"ownershipVerified": True, "fileBackend": True, "credentialsAbsent": True, "directoryRemoved": True, "passed": True, "logout": {"attempted": True, "exitCode": 0}}
         original.update(acceptanceComplete=True, registryCleanup=dict(IDENTITY, sourceVerified=True, profile=OWNER["registryProfile"], cleanup=cleanup))
         qualify.validate_receipt(original, IDENTITY, images)
-        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"}), ("acceptanceComplete", False), ("registryAuth", {}), ("registryCleanup", {}), ("registryCleanup", dict(original["registryCleanup"], cleanup=dict(cleanup, credentialsAbsent=False)))):
+        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"}), ("acceptanceComplete", False), ("registryAuth", {}), ("registryCleanup", {}), ("registryCleanup", dict(original["registryCleanup"], cleanup=dict(cleanup, credentialsAbsent=False))), ("dependencies", {"packages": {"acryl-datahub": "1.8.0"}})):
             report = copy.deepcopy(original)
             report[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):

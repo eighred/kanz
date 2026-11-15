@@ -19,7 +19,7 @@ class BuildDiagnosticControls(unittest.TestCase):
     def test_failed_build_diagnostics_keep_only_closed_public_information(self):
         secret = "one-run-registry-credential-marker"
         selection = image_patch.lock()
-        snapshot = {"packages": {"linux-libc-dev:amd64": selection["before"]}, "python": {"acryl-datahub": "1.8.0"}, "pythonVersion": "3.11.14"}
+        snapshot = {"packages": {"linux-libc-dev:amd64": selection["before"]}, "python": {"acryl-datahub": selection["cliPackageVersion"]}, "pythonVersion": "3.11.14"}
         observation = verify_patch.observation("before", snapshot, selection)
         output = ("Step 5/6 : RUN printf KANZ_CATALOG_PATCH_PHASE=completed\n"
                   "KANZ_CATALOG_PATCH_PHASE=before-inventory\n"

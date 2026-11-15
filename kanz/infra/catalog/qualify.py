@@ -359,7 +359,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
         selected_package = image_patch.lock()
         if observed.get("imageID") != derived["baseImageID"] or observed.get("engineIDKind") != derived["baseIdentity"]["engineIDKind"] or observed.get("onBuildCount") != 0 or observed.get("onBuildEmpty") is not True or observed.get("selectedManifestDigestMatches") is not True or package.get("category") != "passed" or package.get("receivedBytes") != selected_package["bytes"] or package.get("receivedSHA256") != selected_package["sha256"] or type(package.get("httpStatus")) is not int or not 200 <= package["httpStatus"] < 300:
             raise ValueError("catalog public preparation evidence incomplete")
-    if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != "1.8.0" or report.get("projectionTests", {}).get("count") != 14:
+    if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
     if report.get("qualificationControls", {}).get("count") != 32 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
@@ -773,7 +773,7 @@ def qualify(scratch, binary):
         report["images"] = fixture.setup()
         fixture.stage = "locked-cli-version"
         dependencies = json.loads(fixture.cli(["python", "-c", "import importlib.metadata,json,sys; print(json.dumps({'python':sys.version.split()[0],'packages':{d.metadata['Name']:d.version for d in importlib.metadata.distributions()}}))"], network=False))
-        if dependencies["packages"].get("acryl-datahub") != "1.8.0":
+        if dependencies["packages"].get("acryl-datahub") != image_patch.lock()["cliPackageVersion"]:
             raise ValueError("actual ingestion package version differs")
         report["dependencies"] = dependencies
         patch = json.loads(fixture.cli(["cat", "/opt/kanz-catalog-patch.json"], network=False))

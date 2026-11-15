@@ -84,12 +84,17 @@ class ImagePatchControls(unittest.TestCase):
     def test_only_fixed_package_may_change_with_identical_cli_python_graph(self):
         selection = image_patch.lock()
         package = "linux-libc-dev:amd64"
-        before = {"packages": {package: selection["before"], "libc6:amd64": "unchanged"}, "python": {"acryl-datahub": "1.8.0", "requests": "unchanged"}, "pythonVersion": "3.12.3"}
+        before = {"packages": {package: selection["before"], "libc6:amd64": "unchanged"}, "python": {"acryl-datahub": selection["cliPackageVersion"], "requests": "unchanged"}, "pythonVersion": "3.12.3"}
         after = copy.deepcopy(before)
         after["packages"][package] = selection["after"]
         proof = verify_patch.compare(before, after, selection)
         dependencies = {"python": after["pythonVersion"], "packages": after["python"]}
         image_patch.validate_proof(proof, dependencies)
+        self.assertEqual(selection["cliPackageVersion"], "1.8.0+docker")
+        wrong_before, wrong_after = copy.deepcopy(before), copy.deepcopy(after)
+        wrong_before["python"]["acryl-datahub"] = wrong_after["python"]["acryl-datahub"] = "1.8.0"
+        with self.assertRaises(ValueError):
+            verify_patch.compare(wrong_before, wrong_after, selection)
         for field, key, value in (("packages", package, selection["before"]), ("packages", "libc6:amd64", "changed"), ("python", "requests", "changed"), ("python", "acryl-datahub", "1.9.0")):
             changed = copy.deepcopy(after)
             changed[field][key] = value
@@ -98,7 +103,9 @@ class ImagePatchControls(unittest.TestCase):
         with self.assertRaises(ValueError):
             image_patch.validate_proof(proof, dict(dependencies, python="3.13"))
         with self.assertRaises(ValueError):
-            image_patch.validate_proof(proof, dict(dependencies, packages={"acryl-datahub": "1.8.0"}))
+            image_patch.validate_proof(proof, dict(dependencies, packages={"acryl-datahub": selection["cliPackageVersion"]}))
+        with self.assertRaises(ValueError):
+            image_patch.validate_proof(dict(proof, datahubVersion="1.8.0"), dependencies)
 
     def test_derived_image_must_preserve_exact_base_behavior_layers_and_owner(self):
         record = OWNER["derivedImage"]

@@ -278,7 +278,7 @@ def validate_proof(proof, dependencies):
     expected = {"baseReference": selection["base"], "packageSHA256": selection["sha256"],
                 "package": selection["package"] + ":" + selection["architecture"],
                 "before": selection["before"], "after": selection["after"],
-                "onlyFixedPackageChanged": True, "pythonUnchanged": True, "datahubVersion": "1.8.0"}
+                "onlyFixedPackageChanged": True, "pythonUnchanged": True, "datahubVersion": selection["cliPackageVersion"]}
     if any(proof.get(key) != value for key, value in expected.items()) or proof.get("pythonVersion") != dependencies.get("python") or proof.get("pythonPackagesSHA256") != digest(dependencies.get("packages")):
         raise ValueError("executed CLI does not match the exact package/Python build proof")
     for key in ("beforePackagesSHA256", "afterPackagesSHA256", "pythonPackagesSHA256"):

@@ -181,10 +181,23 @@ Dockerfile hashes enter the owner record and receipt.
 
 Before and after `dpkg -i`, the verifier records the complete installed package
 inventory and Python dependency graph. Exactly `linux-libc-dev:amd64` must change
-to the pinned version; the Python graph/version and `acryl-datahub` 1.8.0 must
-remain identical. Image inspection also requires the exact base layer prefix
+to the pinned version; the Python graph/version must remain identical. The
+installed `acryl-datahub` version must exactly match `cliPackageVersion`, pinned
+separately as `1.8.0+docker`. Image inspection also requires the exact base layer prefix
 and unchanged user, entrypoint, command, environment and other execution config.
 The executed CLI rereads this build proof and must match its dependency hash.
+
+The selected product release remains 1.8.0. The verified immutable base config
+`a9d4daa22bb41a875400152e2b03724ffb1a07fb5616675785586b2d0a5c8348`
+records `RELEASE_VERSION=1.8.0+docker`; the release's
+[Dockerfile](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/docker/datahub-ingestion/Dockerfile#L147)
+passes that argument to its
+[version updater](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/python-build/version_updater.py#L29)
+before the editable installation. That source-backed packaging literal is
+required everywhere without stripping or normalizing build metadata. A plain
+`1.8.0` dependency refuses even if its before/after graph is otherwise identical.
+The observed earlier equality mismatch supports this causal inference; actual
+dependency readback must still confirm the expected installed literal.
 
 The upstream manifest/base image ID and derived local image ID have separate
 receipt fields. Only the actual untagged derived ID is scanned and used for

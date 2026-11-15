@@ -23,7 +23,7 @@ def compare(before, after, lock):
     if before["packages"].get(name) != lock["before"] or after["packages"].get(name) != lock["after"]:
         raise ValueError("fixed package versions differ")
     expected = dict(before["packages"], **{name: lock["after"]})
-    if after["packages"] != expected or before["python"] != after["python"] or before["pythonVersion"] != after["pythonVersion"] or after["python"].get("acryl-datahub") != "1.8.0":
+    if after["packages"] != expected or before["python"] != after["python"] or before["pythonVersion"] != after["pythonVersion"] or after["python"].get("acryl-datahub") != lock["cliPackageVersion"]:
         raise ValueError("single-package/Python compatibility proof refused")
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     return {"baseReference": lock["base"], "packageSHA256": lock["sha256"], "package": name,
@@ -36,7 +36,7 @@ def observation(phase, snapshot, lock):
     version = snapshot["packages"].get(lock["package"] + ":" + lock["architecture"])
     expected = lock["before"] if phase == "before" else lock["after"]
     return {"phase": phase, "targetVersionState": "expected" if version == expected else "missing" if version is None else "unexpected",
-            "datahubVersionMatches": snapshot["python"].get("acryl-datahub") == "1.8.0", "pythonVersion": snapshot["pythonVersion"],
+            "datahubVersionMatches": snapshot["python"].get("acryl-datahub") == lock["cliPackageVersion"], "pythonVersion": snapshot["pythonVersion"],
             "packageCount": len(snapshot["packages"]), "pythonPackageCount": len(snapshot["python"])}
 
 
