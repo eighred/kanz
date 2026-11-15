@@ -163,6 +163,8 @@ def forge_workflow(text):
                 if line.startswith("        run: ")]
     required = [
         "python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked",
+        "python3 -B tools/check_readmes.py --inventory",
+        "python3 -B -m unittest discover -s tools -p test_check_readmes.py -v",
         "python3 -B .agents/plugins/kanz-forge/scripts/provenance.py",
         "node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs",
         "python3 -B -m unittest discover -s .agents/plugins/kanz-forge/scripts -p 'test_*.py' -v",

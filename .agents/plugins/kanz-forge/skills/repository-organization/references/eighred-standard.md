@@ -131,6 +131,11 @@ and migration paths, scripts, scaffolds, architecture guards and documentation.
 Sibling modules can move only with verified local resolution and build contexts.
 Review path edits separately from semantic changes.
 
+Preserve executable Git modes and shebang line endings as well as file bytes.
+Windows may ignore local executable bits while a Linux caller still needs them.
+Audit the index mode of native entrypoints after a move; invoking a script through
+Python or Bash in a local test does not exercise a foreign tool executing it directly.
+
 Validate the complete effective source inventory, including new nonignored files
 and excluding deletions. Run naming/link checks and affected generation/build/test
 entrypoints. Prove a guard rejects a representative violation and detect dead

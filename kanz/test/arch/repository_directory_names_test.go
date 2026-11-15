@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -91,5 +92,45 @@ func TestRepositoryDirectoryNamingRejectsRegression(t *testing.T) {
 		if len(invalidRepositoryDirectories([]string{file})) == 0 {
 			t.Fatalf("accepted a noncanonical directory: %s", file)
 		}
+	}
+}
+
+// A Windows checkout can execute a helper through its interpreter while losing
+// the Git mode that an external Linux caller (for example ORAS) requires.
+func TestNativeEntrypointsKeepExecutableGitMode(t *testing.T) {
+	root := filepath.Dir(moduleRoot(t))
+	raw, err := exec.Command("git", "-C", root, "ls-files", "--stage", "-z").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, entry := range strings.Split(string(raw), "\x00") {
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, "\t", 2)
+		if len(parts) != 2 || len(strings.Fields(parts[0])) != 3 {
+			t.Fatal("incomplete Git mode inventory")
+		}
+		name := parts[1]
+		if filepath.Ext(name) != "" {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(root, name))
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(body), "#!") {
+			continue
+		}
+		checked++
+		if strings.Fields(parts[0])[0] != "100755" {
+			t.Errorf("native entrypoint lost executable Git mode: %s", name)
+		}
+	}
+	if checked < 2 {
+		t.Fatal("native entrypoint inventory missed the hook or credential helper")
 	}
 }

@@ -1061,7 +1061,7 @@ jobs:
   # error or a broken build reached main unremarked.
   #
   # There is no linter step because the repository has no JS/TS linter anywhere;
-  # the compiler is the quality gate, exactly as it is for kanz/ts/kanz-bus.
+  # the compiler is the quality gate, exactly as it is for kanz/ts/kanz_bus.
   web:
     needs: scope
     if: needs.scope.outputs.application == 'true'

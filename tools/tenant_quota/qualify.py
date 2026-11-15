@@ -3,7 +3,7 @@
 
 Requires kind, Docker, kubectl, bash and jq. Never uses the current kubeconfig.
 Only the unchanged tenantctl quota functions run; broker/identity lifecycle
-qualification remains owned by tools/native-kafka-provision.
+qualification remains owned by tools/native_kafka_provision.
 """
 import hashlib
 import json

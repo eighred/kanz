@@ -290,6 +290,8 @@ class WorkflowContractTests(unittest.TestCase):
                          ("    runs-on: ubuntu-latest", "    runs-on: windows-latest"),
                          ("run: node --test", "run: true # node --test"),
                          ("scripts/provenance.py", "scripts/provenance.py || true"),
+                         ("tools/check_readmes.py --inventory", "tools/check_readmes.py --disabled"),
+                         ("test_check_readmes.py -v", "missing_test.py -v"),
                          ("    steps:", "    if: false\n    steps:"),
                          ("    steps:", "    continue-on-error: true\n    steps:")):
             with self.subTest(old=old), self.assertRaises(ValueError):
