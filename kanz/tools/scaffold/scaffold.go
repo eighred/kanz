@@ -30,8 +30,8 @@ type Data struct {
 
 // newData validates name and derives the template fields.
 func newData(name string) (Data, error) {
-	if !nameRE.MatchString(name) {
-		return Data{}, fmt.Errorf("scaffold: invalid service name %q (want lowercase letters, digits, dashes; e.g. risk-engine)", name)
+	if !nameRE.MatchString(name) || strings.Contains(name, "--") {
+		return Data{}, fmt.Errorf("scaffold: invalid service name %q (want lowercase letters, digits, single dashes; e.g. risk-engine)", name)
 	}
 	env := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 	return Data{Name: name, Directory: strings.ReplaceAll(name, "-", "_"), EnvPrefix: env, Title: strings.ToUpper(name[:1]) + name[1:]}, nil

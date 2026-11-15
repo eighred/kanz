@@ -77,7 +77,7 @@ func TestGenerateRefusesOverwrite(t *testing.T) {
 
 func TestGenerateRejectsBadNames(t *testing.T) {
 	root := t.TempDir()
-	for _, bad := range []string{"", "A", "Foo", "bad name", "-leading", "x", "with_underscore", "trailing-"} {
+	for _, bad := range []string{"", "A", "Foo", "bad name", "-leading", "x", "with_underscore", "trailing-", "bad--name"} {
 		if _, err := scaffold.Generate(root, bad); err == nil {
 			t.Errorf("Generate(%q) succeeded, want rejection", bad)
 		}
