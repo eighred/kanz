@@ -7,7 +7,7 @@ normative specifications below.
 ```sh
 buf generate    # regenerate the Go/Python SDKs
 buf lint
-buf breaking --against '.git#branch=main'
+bash check-breaking.sh  # compare with origin/main, including its pre-move layout
 ```
 
 ## What is normative here

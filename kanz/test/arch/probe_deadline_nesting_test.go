@@ -627,9 +627,9 @@ var timeUnits = map[string]time.Duration{
 // THE FILE THAT DEFECT LIVED IN IS GONE WITH THE TERMINAL CLIENT, and this list
 // was repointed rather than emptied. An empty list here would pass forever while
 // asserting nothing — and the property is not about that file, it is about any
-// surface that says it delegates to the shared transport. universe's control-
-// plane source is the remaining one that says so, and "delegates" is a property
-// that decays the first time somebody needs "just one" direct request.
+// surface that says it delegates to the signed gateway transport. The lake
+// snapshot command is the remaining consumer; a direct request there would
+// duplicate its signature and deadline responsibilities.
 var delegatingClientFiles = []string{
 	"cmd/kanz_lake_snapshot/main.go",
 }

@@ -1444,6 +1444,8 @@ jobs:
       - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
+      - name: Verify baseline selection and incompatible-change refusal
+        run: python3 -B -m unittest discover -s .github/scripts -p test_schema_baseline.py
       - name: Lint
         working-directory: schemas
         run: buf lint
@@ -1459,7 +1461,7 @@ jobs:
       # is why this guard was inert on exactly the changes it exists to gate.
       - name: Breaking-change check
         working-directory: schemas
-        run: buf breaking --against '../.git#ref=origin/main,subdir=schemas'
+        run: bash check-breaking.sh
 
   # The only application context required by the main ruleset. Missing results,
   # cancellation, and accidental skips must never masquerade as successful CI.
