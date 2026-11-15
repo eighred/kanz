@@ -109,6 +109,27 @@ skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.
 Containers and their ephemeral state are removed on exit.
 
+### Fixture maintenance images
+
+The disposable search and broker select official maintenance releases
+[OpenSearch 2.19.7](https://github.com/opensearch-project/OpenSearch/releases/tag/2.19.7)
+and Redpanda 26.2.7. `images.json` selects their exact linux/amd64 platform
+manifests; `image-descriptors.json` binds the independently read raw manifest and
+config hashes, byte counts, media types and ordered rootfs DiffIDs. The other
+four image selections remain unchanged.
+
+The selected Redpanda image records `libbrotli1:amd64` version
+`1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)
+identifies as fixing CVE-2026-111497. Its three Brotli library binaries and three
+SONAME symlinks match the official fixed Debian package exactly across the
+verified image layers. Its runtime configuration matches the previous image;
+Redpanda's [patch-release policy](https://docs.redpanda.com/streaming/current/upgrade/rolling-upgrade/)
+preserves user-facing behavior. These source and package checks do not establish
+a clean scanner verdict or DataHub runtime compatibility. The unchanged full
+six-image fixed-CRITICAL/Java scan and actual catalog workflow must qualify the
+selected bytes before acceptance. MySQL 8.2 retains its existing pin and
+descriptor; its advisory findings remain unresolved and still prevent acceptance.
+
 ### Fixture-only ingestion package correction
 
 The official 1.8.0 locked CLI manifest selected in `images.json` was unchanged
