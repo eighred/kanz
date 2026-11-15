@@ -35,6 +35,8 @@ SCANNER_FILE_LIMIT = 8 << 30
 SCANNER_DISK_LIMIT = 12 << 30
 READINESS_OUTPUT_LIMIT = 64 << 10
 READINESS_ATTEMPTS_RETAINED = 8
+READINESS_CONTEXT_LINES = 40
+READINESS_CONTEXT_RECORDS = 16
 READINESS_ROLES = frozenset({"broker", "mysql", "search", "gms"})
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
@@ -202,7 +204,8 @@ def runtime_output(output, code, source):
     """Informational closed signals; no text can authorise readiness/cleanup."""
     if source not in {"readiness-command", "broker-startup-log"} or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
         raise ValueError("runtime diagnostic source/size refused")
-    diagnostic = output.decode("utf-8", errors="replace").lower()
+    text = output.decode("utf-8", errors="replace")
+    diagnostic = text.lower()
     patterns = {
         "configuration-refused": ("unable to load config", "unable to decode config", "yaml: unmarshal", "yaml: line", "unknown configuration property"),
         "permission-refused": ("permission denied", "operation not permitted", "read-only file system"),
@@ -213,11 +216,63 @@ def runtime_output(output, code, source):
         "startup-fatal": ("startup aborted", "startup failed", "fatal error"),
     }
     signals = sorted(key for key, markers in patterns.items() if any(marker in diagnostic for marker in markers))
+    # Go 1.27.3 io/fs.PathError formats Op + " " + Path + ": " + Err.
+    # Match only that adjacent sequence, never an operation on another line.
+    # Resource classes come from this fixture's literal launch paths, selected
+    # image payload metadata and standard proc/sys roots. Neither the matched
+    # path nor arbitrary text is retained. A shape is not a caller/fatal cause.
+    path_error = re.compile(r"(?<![\w/.-])(?P<operation>open|read|write|mkdir|chmod|chown|stat|lstat|remove|unlink|truncate|chtimes|readdir|readlink) (?P<path>/[A-Za-z0-9_./@+,-]+): (?P<error>permission denied|operation not permitted|read-only file system|no space left on device|file too large)(?![\w-])")
+    def resource_class(path):
+        if any(part in {".", ".."} for part in path.split("/")):
+            return "unclassified"
+        if path == "/tmp/redpanda.yaml":
+            return "selected-broker-config"
+        if path == "/tmp":
+            return "bounded-temporary-root"
+        if path == "/etc/redpanda/redpanda.yaml":
+            return "packaged-vendor-config"
+        for prefix, classification in (("/var/lib/redpanda/data", "selected-broker-data"),
+                                       ("/var/lib/redpanda/coredump", "packaged-coredump-directory"),
+                                       ("/proc/sys/kernel", "proc-sys-kernel"), ("/proc/sys/vm", "proc-sys-vm"),
+                                       ("/proc/sys/fs", "proc-sys-fs"), ("/proc", "proc-filesystem"), ("/sys", "sys-filesystem")):
+            if path == prefix or path.startswith(prefix + "/"):
+                return classification
+        return "unclassified"
+    lines = text.splitlines()
+    context = {"lineLimit": READINESS_CONTEXT_LINES, "recordLimit": READINESS_CONTEXT_RECORDS,
+               "inspectedLines": min(len(lines), READINESS_CONTEXT_LINES),
+               "omittedEarlierLines": max(0, len(lines) - READINESS_CONTEXT_LINES),
+               "signalLines": 0, "omittedSignalLines": 0, "records": []}
+    records = {}
+    for line in lines[-READINESS_CONTEXT_LINES:]:
+        lowered = line.lower()
+        line_signals = tuple(sorted(key for key, markers in patterns.items() if any(marker in lowered for marker in markers)))
+        if not line_signals:
+            continue
+        context["signalLines"] += 1
+        bindings = [(match["operation"], resource_class(match["path"]), match["error"].replace(" ", "-")) for match in path_error.finditer(line)]
+        values = ["unclassified"] * 3
+        for index in range(3):
+            items = {value[index] for value in bindings}
+            if items:
+                values[index] = next(iter(items)) if len(items) == 1 else "multiple"
+        # No selected vendor stage/level format is established yet. Keep both
+        # explicitly unknown rather than turning a warning token into a cause.
+        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals)
+        if key not in records:
+            if len(records) == READINESS_CONTEXT_RECORDS:
+                context["omittedSignalLines"] += 1
+                continue
+            records[key] = {"stage": key[0], "level": key[1], "binding": key[2], "operation": key[3],
+                            "resource": key[4], "error": key[5], "signals": list(line_signals), "count": 0}
+            context["records"].append(records[key])
+        records[key]["count"] += 1
+    context["truncated"] = bool(context["omittedEarlierLines"] or context["omittedSignalLines"])
     return {"informationalOnly": True, "source": source, "captureComplete": True,
             "outputLimitBytes": READINESS_OUTPUT_LIMIT, "capturedBytes": len(output),
             "capturedSHA256": hashlib.sha256(output).hexdigest(), "exitCode": code,
             "category": "multiple-signals" if len(signals) > 1 else "signal-observed" if signals else "unclassified-output",
-            "matchedSignals": signals}
+            "matchedSignals": signals, "lineContext": context}
 
 
 def runtime_refusal(category, source, code=None):

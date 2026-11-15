@@ -56,7 +56,7 @@ class QualificationControls(unittest.TestCase):
                 return json.dumps([inspected])
             if args[:4] == ["docker", "logs", "--tail", "40"]:
                 self.assertEqual(args[-1], container_id)
-                fixture.last_runtime_result = qualify.runtime_output(("unknown flag " + secret).encode(), 0, "broker-startup-log")
+                fixture.last_runtime_result = qualify.runtime_output(("unknown flag " + secret + "\nwrite /tmp/redpanda.yaml: permission denied " + secret).encode(), 0, "broker-startup-log")
                 return secret
             self.fail("diagnostics cannot launch or mutate resources")
         fixture.run = execute
@@ -71,7 +71,11 @@ class QualificationControls(unittest.TestCase):
         self.assertEqual(entry["waitOutcome"], "terminal-state")
         self.assertEqual(entry["recent"][0]["container"]["exitCode"], 1)
         self.assertTrue(entry["recent"][0]["container"]["errorPresent"])
-        self.assertEqual(entry["recent"][0]["brokerLog"]["matchedSignals"], ["option-refused"])
+        self.assertEqual(entry["recent"][0]["brokerLog"]["matchedSignals"], ["option-refused", "permission-refused"])
+        context = entry["recent"][0]["brokerLog"]["lineContext"]
+        self.assertEqual((context["signalLines"], context["omittedSignalLines"]), (2, 0))
+        selected = next(record for record in context["records"] if record["resource"] == "selected-broker-config")
+        self.assertEqual((selected["operation"], selected["error"], selected["count"]), ("write", "permission-denied", 1))
         self.assertEqual(entry["recent"][0]["binding"]["containerID"], container_id)
         self.assertEqual([args[-1] for args, _ in calls if args[:2] == ["docker", "inspect"]], [name, container_id])
         self.assertNotIn(secret, json.dumps(fixture.readiness_evidence))
@@ -84,7 +88,7 @@ class QualificationControls(unittest.TestCase):
                 fixture.wait_exec(name, ["rpk", "cluster", "info"])
             self.assertFalse(any(args[:2] in (["docker", "logs"], ["docker", "exec"]) for args, _ in calls))
             refused = json.dumps(fixture.readiness_evidence)
-            for unbound in ("capturedSHA256", "matchedSignals", "probe", secret):
+            for unbound in ("capturedSHA256", "matchedSignals", "lineContext", "probe", secret):
                 self.assertNotIn(unbound, refused)
         for role in ("mysql", "search", "gms"):
             calls.clear()

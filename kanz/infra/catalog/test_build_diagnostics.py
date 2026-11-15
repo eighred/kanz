@@ -79,6 +79,50 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertEqual(projected["capturedBytes"], len(runtime))
         self.assertTrue(projected["informationalOnly"])
         self.assertNotIn(secret, json.dumps(projected))
+        # A PathError-shaped sequence binds only its adjacent public resource
+        # class. Tokens on other lines or secret path/level/operation values
+        # never become retained text or an attributed vendor failure.
+        contextual = ("WARN open /tmp/redpanda.yaml: permission denied " + secret + "\n"
+                      "write /var/lib/redpanda/data/cache: read-only file system " + secret + "\n"
+                      "open /proc/sys/vm/swappiness: operation not permitted " + secret + "\n"
+                      "open /tmp/redpanda.yaml-" + secret + ": permission denied\n"
+                      + secret + " /tmp/redpanda.yaml: permission denied\n"
+                      "open /tmp/redpanda.yaml\npermission denied " + secret + "\n"
+                      "open /tmp/redpanda.yaml: permission denied; write /var/lib/redpanda/data: operation not permitted\n").encode()
+        contexts = qualify.runtime_output(contextual, 0, "broker-startup-log")["lineContext"]
+        records = contexts["records"]
+        config = next(record for record in records if record["resource"] == "selected-broker-config")
+        self.assertEqual((config["operation"], config["error"], config["binding"]), ("open", "permission-denied", "path-error-sequence"))
+        self.assertEqual((config["stage"], config["level"]), ("unclassified", "unclassified"))
+        self.assertTrue(any(record["resource"] == "selected-broker-data" and record["operation"] == "write" for record in records))
+        self.assertTrue(any(record["resource"] == "proc-sys-vm" and record["error"] == "operation-not-permitted" for record in records))
+        self.assertTrue(any(record["binding"] == "multiple-path-error-sequences" and record["resource"] == "multiple" and record["error"] == "multiple" for record in records))
+        self.assertEqual(next(record for record in records if record["binding"] == "unclassified")["count"], 2)
+        self.assertTrue(any(record["operation"] == "open" and record["resource"] == "unclassified" for record in records))
+        self.assertFalse(contexts["truncated"])
+        for public_path, classification in (("/tmp", "bounded-temporary-root"), ("/etc/redpanda/redpanda.yaml", "packaged-vendor-config"), ("/var/lib/redpanda/coredump/core", "packaged-coredump-directory")):
+            packaged = qualify.runtime_output(("open " + public_path + ": permission denied " + secret).encode(), 1, "broker-startup-log")["lineContext"]["records"][0]
+            self.assertEqual(packaged["resource"], classification)
+            self.assertNotIn(secret, json.dumps(packaged))
+        for private_path in ("/tmp/" + secret, "/tmp/REDPANDA.yaml", "/tmp/redpanda.yaml/" + secret, "/etc/redpanda/redpanda.yaml-" + secret, "/var/lib/redpanda/data-" + secret, "/var/lib/redpanda/data/../" + secret, "/var/lib/redpanda/coredump-" + secret, "/proc-" + secret, "/sys-" + secret):
+            negative = qualify.runtime_output((secret + " open " + private_path + ": permission denied").encode(), 1, "broker-startup-log")["lineContext"]["records"][0]
+            self.assertEqual((negative["resource"], negative["level"], negative["stage"]), ("unclassified",) * 3)
+            self.assertNotIn(secret, json.dumps(negative))
+        self.assertNotIn(secret, json.dumps(contexts))
+        for raw_path in ("/tmp", "/var/lib/redpanda", "/proc/sys"):
+            self.assertNotIn(raw_path, json.dumps(contexts))
+        resources = ("/tmp/redpanda.yaml", "/var/lib/redpanda/data", "/proc/sys/kernel", "/proc/sys/vm", "/proc/sys/fs", "/proc/1/status", "/sys/kernel", "/unknown/" + secret)
+        lines = [operation + " " + path + ": permission denied" for operation in ("open", "write") for path in resources]
+        lines += ["mkdir /tmp/redpanda.yaml: permission denied", lines[0]]
+        bounded_contexts = qualify.runtime_output("\n".join(lines).encode(), 1, "broker-startup-log")["lineContext"]
+        self.assertEqual((bounded_contexts["recordLimit"], len(bounded_contexts["records"]), bounded_contexts["signalLines"], bounded_contexts["omittedSignalLines"]), (16, 16, 18, 1))
+        self.assertEqual(bounded_contexts["records"][0]["count"], 2)
+        self.assertTrue(bounded_contexts["truncated"])
+        self.assertEqual(sum(record["count"] for record in bounded_contexts["records"]) + bounded_contexts["omittedSignalLines"], bounded_contexts["signalLines"])
+        tail = qualify.runtime_output(("\n".join([lines[0]] * 41)).encode(), 1, "broker-startup-log")["lineContext"]
+        self.assertEqual((tail["lineLimit"], tail["inspectedLines"], tail["omittedEarlierLines"], tail["records"][0]["count"]), (40, 40, 1, 40))
+        self.assertTrue(tail["truncated"])
+        self.assertNotIn(secret, json.dumps(bounded_contexts))
         for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)

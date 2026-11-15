@@ -115,6 +115,14 @@ check, then refused at the first broker readiness wait. The retained receipt and
 job logs contained no broker state or startup output; they establish no cause.
 The runtime cases and actual MySQL process/SQL observations were not reached.
 
+The subsequent [run 43675904332](https://github.com/eighred/kanz/actions/runs/43675904332)
+bound the same owned broker container ID before and after its first failed
+probe. It had exited with code 1, without an OOM or Docker state error. Its
+complete bounded startup-log capture matched only the permission signal; that
+receipt identifies neither an operation/path nor a fatal cause. All six scans
+and the MySQL container profile passed; process/SQL and runtime cases were not
+reached. The cleanup and credential-absence evidence does not supply acceptance.
+
 Readiness diagnostics now bind the exact source/run/nonce/image/container ID
 before executing a probe. Subsequent execution, inspection and broker log reads
 use that immutable ID; a replaced name cannot redirect the observed output.
@@ -127,9 +135,28 @@ and process-group termination at overflow, inside the unchanged command limits.
 Only eight recent failed attempts per selected role survive; terminal state,
 unknown inspection and readiness deadline remain distinct. Signals are
 informational and cannot grant readiness, acceptance or cleanup authority.
+Within the last 40 captured lines, at most 16 aggregated context records retain
+fixed enum values and counts, with omitted-line counts and explicit truncation.
+Only an adjacent operation/path/errno sequence matching
+[Go 1.27.3's PathError format](https://github.com/golang/go/blob/go1.27.3/src/io/fs/fs.go#L250)
+binds a supported operation to a resource class. This recognises a text format,
+not an actual caller. Paths are classified only as the selected broker config
+or data tree, the exact bounded temporary root, the packaged vendor config or
+coredump tree, standard proc/sys classes, or unclassified. Exact config names
+and directory boundaries matter; case changes, traversal components and
+appended filename suffixes are not
+normalised into selected resources. Multiple sequences remain ambiguous.
+Selected config/data paths come from the committed launch; packaged paths come
+from the selected image payload, which establishes presence rather than writes.
+The selected broker's exact public startup-source join remains unresolved;
+vendor stage and log level therefore remain explicitly unclassified. No raw
+line, path, environment, argument or arbitrary capture enters these records.
 The existing pre-authentication synthetic diagnostic control also exercises
-secret-bearing runtime projection; target-side controls discriminate foreign
-owners/name replacement, non-broker log refusal, retention and capture overflow.
+secret-bearing runtime projection, same-line binding, unknown path/operation/
+level refusal, ambiguity and both context limits; target-side controls
+discriminate foreign owners/name replacement, non-broker log refusal, retention
+and capture overflow. The inventory remains 49 catalog controls, seven shared
+auth controls, one pre-authentication diagnostic control and eight runtime cases.
 No guessed broker configuration fix or weakened default follows from the earlier
 generic refusal. The changed controller still requires a fresh full Linux run.
 
