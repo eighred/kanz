@@ -229,7 +229,9 @@ def runtime_output(output, code, source):
         "pid-read-message": "failed to read pid file",
         "pid-unlink-message": "failed to unlink pid file",
     }
-    template_shapes = {"memory-below-required-message": r"(?<![\w-])memory: '[^'\r\n]*' below required: '[^'\r\n]*'(?![\w-])"}
+    # Exclude every str.splitlines separator in either substituted value so
+    # full-capture signals and per-line context agree on the same-line rule.
+    template_shapes = {"memory-below-required-message": r"(?<![\w-])memory: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*' below required: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*'(?![\w-])"}
     apis = {"perf-event-open-failed": "perf_event_open() failed", "chmod-failed": "chmod failed", "open-failed": "open failed"}
     literals = {**templates, **apis}
     def signal_classes(value):

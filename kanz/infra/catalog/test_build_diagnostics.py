@@ -172,7 +172,9 @@ class BuildDiagnosticControls(unittest.TestCase):
         for broken_memory in ("Memory: '" + secret + "'\nbelow required: '" + secret + "'",
                               "Memory: '" + secret + "' below required:\n'" + secret + "'",
                               "Memory: '" + secret + "\n' below required: '" + secret + "'",
-                              "Memory: '" + secret + "'\rbelow required: '" + secret + "'"):
+                              "Memory: '" + secret + "'\rbelow required: '" + secret + "'",
+                              *("Memory: '" + secret + separator + "' below required: '" + secret + "'" for separator in ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")),
+                              *("Memory: '" + secret + "' below required: '" + secret + separator + "'" for separator in ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"))):
             negative_memory = qualify.runtime_output(broken_memory.encode(), 1, "broker-startup-log")
             self.assertEqual(negative_memory["matchedSignals"], [])
             self.assertEqual(negative_memory["lineContext"]["records"], [])
