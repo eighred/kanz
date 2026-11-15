@@ -62,20 +62,27 @@ class RegistryProfileTests(unittest.TestCase):
                 self.assertNotIn(DUMMY, json.dumps(result))
 
     def test_only_actual_erasure_and_directory_absence_pass(self):
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {'DOCKER_AUTH_CONFIG': ''}):
-            root = Path(temporary)
-            profile = self.create(root)
-            result = auth.cleanup(root, profile, IDENTITY, logout=self.erased)
-            self.assertTrue(all(result[key] for key in ('ownershipVerified', 'fileBackend', 'credentialsAbsent', 'directoryRemoved', 'passed')))
-            self.assertEqual(result['logout'], {'attempted': True, 'exitCode': 0})
-            self.assertFalse(profile.exists())
-
-    def test_external_stores_helpers_and_ambient_auth_refused_without_calling_them(self):
-        for field, value in (('credsStore', 'dummy-helper'), ('credHelpers', {'ghcr.io': 'dummy-helper'})):
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {'DOCKER_AUTH_CONFIG': ''}):
+        for authenticated in (False, True):
+            with self.subTest(authenticated=authenticated), tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {'DOCKER_AUTH_CONFIG': ''}):
                 root = Path(temporary)
                 profile = self.create(root)
-                self.write(profile, {'auths': {'ghcr.io': {'auth': DUMMY}}, field: value})
+                if not authenticated:
+                    self.write(profile, {'auths': {'ghcr.io': {}}})
+                result = auth.cleanup(root, profile, IDENTITY, logout=self.erased)
+                self.assertTrue(all(result[key] for key in ('ownershipVerified', 'fileBackend', 'credentialsAbsent', 'directoryRemoved', 'passed')))
+                self.assertEqual(result['logout'], {'attempted': True, 'exitCode': 0})
+                self.assertFalse(profile.exists())
+
+    def test_external_stores_helpers_and_ambient_auth_refused_without_calling_them(self):
+        cases = [(field, {'auths': {'ghcr.io': {'auth': DUMMY}}, field: value})
+                 for field, value in (('credsStore', 'dummy-helper'), ('credHelpers', {'ghcr.io': 'dummy-helper'}))]
+        cases.extend((key, {'auths': {key: {'auth': DUMMY}}}) for key in
+                     ('not-ghcr.io', 'ghcr.io.evil.example', 'https://ghcr.io', 'evil.example/ghcr.io'))
+        for mutation, config in cases:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {'DOCKER_AUTH_CONFIG': ''}):
+                root = Path(temporary)
+                profile = self.create(root)
+                self.write(profile, config)
                 with self.assertRaises(ValueError):
                     auth.verify_backend(root, profile, IDENTITY)
                 logout = mock.Mock(return_value=0)

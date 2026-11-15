@@ -215,7 +215,7 @@ def cleanup(root, profile, identity, logout=None):
             try:
                 auths = _file_backend(_read(descriptor, CONFIG, MAX_CONFIG))
                 result['fileBackend'] = True
-                if 'ghcr.io' in auths:
+                if auths.get('ghcr.io') is not None:
                     result['logout']['attempted'] = True
                     code = (logout or _logout)(Path(profile))
                     if type(code) is not int:
