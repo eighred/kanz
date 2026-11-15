@@ -249,8 +249,9 @@ def runtime_output(output, code, source):
     template_shapes = {"memory-below-required-message": r"(?<![\w-])memory: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*' below required: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*'(?![\w-])"}
     apis = {"perf-event-open-failed": "perf_event_open() failed", "chmod-failed": "chmod failed", "open-failed": "open failed"}
     if source == "search-startup-log":
-        # Public OpenSearch 3.9.0 source at 4ee42a94 supplies these finite
-        # wrappers/message frames. Matching one is not a caller/cause claim.
+        # OpenSearch launcher source 4ee42a94 and its expected bundle's public
+        # OpenJDK 25u source 7b65d74b supply these finite tokens. This neither
+        # identifies the actual image JDK nor establishes a caller or cause.
         templates = {
             "search-root-cause-wrapper": "likely root cause:",
             "search-node-validation-wrapper": "node validation exception",
@@ -263,12 +264,32 @@ def runtime_output(output, code, source):
             "search-config-path-message": "opensearch_path_conf must be set to the configuration path",
             "search-jvm-option-message": "encountered improperly formatted jvm option in",
             "search-bootstrap-check-message": "bootstrap checks failed",
+            "search-jvm-initialization-message": "error occurred during initialization of vm",
+            "search-jvm-create-message": "could not create the java virtual machine.",
+            "search-jvm-log-open-message": "error opening log file",
+            "search-jvm-xlog-message": "invalid -xlog option",
+            "search-jvm-unrecognized-option-message": "unrecognized vm option",
+            "search-jvm-initial-heap-message": "invalid initial heap size:",
+            "search-jvm-maximum-heap-message": "invalid maximum heap size:",
+            "search-jvm-thread-start-message": "failed to start thread",
+            "search-jvm-thread-resource-message": "cannot create vm thread. out of system resources.",
         }
-        template_shapes = {}
+        # This source template substitutes only a nonzero integer exit status;
+        # the regex cannot span any splitlines separator or retain a suffix.
+        template_shapes = {"search-java-start-message": r"(?<![\w-])starting java failed with \[-?[1-9][0-9]{0,9}\](?![\w-])"}
         apis = {"search-access-denied-exception": "java.nio.file.accessdeniedexception",
                 "search-bootstrap-exception": "org.opensearch.bootstrap.bootstrapexception",
                 "search-node-validation-exception": "org.opensearch.node.nodevalidationexception",
-                "search-illegal-state-exception": "java.lang.illegalstateexception"}
+                "search-illegal-state-exception": "java.lang.illegalstateexception",
+                "search-runtime-exception": "java.lang.runtimeexception",
+                "search-null-pointer-exception": "java.lang.nullpointerexception",
+                "search-out-of-memory-error": "java.lang.outofmemoryerror",
+                "search-jvm-ergonomics-frame": "org.opensearch.tools.launchers.jvmergonomics",
+                "search-jvm-options-parser-frame": "org.opensearch.tools.launchers.jvmoptionsparser",
+                "search-pthread-create-message": "pthread_create failed",
+                "search-jdk-cgroup-factory-frame": "jdk.internal.platform.cgroupsubsystemfactory",
+                "search-jdk-cgroup-v2-frame": "jdk.internal.platform.cgroupv2.cgroupv2subsystem",
+                "search-jdk-os-metrics-frame": "com.sun.management.internal.operatingsystemimpl"}
     literals = {**templates, **apis}
     def signal_classes(value):
         result = {key for key, markers in patterns.items() if any(marker in value for marker in markers)}

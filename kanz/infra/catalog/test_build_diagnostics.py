@@ -242,10 +242,50 @@ class BuildDiagnosticControls(unittest.TestCase):
                                ("bootstrap checks failed", "search-bootstrap-check-message"),
                                ("org.opensearch.bootstrap.BootstrapException", "search-bootstrap-exception"),
                                ("org.opensearch.node.NodeValidationException", "search-node-validation-exception"),
-                               ("java.lang.IllegalStateException", "search-illegal-state-exception")):
+                               ("java.lang.IllegalStateException", "search-illegal-state-exception"),
+                               ("starting java failed with [1]", "search-java-start-message"),
+                               ("Error occurred during initialization of VM", "search-jvm-initialization-message"),
+                               ("Could not create the Java Virtual Machine.", "search-jvm-create-message"),
+                               ("Error opening log file", "search-jvm-log-open-message"),
+                               ("Invalid -Xlog option", "search-jvm-xlog-message"),
+                               ("Unrecognized VM option", "search-jvm-unrecognized-option-message"),
+                               ("Invalid initial heap size:", "search-jvm-initial-heap-message"),
+                               ("Invalid maximum heap size:", "search-jvm-maximum-heap-message"),
+                               ("Failed to start thread", "search-jvm-thread-start-message"),
+                               ("Cannot create VM thread. Out of system resources.", "search-jvm-thread-resource-message"),
+                               ("java.lang.RuntimeException", "search-runtime-exception"),
+                               ("java.lang.NullPointerException", "search-null-pointer-exception"),
+                               ("java.lang.OutOfMemoryError", "search-out-of-memory-error"),
+                               ("org.opensearch.tools.launchers.JvmErgonomics.flagsFinal", "search-jvm-ergonomics-frame"),
+                               ("org.opensearch.tools.launchers.JvmOptionsParser.main", "search-jvm-options-parser-frame"),
+                               ("pthread_create failed", "search-pthread-create-message"),
+                               ("jdk.internal.platform.CgroupSubsystemFactory.create", "search-jdk-cgroup-factory-frame"),
+                               ("jdk.internal.platform.cgroupv2.CgroupV2Subsystem.getInstance", "search-jdk-cgroup-v2-frame"),
+                               ("com.sun.management.internal.OperatingSystemImpl.<init>", "search-jdk-os-metrics-frame")):
             observation = qualify.runtime_output((text + " " + secret).encode(), 1, "search-startup-log")
             self.assertEqual(observation["matchedSignals"], [expected])
             self.assertNotIn(secret, json.dumps(observation))
+        launcher_body = ("java.lang.RuntimeException: starting java failed with [1]\noutput:\n" + secret + "\nerror:\nError occurred during initialization of VM\nError opening log file '" + secret + "': " + secret).encode()
+        launcher = qualify.runtime_output(launcher_body, 1, "search-startup-log")
+        self.assertEqual(launcher["matchedSignals"], ["search-java-start-message", "search-jvm-initialization-message", "search-jvm-log-open-message", "search-runtime-exception"])
+        self.assertEqual(len(launcher["lineContext"]["records"]), 3)
+        self.assertEqual(launcher["lineContext"]["records"][0]["coOccurrence"]["apiSignals"], ["search-runtime-exception"])
+        for row in launcher["lineContext"]["records"]:
+            self.assertIsNone(row["startupMessage"])
+            self.assertEqual([row[key] for key in ("operation", "resource", "error", "stage", "level", "binding")], ["unclassified"] * 6)
+        self.assertNotIn(secret, json.dumps(launcher))
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            for broken in ("starting java failed with [" + separator + "1]", "starting java failed" + separator + "with [1]", "starting java failed with [1" + separator + "]"):
+                negative = qualify.runtime_output((broken + " " + secret).encode(), 1, "search-startup-log")
+                self.assertEqual(negative["matchedSignals"], [])
+                self.assertEqual(negative["lineContext"]["records"], [])
+                self.assertNotIn(secret, json.dumps(negative))
+        for unknown in ("starting java failed with [0]", "starting java failed with [" + secret + "]", "starting java failed with [12345678901]", "starting java failed with [1]" + secret, "java.lang.RuntimeException" + secret, "java.lang.NullPointerException" + secret, "java.lang.OutOfMemoryError" + secret, "org.opensearch.tools.launchers.JvmErgonomics" + secret):
+            self.assertEqual(qualify.runtime_output(unknown.encode(), 1, "search-startup-log")["matchedSignals"], [])
+        thread = qualify.runtime_output(('Failed to start thread "' + secret + '" - pthread_create failed (' + secret + ') for attributes: ' + secret).encode(), 1, "search-startup-log")["lineContext"]["records"][0]
+        self.assertEqual(thread["coOccurrence"], {"resourceSignals": [], "apiSignals": ["search-pthread-create-message"], "templateSignals": ["search-jvm-thread-start-message"]})
+        self.assertEqual((thread["operation"], thread["error"], thread["stage"], thread["level"]), ("unclassified",) * 4)
+        self.assertNotIn(secret, json.dumps(thread))
         for path, classification in (("/usr/share/opensearch/data/nodes/0", "selected-search-data"), ("/usr/share/opensearch/logs/opensearch.log", "selected-search-logs")):
             observed = qualify.runtime_output(('java.nio.file.AccessDeniedException: "' + path + '" ' + secret).encode(), 1, "search-startup-log")
             self.assertEqual(observed["lineContext"]["records"][0]["coOccurrence"]["resourceSignals"], [classification])

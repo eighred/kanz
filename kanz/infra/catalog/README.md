@@ -102,26 +102,13 @@ An independent 8 MiB stdout/stderr pipe budget kills and reaps the process group
 at overflow, with a separate deadline. Scanner storage, database download,
 network diagnostics and actual structured advisory refusal have closed error
 categories. No raw command arguments/logs or credentials enter diagnostics.
-The earlier CI stopped before per-image scans; its exact errno was not retained
-and is not relabelled as an observed EFBIG or advisory result.
 Required runtime cases cannot skip. Normal runs without the disposable catalog
 skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.
 Containers and their ephemeral state are removed on exit.
 
-Actual [run 43674164917](https://github.com/eighred/kanz/actions/runs/43674164917)
-passed all six fixed-CRITICAL/Java image scans and the MySQL container-profile
-check, then refused at the first broker readiness wait. The retained receipt and
-job logs contained no broker state or startup output; they establish no cause.
-The runtime cases and actual MySQL process/SQL observations were not reached.
-
-The subsequent [run 43675904332](https://github.com/eighred/kanz/actions/runs/43675904332)
-bound the same owned broker container ID before and after its first failed
-probe. It had exited with code 1, without an OOM or Docker state error. Its
-complete bounded startup-log capture matched only the permission signal; that
-receipt identifies neither an operation/path nor a fatal cause. All six scans
-and the MySQL container profile passed; process/SQL and runtime cases were not
-reached. The cleanup and credential-absence evidence does not supply acceptance.
+Immutable verification history, prior refusals and source-bound CI artifacts
+are recorded in [PR #1727](https://github.com/eighred/kanz/pull/1727).
 
 Readiness diagnostics now bind the exact source/run/nonce/image/container ID
 before executing a probe. Subsequent execution, inspection and broker log reads
@@ -176,6 +163,21 @@ only the existing bounded whole-capture byte count/hash is retained. Conditional
 vendor keystore creation/upgrades do not establish the selected image's state
 or justify a writable-config repair without observed evidence. Search startup
 arguments, image pins and the entire isolation/resource profile are unchanged.
+The [JvmErgonomics options probe](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/distribution/tools/launchers/src/main/java/org/opensearch/tools/launchers/JvmErgonomics.java#L108)
+starts a separate Java process before OpenSearch and wraps a nonzero result in
+a RuntimeException. Only its fixed nonzero-integer wrapper and known frame
+tokens are projected; its output/error sections and variable options are not.
+The pinned public [bundle selection](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/gradle/libs.versions.toml#L5)
+is Adoptium `25.0.4.1+1`. Public OpenJDK 25u tag `jdk-25.0.4.1+1` resolves to
+[7b65d74b](https://github.com/openjdk/jdk25u/tree/7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a).
+That source supplies finite initialization, VM-creation, logging, option/heap,
+native-thread, RuntimeException, NullPointerException and OutOfMemoryError
+tokens, plus known launcher/container-metrics frame classes. A frame match is
+only same-line co-occurrence; it does not establish a cgroup, null-input,
+memory or other cause. The public bundle selection is not proof of the selected
+image's actual JDK contents/version. No large payload read or execution is
+substituted for that unresolved source-to-image join. The wrapper regex cannot
+cross any `splitlines()` separator and retains no numeric status or suffix.
 Only a broker line containing the exact case-sensitive compiled prefix
 `Failure during startup: ` once may retain `startupMessage` byte length and
 SHA-256 of its suffix. The capture must round-trip as valid UTF-8; trimming is
@@ -216,8 +218,7 @@ profile. The [published v26.2 listener contract](https://docs.redpanda.com/strea
 rejects wildcard advertised addresses. The public v26.2.2 source
 [falls back to the bound RPC address when advertisement is omitted](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/v/config/node_config.h#L163)
 and [validates that advertised RPC address at startup](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/v/config/node_config.cc#L326).
-This is a published-contract repair candidate for the pinned image; the actual
-failed field remains unobserved until runtime verification.
+Actual broker readiness and the live property proof below remain mandatory.
 
 After broker readiness and before SystemUpdate, the controller binds the exact
 source/run/nonce/image/network/name to its immutable container ID, sets only
@@ -229,7 +230,7 @@ Only exact ASCII `true` followed by one LF passes; missing, false, malformed,
 failed or foreign-owner results refuse setup. The mandatory receipt retains
 only the fixed property/value, source/image/container identities, success flags
 and readback length/hash. It retains no command output, arguments or profiles.
-The changed controller still requires a fresh full Linux run and all cases.
+Each changed controller revision requires the full Linux workflow and all cases.
 
 ### Fixture maintenance images
 
@@ -241,9 +242,6 @@ manifests; `image-descriptors.json` binds the independently read raw manifest an
 config hashes, byte counts, media types and ordered rootfs DiffIDs. The three
 DataHub image selections remain unchanged.
 
-The previous OpenSearch 2.19.7 candidate still reported two fixed-CRITICAL
-`bcprov-jdk15to18` 1.79 findings in
-[run 43671955287](https://github.com/eighred/kanz/actions/runs/43671955287).
 DataHub 1.8.0's immutable
 [shim factory](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/metadata-service/factories/src/main/java/com/linkedin/gms/factory/search/SearchClientShimFactory.java)
 uses engine autodetection by default; its
@@ -254,20 +252,19 @@ older 2.x-only shim guide is stale; upstream's 3.2.0 integration target does not
 prove this 3.9.0 image. OpenSearch's
 [versioned breaking changes](https://docs.opensearch.org/3.9/breaking-changes/#performance-analyzer-plugin)
 record RCA removal in 3.0 while retaining the Performance Analyzer plugin.
-Actual clean-scan and DataHub runtime compatibility still require the full workflow.
+Clean-scan and DataHub runtime compatibility require the full workflow.
 No jar or plugin is removed or replaced to obtain a scanner pass.
 
 The selected Redpanda image records `libbrotli1:amd64` version
 `1.1.0-2+deb13u1`, which [Debian DSA-6582-1](https://lists.debian.org/debian-security-announce/2026/msg00498.html)
 identifies as fixing CVE-2026-111497. Its three Brotli library binaries and three
 SONAME symlinks match the official fixed Debian package exactly across the
-verified image layers. Its runtime configuration matches the previous image;
-Redpanda's [patch-release policy](https://docs.redpanda.com/streaming/current/upgrade/rolling-upgrade/)
+verified image layers. Its RPC advertisement and live-property requirements are
+defined above. Redpanda's [patch-release policy](https://docs.redpanda.com/streaming/current/upgrade/rolling-upgrade/)
 preserves user-facing behavior. These source and package checks do not establish
 a clean scanner verdict or DataHub runtime compatibility. The unchanged full
 six-image fixed-CRITICAL/Java scan and actual catalog workflow must qualify the
-selected bytes before acceptance. The earlier 2.19.7 refusal remains failed
-evidence and does not qualify the new 3.9.0 bytes.
+selected bytes before acceptance.
 
 The disposable SQL store selects Canonical's maintained stable
 [`ubuntu/mysql:8.4-26.04_stable`](https://hub.docker.com/r/ubuntu/mysql), pinned to
@@ -277,8 +274,8 @@ Read-only data inspection verified all five compressed layer hashes/sizes:
 124,184,162 bytes and 7,668 entries. There were no gosu or certifi paths and no
 `.whl`, `.egg` or `.zip` entries. The final Pebble binary's Go build metadata reports
 1.27.1; the MySQL packages report `8.4.11-0ubuntu0.26.04.1`. The mysqld binary
-contains that full version literal; its actual SQL response remains unproved.
-These observations address the old payload selection and do not establish a
+contains that full version literal; runtime readback must match it exactly.
+These payload observations do not establish a
 clean scan, vulnerability absence or DataHub runtime compatibility.
 
 The embedded vendor initialization helper and MySQL configuration match
@@ -304,7 +301,7 @@ actual Pebble/mysqld effective UID/GID and reads SQL `VERSION()`. Only matching
 public version data, numeric identities, output length/hash and verified profile
 flags enter the receipt. Missing/wrong identities, changed mounts/privileges or
 an unexpected version refuse; raw output, environment and credentials do not
-enter receipts or exceptions. These checks still require hosted Linux proof.
+enter receipts or exceptions. Hosted Linux qualification enforces these checks.
 
 DataHub 1.8's
 [pinned Connector/J 9.4.0](https://github.com/datahub-project/datahub/blob/faab576d96cbdb27b8344a755e0bc0f42fdc9c15/build.gradle#L364)
@@ -314,16 +311,15 @@ That supports this disposable maintenance choice; all six unchanged scanner
 checks and all eight actual catalog cases remain mandatory. Pebble's embedded
 VCS revision was not retrievable from the public source/module endpoints during
 inspection. The publisher image bytes and matching helper/configuration are
-verified, but the installed Pebble's exact nonroot/copy-once behavior remains a
-runtime qualification boundary. This fixture does not change Kanz PostgreSQL,
+verified; each run must verify the installed Pebble's exact nonroot/copy-once
+behavior. This fixture does not change Kanz PostgreSQL,
 broker authority or any held production/native runtime.
 
 ### Fixture-only ingestion package correction
 
-The official 1.8.0 locked CLI manifest selected in `images.json` was unchanged
-when checked on 2026-11-15. Actual run 43652444758 refused its 25 fixed-CRITICAL
-`linux-libc-dev` findings (installed 6.8.0-147.147, fixed 6.8.0-149.149) before
-service startup. `ingestion_patch/package-lock.json` pins the official Ubuntu
+The official 1.8.0 locked CLI base contains `linux-libc-dev` 6.8.0-147.147.
+The fixture corrects only that package to 6.8.0-149.149;
+`ingestion_patch/package-lock.json` pins the official Ubuntu
 amd64 replacement: 1,698,546 bytes, SHA256
 `e4b7b9c5023ba727908868661e1113d28ed9b68e47aed00e314723dad4b2b31d`.
 The reviewed publisher HTTPS package indexes and exact downloaded bytes agreed;
@@ -338,7 +334,7 @@ The offline legacy Docker build uses `DOCKER_BUILDKIT=0`, no network/pull/tag,
 intermediate containers. That flag does not remove intermediate images.
 Unsupported legacy builders refuse; no fallback is
 attempted. The receipt records the actual client/server/API versions, builder
-mode and limits. Hosted compatibility remains unproved until the exact CI run.
+mode and limits. The exact hosted run must verify compatibility.
 Those validated public Docker/client/API and builder-limit fields are preserved
 before launch, including on failure. A bounded parser records only output length
 and SHA, closed signal categories, exact recipe phases and projected package/Python
@@ -380,7 +376,7 @@ version and build stages. Its public projection contains only the base image ID,
 config/manifest match flags, `OnBuild` count/empty flag and package HTTP status,
 received size/hash and closed refusal category. It never records raw image
 configuration, environment, URLs from errors or command logs. A current primary
-registry/package read cannot establish the cause of an earlier generic CI refusal.
+registry/package read does not prove execution or establish a runtime failure's cause.
 Inherited `OnBuild` triggers must be empty: Docker executes them before the
 first explicit instruction. The template renders one complete six-label owner
 instruction immediately after `FROM`, before any `ARG`, `USER`, `COPY` or `RUN`;
@@ -405,8 +401,7 @@ passes that argument to its
 before the editable installation. That source-backed packaging literal is
 required everywhere without stripping or normalizing build metadata. A plain
 `1.8.0` dependency refuses even if its before/after graph is otherwise identical.
-The observed earlier equality mismatch supports this causal inference; actual
-dependency readback must still confirm the expected installed literal.
+Actual dependency readback must confirm the expected installed literal.
 
 The upstream manifest/base image ID and derived local image ID have separate
 receipt fields. Only the actual untagged derived ID is scanned and used for
@@ -417,7 +412,7 @@ advisory exit 42; only that exact code plus a complete, exact-image report may
 continue to the next role. Infrastructure exit 1, report, database and resource
 failures stop immediately even when advisory JSON exists. Informational DB logs
 cannot mask code 42. This changes the discriminator, not severity, fixed-only or
-Java policy. The historical run above used advisory exit 1. No service/network starts
+Java policy. No service/network starts
 if any advisory remains, and Java analysis remains enabled.
 
 The exclusive owner record additionally binds the exact nonce/source/run/attempt,
