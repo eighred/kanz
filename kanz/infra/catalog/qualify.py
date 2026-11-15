@@ -539,6 +539,19 @@ def owned_runtime_state(info, container, image_id, network, required_labels):
             "healthStatus": health["Status"] if health is not None else "not-configured"}
 
 
+def validate_upgrade_outcome(evidence, image_id, identity):
+    keys = {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "before", "after", "waitCategory", "waitExitCode", "outcome"}
+    if not isinstance(evidence, dict) or set(evidence) != keys or evidence.get("informationalOnly") is not True or any(evidence.get(key) != identity[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")) or evidence.get("waitCategory") != "completed" or type(evidence.get("waitExitCode")) is not int or evidence["waitExitCode"] != 0 or evidence.get("outcome") != "exit-zero":
+        raise ValueError("catalog upgrade outcome incomplete")
+    state_keys = {"containerID", "imageID", "ownerVerified", "status", "Running", "Paused", "Restarting", "OOMKilled", "Dead", "exitCode", "errorPresent", "healthStatus"}
+    for key in ("before", "after"):
+        state = evidence.get(key)
+        if not isinstance(state, dict) or set(state) != state_keys or not isinstance(state.get("containerID"), str) or not re.fullmatch(r"[0-9a-f]{64}", state["containerID"]) or state.get("imageID") != image_id or state.get("ownerVerified") is not True or state.get("status") not in {"running", "exited"} or type(state.get("Running")) is not bool or state["Running"] != (state["status"] == "running") or any(state.get(flag) is not False for flag in ("Paused", "Restarting", "OOMKilled", "Dead", "errorPresent")) or type(state.get("exitCode")) is not int or not -255 <= state["exitCode"] <= 255 or state.get("healthStatus") not in {"not-configured", "starting", "healthy", "unhealthy"}:
+            raise ValueError("catalog upgrade state incomplete")
+    if evidence["before"]["containerID"] != evidence["after"]["containerID"] or evidence["before"]["status"] == "exited" and evidence["before"]["exitCode"] != 0 or evidence["after"]["status"] != "exited" or evidence["after"]["exitCode"] != 0:
+        raise ValueError("catalog upgrade terminal state differs")
+
+
 def retain_readiness(evidence, role, record):
     if role not in READINESS_ROLES:
         raise ValueError("unselected readiness role refused")
@@ -749,6 +762,8 @@ def validate_receipt(report, identity, images, registry_pending=False):
         validate_mysql_runtime(report.get("mysqlRuntime", {}), report["images"]["mysql"].get("imageID"))
     if "broker" in images:
         validate_broker_runtime(report.get("brokerRuntime"), report["images"]["broker"].get("imageID"), identity["sourceSHA"])
+    if "upgrade" in images:
+        validate_upgrade_outcome(report.get("upgradeOutcome"), report["images"]["upgrade"].get("imageID"), identity)
     for role, reference in images.items():
         item = report["images"][role]
         selected = image_identity.selections()[role]
@@ -781,7 +796,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 38 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 39 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1107,6 +1122,49 @@ class Fixture:
                           ["-c", SEARCH_CONFIG_PREPARE, "catalog-search-config", SEARCH_CONFIG_SOURCE, SEARCH_CONFIG_COPY, SEARCH_LAUNCHER,
                            "-Ediscovery.type=single-node", "-Eplugins.security.disabled=true", "-Enetwork.host=0.0.0.0", "-Enode.store.allow_mmap=false"], memory="2g", entrypoint="/bin/bash")
 
+    def wait_upgrade(self, container):
+        # This batch outcome seam grants no readiness-log or cleanup authority.
+        evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
+                        informationalOnly=True, before=None, after=None, waitCategory="not-started", waitExitCode=None, outcome="binding-refused")
+        self.upgrade_evidence = evidence
+        def inspect(selector):
+            result = json.loads(self.run(["docker", "inspect", selector], timeout=10, output_limit=READINESS_OUTPUT_LIMIT))
+            if not isinstance(result, list) or len(result) != 1:
+                raise ValueError("upgrade inspection inventory refused")
+            state = owned_runtime_state(result[0], container, self.image_identities["upgrade"]["imageID"], self.network, labels(self.owner))
+            if selector != container and state["containerID"] != selector:
+                raise ValueError("upgrade immutable container ID differs")
+            return state
+        try:
+            if container != self.network + "-upgrade":
+                raise ValueError("unowned upgrade name refused")
+            evidence["before"] = inspect(container)
+        except (ValueError, KeyError, TypeError, OSError):
+            raise ValueError("catalog upgrade ownership binding refused") from None
+        container_id = evidence["before"]["containerID"]
+        try:
+            output = self.run(["docker", "wait", container_id], timeout=300, output_limit=64)
+            if isinstance(output, str) and re.fullmatch(r"(?:0|[1-9][0-9]{0,2})\n", output) and int(output) <= 255:
+                evidence.update(waitCategory="completed", waitExitCode=int(output))
+            else:
+                evidence["waitCategory"] = "malformed-result"
+        except CommandFailure as error:
+            evidence["waitCategory"] = error.category if error.category in {"timeout", "output-budget"} else "command-refused"
+        except (ValueError, KeyError, TypeError, OSError):
+            evidence["waitCategory"] = "command-refused"
+        evidence["outcome"] = "observation-refused"
+        try:
+            evidence["after"] = inspect(container_id)
+        except (ValueError, KeyError, TypeError, OSError):
+            raise ValueError("catalog upgrade terminal observation refused") from None
+        evidence["outcome"] = "exit-zero"
+        try:
+            validate_upgrade_outcome(evidence, self.image_identities["upgrade"]["imageID"], self.owner)
+        except (ValueError, KeyError, TypeError):
+            evidence["outcome"] = "refused"
+            raise ValueError("catalog system update refused") from None
+        return evidence
+
     def configure_broker(self, container):
         self.broker_evidence = None
         try:
@@ -1204,9 +1262,7 @@ class Fixture:
         options = [item for key, value in common.items() for item in ("--env", key + "=" + value)]
         self.stage = "system-update"
         upgrade = self.start("upgrade", options + ["--env", "DATAHUB_PRECREATE_TOPICS=true", "--env", "DATAHUB_SQL_SETUP_ENABLED=true", "--env", "CREATE_USER=false", "--env", "SCHEMA_REGISTRY_SYSTEM_UPDATE=true", "--env", "PARTITIONS=1"], ["-u", "SystemUpdate"], memory="2g")
-        code = self.run(["docker", "wait", upgrade], timeout=300).strip()
-        if code != "0":
-            raise ValueError("catalog system update refused")
+        self.wait_upgrade(upgrade)
         self.stage = "gms"
         gms = self.start("gms", options + ["--env", "METADATA_SERVICE_AUTH_ENABLED=true", "--env", "MAE_CONSUMER_ENABLED=true", "--env", "MCE_CONSUMER_ENABLED=true", "--env", "PE_CONSUMER_ENABLED=true", "--env", "DEV_TOOLING_ENABLED=false"], memory="2g")
         self.wait_exec(gms, ["curl", "--fail", "--silent", "http://gms:8080/health"], timeout=300)
@@ -1340,11 +1396,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 52 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 53 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 38}
+        report["qualificationControls"] = {"count": 39}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -1378,6 +1434,7 @@ def qualify(scratch, binary):
         report["preparation"] = getattr(fixture, "preparation_evidence", None)
         report["mysqlRuntime"] = getattr(fixture, "mysql_evidence", None)
         report["brokerRuntime"] = getattr(fixture, "broker_evidence", None)
+        report["upgradeOutcome"] = getattr(fixture, "upgrade_evidence", None)
         report["readiness"] = getattr(fixture, "readiness_evidence", {})
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)

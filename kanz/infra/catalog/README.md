@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-eight
+stage/category, never subprocess arguments or one-run credentials. Thirty-nine
 qualification controls discriminate these failures alongside the 14 projection
-controls: 52 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 53 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -296,7 +296,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 52 catalog controls, seven shared
+and capture overflow. The inventory contains 53 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -318,6 +318,25 @@ failed or foreign-owner results refuse setup. The mandatory receipt retains
 only the fixed property/value, source/image/container identities, success flags
 and readback length/hash. It retains no command output, arguments or profiles.
 Each changed controller revision requires the full Linux workflow and all cases.
+
+SystemUpdate has a separate outcome observation and receives no readiness-log
+role. Before waiting, the controller binds its canonical name to the selected
+image, network and complete source/run/nonce labels, then uses only that full
+container ID for `docker wait` and the post-wait inspection. Inspection has a
+10-second/64-KiB bound; waiting has a 300-second/64-byte bound. The target's wait
+result is distinct from the Docker client's exit status: only canonical ASCII
+decimal 0–255 followed by one LF is recorded. Timeout, command failure and
+malformed results remain closed refusals; post-inspection still uses the bound
+ID. An invalid initial binding permits neither waiting nor further inspection.
+
+`upgradeOutcome` retains source/tree/run/attempt, closed before/after state,
+the numeric wait result and fixed categories. It retains no logs, raw output,
+arguments, environment or Docker error text. A fast job may already have exited
+before binding. Proceeding requires wait zero plus the same owned container's
+consistent exited-zero state, without OOM or Docker error; unknown or nonzero
+results refuse. Final receipt validation independently checks that join.
+The observation grants no cleanup authority and replaces none of the remaining
+catalog cases or source/registry/resource checks.
 
 ### Fixture maintenance images
 

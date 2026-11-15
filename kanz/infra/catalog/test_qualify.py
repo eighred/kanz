@@ -134,6 +134,111 @@ class QualificationControls(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
 
+    def test_upgrade_outcome_binds_wait_and_terminal_state_without_logs(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network = OWNER, OWNER["network"]
+        image_id = "sha256:" + "7" * 64
+        fixture.image_identities = {"upgrade": {"imageID": image_id}}
+        name, container_id = OWNER["network"] + "-upgrade", "6" * 64
+        calls, output, failure = [], "0\n", None
+        before = runtime_state_info("upgrade")
+        after = runtime_state_info("upgrade", "exited")
+        after["State"]["ExitCode"] = 0
+        secret = "upgrade-secret-must-not-leak"
+        def execute(command, **options):
+            calls.append((command, options))
+            if command[:2] == ["docker", "inspect"]:
+                self.assertEqual(options, {"timeout": 10, "output_limit": qualify.READINESS_OUTPUT_LIMIT})
+                return json.dumps([before if command[-1] == name else after])
+            self.assertEqual(command, ["docker", "wait", container_id])
+            self.assertEqual(options, {"timeout": 300, "output_limit": 64})
+            if failure is not None:
+                raise failure
+            return output
+        fixture.run = execute
+        passed = copy.deepcopy(fixture.wait_upgrade(name))
+        qualify.validate_upgrade_outcome(passed, image_id, IDENTITY)
+        self.assertEqual([command for command, _ in calls], [["docker", "inspect", name], ["docker", "wait", container_id], ["docker", "inspect", container_id]])
+        self.assertEqual(passed["waitExitCode"], 0)
+        self.assertNotIn("upgrade", qualify.READINESS_ROLES)
+        before = copy.deepcopy(after)  # A fast job can finish before initial binding.
+        fixture.wait_upgrade(name)
+        before = runtime_state_info("upgrade")
+        for output in ("1\n", "255\n", "", "0", "00\n", "+0\n", "-1\n", "256\n", "0\r\n", " 0\n", "0\n\n", "0\n" + secret, True, None):
+            calls.clear()
+            with self.assertRaises(ValueError):
+                fixture.wait_upgrade(name)
+            self.assertEqual(fixture.upgrade_evidence["outcome"], "refused")
+            self.assertIsNotNone(fixture.upgrade_evidence["after"])
+            self.assertEqual(calls[-1][0], ["docker", "inspect", container_id])
+            self.assertNotIn(secret, json.dumps(fixture.upgrade_evidence))
+            self.assertEqual(fixture.upgrade_evidence["waitExitCode"], int(output) if output in ("1\n", "255\n") else None)
+        output = "0\n"
+        for failure in (qualify.CommandFailure("system-update", "timeout"), qualify.CommandFailure("system-update", "output-budget"), OSError(secret)):
+            calls.clear()
+            try:
+                fixture.wait_upgrade(name)
+            except ValueError:
+                self.assertNotIn(secret, traceback.format_exc() + json.dumps(fixture.upgrade_evidence))
+            else:
+                self.fail("failed wait must never satisfy system update")
+            self.assertEqual(calls[-1][0], ["docker", "inspect", container_id])
+            self.assertIsNone(fixture.upgrade_evidence["waitExitCode"])
+        failure = None
+        for field, value in (("Image", "sha256:" + "f" * 64), ("Name", "/foreign"), ("Id", secret), ("Config", {"Labels": {"foreign": secret}}), ("HostConfig", {"NetworkMode": "foreign"})):
+            before = dict(runtime_state_info("upgrade"), **{field: value})
+            calls.clear()
+            with self.assertRaises(ValueError):
+                fixture.wait_upgrade(name)
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(fixture.upgrade_evidence["before"])
+            self.assertIsNone(fixture.upgrade_evidence["after"])
+            self.assertNotIn(secret, json.dumps(fixture.upgrade_evidence))
+        before = runtime_state_info("upgrade")
+        for key in qualify.labels(OWNER):
+            before["Config"]["Labels"][key] = "foreign"
+            calls.clear()
+            with self.assertRaises(ValueError):
+                fixture.wait_upgrade(name)
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(fixture.upgrade_evidence["before"])
+            before = runtime_state_info("upgrade")
+        for changed in (dict(after, Id="8" * 64), dict(after, Image="sha256:" + "f" * 64), dict(after, Name="/foreign"), dict(after, Config={"Labels": {"foreign": secret}}), dict(after, HostConfig={"NetworkMode": "foreign"})):
+            original, after = after, changed
+            with self.assertRaises(ValueError):
+                fixture.wait_upgrade(name)
+            self.assertEqual(fixture.upgrade_evidence["outcome"], "observation-refused")
+            self.assertIsNone(fixture.upgrade_evidence["after"])
+            self.assertNotIn(secret, json.dumps(fixture.upgrade_evidence))
+            after = original
+        for field, value in (("ExitCode", 1), ("OOMKilled", True), ("Error", secret), ("Running", True), ("Status", "running"), ("Paused", True), ("Restarting", True), ("Dead", True)):
+            original = copy.deepcopy(after)
+            after["State"][field] = value
+            with self.assertRaises(ValueError):
+                fixture.wait_upgrade(name)
+            self.assertEqual(fixture.upgrade_evidence["outcome"], "refused")
+            self.assertNotIn(secret, json.dumps(fixture.upgrade_evidence))
+            after = original
+        for field, value in (("sourceSHA", "c" * 40), ("treeSHA", "c" * 40), ("runID", "456"), ("runAttempt", "2"), ("waitExitCode", False), ("waitCategory", "timeout"), ("outcome", "refused"), ("after", dict(passed["after"], containerID="8" * 64))):
+            with self.assertRaises(ValueError):
+                qualify.validate_upgrade_outcome(dict(passed, **{field: value}), image_id, IDENTITY)
+        for changed in (None, {}, dict(passed, arbitrary=secret)):
+            with self.assertRaises(ValueError):
+                qualify.validate_upgrade_outcome(changed, image_id, IDENTITY)
+        with mock.patch.object(fixture, "run", side_effect=[json.dumps([before]), "0\n", OSError(secret)]):
+            try:
+                fixture.wait_upgrade(name)
+            except ValueError:
+                self.assertNotIn(secret, traceback.format_exc() + json.dumps(fixture.upgrade_evidence))
+            else:
+                self.fail("unknown post-wait inspection must refuse")
+            self.assertEqual(fixture.upgrade_evidence["outcome"], "observation-refused")
+            self.assertIsNone(fixture.upgrade_evidence["after"])
+        calls.clear()
+        with self.assertRaises(ValueError):
+            fixture.wait_upgrade("foreign-upgrade")
+        self.assertEqual(calls, [])
+
     def test_broker_rpc_and_live_property_require_the_same_owned_container(self):
         fixture = object.__new__(qualify.Fixture)
         fixture.owner, fixture.network = OWNER, OWNER["network"]
@@ -655,24 +760,30 @@ class QualificationControls(unittest.TestCase):
         execute.assert_not_called()
 
     def test_receipt_cannot_pass_with_missing_cases_or_foreign_revision(self):
-        selected = qualify.image_identity.selections()["gms"]
-        images = {"gms": selected["reference"]}
-        image_id = selected["configDigest"]
-        identity = qualify.image_identity.verify_engine({"Id": image_id, "Os": selected["os"], "Architecture": selected["architecture"], "RootFS": {"Type": selected["rootFSType"], "Layers": selected["rootFSDiffIDs"]}, "RepoDigests": [selected["repository"] + "@" + selected["manifestDigest"]]}, selected)
+        images, observed = {}, {}
+        for role in ("gms", "upgrade"):
+            selected = qualify.image_identity.selections()[role]
+            images[role], image_id = selected["reference"], selected["configDigest"]
+            identity = qualify.image_identity.verify_engine({"Id": image_id, "Os": selected["os"], "Architecture": selected["architecture"], "RootFS": {"Type": selected["rootFSType"], "Layers": selected["rootFSDiffIDs"]}, "RepoDigests": [selected["repository"] + "@" + selected["manifestDigest"]]}, selected)
+            observed[role] = {"reference": images[role], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}
         original = dict(IDENTITY, owner=OWNER, status="passed", cleanupPassed=True,
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
-                        images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
+                        images=observed,
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 38}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 39}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
         original["registryAuth"] = {"verifiedBeforeTargets": True, "helperSHA256": OWNER["registryHelperSHA256"], "controlsSHA256": OWNER["registryControlsSHA256"], "controlsCount": 7}
         original["buildDiagnosticControls"] = {"count": 1, "sha256": OWNER["buildDiagnosticControlsSHA256"]}
+        upgrade_info = runtime_state_info("upgrade", "exited")
+        upgrade_info["Image"], upgrade_info["State"]["ExitCode"] = observed["upgrade"]["imageID"], 0
+        state = qualify.owned_runtime_state(upgrade_info, OWNER["network"] + "-upgrade", observed["upgrade"]["imageID"], OWNER["network"], qualify.labels(OWNER))
+        original["upgradeOutcome"] = dict(IDENTITY, informationalOnly=True, before=state, after=state, waitCategory="completed", waitExitCode=0, outcome="exit-zero")
         cleanup = {"ownershipVerified": True, "fileBackend": True, "credentialsAbsent": True, "directoryRemoved": True, "passed": True, "logout": {"attempted": True, "exitCode": 0}}
         original.update(acceptanceComplete=True, registryCleanup=dict(IDENTITY, sourceVerified=True, profile=OWNER["registryProfile"], cleanup=cleanup))
         qualify.validate_receipt(original, IDENTITY, images)
-        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"}), ("acceptanceComplete", False), ("registryAuth", {}), ("registryCleanup", {}), ("registryCleanup", dict(original["registryCleanup"], cleanup=dict(cleanup, credentialsAbsent=False))), ("dependencies", {"packages": {"acryl-datahub": "1.8.0"}})):
+        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"}), ("acceptanceComplete", False), ("registryAuth", {}), ("registryCleanup", {}), ("registryCleanup", dict(original["registryCleanup"], cleanup=dict(cleanup, credentialsAbsent=False))), ("upgradeOutcome", None), ("upgradeOutcome", dict(original["upgradeOutcome"], sourceSHA="c" * 40)), ("dependencies", {"packages": {"acryl-datahub": "1.8.0"}})):
             report = copy.deepcopy(original)
             report[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
