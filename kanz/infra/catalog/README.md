@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-four
+stage/category, never subprocess arguments or one-run credentials. Thirty-five
 qualification controls discriminate these failures alongside the 14 projection
-controls: 48 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 49 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -108,6 +108,30 @@ Required runtime cases cannot skip. Normal runs without the disposable catalog
 skip the two externally gated tests; the dedicated workflow proves them.
 Runtime logs, command arguments and generated credentials are never uploaded.
 Containers and their ephemeral state are removed on exit.
+
+Actual [run 43674164917](https://github.com/eighred/kanz/actions/runs/43674164917)
+passed all six fixed-CRITICAL/Java image scans and the MySQL container-profile
+check, then refused at the first broker readiness wait. The retained receipt and
+job logs contained no broker state or startup output; they establish no cause.
+The runtime cases and actual MySQL process/SQL observations were not reached.
+
+Readiness diagnostics now bind the exact source/run/nonce/image/container ID
+before executing a probe. Subsequent execution, inspection and broker log reads
+use that immutable ID; a replaced name cannot redirect the observed output.
+Foreign bindings collect no probe/log signals or captured hashes. The bounded
+projection retains Docker's public state/exit/OOM flags, command output length
+and hash, and fixed possibly-multiple text signals from only the owned broker's
+last 40 startup log lines. It retains no raw logs, commands, environment, error
+text or credentials. Probe/inspection/log capture has a streaming 64 KiB ceiling
+and process-group termination at overflow, inside the unchanged command limits.
+Only eight recent failed attempts per selected role survive; terminal state,
+unknown inspection and readiness deadline remain distinct. Signals are
+informational and cannot grant readiness, acceptance or cleanup authority.
+The existing pre-authentication synthetic diagnostic control also exercises
+secret-bearing runtime projection; target-side controls discriminate foreign
+owners/name replacement, non-broker log refusal, retention and capture overflow.
+No guessed broker configuration fix or weakened default follows from the earlier
+generic refusal. The changed controller still requires a fresh full Linux run.
 
 ### Fixture maintenance images
 

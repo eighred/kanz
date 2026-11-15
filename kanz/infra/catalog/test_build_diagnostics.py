@@ -69,6 +69,24 @@ class BuildDiagnosticControls(unittest.TestCase):
             raise AssertionError("diagnostic markers cannot authorize mutation")
         with mock.patch.object(image_patch, "read_marker", side_effect=lambda _record, phase: image_patch.marker_body(record, phase, base=base_identity) if phase == "started" else None), mock.patch.object(image_patch.time, "sleep"), self.assertRaisesRegex(ValueError, "completion remains unknown"):
             image_patch.cleanup(record, execute)
+        # This same pre-authentication host control exercises runtime projection
+        # even when the real fixture stops before its target-side unit suite.
+        runtime = ("unable to load config: permission denied " + secret + "\n").encode()
+        projected = qualify.runtime_output(runtime, 1, "broker-startup-log")
+        self.assertEqual(projected["category"], "multiple-signals")
+        self.assertEqual(projected["matchedSignals"], ["configuration-refused", "permission-refused"])
+        self.assertEqual(projected["capturedSHA256"], hashlib.sha256(runtime).hexdigest())
+        self.assertEqual(projected["capturedBytes"], len(runtime))
+        self.assertTrue(projected["informationalOnly"])
+        self.assertNotIn(secret, json.dumps(projected))
+        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log")):
+            try:
+                qualify.runtime_output(body, code, source)
+            except ValueError as error:
+                refused = str(error) + traceback.format_exc()
+            else:
+                self.fail("unknown/oversized runtime projection must refuse")
+            self.assertNotIn(secret, refused)
 
 
 

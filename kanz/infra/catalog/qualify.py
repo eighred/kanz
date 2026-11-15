@@ -33,6 +33,9 @@ OUTPUT_LIMIT = 8 << 20
 DEFAULT_FILE_LIMIT = 8 << 20
 SCANNER_FILE_LIMIT = 8 << 30
 SCANNER_DISK_LIMIT = 12 << 30
+READINESS_OUTPUT_LIMIT = 64 << 10
+READINESS_ATTEMPTS_RETAINED = 8
+READINESS_ROLES = frozenset({"broker", "mysql", "search", "gms"})
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
@@ -133,13 +136,13 @@ def command_limits(args, scanner):
     return SCANNER_FILE_LIMIT if scanner else DEFAULT_FILE_LIMIT
 
 
-def append_output(output, chunk):
-    if len(output) + len(chunk) > OUTPUT_LIMIT:
+def append_output(output, chunk, limit=OUTPUT_LIMIT):
+    if type(limit) is not int or not 0 < limit <= OUTPUT_LIMIT or len(output) + len(chunk) > limit:
         raise CommandFailure("capture", "output-budget")
     output.extend(chunk)
 
 
-def capture_process(process, timeout):
+def capture_process(process, timeout, limit=OUTPUT_LIMIT):
     deadline, output = time.monotonic() + timeout, bytearray()
     with selectors.DefaultSelector() as ready:
         ready.register(process.stdout, selectors.EVENT_READ)
@@ -150,7 +153,7 @@ def capture_process(process, timeout):
             for key, _ in ready.select(min(remaining, 1)):
                 chunk = os.read(key.fd, 64 << 10)
                 if chunk:
-                    append_output(output, chunk)
+                    append_output(output, chunk, limit)
                 else:
                     ready.unregister(key.fileobj)
     try:
@@ -193,6 +196,60 @@ def failure_category(output, code, scanner):
     if "database" in diagnostic or "vulnerability db" in diagnostic:
         return "scanner-db-download"
     return "scanner-command-exit"
+
+
+def runtime_output(output, code, source):
+    """Informational closed signals; no text can authorise readiness/cleanup."""
+    if source not in {"readiness-command", "broker-startup-log"} or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
+        raise ValueError("runtime diagnostic source/size refused")
+    diagnostic = output.decode("utf-8", errors="replace").lower()
+    patterns = {
+        "configuration-refused": ("unable to load config", "unable to decode config", "yaml: unmarshal", "yaml: line", "unknown configuration property"),
+        "permission-refused": ("permission denied", "operation not permitted", "read-only file system"),
+        "resource-refused": ("no space left on device", "file too large", "cannot allocate memory", "std::bad_alloc", "out of memory"),
+        "option-refused": ("unknown flag", "unknown command", "unrecognized option", "unrecognised option"),
+        "connection-refused": ("connection refused", "no brokers available", "all brokers are unreachable", "unable to dial", "i/o timeout"),
+        "address-conflict": ("address already in use",),
+        "startup-fatal": ("startup aborted", "startup failed", "fatal error"),
+    }
+    signals = sorted(key for key, markers in patterns.items() if any(marker in diagnostic for marker in markers))
+    return {"informationalOnly": True, "source": source, "captureComplete": True,
+            "outputLimitBytes": READINESS_OUTPUT_LIMIT, "capturedBytes": len(output),
+            "capturedSHA256": hashlib.sha256(output).hexdigest(), "exitCode": code,
+            "category": "multiple-signals" if len(signals) > 1 else "signal-observed" if signals else "unclassified-output",
+            "matchedSignals": signals}
+
+
+def runtime_refusal(category, source, code=None):
+    if category not in {"capture-unavailable", "timeout", "output-budget", "command-unavailable", "reap-timeout", "reap-unavailable"} or source not in {"readiness-command", "broker-startup-log"} or code is not None and (type(code) is not int or not -255 <= code <= 255):
+        raise ValueError("runtime refusal category refused")
+    return {"informationalOnly": True, "source": source, "captureComplete": False,
+            "outputLimitBytes": READINESS_OUTPUT_LIMIT, "capturedBytes": None,
+            "capturedSHA256": None, "exitCode": code, "category": category, "matchedSignals": []}
+
+
+def owned_runtime_state(info, container, image_id, network, required_labels):
+    if not isinstance(info, dict) or not re.fullmatch(r"[0-9a-f]{64}", info.get("Id", "")) or info.get("Name") != "/" + container or info.get("Image") != image_id or not isinstance(info.get("Config"), dict) or not isinstance(info["Config"].get("Labels"), dict) or not isinstance(info.get("HostConfig"), dict) or info["HostConfig"].get("NetworkMode") != network or any(info["Config"]["Labels"].get(key) != value for key, value in required_labels.items()):
+        raise ValueError("readiness container ownership refused")
+    state = info.get("State", {})
+    booleans = ("Running", "Paused", "Restarting", "OOMKilled", "Dead")
+    if not isinstance(state, dict) or state.get("Status") not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"} or any(type(state.get(key)) is not bool for key in booleans) or type(state.get("ExitCode")) is not int or not -255 <= state["ExitCode"] <= 255 or not isinstance(state.get("Error"), str):
+        raise ValueError("readiness state shape refused")
+    health = state.get("Health")
+    if health is not None and (not isinstance(health, dict) or health.get("Status") not in {"starting", "healthy", "unhealthy"}):
+        raise ValueError("readiness health shape refused")
+    return {"containerID": info["Id"], "imageID": image_id, "ownerVerified": True,
+            "status": state["Status"], **{key: state[key] for key in booleans},
+            "exitCode": state["ExitCode"], "errorPresent": bool(state["Error"]),
+            "healthStatus": health["Status"] if health is not None else "not-configured"}
+
+
+def retain_readiness(evidence, role, record):
+    if role not in READINESS_ROLES:
+        raise ValueError("unselected readiness role refused")
+    entry = evidence.setdefault(role, {"informationalOnly": True, "attempts": 0, "recent": []})
+    entry["attempts"] += 1
+    entry["recent"] = (entry["recent"] + [record])[-READINESS_ATTEMPTS_RETAINED:]
 
 
 def mount_record(path):
@@ -427,7 +484,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 34 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 35 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -536,9 +593,15 @@ class Fixture:
         self.images["ingestion"] = image_id
         return {"reference": image_id, "imageID": image_id, "identity": image_identity.derived_engine(derived), "derived": evidence}
 
-    def run(self, args, timeout=180, environment=None, scanner=False, build=False):
+    def run(self, args, timeout=180, environment=None, scanner=False, build=False, output_limit=OUTPUT_LIMIT, runtime_source=None):
         if build and (args[:2] != ["docker", "build"] or scanner):
             raise ValueError("build diagnostics require the fixed Docker build seam")
+        if type(output_limit) is not int or not 0 < output_limit <= OUTPUT_LIMIT:
+            raise ValueError("command output bound refused")
+        if runtime_source is not None and (scanner or build or output_limit != READINESS_OUTPUT_LIMIT or runtime_source not in {"readiness-command", "broker-startup-log"} or runtime_source == "readiness-command" and args[:2] != ["docker", "exec"] or runtime_source == "broker-startup-log" and args[:4] != ["docker", "logs", "--tail", "40"]):
+            raise ValueError("runtime diagnostic command seam refused")
+        if runtime_source is not None:
+            self.last_runtime_result = runtime_refusal("capture-unavailable", runtime_source)
         file_limit = command_limits(args, scanner)
         def limits():
             resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
@@ -546,8 +609,10 @@ class Fixture:
         process, capture_complete = None, False
         try:
             process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment or self.environment, preexec_fn=limits, start_new_session=True)
-            code, output = capture_process(process, timeout)
+            code, output = capture_process(process, timeout, output_limit)
             capture_complete = True
+            if runtime_source is not None:
+                self.last_runtime_result = runtime_output(output, code, runtime_source)
             if build:
                 self.preparation_evidence["build"]["diagnostic"] = image_patch.build_diagnostic(output, code)
             if code:
@@ -555,11 +620,15 @@ class Fixture:
             return output.decode("utf-8", errors="replace")
         except (CommandFailure, subprocess.TimeoutExpired) as error:
             category = error.category if isinstance(error, CommandFailure) else "timeout"
+            if runtime_source is not None and not capture_complete:
+                self.last_runtime_result = runtime_refusal(category, runtime_source, getattr(error, "code", None))
             if build and not capture_complete:
                 self.preparation_evidence["build"]["diagnostic"] = {"category": category, "informationalOnly": True, "processCaptureComplete": False, "capturedBytes": None, "capturedSHA256": None, "exitCode": None}
             self.last_failure = {"stage": self.stage, "category": category, "exitCode": getattr(error, "code", None)}
             raise CommandFailure(self.stage, category, getattr(error, "code", None)) from None
         except (OSError, subprocess.SubprocessError):
+            if runtime_source is not None:
+                self.last_runtime_result = runtime_refusal("command-unavailable", runtime_source)
             if build:
                 self.preparation_evidence["build"]["diagnostic"] = {"category": "command-unavailable", "informationalOnly": True, "processCaptureComplete": False, "capturedBytes": None, "capturedSHA256": None, "exitCode": None}
             self.last_failure = {"stage": self.stage, "category": "command-unavailable"}
@@ -573,6 +642,8 @@ class Fixture:
                     if not capture_complete or process.poll() is None:
                         stop_process(process)
                 except CommandFailure as error:
+                    if runtime_source is not None:
+                        self.last_runtime_result = runtime_refusal(error.category, runtime_source)
                     self.last_failure = {"stage": self.stage, "category": error.category}
                     raise CommandFailure(self.stage, error.category) from None
                 finally:
@@ -815,16 +886,81 @@ class Fixture:
         output = self.run(["go", "tool", "test2json", "-p", "github.com/eighred/kanz/services/lineage/internal/server", "-t", *command], timeout=180)
         (self.scratch / evidence).write_text(output)
 
+    def readiness_state(self, container, selector):
+        role = next((value for value in READINESS_ROLES if container == self.network + "-" + value), None)
+        if role is None or selector != container and not re.fullmatch(r"[0-9a-f]{64}", selector):
+            raise ValueError("unowned readiness name refused")
+        inspected = json.loads(self.run(["docker", "inspect", selector], timeout=10, output_limit=READINESS_OUTPUT_LIMIT))
+        if not isinstance(inspected, list) or len(inspected) != 1:
+            raise ValueError("readiness inspection inventory refused")
+        state = owned_runtime_state(inspected[0], container, self.image_identities[role]["imageID"], self.network, labels(self.owner))
+        if selector != container and state["containerID"] != selector:
+            raise ValueError("readiness immutable container ID differs")
+        return state
+
+    def readiness_failure(self, container, binding, probe):
+        role = next((value for value in READINESS_ROLES if container == self.network + "-" + value), None)
+        if role is None:
+            raise ValueError("unowned readiness name refused")
+        if not hasattr(self, "readiness_evidence"):
+            self.readiness_evidence = {}
+        record = {"informationalOnly": True, "stage": self.stage, "binding": dict(binding), "probe": dict(probe)}
+        try:
+            state = self.readiness_state(container, binding["containerID"])
+            record["container"] = state
+            # Only this broker's exact immutable ID may supply startup signals.
+            # GMS/MySQL logs can contain synthetic credentials and are not read.
+            if role == "broker":
+                try:
+                    self.run(["docker", "logs", "--tail", "40", state["containerID"]], timeout=10,
+                             output_limit=READINESS_OUTPUT_LIMIT, runtime_source="broker-startup-log")
+                except CommandFailure:
+                    pass  # The closed result records a failed/incomplete capture.
+                record["brokerLog"] = dict(self.last_runtime_result)
+            return state
+        except (ValueError, KeyError, TypeError, OSError):
+            record["collectionFailure"] = "owned-container-inspection-refused"
+            self.readiness_evidence.setdefault(role, {"informationalOnly": True, "attempts": 0, "recent": []})["waitOutcome"] = "diagnostics-refused"
+            raise ValueError("owned readiness diagnostics refused") from None
+        finally:
+            retain_readiness(self.readiness_evidence, role, record)
+
     def wait_exec(self, container, args, timeout=120):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            # Bind source/run/nonce/image/name before any probe output exists.
+            # Later reads and execution cannot follow a replacement name.
             try:
-                return self.run(["docker", "exec", container, *args], timeout=15)
+                binding = self.readiness_state(container, container)
+            except (ValueError, KeyError, TypeError, OSError):
+                role = container.removeprefix(self.network + "-")
+                if role in READINESS_ROLES:
+                    if not hasattr(self, "readiness_evidence"):
+                        self.readiness_evidence = {}
+                    self.readiness_evidence.setdefault(role, {"informationalOnly": True, "attempts": 0, "recent": []})["waitOutcome"] = "binding-refused"
+                raise ValueError("readiness source ownership binding refused") from None
+            try:
+                output = self.run(["docker", "exec", binding["containerID"], *args], timeout=15,
+                                  output_limit=READINESS_OUTPUT_LIMIT, runtime_source="readiness-command")
+                if hasattr(self, "readiness_evidence"):
+                    role = container.removeprefix(self.network + "-")
+                    if role in self.readiness_evidence:
+                        self.readiness_evidence[role]["waitOutcome"] = "command-exit-zero"
+                return output
             except ValueError:
-                state = json.loads(self.run(["docker", "inspect", "--format", "{{json .State}}", container]))
+                probe = dict(getattr(self, "last_runtime_result", runtime_refusal("capture-unavailable", "readiness-command")))
+                state = self.readiness_failure(container, binding, probe)
                 if not state["Running"]:
+                    role = container.removeprefix(self.network + "-")
+                    self.readiness_evidence[role]["waitOutcome"] = "terminal-state" if state["status"] in {"exited", "dead"} else "container-not-running"
                     raise ValueError("fixture stopped at " + self.stage) from None
                 time.sleep(2)
+        role = container.removeprefix(self.network + "-")
+        if role not in READINESS_ROLES:
+            raise ValueError("unowned readiness deadline refused")
+        if not hasattr(self, "readiness_evidence"):
+            self.readiness_evidence = {}
+        self.readiness_evidence.setdefault(role, {"informationalOnly": True, "attempts": 0, "recent": []})["waitOutcome"] = "deadline-exceeded"
         raise ValueError("fixture readiness exceeded bound at " + self.stage)
 
     def close(self):
@@ -866,11 +1002,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 48 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 49 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 34}
+        report["qualificationControls"] = {"count": 35}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -903,6 +1039,7 @@ def qualify(scratch, binary):
         report["images"] = getattr(fixture, "image_identities", report.get("images", {}))
         report["preparation"] = getattr(fixture, "preparation_evidence", None)
         report["mysqlRuntime"] = getattr(fixture, "mysql_evidence", None)
+        report["readiness"] = getattr(fixture, "readiness_evidence", {})
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)
         if not report["cleanupPassed"]:

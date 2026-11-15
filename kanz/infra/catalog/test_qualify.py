@@ -21,7 +21,105 @@ OWNER["derivedImage"] = qualify.image_patch.owned_spec(OWNER, OWNER_PATH)
 OWNER.update(registryProfile="/owned/run/catalog-registry-" + IDENTITY["sourceSHA"][:12] + "-123-1-0123456789abcdef", registryHelperSHA256="7" * 64, registryControlsSHA256="8" * 64, buildDiagnosticControlsSHA256="9" * 64)
 
 
+def runtime_state_info(role, status="running"):
+    return {"Id": "6" * 64, "Name": "/" + OWNER["network"] + "-" + role, "Image": "sha256:" + "7" * 64,
+            "Config": {"Labels": qualify.labels(OWNER)}, "HostConfig": {"NetworkMode": OWNER["network"]},
+            "State": {"Status": status, "Running": status == "running", "Paused": False, "Restarting": False,
+                      "OOMKilled": False, "Dead": status == "dead", "ExitCode": 1 if status == "exited" else 0, "Error": ""}}
+
+
 class QualificationControls(unittest.TestCase):
+    def test_readiness_diagnostics_bind_owner_limit_retention_and_preserve_refusal(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network, fixture.stage = OWNER, OWNER["network"], "storage-readiness"
+        fixture.image_identities = {role: {"imageID": "sha256:" + "7" * 64} for role in qualify.READINESS_ROLES}
+        name, container_id = OWNER["network"] + "-broker", "6" * 64
+        secret = "one-run-runtime-credential-marker"
+        info = runtime_state_info("broker", "exited")
+        info["Config"]["Env"] = ["PASSWORD=" + secret]
+        info["State"].update(Error=secret, Health={"Status": "unhealthy", "Log": [{"Output": secret}]})
+        calls = []
+        inspected = info
+        name_replaced = False
+        def execute(args, **kwargs):
+            nonlocal name_replaced
+            calls.append((args, kwargs))
+            self.assertEqual(kwargs["output_limit"], 65536)
+            if args[:2] == ["docker", "exec"]:
+                self.assertEqual(args[2], container_id)
+                name_replaced = True
+                fixture.last_runtime_result = qualify.runtime_output(("connection refused " + secret).encode(), 1, "readiness-command")
+                raise qualify.CommandFailure(fixture.stage, "command-exit", 1)
+            if args[:2] == ["docker", "inspect"]:
+                if args[-1] == name and name_replaced:
+                    return json.dumps([dict(info, Id="8" * 64, Config={"Labels": {"foreign": secret}})])
+                return json.dumps([inspected])
+            if args[:4] == ["docker", "logs", "--tail", "40"]:
+                self.assertEqual(args[-1], container_id)
+                fixture.last_runtime_result = qualify.runtime_output(("unknown flag " + secret).encode(), 0, "broker-startup-log")
+                return secret
+            self.fail("diagnostics cannot launch or mutate resources")
+        fixture.run = execute
+        try:
+            fixture.wait_exec(name, ["rpk", "cluster", "info"])
+        except ValueError as error:
+            refusal = str(error) + traceback.format_exc()
+        else:
+            self.fail("terminal broker diagnostics cannot satisfy readiness")
+        self.assertNotIn(secret, refusal)
+        entry = fixture.readiness_evidence["broker"]
+        self.assertEqual(entry["waitOutcome"], "terminal-state")
+        self.assertEqual(entry["recent"][0]["container"]["exitCode"], 1)
+        self.assertTrue(entry["recent"][0]["container"]["errorPresent"])
+        self.assertEqual(entry["recent"][0]["brokerLog"]["matchedSignals"], ["option-refused"])
+        self.assertEqual(entry["recent"][0]["binding"]["containerID"], container_id)
+        self.assertEqual([args[-1] for args, _ in calls if args[:2] == ["docker", "inspect"]], [name, container_id])
+        self.assertNotIn(secret, json.dumps(fixture.readiness_evidence))
+        for field, value in (("Image", "sha256:" + "f" * 64), ("Name", "/foreign"), ("Id", "foreign"), ("Config", {"Labels": {}})):
+            calls.clear()
+            name_replaced = False
+            fixture.readiness_evidence = {}
+            inspected = dict(info, **{field: value})
+            with self.assertRaises(ValueError):
+                fixture.wait_exec(name, ["rpk", "cluster", "info"])
+            self.assertFalse(any(args[:2] in (["docker", "logs"], ["docker", "exec"]) for args, _ in calls))
+            refused = json.dumps(fixture.readiness_evidence)
+            for unbound in ("capturedSHA256", "matchedSignals", "probe", secret):
+                self.assertNotIn(unbound, refused)
+        for role in ("mysql", "search", "gms"):
+            calls.clear()
+            inspected = dict(info, Name="/" + OWNER["network"] + "-" + role)
+            binding = qualify.owned_runtime_state(inspected, OWNER["network"] + "-" + role, "sha256:" + "7" * 64, OWNER["network"], qualify.labels(OWNER))
+            fixture.readiness_failure(OWNER["network"] + "-" + role, binding, qualify.runtime_refusal("timeout", "readiness-command"))
+            self.assertFalse(any(args[:2] == ["docker", "logs"] for args, _ in calls))
+        calls.clear()
+        with self.assertRaises(ValueError):
+            fixture.wait_exec("foreign-broker", ["rpk", "cluster", "info"])
+        self.assertEqual(calls, [])
+        for index in range(30):
+            qualify.retain_readiness(fixture.readiness_evidence, "broker", {"attempt": index})
+        self.assertEqual(len(fixture.readiness_evidence["broker"]["recent"]), 8)
+        self.assertEqual(fixture.readiness_evidence["broker"]["recent"][0], {"attempt": 22})
+        self.assertNotIn(secret, json.dumps(fixture.readiness_evidence))
+        with mock.patch.object(qualify.time, "monotonic", side_effect=[0, 1]), self.assertRaises(ValueError):
+            fixture.wait_exec(name, ["rpk", "cluster", "info"], timeout=1)
+        self.assertEqual(fixture.readiness_evidence["broker"]["waitOutcome"], "deadline-exceeded")
+        bounded = bytearray(b"x" * 65536)
+        with self.assertRaises(qualify.CommandFailure):
+            qualify.append_output(bounded, b"x", 65536)
+        self.assertEqual(len(bounded), 65536)
+        runner = object.__new__(qualify.Fixture)
+        runner.stage, runner.environment = "storage-readiness", {}
+        process = mock.Mock()
+        with mock.patch.object(qualify.subprocess, "Popen", return_value=process), mock.patch.object(qualify, "capture_process", side_effect=qualify.CommandFailure("capture", "output-budget")) as capture, mock.patch.object(qualify, "stop_process") as stop:
+            with self.assertRaises(qualify.CommandFailure):
+                runner.run(["docker", "logs", "--tail", "40", container_id], output_limit=65536, runtime_source="broker-startup-log")
+            capture.assert_called_once_with(process, 180, 65536)
+            stop.assert_called_once_with(process)
+        self.assertEqual(runner.last_runtime_result["category"], "output-budget")
+        self.assertFalse(runner.last_runtime_result["captureComplete"])
+        self.assertIsNone(runner.last_runtime_result["capturedSHA256"])
+
     def test_mysql_startup_preserves_vendor_plan_and_bounded_nonroot_profile(self):
         fixture = object.__new__(qualify.Fixture)
         reference = "ubuntu/mysql:8.4-26.04_stable@sha256:b22e8fc950df66a17d4b001b28ef5b557b9572d06da25f93967ea3f455c6410e"
@@ -49,8 +147,10 @@ class QualificationControls(unittest.TestCase):
         for expected in ("/proc/1/status", "= pebble", "= mysqld", "/run/mysqld/mysqld.pid", "@@GLOBAL.skip_networking", "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"", "pebbleUID=", "mysqlUID="):
             self.assertIn(expected, qualify.MYSQL_PROBE)
         wait = object.__new__(qualify.Fixture)
-        wait.run = mock.Mock(return_value="public-observation")
-        self.assertEqual(wait.wait_exec("owned-mysql", ["bash", "-ec", qualify.MYSQL_PROBE]), "public-observation")
+        wait.owner, wait.network = OWNER, OWNER["network"]
+        wait.image_identities = {"mysql": {"imageID": "sha256:" + "7" * 64}}
+        wait.run = mock.Mock(side_effect=[json.dumps([runtime_state_info("mysql")]), "public-observation"])
+        self.assertEqual(wait.wait_exec(OWNER["network"] + "-mysql", ["bash", "-ec", qualify.MYSQL_PROBE]), "public-observation")
 
     def test_mysql_runtime_refuses_foreign_privileges_identity_and_secret_output(self):
         image_id = qualify.image_identity.selections()["mysql"]["manifestDigest"]
@@ -322,7 +422,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 34}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 35}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
