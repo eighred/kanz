@@ -158,9 +158,9 @@ and [JvmOptionsParser](https://github.com/opensearch-project/OpenSearch/blob/4ee
 neither arbitrary exception names, JVM options nor message tails are retained.
 Search resource co-occurrence classes cover only its packaged config tree,
 selected data/log trees and shared temporary/proc/sys classes. Stage, level and
-causal attribution remain unknown. Search exception bodies retain only the
-bounded whole-capture byte count/hash; CLI suffix metadata follows the separate
-source-frame contract below. Conditional
+causal attribution remain unknown. Individual search suffix fingerprints follow
+only the CLI source-frame contract below; other search output retains the
+bounded whole-capture byte count/hash. Conditional
 vendor keystore creation/upgrades do not establish the selected image's state
 or justify a writable-config repair without observed evidence. Search startup
 arguments, image pins and the entire isolation/resource profile are unchanged.
