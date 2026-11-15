@@ -6,12 +6,16 @@ on:
       - 'kanz/infra/observability/prometheus-runtime/**'
       - 'kanz/infra/observability/prometheus.yaml'
       - '.github/workflows/prometheus-runtime.yml'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/release.yml'
   push:
     branches: [main]
     paths:
       - 'kanz/infra/observability/prometheus-runtime/**'
       - 'kanz/infra/observability/prometheus.yaml'
       - '.github/workflows/prometheus-runtime.yml'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 permissions:

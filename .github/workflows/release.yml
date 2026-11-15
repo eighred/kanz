@@ -116,6 +116,8 @@ jobs:
             dockerfile: kanz/services/web-bff/Dockerfile
           - service: cloudflared
             dockerfile: kanz/infra/edge/Dockerfile.cloudflared
+          - service: prometheus
+            dockerfile: kanz/infra/observability/prometheus-runtime/Dockerfile
           - service: archiver
             dockerfile: kanz/services/archiver/Dockerfile
           - service: lake-sink
@@ -243,6 +245,26 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      - name: Qualify the actual Prometheus release image before signing
+        if: matrix.service == 'prometheus'
+        env:
+          PROMETHEUS_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker pull "$PROMETHEUS_IMAGE"
+          docker pull ghcr.io/eighred/base/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+          docker pull ghcr.io/eighred/base/python:3.12-slim
+          python3 kanz/infra/observability/prometheus-runtime/qualify.py \
+            --candidate "$PROMETHEUS_IMAGE" \
+            --helper ghcr.io/eighred/base/python:3.12-slim \
+            --output "$RUNNER_TEMP/prometheus-runtime.json"
+      - name: Preserve actual Prometheus release qualification
+        if: matrix.service == 'prometheus'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prometheus-runtime-release-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prometheus-runtime.json
+          if-no-files-found: error
 
       # Everything below pins to the immutable digest, never a tag.
       - name: Vulnerability scan (fail on CRITICAL)

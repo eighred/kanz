@@ -209,6 +209,9 @@ jobs:
           - service: cloudflared
             dockerfile: kanz/infra/edge/Dockerfile.cloudflared
             testnet_ecr: true
+          - service: prometheus
+            dockerfile: kanz/infra/observability/prometheus-runtime/Dockerfile
+            testnet_ecr: true
           # DATA-M1 (Task 7): the durable-log producer. archiver drains the NATS
           # live spine into the Kafka log of record; it had a Dockerfile, a
           # single-writer deploy manifest and real-broker integration tests
@@ -531,7 +534,7 @@ jobs:
           # a shared scope. BuildKit still keys every layer by its full inputs.
           cache-from: |
             type=gha,scope=${{ matrix.service }}
-            ${{ startsWith(matrix.dockerfile, 'kanz/') && matrix.service != 'cloudflared' && 'type=gha,scope=accounting' || '' }}
+            ${{ startsWith(matrix.dockerfile, 'kanz/') && matrix.service != 'cloudflared' && matrix.service != 'prometheus' && 'type=gha,scope=accounting' || '' }}
           # PR caches cannot be reused by main and can evict its shared layers.
           # Only main publication warms the durable per-service cache.
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=gha,scope={0},mode=max', matrix.service) || '' }}
