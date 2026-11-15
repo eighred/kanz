@@ -134,6 +134,137 @@ class QualificationControls(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
 
+    def test_bootstrap_metadata_parsers_refuse_ambiguity_and_project_only_fixed_fields(self):
+        secret = "unselected-secret-name-must-not-survive"
+        absent = qualify.broker_topic_values("[]")
+        self.assertEqual(set(absent), set(qualify.BOOTSTRAP_TOPICS))
+        self.assertTrue(all(row == {"present": False, "partitions": None, "replicas": None} for row in absent.values()))
+        row = {"name": qualify.BOOTSTRAP_TOPICS[0], "partitions": 1, "replicas": 1}
+        projected = qualify.broker_topic_values(json.dumps([row, dict(row, name=secret)]))
+        self.assertEqual(projected[row["name"]], {"present": True, "partitions": 1, "replicas": 1})
+        self.assertNotIn(secret, json.dumps(projected))
+        bad_topics = ["{}", "null", json.dumps([row, row]), json.dumps([dict(row, unexpected=secret)]), '[{"name":"x","name":"y","partitions":1,"replicas":1}]', secret, " " * (qualify.READINESS_OUTPUT_LIMIT + 1)]
+        for key in ("partitions", "replicas"):
+            bad_topics.extend(json.dumps([dict(row, **{key: value})]) for value in (True, -1, 1.0, None, 2**31))
+        bad_topics.extend(json.dumps([dict(row, name=name)]) for name in ("", ".", "..", "has space", "has/slash", "line\nname", "nul\x00name", "unicode-\ufffd", "a" * 250))
+        for name in ("a", "a" * 249):
+            self.assertEqual(qualify.broker_topic_values(json.dumps([dict(row, name=name)])), absent)
+        for output in bad_topics:
+            with self.assertRaises((ValueError, TypeError)):
+                qualify.broker_topic_values(output)
+        for value in (0, 5 << 30, 2**64 - 1):
+            self.assertEqual(qualify.broker_storage_values(str(value) + "\n"), {"bytes": value})
+        for output in ("", "0", "00\n", "+1\n", "-1\n", "1\r\n", " 1\n", "1\n\n", str(2**64) + "\n", "1" * 63 + "\n", secret, True, None):
+            with self.assertRaises(ValueError):
+                qualify.broker_storage_values(output)
+        self.assertEqual(qualify.search_stats_values('{"indices":{"count":0}}'), {"apiReportedIndexCount": 0, "apiReportedTotalShards": None, "apiReportedPrimaryShards": None})
+        self.assertEqual(qualify.search_stats_values('{"indices":{"count":0,"shards":{"total":0}}}')["apiReportedPrimaryShards"], None)
+        self.assertEqual(qualify.search_stats_values('{"indices":{"count":2,"shards":{"total":4,"primaries":2}}}'), {"apiReportedIndexCount": 2, "apiReportedTotalShards": 4, "apiReportedPrimaryShards": 2})
+        for output in ('{}', '{"indices":{}}', '{"indices":{"count":1}}', '{"indices":{"count":1,"shards":{"total":1}}}', '{"indices":{"count":false}}', '{"indices":{"count":-1}}', '{"indices":{"count":1.0}}', '{"indices":{"count":2147483648}}', '{"indices":{"count":0,"count":1}}', '{"indices":{"count":0,"private":"' + secret + '"}}', '{"indices":{"count":1,"shards":{"total":1,"primaries":null}}}'):
+            with self.assertRaises((ValueError, TypeError)):
+                qualify.search_stats_values(output)
+        for status in ("green", "yellow", "red"):
+            self.assertEqual(qualify.search_health_values(json.dumps({"status": status, "number_of_nodes": 1})), {"status": status, "numberOfNodes": 1})
+        for value in ({}, {"status": "green"}, {"status": "GREEN", "number_of_nodes": 1}, {"status": secret, "number_of_nodes": 1}, {"status": "green", "number_of_nodes": True}, {"status": "green", "number_of_nodes": -1}, {"status": "red", "number_of_nodes": 2**31}):
+            with self.assertRaises((ValueError, TypeError)):
+                qualify.search_health_values(json.dumps(value))
+
+    def test_combined_bootstrap_snapshot_keeps_independent_queries_and_original_failure(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network, fixture.stage = OWNER, OWNER["network"], "system-update"
+        roles = ("mysql", "broker", "search")
+        ids = dict(zip(roles, ("6" * 64, "8" * 64, "9" * 64)))
+        names = {role: fixture.network + "-" + role for role in roles}
+        fixture.image_identities = {role: {"imageID": "sha256:" + digit * 64} for role, digit in zip(roles, "789")}
+        fixture.upgrade_evidence = {"outcome": "refused", "waitExitCode": 1}
+        prior_failure, prior_runtime = {"category": "prior"}, {"category": "prior-runtime"}
+        fixture.last_failure, fixture.last_runtime_result = prior_failure, prior_runtime
+        secret, calls = "combined-metadata-secret-must-not-survive", []
+        outputs = {"mysql": "1\t1\t1\t1\n", "topics": json.dumps([{"name": qualify.BOOTSTRAP_TOPICS[0], "partitions": 1, "replicas": 1}, {"name": secret, "partitions": 1, "replicas": 1}]), "storageMinFree": str(5 << 30) + "\n", "stats": '{"indices":{"count":0}}', "health": '{"status":"yellow","number_of_nodes":1}'}
+        commands = {
+            "mysql": ["bash", "-ec", qualify.MYSQL_BOOTSTRAP_PROBE],
+            "topics": ["rpk", "--ignore-profile", "-X", "brokers=broker:9092", "topic", "list", "--format", "json"],
+            "storageMinFree": ["rpk", "cluster", "config", "get", "storage_min_free_bytes", "--ignore-profile", "-X", "admin.hosts=127.0.0.1:9644"],
+            "stats": ["curl", "--fail", "--silent", "http://127.0.0.1:9200/_cluster/stats?filter_path=indices.count,indices.shards.total,indices.shards.primaries"],
+            "health": ["curl", "--fail", "--silent", "http://127.0.0.1:9200/_cluster/health?level=cluster&filter_path=status,number_of_nodes"],
+        }
+        foreign_before, foreign_after, stopped_after = None, None, None
+        def execute(command, **options):
+            calls.append(command)
+            fixture.stage, fixture.last_failure, fixture.last_runtime_result = "observer", {}, {}
+            if command[:2] == ["docker", "inspect"]:
+                selector = command[-1]
+                role = next(role for role in roles if selector in (names[role], ids[role]))
+                info = runtime_state_info(role)
+                info["Id"], info["Image"] = ids[role], fixture.image_identities[role]["imageID"]
+                if role == foreign_before and selector == names[role] or role == foreign_after and selector == ids[role]:
+                    info["Config"]["Labels"] = {"foreign": secret}
+                if role == stopped_after and selector == ids[role]:
+                    info["State"].update(Status="exited", Running=False, ExitCode=1)
+                self.assertEqual(options, {"timeout": 10, "output_limit": qualify.READINESS_OUTPUT_LIMIT})
+                return json.dumps([info])
+            self.assertEqual(command[:2], ["docker", "exec"])
+            role = next(role for role in roles if ids[role] == command[2])
+            operation = next(key for key, expected in commands.items() if command[3:] == expected)
+            self.assertEqual(role, "mysql" if operation == "mysql" else "broker" if operation in {"topics", "storageMinFree"} else "search")
+            self.assertEqual(options, {"timeout": 10, "output_limit": 64 if operation in {"mysql", "storageMinFree"} else qualify.READINESS_OUTPUT_LIMIT})
+            result = outputs[operation]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        fixture.run = execute
+        def snapshot():
+            calls.clear()
+            fixture.observe_bootstrap_snapshot(names["mysql"], names["broker"], names["search"])
+            self.assertEqual(fixture.stage, "system-update")
+            self.assertIs(fixture.last_failure, prior_failure)
+            self.assertIs(fixture.last_runtime_result, prior_runtime)
+            self.assertEqual(fixture.upgrade_evidence, {"outcome": "refused", "waitExitCode": 1})
+            records = {role: getattr(fixture, role + "_bootstrap_evidence") for role in roles}
+            self.assertNotIn(secret, json.dumps(records))
+            return records
+        records = snapshot()
+        self.assertEqual(len([command for command in calls if command[:2] == ["docker", "exec"]]), 5)
+        self.assertEqual(records["broker"]["values"]["storageMinFree"]["values"], {"bytes": 5 << 30})
+        self.assertEqual(records["broker"]["values"]["sourceConfiguredDataTmpfsBytes"], 1 << 30)
+        self.assertEqual(records["search"]["values"]["stats"]["values"]["apiReportedPrimaryShards"], None)
+        self.assertEqual(records["search"]["values"]["health"]["values"]["status"], "yellow")
+        saved_topics, saved_health = outputs["topics"], outputs["health"]
+        outputs["topics"], outputs["health"] = secret, qualify.CommandFailure("observer", "timeout")
+        records = snapshot()
+        self.assertEqual(records["broker"]["outcome"], "partial")
+        self.assertIsNone(records["broker"]["values"]["topics"]["values"])
+        self.assertEqual(records["broker"]["values"]["storageMinFree"]["outcome"], "observed")
+        self.assertEqual(records["search"]["outcome"], "partial")
+        self.assertEqual(records["search"]["values"]["stats"]["outcome"], "observed")
+        self.assertEqual(records["search"]["values"]["health"]["outcome"], "timeout")
+        outputs["topics"], outputs["health"] = saved_topics, saved_health
+        outputs["storageMinFree"] = RuntimeError(secret)
+        refusal = ValueError("original upgrade refusal")
+        with self.assertRaises(ValueError) as stopped:
+            try:
+                raise refusal
+            finally:
+                records = snapshot()
+        self.assertIs(stopped.exception, refusal)
+        self.assertEqual(records["broker"]["values"]["topics"]["outcome"], "observed")
+        self.assertEqual(records["broker"]["values"]["storageMinFree"]["outcome"], "observation-refused")
+        outputs["storageMinFree"] = "0\n"
+        for foreign_after in ("broker", "search"):
+            records = snapshot()
+            self.assertEqual(records[foreign_after]["outcome"], "observation-refused")
+            self.assertIsNone(records[foreign_after]["values"])
+        foreign_after, foreign_before = None, "broker"
+        records = snapshot()
+        self.assertEqual(records["broker"]["outcome"], "binding-refused")
+        self.assertFalse(any(command[:3] == ["docker", "exec", ids["broker"]] for command in calls))
+        foreign_before, stopped_after = None, "search"
+        self.assertIsNone(snapshot()["search"]["values"])
+        calls.clear()
+        with self.assertRaises(ValueError):
+            fixture._observe_bootstrap_metadata("foreign", "gms")
+        self.assertEqual(calls, [])
+
     def test_mysql_bootstrap_observation_preserves_upgrade_refusal_and_privacy(self):
         fixture = object.__new__(qualify.Fixture)
         fixture.owner, fixture.network, fixture.stage = OWNER, OWNER["network"], "system-update"
@@ -855,7 +986,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images=observed,
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 40}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 42}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}

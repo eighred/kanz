@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Forty
+stage/category, never subprocess arguments or one-run credentials. Forty-two
 qualification controls discriminate these failures alongside the 14 projection
-controls: 54 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 56 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -296,7 +296,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 54 catalog controls, seven shared
+and capture overflow. The inventory contains 56 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -338,9 +338,10 @@ results refuse. Final receipt validation independently checks that join.
 The observation grants no cleanup authority and replaces none of the remaining
 catalog cases or source/registry/resource checks.
 
-After SystemUpdate succeeds or refuses, an informational SQL probe uses the
-existing running MySQL container. It binds the same source/run/nonce/image to
-the immutable container ID before and after execution. A fixed read-only SELECT
+After SystemUpdate succeeds or refuses, one informational snapshot probes the
+existing MySQL, broker and Search containers. Each role independently binds the
+same source/run/nonce/image to its running immutable container ID before and
+after execution. A fixed read-only SQL SELECT
 connects over TCP to the existing `mysql` alias as root; the in-container shell
 passes its existing password through `MYSQL_PWD` and discards stderr. No secret
 is expanded into host arguments. The 10-second/64-byte capture accepts only one
@@ -357,6 +358,40 @@ evidence and cannot grant or deny acceptance. This is TCP/wildcard-account and
 schema/table metadata evidence, not a JDBC connection from another container.
 It collects no grant lists, row data, source files or logs and changes no SQL
 state, credentials or runtime profile.
+
+`brokerBootstrap` retains only the seven configured DataHub topic slots with
+presence, partition and replica counts from a complete validated list. Absent
+topics have null counts; malformed or refused lists have no values. Unknown
+names never enter the receipt. The adjacent public v26.2.2
+[topic-list summary](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/go/rpk/pkg/cli/topic/list.go#L114)
+defines the JSON rows; actual selected v26.2.7 output must qualify that contract.
+These summaries do not establish topic health or message acceptance. A separate
+read-only Admin API query retrieves `storage_min_free_bytes` through the same
+explicit localhost/profile-free seam. The
+[scalar getter](https://github.com/redpanda-data/redpanda/blob/fd30e45b31e0c5e9595e530121a0896e3ddd12a3/src/go/rpk/pkg/cli/cluster/config/get.go#L63)
+prints its YAML integer; only canonical nonnegative decimal plus one LF in the
+unsigned 64-bit range passes. `sourceConfiguredDataTmpfsBytes=1073741824` labels
+the committed fixture bound, not observed free space or supported capacity.
+The storage guard and all resource limits remain unchanged. Topic retention
+and offsets are not collected.
+
+`searchBootstrap` uses filtered cluster stats and cluster health APIs over
+loopback. It retains API-reported index, total-shard and primary-shard counts;
+at index count zero, omitted shard fields remain null rather than fabricated
+zeroes. These counts are not a complete inventory. The pinned
+[stats serializer](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/action/admin/cluster/stats/ClusterStatsIndices.java#L225)
+omits shard totals when there are no indices. The
+[health API](https://docs.opensearch.org/3.9/api-reference/cluster-api/cluster-health/)
+supplies only the closed green/yellow/red status and node count; every color is
+informational. No index names, documents, messages or logs are collected.
+
+Broker and Search use independent per-query closed outcomes, so a refused
+health or storage query cannot erase a valid stats or topic result. Each
+command has a 10-second/64-KiB capture bound, with a 64-byte ceiling for the
+scalar storage query. All values remain withheld if the final container
+binding or running state fails. The shared observation wrapper restores the
+prior stage/failure/runtime evidence, preserves the original upgrade exception
+and gives no metadata value acceptance or cleanup authority.
 
 ### Fixture maintenance images
 

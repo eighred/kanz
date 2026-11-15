@@ -47,6 +47,7 @@ REFERENCE_DB_LAYERS = [
 MYSQL_USER = "584788:584788"
 MYSQL_VERSION = "8.4.11-0ubuntu0.26.04.1"
 BROKER_PROPERTY = "auto_create_topics_enabled"
+BOOTSTRAP_TOPICS = ("MetadataChangeProposal_v1", "FailedMetadataChangeProposal_v1", "MetadataChangeLog_Versioned_v1", "MetadataChangeLog_Timeseries_v1", "PlatformEvent_v1", "DataHubUpgradeHistory_v1", "DataHubUsageEvent_v1")
 SEARCH_CONFIG_SOURCE = "/usr/share/opensearch/config"
 SEARCH_CONFIG_COPY = "/tmp/kanz-catalog-search-config"
 SEARCH_LAUNCHER = "/usr/share/opensearch/bin/opensearch"
@@ -107,6 +108,70 @@ def mysql_bootstrap_values(output):
         raise ValueError("catalog MySQL bootstrap observation shape refused")
     return dict(zip(("rootWildcardAccount", "datahubSchemaExists", "metadataAspectV2Exists", "networkingEnabled"),
                     (value == "1" for value in output[:-1].split("\t"))))
+
+
+def metadata_json(output):
+    if not isinstance(output, str) or len(output.encode("utf-8")) > READINESS_OUTPUT_LIMIT:
+        raise ValueError("bootstrap metadata capture refused")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate metadata field refused")
+            result[key] = value
+        return result
+    return json.loads(output, object_pairs_hook=unique)
+
+
+def metadata_count(value):
+    if type(value) is not int or not 0 <= value <= 2**31 - 1:
+        raise ValueError("bootstrap metadata count refused")
+    return value
+
+
+def broker_topic_values(output):
+    rows = metadata_json(output)
+    if not isinstance(rows, list):
+        raise ValueError("broker topic inventory refused")
+    values = {name: {"present": False, "partitions": None, "replicas": None} for name in BOOTSTRAP_TOPICS}
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"name", "partitions", "replicas"} or not isinstance(row["name"], str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", row["name"]) or row["name"] in {".", ".."} or row["name"] in seen:
+            raise ValueError("broker topic row refused")
+        seen.add(row["name"])
+        partitions, replicas = metadata_count(row["partitions"]), metadata_count(row["replicas"])
+        if row["name"] in values:
+            values[row["name"]] = {"present": True, "partitions": partitions, "replicas": replicas}
+    return values
+
+
+def broker_storage_values(output):
+    if not isinstance(output, str) or not re.fullmatch(r"(?:0|[1-9][0-9]{0,19})\n", output) or int(output) > 2**64 - 1:
+        raise ValueError("broker storage threshold refused")
+    return {"bytes": int(output)}
+
+
+def search_stats_values(output):
+    value = metadata_json(output)
+    if not isinstance(value, dict) or set(value) != {"indices"} or not isinstance(value["indices"], dict) or not {"count"} <= set(value["indices"]) <= {"count", "shards"}:
+        raise ValueError("search stats shape refused")
+    indices = value["indices"]
+    count = metadata_count(indices["count"])
+    shards = indices.get("shards")
+    if shards is None and count == 0:
+        return {"apiReportedIndexCount": count, "apiReportedTotalShards": None, "apiReportedPrimaryShards": None}
+    if not isinstance(shards, dict) or not set(shards) <= {"total", "primaries"} or count and set(shards) != {"total", "primaries"}:
+        raise ValueError("search shard stats refused")
+    def shard_count(key):
+        return None if count == 0 and shards.get(key) is None else metadata_count(shards.get(key))
+    return {"apiReportedIndexCount": count, "apiReportedTotalShards": shard_count("total"), "apiReportedPrimaryShards": shard_count("primaries")}
+
+
+def search_health_values(output):
+    value = metadata_json(output)
+    if not isinstance(value, dict) or set(value) != {"status", "number_of_nodes"} or not isinstance(value["status"], str) or value["status"] not in {"green", "yellow", "red"}:
+        raise ValueError("search health shape refused")
+    return {"status": value["status"], "numberOfNodes": metadata_count(value["number_of_nodes"])}
 
 
 def mysql_container_profile(info, image_id, network, required_labels):
@@ -807,7 +872,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 40 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 42 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1176,18 +1241,44 @@ class Fixture:
             raise ValueError("catalog system update refused") from None
         return evidence
 
+    def _bootstrap_query(self, container_id, command, parser, limit=READINESS_OUTPUT_LIMIT):
+        try:
+            output = self.run(["docker", "exec", container_id, *command], timeout=10, output_limit=limit)
+        except CommandFailure as error:
+            return {"outcome": error.category if error.category in {"timeout", "output-budget"} else "command-refused", "values": None}
+        except (ValueError, KeyError, TypeError, OSError):
+            return {"outcome": "command-refused", "values": None}
+        except Exception:
+            return {"outcome": "observation-refused", "values": None}
+        try:
+            return {"outcome": "observed", "values": parser(output)}
+        except (ValueError, KeyError, TypeError):
+            return {"outcome": "malformed-result", "values": None}
+        except Exception:
+            return {"outcome": "observation-refused", "values": None}
+
     def observe_mysql_bootstrap(self, container):
-        # Diagnostic SQL cannot replace upgrade success or alter its refusal.
+        return self._observe_bootstrap_metadata(container, "mysql")
+
+    def observe_bootstrap_snapshot(self, mysql, broker, search):
+        for role, container in (("mysql", mysql), ("broker", broker), ("search", search)):
+            self._observe_bootstrap_metadata(container, role)
+
+    def _observe_bootstrap_metadata(self, container, role):
+        # Fixed metadata probes cannot replace upgrade success or its refusal.
+        attribute = {"mysql": "mysql_bootstrap_evidence", "broker": "broker_bootstrap_evidence", "search": "search_bootstrap_evidence"}.get(role)
+        if attribute is None:
+            raise ValueError("unselected bootstrap metadata role refused")
         missing = object()
         saved = {key: getattr(self, key, missing) for key in ("stage", "last_failure", "last_runtime_result")}
         evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
                         informationalOnly=True, before=None, after=None, outcome="binding-refused", values=None)
-        self.mysql_bootstrap_evidence = evidence
+        setattr(self, attribute, evidence)
         def running(state):
             return isinstance(state, dict) and state.get("status") == "running" and state.get("Running") is True and all(state.get(key) is False for key in ("Paused", "Restarting", "OOMKilled", "Dead", "errorPresent"))
         try:
             try:
-                if container != self.network + "-mysql":
+                if container != self.network + "-" + role:
                     return evidence
                 evidence["before"] = self.readiness_state(container, container)
             except (ValueError, KeyError, TypeError, OSError):
@@ -1196,17 +1287,23 @@ class Fixture:
                 evidence["outcome"] = "container-not-running"
                 return evidence
             container_id = evidence["before"]["containerID"]
-            values = None
-            try:
-                output = self.run(["docker", "exec", container_id, "bash", "-ec", MYSQL_BOOTSTRAP_PROBE], timeout=10, output_limit=64)
-                evidence["outcome"] = "malformed-result"
-                values = mysql_bootstrap_values(output)
-                evidence["outcome"] = "observed"
-            except CommandFailure as error:
-                evidence["outcome"] = error.category if error.category in {"timeout", "output-budget"} else "command-refused"
-            except (ValueError, KeyError, TypeError, OSError):
-                if evidence["outcome"] != "malformed-result":
-                    evidence["outcome"] = "command-refused"
+            if role == "mysql":
+                query = self._bootstrap_query(container_id, ["bash", "-ec", MYSQL_BOOTSTRAP_PROBE], mysql_bootstrap_values, 64)
+                evidence["outcome"], values = query["outcome"], query["values"]
+            else:
+                if role == "broker":
+                    queries = {
+                        "topics": self._bootstrap_query(container_id, ["rpk", "--ignore-profile", "-X", "brokers=broker:9092", "topic", "list", "--format", "json"], broker_topic_values),
+                        "storageMinFree": self._bootstrap_query(container_id, ["rpk", "cluster", "config", "get", "storage_min_free_bytes", "--ignore-profile", "-X", "admin.hosts=127.0.0.1:9644"], broker_storage_values, 64),
+                    }
+                else:
+                    queries = {
+                        "stats": self._bootstrap_query(container_id, ["curl", "--fail", "--silent", "http://127.0.0.1:9200/_cluster/stats?filter_path=indices.count,indices.shards.total,indices.shards.primaries"], search_stats_values),
+                        "health": self._bootstrap_query(container_id, ["curl", "--fail", "--silent", "http://127.0.0.1:9200/_cluster/health?level=cluster&filter_path=status,number_of_nodes"], search_health_values),
+                    }
+                successes = sum(query["outcome"] == "observed" for query in queries.values())
+                evidence["outcome"] = "observed" if successes == len(queries) else "partial" if successes else "queries-refused"
+                values = dict(queries, sourceConfiguredDataTmpfsBytes=1 << 30) if role == "broker" else queries
             try:
                 evidence["after"] = self.readiness_state(container, container_id)
             except (ValueError, KeyError, TypeError, OSError):
@@ -1214,7 +1311,7 @@ class Fixture:
                 return evidence
             if not running(evidence["after"]):
                 evidence["outcome"] = "container-not-running"
-            elif evidence["outcome"] == "observed":
+            elif evidence["outcome"] in {"observed", "partial", "queries-refused"}:
                 evidence["values"] = values
             return evidence
         except Exception:
@@ -1329,7 +1426,7 @@ class Fixture:
         try:
             self.wait_upgrade(upgrade)
         finally:
-            self.observe_mysql_bootstrap(mysql)
+            self.observe_bootstrap_snapshot(mysql, broker, search)
         self.stage = "gms"
         gms = self.start("gms", options + ["--env", "METADATA_SERVICE_AUTH_ENABLED=true", "--env", "MAE_CONSUMER_ENABLED=true", "--env", "MCE_CONSUMER_ENABLED=true", "--env", "PE_CONSUMER_ENABLED=true", "--env", "DEV_TOOLING_ENABLED=false"], memory="2g")
         self.wait_exec(gms, ["curl", "--fail", "--silent", "http://gms:8080/health"], timeout=300)
@@ -1463,11 +1560,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 54 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 56 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 40}
+        report["qualificationControls"] = {"count": 42}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -1503,6 +1600,8 @@ def qualify(scratch, binary):
         report["brokerRuntime"] = getattr(fixture, "broker_evidence", None)
         report["upgradeOutcome"] = getattr(fixture, "upgrade_evidence", None)
         report["mysqlBootstrap"] = getattr(fixture, "mysql_bootstrap_evidence", None)
+        report["brokerBootstrap"] = getattr(fixture, "broker_bootstrap_evidence", None)
+        report["searchBootstrap"] = getattr(fixture, "search_bootstrap_evidence", None)
         report["readiness"] = getattr(fixture, "readiness_evidence", {})
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)
