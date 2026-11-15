@@ -131,6 +131,13 @@ attempted. The receipt records the actual client/server/API versions, builder
 mode and limits. Hosted compatibility remains unproved until the exact CI run.
 
 The exact base config image ID is pinned and checked against the pulled image.
+Preparation records pulled actual IDs before patching and separates selection,
+base validation, context creation/input copying, download, package write, Docker
+version and build stages. Its public projection contains only the base image ID,
+config/manifest match flags, `OnBuild` count/empty flag and package HTTP status,
+received size/hash and closed refusal category. It never records raw image
+configuration, environment, URLs from errors or command logs. A current primary
+registry/package read cannot establish the cause of an earlier generic CI refusal.
 Inherited `OnBuild` triggers must be empty: Docker executes them before the
 first explicit instruction. The template renders one complete six-label owner
 instruction immediately after `FROM`, before any `ARG`, `USER`, `COPY` or `RUN`;

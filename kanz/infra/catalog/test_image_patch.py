@@ -38,6 +38,30 @@ class ImagePatchControls(unittest.TestCase):
         self.assertIn("FROM " + selected["base"], dockerfile)
         self.assertIn("dpkg -i /tmp/kanz-catalog-patch/linux-libc-dev.deb", dockerfile)
         self.assertNotIn("apt-get", dockerfile)
+        observation = {}
+        selection = dict(selected, bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
+        response = mock.MagicMock(status=200)
+        response.__enter__.return_value = response
+        response.read.return_value = body
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(image_patch.urllib.request, "build_opener", return_value=opener):
+            self.assertEqual(image_patch.download(selection, evidence=observation), body)
+        self.assertEqual(observation, {"category": "passed", "httpStatus": 200, "receivedBytes": len(body), "receivedSHA256": selection["sha256"]})
+        for failure, category in ((image_patch.urllib.error.HTTPError(selection["url"], 302, "secret-marker", {}, None), "package-redirect-refused"), (image_patch.urllib.error.URLError("secret-marker"), "package-network-refused"), (TimeoutError("secret-marker"), "package-timeout")):
+            opener.open.side_effect = failure
+            with self.subTest(category=category), mock.patch.object(image_patch.urllib.request, "build_opener", return_value=opener), self.assertRaises(ValueError) as refused:
+                image_patch.download(selection, evidence=observation)
+            self.assertEqual(observation["category"], category)
+            self.assertNotIn("secret-marker", str(refused.exception))
+            self.assertIsNone(observation["receivedBytes"])
+        opener.open.side_effect = None
+        response.read.return_value = body + b"x"
+        with mock.patch.object(image_patch.urllib.request, "build_opener", return_value=opener), self.assertRaises(ValueError):
+            image_patch.download(selection, evidence=observation)
+        self.assertEqual(observation["category"], "package-integrity-refused")
+        self.assertEqual(observation["receivedBytes"], len(body) + 1)
+        self.assertEqual(observation["receivedSHA256"], hashlib.sha256(body + b"x").hexdigest())
 
     def test_only_fixed_package_may_change_with_identical_cli_python_graph(self):
         selection = image_patch.lock()
@@ -61,6 +85,7 @@ class ImagePatchControls(unittest.TestCase):
     def test_derived_image_must_preserve_exact_base_behavior_layers_and_owner(self):
         record = OWNER["derivedImage"]
         base = base_info(record)
+        self.assertEqual(image_patch.observe_base(base, record), {"imageID": record["baseImageID"], "configImageIDMatches": True, "onBuildCount": 0, "onBuildEmpty": True, "repoDigestCount": 1, "selectedManifestDigestMatches": True})
         derived = {"Id": "sha256:" + "2" * 64, "Os": "linux", "Architecture": "amd64", "RepoTags": [], "Config": dict(base["Config"], Labels=record["labels"]), "RootFS": {"Layers": ["original-layer", "fixed-package-layer"]}}
         proof = image_patch.validate_derived(base, derived, record)
         self.assertNotEqual(proof["baseImageID"], proof["imageID"])

@@ -310,6 +310,12 @@ def validate_receipt(report, identity, images):
         if derived.get("packageInput") != image_patch.lock():
             raise ValueError("catalog package provenance selection differs")
         image_patch.validate_proof(report.get("packagePatch", {}), report.get("dependencies", {}))
+        preparation = report.get("preparation", {})
+        observed = preparation.get("base", {})
+        package = preparation.get("package", {})
+        selected_package = image_patch.lock()
+        if observed.get("imageID") != derived["baseImageID"] or observed.get("configImageIDMatches") is not True or observed.get("onBuildCount") != 0 or observed.get("onBuildEmpty") is not True or observed.get("selectedManifestDigestMatches") is not True or package.get("category") != "passed" or package.get("receivedBytes") != selected_package["bytes"] or package.get("receivedSHA256") != selected_package["sha256"] or type(package.get("httpStatus")) is not int or not 200 <= package["httpStatus"] < 300:
+            raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != "1.8.0" or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
     if report.get("qualificationControls", {}).get("count") != 24 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
@@ -352,23 +358,33 @@ class Fixture:
         self.stage = "initialization"
 
     def prepare_ingestion(self, base):
-        self.stage = "fixed-ingestion-package"
+        self.preparation_evidence = {}
+        self.stage = "fixed-ingestion-selection"
         record = self.owner["derivedImage"]
         if record != image_patch.owned_spec(self.owner, self.owner_path) or record["baseReference"] != self.source_images["ingestion"]:
             raise ValueError("fixed package base/source binding differs")
+        self.stage = "fixed-ingestion-base"
+        self.preparation_evidence["base"] = image_patch.observe_base(base, record)
         image_patch.validate_base(base, record)
+        self.stage = "fixed-ingestion-context-absence"
         context = Path(record["context"])
         if os.path.lexists(context):
             raise ValueError("fixed package requires a fresh private build context")
+        self.stage = "fixed-ingestion-context-create"
         context.mkdir(mode=0o700)
         context_info = context.lstat()
         if context.is_symlink() or not stat.S_ISDIR(context_info.st_mode) or context_info.st_uid != os.getuid() or stat.S_IMODE(context_info.st_mode) != 0o700:
             raise ValueError("fixed package context owner/mode differs")
+        self.stage = "fixed-ingestion-context-inputs"
         for name in ("verify_patch.py", "package-lock.json"):
             (context / name).write_bytes((image_patch.HERE / name).read_bytes())
         (context / "Dockerfile").write_bytes(image_patch.render_dockerfile(record["labels"]))
-        (context / "linux-libc-dev.deb").write_bytes(image_patch.download(image_patch.lock()))
-        self.stage = "offline-ingestion-build"
+        self.stage = "fixed-ingestion-package-download"
+        self.preparation_evidence["package"] = {}
+        body = image_patch.download(image_patch.lock(), evidence=self.preparation_evidence["package"])
+        self.stage = "fixed-ingestion-package-write"
+        (context / "linux-libc-dev.deb").write_bytes(body)
+        self.stage = "fixed-ingestion-docker-version"
         versions = json.loads(self.run(["docker", "version", "--format", '{"client":{{json .Client.Version}},"server":{{json .Server.Version}},"clientAPI":{{json .Client.APIVersion}},"serverAPI":{{json .Server.APIVersion}}}']))
         build = dict(image_patch.BUILD, docker=versions)
         image_patch.validate_build(build)
@@ -376,7 +392,9 @@ class Fixture:
         # Classic build uses the existing daemon without another builder
         # service. The base is already pulled and only public inputs
         # enter this fresh context; no tag or dependency network is accepted.
+        self.stage = "fixed-ingestion-launch-record"
         image_patch.write_marker(record, "started")
+        self.stage = "offline-ingestion-build"
         self.run(["docker", "build", "--pull=false", "--network=none", "--no-cache", "--force-rm", "--memory", "1g", "--memory-swap", "1g", "--cpu-quota", "200000", "--cpu-period", "100000", "--iidfile", str(iid), str(context)], timeout=300, environment=dict(self.environment, DOCKER_BUILDKIT="0"))
         image_id = bounded_file(iid, 128).decode().strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
@@ -583,6 +601,7 @@ class Fixture:
     def setup(self):
         self.stage = "immutable-inputs"
         identities = {}
+        self.image_identities = identities
         for role, image in self.images.items():
             self.run(["docker", "pull", "--platform", "linux/amd64", image], timeout=600)
             info = json.loads(self.run(["docker", "image", "inspect", image]))[0]
@@ -722,12 +741,14 @@ def qualify(scratch, binary):
     except CommandFailure as error:
         fatal_failure = {"stage": error.stage, "category": error.category, "exitCode": error.code}
     except (ValueError, KeyError, TypeError, OSError):
-        fatal_failure = {"stage": fixture.stage, "category": "evidence-refused"}
+        package_category = getattr(fixture, "preparation_evidence", {}).get("package", {}).get("category")
+        fatal_failure = {"stage": fixture.stage, "category": package_category if fixture.stage == "fixed-ingestion-package-download" and package_category in image_patch.PACKAGE_REFUSALS else "evidence-refused"}
     finally:
         report["stage"] = fixture.stage
         report["failure"] = fatal_failure
         report["scanner"] = getattr(fixture, "scanner_evidence", None)
         report["images"] = getattr(fixture, "image_identities", report.get("images", {}))
+        report["preparation"] = getattr(fixture, "preparation_evidence", None)
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)
         if not report["cleanupPassed"]:

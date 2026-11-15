@@ -6,11 +6,13 @@ from pathlib import Path
 import re
 import stat
 import time
+import urllib.error
 import urllib.request
 
 HERE = Path(__file__).resolve().parent / "ingestion_patch"
 BEHAVIOR = ("User", "Entrypoint", "Cmd", "WorkingDir", "Env", "ExposedPorts", "Healthcheck", "StopSignal", "Shell", "OnBuild")
 ADVISORY_EXIT = 42
+PACKAGE_REFUSALS = frozenset({"package-publisher-refused", "package-redirect-refused", "package-http-refused", "package-timeout", "package-network-refused", "package-integrity-refused"})
 BUILD = {"mode": "docker-legacy", "DOCKER_BUILDKIT": "0", "network": "none", "pull": False,
          "memoryBytes": 1 << 30, "swapBytes": 1 << 30, "cpuQuota": 200000, "cpuPeriod": 100000,
          "timeoutSeconds": 300, "forceRemoveIntermediateContainers": True, "tag": None}
@@ -29,19 +31,33 @@ def validate_package(body, selection):
         raise ValueError("fixed package bytes differ from reviewed publisher input")
 
 
-def download(selection):
+def download(selection, evidence=None):
+    evidence = evidence if evidence is not None else {}
+    evidence.update(category="package-request-pending", httpStatus=None, receivedBytes=None, receivedSHA256=None)
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *_args, **_kwargs):
             return None
     if selection["url"] != "https://security.ubuntu.com/ubuntu/pool/main/l/linux/linux-libc-dev_6.8.0-149.149_amd64.deb":
+        evidence["category"] = "package-publisher-refused"
         raise ValueError("fixed package publisher differs")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
         with opener.open(selection["url"], timeout=30) as response:
+            evidence["httpStatus"] = response.status
             body = response.read(selection["bytes"] + 1)
-    except OSError:
+    except urllib.error.HTTPError as error:
+        evidence.update(category="package-redirect-refused" if 300 <= error.code < 400 else "package-http-refused", httpStatus=error.code)
+        raise ValueError("fixed package HTTP request refused") from None
+    except OSError as error:
+        evidence["category"] = "package-timeout" if isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError) else "package-network-refused"
         raise ValueError("fixed package download refused") from None
-    validate_package(body, selection)
+    evidence.update(receivedBytes=len(body), receivedSHA256=hashlib.sha256(body).hexdigest())
+    try:
+        validate_package(body, selection)
+    except ValueError:
+        evidence["category"] = "package-integrity-refused"
+        raise ValueError("fixed package integrity refused") from None
+    evidence["category"] = "passed"
     return body
 
 
@@ -70,8 +86,22 @@ def render_dockerfile(labels):
     return template.replace("__KANZ_CATALOG_OWNERSHIP__", " ".join(key + "=" + json.dumps(value) for key, value in sorted(labels.items()))).encode()
 
 
+def observe_base(base, record):
+    config = base.get("Config")
+    triggers = config.get("OnBuild") if isinstance(config, dict) else "invalid"
+    digests = base.get("RepoDigests")
+    image_id = base.get("Id")
+    return {"imageID": image_id if isinstance(image_id, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) else None,
+            "configImageIDMatches": image_id == record["baseImageID"],
+            "onBuildCount": len(triggers) if isinstance(triggers, list) else 0 if triggers is None else None,
+            "onBuildEmpty": isinstance(config, dict) and (triggers is None or isinstance(triggers, list) and not triggers),
+            "repoDigestCount": len(digests) if isinstance(digests, list) else None,
+            "selectedManifestDigestMatches": isinstance(digests, list) and any(isinstance(item, str) and item.endswith("@" + record["baseReference"].rsplit("@", 1)[1]) for item in digests)}
+
+
 def validate_base(base, record):
-    if base.get("Id") != record["baseImageID"] or not isinstance(base.get("Config"), dict) or base["Config"].get("OnBuild") or not any(item.endswith("@" + record["baseReference"].rsplit("@", 1)[1]) for item in base.get("RepoDigests", [])):
+    observation = observe_base(base, record)
+    if not observation["configImageIDMatches"] or not observation["onBuildEmpty"] or not observation["selectedManifestDigestMatches"]:
         raise ValueError("exact base identity or pre-label OnBuild trigger refused")
 
 
