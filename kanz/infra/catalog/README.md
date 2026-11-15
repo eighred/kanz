@@ -87,9 +87,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Forty-four
+stage/category, never subprocess arguments or one-run credentials. Forty-five
 qualification controls discriminate these failures alongside the 14 projection
-controls: 58 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 59 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -309,7 +309,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 58 catalog controls, seven shared
+and capture overflow. The inventory contains 59 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -482,6 +482,34 @@ declaration and actual line count. The inventory covers only those three source
 trees and establishes neither a complete dependency inventory, an actual caller,
 a loaded version nor a failure cause. Existing source-free host privacy and
 lifecycle controls exercise this projection without adding a capture or role.
+
+A failed-Search observer uses the same private fixed-role capture implementation,
+with its own predicate and enum-only reducer. It requires a completed nonzero
+upgrade outcome and the exact source-joined `searchBootstrap` shape whose
+`before` state is selected, owned, exited and nonzero, with `after` and `values`
+null. Fresh pre/post inspections of that full Search ID must equal the terminal
+snapshot. Running, unknown, zero-exit, stale, foreign or differently shaped
+snapshots grant no log access. This observation runs after the metadata batch.
+
+`failedSearch` has only the existing nine-field enum/count envelope. Search
+never invokes the startup renderer, hashes, source frames or unknown fallback.
+The private capture permits only explicitly guarded upgrade/Search roles; it
+does not extend generic runtime log authority or GMS/MySQL permissions. Both
+roles retain the same 256-line, 64-KiB, 10-second and 16-record ceilings and
+process/pipe cleanup. Refusal clears signals and preserves the original upgrade
+exception, stage and failure evidence without affecting admission or cleanup.
+
+The Search text catalogue uses expected-bundle OpenJDK revision
+`7b65d74bcbd7c3a0b4c1f5c5bd85e64aa2e51b4a`: fixed filesystem phrases from
+`os.cpp`, heap text from `universe.cpp`, the whole bounded direct-buffer template
+from `java/nio/Bits.java` and the exact native-thread-create prefix from
+`prims/jvm.cpp` line 2847. Heap classification requires same-line public
+`OutOfMemoryError` and `Java heap space`; the GC-overhead category likewise
+requires same-line OOME plus its exact public reason. Generic OOME alone remains ambiguous.
+Direct-memory numbers and native thread names are discarded. The unverified
+`unable to create native thread` wording is not matched. Native coverage is
+partial and describes only public text; it establishes no loaded JDK version,
+fatal cause, operation, resource requirement or justified profile change.
 
 Public token provenance includes the existing DataHub source revision
 `faab576d96cbdb27b8344a755e0bc0f42fdc9c15`, expected-bundle JDK sources above,

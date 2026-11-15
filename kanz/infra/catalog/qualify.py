@@ -81,6 +81,16 @@ FAILED_UPGRADE_STEP_CODES = {
     "bootstrap-page-modules-v10": "bootstrap-page-modules",
     "bootstrap-page-templates-v3": "bootstrap-page-templates",
 }
+FAILED_SEARCH_LITERALS = {
+    "java-state-error": ("java.lang.IllegalStateException",),
+    "java-memory-error": ("java.lang.OutOfMemoryError",),
+    "native-link-error": ("java.lang.UnsatisfiedLinkError",),
+    "filesystem-permission": ("Permission denied",),
+    "filesystem-space": ("No space left on device",),
+    "filesystem-readonly": ("Read-only file system",),
+    "filesystem-open-files": ("Too many open files",),
+    "native-thread-create-refused": ("Failed to start the native thread for java.lang.Thread ",),
+}
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
@@ -684,6 +694,17 @@ def failed_upgrade_id(evidence, image_id, identity):
     return after["containerID"]
 
 
+def failed_search_state(evidence, image_id, identity):
+    keys = {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "before", "after", "outcome", "values"}
+    if not isinstance(evidence, dict) or set(evidence) != keys or evidence.get("informationalOnly") is not True or any(evidence.get(key) != identity[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")) or evidence.get("outcome") != "container-not-running" or evidence.get("after") is not None or evidence.get("values") is not None:
+        raise ValueError("failed search snapshot refused")
+    state = evidence.get("before")
+    state_keys = {"containerID", "imageID", "ownerVerified", "status", "Running", "Paused", "Restarting", "OOMKilled", "Dead", "exitCode", "errorPresent", "healthStatus"}
+    if not isinstance(state, dict) or set(state) != state_keys or not isinstance(state.get("containerID"), str) or not re.fullmatch(r"[0-9a-f]{64}", state["containerID"]) or state.get("imageID") != image_id or state.get("ownerVerified") is not True or state.get("status") != "exited" or any(state.get(key) is not False for key in ("Running", "Paused", "Restarting", "Dead")) or any(type(state.get(key)) is not bool for key in ("OOMKilled", "errorPresent")) or type(state.get("exitCode")) is not int or not 1 <= state["exitCode"] <= 255 or state.get("healthStatus") not in {"not-configured", "starting", "healthy", "unhealthy"}:
+        raise ValueError("failed search terminal state refused")
+    return state
+
+
 def failed_upgrade_step_signals(lines):
     # Bind only complete public manager messages, optionally behind the pinned
     # plain Logback prefix. Dynamic IDs, counters and details never leave here.
@@ -733,6 +754,49 @@ def reduce_failed_upgrade(output):
         if count:
             signals.append({"code": code, "count": count})
     signals.extend(failed_upgrade_step_signals(lines))
+    if len(signals) > READINESS_CONTEXT_RECORDS:
+        return refused("record-budget")
+    return {"outcome": "reduced", "signals": signals} if signals else refused("unclassified-output")
+
+
+def reduce_failed_search(output):
+    refused = lambda outcome: {"outcome": outcome, "signals": []}
+    if not isinstance(output, bytes):
+        return refused("malformed-output")
+    if len(output) > READINESS_OUTPUT_LIMIT:
+        return refused("output-budget")
+    if not output:
+        return refused("empty-output")
+    try:
+        text = output.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return refused("malformed-output")
+    if "\x00" in text or "\x1b" in text:
+        return refused("malformed-output")
+    lines = text.splitlines()
+    if len(lines) > FAILED_UPGRADE_LINE_LIMIT:
+        return refused("line-budget")
+    signals = []
+    boundary = r"A-Za-z0-9_.$/\\"
+    for code, literals in FAILED_SEARCH_LITERALS.items():
+        patterns = [re.compile(r"(?<![" + boundary + r"])" + re.escape(literal) + r"(?![" + boundary + r"])") for literal in literals]
+        count = sum(any(pattern.search(line) for pattern in patterns) for line in lines)
+        if count:
+            signals.append({"code": code, "count": count})
+    number = r"(0|[1-9][0-9]{0,18})"
+    direct = re.compile(r"(?<![" + boundary + r"])Cannot reserve " + number + r" bytes of direct buffer memory \(allocated: " + number + ", limit: " + number + r"\)(?![" + boundary + r"])")
+    direct_count = sum(any(all(int(value) <= 2**63 - 1 for value in match.groups()) for match in direct.finditer(line)) for line in lines)
+    if direct_count:
+        signals.append({"code": "jvm-direct-memory", "count": direct_count})
+    heap_type = re.compile(r"(?<![" + boundary + r"])java\.lang\.OutOfMemoryError(?![" + boundary + r"])")
+    heap_reason = re.compile(r"(?<![" + boundary + r"])Java heap space(?![" + boundary + r"])")
+    heap_count = sum(bool(heap_type.search(line) and heap_reason.search(line)) for line in lines)
+    if heap_count:
+        signals.append({"code": "jvm-heap", "count": heap_count})
+    gc_reason = re.compile(r"(?<![" + boundary + r"])GC overhead limit exceeded(?![" + boundary + r"])")
+    gc_count = sum(bool(heap_type.search(line) and gc_reason.search(line)) for line in lines)
+    if gc_count:
+        signals.append({"code": "jvm-gc-overhead", "count": gc_count})
     if len(signals) > READINESS_CONTEXT_RECORDS:
         return refused("record-budget")
     return {"outcome": "reduced", "signals": signals} if signals else refused("unclassified-output")
@@ -1069,7 +1133,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 44 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 45 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1439,32 +1503,45 @@ class Fixture:
         return evidence
 
     def observe_failed_upgrade(self, container):
+        return self._observe_failed_service(container, "upgrade")
+
+    def observe_failed_search(self, container):
+        return self._observe_failed_service(container, "search")
+
+    def _observe_failed_service(self, container, role):
         # Separate capability: generic run/runtime log permissions stay closed.
+        attribute = {"upgrade": "failed_upgrade_evidence", "search": "failed_search_evidence"}.get(role)
+        if attribute is None:
+            raise ValueError("unselected failed-service role refused")
         missing = object()
         saved = {key: getattr(self, key, missing) for key in ("stage", "last_failure", "last_runtime_result")}
         evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
                         informationalOnly=True, before=None, after=None, outcome="scope-refused", signals=[])
-        self.failed_upgrade_evidence = evidence
-        frame_evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
-                              informationalOnly=True, containerID=None, imageID=None, outcome="scope-refused", frames=[], truncated=False)
-        self.failed_upgrade_frame_evidence = frame_evidence
+        setattr(self, attribute, evidence)
+        frame_evidence = None
+        if role == "upgrade":
+            frame_evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
+                                  informationalOnly=True, containerID=None, imageID=None, outcome="scope-refused", frames=[], truncated=False)
+            self.failed_upgrade_frame_evidence = frame_evidence
         frames_published = False
         try:
-            selected = self.image_identities["upgrade"]
-            if container != self.network + "-upgrade" or selected["reference"] != image_identity.selections()["upgrade"]["reference"]:
+            selected = self.image_identities[role]
+            upgrade_image = self.image_identities["upgrade"]
+            if container != self.network + "-" + role or selected["reference"] != image_identity.selections()[role]["reference"] or upgrade_image["reference"] != image_identity.selections()["upgrade"]["reference"]:
                 return evidence
             try:
-                container_id = failed_upgrade_id(getattr(self, "upgrade_evidence", None), selected["imageID"], self.owner)
+                upgrade_id = failed_upgrade_id(getattr(self, "upgrade_evidence", None), upgrade_image["imageID"], self.owner)
+                expected = self.upgrade_evidence["after"] if role == "upgrade" else failed_search_state(getattr(self, "search_bootstrap_evidence", None), selected["imageID"], self.owner)
             except (ValueError, KeyError, TypeError):
                 return evidence
-            expected = self.upgrade_evidence["after"]
+            container_id = upgrade_id if role == "upgrade" else expected["containerID"]
             def inspect():
                 rows = json.loads(self.run(["docker", "inspect", container_id], timeout=10, output_limit=READINESS_OUTPUT_LIMIT))
                 if not isinstance(rows, list) or len(rows) != 1:
-                    raise ValueError("failed upgrade inspection refused")
+                    raise ValueError("failed service inspection refused")
                 state = owned_runtime_state(rows[0], container, selected["imageID"], self.network, labels(self.owner))
                 if state != expected:
-                    raise ValueError("failed upgrade fresh terminal state differs")
+                    raise ValueError("failed service fresh terminal state differs")
                 return state
             evidence["outcome"] = "binding-refused"
             try:
@@ -1484,8 +1561,11 @@ class Fixture:
                     code, raw = capture_process(process, 10, READINESS_OUTPUT_LIMIT)
                     complete = True
                     if type(code) is int and code == 0:
-                        result = reduce_failed_upgrade(raw)
-                        frame_result = reduce_failed_upgrade_frames(raw)
+                        if role == "upgrade":
+                            result = reduce_failed_upgrade(raw)
+                            frame_result = reduce_failed_upgrade_frames(raw)
+                        else:
+                            result = reduce_failed_search(raw)
                     else:
                         result = {"outcome": "command-refused", "signals": []}
                 except CommandFailure as error:
@@ -1521,14 +1601,15 @@ class Fixture:
             except (ValueError, KeyError, TypeError, OSError):
                 return evidence
             evidence.update(reduced)
-            frame_evidence.update(projected_frames, containerID=container_id, imageID=selected["imageID"])
-            frames_published = True
+            if frame_evidence is not None:
+                frame_evidence.update(projected_frames, containerID=container_id, imageID=selected["imageID"])
+                frames_published = True
             return evidence
         except Exception:
             evidence.update(outcome="observation-refused", signals=[])
             return evidence
         finally:
-            if not frames_published:
+            if frame_evidence is not None and not frames_published:
                 frame_evidence.update(containerID=None, imageID=None, outcome=evidence["outcome"], frames=[], truncated=False)
             for key, value in saved.items():
                 if value is missing:
@@ -1737,6 +1818,7 @@ class Fixture:
         finally:
             self.observe_failed_upgrade(upgrade)
             self.observe_bootstrap_snapshot(mysql, broker, search)
+            self.observe_failed_search(search)
         self.stage = "gms"
         gms = launch_datahub("gms")
         self.wait_exec(gms, ["curl", "--fail", "--silent", "http://gms:8080/health"], timeout=300)
@@ -1870,11 +1952,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 58 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 59 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 44}
+        report["qualificationControls"] = {"count": 45}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -1911,6 +1993,7 @@ def qualify(scratch, binary):
         report["upgradeOutcome"] = getattr(fixture, "upgrade_evidence", None)
         report["failedUpgrade"] = getattr(fixture, "failed_upgrade_evidence", None)
         report["failedUpgradeFrames"] = getattr(fixture, "failed_upgrade_frame_evidence", None)
+        report["failedSearch"] = getattr(fixture, "failed_search_evidence", None)
         report["mysqlBootstrap"] = getattr(fixture, "mysql_bootstrap_evidence", None)
         report["brokerBootstrap"] = getattr(fixture, "broker_bootstrap_evidence", None)
         report["searchBootstrap"] = getattr(fixture, "search_bootstrap_evidence", None)

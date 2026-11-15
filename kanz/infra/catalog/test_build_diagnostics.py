@@ -644,6 +644,41 @@ class BuildDiagnosticControls(unittest.TestCase):
                 refused_frames = qualify.reduce_failed_upgrade_frames(public_frame())
             self.assertEqual(refused_frames, {"outcome": "source-inventory-refused", "frames": [], "truncated": False})
             self.assertNotIn(secret, json.dumps(refused_frames))
+        for category, literals in qualify.FAILED_SEARCH_LITERALS.items():
+            for literal in literals:
+                projected = qualify.reduce_failed_search((literal + ': "' + secret + '"').encode())
+                self.assertEqual(set(projected), {"outcome", "signals"})
+                self.assertIn({"code": category, "count": 1}, projected["signals"])
+                self.assertTrue(all(set(signal) == {"code", "count"} for signal in projected["signals"]))
+                self.assertNotIn(secret, json.dumps(projected))
+                self.assertNotIn(literal, json.dumps(projected))
+        generic_memory = qualify.reduce_failed_search(("java.lang.OutOfMemoryError: " + secret).encode())
+        self.assertEqual(generic_memory, {"outcome": "reduced", "signals": [{"code": "java-memory-error", "count": 1}]})
+        self.assertEqual(qualify.reduce_failed_search(b"Java heap space"), {"outcome": "unclassified-output", "signals": []})
+        heap = qualify.reduce_failed_search(("java.lang.OutOfMemoryError: Java heap space " + secret).encode())
+        self.assertIn({"code": "jvm-heap", "count": 1}, heap["signals"])
+        gc = qualify.reduce_failed_search(("java.lang.OutOfMemoryError: GC overhead limit exceeded " + secret).encode())
+        self.assertIn({"code": "jvm-gc-overhead", "count": 1}, gc["signals"])
+        self.assertEqual(qualify.reduce_failed_search(b"GC overhead limit exceeded"), {"outcome": "unclassified-output", "signals": []})
+        direct = "Cannot reserve 12345 bytes of direct buffer memory (allocated: 67890, limit: 99999)"
+        direct_result = qualify.reduce_failed_search(("java.lang.OutOfMemoryError: " + direct).encode())
+        self.assertIn({"code": "jvm-direct-memory", "count": 1}, direct_result["signals"])
+        for value in ("12345", "67890", "99999", direct):
+            self.assertNotIn(value, json.dumps(direct_result))
+        for body in (secret, "private.java.lang.IllegalStateException", "java.lang.IllegalStateExceptionSuffix", "/private/Read-only file system", "Cannot reserve " + secret + " bytes of direct buffer memory (allocated: 1, limit: 2)", direct.replace("12345", "012345"), direct.replace("12345", "9223372036854775808"), "unable to create native thread"):
+            result = qualify.reduce_failed_search(body.encode())
+            self.assertEqual(result, {"outcome": "unclassified-output", "signals": []})
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            split_heap = qualify.reduce_failed_search(("java.lang.OutOfMemoryError" + separator + "Java heap space").encode())
+            self.assertNotIn("jvm-heap", [signal["code"] for signal in split_heap["signals"]])
+            split_direct = qualify.reduce_failed_search(direct.replace(" bytes of direct", separator + " bytes of direct").encode())
+            self.assertNotIn("jvm-direct-memory", [signal["code"] for signal in split_direct["signals"]])
+        for body, outcome in ((b"", "empty-output"), (b"\xffjava.lang.IllegalStateException", "malformed-output"), (b"\x1b[31mjava.lang.IllegalStateException", "malformed-output"), (b"java.lang.IllegalStateException\x00", "malformed-output"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), "output-budget"), (b"\n".join([b"java.lang.IllegalStateException"] * 257), "line-budget")):
+            self.assertEqual(qualify.reduce_failed_search(body), {"outcome": outcome, "signals": []})
+        repeated_search = qualify.reduce_failed_search(b"\n".join([b"java.lang.IllegalStateException"] * 256))
+        self.assertEqual(repeated_search, {"outcome": "reduced", "signals": [{"code": "java-state-error", "count": 256}]})
+        with mock.patch.object(qualify, "FAILED_SEARCH_LITERALS", {"fixed-" + str(index): ("PublicSearchToken" + str(index),) for index in range(17)}):
+            self.assertEqual(qualify.reduce_failed_search("\n".join("PublicSearchToken" + str(index) for index in range(17)).encode()), {"outcome": "record-budget", "signals": []})
         for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (runtime, 1, "mysql-startup-log"), (runtime, 1, "gms-startup-log"), (runtime, 1, "upgrade-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)
