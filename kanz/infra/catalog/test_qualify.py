@@ -134,6 +134,91 @@ class QualificationControls(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
 
+    def test_mysql_bootstrap_observation_preserves_upgrade_refusal_and_privacy(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network, fixture.stage = OWNER, OWNER["network"], "system-update"
+        fixture.image_identities = {"mysql": {"imageID": "sha256:" + "7" * 64}}
+        original_failure, original_runtime = {"category": "prior-failure"}, {"category": "prior-runtime"}
+        fixture.last_failure, fixture.last_runtime_result = original_failure, original_runtime
+        fixture.upgrade_evidence = {"outcome": "refused", "waitExitCode": 1}
+        name, container_id, calls = OWNER["network"] + "-mysql", "6" * 64, []
+        before, after = runtime_state_info("mysql"), runtime_state_info("mysql")
+        output, failure, secret = "1\t1\t1\t1\n", None, "mysql-bootstrap-secret-must-not-leak"
+        def execute(command, **options):
+            calls.append(command)
+            fixture.stage, fixture.last_failure, fixture.last_runtime_result = "observer", {}, {}
+            if command[:2] == ["docker", "inspect"]:
+                self.assertEqual(options, {"timeout": 10, "output_limit": qualify.READINESS_OUTPUT_LIMIT})
+                return json.dumps([before if command[-1] == name else after])
+            self.assertEqual(command, ["docker", "exec", container_id, "bash", "-ec", qualify.MYSQL_BOOTSTRAP_PROBE])
+            self.assertEqual(options, {"timeout": 10, "output_limit": 64})
+            self.assertNotIn(secret, " ".join(command))
+            if failure is not None:
+                raise failure
+            return output
+        fixture.run = execute
+        def observe():
+            calls.clear()
+            result = fixture.observe_mysql_bootstrap(name)
+            self.assertEqual(fixture.stage, "system-update")
+            self.assertIs(fixture.last_failure, original_failure)
+            self.assertIs(fixture.last_runtime_result, original_runtime)
+            self.assertEqual(fixture.upgrade_evidence, {"outcome": "refused", "waitExitCode": 1})
+            self.assertEqual(set(result), {"informationalOnly", "sourceSHA", "treeSHA", "runID", "runAttempt", "before", "after", "outcome", "values"})
+            self.assertNotIn(secret, json.dumps(result))
+            return result
+        observed = observe()
+        self.assertEqual(observed["outcome"], "observed")
+        self.assertEqual(observed["values"], {"rootWildcardAccount": True, "datahubSchemaExists": True, "metadataAspectV2Exists": True, "networkingEnabled": True})
+        self.assertEqual(calls[0], ["docker", "inspect", name])
+        self.assertEqual(calls[-1], ["docker", "inspect", container_id])
+        self.assertIn('MYSQL_PWD="$MYSQL_ROOT_PASSWORD"', qualify.MYSQL_BOOTSTRAP_PROBE)
+        self.assertIn("--protocol=TCP --host=mysql --user=root", qualify.MYSQL_BOOTSTRAP_PROBE)
+        self.assertIn("exec 2>/dev/null", qualify.MYSQL_BOOTSTRAP_PROBE)
+        for output in ("0\t0\t0\t0\n", "1\t0\t1\t0\n"):
+            result = observe()
+            self.assertEqual(result["outcome"], "observed")
+            self.assertEqual(list(result["values"].values()), [part == "1" for part in output[:-1].split("\t")])
+        for output in ("", "1\t1\t1\t1", "1\t1\t1\t1\r\n", "1 1 1 1\n", "1\t1\t1\t2\n", "1\t1\t1\t1\n\n", " 1\t1\t1\t1\n", "1\t1\t1\t1\n" + secret, True, None):
+            result = observe()
+            self.assertEqual(result["outcome"], "malformed-result")
+            self.assertIsNone(result["values"])
+            self.assertEqual(calls[-1], ["docker", "inspect", container_id])
+        output = "1\t1\t1\t1\n"
+        for failure, category in ((qualify.CommandFailure("observer", "timeout"), "timeout"), (qualify.CommandFailure("observer", "output-budget"), "output-budget"), (OSError(secret), "command-refused"), (RuntimeError(secret), "observation-refused")):
+            result = observe()
+            self.assertEqual(result["outcome"], category)
+            self.assertIsNone(result["values"])
+        refusal = ValueError("original upgrade refusal")
+        with self.assertRaises(ValueError) as stopped:
+            try:
+                raise refusal
+            finally:
+                observe()
+        self.assertIs(stopped.exception, refusal)
+        failure = None
+        for field, value in (("Image", "sha256:" + "f" * 64), ("Name", "/foreign"), ("Id", secret), ("Config", {"Labels": {"foreign": secret}}), ("HostConfig", {"NetworkMode": "foreign"})):
+            before = dict(runtime_state_info("mysql"), **{field: value})
+            result = observe()
+            self.assertEqual(result["outcome"], "binding-refused")
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(result["values"])
+        before = runtime_state_info("mysql", "exited")
+        self.assertEqual(observe()["outcome"], "container-not-running")
+        self.assertEqual(len(calls), 1)
+        before = runtime_state_info("mysql")
+        for after in (dict(runtime_state_info("mysql"), Id="8" * 64), dict(runtime_state_info("mysql"), Config={"Labels": {"foreign": secret}})):
+            result = observe()
+            self.assertEqual(result["outcome"], "observation-refused")
+            self.assertIsNone(result["values"])
+            self.assertIsNone(result["after"])
+        after = runtime_state_info("mysql", "exited")
+        self.assertEqual(observe()["outcome"], "container-not-running")
+        self.assertIsNone(fixture.mysql_bootstrap_evidence["values"])
+        calls.clear()
+        self.assertEqual(fixture.observe_mysql_bootstrap("foreign-mysql")["outcome"], "binding-refused")
+        self.assertEqual(calls, [])
+
     def test_upgrade_outcome_binds_wait_and_terminal_state_without_logs(self):
         fixture = object.__new__(qualify.Fixture)
         fixture.owner, fixture.network = OWNER, OWNER["network"]
@@ -770,7 +855,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images=observed,
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 39}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 40}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}

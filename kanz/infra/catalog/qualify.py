@@ -96,6 +96,17 @@ awk '/^Uid:/{print "pebbleUID=" $3}/^Gid:/{print "pebbleGID=" $3}' /proc/1/statu
 awk '/^Uid:/{print "mysqlUID=" $3}/^Gid:/{print "mysqlGID=" $3}' /proc/"$pid"/status
 printf 'sql=%s\n' "$sql"
 '''
+MYSQL_BOOTSTRAP_PROBE = r'''set -eu
+exec 2>/dev/null
+MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=TCP --host=mysql --user=root --batch --skip-column-names --execute="SELECT BINARY CURRENT_USER() = 'root@%', EXISTS (SELECT 1 FROM information_schema.SCHEMATA WHERE BINARY SCHEMA_NAME = 'datahub'), EXISTS (SELECT 1 FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = 'datahub' AND BINARY TABLE_NAME = 'metadata_aspect_v2'), @@GLOBAL.skip_networking = 0"
+'''
+
+
+def mysql_bootstrap_values(output):
+    if not isinstance(output, str) or not re.fullmatch(r"[01]\t[01]\t[01]\t[01]\n", output):
+        raise ValueError("catalog MySQL bootstrap observation shape refused")
+    return dict(zip(("rootWildcardAccount", "datahubSchemaExists", "metadataAspectV2Exists", "networkingEnabled"),
+                    (value == "1" for value in output[:-1].split("\t"))))
 
 
 def mysql_container_profile(info, image_id, network, required_labels):
@@ -796,7 +807,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 39 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 40 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1165,6 +1176,59 @@ class Fixture:
             raise ValueError("catalog system update refused") from None
         return evidence
 
+    def observe_mysql_bootstrap(self, container):
+        # Diagnostic SQL cannot replace upgrade success or alter its refusal.
+        missing = object()
+        saved = {key: getattr(self, key, missing) for key in ("stage", "last_failure", "last_runtime_result")}
+        evidence = dict({key: self.owner[key] for key in ("sourceSHA", "treeSHA", "runID", "runAttempt")},
+                        informationalOnly=True, before=None, after=None, outcome="binding-refused", values=None)
+        self.mysql_bootstrap_evidence = evidence
+        def running(state):
+            return isinstance(state, dict) and state.get("status") == "running" and state.get("Running") is True and all(state.get(key) is False for key in ("Paused", "Restarting", "OOMKilled", "Dead", "errorPresent"))
+        try:
+            try:
+                if container != self.network + "-mysql":
+                    return evidence
+                evidence["before"] = self.readiness_state(container, container)
+            except (ValueError, KeyError, TypeError, OSError):
+                return evidence
+            if not running(evidence["before"]):
+                evidence["outcome"] = "container-not-running"
+                return evidence
+            container_id = evidence["before"]["containerID"]
+            values = None
+            try:
+                output = self.run(["docker", "exec", container_id, "bash", "-ec", MYSQL_BOOTSTRAP_PROBE], timeout=10, output_limit=64)
+                evidence["outcome"] = "malformed-result"
+                values = mysql_bootstrap_values(output)
+                evidence["outcome"] = "observed"
+            except CommandFailure as error:
+                evidence["outcome"] = error.category if error.category in {"timeout", "output-budget"} else "command-refused"
+            except (ValueError, KeyError, TypeError, OSError):
+                if evidence["outcome"] != "malformed-result":
+                    evidence["outcome"] = "command-refused"
+            try:
+                evidence["after"] = self.readiness_state(container, container_id)
+            except (ValueError, KeyError, TypeError, OSError):
+                evidence["outcome"] = "observation-refused"
+                return evidence
+            if not running(evidence["after"]):
+                evidence["outcome"] = "container-not-running"
+            elif evidence["outcome"] == "observed":
+                evidence["values"] = values
+            return evidence
+        except Exception:
+            # Optional diagnostics must not replace the original upgrade error.
+            # Interrupts and process termination remain BaseException signals.
+            evidence.update(outcome="observation-refused", values=None)
+            return evidence
+        finally:
+            for key, value in saved.items():
+                if value is missing:
+                    self.__dict__.pop(key, None)
+                else:
+                    setattr(self, key, value)
+
     def configure_broker(self, container):
         self.broker_evidence = None
         try:
@@ -1262,7 +1326,10 @@ class Fixture:
         options = [item for key, value in common.items() for item in ("--env", key + "=" + value)]
         self.stage = "system-update"
         upgrade = self.start("upgrade", options + ["--env", "DATAHUB_PRECREATE_TOPICS=true", "--env", "DATAHUB_SQL_SETUP_ENABLED=true", "--env", "CREATE_USER=false", "--env", "SCHEMA_REGISTRY_SYSTEM_UPDATE=true", "--env", "PARTITIONS=1"], ["-u", "SystemUpdate"], memory="2g")
-        self.wait_upgrade(upgrade)
+        try:
+            self.wait_upgrade(upgrade)
+        finally:
+            self.observe_mysql_bootstrap(mysql)
         self.stage = "gms"
         gms = self.start("gms", options + ["--env", "METADATA_SERVICE_AUTH_ENABLED=true", "--env", "MAE_CONSUMER_ENABLED=true", "--env", "MCE_CONSUMER_ENABLED=true", "--env", "PE_CONSUMER_ENABLED=true", "--env", "DEV_TOOLING_ENABLED=false"], memory="2g")
         self.wait_exec(gms, ["curl", "--fail", "--silent", "http://gms:8080/health"], timeout=300)
@@ -1396,11 +1463,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 53 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 54 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 39}
+        report["qualificationControls"] = {"count": 40}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -1435,6 +1502,7 @@ def qualify(scratch, binary):
         report["mysqlRuntime"] = getattr(fixture, "mysql_evidence", None)
         report["brokerRuntime"] = getattr(fixture, "broker_evidence", None)
         report["upgradeOutcome"] = getattr(fixture, "upgrade_evidence", None)
+        report["mysqlBootstrap"] = getattr(fixture, "mysql_bootstrap_evidence", None)
         report["readiness"] = getattr(fixture, "readiness_evidence", {})
         report["cleanupPassed"] = fixture.close()
         report["derivedCleanup"] = getattr(fixture, "cleanup_evidence", None)

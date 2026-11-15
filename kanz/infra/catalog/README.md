@@ -74,9 +74,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Thirty-nine
+stage/category, never subprocess arguments or one-run credentials. Forty
 qualification controls discriminate these failures alongside the 14 projection
-controls: 53 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 54 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -296,7 +296,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 53 catalog controls, seven shared
+and capture overflow. The inventory contains 54 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while
@@ -337,6 +337,26 @@ consistent exited-zero state, without OOM or Docker error; unknown or nonzero
 results refuse. Final receipt validation independently checks that join.
 The observation grants no cleanup authority and replaces none of the remaining
 catalog cases or source/registry/resource checks.
+
+After SystemUpdate succeeds or refuses, an informational SQL probe uses the
+existing running MySQL container. It binds the same source/run/nonce/image to
+the immutable container ID before and after execution. A fixed read-only SELECT
+connects over TCP to the existing `mysql` alias as root; the in-container shell
+passes its existing password through `MYSQL_PWD` and discards stderr. No secret
+is expanded into host arguments. The 10-second/64-byte capture accepts only one
+ASCII row of four `0`/`1` values separated by TABs and followed by one LF:
+wildcard-root account match, exact `datahub` schema presence, exact
+`metadata_aspect_v2` table presence and networking enabled.
+
+`mysqlBootstrap` records the source joins, verified container states and these
+four booleans only after the post-execution binding succeeds. Unknown bindings,
+stopped containers, command/timeout/budget errors and malformed output retain a
+fixed refusal with no values, raw output or hash. False booleans remain valid
+observations. The probe preserves the prior upgrade exception, stage and failure
+evidence and cannot grant or deny acceptance. This is TCP/wildcard-account and
+schema/table metadata evidence, not a JDBC connection from another container.
+It collects no grant lists, row data, source files or logs and changes no SQL
+state, credentials or runtime profile.
 
 ### Fixture maintenance images
 
