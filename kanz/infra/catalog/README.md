@@ -57,6 +57,19 @@ read-only. Containers cannot download dependencies; the locked official ingestio
 base pins the CLI and its transitive environment. The broker is disposable
 Redpanda, not an additional authoritative Kanz writer or JVM Kafka runtime.
 
+The disposable upgrade and GMS processes share
+`KAFKA_PRODUCER_COMPRESSION_TYPE=none`. Their launcher creates the signing key
+and salt once and shares the same options between both role-specific starts.
+In the pinned [DataHub source](https://github.com/datahub-project/datahub/tree/faab576d96cbdb27b8344a755e0bc0f42fdc9c15),
+`application.yaml` line 1252 feeds `DataHubKafkaProducerFactory` lines 163–165;
+the SystemUpdate Kafka messaging configuration uses that producer builder too.
+The verified Confluent Kafka `8.2.2-ccs` source revision `745df1f` accepts `none`
+and selects `NoCompression`. This fixture-only producer choice trades compression
+for larger wire records while preserving acknowledgements, retries, idempotence,
+request limits and isolation. It changes neither decoding nor any global native
+policy and does not establish Snappy as the earlier failure's cause. Actual
+startup, delivery and all acceptance cases still require the Linux workflow.
+
 The fixture exports OpenLineage events through the actual Go harvester, runs
 `datahub ingest -c /catalog/datahub-recipe.yaml`, and reads actual GMS aspects.
 Two dummy datasets must retain distinct stewards, distinct sensitivity tags,
@@ -74,9 +87,9 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Forty-three
+stage/category, never subprocess arguments or one-run credentials. Forty-four
 qualification controls discriminate these failures alongside the 14 projection
-controls: 57 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls: 58 cases inside the CLI sandbox, plus seven shared registry lifecycle
 controls and one synthetic diagnostic control on the host before authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
@@ -296,7 +309,7 @@ secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
 discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
-and capture overflow. The inventory contains 57 catalog controls, seven shared
+and capture overflow. The inventory contains 58 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 
 The disposable broker explicitly advertises `broker:33145` for RPC while

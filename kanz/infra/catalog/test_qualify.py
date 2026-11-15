@@ -30,6 +30,61 @@ def runtime_state_info(role, status="running"):
 
 
 class QualificationControls(unittest.TestCase):
+    def test_datahub_launches_share_producer_none_signing_inputs_and_original_profiles(self):
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network, fixture.secret = OWNER, OWNER["network"], "one-run-datahub-control-marker"
+        fixture.images = {
+            "upgrade": "acryldata/datahub-upgrade:v1.8.0@sha256:560d9fb91f9cf99cddbc4ed285442f9072358687ffdbcdeea54c04d17bc17e1a",
+            "gms": "acryldata/datahub-gms:v1.8.0@sha256:73f24aab74fe8342523b5f920bc9013e1e6891b92a23e9fc019da36f419b9e0a",
+        }
+        fixture.run = mock.Mock(return_value="")
+        extras = {"upgrade": {"DATAHUB_PRECREATE_TOPICS": "true", "DATAHUB_SQL_SETUP_ENABLED": "true", "CREATE_USER": "false", "SCHEMA_REGISTRY_SYSTEM_UPDATE": "true", "PARTITIONS": "1"},
+                  "gms": {"METADATA_SERVICE_AUTH_ENABLED": "true", "MAE_CONSUMER_ENABLED": "true", "MCE_CONSUMER_ENABLED": "true", "PE_CONSUMER_ENABLED": "true", "DEV_TOOLING_ENABLED": "false"}}
+        with mock.patch.object(qualify.secrets, "token_hex", side_effect=["a" * 64, "b" * 64]) as generate:
+            launch = fixture.datahub_launches()
+            for role in ("upgrade", "gms"):
+                self.assertEqual(launch(role), OWNER["network"] + "-" + role)
+            generate.assert_has_calls([mock.call(32), mock.call(32)])
+            self.assertEqual(generate.call_count, 2)
+            prior_calls = fixture.run.call_count
+            with self.assertRaises(ValueError):
+                launch("mysql")
+            self.assertEqual(fixture.run.call_count, prior_calls)
+            self.assertEqual(generate.call_count, 2)
+        starts = [call.args[0] for call in fixture.run.call_args_list if call.args[0][:2] == ["docker", "run"]]
+        self.assertEqual(len(starts), 2)
+        shared = []
+        for role, args in zip(("upgrade", "gms"), starts):
+            reference = fixture.images[role]
+            self.assertEqual(qualify.image_identity.selections()[role]["reference"], reference)
+            image_index = args.index(reference)
+            self.assertEqual(args[image_index + 1:], ["-u", "SystemUpdate"] if role == "upgrade" else [])
+            options = args[:image_index]
+            def values(flag):
+                return [options[index + 1] for index, value in enumerate(options[:-1]) if value == flag]
+            environment = values("--env")
+            env = dict(value.split("=", 1) for value in environment)
+            self.assertEqual(len(env), len(environment))
+            self.assertEqual(env["KAFKA_PRODUCER_COMPRESSION_TYPE"], "none")
+            self.assertEqual(env["EBEAN_DATASOURCE_PASSWORD"], fixture.secret)
+            self.assertEqual(env["DATAHUB_SYSTEM_CLIENT_SECRET"], fixture.secret)
+            self.assertEqual(env["DATAHUB_TOKEN_SERVICE_SIGNING_KEY"], "a" * 64)
+            self.assertEqual(env["DATAHUB_TOKEN_SERVICE_SALT"], "b" * 64)
+            self.assertEqual(env["JAVA_OPTS"], "-Xms512m -Xmx1g")
+            self.assertEqual(env["EXTRACT_JAR_ENABLED"], "false")
+            self.assertEqual({key: env[key] for key in extras[role]}, extras[role])
+            shared.append({key: value for key, value in env.items() if key not in extras[role]})
+            self.assertFalse(any(any(marker in key for marker in ("ACKS", "RETRIES", "IDEMPOTENCE", "MAX_REQUEST")) for key in env))
+            for flag, expected in (("--name", OWNER["network"] + "-" + role), ("--network", OWNER["network"]), ("--network-alias", role), ("--cap-drop", "ALL"), ("--security-opt", "no-new-privileges"), ("--memory", "2g"), ("--memory-swap", "2g"), ("--cpus", "2"), ("--pids-limit", "256"), ("--platform", "linux/amd64")):
+                self.assertEqual(values(flag), [expected])
+            self.assertIn("--read-only", options)
+            self.assertEqual(values("--tmpfs"), ["/tmp:rw,nosuid,nodev,size=512m"])
+            for flag in ("--privileged", "--cap-add", "--mount", "--volume", "--publish", "-p", "--entrypoint", "--user"):
+                self.assertNotIn(flag, options)
+            self.assertNotIn(OWNER["registryProfile"], " ".join(args))
+            self.assertFalse(any("DOCKER_CONFIG" in value or "GITHUB_TOKEN" in value for value in environment))
+        self.assertEqual(shared[0], shared[1])
+
     def test_search_java_variant_preserves_provider_and_isolation_contract(self):
         fixture = object.__new__(qualify.Fixture)
         fixture.owner, fixture.network = OWNER, OWNER["network"]
@@ -1084,7 +1139,7 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images=observed,
                         dependencies={"packages": {"acryl-datahub": qualify.image_patch.lock()["cliPackageVersion"]}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 43}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 44}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}

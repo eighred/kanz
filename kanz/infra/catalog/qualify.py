@@ -936,7 +936,7 @@ def validate_receipt(report, identity, images, registry_pending=False):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != image_patch.lock()["cliPackageVersion"] or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 43 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 44 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -1514,6 +1514,33 @@ class Fixture:
                 "--entrypoint", command[0], self.images["ingestion"], *command[1:]]
         return self.run(args, timeout=240, environment=child)
 
+    def datahub_launches(self):
+        # Generate shared signing inputs once, before either DataHub process.
+        # Producer-only none is supported by the vendor Kafka configuration;
+        # it disables producer compression without changing decode policy.
+        common = {
+            "EBEAN_DATASOURCE_DRIVER": "com.mysql.jdbc.Driver", "EBEAN_DATASOURCE_HOST": "mysql:3306",
+            "EBEAN_DATASOURCE_URL": "jdbc:mysql://mysql:3306/datahub?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8",
+            "EBEAN_DATASOURCE_USERNAME": "root", "EBEAN_DATASOURCE_PASSWORD": self.secret,
+            "ELASTICSEARCH_HOST": "search", "ELASTICSEARCH_PORT": "9200", "ELASTICSEARCH_PROTOCOL": "http",
+            "ELASTICSEARCH_USE_SSL": "false", "ELASTICSEARCH_IMPLEMENTATION": "opensearch", "GRAPH_SERVICE_IMPL": "elasticsearch",
+            "KAFKA_BOOTSTRAP_SERVER": "broker:9092", "KAFKA_SCHEMAREGISTRY_URL": "http://gms:8080/schema-registry/api/",
+            "KAFKA_PRODUCER_COMPRESSION_TYPE": "none",
+            "SCHEMA_REGISTRY_TYPE": "INTERNAL", "DATAHUB_SYSTEM_CLIENT_ID": "__datahub_system",
+            "DATAHUB_SYSTEM_CLIENT_SECRET": self.secret, "DATAHUB_TOKEN_SERVICE_SIGNING_KEY": secrets.token_hex(32),
+            "DATAHUB_TOKEN_SERVICE_SALT": secrets.token_hex(32), "DATAHUB_TELEMETRY_ENABLED": "false",
+            "ENTITY_REGISTRY_CONFIG_PATH": "/datahub/datahub-gms/resources/entity-registry.yml",
+            "JAVA_OPTS": "-Xms512m -Xmx1g", "EXTRACT_JAR_ENABLED": "false", "ENTITY_VERSIONING_ENABLED": "true",
+        }
+        options = [item for key, value in common.items() for item in ("--env", key + "=" + value)]
+        def launch(role):
+            if role == "upgrade":
+                return self.start(role, options + ["--env", "DATAHUB_PRECREATE_TOPICS=true", "--env", "DATAHUB_SQL_SETUP_ENABLED=true", "--env", "CREATE_USER=false", "--env", "SCHEMA_REGISTRY_SYSTEM_UPDATE=true", "--env", "PARTITIONS=1"], ["-u", "SystemUpdate"], memory="2g")
+            if role == "gms":
+                return self.start(role, options + ["--env", "METADATA_SERVICE_AUTH_ENABLED=true", "--env", "MAE_CONSUMER_ENABLED=true", "--env", "MCE_CONSUMER_ENABLED=true", "--env", "PE_CONSUMER_ENABLED=true", "--env", "DEV_TOOLING_ENABLED=false"], memory="2g")
+            raise ValueError("unselected DataHub role refused")
+        return launch
+
     def setup(self):
         self.stage = "immutable-inputs"
         identities = {}
@@ -1554,29 +1581,16 @@ class Fixture:
         validate_mysql_runtime(self.mysql_evidence, identities["mysql"]["imageID"])
         self.stage = "storage-readiness"
         self.wait_exec(search, ["curl", "--fail", "--silent", "http://search:9200/_cluster/health"])
-        common = {
-            "EBEAN_DATASOURCE_DRIVER": "com.mysql.jdbc.Driver", "EBEAN_DATASOURCE_HOST": "mysql:3306",
-            "EBEAN_DATASOURCE_URL": "jdbc:mysql://mysql:3306/datahub?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8",
-            "EBEAN_DATASOURCE_USERNAME": "root", "EBEAN_DATASOURCE_PASSWORD": self.secret,
-            "ELASTICSEARCH_HOST": "search", "ELASTICSEARCH_PORT": "9200", "ELASTICSEARCH_PROTOCOL": "http",
-            "ELASTICSEARCH_USE_SSL": "false", "ELASTICSEARCH_IMPLEMENTATION": "opensearch", "GRAPH_SERVICE_IMPL": "elasticsearch",
-            "KAFKA_BOOTSTRAP_SERVER": "broker:9092", "KAFKA_SCHEMAREGISTRY_URL": "http://gms:8080/schema-registry/api/",
-            "SCHEMA_REGISTRY_TYPE": "INTERNAL", "DATAHUB_SYSTEM_CLIENT_ID": "__datahub_system",
-            "DATAHUB_SYSTEM_CLIENT_SECRET": self.secret, "DATAHUB_TOKEN_SERVICE_SIGNING_KEY": secrets.token_hex(32),
-            "DATAHUB_TOKEN_SERVICE_SALT": secrets.token_hex(32), "DATAHUB_TELEMETRY_ENABLED": "false",
-            "ENTITY_REGISTRY_CONFIG_PATH": "/datahub/datahub-gms/resources/entity-registry.yml",
-            "JAVA_OPTS": "-Xms512m -Xmx1g", "EXTRACT_JAR_ENABLED": "false", "ENTITY_VERSIONING_ENABLED": "true",
-        }
-        options = [item for key, value in common.items() for item in ("--env", key + "=" + value)]
+        launch_datahub = self.datahub_launches()
         self.stage = "system-update"
-        upgrade = self.start("upgrade", options + ["--env", "DATAHUB_PRECREATE_TOPICS=true", "--env", "DATAHUB_SQL_SETUP_ENABLED=true", "--env", "CREATE_USER=false", "--env", "SCHEMA_REGISTRY_SYSTEM_UPDATE=true", "--env", "PARTITIONS=1"], ["-u", "SystemUpdate"], memory="2g")
+        upgrade = launch_datahub("upgrade")
         try:
             self.wait_upgrade(upgrade)
         finally:
             self.observe_failed_upgrade(upgrade)
             self.observe_bootstrap_snapshot(mysql, broker, search)
         self.stage = "gms"
-        gms = self.start("gms", options + ["--env", "METADATA_SERVICE_AUTH_ENABLED=true", "--env", "MAE_CONSUMER_ENABLED=true", "--env", "MCE_CONSUMER_ENABLED=true", "--env", "PE_CONSUMER_ENABLED=true", "--env", "DEV_TOOLING_ENABLED=false"], memory="2g")
+        gms = launch_datahub("gms")
         self.wait_exec(gms, ["curl", "--fail", "--silent", "http://gms:8080/health"], timeout=300)
         return identities
 
@@ -1708,11 +1722,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 57 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 58 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 43}
+        report["qualificationControls"] = {"count": 44}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
