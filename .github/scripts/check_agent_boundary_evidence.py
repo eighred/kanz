@@ -18,7 +18,7 @@ HTTP_TESTS = {"TestRealAgentBoundary"} | {
     GatewayMutationDenials GatewayAnonymousDenials GatewayPrivilegedControls GatewayForgedHeaders GatewayUnknownAmend
     MCPToolInventory MCPReadProjection MCPTenantIsolation MCPUnknownOwner MCPUnknownCoverage MCPStaleness
     MCPMutationRefusals RequestBodyBound OptimizationReadOnly OptimizationPortfolioScope OptimizationVerdictRefusal
-    GatewayCapabilityMutation
+    GatewayCapabilityMutation GatewayWritesDisabled
     """.split()
 }
 PROJECTION_TESTS = {

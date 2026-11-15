@@ -292,7 +292,13 @@ func run() int {
 			}()
 		}
 	}
-	ordersHandler := orders.New(producer, cfg.ApproveRole, gate)
+	// A typed nil in Publisher would make the absent write surface look live
+	// to both the halt and publish guards. Preserve an actual nil interface.
+	var orderPublisher orders.Publisher
+	if producer != nil {
+		orderPublisher = producer
+	}
+	ordersHandler := orders.New(orderPublisher, cfg.ApproveRole, gate)
 
 	// AUTH-01d: every capability decision this gateway makes is recorded.
 	//

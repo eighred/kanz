@@ -137,6 +137,27 @@ func TestRealAgentBoundary(t *testing.T) {
 			t.Fatalf("privileged inert control failed or trusted forged identity: status%d", status)
 		}
 	})
+	t.Run("GatewayWritesDisabled", func(t *testing.T) {
+		control := issuer.tokenFor(t, "human:disabled-writes-proof", "tenant_a",
+			[]string{readerRole, "human.trade", "human.approve"}, []string{"PF_A"})
+		beforeHTTP, beforeRPC := forwarded.Load(), risk.calls.Load()
+		for _, command := range []struct{ path, body string }{
+			{"/v1/orders", `{"orderId":"DISABLED_SUBMIT"}`},
+			{"/v1/orders/DISABLED_CANCEL/cancel", `{}`},
+			{"/v1/orders/DISABLED_APPROVE/approve", `{"digest":"fixture-command-digest"}`},
+		} {
+			status, body := request(t, http.MethodPost, gateway+command.path, control, command.body, nil)
+			var refusal struct {
+				Error string `json:"error"`
+			}
+			if status != http.StatusServiceUnavailable || json.Unmarshal(body, &refusal) != nil || refusal.Error != "order writes are disabled" {
+				t.Fatalf("no-broker gateway %s did not report its disabled write surface: status%d", command.path, status)
+			}
+		}
+		if forwarded.Load() != beforeHTTP || risk.calls.Load() != beforeRPC {
+			t.Fatal("disabled order commands reached an upstream")
+		}
+	})
 	t.Run("GatewayForgedHeaders", func(t *testing.T) {
 		before := forwarded.Load()
 		for _, path := range []string{"/v1/orders", "/v1/model-portfolios/orders", "/v1/portfolios/PF_A/mandate"} {

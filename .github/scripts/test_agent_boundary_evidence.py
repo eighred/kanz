@@ -154,7 +154,15 @@ class PureEvidenceTests(unittest.TestCase):
         required = {gate.HTTP_PACKAGE: gate.HTTP_TESTS}
         result = gate.checked_events(raw(events(required)), required)
         self.assertEqual(result["required_passes"], len(gate.HTTP_TESTS))
-        self.assertGreaterEqual(result["required_passes"], 18)
+        self.assertEqual(result["required_passes"], 19)
+
+    def test_disabled_writes_positive_control_must_execute(self):
+        rows = http_events()
+        name = "TestRealAgentBoundary/GatewayWritesDisabled"
+        self.assertIn(name, gate.HTTP_TESTS)
+        gate.checked_http(raw(rows), ROUTES)
+        with self.assertRaises(ValueError):
+            gate.checked_http(raw([row for row in rows if row.get("Test") != name]), ROUTES)
 
     def test_every_named_http_case_must_execute(self):
         required = {gate.HTTP_PACKAGE: gate.HTTP_TESTS}
