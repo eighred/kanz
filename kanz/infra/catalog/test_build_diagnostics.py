@@ -146,6 +146,42 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertEqual(wrapper["matchedSignals"], ["startup-failure-wrapper"])
         self.assertEqual(wrapper["lineContext"]["signalLines"], 1)
         self.assertEqual(wrapper["lineContext"]["records"][0]["errnoSignals"], [])
+        fingerprint = wrapper["lineContext"]["records"][0]["startupMessage"]
+        self.assertEqual((fingerprint["status"], fingerprint["category"], fingerprint["prefixCount"], fingerprint["bodyBytes"], fingerprint["bodySHA256"]), ("hashed", "bounded-body", 1, len(secret.encode()), hashlib.sha256(secret.encode()).hexdigest()))
+        self.assertEqual((fingerprint["framing"], fingerprint["trim"], fingerprint["bodyLimitBytes"]), ("single-logical-line", "ascii-whitespace", 4096))
+        framed = qualify.runtime_output(("\tFailure during startup: \t " + secret + " \t").encode(), 1, "broker-startup-log")["lineContext"]["records"][0]["startupMessage"]
+        self.assertEqual(framed, fingerprint)
+        non_ascii_space = (secret + "\u00a0").encode()
+        exact_bytes = qualify.runtime_output(b"Failure during startup: " + non_ascii_space, 1, "broker-startup-log")["lineContext"]["records"][0]["startupMessage"]
+        self.assertEqual((exact_bytes["bodyBytes"], exact_bytes["bodySHA256"]), (len(non_ascii_space), hashlib.sha256(non_ascii_space).hexdigest()))
+        maximum = qualify.runtime_output(b"Failure during startup: " + b"x" * 4096, 1, "broker-startup-log")["lineContext"]["records"][0]["startupMessage"]
+        self.assertEqual((maximum["status"], maximum["bodyBytes"], maximum["bodySHA256"]), ("hashed", 4096, hashlib.sha256(b"x" * 4096).hexdigest()))
+        for body, category, count in ((b"Failure during startup:\t" + secret.encode(), "unknown-prefix", 0),
+                                      (b"failure during startup: " + secret.encode(), "unknown-prefix", 0),
+                                      (b"Failure during startup: Failure during startup: " + secret.encode(), "multiple-prefixes", 2),
+                                      (b"Failure during startup: \t ", "empty-body", 1),
+                                      (b"Failure during startup: " + b"x" * 4097, "body-budget", 1),
+                                      (b"Failure during startup: " + secret.encode() + b"\xff", "invalid-utf8", 1)):
+            refused_metadata = qualify.runtime_output(body, 1, "broker-startup-log")["lineContext"]["records"][0]["startupMessage"]
+            self.assertEqual((refused_metadata["status"], refused_metadata["category"], refused_metadata["prefixCount"]), ("refused", category, count))
+            self.assertIsNone(refused_metadata["bodyBytes"])
+            self.assertIsNone(refused_metadata["bodySHA256"])
+            self.assertNotIn(secret, json.dumps(refused_metadata))
+        non_broker = qualify.runtime_output(("Failure during startup: " + secret).encode(), 1, "readiness-command")
+        self.assertIsNone(non_broker["lineContext"]["records"][0]["startupMessage"])
+        for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            split_wrapper = qualify.runtime_output(("Failure during" + separator + "startup: " + secret).encode(), 1, "broker-startup-log")
+            self.assertNotIn("startup-failure-wrapper", split_wrapper["matchedSignals"])
+            self.assertEqual(split_wrapper["lineContext"]["records"], [])
+            split_body = qualify.runtime_output(("Failure during startup: " + separator + secret).encode(), 1, "broker-startup-log")
+            refused_metadata = split_body["lineContext"]["records"][0]["startupMessage"]
+            self.assertEqual(refused_metadata["category"], "empty-body")
+            self.assertIsNone(refused_metadata["bodyBytes"])
+            self.assertIsNone(refused_metadata["bodySHA256"])
+        separate = qualify.runtime_output(("Failure during startup: " + secret + "-one\nFailure during startup: " + secret + "-two\nFailure during startup: " + secret + "-one").encode(), 1, "broker-startup-log")["lineContext"]
+        self.assertEqual((len(separate["records"]), [row["count"] for row in separate["records"]]), (2, [2, 1]))
+        self.assertEqual([row["startupMessage"]["bodySHA256"] for row in separate["records"]], [hashlib.sha256((secret + suffix).encode()).hexdigest() for suffix in ("-one", "-two")])
+        self.assertNotIn(secret, json.dumps((wrapper, framed, exact_bytes, non_broker, separate)))
         split = qualify.runtime_output(('filesystem error: chmod failed ' + secret + '\nOperation not permitted\n["/tmp/redpanda.yaml"]').encode(), 1, "broker-startup-log")["lineContext"]["records"]
         self.assertEqual(len(split), 2)
         self.assertEqual(split[0]["errnoSignals"], [])

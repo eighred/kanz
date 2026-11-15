@@ -160,6 +160,17 @@ other signals. PID unlink text may concern cleanup. These template matches
 assert neither severity nor reachability nor a fatal cause. Storage-alert
 configuration descriptions are not classified as refusal messages. Projection
 is deliberately non-exhaustive, so an absent match proves no global absence.
+Only a broker line containing the exact case-sensitive compiled prefix
+`Failure during startup: ` once may retain `startupMessage` byte length and
+SHA-256 of its suffix. The capture must round-trip as valid UTF-8; trimming is
+limited to ASCII space, tab, CR, LF, VT and FF, and the trimmed body must contain
+1–4096 bytes. Unknown/repeated prefix framing, invalid UTF-8, an empty body or
+an oversized body retains a closed refusal category with no body size/hash.
+Other records and readiness-command output retain no startup fingerprint.
+No suffix text, path, type or arbitrary field is retained. The fingerprint
+participates in the same bounded aggregation key, and cannot join lines or
+authorize readiness, cleanup or a causal conclusion. Only an exact match to a
+verified public candidate can identify that public message.
 The compiled-template provenance is the selected broker manifest
 `sha256:d5cc5fa94b1caf1cee182f4ab6305d73e7ba89ad58ed806bb31f7ae0ae038442`,
 whose verified final layer is 84,020,836 compressed bytes with SHA-256

@@ -37,6 +37,7 @@ READINESS_OUTPUT_LIMIT = 64 << 10
 READINESS_ATTEMPTS_RETAINED = 8
 READINESS_CONTEXT_LINES = 40
 READINESS_CONTEXT_RECORDS = 16
+STARTUP_MESSAGE_LIMIT = 4096
 READINESS_ROLES = frozenset({"broker", "mysql", "search", "gms"})
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
@@ -205,6 +206,7 @@ def runtime_output(output, code, source):
     if source not in {"readiness-command", "broker-startup-log"} or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
         raise ValueError("runtime diagnostic source/size refused")
     text = output.decode("utf-8", errors="replace")
+    utf8_roundtrip = text.encode("utf-8") == output
     diagnostic = text.lower()
     patterns = {
         "configuration-refused": ("unable to load config", "unable to decode config", "yaml: unmarshal", "yaml: line", "unknown configuration property"),
@@ -287,9 +289,32 @@ def runtime_output(output, code, source):
         resource_signals = tuple(sorted({resource_class(next(value for value in match.groups() if value is not None)) for match in resource_tokens} - {"unclassified"}))
         api_signals = tuple(key for key in line_signals if key in apis)
         template_signals = tuple(key for key in line_signals if key in templates or key in template_shapes)
+        startup_message = None
+        if source == "broker-startup-log" and "startup-failure-wrapper" in line_signals:
+            prefix = b"Failure during startup: "
+            raw_line = line.encode("utf-8")
+            prefix_count = raw_line.count(prefix)
+            startup_message = {"informationalOnly": True, "framing": "single-logical-line", "trim": "ascii-whitespace",
+                               "prefixCount": prefix_count, "bodyLimitBytes": STARTUP_MESSAGE_LIMIT,
+                               "status": "refused", "category": "unknown-prefix", "bodyBytes": None, "bodySHA256": None}
+            if not utf8_roundtrip:
+                startup_message["category"] = "invalid-utf8"
+            elif prefix_count > 1:
+                startup_message["category"] = "multiple-prefixes"
+            elif prefix_count == 1:
+                # Re-encoding valid UTF-8 preserves the exact raw suffix bytes.
+                # Never retain or interpolate that suffix, including on refusal.
+                body = raw_line.split(prefix, 1)[1].strip(b" \t\r\n\v\f")
+                if not body:
+                    startup_message["category"] = "empty-body"
+                elif len(body) > STARTUP_MESSAGE_LIMIT:
+                    startup_message["category"] = "body-budget"
+                else:
+                    startup_message.update(status="hashed", category="bounded-body", bodyBytes=len(body), bodySHA256=hashlib.sha256(body).hexdigest())
+        startup_key = tuple(sorted(startup_message.items())) if startup_message is not None else None
         # No selected vendor stage/level format is established yet. Keep both
         # explicitly unknown rather than turning a warning token into a cause.
-        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals, errno_signals, resource_signals, api_signals, template_signals)
+        key = ("unclassified", "unclassified", "multiple-path-error-sequences" if len(bindings) > 1 else "path-error-sequence" if bindings else "unclassified", *values, line_signals, errno_signals, resource_signals, api_signals, template_signals, startup_key)
         if key not in records:
             if len(records) == READINESS_CONTEXT_RECORDS:
                 context["omittedSignalLines"] += 1
@@ -297,7 +322,8 @@ def runtime_output(output, code, source):
             records[key] = {"stage": key[0], "level": key[1], "binding": key[2], "operation": key[3],
                             "resource": key[4], "error": key[5], "signals": list(line_signals), "count": 0,
                             "errnoSignals": list(errno_signals),
-                            "coOccurrence": {"resourceSignals": list(resource_signals), "apiSignals": list(api_signals), "templateSignals": list(template_signals)}}
+                            "coOccurrence": {"resourceSignals": list(resource_signals), "apiSignals": list(api_signals), "templateSignals": list(template_signals)},
+                            "startupMessage": startup_message}
             context["records"].append(records[key])
         records[key]["count"] += 1
     context["truncated"] = bool(context["omittedEarlierLines"] or context["omittedSignalLines"])
