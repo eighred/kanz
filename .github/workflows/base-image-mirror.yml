@@ -46,6 +46,8 @@ on:
     paths:
       - 'tools/rust-audit-tools/**'
       - '.github/workflows/base-image-mirror.yml'
+      - '.github/scripts/catalog_registry_auth.py'
+      - '.github/scripts/test_catalog_registry_auth.py'
       - 'kanz/test/arch/rust_audit_tool_producer_test.go'
   # A MIRROR WITHOUT A REFRESH PATH SILENTLY AGES, and that is worse than not
   # mirroring at all. `golang:1.26.10` is a MUTABLE tag: upstream rebuilds it
@@ -73,6 +75,8 @@ on:
     paths:
       - '.github/workflows/base-image-mirror.yml'
       - 'tools/rust-audit-tools/**'
+      - '.github/scripts/catalog_registry_auth.py'
+      - '.github/scripts/test_catalog_registry_auth.py'
 
 permissions:
   contents: read
@@ -314,6 +318,17 @@ jobs:
             echo "- ✅ \`${{ matrix.target }}\` unchanged (\`$after\`)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  catalog-registry-auth-controls:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Refuse false cleanup using source-free Linux controls
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_catalog_registry_auth.py' -v
+
   # The writer's readback cannot establish the future consumer's read-only access.
   # Authenticate only on this host; no target process receives registry credentials.
   catalog-base-readback:
@@ -328,13 +343,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Prepare an exclusive file-based host registry profile
+        run: python3 -B .github/scripts/catalog_registry_auth.py prepare
       - name: Authenticate the read-only host
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          logout: true
+          logout: false # Explicit owned-profile cleanup below is authoritative.
       - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
       - name: Verify private reader access and end the host registry session
         if: always()
@@ -342,7 +359,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, subprocess
+          import json, os, pathlib, re, subprocess, sys
+          sys.path.insert(0, '.github/scripts')
+          import catalog_registry_auth as registry_auth
 
           target = 'ghcr.io/eighred/base/datahub-ingestion:v1.8.0-locked'
           expected = 'sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23'
@@ -360,13 +379,19 @@ jobs:
                   raise ValueError('reader command refused')
               return result.stdout.strip()
 
+          identity = None
+          profile = os.environ.get('DOCKER_CONFIG')
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
           try:
+              identity = registry_auth.identity_from_environment()
               report['source'] = read(['git', 'rev-parse', 'HEAD'])
               report['tree'] = read(['git', 'rev-parse', 'HEAD^{tree}'])
               if (report['source'] != os.environ['GITHUB_SHA'] or not re.fullmatch('[0-9a-f]{40}', report['source'])
                   or not re.fullmatch('[0-9a-f]{40}', report['tree']) or report['repository'] != 'eighred/kanz'
                   or os.environ['GITHUB_REF'] != 'refs/heads/main' or report['event'] not in {'push', 'schedule', 'workflow_dispatch'}):
                   raise ValueError('reader source identity refused')
+              report['stage'] = 'owned-file-backend'
+              registry_auth.verify_backend(root, profile, identity)
               report['stage'] = 'reader-digest'
               actual = read(['crane', 'digest', target])
               if re.fullmatch('sha256:[0-9a-f]{64}', actual):
@@ -383,15 +408,10 @@ jobs:
           except Exception as error:
               report['failureType'] = type(error).__name__
           finally:
-              # Record only the actual logout result; retain no token, config or logs.
-              report['logout'] = {'attempted': True, 'exitCode': None, 'passed': False}
-              try:
-                  result = subprocess.run(['docker', 'logout', 'ghcr.io'], stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL, timeout=30, check=False)
-                  report['logout'].update(exitCode=result.returncode, passed=result.returncode == 0)
-              except Exception as error:
-                  report['logout']['errorType'] = type(error).__name__
-              report['passed'] &= report['logout']['passed']
+              # Docker's zero exit can hide failed erasure. Prove absence before
+              # removing only this profile's verified regular files and directory.
+              report['registryCleanup'] = registry_auth.cleanup(root, profile, identity)
+              report['passed'] &= report['registryCleanup']['passed']
               payload = json.dumps(report, sort_keys=True, indent=2) + '\n'
               if len(payload.encode('utf-8')) > 4096:
                   raise SystemExit('reader receipt budget exceeded')
