@@ -435,6 +435,25 @@ fragments; no dynamic step IDs or details survive. Generic `Exiting upgrade`
 does not match because it also appears on the success path. Empty output has a
 distinct refusal from nonempty unclassified output.
 
+The separate `FAILED_UPGRADE_STEP_CODES` catalogue associates 20 exact public
+IDs with fixed aliases only inside the source-defined manager wrappers. A
+complete required-step final report emits `required-final-*`; the caught-attempt
+wrapper emits `caught-attempt-*`, which may describe a retry that later succeeds.
+Canonical counters are bounded by Java integer/list limits, with positive final
+ordinal/total and zero permitted for attempts and retries. Bare messages or the
+pinned plain Logback prefix are supported, without retaining prefix fields,
+counters, IDs or exception suffixes. No log level is interpreted as a fatal cause.
+Optional/success messages, altered IDs, paths, cross-line fragments and unknown
+wrappers receive no step association. All generic and step records still share
+the same 16-record refusal ceiling.
+
+Coverage is deliberately partial: the pinned DataHub core ID declarations and
+eight exact default blocking MCP IDs joined by `BootstrapMCPStep` and packaged
+`bootstrap_mcps.yaml` are included. There is no generic bootstrap/version match;
+runtime overrides, optional/nonblocking and migration-specific IDs remain
+unknown. This catalogue identifies public wrapper text, not the complete step
+inventory, a loaded implementation or the precise failure cause.
+
 Public token provenance includes the existing DataHub source revision
 `faab576d96cbdb27b8344a755e0bc0f42fdc9c15`, expected-bundle JDK sources above,
 [Spring's bean exception](https://github.com/spring-projects/spring-framework/blob/v6.2.15/spring-beans/src/main/java/org/springframework/beans/factory/BeanCreationException.java),

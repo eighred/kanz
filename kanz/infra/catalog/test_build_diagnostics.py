@@ -551,6 +551,32 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertEqual(maximum, {"outcome": "reduced", "signals": [{"code": "sql-error", "count": 256}]})
         self.assertEqual(qualify.reduce_failed_upgrade(b""), {"outcome": "empty-output", "signals": []})
         self.assertEqual(qualify.reduce_failed_upgrade(b"Exiting upgrade"), {"outcome": "unclassified-output", "signals": []})
+        report_prefix = "2026-11-15 12:00:00,000 [main] INFO  c.l.d.u.DefaultUpgradeReport - "
+        def step_codes(body):
+            result = qualify.reduce_failed_upgrade(body.encode())
+            self.assertEqual(set(result), {"outcome", "signals"})
+            self.assertTrue(all(set(signal) == {"code", "count"} for signal in result["signals"]))
+            self.assertNotIn(secret, json.dumps(result))
+            return {signal["code"]: signal["count"] for signal in result["signals"] if signal["code"].startswith(("required-final-", "caught-attempt-"))}
+        for step_id, code in qualify.FAILED_UPGRADE_STEP_CODES.items():
+            final = "Failed Step 1/20: " + step_id + ". Failed after 0 retries."
+            attempt = "Caught exception during attempt 0 of Step with id " + step_id
+            self.assertEqual(step_codes(final), {"required-final-" + code: 1})
+            self.assertEqual(step_codes(report_prefix + final), {"required-final-" + code: 1})
+            self.assertEqual(step_codes(report_prefix + attempt), {"caught-attempt-" + code: 1})
+            self.assertNotIn(step_id, json.dumps(qualify.reduce_failed_upgrade((report_prefix + final).encode())))
+            for wrong_id in (step_id + "Suffix", step_id + "/private", "private/" + step_id, secret, "CreateUserStep", "SQLCreateTablesStep", "bootstrap-root-user-v6"):
+                self.assertEqual(step_codes("Failed Step 1/20: " + wrong_id + ". Failed after 0 retries."), {})
+                self.assertEqual(step_codes("Caught exception during attempt 0 of Step with id " + wrong_id), {})
+            for invalid in ("Failed Step 0/20: " + step_id + ". Failed after 0 retries.", "Failed Step 2/1: " + step_id + ". Failed after 0 retries.", "Failed Step 01/20: " + step_id + ". Failed after 0 retries.", "Failed Step 1/0: " + step_id + ". Failed after 0 retries.", final + " " + secret, "/private/" + final, "Optional " + final, "Successfully completed " + step_id, "Caught exception during attempt -1 of Step with id " + step_id, "Caught exception during attempt 00 of Step with id " + step_id, "Caught exception during attempt 2147483648 of Step with id " + step_id, attempt + ": " + secret):
+                self.assertEqual(step_codes(invalid), {})
+            for separator in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+                self.assertEqual(step_codes("Failed Step 1/20: " + separator + step_id + ". Failed after 0 retries."), {})
+                self.assertEqual(step_codes("Caught exception during attempt 0 of Step with id " + separator + step_id), {})
+        self.assertEqual(step_codes("Caught exception during attempt 2147483647 of Step with id CreateKafkaTopicsStep"), {"caught-attempt-create-kafka-topics": 1})
+        self.assertEqual(step_codes("Failed Step 2147483647/2147483647: CreateKafkaTopicsStep. Failed after 2147483647 retries."), {"required-final-create-kafka-topics": 1})
+        union_overflow = "\n".join("Failed Step 1/20: " + step_id + ". Failed after 0 retries." for step_id in list(qualify.FAILED_UPGRADE_STEP_CODES)[:16])
+        self.assertEqual(qualify.reduce_failed_upgrade(union_overflow.encode()), {"outcome": "record-budget", "signals": []})
         for category, literals in qualify.FAILED_UPGRADE_LITERALS.items():
             for literal in literals:
                 one = qualify.reduce_failed_upgrade((literal + ": " + secret).encode())

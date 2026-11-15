@@ -59,6 +59,28 @@ FAILED_UPGRADE_LITERALS = {
     "search-index-build-failure": ("BuildIndicesStep failed.", "BuildIndicesPostStep failed."),
     "upgrade-failure-report": ("Failed Step", "Caught exception during attempt"),
 }
+FAILED_UPGRADE_STEP_CODES = {
+    "ScaleDownEvaluationStep": "scale-down-evaluation",
+    "CreateKafkaTopicsStep": "create-kafka-topics",
+    "BuildIndicesStep": "build-indices",
+    "BuildIndicesPostStep": "post-build-indices",
+    "ingest-default-global-settings": "global-settings",
+    "ingest-policies": "policies",
+    "WaitForKafkaReadyStep": "wait-kafka-ready",
+    "BuildIndicesPreStep": "pre-build-indices",
+    "CreateElasticsearchUserStep": "create-search-user",
+    "CreateUsageEventIndicesStep": "create-usage-indices",
+    "DataHubStartupStep": "startup-notification",
+    "CreateTablesStep": "create-sql-tables",
+    "bootstrap-root-user-v5": "bootstrap-root-user",
+    "bootstrap-data-platforms-v18": "bootstrap-data-platforms",
+    "bootstrap-data-types-v1": "bootstrap-data-types",
+    "bootstrap-ownership-types-v1": "bootstrap-ownership-types",
+    "bootstrap-lifecycle-stages-v2": "bootstrap-lifecycle-stages",
+    "bootstrap-roles-v1": "bootstrap-roles",
+    "bootstrap-page-modules-v10": "bootstrap-page-modules",
+    "bootstrap-page-templates-v3": "bootstrap-page-templates",
+}
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
@@ -662,6 +684,29 @@ def failed_upgrade_id(evidence, image_id, identity):
     return after["containerID"]
 
 
+def failed_upgrade_step_signals(lines):
+    # Bind only complete public manager messages, optionally behind the pinned
+    # plain Logback prefix. Dynamic IDs, counters and details never leave here.
+    prefix = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} \[[\x20-\x5c\x5e-\x7e]{1,128}\] (?:TRACE|DEBUG|INFO|WARN|ERROR) {1,5}[A-Za-z_$][A-Za-z0-9_.$]{0,127} - ")
+    positive = r"([1-9][0-9]{0,9})"
+    unsigned = r"(0|[1-9][0-9]{0,9})"
+    counts = {}
+    for line in lines:
+        framed = prefix.match(line)
+        message = line[framed.end():] if framed else line
+        for step_id, code in FAILED_UPGRADE_STEP_CODES.items():
+            required = re.fullmatch(r"Failed Step " + positive + "/" + positive + ": " + re.escape(step_id) + r"\. Failed after " + unsigned + r" retries\.", message)
+            attempt = re.fullmatch(r"Caught exception during attempt " + unsigned + " of Step with id " + re.escape(step_id), message)
+            if required and all(int(value) <= 2**31 - 1 for value in required.groups()) and int(required[1]) <= int(required[2]):
+                key = "required-final-" + code
+            elif attempt and int(attempt[1]) <= 2**31 - 1:
+                key = "caught-attempt-" + code
+            else:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+    return [{"code": code, "count": count} for code, count in counts.items()]
+
+
 def reduce_failed_upgrade(output):
     """Fixed literal presence only; no hashes, bodies, groups or unknown fallback."""
     refused = lambda outcome: {"outcome": outcome, "signals": []}
@@ -687,6 +732,7 @@ def reduce_failed_upgrade(output):
         count = sum(any(pattern.search(line) for pattern in patterns) for line in lines)
         if count:
             signals.append({"code": code, "count": count})
+    signals.extend(failed_upgrade_step_signals(lines))
     if len(signals) > READINESS_CONTEXT_RECORDS:
         return refused("record-budget")
     return {"outcome": "reduced", "signals": signals} if signals else refused("unclassified-output")
