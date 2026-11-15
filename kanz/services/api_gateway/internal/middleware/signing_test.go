@@ -10,35 +10,6 @@ import (
 	"github.com/eighred/kanz/internal/gatewaysig"
 )
 
-// THE BOUNDARY THAT FAILED THREE TIMES, DRIVEN END TO END (#781).
-//
-// Signing had no test of its own. Its callers had theirs — the TUI client
-// asserted the header it set, web-bff asserted the header it forwarded — and
-// every one of those tests compared a signature against a signature the SAME
-// FILE computed. That is a closed loop: it passes for any canonicalization,
-// including a wrong one, and it is precisely why three callers shipped unable to
-// talk to this middleware while their own suites were green (#198, #774, #777).
-//
-// These drive the real verifier with the real shared signer. Since #781 every
-// caller signs through internal/gatewaysig, so proving gatewaysig against this
-// middleware proves the callers against the gateway — which is the property the
-// shared implementation exists to buy.
-//
-// WHAT THEY DO NOT CATCH, AND IT IS WORTH BEING EXACT ABOUT IT. Signer and
-// verifier are now the same function, so a change to the canonicalization moves
-// BOTH and every test here still passes. That was confirmed by mutation:
-// dropping the trailing newline from gatewaysig.Sign leaves this file green.
-// These tests prove the middleware still GOES THROUGH the shared function — a
-// reverted, hand-rolled verifier fails them — and they pin which requests must
-// be refused.
-//
-// The drift itself is caught by the two checks that do not share the
-// implementation: gatewaysig's vector test, whose expected value was computed
-// outside Go, and test/arch's cross-language check, which runs
-// provision-tenant.sh's openssl pipeline and compares bytes. A shared
-// implementation removes the drift between CALLERS; only an independent oracle
-// can see the whole thing move at once.
-
 func signingServer(t *testing.T, secret string) *httptest.Server {
 	t.Helper()
 	h := Signing(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

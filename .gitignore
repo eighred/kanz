@@ -18,8 +18,6 @@ bin/
 # command rather than as a blanket rule: `kanz` and `operator` are also directory
 # names in this repo, and a pattern broad enough to catch the binaries would
 # silently ignore the source trees beside them.
-/kanz/universe
-/kanz/universe.exe
 /kanz/kanz-provisioner
 /kanz/kanz-provisioner.exe
 /kanz/kanz_provisioner

@@ -338,15 +338,6 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 	}
 }
 
-// probeTimeout bounds how long Probe waits for its Job to answer. Generous next to the
-// binary's own 10s dial, because the wait also covers scheduling and possibly an image
-// pull; the caller is a human waiting on a form, not a control loop.
-//
-// This is the INNERMOST of the three bounds on a Test Connection, and it must stay the
-// smallest: the two layers above it (control.testConnectionTimeout, then the TUI's
-// testConnTimeout) exist to let this one fire first, because only this layer can say
-// "the probe job did not answer" rather than "something upstream timed out". test/arch
-// asserts the ordering across the three packages.
 const probeTimeout = 60 * time.Second
 
 // probePollInterval is how often the probe pod's status is re-read. A poll, not a
@@ -354,16 +345,6 @@ const probeTimeout = 60 * time.Second
 // List with a label selector needs no RBAC the operator does not already have.
 const probePollInterval = 250 * time.Millisecond
 
-// provisionTTL reclaims a finished PROVISIONING Job — and, with it, the
-// owner-referenced Secret holding the SSH bootstrap key and the K3S_TOKEN — even
-// if this process dies before its own explicit Delete runs.
-//
-// 300s, not probeTTL's 60s, is a deliberate trade stated so it can be changed
-// knowingly: a failed node provision is exactly when an operator wants
-// `kubectl logs` on the pod, and 60s is not enough time for a human to react to
-// the TUI reporting a failure. Five minutes is long enough to look, short enough
-// that a cluster-admission token is not left sitting in the cluster. Lower it if
-// credential exposure ever outweighs debuggability; do not remove it.
 const provisionTTL int32 = 300
 
 // probeTTL reclaims a finished probe Job even if this process dies before its own

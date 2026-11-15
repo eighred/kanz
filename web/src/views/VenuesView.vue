@@ -2,13 +2,6 @@
 import { onMounted, ref } from 'vue'
 import { control, describe, type VenueKeyStatus } from '../api/control'
 
-// The page that started all this: /venues answered "Login" because the TUI's
-// device flow could not complete against an SSO that does not exist.
-//
-// PRESENCE ONLY, NEVER KEY MATERIAL. The gateway returns a `configured` flag and
-// nothing else, and this screen must never grow a way to read a key back — a
-// surface that can display one is a surface that can leak one. The form below
-// WRITES; there is deliberately no path that reads.
 const rows = ref<VenueKeyStatus[]>([])
 const error = ref('')
 const loading = ref(true)

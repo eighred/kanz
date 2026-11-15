@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -136,28 +135,6 @@ var operatorSVIDs = map[string]string{
 	"kanz-redrive": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-redrive",
 }
 
-// readOnlyObserverSVIDs is a DISTINCT category from operatorSVIDs, not an entry
-// in it. A read-only observer dials the spine (so it trips the same cmd/-dialer
-// guard operators do — TestOperatorCLIsHaveBrokerAccounts below) and binds an
-// EPHEMERAL JetStream consumer to stream subjects to a terminal, but its
-// tenancy.yaml grant DENIES all business publish: the publish allow-list holds
-// ONLY the JetStream consumer machinery ($JS.API.>/$JS.ACK.>), so with an
-// allow-list present every domain subject (order.*, risk.*, everything) is
-// denied by default. It is admitted to the broker like an operator yet is
-// PROVABLY incapable of moving capital — which is exactly why it must not be an
-// operatorSVIDs entry: operators publish, and operatorSVIDs carries the publish
-// authority the operator plane needs. TestReadOnlyObserversCannotPublish below
-// makes "watches the loop, cannot move it" a guarded fact, not a comment.
-//
-// kanz-monitor is the read-only Bubble Tea TUI (cmd/kanz_monitor): it
-// SubscribeBroadcasts order.> and risk.position.> and publishes NO business
-// subject. Its manifest half (a kanz-operator ServiceAccount) is not yet
-// shipped — like the operator tools, the broker-side half is declared in
-// tenancy.yaml now, ready for when that manifest lands.
-var readOnlyObserverSVIDs = map[string]string{
-	"kanz-monitor": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-monitor",
-}
-
 // operatorServiceAccountFiles are every manifest that may declare a
 // ServiceAccount in the kanz-operator namespace. kanz-halt's lives in
 // halt-job.yaml (it owns that tool's whole manifest, Job included); the
@@ -234,12 +211,6 @@ func TestOperatorCLIsHaveServiceAccounts(t *testing.T) {
 	serviceAccounts := operatorServiceAccounts(t, operatorDir)
 
 	var problems []string
-	// readOnlyObserverSVIDs is DELIBERATELY not iterated here: a read-only
-	// observer (kanz-monitor) has no operator Job manifest and the plan does not
-	// ask for one, so requiring a ServiceAccount for it would fail the build for
-	// a manifest this task's scope does not ship. The residual — that its
-	// broker-side grant is declared ahead of that manifest — is recorded on the
-	// tenancy.yaml entry itself, so this omission is explicit, not an oversight.
 	for name, svid := range operatorSVIDs {
 		// svid is spiffe://kanz.internal/ns/{namespace}/sa/{serviceAccountName};
 		// registration.yaml's spiffeIDTemplate constructs it from exactly that
@@ -339,18 +310,9 @@ func TestOperatorCLIsHaveBrokerAccounts(t *testing.T) {
 			continue
 		}
 		seen[deployedServiceName(e.Name())] = true
-		// A cmd/ dialer is acceptable if it declares an SVID in EITHER plane:
-		// operatorSVIDs (operators, which publish) or readOnlyObserverSVIDs
-		// (read-only observers, whose grant denies business publish). Both map
-		// to a __system__ user that must be admitted; a name in NEITHER map is
-		// the real failure this guard exists to catch.
 		svid, declared := operatorSVIDs[deployedServiceName(e.Name())]
 		if !declared {
-			svid, declared = readOnlyObserverSVIDs[deployedServiceName(e.Name())]
-		}
-		if !declared {
-			problems = append(problems, e.Name()+": dials bus.DialNATS but declares no SVID in operatorSVIDs or "+
-				"readOnlyObserverSVIDs — the production broker requires one, so this tool cannot reach the spine at all")
+			problems = append(problems, e.Name()+": dials bus.DialNATS but declares no SVID in operatorSVIDs — the production broker requires one, so this tool cannot reach the spine at all")
 			continue
 		}
 		if !users[svid] {
@@ -364,11 +326,6 @@ func TestOperatorCLIsHaveBrokerAccounts(t *testing.T) {
 	for name := range operatorSVIDs {
 		if !seen[name] {
 			problems = append(problems, name+": is in operatorSVIDs but cmd/"+name+" no longer dials NATS — remove it (dead entry)")
-		}
-	}
-	for name := range readOnlyObserverSVIDs {
-		if !seen[name] {
-			problems = append(problems, name+": is in readOnlyObserverSVIDs but cmd/"+name+" no longer dials NATS — remove it (dead entry)")
 		}
 	}
 
@@ -419,336 +376,4 @@ func TestNATSDialersHaveBrokerAccounts(t *testing.T) {
 		sort.Strings(problems)
 		t.Fatalf("NATS dialers without a broker account (SEC-M3b):\n  %s", strings.Join(problems, "\n  "))
 	}
-}
-
-// readOnlyObserverMachinery is the exact, closed set of subjects a read-only
-// observer's tenancy.yaml publish allow-list may name — and nothing else. These
-// are the JetStream consumer machinery its ephemeral consumer binds ($JS.API.>
-// to resolve the stream + create the consumer, $JS.ACK.> to ack) plus the
-// reply-inbox space; none of them is a business/domain subject, so an
-// allow-list drawn only from this set cannot move capital. _INBOX.> is a
-// subscribe-side subject in practice and will not normally appear in a publish
-// allow-list, but is admitted here so the assertion stays about "only
-// machinery" rather than an over-narrow literal match.
-var readOnlyObserverMachinery = map[string]bool{
-	"$JS.API.>": true,
-	"$JS.ACK.>": true,
-	"_INBOX.>":  true,
-}
-
-// TestReadOnlyObserversCannotPublish is the whole point of the read-only
-// observer category, encoded as a guard: every readOnlyObserverSVIDs member's
-// tenancy.yaml publish grant must be PROVABLY incapable of a business publish.
-// It asserts, for each observer, that (1) an allow-list is actually present,
-// (2) every entry in it is one of the JetStream machinery subjects
-// (readOnlyObserverMachinery) — i.e. NO domain/business subject is publishable —
-// and (3) there is no publish.deny shortcut at all, which also rules out the
-// `deny: [">"]` trap that would break the consumer's own $JS.API.>/$JS.ACK.>
-// machinery (see the risk-engine/archiver headers in tenancy.yaml). An
-// allow-list restricts by omission: with these entries present, order.*, risk.*
-// and every other subject is denied by default, which is what makes "watches the
-// loop, cannot move it" a guarded fact.
-func TestReadOnlyObserversCannotPublish(t *testing.T) {
-	root := moduleRoot(t)
-	perms := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
-
-	var problems []string
-	observers := 0
-	allowEntries := 0
-	for name, svid := range readOnlyObserverSVIDs {
-		perm, ok := perms[svid]
-		if !ok {
-			problems = append(problems, name+": tenancy.yaml has no `permissions` block for "+svid+
-				" — an absent block is UNRESTRICTED within __system__ (NATS semantics), the exact opposite of a "+
-				"read-only observer; it must carry a machinery-only publish allow-list")
-			continue
-		}
-		observers++
-		if len(perm.deny) > 0 {
-			problems = append(problems, name+": tenancy.yaml's permissions.publish for "+svid+" carries a `deny` list "+
-				"("+strings.Join(perm.deny, ", ")+") — a read-only observer must restrict by an allow-list ONLY. In "+
-				"particular `deny: [\">\"]` would deny the $JS.API.>/$JS.ACK.> its own ephemeral consumer binds and ack, "+
-				"silently breaking the consumer (every ack denied, infinite redelivery); a deny list also risks masking "+
-				"a broad allow")
-		}
-		if len(perm.allow) == 0 {
-			problems = append(problems, name+": tenancy.yaml's permissions.publish for "+svid+" has no allow entries — an "+
-				"explicitly empty publish allow-list was proven not to restrict anything on this nats-server (see "+
-				"tenancy.yaml's trap note), so an observer with nothing but machinery to publish must still list that "+
-				"machinery explicitly")
-			continue
-		}
-		for _, subj := range perm.allow {
-			allowEntries++
-			if !readOnlyObserverMachinery[subj] {
-				problems = append(problems, name+": tenancy.yaml's permissions.publish for "+svid+" allows "+
-					strconv.Quote(subj)+", which is NOT JetStream consumer machinery — a read-only observer may publish "+
-					"only $JS.API.>/$JS.ACK.> (its own consumer transactions) and provably no business subject, so this "+
-					"grant would let it move capital")
-			}
-		}
-	}
-
-	// Non-vacuity: the estate has at least one observer (kanz-monitor) with a
-	// non-empty machinery allow-list. A scan that parsed zero observers or zero
-	// allow entries proves nothing about what an observer can publish, which is
-	// the one thing this guard exists to prove.
-	if observers == 0 || allowEntries == 0 {
-		t.Fatalf("parsed %d observer(s) and %d publish-allow entr(y/ies) from tenancy.yaml — the scanner or the "+
-			"readOnlyObserverSVIDs list is broken; this assertion cannot vacuously pass", observers, allowEntries)
-	}
-
-	if len(problems) > 0 {
-		sort.Strings(problems)
-		t.Fatalf("%d read-only observer(s) hold a publish grant that is not machinery-only:\n\n  %s",
-			len(problems), strings.Join(problems, "\n  "))
-	}
-}
-
-// groupedSubscribeCallsInDir AST-walks dir for grouped-Subscribe call sites.
-// Modeled on dialsNATSInDir above (go/parser + ast.Inspect, skip _test.go
-// files, skip dirs on walk error) — root is threaded through only so the
-// call sites it finds can be reported relative to the module root, the way
-// every other scanner in this package reports them; dialsNATSInDir needs no
-// such parameter because it returns a bool, not paths.
-//
-// It matches a *ast.CallExpr whose Fun is a *ast.SelectorExpr with
-// Subscribe with four arguments, or durable SubscribeReady with five.
-//
-// RATIONALE: the bus grouped subscribe signature is
-// Subscribe(ctx, subject, group string, h EventHandler) = 4 args (both
-// *bus.Consumer.Subscribe and *bus.NATSClient.Subscribe); SubscribeBroadcast
-// is 3 args and SubscribeBroadcastReady is 4 args but named differently, so
-// name=="Subscribe" && arity==4 catches exactly the grouped subscribe and
-// nothing else — this is the same arity-based disambiguation
-// natsClientSubscribeMethodArity/directNATSClientSubscribeCalls
-// (nats_jetstream_machinery_test.go) already relies on to avoid false
-// positives like tv-sync's 2-arg Projection.Subscribe.
-//
-// Returns "file:line" strings, file relative to the module root and
-// forward-slashed, matching the style of the other scanners in this package.
-func groupedSubscribeCallsInDir(t *testing.T, root, dir string) []string {
-	t.Helper()
-	var out []string
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		fset := token.NewFileSet()
-		f, perr := parser.ParseFile(fset, path, nil, 0)
-		if perr != nil {
-			t.Fatalf("parse %s: %v", path, perr)
-		}
-		rel := filepath.ToSlash(mustRel(root, path))
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !((sel.Sel.Name == "Subscribe" && len(call.Args) == 4) || (sel.Sel.Name == "SubscribeReady" && len(call.Args) == 5)) {
-				return true
-			}
-			out = append(out, rel+":"+strconv.Itoa(fset.Position(call.Pos()).Line))
-			return true
-		})
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("walk %s: %v", dir, err)
-	}
-	return out
-}
-
-// TestReadOnlyObserversNeverJoinAQueueGroup is the source-level guard for the
-// property readOnlyObserverSVIDs exists to hold: a read-only observer
-// subscribes via consumer.SubscribeBroadcast ONLY — an EPHEMERAL,
-// per-connection JetStream consumer that gets its OWN copy of every event —
-// and NEVER via a grouped consumer.Subscribe(ctx, subject, group, handler).
-// A grouped Subscribe from an observer would JOIN the durable consumer
-// group the real OMS/tv-sync replicas share on that subject and STEAL
-// deliveries meant for them — a capital-path incident, not a UI bug (see
-// busreader.go's own SubscribeBroadcast comments in cmd/kanz_monitor for the
-// same property described at the call site).
-//
-// Before this guard, "SubscribeBroadcast only" was verified by grep alone —
-// a plan-level check, not a build-time one. A regression to a grouped
-// Subscribe would still compile, still dial, still decode, and pass the rest
-// of this test suite, because nothing at the source level distinguished
-// SubscribeBroadcast from Subscribe. This is that source-level guard: it
-// AST-walks every listed observer's cmd/ tree for a grouped-Subscribe call
-// site and fails the build on the first one, naming the file:line.
-//
-// GENERALIZED, not kanz-monitor-specific: this iterates readOnlyObserverSVIDs
-// itself rather than naming kanz-monitor directly, so any future read-only
-// observer added to that map is covered automatically, with no second guard
-// to remember to write.
-func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
-	root := moduleRoot(t)
-
-	var problems []string
-	checked := 0
-	for name := range readOnlyObserverSVIDs {
-		dir := filepath.Join(root, "cmd", sourceDirectoryName(name))
-
-		// A typo'd observer name (or one whose cmd/ tree was removed/renamed)
-		// must fail loudly here rather than let the scan below run over a
-		// missing or empty directory and vacuously find nothing to complain
-		// about.
-		info, statErr := os.Stat(dir)
-		if statErr != nil || !info.IsDir() {
-			t.Fatalf("readOnlyObserverSVIDs[%q]: cmd/%s does not exist — the observer name or directory is wrong; "+
-				"this guard cannot scan an observer it cannot find", name, name)
-		}
-		goFiles := 0
-		walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-			if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
-				goFiles++
-			}
-			return nil
-		})
-		if walkErr != nil {
-			t.Fatalf("walk cmd/%s: %v", name, walkErr)
-		}
-		if goFiles == 0 {
-			t.Fatalf("readOnlyObserverSVIDs[%q]: cmd/%s contains no .go files — the observer name or directory is "+
-				"wrong; a scanner over an empty tree would pass vacuously", name, name)
-		}
-
-		checked++
-		// SCAN THE OBSERVER'S WHOLE CODE, NOT ITS DIRECTORY (#67).
-		//
-		// This used to walk cmd/<name>/ alone, which silently stopped covering
-		// the observer the moment any of its code moved out — and #67 is exactly
-		// that move: "fold kanz-monitor in". Demonstrated before the fix: a
-		// grouped Subscribe planted in internal/tui/monitor/ (where a fold would
-		// naturally put the bus reader) PASSED this guard, because cmd/kanz_monitor/
-		// still existed, still held .go files, and no longer held the subscribe.
-		//
-		// All three vacuity checks above kept passing while the property they
-		// protect had left the building. The guard #67 calls "the acceptance
-		// criteria, not a formality" would have become a formality on the first
-		// commit that implemented #67.
-		//
-		// So the scan follows first-party imports transitively from the binary.
-		// Moving the code no longer moves it out of view.
-		for _, site := range groupedSubscribeCallsInPackages(t, root, observerPackageDirs(t, root, dir)) {
-			problems = append(problems, name+": "+site+" calls a grouped Subscribe(ctx, subject, group, handler) — "+
-				"this JOINS the durable consumer group the real OMS/tv-sync replicas share on that subject and "+
-				"STEALS deliveries from them. A read-only observer must use SubscribeBroadcast only.")
-		}
-	}
-
-	// NON-VACUITY: a guard that checked zero observers would pass no matter how
-	// wrong an observer's subscribe call was — mirrors the checked==0 pattern
-	// nats_jetstream_machinery_test.go's TestServiceHasJetStreamMachineryItsRoleRequires
-	// already uses for the same reason. The per-observer os.Stat/goFiles==0
-	// checks above cover the OTHER vacuity mode: a listed observer whose
-	// directory exists but contains nothing to scan.
-	if checked == 0 {
-		t.Fatal("checked zero read-only observers for grouped-Subscribe call sites — the scanner or " +
-			"readOnlyObserverSVIDs is broken; this guard cannot vacuously pass")
-	}
-
-	if len(problems) > 0 {
-		sort.Strings(problems)
-		t.Fatalf("%d read-only observer(s) join a queue group (steal-nothing violation):\n\n  %s",
-			len(problems), strings.Join(problems, "\n  "))
-	}
-}
-
-// subscribePrimitivePackages DEFINE Subscribe and SubscribeBroadcast rather than
-// choosing between them.
-//
-// pkg/bus is the library: Consumer.Subscribe's body (consumer.go) delegates
-// to c.subscriber.Subscribe, which is the grouped primitive existing so that
-// SERVICES can join a durable consumer group — that is its job. Flagging it
-// would report the bus for providing the call every real consumer needs, and the
-// only way to make the guard green again would be to weaken it.
-//
-// The property this guard protects is the OBSERVER'S CHOICE: kanz-monitor must
-// call SubscribeBroadcast and never Subscribe. That choice is made in the
-// observer's own packages, which are still walked in full.
-var subscribePrimitivePackages = map[string]bool{
-	modulePath + "/pkg/bus": true,
-}
-
-// observerPackageDirs returns the observer's own package directory plus every
-// FIRST-PARTY package it reaches, transitively.
-//
-// This is what makes the read-only guarantee follow the code instead of a path
-// (#67). A read-only observer that subscribes through a helper package is still
-// a read-only observer, and a fold that relocates that helper must not relocate
-// it out of the guard's sight.
-//
-// modulePath (risk_boundary_test.go) is this module's import prefix; reusing it
-// rather than declaring a second copy, which is how the two would drift apart on
-// the next module rename.
-//
-// Third-party imports are deliberately not followed: pkg/bus's own definition of
-// Subscribe is not a call site, and walking the module cache would make this
-// guard slow and noisy for no added safety.
-func observerPackageDirs(t *testing.T, root, start string) []string {
-	t.Helper()
-
-	seen := map[string]bool{}
-	var order []string
-	queue := []string{start}
-
-	for len(queue) > 0 {
-		dir := queue[0]
-		queue = queue[1:]
-		if seen[dir] {
-			continue
-		}
-		seen[dir] = true
-		order = append(order, dir)
-
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			// A package that cannot be read is not silently skipped: the whole
-			// point of this guard is that it never scans less than it claims.
-			t.Fatalf("read %s while resolving the observer's packages: %v", dir, err)
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-				continue
-			}
-			path := filepath.Join(dir, e.Name())
-			f, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-			if perr != nil {
-				t.Fatalf("parse %s: %v", path, perr)
-			}
-			for _, spec := range f.Imports {
-				imp, uerr := strconv.Unquote(spec.Path.Value)
-				if uerr != nil || !strings.HasPrefix(imp, modulePath+"/") {
-					continue
-				}
-				if subscribePrimitivePackages[imp] {
-					continue
-				}
-				next := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(imp, modulePath+"/")))
-				if info, serr := os.Stat(next); serr == nil && info.IsDir() && !seen[next] {
-					queue = append(queue, next)
-				}
-			}
-		}
-	}
-	return order
-}
-
-// groupedSubscribeCallsInPackages runs the existing per-directory scan over each
-// package, non-recursively — observerPackageDirs already enumerated them, and
-// recursing again would pull in unrelated sibling packages that merely sit
-// beneath one the observer imports.
-func groupedSubscribeCallsInPackages(t *testing.T, root string, dirs []string) []string {
-	t.Helper()
-	if len(dirs) == 0 {
-		t.Fatal("resolved zero packages for a read-only observer — a scan over nothing passes vacuously")
-	}
-	var out []string
-	for _, dir := range dirs {
-		out = append(out, groupedSubscribeCallsInDir(t, root, dir)...)
-	}
-	return out
 }

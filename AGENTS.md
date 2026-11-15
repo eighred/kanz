@@ -63,7 +63,7 @@ instructions to replace this repository.
 |---|---|
 | `kanz/` | Existing Go module `github.com/eighred/kanz`; language/toolchain versions come from `go.mod`. This established build anchor is one part of Kanz, not the whole product. |
 | `kanz/services/<owner>/` | Domain service, `cmd/<source_name>/` composition root, private `internal/` code, owned migrations and runbooks. |
-| `kanz/cmd/` | Operator/administrative binaries; preserve names used by humans and the TUI. |
+| `kanz/cmd/` | Operator/administrative binaries; preserve released command names. |
 | `kanz/internal/`, `kanz/pkg/` | Module-private shared owners and deliberately reusable APIs respectively; promotion requires a second actual consumer. |
 | `kanz/test/` | Cross-component tests, architecture guards and qualification fixtures. Unit tests stay beside source. |
 | `kanz/dev/` | Local smoke environment and setup; it does not certify the capital path. |
@@ -158,10 +158,10 @@ and measured behavior. Preserve security boundaries over convenience. MCP cannot
 justify rewriting execution; adapter deduplication must preserve isolation and
 venue-specific semantics.
 
-The TUI is retained until Web equivalents achieve operational parity and
-production verification, followed by deliberate retirement. A route unused by
-the web is not dead: `internal/tui/universe` owns calls to live gateway node
-provisioning routes. Preserve every required human operation throughout migration.
+The browser is the operator interface. Terminal frontends are retired; keep
+administrative commands focused on their explicit task.
+`kanz/test/arch/terminal_retirement_test.go` guards retired entrypoints, UI
+dependencies and the obsolete broker identity.
 
 Idempotent handlers are the correctness floor at every replica count. Per-process
 state is a best-effort optimization that re-baselines on restart. Shared state is

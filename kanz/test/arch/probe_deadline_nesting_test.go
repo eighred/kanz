@@ -16,38 +16,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DEADLINES ON A TEST CONNECTION MUST NEST OUTWARD. This test is that rule, executable.
-//
-// One Add Node "Test Connection" is bounded four times over, by four constants living in
-// four packages that do not import each other:
-//
-//	universe TUI          testConnTimeout        internal/tui/universe/poller.go
-//	api-gateway route     testConnectionTimeout  services/api_gateway/internal/control
-//	operator probe wait   probeTimeout           services/operator/internal/provision
-//	provisioner dial      probeDialTimeout       cmd/kanz_provisioner/probe.go
-//
-// Each must strictly exceed the one beneath it, so the INNERMOST bound is the one that
-// fires. That ordering is not tidiness — it decides what a human is told. Only the
-// operator can say "probe job did not complete in time"; only the provisioner's dial can
-// distinguish "refused" from "silently dropped", which is the entire reason the probe
-// exists. Invert the order and every verdict degrades into the outermost layer's generic
-// deadline error, identical for a black-holed host and a healthy one.
-//
-// This is not hypothetical. Before OPS-M2e the probe was a sub-millisecond in-process
-// dial and the TUI's 5s bound was ample; moving it into an ephemeral Kubernetes Job (Job
-// create + pod schedule + possible image pull + a 10s dial) made the innermost bound the
-// largest, and EVERY Test Connection failed at the outermost layer — including against a
-// healthy host.
-//
-// WHY THIS LIVES IN test/arch. No single package can see all four constants, and none
-// should: the TUI must not import the operator's internals. A comment in each file
-// claiming the ordering is not a guard — four unexported consts in four packages drift
-// the first time one of them is tuned in isolation.
-//
-// WHY IT PARSES SOURCE. The constants are unexported, so they cannot be read by import,
-// and go/ast keeps this test from being a fifth place the values are written down — a
-// hardcoded copy here would go stale exactly as silently as the comments it replaces.
-
 // deadlineLayer is one bound in the chain, outermost first.
 type deadlineLayer struct {
 	name  string // the const's identifier
@@ -65,9 +33,8 @@ type deadlineLayer struct {
 	remedy      string
 }
 
+// Read all three backend bounds from their owners; outer deadlines must exceed inner work.
 var testConnDeadlineChain = []deadlineLayer{
-	{name: "testConnTimeout", file: "internal/tui/universe/poller.go",
-		label: "the TUI's wait on the gateway"},
 	{name: "testConnectionTimeout", file: "services/api_gateway/internal/control/control.go",
 		label: "the gateway's wait on the operator"},
 	{name: "probeTimeout", file: "services/operator/internal/provision/provision.go",
@@ -78,6 +45,9 @@ var testConnDeadlineChain = []deadlineLayer{
 
 func TestTestConnectionDeadlinesNestOutward(t *testing.T) {
 	root := moduleRoot(t)
+	if len(testConnDeadlineChain) != 3 {
+		t.Fatal("gateway, operator and probe must all be covered")
+	}
 
 	got := make([]time.Duration, len(testConnDeadlineChain))
 	for i, layer := range testConnDeadlineChain {
@@ -99,53 +69,15 @@ func TestTestConnectionDeadlinesNestOutward(t *testing.T) {
 	}
 }
 
-// tuiClientFile builds the TUI's one HTTP client; every Test Connection travels on it.
-//
-// It moved from internal/tui/universe/gatewaysource.go when the gateway transport
-// was promoted to its own package for a second TUI surface (#84). The guard below
-// caught the move by failing on a file that no longer constructs a client, which
-// is what its non-vacuity arm is for — the client did not stop existing, it
-// relocated, and a guard pointed at the old address would have gone quietly green.
-const tuiClientFile = "internal/tui/gateway/client.go"
+const gatewayClientFile = "cmd/kanz_lake_snapshot/internal/gatewayclient/client.go"
 
-// TestTUIHTTPClientCarriesNoTimeoutOfItsOwn closes the hole the test above cannot see.
-//
-// The ordering assertion reads four CONSTANTS. But http.Client.Timeout is enforced
-// independently of the request context, so a client-level timeout is a FIFTH bound on the
-// same call, and the effective limit is min(context deadline, client timeout). It won
-// silently: the TUI's client carried a 30s timeout (a flag default, invisible to a test
-// that parses consts) underneath the operator's 60s probe wait, so probeTimeout could
-// never fire and every slow Test Connection died client-side with "Client.Timeout exceeded
-// while awaiting headers" — a message about the gateway and the network, printed while
-// probing a host that may have been perfectly healthy.
-//
-// So the rule is not "keep the client timeout above the others". It is that this call has
-// exactly ONE bound: the context its caller sets. A second one cannot be ordered against
-// the four consts, because it does not live with them.
-func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
-	sites := httpClientTimeoutSites(t, filepath.Join(moduleRoot(t), filepath.FromSlash(tuiClientFile)))
-
-	if sites.inLiteral > 0 {
-		t.Errorf("%s constructs its http.Client with a Timeout field.\n\n"+
-			"That bound is enforced independently of the request context, so every call "+
-			"on this client is bounded by min(context, this) and the SMALLER wins "+
-			"invisibly. If it lands under provision.probeTimeout (60s), Test Connection "+
-			"dies client-side with a message about the gateway while probing a host that "+
-			"may be healthy — and no ordering test over the four consts can see it, "+
-			"because this bound does not live with them. Bound the CALL instead: pass a "+
-			"context deadline (Config.CallTimeout for reads, testConnTimeout for the "+
-			"probe).", tuiClientFile)
+func TestLakeSnapshotHTTPClientUsesCallerDeadline(t *testing.T) {
+	sites := httpClientTimeoutSites(t, filepath.Join(moduleRoot(t), filepath.FromSlash(gatewayClientFile)))
+	if sites.inLiteral > 0 || sites.byAssignment > 0 {
+		t.Fatal("gateway client must preserve its caller's context deadline")
 	}
-	if sites.byAssignment > 0 {
-		t.Errorf("%s assigns a .Timeout field after construction — see this test's "+
-			"failure text for why the client must carry no bound of its own",
-			tuiClientFile)
-	}
-
 	if sites.clients == 0 {
-		t.Fatalf("%s no longer constructs an http.Client literal, so this guard asserted "+
-			"nothing. If the client moved, point tuiClientFile at its new home; if the TUI now "+
-			"uses a client built elsewhere, that client needs this same rule", tuiClientFile)
+		t.Fatal("gateway client construction not found; update the guard's source path")
 	}
 }
 
@@ -153,25 +85,6 @@ func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
 // api-gateway's forwarder to wealth, datamaster, tv-sync and copilot.
 const gatewayProxyClientFile = "services/api_gateway/cmd/api_gateway/main.go"
 
-// TestGatewayProxyClientCarriesNoTimeoutOfItsOwn is the rule above, applied where it had
-// ALREADY been broken.
-//
-// The TUI guard was written for one file, and it was read as being about the TUI. It is
-// not — it is about http.Client.Timeout, and this file carried one: the mTLS proxy client
-// was built with Timeout: 30s. Every consequence the TUI comment predicts had come true
-// here, unobserved:
-//
-//   - It capped POST /v1/ask at 30s while the copilot's own completion budget is FIVE
-//     minutes (openRouterTimeout), so a long tool-use turn died at the gateway with
-//     "Client.Timeout exceeded while awaiting headers" — a message about the network,
-//     printed about a copilot that was working.
-//   - It applied ONLY on the mTLS branch. With no SPIFFE socket the client was
-//     http.DefaultClient and the same call was unbounded, so dev and production had
-//     different limits for no stated reason and the dev path could hang forever.
-//
-// The bound now lives on the call (proxy.forwardBudget), which is per-upstream, readable
-// by a test, and cancelled when the caller hangs up. A Timeout field here would silently
-// take it back.
 func TestGatewayProxyClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
 	sites := httpClientTimeoutSites(t, filepath.Join(moduleRoot(t), filepath.FromSlash(gatewayProxyClientFile)))
 
@@ -203,12 +116,6 @@ type clientTimeoutSites struct {
 	byAssignment int // `x.Timeout = ...` writes, which the literal scan cannot see
 }
 
-// httpClientTimeoutSites is the mechanics behind every no-client-timeout guard here.
-//
-// It carries NO failure text on purpose. Each caller says what a Timeout costs on ITS
-// path — the TUI's is a misdiagnosed Test Connection, the gateway's is a truncated
-// copilot answer — and those two sentences are the whole value of the guard. A shared
-// message would be true of both and useful to neither.
 func httpClientTimeoutSites(t *testing.T, path string) clientTimeoutSites {
 	t.Helper()
 
@@ -248,8 +155,6 @@ func httpClientTimeoutSites(t *testing.T, path string) clientTimeoutSites {
 	return out
 }
 
-// ingressFile publishes the gateway to the public internet; in production every Test
-// Connection the TUI makes travels through it.
 const ingressFile = "infra/deploy/api-gateway-ingress.yaml"
 
 // ingressProxyTimeoutAnnotations are the two nginx bounds on a proxied request. Both
@@ -270,29 +175,13 @@ type ingressDoc struct {
 	} `yaml:"metadata"`
 }
 
-// TestIngressProxyTimeoutsExceedTheTUIBound closes the same hole as the test above, one
-// layer further out — and this one is not even written in Go.
-//
-// The ordering test reads four constants; the client test forbids a fifth bound inside
-// the TUI's HTTP client. Neither can see the SIXTH: in production the TUI does not talk
-// to the gateway Service, it talks to this Ingress, and ingress-nginx bounds a proxied
-// request at proxy-read-timeout / proxy-send-timeout — DEFAULT 60s. That is at or under
-// three of the four Go bounds, and nginx starts its clock when IT proxies, before the
-// operator's probeTimeout starts. So on a slow probe nginx answers 504 first and the TUI
-// prints a gateway/network error while probing a host that may be healthy — verbatim the
-// misdiagnosis the nesting exists to prevent, and invisible to every other guard here
-// because the bound lives in YAML.
-//
-// ABSENCE MUST FAIL, NOT JUST A SMALL VALUE. Deleting the annotation does not remove the
-// bound, it restores the 60s default — the bug itself. A guard that only checked the
-// number when present would pass on the one edit most likely to reintroduce it.
-func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
+func TestIngressProxyTimeoutsExceedTheGatewayBound(t *testing.T) {
 	root := moduleRoot(t)
 
-	// The bound to beat is read from source, not copied: a hardcoded 100s here would go
-	// stale the moment testConnTimeout is tuned, which is exactly when this matters.
-	tuiBound := durationConst(t,
-		filepath.Join(root, filepath.FromSlash("internal/tui/universe/poller.go")), "testConnTimeout")
+	// The bound to beat is read from source, not copied: a hardcoded deadline here would go
+	// stale the moment testConnectionTimeout is tuned, which is exactly when this matters.
+	gatewayBound := durationConst(t,
+		filepath.Join(root, "services/api_gateway/internal/control/control.go"), "testConnectionTimeout")
 
 	annotations := apiGatewayIngressAnnotations(t, root)
 
@@ -301,11 +190,11 @@ func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
 		if !ok {
 			t.Errorf("%s carries no %s annotation.\n\n"+
 				"That does NOT mean the request is unbounded at the edge — it means "+
-				"ingress-nginx applies its 60s DEFAULT, which is under testConnTimeout (%s) "+
+				"ingress-nginx applies its 60s DEFAULT, which is under testConnectionTimeout (%s) "+
 				"and under the operator's own probe wait, and whose clock starts before "+
 				"theirs. Every slow Test Connection then dies as a 504 from nginx and the "+
-				"TUI blames the gateway or the network while probing a host that may be "+
-				"perfectly healthy. Restore it above %s.", ingressFile, key, tuiBound, tuiBound)
+				"caller blames the gateway or the network while probing a host that may be "+
+				"perfectly healthy. Restore it above %s.", ingressFile, key, gatewayBound, gatewayBound)
 			continue
 		}
 		secs, perr := strconv.Atoi(strings.TrimSpace(raw))
@@ -315,15 +204,15 @@ func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
 				"reads as a bound that is set and is not.", ingressFile, key, raw)
 			continue
 		}
-		if got := time.Duration(secs) * time.Second; got <= tuiBound {
-			t.Errorf("%s sets %s = %s, which does not exceed the TUI's testConnTimeout "+
-				"(%s, internal/tui/universe/poller.go).\n\n"+
-				"nginx would cut the connection before the TUI's own bound expires, and "+
+		if got := time.Duration(secs) * time.Second; got <= gatewayBound {
+			t.Errorf("%s sets %s = %s, which does not exceed the gateway's testConnectionTimeout "+
+				"(%s, services/api_gateway/internal/control/control.go).\n\n"+
+				"nginx would cut the connection before the caller's own bound expires, and "+
 				"before that the operator's probeTimeout — so the caller gets a 504 about "+
 				"the edge instead of the probe verdict only the operator can give. Raise "+
-				"this annotation rather than lowering testConnTimeout: the inner bounds are "+
+				"this annotation rather than lowering testConnectionTimeout: the inner bounds are "+
 				"sized to real work (Job create, pod scheduling, image pull, a 10s dial).",
-				ingressFile, key, got, tuiBound)
+				ingressFile, key, got, gatewayBound)
 		}
 	}
 }
@@ -478,7 +367,7 @@ func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 	for _, key := range ingressProxyTimeoutAnnotations {
 		raw, ok := annotations[key]
 		if !ok {
-			continue // TestIngressProxyTimeoutsExceedTheTUIBound owns the absence case
+			continue // TestIngressProxyTimeoutsExceedTheGatewayBound owns the absence case
 		}
 		secs, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
@@ -727,7 +616,7 @@ var timeUnits = map[string]time.Duration{
 
 // delegatingClientFiles must construct NO http.Client of their own.
 //
-// TestTUIHTTPClientCarriesNoTimeoutOfItsOwn pins the ONE client a terminal
+// TestcallerHTTPClientCarriesNoTimeoutOfItsOwn pins the ONE client a terminal
 // surface is allowed to build. That rule was scoped to a single file path, and a
 // second client sat outside it: the kanz shell's own gateway package carried
 // http.Client{Timeout: 60 * time.Second}, so its calls were bounded by
@@ -742,7 +631,7 @@ var timeUnits = map[string]time.Duration{
 // plane source is the remaining one that says so, and "delegates" is a property
 // that decays the first time somebody needs "just one" direct request.
 var delegatingClientFiles = []string{
-	"internal/tui/universe/gatewaysource.go",
+	"cmd/kanz_lake_snapshot/main.go",
 }
 
 func TestDelegatingClientsBuildNoHTTPClientOfTheirOwn(t *testing.T) {
@@ -763,7 +652,7 @@ func TestDelegatingClientsBuildNoHTTPClientOfTheirOwn(t *testing.T) {
 		})
 		if found > 0 {
 			t.Errorf("%s constructs %d http.Client literal(s). It must delegate to "+
-				"internal/tui/gateway instead: a second client is a second place for the "+
+				"cmd/kanz_lake_snapshot/internal/gatewayclient instead: a second client is a second place for the "+
 				"request signature and the deadline rule to drift, and both have already "+
 				"drifted here once (#198) — the signature was absent entirely, and a 60s "+
 				"client timeout silently won over the caller's context.", rel, found)

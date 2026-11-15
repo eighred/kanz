@@ -191,9 +191,6 @@ func (s *Server) routes() {
 	// Same path, different methods, because to a browser they are one idea.
 	s.mux.HandleFunc("POST /auth/login", s.handleCredentialLogin)
 	s.mux.HandleFunc("POST /auth/redeem", s.handleRedeem)
-	// REGISTERED ONLY WHEN CONFIGURED. An unconfigured OIDC route would answer a
-	// browser with a redirect to nowhere, which is how the TUI's /login came to
-	// report "login required but failed" against an issuer that did not exist.
 	if s.oidc != nil {
 		s.mux.HandleFunc("GET /auth/login", s.handleLogin)
 		s.mux.HandleFunc("GET /auth/callback", s.handleCallback)

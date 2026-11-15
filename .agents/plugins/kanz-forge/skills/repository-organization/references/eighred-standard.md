@@ -78,7 +78,7 @@ Language and discovery contracts take precedence:
 For example, the source `kanz/services/risk_engine/cmd/risk_engine/` still
 builds the released `risk-engine` command and image. Scaffolding and release
 recipes must preserve that distinction. A folder rename that silently changes
-an executable called by the TUI is a regression.
+an executable called by another command is a regression.
 
 ## Sharing and dependency direction
 

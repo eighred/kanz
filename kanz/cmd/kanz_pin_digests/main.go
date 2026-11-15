@@ -1,19 +1,3 @@
-// Command kanz-pin-digests rewrites every production manifest image reference
-// from a mutable tag to the immutable digest a release just published.
-//
-// WHY THIS EXISTS. release.yml pins everything AFTER the build to
-// ${IMAGE}@${digest} — trivy, cosign and the SBOM all attest one specific image
-// — and then nothing consumed that digest. Every manifest under infra/ said
-// :latest, so the supply chain terminated at the registry: the signature was
-// real and the cluster ran whatever :latest resolved to at pull time. Two
-// consequences followed. :latest defaults imagePullPolicy to Always, so
-// replicas rescheduled at different moments can run DIFFERENT code under one
-// Deployment; and there is no previous digest to roll back to, which is the
-// primitive the TUI's rollback is supposed to wrap.
-//
-// It is a separate, tested binary rather than a shell step inside the workflow
-// because the workflow cannot be run here — a rewriter that mangles 39
-// production manifests is not something to discover on a release.
 package main
 
 import (

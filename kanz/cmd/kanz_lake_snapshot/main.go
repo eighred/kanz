@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	gatewayclient "github.com/eighred/kanz/internal/tui/gateway"
+	gatewayclient "github.com/eighred/kanz/cmd/kanz_lake_snapshot/internal/gatewayclient"
 	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/google/uuid"

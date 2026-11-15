@@ -44,7 +44,7 @@ make fmt
 Run the affected domain/package suites as well. Database/broker/browser/native
 tests need their real disposable dependencies and explicit settings; report skips.
 `make build` and `make release` emit executable names expected by operators and
-the TUI. `make help` lists tasks; Git for Windows does not supply make.
+administrative callers. `make help` lists tasks; Git for Windows does not supply make.
 
 The [Eighred organization standard](../.agents/plugins/kanz-forge/skills/repository-organization/references/eighred-standard.md)
 governs placement and moves. Deployment acceptance and financial authority

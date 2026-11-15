@@ -30,19 +30,6 @@ func withDeadline(t *testing.T) context.Context {
 	return ctx
 }
 
-// THE SIGNATURE IS THE REASON THIS PACKAGE EXISTS.
-//
-// A request signed differently from the gateway's Signing middleware is rejected
-// with a 401, and a 401 reads as an expired token — so a drifted second copy of
-// Sign would send an operator to re-authenticate against a problem that had
-// nothing to do with their credential. This pins the exact preimage:
-// method \n path \n body, HMAC-SHA256, base64 raw-url.
-// It asserts the EXACT PREIMAGE, recomputed here independently, not merely that
-// every input affects the output. An earlier version of this test did the latter
-// and was mutation-proven useless: replacing the preimage with method+path (no
-// separators) still varies with all four inputs, so it passed while the signature
-// no longer matched the gateway's. Only internal/tui/universe's own test caught
-// it, which left this package depending on a consumer to guard its contract.
 func TestSignIsHMACOverMethodPathBody(t *testing.T) {
 	const (
 		key    = "k"
@@ -135,19 +122,13 @@ func TestDoDoesNotSendAnAPIVersionHeader(t *testing.T) {
 	}
 }
 
-// A CALL WITH NO DEADLINE IS REFUSED, NOT PERFORMED.
-//
-// The client carries no Timeout of its own, so a call site that forgets a
-// deadline would hang the TUI forever on an unresponsive gateway — which looks
-// like a frozen program rather than an error. It must fail immediately the first
-// time it is exercised.
 func TestDoRefusesACallWithNoDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 
 	_, err := testClient(t, srv.URL, "").Do(context.Background(), "GET", "/v1/x", nil, nil)
 	if err == nil {
-		t.Fatal("a call with no context deadline was performed — an unresponsive gateway would hang the TUI")
+		t.Fatal("a call with no context deadline was performed — an unresponsive gateway would hang the command")
 	}
 	if !strings.Contains(err.Error(), "no context deadline") {
 		t.Errorf("error %q does not name the missing deadline", err)

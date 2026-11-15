@@ -1,24 +1,3 @@
-// Package control fronts the operator's control plane at the gateway (OPS-M2b).
-//
-// WHY THIS EXISTS. The operator.v1 service provisions, cordons, drains and relabels
-// nodes, and writes the exchange API credentials the venue adapters sign with. It
-// used to be reachable only by `kubectl port-forward` against a plaintext listener,
-// which meant two things at once: the RPC authenticated nobody, and every operator
-// needed a cluster credential to do routine work. OPS-M2a fixed the first half by
-// making the operator demand an SVID from a named caller. This is the second half:
-// that named caller is the gateway, so a human authenticates as a PERSON — OIDC in
-// production — and never holds a kubeconfig.
-//
-// THE HTTP CONTRACT IS THE PROTO CONTRACT. Requests and responses are marshalled
-// with protojson rather than through hand-written DTOs. That is not laziness about
-// API design: a second set of structs would be a second definition of the same
-// messages, free to drift from the proto the operator actually serves, and the drift
-// would surface as a field silently dropped between the TUI and a node provision.
-// One definition, generated, with the gateway as transport.
-//
-// EVERY ROUTE HERE IS authz.Operate. None is Read and none is Trade — see the
-// capability's own comment. A future route added to this file must decide the same
-// question, because authz.Mux.Handle will not compile without a capability.
 package control
 
 import (
@@ -46,16 +25,6 @@ import (
 // should be told so rather than left hanging.
 const callTimeout = 30 * time.Second
 
-// testConnectionTimeout bounds POST /v1/control/test-connection, the ONE long-running
-// route on this surface. The operator does not dial in-process: it runs the reachability
-// probe as an ephemeral Job and waits for it, so the call legitimately costs Job create,
-// pod scheduling, a possible image pull, and then the probe's own 10s dial.
-//
-// It must stay strictly ABOVE the operator's provision.probeTimeout and strictly BELOW
-// the TUI's testConnTimeout. If this budget were the tightest of the three, the caller
-// would always read "control plane did not answer in time" — a statement about the
-// gateway — in place of the operator's far more useful "probe job did not complete in
-// time". test/arch asserts the ordering; a comment alone would drift.
 const testConnectionTimeout = 90 * time.Second
 
 // maxBody caps a control request. These bodies are hostnames, node names and API

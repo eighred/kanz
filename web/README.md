@@ -33,7 +33,7 @@ preserving access to every served row. Replacing the snapshot resets the page.
 
 This bounds rendered DOM only: the API still transfers and parses the full
 retained response. It does not establish complete history, atomicity across the
-four reads, real-time streaming, production deployment or Web/TUI parity.
+four reads, real-time streaming, production deployment or complete operational coverage.
 Server-side cardinality/pagination and worker adoption remain separate work in
 [#1413](https://github.com/eighred/kanz/issues/1413).
 

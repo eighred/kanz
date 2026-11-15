@@ -1,30 +1,3 @@
-// Package identity is the platform's own identity provider (#99): the user
-// store, the credential primitive, and the invite lifecycle that puts a person
-// in it.
-//
-// WHY THIS EXISTS RATHER THAN AN EXTERNAL IdP. The gateway has always been the
-// sole identity authority — it authenticates and injects X-Kanz-Principal-*, and
-// upstreams trust those headers. What it did NOT have was anywhere for a person
-// to come from: the production path was an OIDC device flow against an Eighred
-// SSO that does not exist, so `/login` failed with "login required but failed"
-// and the only working credential was a hand-minted KANZ_TOKEN in an env var.
-//
-// The authenticator SEAM is kept. pkg/auth already has two implementations and
-// the gateway picks one at its composition root; this adds a third source of
-// truth behind the same interface rather than replacing the interface. A fund
-// manager who later requires their own Okta or Entra tenant is then a new
-// implementation, not a re-architecture — which is a routine institutional
-// demand and a bad thing to have designed out.
-//
-// # PROVISIONING, NOT REGISTRATION
-//
-// There is no self-service signup, and that is the central decision. On this
-// platform a token's claims ARE authority: kanz-trader moves capital,
-// kanz-operator writes venue keys and drains nodes, and the portfolios claim
-// decides which portfolios a caller can see at all. A person who can register
-// themselves either chooses their own authority, or is a stranger who reached
-// the TUI. So an operator CREATES the account — tenant, roles and portfolios are
-// set by them — and the invitee supplies exactly one thing: their credential.
 package identity
 
 import (

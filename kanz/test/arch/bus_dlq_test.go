@@ -191,47 +191,7 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 	return ok && id.Name == pkg
 }
 
-// dlqExemptBroadcastOnlyConsumers is the default-deny allow-list of
-// bus.NewConsumer call sites certified safe to omit bus.WithDLQ because every
-// subscription they make is SubscribeBroadcast/SubscribeBroadcastReady, never
-// the grouped Subscribe.
-//
-// pkg/bus/consumer.go (SubscribeBroadcastReady's shared dispatch path)
-// documents that the broadcast path does NOT route to the DLQ at all — an
-// unreadable or failed broadcast message "is returned as an error, the message
-// is nacked", full stop. c.dlq is never consulted anywhere in that path
-// (consumer.go). That makes bus.WithDLQ structurally INERT on a
-// consumer used only for broadcast: there is no code path left that would
-// ever read c.dlq, so its absence loses nothing.
-//
-// A listed entry must also be a consumer that CANNOT hold a DLQ publisher: a
-// read-only observer whose tenancy grant denies all business publish (see
-// test/arch/nats_identity_test.go's readOnlyObserverSVIDs) has no dlq.*
-// publish grant to construct bus.WithDLQ from in the first place. Certifying
-// the exemption on inertness alone, without also requiring read-only, would
-// let a capital-path consumer skip the DLQ merely by *also* subscribing to a
-// broadcast subject elsewhere — this list is for consumers with NOTHING but
-// broadcast subscriptions, and specifically ones that could never wire a DLQ
-// even if asked to.
-//
-// This is default-deny like retryCertifiedConsumers below: a NEW
-// bus.NewConsumer call site that lacks WithDLQ still fails
-// TestEveryBusConsumerWiresADLQ until an entry here names it explicitly, with
-// its own justification. Listing cannot silently widen — only enumerating a
-// specific file:line can, and that requires a reviewed edit to this file.
 var dlqExemptBroadcastOnlyConsumers = map[string]string{
-	"cmd/kanz_monitor/busreader.go:runBusReader": "kanz-monitor: this Consumer is used " +
-		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go and " +
-		"risk.position.changed.> at busreader.go) — there is no Subscribe call anywhere " +
-		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
-		"(consumer.go, Consumer.Subscribe) is unreachable from this call site; per " +
-		"SubscribeBroadcastReady's shared dispatch in consumer.go the broadcast path never " +
-		"consults c.dlq regardless, so " +
-		"WithDLQ would be inert here. The monitor is also a read-only observer " +
-		"(test/arch/nats_identity_test.go's readOnlyObserverSVIDs; its tenancy grant " +
-		"denies all business publish) and physically cannot hold the dlq.* " +
-		"publisher WithDLQ requires — there is no producer anywhere in this file, " +
-		"see busreader.go's own READ-ONLY doc comment.",
 	"test/load/orderflow/facts.go:watchFacts": "orderflow (#865): this Consumer makes " +
 		"TWO SubscribeReplay calls (order.order.accepted and order.order.rejected) and " +
 		"nothing else — there is no Subscribe call anywhere in test/load/orderflow, so the " +
@@ -239,7 +199,7 @@ var dlqExemptBroadcastOnlyConsumers = map[string]string{
 		"site. SubscribeReplay shares subscribeEphemeral with SubscribeBroadcast in " +
 		"pkg/bus/nats.go — one function, one enum apart — so the same fact holds: the " +
 		"ephemeral path never consults c.dlq and WithDLQ is structurally inert here.\n" +
-		"It also CANNOT hold a DLQ publisher, for a stronger reason than the monitor's: " +
+		"It also CANNOT hold a DLQ publisher, because " +
 		"this whole package must not publish AT ALL. It is the write-path load harness, and " +
 		"test/arch/load_harness_front_door_test.go enforces that it submits orders through " +
 		"the api-gateway's POST /v1/orders rather than putting anything on the bus itself. " +

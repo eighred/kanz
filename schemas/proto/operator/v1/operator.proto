@@ -1,22 +1,8 @@
 syntax = "proto3";
 
-// Operator service — the control-plane surface over the Kubernetes estate for the
-// root@universe operator plane. Reads: ListNodes / ListClusters. Writes (S2a):
-// AddNode provisions a new host (one-shot k3s-join Job) and ListProvisions reports
-// its status. Key material is written via SetVenueKeys (S4a, API Manager).
-//
-// # Consumers
-//
-// The `operator` service implements the server, reading Node objects from the
-// Kubernetes API via client-go under a get/list-nodes ClusterRole. The
-// `universe` TUI is the only client, dialing over a kubeconfig-gated
-// port-forward. No other service dials this.
-//
-// # Versioning
-//
-// operator.v1, additive-only within the version — a removed/retyped field or
-// RPC breaks every client and requires a sibling operator/v2.
 package operator.v1;
+
+// The gateway calls this typed control-plane API with workload identity.
 
 import "google/protobuf/timestamp.proto";
 

@@ -10,28 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// THERE IS EXACTLY ONE PLACE THAT DECIDES WHICH IMAGE THE ESTATE RUNS.
-//
-// OPS-M4a (#81) states the constraint as a choice: "Choose ONE substitution point
-// — release.yml writing an image-digest map the GitOps layer consumes, OR Argo
-// kustomize.images — never both." The choice was made — pin-digests rewrites the
-// manifests in git — and TestProductionManifestsPinImagesByDigest then holds those
-// manifests to digests. Neither of those notices a SECOND mechanism appearing
-// beside them, and that is the failure this guard exists for.
-//
-// Two substitution points is worse than either one alone, because they do not
-// conflict loudly. Manifests in git would say @sha256:abc while Argo's override
-// silently deployed :latest, and every artifact a reader consults to answer "what
-// is running?" — the manifest, the pin PR, the cosign attestation — would agree
-// with each other and disagree with the cluster. The digest guard would stay green
-// throughout: it reads git, and git would be correct. The lie would live entirely
-// in the layer nobody diffs.
-//
-// It also destroys the rollback primitive. Rollback here means "re-point at the
-// previous digest", which is only meaningful if the digest in git is what runs.
-// An override upstream of it makes the TUI's rollback (#82) a no-op that reports
-// success — the same shape as the DR failures elsewhere in this repo, where the
-// control ran, said nothing, and changed nothing.
 func TestExactlyOneImageSubstitutionPoint(t *testing.T) {
 	root := moduleRoot(t)
 

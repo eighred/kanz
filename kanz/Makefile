@@ -36,23 +36,6 @@ generate: | $(GOTMPDIR) ## Regenerate and initialize the schemas Go SDK
 	cd $(SCHEMAS_DIR) && buf generate && bash bootstrap-go-sdk.sh
 
 .PHONY: build
-# THE BINARIES HAVE TO LAND IN ONE DIRECTORY, TOGETHER.
-#
-# This was `go build ./...`, which compiles every package and writes NOTHING:
-# with several main packages, go build discards the executables. "Build every
-# package" was true and produced nothing to run.
-#
-# That is not a tidiness problem. The kanz shell reaches kanz-monitor and
-# kanz-halt by executing them, resolved NEXT TO THE RUNNING BINARY (#161/#175) —
-# because Go refuses a bare name found via the working directory, and rightly:
-# a kanz-halt dropped in whatever directory you happened to be in would
-# otherwise become the platform kill switch. So the tools must ship together,
-# and until now no target made them do so. `make release` does not cover cmd/
-# at all; it builds ./services/... only.
-#
-# -o with a DIRECTORY writes one executable per main package and ignores the
-# rest, so `./...` stays honest: it still compiles everything, and now the
-# things that can be run can be found. bin/ is already gitignored.
 build: generate | $(GOTMPDIR) ## Build every package, emitting the binaries into bin/
 	@mkdir -p bin
 	$(call build_commands,./...,)
@@ -81,8 +64,6 @@ VERSION_LDFLAGS := $(if $(VERSION),-X github.com/eighred/kanz/internal/version.s
 GO_RELEASE_LDFLAGS := -s -w $(VERSION_LDFLAGS)
 TAGS ?=
 
-# Both developer and release output preserve the command names used by the TUI
-# and operators even when source directory names use underscores.
 define build_commands
 @set -e; \
 	packages="$$(go list -tags "$(2)" -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' $(1))"; \

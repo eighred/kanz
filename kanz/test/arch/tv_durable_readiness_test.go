@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+// Terminal observers are absent under TestRetiredTerminalInterfacesStayRemoved.
+// Live SubscribeReady consumers remain covered by the permission and machinery guards.
 var tvReadinessMarkers = map[string][]string{
 	"pkg/bus/bus.go":                                       {"type ReadySubscriber interface"},
 	"pkg/bus/consumer.go":                                  {"effective.DurableConsumerTuning(subject)", "tuning.MaxDeliver != -1", "c.subscribe(ctx, subject, group, h, nil)", "c.subscribe(ctx, subject, group, h, ready)", "transport lacks durable readiness"},
@@ -15,7 +17,6 @@ var tvReadinessMarkers = map[string][]string{
 	"services/tv_sync/internal/server/server.go":           {"broker.SetStreamGate(readiness)", "context.AfterFunc(ctx, r.revokeStreams)", "r.revokeStreams()", "!r.foldFailures.blocked.Load()", "r.ctx.Err() == nil", "!s.readiness.Ready()", "s.serveBroker(w, r, s.mux)", "s.serveBroker(w, r, s.legacy)"},
 	"test/arch/nats_subscribe_permissions_test.go":         {"\"SubscribeReady\":"},
 	"test/arch/nats_jetstream_machinery_test.go":           {"\"SubscribeReady\":"},
-	"test/arch/nats_identity_test.go":                      {"sel.Sel.Name == \"SubscribeReady\" && len(call.Args) == 5"},
 	"../.github/workflows/kanz-ci.yml":                     {"check_tv_readiness_evidence.py", "TEST_NATS_URL: nats://localhost:4222"},
 	"services/tv_sync/cmd/tv_sync/fact_consumers.go":       {"bus.WithRetainedRetries(projection.Subjects()...)", "bus.RequireTenantScope", "env.GetTenantId() != tenant", "attempts.Lock()", "defer attempts.Unlock()", "readiness.FoldResult", "failed := true", "r.facts.SubscribeReady", "r.prices.SubscribeReady", `root == "order"`, `strings.ContainsAny(root, "*>")`},
 	"services/tv_sync/internal/server/fold_readiness.go":   {"maxUnresolvedFolds = 4096", "sha256.Sum256", "f.overflow = true", "delete(f.pending, key)", "f.overflow || len(f.pending) > 0"},

@@ -1,25 +1,4 @@
-// Package gateway is the TUI's one way of talking to the api-gateway.
-//
-// It carries the transport concerns every TUI surface shares — the bearer token,
-// the HMAC request signature, the deadline rule, and the read limit — so that a
-// second surface does not arrive with its own copy of them. It deliberately does
-// NOT carry a codec or the operator-facing wording for a failure: the control
-// plane speaks protojson over the operator's generated types, other surfaces
-// speak ordinary JSON DTOs, and a 404 means something different on each of them.
-//
-// # Why this is a package and not a helper inside one caller
-//
-// It was a helper inside one caller. internal/tui/universe/gatewaysource.go held
-// the token, the signature and the client, because the estate view was the only
-// thing that talked to the gateway. A second consumer appeared — the positions,
-// PnL and risk surface (#84) — and the rule this repository states for that
-// moment is to promote rather than copy.
-//
-// The fix that must be able to spread is the SIGNATURE. A request signed
-// differently from the way the gateway's Signing middleware expects is rejected
-// with a 401, and a 401 reads as an expired token: a second copy of Sign that
-// drifted by one newline would send an operator to re-authenticate against a
-// problem that had nothing to do with their credential.
+// Package gateway implements the snapshot command's signed, authenticated transport.
 package gateway
 
 import (
@@ -33,9 +12,6 @@ import (
 	"strings"
 )
 
-// Config is what the TUI needs to reach the gateway. None of it is a kubeconfig:
-// the TUI is an ordinary API client, and the gateway is the platform's single
-// identity authority.
 type Config struct {
 	// BaseURL of the gateway, e.g. https://api.eighred.com.
 	BaseURL string
@@ -87,7 +63,7 @@ type Client struct {
 func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, fmt.Errorf("no gateway URL: set --gateway-url or KANZ_GATEWAY_URL " +
-			"(e.g. https://api.eighred.com). The TUI reaches the estate through the API " +
+			"(e.g. https://api.eighred.com). This command reaches the estate through the API " +
 			"gateway; it does not talk to the cluster directly")
 	}
 	u, err := url.Parse(cfg.BaseURL)
@@ -162,12 +138,6 @@ func (e *StatusError) Error() string {
 // A non-2xx yields a *StatusError. A missing context deadline is refused rather
 // than performed — see below.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body []byte) ([]byte, error) {
-	// The HTTP client deliberately carries no Timeout of its own, so the caller's context is
-	// the ONLY thing bounding this request. A call site that forgets a deadline would
-	// therefore hang the TUI forever on an unresponsive gateway — the worst failure mode in
-	// an operator tool, because it looks like a frozen program rather than an error. Refuse
-	// it instead: this is a programming mistake, and it should be loud and immediate the
-	// first time it is exercised rather than a hang someone has to bisect.
 	if _, ok := ctx.Deadline(); !ok {
 		return nil, fmt.Errorf("internal: %s %s was called with no context deadline; every "+
 			"gateway call must set one (the HTTP client sets no timeout of its own)",
@@ -210,15 +180,6 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	return payload, nil
 }
 
-// Sign is internal/gatewaysig.Sign, kept under this name because it was the
-// tree's only signer and #195 promoted it here for callers that still reach for
-// it.
-//
-// THE IMPLEMENTATION MOVED OUT OF THIS PACKAGE ON PURPOSE (#781). This one lives
-// in internal/tui, and internal/tui is the surface #371 retires; when the TUI
-// goes, the reference implementation would have gone with it, leaving the
-// web-bff and shell copies to drift against a verifier none of them shares. The
-// canonicalization now lives beside the verifier that enforces it.
 func Sign(key []byte, method, path string, body []byte) string {
 	return gatewaysig.Sign(key, method, path, body)
 }

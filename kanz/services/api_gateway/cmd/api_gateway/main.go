@@ -315,10 +315,6 @@ func run() int {
 		return 2
 	}
 
-	// The control plane (OPS-M2b). Absent unless an address is configured, and a
-	// FATAL rather than a degraded start when it is configured and cannot be reached
-	// securely — an operator surface that half-exists is worse than one that does
-	// not, because the TUI would report "no control plane" for a config error.
 	var ctlHandler *control.Handler
 	if cfg.OperatorAddr != "" {
 		opConn, err := dialOperator(ctx, cfg, logger)
@@ -783,26 +779,6 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		return proxy.New(nil, proxyRoles(cfg)), nil
 	}
 
-	// ONE CLIENT, BUILT THE SAME WAY ON BOTH BRANCHES; ONLY THE TLS DIFFERS.
-	//
-	// The plaintext branch used to be `client := http.DefaultClient`, and that was
-	// wrong for two reasons that outlived the timeout it was filed for (#235).
-	// http.DefaultClient is a SHARED MUTABLE GLOBAL: any package linked into this
-	// binary that sets DefaultClient.Timeout or swaps DefaultTransport silently
-	// retunes every proxied read, from somewhere no reader of this file would look.
-	// And it carries http.DefaultTransport, whose MaxIdleConnsPerHost is 2 — for a
-	// gateway fanning out to four upstreams that is connection churn on the hot
-	// read path, chosen by nobody.
-	//
-	// NO Timeout FIELD ON EITHER BRANCH, DELIBERATELY — it used to carry 30s and that
-	// was a bug of the exact kind the TUI already paid for. http.Client.Timeout is
-	// enforced independently of the request context, so it was a SECOND bound on the
-	// same call and min(context, 30s) won invisibly: it capped /v1/ask at 30s
-	// underneath the copilot's own five-minute completion budget, and it applied only
-	// on the mTLS path, so dev and production were bounded differently for reasons
-	// nothing stated. The one bound lives on the call (proxy.forwardBudget), where the
-	// route that needs a different budget can say so and a test can read it.
-	// test/arch/probe_deadline_nesting_test.go fails the build if it comes back.
 	tr := &http.Transport{
 		MaxIdleConnsPerHost: proxyMaxIdleConnsPerHost,
 		IdleConnTimeout:     proxyIdleConnTimeout,

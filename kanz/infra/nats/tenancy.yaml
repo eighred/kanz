@@ -276,7 +276,6 @@ data:
           # else, and every one of those is JetStream's management API with the
           # reply on an inbox. So these two grants are the whole job, and with an
           # allow-list present every other subject is denied — the same argument
-          # kanz-monitor's entry makes for the read-only operator identity.
           #
           # NO $JS.ACK.>, deliberately: this Job never consumes a message, so it
           # never acks one. Granting it would be copying a shape rather than
@@ -477,25 +476,6 @@ data:
                 ]
               }
               subscribe: { allow: ["dlq.>", "_INBOX.>"] }
-            }
-          }
-          # READ-ONLY OBSERVER (kanz-monitor, test/arch/nats_identity_test.go's
-          # readOnlyObserverSVIDs). It streams order.> and risk.position.> to a
-          # terminal via SubscribeBroadcast and publishes NO business subject.
-          # The publish allow-list holds ONLY the JetStream consumer machinery its
-          # ephemeral consumer binds ($JS.API.> to resolve the stream + create the
-          # consumer, $JS.ACK.> to ack) — with an allow-list present, every other
-          # subject (order.*, risk.*, everything) is denied by default, so this
-          # identity provably cannot move capital. NOT `deny: [">"]`: that trap
-          # (see the risk-engine header above) would also deny $JS.API.>/$JS.ACK.>,
-          # breaking the consumer and silently failing every ack forever.
-          # Manifest half (a kanz-operator ServiceAccount for kanz-monitor) is not
-          # yet shipped — like the other operator tools, the broker-side half is
-          # declared here ready for when that manifest lands.
-          { user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-monitor"
-            permissions: {
-              publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
-              subscribe: { allow: ["order.>", "risk.position.>", "_INBOX.>"] }
             }
           }
           # SEC-M3e: the 15 service users below (risk-engine .. webhook-ingest —

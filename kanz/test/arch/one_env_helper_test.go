@@ -144,7 +144,6 @@ var envHelperExempt = map[string]string{
 	// interchangeable as written — Read derives the path from KEY_FILE while this
 	// reads a flag — so unifying them is a change to this tool's command line
 	// rather than a helper swap, and it is not smuggled into #692's repair.
-	"cmd/universe/main.go:secretFrom": "#692 — a (path, key) secret reader, not a key-and-default wrapper; unifying it with pkg/secret.Read is a CLI change",
 }
 
 // readsEnvironment reports whether the body calls os.Getenv or os.LookupEnv.

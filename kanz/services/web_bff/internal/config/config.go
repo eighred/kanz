@@ -149,16 +149,6 @@ func Load() (Config, error) {
 			return Config{}, errors.New("WEB_BFF_GATEWAY_SPIFFE_SOCKET requires a credential-free HTTPS gateway URL")
 		}
 	}
-	// SSO IS NOW OPTIONAL, AND THAT IS THE POINT OF THIS CHANGE. WEB_BFF_SSO_ISSUER
-	// used to be required, so this service could not START without an Eighred SSO
-	// that does not exist — the browser path was as dead as the TUI's /login.
-	// Credential login against the identity service replaces it.
-	//
-	// The OIDC arm is kept rather than deleted, for the same reason pkg/auth keeps
-	// its authenticator seam: a fund manager who requires their own Okta or Entra
-	// tenant is then configuration, not a re-architecture. Configured HALF-way is
-	// the one thing refused — an issuer with no redirect URL would advertise a
-	// login route that cannot complete.
 	if (cfg.Issuer == "") != (cfg.RedirectURL == "") {
 		return Config{}, errors.New("WEB_BFF_SSO_ISSUER and WEB_BFF_REDIRECT_URL must be set together " +
 			"or not at all — an issuer with no redirect URL offers a login that cannot complete")

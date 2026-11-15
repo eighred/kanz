@@ -276,18 +276,7 @@ func signArgsFunc(t *testing.T, src string) string {
 func TestEveryGatewayDialingBinaryCanSign(t *testing.T) {
 	const signer = "github.com/eighred/kanz/internal/gatewaysig"
 
-	// A BINARY THAT REACHES THE GATEWAY AND MUST NOT SIGN, with the reason.
-	//
-	// kanz-monitor polls the gateway's /readyz and nothing else. The signing
-	// middleware is mounted on the /v1/ subtree only (api-gateway main.go:
-	// mux.Handle("/v1/", chain(gwMux))), so /readyz is outside it and a signature
-	// there would be neither required nor checked. The day this tool reads a /v1
-	// path it becomes the fourth instance, and deleting this entry is the change
-	// that makes it sign.
-	exempt := map[string]string{
-		"github.com/eighred/kanz/cmd/kanz_monitor": "polls /readyz only, which is mounted " +
-			"outside the signed /v1/ chain",
-	}
+	exempt := map[string]string{}
 	matched := map[string]bool{}
 
 	// Packages that name a gateway base URL — the honest marker for "this
