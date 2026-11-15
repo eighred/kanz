@@ -133,6 +133,8 @@ class QualificationControls(unittest.TestCase):
         calls = []
         inspected = info
         name_replaced = False
+        log_source = "broker-startup-log"
+        log_body = "unknown flag " + secret + "\nwrite /tmp/redpanda.yaml: permission denied " + secret
         def execute(args, **kwargs):
             nonlocal name_replaced
             calls.append((args, kwargs))
@@ -148,7 +150,8 @@ class QualificationControls(unittest.TestCase):
                 return json.dumps([inspected])
             if args[:4] == ["docker", "logs", "--tail", "40"]:
                 self.assertEqual(args[-1], container_id)
-                fixture.last_runtime_result = qualify.runtime_output(("unknown flag " + secret + "\nwrite /tmp/redpanda.yaml: permission denied " + secret).encode(), 0, "broker-startup-log")
+                self.assertEqual(kwargs["runtime_source"], log_source)
+                fixture.last_runtime_result = qualify.runtime_output(log_body.encode(), 0, log_source)
                 return secret
             self.fail("diagnostics cannot launch or mutate resources")
         fixture.run = execute
@@ -184,7 +187,37 @@ class QualificationControls(unittest.TestCase):
             refused = json.dumps(fixture.readiness_evidence)
             for unbound in ("capturedSHA256", "matchedSignals", "lineContext", "probe", secret):
                 self.assertNotIn(unbound, refused)
-        for role in ("mysql", "search", "gms"):
+        name = OWNER["network"] + "-search"
+        info = runtime_state_info("search", "exited")
+        info["Config"]["Env"] = ["PASSWORD=" + secret]
+        info["State"]["Error"] = secret
+        inspected, name_replaced = info, False
+        log_source = "search-startup-log"
+        log_body = 'Likely root cause: java.nio.file.AccessDeniedException: "/usr/share/opensearch/config/opensearch.keystore.tmp" ' + secret
+        fixture.readiness_evidence = {}
+        calls.clear()
+        with self.assertRaises(ValueError):
+            fixture.wait_exec(name, ["curl", "--fail", "--silent", "http://search:9200/_cluster/health"])
+        entry = fixture.readiness_evidence["search"]
+        self.assertEqual(entry["waitOutcome"], "terminal-state")
+        self.assertEqual([args[-1] for args, _ in calls if args[:2] == ["docker", "inspect"]], [name, container_id])
+        self.assertNotIn("brokerLog", entry["recent"][0])
+        observed = entry["recent"][0]["searchLog"]
+        self.assertEqual(observed["matchedSignals"], ["search-access-denied-exception", "search-root-cause-wrapper"])
+        self.assertEqual(observed["lineContext"]["records"][0]["coOccurrence"]["resourceSignals"], ["packaged-search-config"])
+        self.assertIsNone(observed["lineContext"]["records"][0]["startupMessage"])
+        self.assertNotIn(secret, json.dumps(fixture.readiness_evidence))
+        for field, value in (("Image", "sha256:" + "f" * 64), ("Name", "/foreign"), ("Id", "foreign"), ("Config", {"Labels": {}})):
+            calls.clear()
+            name_replaced = False
+            fixture.readiness_evidence = {}
+            inspected = dict(info, **{field: value})
+            with self.assertRaises(ValueError):
+                fixture.wait_exec(name, ["curl", "--fail", "--silent", "http://search:9200/_cluster/health"])
+            self.assertFalse(any(args[:2] in (["docker", "logs"], ["docker", "exec"]) for args, _ in calls))
+            for unbound in ("capturedSHA256", "matchedSignals", "lineContext", "probe", secret):
+                self.assertNotIn(unbound, json.dumps(fixture.readiness_evidence))
+        for role in ("mysql", "gms"):
             calls.clear()
             inspected = dict(info, Name="/" + OWNER["network"] + "-" + role)
             binding = qualify.owned_runtime_state(inspected, OWNER["network"] + "-" + role, "sha256:" + "7" * 64, OWNER["network"], qualify.labels(OWNER))
@@ -199,6 +232,7 @@ class QualificationControls(unittest.TestCase):
         self.assertEqual(len(fixture.readiness_evidence["broker"]["recent"]), 8)
         self.assertEqual(fixture.readiness_evidence["broker"]["recent"][0], {"attempt": 22})
         self.assertNotIn(secret, json.dumps(fixture.readiness_evidence))
+        name = OWNER["network"] + "-broker"
         with mock.patch.object(qualify.time, "monotonic", side_effect=[0, 1]), self.assertRaises(ValueError):
             fixture.wait_exec(name, ["rpk", "cluster", "info"], timeout=1)
         self.assertEqual(fixture.readiness_evidence["broker"]["waitOutcome"], "deadline-exceeded")
@@ -209,14 +243,18 @@ class QualificationControls(unittest.TestCase):
         runner = object.__new__(qualify.Fixture)
         runner.stage, runner.environment = "storage-readiness", {}
         process = mock.Mock()
-        with mock.patch.object(qualify.subprocess, "Popen", return_value=process), mock.patch.object(qualify, "capture_process", side_effect=qualify.CommandFailure("capture", "output-budget")) as capture, mock.patch.object(qualify, "stop_process") as stop:
-            with self.assertRaises(qualify.CommandFailure):
-                runner.run(["docker", "logs", "--tail", "40", container_id], output_limit=65536, runtime_source="broker-startup-log")
-            capture.assert_called_once_with(process, 180, 65536)
-            stop.assert_called_once_with(process)
-        self.assertEqual(runner.last_runtime_result["category"], "output-budget")
-        self.assertFalse(runner.last_runtime_result["captureComplete"])
-        self.assertIsNone(runner.last_runtime_result["capturedSHA256"])
+        for source in ("broker-startup-log", "search-startup-log"):
+            with mock.patch.object(qualify.subprocess, "Popen", return_value=process), mock.patch.object(qualify, "capture_process", side_effect=qualify.CommandFailure("capture", "output-budget")) as capture, mock.patch.object(qualify, "stop_process") as stop:
+                with self.assertRaises(qualify.CommandFailure):
+                    runner.run(["docker", "logs", "--tail", "40", container_id], output_limit=65536, runtime_source=source)
+                capture.assert_called_once_with(process, 180, 65536)
+                stop.assert_called_once_with(process)
+            self.assertEqual(runner.last_runtime_result["category"], "output-budget")
+            self.assertFalse(runner.last_runtime_result["captureComplete"])
+            self.assertIsNone(runner.last_runtime_result["capturedSHA256"])
+        with mock.patch.object(qualify.subprocess, "Popen") as launch, self.assertRaises(ValueError):
+            runner.run(["docker", "inspect", container_id], output_limit=65536, runtime_source="search-startup-log")
+        launch.assert_not_called()
 
     def test_mysql_startup_preserves_vendor_plan_and_bounded_nonroot_profile(self):
         fixture = object.__new__(qualify.Fixture)

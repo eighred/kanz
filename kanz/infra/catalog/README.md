@@ -129,7 +129,9 @@ use that immutable ID; a replaced name cannot redirect the observed output.
 Foreign bindings collect no probe/log signals or captured hashes. The bounded
 projection retains Docker's public state/exit/OOM flags, command output length
 and hash, and fixed possibly-multiple text signals from only the owned broker's
-last 40 startup log lines. It retains no raw logs, commands, environment, error
+or search container's last 40 startup log lines. Source-specific allowlists keep
+broker and search template/resource classes separate. It retains no raw logs,
+commands, environment, error
 text or credentials. Probe/inspection/log capture has a streaming 64 KiB ceiling
 and process-group termination at overflow, inside the unchanged command limits.
 Only eight recent failed attempts per selected role survive; terminal state,
@@ -160,6 +162,20 @@ other signals. PID unlink text may concern cleanup. These template matches
 assert neither severity nor reachability nor a fatal cause. Storage-alert
 configuration descriptions are not classified as refusal messages. Projection
 is deliberately non-exhaustive, so an absent match proves no global absence.
+Search diagnostics use a finite allowlist from public OpenSearch 3.9.0 source
+at [4ee42a94](https://github.com/opensearch-project/OpenSearch/tree/4ee42a94e87f66fbf1e62a9871b1b87f91e02472):
+launcher/config/JVM-option messages, bootstrap/root-cause wrappers, node-lock/
+data-write messages and fixed exception tokens. The sensitive message seams are
+[KeyStoreWrapper](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java#L564)
+and [JvmOptionsParser](https://github.com/opensearch-project/OpenSearch/blob/4ee42a94e87f66fbf1e62a9871b1b87f91e02472/distribution/tools/launchers/src/main/java/org/opensearch/tools/launchers/JvmOptionsParser.java#L110);
+neither arbitrary exception names, JVM options nor message tails are retained.
+Search resource co-occurrence classes cover only its packaged config tree,
+selected data/log trees and shared temporary/proc/sys classes. Stage, level and
+causal attribution remain unknown. Search logs receive no suffix fingerprint;
+only the existing bounded whole-capture byte count/hash is retained. Conditional
+vendor keystore creation/upgrades do not establish the selected image's state
+or justify a writable-config repair without observed evidence. Search startup
+arguments, image pins and the entire isolation/resource profile are unchanged.
 Only a broker line containing the exact case-sensitive compiled prefix
 `Failure during startup: ` once may retain `startupMessage` byte length and
 SHA-256 of its suffix. The capture must round-trip as valid UTF-8; trimming is
@@ -190,7 +206,7 @@ The existing pre-authentication synthetic diagnostic control also exercises
 secret-bearing runtime projection, same-line binding/co-occurrence, independent
 errno text, fallback/wrapper discrimination, unknown path/operation/level
 refusal, ambiguity and both context limits; target-side controls
-discriminate foreign owners/name replacement, non-broker log refusal, retention
+discriminate foreign owners/name replacement, MySQL/GMS log refusal, retention
 and capture overflow. The inventory contains 50 catalog controls, seven shared
 auth controls, one pre-authentication diagnostic control and eight runtime cases.
 

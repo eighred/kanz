@@ -39,6 +39,7 @@ READINESS_CONTEXT_LINES = 40
 READINESS_CONTEXT_RECORDS = 16
 STARTUP_MESSAGE_LIMIT = 4096
 READINESS_ROLES = frozenset({"broker", "mysql", "search", "gms"})
+READINESS_SOURCES = frozenset({"readiness-command", "broker-startup-log", "search-startup-log"})
 REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
@@ -215,7 +216,7 @@ def failure_category(output, code, scanner):
 
 def runtime_output(output, code, source):
     """Informational closed signals; no text can authorise readiness/cleanup."""
-    if source not in {"readiness-command", "broker-startup-log"} or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
+    if source not in READINESS_SOURCES or not isinstance(output, bytes) or len(output) > READINESS_OUTPUT_LIMIT or type(code) is not int or not -255 <= code <= 255:
         raise ValueError("runtime diagnostic source/size refused")
     text = output.decode("utf-8", errors="replace")
     utf8_roundtrip = text.encode("utf-8") == output
@@ -247,6 +248,27 @@ def runtime_output(output, code, source):
     # full-capture signals and per-line context agree on the same-line rule.
     template_shapes = {"memory-below-required-message": r"(?<![\w-])memory: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*' below required: '[^'\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*'(?![\w-])"}
     apis = {"perf-event-open-failed": "perf_event_open() failed", "chmod-failed": "chmod failed", "open-failed": "open failed"}
+    if source == "search-startup-log":
+        # Public OpenSearch 3.9.0 source at 4ee42a94 supplies these finite
+        # wrappers/message frames. Matching one is not a caller/cause claim.
+        templates = {
+            "search-root-cause-wrapper": "likely root cause:",
+            "search-node-validation-wrapper": "node validation exception",
+            "search-uncaught-wrapper": "uncaught exception in thread",
+            "search-root-user-message": "can not run opensearch as root",
+            "search-node-lock-message": "failed to obtain node locks",
+            "search-data-write-message": "failed to test writes in data directory",
+            "search-keystore-write-message": "unable to create temporary keystore at",
+            "search-keystore-console-message": "failed to read keystore password on console",
+            "search-config-path-message": "opensearch_path_conf must be set to the configuration path",
+            "search-jvm-option-message": "encountered improperly formatted jvm option in",
+            "search-bootstrap-check-message": "bootstrap checks failed",
+        }
+        template_shapes = {}
+        apis = {"search-access-denied-exception": "java.nio.file.accessdeniedexception",
+                "search-bootstrap-exception": "org.opensearch.bootstrap.bootstrapexception",
+                "search-node-validation-exception": "org.opensearch.node.nodevalidationexception",
+                "search-illegal-state-exception": "java.lang.illegalstateexception"}
     literals = {**templates, **apis}
     def signal_classes(value):
         result = {key for key, markers in patterns.items() if any(marker in value for marker in markers)}
@@ -265,16 +287,21 @@ def runtime_output(output, code, source):
     def resource_class(path):
         if any(part in {".", ".."} for part in path.split("/")):
             return "unclassified"
-        if path == "/tmp/redpanda.yaml":
-            return "selected-broker-config"
         if path == "/tmp":
             return "bounded-temporary-root"
-        if path == "/etc/redpanda/redpanda.yaml":
-            return "packaged-vendor-config"
-        for prefix, classification in (("/var/lib/redpanda/data", "selected-broker-data"),
-                                       ("/var/lib/redpanda/coredump", "packaged-coredump-directory"),
-                                       ("/proc/sys/kernel", "proc-sys-kernel"), ("/proc/sys/vm", "proc-sys-vm"),
-                                       ("/proc/sys/fs", "proc-sys-fs"), ("/proc", "proc-filesystem"), ("/sys", "sys-filesystem")):
+        if source == "search-startup-log":
+            selected_paths = (("/usr/share/opensearch/config", "packaged-search-config"),
+                              ("/usr/share/opensearch/data", "selected-search-data"),
+                              ("/usr/share/opensearch/logs", "selected-search-logs"))
+        else:
+            if path == "/tmp/redpanda.yaml":
+                return "selected-broker-config"
+            if path == "/etc/redpanda/redpanda.yaml":
+                return "packaged-vendor-config"
+            selected_paths = (("/var/lib/redpanda/data", "selected-broker-data"),
+                              ("/var/lib/redpanda/coredump", "packaged-coredump-directory"))
+        for prefix, classification in selected_paths + (("/proc/sys/kernel", "proc-sys-kernel"), ("/proc/sys/vm", "proc-sys-vm"),
+                                                        ("/proc/sys/fs", "proc-sys-fs"), ("/proc", "proc-filesystem"), ("/sys", "sys-filesystem")):
             if path == prefix or path.startswith(prefix + "/"):
                 return classification
         return "unclassified"
@@ -347,7 +374,7 @@ def runtime_output(output, code, source):
 
 
 def runtime_refusal(category, source, code=None):
-    if category not in {"capture-unavailable", "timeout", "output-budget", "command-unavailable", "reap-timeout", "reap-unavailable"} or source not in {"readiness-command", "broker-startup-log"} or code is not None and (type(code) is not int or not -255 <= code <= 255):
+    if category not in {"capture-unavailable", "timeout", "output-budget", "command-unavailable", "reap-timeout", "reap-unavailable"} or source not in READINESS_SOURCES or code is not None and (type(code) is not int or not -255 <= code <= 255):
         raise ValueError("runtime refusal category refused")
     return {"informationalOnly": True, "source": source, "captureComplete": False,
             "outputLimitBytes": READINESS_OUTPUT_LIMIT, "capturedBytes": None,
@@ -726,7 +753,7 @@ class Fixture:
             raise ValueError("build diagnostics require the fixed Docker build seam")
         if type(output_limit) is not int or not 0 < output_limit <= OUTPUT_LIMIT:
             raise ValueError("command output bound refused")
-        if runtime_source is not None and (scanner or build or output_limit != READINESS_OUTPUT_LIMIT or runtime_source not in {"readiness-command", "broker-startup-log"} or runtime_source == "readiness-command" and args[:2] != ["docker", "exec"] or runtime_source == "broker-startup-log" and args[:4] != ["docker", "logs", "--tail", "40"]):
+        if runtime_source is not None and (scanner or build or output_limit != READINESS_OUTPUT_LIMIT or runtime_source not in READINESS_SOURCES or runtime_source == "readiness-command" and args[:2] != ["docker", "exec"] or runtime_source in {"broker-startup-log", "search-startup-log"} and args[:4] != ["docker", "logs", "--tail", "40"]):
             raise ValueError("runtime diagnostic command seam refused")
         if runtime_source is not None:
             self.last_runtime_result = runtime_refusal("capture-unavailable", runtime_source)
@@ -1067,15 +1094,15 @@ class Fixture:
         try:
             state = self.readiness_state(container, binding["containerID"])
             record["container"] = state
-            # Only this broker's exact immutable ID may supply startup signals.
+            # Only these exact immutable IDs may supply startup signals.
             # GMS/MySQL logs can contain synthetic credentials and are not read.
-            if role == "broker":
+            if role in {"broker", "search"}:
                 try:
                     self.run(["docker", "logs", "--tail", "40", state["containerID"]], timeout=10,
-                             output_limit=READINESS_OUTPUT_LIMIT, runtime_source="broker-startup-log")
+                             output_limit=READINESS_OUTPUT_LIMIT, runtime_source=role + "-startup-log")
                 except CommandFailure:
                     pass  # The closed result records a failed/incomplete capture.
-                record["brokerLog"] = dict(self.last_runtime_result)
+                record[role + "Log"] = dict(self.last_runtime_result)
             return state
         except (ValueError, KeyError, TypeError, OSError):
             record["collectionFailure"] = "owned-container-inspection-refused"

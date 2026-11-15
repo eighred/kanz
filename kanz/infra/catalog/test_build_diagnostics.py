@@ -223,7 +223,47 @@ class BuildDiagnosticControls(unittest.TestCase):
         self.assertNotIn(secret, json.dumps((cpp_projection, wrapper, split, mixed)))
         for raw in ("/tmp/redpanda.yaml", "filesystem error:", "chmod failed:", "Failure during startup:"):
             self.assertNotIn(raw, json.dumps(cpp_projection))
-        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log")):
+        search_body = ('Likely root cause: java.nio.file.AccessDeniedException: "/usr/share/opensearch/config/opensearch.keystore.tmp" ' + secret).encode()
+        search = qualify.runtime_output(search_body, 1, "search-startup-log")
+        row = search["lineContext"]["records"][0]
+        self.assertEqual(search["matchedSignals"], ["search-access-denied-exception", "search-root-cause-wrapper"])
+        self.assertEqual(row["coOccurrence"], {"resourceSignals": ["packaged-search-config"], "apiSignals": ["search-access-denied-exception"], "templateSignals": ["search-root-cause-wrapper"]})
+        self.assertEqual([row[key] for key in ("operation", "resource", "error", "stage", "level", "binding")], ["unclassified"] * 6)
+        self.assertIsNone(row["startupMessage"])
+        for text, expected in (("node validation exception", "search-node-validation-wrapper"),
+                               ("uncaught exception in thread", "search-uncaught-wrapper"),
+                               ("can not run opensearch as root", "search-root-user-message"),
+                               ("failed to obtain node locks", "search-node-lock-message"),
+                               ("failed to test writes in data directory", "search-data-write-message"),
+                               ("unable to create temporary keystore at", "search-keystore-write-message"),
+                               ("Failed to read keystore password on console", "search-keystore-console-message"),
+                               ("OPENSEARCH_PATH_CONF must be set to the configuration path", "search-config-path-message"),
+                               ("encountered improperly formatted JVM option in", "search-jvm-option-message"),
+                               ("bootstrap checks failed", "search-bootstrap-check-message"),
+                               ("org.opensearch.bootstrap.BootstrapException", "search-bootstrap-exception"),
+                               ("org.opensearch.node.NodeValidationException", "search-node-validation-exception"),
+                               ("java.lang.IllegalStateException", "search-illegal-state-exception")):
+            observation = qualify.runtime_output((text + " " + secret).encode(), 1, "search-startup-log")
+            self.assertEqual(observation["matchedSignals"], [expected])
+            self.assertNotIn(secret, json.dumps(observation))
+        for path, classification in (("/usr/share/opensearch/data/nodes/0", "selected-search-data"), ("/usr/share/opensearch/logs/opensearch.log", "selected-search-logs")):
+            observed = qualify.runtime_output(('java.nio.file.AccessDeniedException: "' + path + '" ' + secret).encode(), 1, "search-startup-log")
+            self.assertEqual(observed["lineContext"]["records"][0]["coOccurrence"]["resourceSignals"], [classification])
+        for path in ("/usr/share/OpenSearch/config/" + secret, "/usr/share/opensearch/config-" + secret, "/usr/share/opensearch/config/../" + secret, "/unknown/" + secret):
+            observed = qualify.runtime_output(('java.nio.file.AccessDeniedException: "' + path + '"').encode(), 1, "search-startup-log")
+            self.assertEqual(observed["lineContext"]["records"][0]["coOccurrence"]["resourceSignals"], [])
+            self.assertNotIn(secret, json.dumps(observed))
+        split_search = qualify.runtime_output(('unable to create temporary keystore at ' + secret + '\n"/usr/share/opensearch/config/opensearch.keystore.tmp"').encode(), 1, "search-startup-log")
+        self.assertEqual(split_search["lineContext"]["records"][0]["coOccurrence"]["resourceSignals"], [])
+        for body in ("unable to create temporary\nkeystore at " + secret, "java.nio.file.\nAccessDeniedException " + secret, "java.nio.file.AccessDeniedException" + secret, "Failure during startup: " + secret):
+            unknown = qualify.runtime_output(body.encode(), 1, "search-startup-log")
+            self.assertEqual(unknown["matchedSignals"], [])
+            self.assertEqual(unknown["lineContext"]["records"], [])
+            self.assertNotIn(secret, json.dumps(unknown))
+        self.assertEqual(qualify.runtime_output(search_body, 1, "broker-startup-log")["matchedSignals"], [])
+        self.assertNotIn(secret, json.dumps(search))
+        self.assertNotIn("/usr/share/opensearch", json.dumps(search))
+        for body, code, source in ((runtime, secret, "broker-startup-log"), (runtime, 1, secret), (runtime, 1, "search-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "broker-startup-log"), (b"x" * (qualify.READINESS_OUTPUT_LIMIT + 1), 1, "search-startup-log")):
             try:
                 qualify.runtime_output(body, code, source)
             except ValueError as error:
