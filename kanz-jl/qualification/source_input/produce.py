@@ -184,6 +184,28 @@ def write_new(directory_fd, name, data):
         os.close(fd)
 
 
+def stage_tests(path):
+    """Trusted parent copy; the unprivileged sandbox never traverses host home."""
+    source_fd = directory(HERE)
+    destination_fd = None
+    try:
+        destination_fd = new_directory(path)
+        os.fchmod(destination_fd, 0o755)
+        for name, maximum in {'produce.py': 64 << 10, 'test_produce.py': 64 << 10,
+                              'pins.json': 8 << 10, 'VERSION.dat': 1 << 10}.items():
+            data = read_regular(source_fd, name, maximum)
+            write_new(destination_fd, name, data)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=destination_fd)
+            try:
+                os.fchmod(fd, 0o644)
+            finally:
+                os.close(fd)
+    finally:
+        os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+
+
 def elf(data, soname):
     """Independent bounded ELF64 inspection; never load a candidate library."""
     if len(data) < 64 or data[:7] != b'\x7fELF\x02\x01\x01':
@@ -329,6 +351,31 @@ def inspect_boundary(value, image, work, inputs):
         raise ValueError('native build isolation differs')
 
 
+def release_scratch(source_fd, work_fd, work, mounted, output_fd, lane, failure, cleanup):
+    """Called only after owned container removal; refusal cannot skip cleanup."""
+    try:
+        if failure is not None and source_fd is not None:
+            for file in ('build.log', 'full_tests.log', 'regression_tests.log', 'version.txt'):
+                try:
+                    data = read_regular(source_fd, file, FILES[file], allow_empty=True)
+                except FileNotFoundError:
+                    continue
+                write_new(output_fd, lane + '_failure_' + file, data)
+    finally:
+        try:
+            try:
+                if source_fd is not None:
+                    os.close(source_fd)
+            finally:
+                if work_fd is not None:
+                    os.close(work_fd)
+        finally:
+            if mounted:
+                checked(['sudo', 'umount', str(work)])
+                cleanup['scratchUnmounted'] = True
+            os.rmdir(work)
+
+
 def build(inputs, output_fd, lane, source_sha, image):
     name = 'kanz-openssl-source-' + uuid.uuid4().hex
     temporary = Path(tempfile.mkdtemp(prefix='kanz-openssl-source-'))
@@ -386,27 +433,21 @@ def build(inputs, output_fd, lane, source_sha, image):
             if checked(listing).strip():
                 raise ValueError('owned native container remains')
             cleanup.update(container=name, label=source_sha, removed=bool(existing), remaining=0)
-            # Failed builds still need bounded diagnosis. Collection happens only
-            # after owned removal proves no target process can alter the files.
-            if failure is not None and source_fd is not None:
-                for file in ('build.log', 'full_tests.log', 'regression_tests.log', 'version.txt'):
-                    try:
-                        data = read_regular(source_fd, file, FILES[file], allow_empty=True)
-                    except FileNotFoundError:
-                        continue
-                    write_new(output_fd, lane + '_failure_' + file, data)
-            for fd in (source_fd, work_fd):
-                if fd is not None:
-                    os.close(fd)
-            if mounted:
-                checked(['sudo', 'umount', str(work)])
-                cleanup['scratchUnmounted'] = True
-            os.rmdir(work)
+            try:
+                release_scratch(source_fd, work_fd, work, mounted, output_fd, lane, failure, cleanup)
+            except BaseException as cleanup_error:
+                if failure is None:
+                    raise
+                cleanup['collectionOrScratchError'] = type(cleanup_error).__name__
+                failure.add_note('Protected collection/scratch cleanup refused: ' + type(cleanup_error).__name__)
             if failure is not None:
-                write_new(output_fd, lane + '_failure.json', json.dumps({
-                    'sourceSHA': source_sha, 'builderImageID': image['Id'],
-                    'errorType': type(failure).__name__, 'consumerAccepted': False,
-                    'cleanup': cleanup}, sort_keys=True, indent=2).encode())
+                try:
+                    write_new(output_fd, lane + '_failure.json', json.dumps({
+                        'sourceSHA': source_sha, 'builderImageID': image['Id'],
+                        'errorType': type(failure).__name__, 'consumerAccepted': False,
+                        'cleanup': cleanup}, sort_keys=True, indent=2).encode())
+                except BaseException as evidence_error:
+                    failure.add_note('Failure evidence write refused: ' + type(evidence_error).__name__)
     finally:
         # Never recursively delete a possibly mounted scratch tree after an
         # ownership/daemon failure. Its unique path remains available to repair.
@@ -470,4 +511,7 @@ if __name__ == '__main__':
     def interrupt(signum, frame):
         raise KeyboardInterrupt('producer interrupted')
     signal.signal(signal.SIGTERM, interrupt)
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == '--stage-tests':
+        stage_tests(Path(sys.argv[2]))
+    else:
+        main()

@@ -4,6 +4,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import produce as p
 
@@ -130,6 +131,41 @@ class PromotionTests(unittest.TestCase):
         self.assertNotEqual(os.fstat(self.fd).st_uid, 65532)
         with self.assertRaises(ValueError):
             p.scratch_boundary(self.fd, self.fd)
+
+    def test_staging_copies_only_bounded_allowlisted_files(self):
+        staged = self.path / 'staged'
+        p.stage_tests(staged)
+        self.assertEqual({x.name for x in staged.iterdir()},
+                         {'produce.py', 'test_produce.py', 'pins.json', 'VERSION.dat'})
+        self.assertEqual(staged.stat().st_mode & 0o777, 0o755)
+        for item in staged.iterdir():
+            self.assertEqual(item.read_bytes(), (p.HERE / item.name).read_bytes())
+            self.assertEqual(item.stat().st_mode & 0o777, 0o644)
+
+    def test_staging_refuses_linked_source(self):
+        source = self.path / 'fake_source'
+        source.mkdir()
+        os.symlink(p.HERE / 'produce.py', source / 'produce.py')
+        with patch.object(p, 'HERE', source), self.assertRaises(OSError):
+            p.stage_tests(self.path / 'refused')
+
+    def test_log_refusal_still_closes_descriptors_and_unmounts(self):
+        work = self.path / 'scratch'
+        result = work / 'result'
+        result.mkdir(parents=True)
+        os.symlink('missing', result / 'build.log')
+        work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        source_fd = os.open(result, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        cleanup = {'remaining': 0}
+        with patch.object(p, 'checked', return_value=b'') as commands, patch.object(p.os, 'rmdir'):
+            with self.assertRaises(OSError):
+                p.release_scratch(source_fd, work_fd, work, True, self.fd, 'one',
+                                  RuntimeError('original build failure'), cleanup)
+        commands.assert_called_once_with(['sudo', 'umount', str(work)])
+        self.assertTrue(cleanup['scratchUnmounted'])
+        for fd in (source_fd, work_fd):
+            with self.assertRaises(OSError):
+                os.fstat(fd)
 
 
 class BoundaryTests(unittest.TestCase):

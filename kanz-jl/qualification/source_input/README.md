@@ -59,5 +59,9 @@ Unit guards run with `bash sandbox_tests.sh` on a Linux host with systemd,
 bubblewrap and sudo. The harness first supports a `--probe` using only `true`,
 then executes Python tests as nobody in an empty network/PID/user namespace,
 read-only distro/source mounts and bounded tmpfs/cgroup/ulimits. It exposes no
-host home or repository siblings. The actual producer requires Docker plus
+host home or repository siblings. The trusted parent stages only the four
+allowlisted Python/test/pin/version files through protected bounded reads into
+an exclusive public-traversable scratch directory; nobody never traverses the
+host checkout. That disposable copy is mounted read-only and removed after the
+test service exits. The actual producer requires Docker plus
 permission to mount its bounded tmpfs; unavailable isolation is a refusal.
