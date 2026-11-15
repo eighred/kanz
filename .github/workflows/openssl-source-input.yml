@@ -1,0 +1,55 @@
+name: openssl-source-input
+
+on:
+  # Candidate input proof only. A PR would also select the unchanged, held
+  # Julia consumer workflow; this branch-push lane does not create that PR.
+  push:
+    branches: [eighred/1536-openssl-source-input]
+    paths:
+      - 'kanz-jl/qualification/source_input/**'
+      - '.github/workflows/openssl-source-input.yml'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  reproduce-native-input:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Authenticate read access to the existing immutable compiler
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Acquire compiler before any source execution
+        run: |
+          set -euo pipefail
+          image=$(python3 -c "import json; print(json.load(open('kanz-jl/qualification/source_input/pins.json'))['builder'])")
+          docker pull --platform linux/amd64 "$image"
+          docker logout ghcr.io
+      - name: Prove the unit-test sandbox and run refusing controls
+        run: |
+          set -euo pipefail
+          bash kanz-jl/qualification/source_input/sandbox_tests.sh --probe
+          bash kanz-jl/qualification/source_input/sandbox_tests.sh
+      - name: Reproduce honest development libraries twice without consumer activation
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            python3 -B kanz-jl/qualification/source_input/produce.py \
+            --output "$RUNNER_TEMP/openssl-source-evidence" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Preserve only protected producer evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-source-input
+          path: ${{ runner.temp }}/openssl-source-evidence/
+          if-no-files-found: error
+          retention-days: 14

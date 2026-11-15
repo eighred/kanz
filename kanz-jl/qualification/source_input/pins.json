@@ -1,0 +1,27 @@
+{
+  "source": "6b33bfe3af6344881d4132a51c8b991f358ac3c5",
+  "tree": "8d0b3a35dcda4946e5b6bac5ab9c606e93510328",
+  "url": "https://codeload.github.com/openssl/openssl/tar.gz/6b33bfe3af6344881d4132a51c8b991f358ac3c5",
+  "sha256": "a64085eb2954a9902feaacbcdb8fb4e55c6e2aad89a5e094ced119d81abfd68d",
+  "size": 53506495,
+  "epoch": 1794780043,
+  "version": "3.5.10-dev",
+  "builder": "ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f",
+  "fixes": {
+    "CVE-2026-107496": "a0051cfe699bf5a047bc1c4faef65f80f7987366",
+    "CVE-2026-88822": "1a73dc590cbad62d6f0329ea4779eadaa8d8fd75",
+    "CVE-2026-88823": "159e1de0c448d7b9f09ad768c8e141def4aa1eb4",
+    "CVE-2026-95691": "f6244675833e097c2429a40d1b206d95385bd42f",
+    "CVE-2026-95692": "257a3427aa0ef8d9dd2ef5b3e2d1c021a221b116"
+  },
+  "regressions": ["test_bio_dgram", "test_ec", "test_evp", "test_evp_extra", "test_quic_stream"],
+  "regressionCases": [
+    "keygen_invalid_order_test",
+    "test_aes_gcm_siv_zero_length_aad",
+    "test_aes_gcm_siv_reinit_aad_replay",
+    "test_aes_gcm_siv_reinit_aad_prefix",
+    "test_aes_gcm_siv_reinit_aad_replay_no_nonce",
+    "test_aes_gcm_siv_reinit_aad_params_only_keeps",
+    "test_rstream_checked_out_multirange_cover"
+  ]
+}
