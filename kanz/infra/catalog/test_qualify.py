@@ -246,12 +246,15 @@ class QualificationControls(unittest.TestCase):
         execute.assert_not_called()
 
     def test_receipt_cannot_pass_with_missing_cases_or_foreign_revision(self):
-        images = {"gms": "gms:v1@sha256:" + "1" * 64}
+        selected = qualify.image_identity.selections()["gms"]
+        images = {"gms": selected["reference"]}
+        image_id = selected["configDigest"]
+        identity = qualify.image_identity.verify_engine({"Id": image_id, "Os": selected["os"], "Architecture": selected["architecture"], "RootFS": {"Type": selected["rootFSType"], "Layers": selected["rootFSDiffIDs"]}, "RepoDigests": [selected["repository"] + "@" + selected["manifestDigest"]]}, selected)
         original = dict(IDENTITY, owner=OWNER, status="passed", cleanupPassed=True,
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
-                        images={"gms": {"reference": images["gms"], "imageID": "sha256:" + "2" * 64, "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
+                        images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 24}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 29}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}

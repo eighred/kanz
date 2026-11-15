@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 import image_patch
+import image_identity
 import qualify
 from test_qualify import IDENTITY, OWNER, OWNER_PATH
 
@@ -18,9 +19,26 @@ spec.loader.exec_module(verify_patch)
 
 
 def base_info(record):
-    return {"Id": record["baseImageID"], "RepoDigests": [record["baseReference"]],
+    return {"Id": record["baseConfigDigest"], "RepoDigests": [record["baseReference"]],
+            "Os": "linux", "Architecture": "amd64",
             "Config": {"User": "datahub", "Entrypoint": ["datahub"], "Env": ["PUBLIC=setting"]},
-            "RootFS": {"Layers": ["original-layer"]}}
+            "RootFS": {"Type": "layers", "Layers": image_identity.selections()["ingestion"]["rootFSDiffIDs"]}}
+
+
+def marker_body(record, phase, image_id=None, chain=None):
+    return image_patch.marker_body(record, phase, image_id, chain, base=image_patch.validate_base(base_info(record), record))
+
+
+def write_marker(record, phase, image_id=None, chain=None):
+    return image_patch.write_marker(record, phase, image_id, chain, base=image_patch.validate_base(base_info(record), record))
+
+
+def scan_identity(image_id):
+    return {"engineID": image_id, "engineIDKind": "owned-build", "os": "linux", "architecture": "amd64", "rootFSType": "layers", "rootFSDiffIDs": ["sha256:" + "9" * 64]}
+
+
+def scan_metadata(identity):
+    return {"ImageID": identity["engineID"], "DiffIDs": identity["rootFSDiffIDs"], "ImageConfig": {"os": identity["os"], "architecture": identity["architecture"], "rootfs": {"type": identity["rootFSType"], "diff_ids": identity["rootFSDiffIDs"]}}}
 
 
 class ImagePatchControls(unittest.TestCase):
@@ -85,8 +103,8 @@ class ImagePatchControls(unittest.TestCase):
     def test_derived_image_must_preserve_exact_base_behavior_layers_and_owner(self):
         record = OWNER["derivedImage"]
         base = base_info(record)
-        self.assertEqual(image_patch.observe_base(base, record), {"imageID": record["baseImageID"], "configImageIDMatches": True, "onBuildCount": 0, "onBuildEmpty": True, "repoDigestCount": 1, "selectedManifestDigestMatches": True})
-        derived = {"Id": "sha256:" + "2" * 64, "Os": "linux", "Architecture": "amd64", "RepoTags": [], "Config": dict(base["Config"], Labels=record["labels"]), "RootFS": {"Layers": ["original-layer", "fixed-package-layer"]}}
+        self.assertEqual(image_patch.observe_base(base, record), {"imageID": record["baseConfigDigest"], "engineIDKind": "config", "onBuildCount": 0, "onBuildEmpty": True, "repoDigestCount": 1, "selectedManifestDigestMatches": True})
+        derived = {"Id": "sha256:" + "2" * 64, "Os": "linux", "Architecture": "amd64", "RepoTags": [], "Config": dict(base["Config"], Labels=record["labels"]), "RootFS": {"Type": "layers", "Layers": base["RootFS"]["Layers"] + ["sha256:" + "8" * 64]}}
         proof = image_patch.validate_derived(base, derived, record)
         self.assertNotEqual(proof["baseImageID"], proof["imageID"])
         for field, value in (("Id", base["Id"]), ("RepoTags", ["foreign:tag"]), ("Architecture", "arm64"), ("RootFS", {"Layers": ["other-base", "fixed"]}), ("Config", dict(derived["Config"], User="root")), ("Config", dict(derived["Config"], Labels={}))):
@@ -104,7 +122,7 @@ class ImagePatchControls(unittest.TestCase):
         for variant in ("owned", "foreign-label", "foreign-tag", "registry-base", "branch", "missing-parent", "cycle", "foreign-container"):
             record = OWNER["derivedImage"]
             removed = []
-            state = {parent: {"Id": parent, "Parent": record["baseImageID"], "Config": {"Labels": record["labels"]}}, image_id: {"Id": image_id, "Parent": parent, "Config": {"Labels": record["labels"]}}}
+            state = {parent: {"Id": parent, "Parent": record["baseConfigDigest"], "Config": {"Labels": record["labels"]}}, image_id: {"Id": image_id, "Parent": parent, "Config": {"Labels": record["labels"]}}}
             containers = {container_id: {"Id": container_id, "Image": parent, "Config": {"Labels": record["labels"]}}}
             if variant == "foreign-label":
                 state[parent]["Config"] = {"Labels": {}}
@@ -113,7 +131,7 @@ class ImagePatchControls(unittest.TestCase):
             elif variant == "registry-base":
                 state[parent]["RepoDigests"] = [record["baseReference"]]
             elif variant == "branch":
-                state[image_id]["Parent"] = record["baseImageID"]
+                state[image_id]["Parent"] = record["baseConfigDigest"]
             elif variant == "missing-parent":
                 state[parent]["Parent"] = ""
             elif variant == "cycle":
@@ -126,7 +144,7 @@ class ImagePatchControls(unittest.TestCase):
                 if args[:3] == ["docker", "ps", "--all"]:
                     return "\n".join(containers)
                 if args[:3] == ["docker", "image", "inspect"]:
-                    return json.dumps([base_info(record) if args[-1] == record["baseImageID"] else state[args[-1]]])
+                    return json.dumps([base_info(record) if args[-1] == record["baseConfigDigest"] else state[args[-1]]])
                 if args[:3] == ["docker", "inspect", "--type"]:
                     return json.dumps([containers[args[-1]]])
                 if args[:3] == ["docker", "rm", "--force"]:
@@ -134,19 +152,19 @@ class ImagePatchControls(unittest.TestCase):
                     del containers[args[-1]]
                     return ""
                 if args[:4] == ["docker", "image", "rm", "--no-prune"]:
-                    self.assertNotEqual(args[-1], record["baseImageID"])
+                    self.assertNotEqual(args[-1], record["baseConfigDigest"])
                     removed.append(args[-1])
                     del state[args[-1]]
                     return ""
                 raise AssertionError("cleanup may only inspect/remove exact owned IDs")
             def marker(_record, phase):
-                return image_patch.marker_body(record, phase, image_id if phase == "completed" else None, [image_id, parent] if phase == "completed" else None)
+                return marker_body(record, phase, image_id if phase == "completed" else None, [image_id, parent] if phase == "completed" else None)
             with mock.patch.object(image_patch, "read_marker", side_effect=marker), mock.patch.object(image_patch.time, "sleep"):
                 if variant == "owned":
                     evidence = image_patch.cleanup(record, execute)
                     self.assertEqual(removed, [container_id, image_id, parent])
                     self.assertTrue(evidence["completionAcknowledged"])
-                    derived = {"imageID": image_id, "baseImageID": record["baseImageID"], "imageChain": [image_id, parent]}
+                    derived = {"imageID": image_id, "baseImageID": record["baseConfigDigest"], "baseIdentity": image_patch.validate_base(base_info(record), record), "imageChain": [image_id, parent]}
                     image_patch.validate_cleanup(evidence, derived)
                     for field, value in (("completionAcknowledged", False), ("imageID", parent), ("imageIDsRemoved", [parent]), ("buildContainerIDsRemoved", ["foreign"]), ("emptyRechecks", 0)):
                         with self.subTest(field=field), self.assertRaises(ValueError):
@@ -171,13 +189,14 @@ class ImagePatchControls(unittest.TestCase):
 
     def test_structured_scan_must_bind_exact_image_and_fixed_critical_policy(self):
         reference = "sha256:" + "2" * 64
-        report = {"SchemaVersion": 2, "ArtifactType": "container_image", "ArtifactName": reference, "Metadata": {"ImageID": reference}, "Results": []}
-        self.assertFalse(image_patch.validate_scan(report, reference, reference))
+        identity = scan_identity(reference)
+        report = {"SchemaVersion": 2, "ArtifactType": "container_image", "ArtifactName": reference, "Metadata": scan_metadata(identity), "Results": []}
+        self.assertFalse(image_patch.validate_scan(report, reference, identity))
         report["Results"] = [{"Vulnerabilities": [{"Severity": "CRITICAL", "FixedVersion": "fixed", "VulnerabilityID": "CVE-fixture", "PkgName": "fixture"}]}]
-        self.assertTrue(image_patch.validate_scan(report, reference, reference))
+        self.assertTrue(image_patch.validate_scan(report, reference, identity))
         for key, value in (("ArtifactName", "foreign:tag"), ("Metadata", {"ImageID": "sha256:" + "3" * 64}), ("SchemaVersion", 1), ("Results", [{"Vulnerabilities": [{"Severity": "HIGH"}]}])):
             with self.subTest(key=key), self.assertRaises(ValueError):
-                image_patch.validate_scan(dict(report, **{key: value}), reference, reference)
+                image_patch.validate_scan(dict(report, **{key: value}), reference, identity)
 
     def test_offline_build_selects_actual_derived_id_without_a_tag_or_network(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -189,7 +208,7 @@ class ImagePatchControls(unittest.TestCase):
             fixture.images, fixture.environment = dict(fixture.source_images), {}
             base = base_info(fixture.owner["derivedImage"])
             image_id = "sha256:" + "2" * 64
-            derived = {"Id": image_id, "Parent": base["Id"], "Os": "linux", "Architecture": "amd64", "RepoTags": [], "Config": dict(base["Config"], Labels=fixture.owner["derivedImage"]["labels"]), "RootFS": {"Layers": ["original-layer", "fixed"]}}
+            derived = {"Id": image_id, "Parent": base["Id"], "Os": "linux", "Architecture": "amd64", "RepoTags": [], "Config": dict(base["Config"], Labels=fixture.owner["derivedImage"]["labels"]), "RootFS": {"Type": "layers", "Layers": base["RootFS"]["Layers"] + ["sha256:" + "8" * 64]}}
             commands = []
             def execute(args, **kwargs):
                 commands.append(args)
@@ -225,8 +244,8 @@ class ImagePatchControls(unittest.TestCase):
             self.assertEqual(fixture.source_images["ingestion"], image_patch.lock()["base"])
             self.assertEqual(len(commands), 5)
             self.assertEqual(image_patch.read_marker(fixture.owner["derivedImage"], "completed")["imageID"], image_id)
-            self.assertEqual(evidence["build"]["mode"], "docker-legacy")
-            for changed in ({}, dict(evidence["build"], network="default"), dict(evidence["build"], docker={}), dict(evidence["build"], memoryBytes=0)):
+            self.assertEqual(evidence["derived"]["build"]["mode"], "docker-legacy")
+            for changed in ({}, dict(evidence["derived"]["build"], network="default"), dict(evidence["derived"]["build"], docker={}), dict(evidence["derived"]["build"], memoryBytes=0)):
                 with self.assertRaises(ValueError):
                     image_patch.validate_build(changed)
 
@@ -243,6 +262,8 @@ class ImagePatchControls(unittest.TestCase):
             fixture.images = json.loads((qualify.HERE / "images.json").read_text())["images"]
             fixture.source_images = dict(fixture.images)
             identities = {role: {"imageID": "sha256:" + str(index) * 64, "reference": reference} for index, (role, reference) in enumerate(fixture.images.items(), 1)}
+            for item in identities.values():
+                item["identity"] = scan_identity(item["imageID"])
             for folder, filename, version in (("db", "trivy.db", 2), ("java-db", "trivy-java.db", 1)):
                 root = path / "cache" / folder
                 root.mkdir(parents=True)
@@ -255,10 +276,11 @@ class ImagePatchControls(unittest.TestCase):
                 if "--download-db-only" in args:
                     return ""
                 self.assertEqual(args[:2], ["trivy", "image"])
+                self.assertEqual(args[args.index("--image-src") + 1], "docker")
                 role = next(role for role, reference in fixture.images.items() if reference == args[-1])
                 scanned.append(role)
                 findings = [{"Severity": "CRITICAL", "FixedVersion": "fixed", "VulnerabilityID": "CVE-fixture", "PkgName": "fixture"}] if role in {"gms", "broker"} else []
-                scan = {"SchemaVersion": 2, "ArtifactType": "container_image", "ArtifactName": args[-1], "Metadata": {"ImageID": identities[role]["imageID"]}, "Results": [{"Vulnerabilities": findings}]}
+                scan = {"SchemaVersion": 2, "ArtifactType": "container_image", "ArtifactName": args[-1], "Metadata": scan_metadata(identities[role]["identity"]), "Results": [{"Vulnerabilities": findings}]}
                 Path(args[args.index("--output") + 1]).write_text(json.dumps(scan))
                 if findings:
                     raise qualify.CommandFailure(fixture.stage, "scanner-advisory-exit", image_patch.ADVISORY_EXIT)
@@ -297,16 +319,16 @@ class ImagePatchControls(unittest.TestCase):
     def test_exclusive_terminal_markers_and_late_resources_cannot_clear_interruption(self):
         with tempfile.TemporaryDirectory() as directory:
             record = image_patch.owned_spec(OWNER, Path(directory) / "owner.json")
-            image_patch.write_marker(record, "started")
-            self.assertEqual(image_patch.read_marker(record, "started"), image_patch.marker_body(record, "started"))
+            write_marker(record, "started")
+            self.assertEqual(image_patch.read_marker(record, "started"), marker_body(record, "started"))
             with self.assertRaises(FileExistsError):
-                image_patch.write_marker(record, "started")
+                write_marker(record, "started")
             link = Path(directory) / "foreign-link"
             link.symlink_to(record["startedPath"])
             with self.assertRaises(OSError):
                 image_patch.read_marker(dict(record, startedPath=str(link)), "started")
             image_id, container_id = "sha256:" + "2" * 64, "3" * 64
-            image_patch.write_marker(record, "completed", image_id, [image_id])
+            write_marker(record, "completed", image_id, [image_id])
             complete = image_patch.read_marker(record, "completed")
             self.assertEqual(complete["imageID"], image_id)
             changed = dict(complete, renderedDockerfileSHA256="f" * 64)
@@ -317,11 +339,11 @@ class ImagePatchControls(unittest.TestCase):
             def execute(args, **_kwargs):
                 nonlocal snapshots
                 if args[:3] == ["docker", "image", "inspect"]:
-                    return json.dumps([base_info(record) if args[-1] == record["baseImageID"] else images[args[-1]]])
+                    return json.dumps([base_info(record) if args[-1] == record["baseConfigDigest"] else images[args[-1]]])
                 if args[:3] == ["docker", "image", "ls"]:
                     snapshots += 1
                     if snapshots == 2:
-                        images[image_id] = {"Id": image_id, "Parent": record["baseImageID"], "Config": {"Labels": record["labels"]}}
+                        images[image_id] = {"Id": image_id, "Parent": record["baseConfigDigest"], "Config": {"Labels": record["labels"]}}
                         containers[container_id] = {"Id": container_id, "Image": image_id, "Config": {"Labels": record["labels"]}}
                     return "\n".join(images)
                 if args[:3] == ["docker", "ps", "--all"]:
@@ -337,7 +359,7 @@ class ImagePatchControls(unittest.TestCase):
                     del images[args[-1]]
                     return ""
                 raise AssertionError("unexpected interruption cleanup command")
-            with mock.patch.object(image_patch, "read_marker", side_effect=lambda _record, phase: image_patch.marker_body(record, phase) if phase == "started" else None), mock.patch.object(image_patch.time, "sleep"), self.assertRaisesRegex(ValueError, "completion remains unknown"):
+            with mock.patch.object(image_patch, "read_marker", side_effect=lambda _record, phase: marker_body(record, phase) if phase == "started" else None), mock.patch.object(image_patch.time, "sleep"), self.assertRaisesRegex(ValueError, "completion remains unknown"):
                 image_patch.cleanup(record, execute)
             self.assertEqual(removed, [container_id, image_id])
             self.assertFalse(images or containers)
@@ -349,21 +371,21 @@ class ImagePatchControls(unittest.TestCase):
                 def first_label(args, **_kwargs):
                     nonlocal first_step
                     if args[:3] == ["docker", "image", "inspect"]:
-                        self.assertEqual(args[-1], record["baseImageID"])
+                        self.assertEqual(args[-1], record["baseConfigDigest"])
                         return json.dumps([base_info(record)])
                     if args[:3] == ["docker", "image", "ls"]:
                         return ""
                     if args[:3] == ["docker", "ps", "--all"]:
                         return container_id if first_step else ""
                     if args[:3] == ["docker", "inspect", "--type"]:
-                        return json.dumps([{"Id": container_id, "Image": record["baseImageID"], "Config": {"Labels": record["labels"] if owned else {"kanz.catalog.owner": "foreign"}}}])
+                        return json.dumps([{"Id": container_id, "Image": record["baseConfigDigest"], "Config": {"Labels": record["labels"] if owned else {"kanz.catalog.owner": "foreign"}}}])
                     if args[:3] == ["docker", "rm", "--force"]:
                         self.assertEqual(args[-1], container_id)
                         deleted.append(args[-1])
                         first_step = False
                         return ""
                     raise AssertionError("the base image must never be deleted")
-                with self.subTest(owned=owned), mock.patch.object(image_patch, "read_marker", side_effect=lambda _record, phase: image_patch.marker_body(record, phase) if phase == "started" else None), mock.patch.object(image_patch.time, "sleep"), self.assertRaises(ValueError) as refused:
+                with self.subTest(owned=owned), mock.patch.object(image_patch, "read_marker", side_effect=lambda _record, phase: marker_body(record, phase) if phase == "started" else None), mock.patch.object(image_patch.time, "sleep"), self.assertRaises(ValueError) as refused:
                     image_patch.cleanup(record, first_label)
                 self.assertEqual(deleted, [container_id] if owned else [])
                 self.assertEqual(first_step, not owned)
@@ -385,6 +407,8 @@ class ImagePatchControls(unittest.TestCase):
                 fixture.images = json.loads((qualify.HERE / "images.json").read_text())["images"]
                 fixture.source_images = dict(fixture.images)
                 identities = {role: {"imageID": "sha256:" + "1" * 64} for role in fixture.images}
+                for item in identities.values():
+                    item["identity"] = scan_identity(item["imageID"])
                 scanned = []
                 def execute(args, **_kwargs):
                     if args == ["trivy", "--version"]:
@@ -393,7 +417,7 @@ class ImagePatchControls(unittest.TestCase):
                         return ""
                     scanned.append(args[-1])
                     self.assertEqual(args[args.index("--exit-code") + 1], "42")
-                    scan = {"SchemaVersion": 2, "ArtifactType": "container_image", "ArtifactName": args[-1], "Metadata": {"ImageID": "sha256:" + "1" * 64}, "Results": [{"Vulnerabilities": [{"Severity": "CRITICAL", "FixedVersion": "fixed", "VulnerabilityID": "CVE-fixture", "PkgName": "fixture"}]}]}
+                    scan = {"SchemaVersion": 2, "ArtifactType": "container_image", "ArtifactName": args[-1], "Metadata": scan_metadata(scan_identity("sha256:" + "1" * 64)), "Results": [{"Vulnerabilities": [{"Severity": "CRITICAL", "FixedVersion": "fixed", "VulnerabilityID": "CVE-fixture", "PkgName": "fixture"}]}]}
                     Path(args[args.index("--output") + 1]).write_text(json.dumps(scan))
                     raise qualify.CommandFailure(fixture.stage, category, 1)
                 fixture.run = execute

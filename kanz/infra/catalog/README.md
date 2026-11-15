@@ -74,7 +74,7 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Twenty-four
+stage/category, never subprocess arguments or one-run credentials. Twenty-nine
 qualification controls discriminate these failures alongside the 14 projection
 controls.
 The PR/main trigger contract includes the consumed authorization/lineage
@@ -130,7 +130,27 @@ Unsupported legacy builders refuse; no fallback is
 attempted. The receipt records the actual client/server/API versions, builder
 mode and limits. Hosted compatibility remains unproved until the exact CI run.
 
-The exact base config image ID is pinned and checked against the pulled image.
+`image-descriptors.json` pins all six selected platform manifests, their config
+descriptors and ordered rootfs diff IDs. Before pull acceptance, the controller
+verifies raw manifest bytes/hash, its exact config descriptor/size, raw config
+bytes/hash and linux/amd64 platform/rootfs. Indices are unsupported inputs and
+refuse. Only projected public identity fields survive; raw configuration and
+public registry tokens are never recorded. Canonical repository plus manifest
+binding is required; a matching digest suffix from another repository is refused.
+
+Docker store formats can report either the platform-manifest digest or its
+linked config digest as `inspect.Id`. The controller accepts only exact matches
+to those verified descriptors and records the kind. Trivy is explicitly limited
+to `--image-src docker`; its image ID must equal that actual Docker ID, not the
+other known digest. Exact artifact name, platform, ordered diff IDs and canonical
+repository/manifest binding must also agree. No default-source fallback is used.
+
+The source owner record retains immutable descriptor authority. Launch and
+completion markers bind one actual verified base engine ID/kind. Cleanup still
+requires its complete parent chain to end at that single observed ID, never at
+either member of an interchangeable allow-list. Missing parent metadata refuses.
+This preserves the existing builder/daemon and package correction.
+
 Preparation records pulled actual IDs before patching and separates selection,
 base validation, context creation/input copying, download, package write, Docker
 version and build stages. Its public projection contains only the base image ID,
@@ -180,10 +200,11 @@ cyclic ancestry, foreign labels/tags/registry references and unexpected terminal
 IDs refuse. Only verified build containers and child-to-parent image IDs are
 removed, followed by repeated inventories. Image deletion uses `--no-prune`,
 never force, the base, foreign tags or shared cache deletion. The completion ID,
-removed chain/container IDs and rechecks enter the receipt. Eleven added controls
+removed chain/container IDs and rechecks enter the receipt. Sixteen added controls
 discriminate package/Python drift, config/OnBuild/owner mismatch, complete chain
 cleanup, late interrupted resources, actual offline build selection and advisory
-versus infrastructure exits.
+versus infrastructure exits, raw descriptor tampering, engine kind, canonical
+repository binding and Docker-only scan identity.
 
 Relevant pinned source: [Trivy configured finding exit](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/commands/operation/operation.go#L112),
 [fatal exit 1](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/log/logger.go#L78),
