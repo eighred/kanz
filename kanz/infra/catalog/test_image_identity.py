@@ -24,6 +24,7 @@ def fixture(config_changes=None, descriptor_changes=None):
     manifest_body = json.dumps(manifest).encode()
     manifest_digest = "sha256:" + hashlib.sha256(manifest_body).hexdigest()
     selected = {"reference": "acryldata/datahub-ingestion:v1.8.0-locked@" + manifest_digest, "repository": "acryldata/datahub-ingestion", "manifestDigest": manifest_digest, "manifestBytes": len(manifest_body), "manifestMediaType": manifest["mediaType"], "configDigest": config_digest, "configBytes": len(config_body), "configMediaType": "application/vnd.oci.image.config.v1+json", "os": "linux", "architecture": "amd64", "rootFSType": "layers", "rootFSDiffIDs": layers}
+    selected.update(publisherReference=selected["reference"], executionRepository="docker.io/" + selected["repository"])
     return selected, manifest_body, config_body
 
 
@@ -65,6 +66,12 @@ class ImageIdentityControls(unittest.TestCase):
             for changed in (dict(info, Id="sha256:" + "f" * 64), dict(info, Architecture="arm64"), dict(info, RootFS={"Type": "layers", "Layers": list(reversed(selected["rootFSDiffIDs"]))}), dict(info, RepoDigests=["evil.example/" + info["RepoDigests"][0]]), dict(info, RepoDigests=["other/repo@" + selected["manifestDigest"]])):
                 with self.assertRaises(ValueError):
                     identity.verify_engine(changed, selected)
+        private = dict(selected, reference="ghcr.io/eighred/base/datahub-ingestion:v1.8.0-locked@" + selected["manifestDigest"], executionRepository="ghcr.io/eighred/base/datahub-ingestion")
+        private_info = dict(engine(selected), RepoDigests=[private["executionRepository"] + "@" + selected["manifestDigest"]])
+        self.assertEqual(identity.verify_engine(private_info, private)["executionRepository"], private["executionRepository"])
+        for digests in (engine(selected)["RepoDigests"], ["ghcr.io/eighred/base/other@" + selected["manifestDigest"]], ["ghcr.io/other/base/datahub-ingestion@" + selected["manifestDigest"]]):
+            with self.assertRaises(ValueError):
+                identity.verify_engine(dict(private_info, RepoDigests=digests), private)
 
     def test_docker_scan_id_must_equal_observed_engine_even_if_other_digest_known(self):
         selected, _, _ = fixture()

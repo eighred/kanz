@@ -6,6 +6,7 @@ CLI sees read-only catalog source and its assigned scratch directory.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -36,6 +37,24 @@ REFERENCE_DB_LAYERS = [
     {"repository": "mirror.gcr.io/aquasec/trivy-db:2", "compressedBytes": 140857902, "digest": "sha256:d1962eb370fc230dd1d8d31261144eaaab765192d88f4ca4e8156c803d59e8ac"},
     {"repository": "mirror.gcr.io/aquasec/trivy-java-db:1", "compressedBytes": 999527167, "digest": "sha256:7fd2ba5c26dc70e021bc57f9bd478227549e5e566c6515477a9f8e9dd9e4ef51"},
 ]
+
+
+def load_registry_auth():
+    # Host-only seam: /catalog unit imports never load or mount this helper's
+    # private profile. The shared owner returns no credential values.
+    spec = importlib.util.spec_from_file_location("catalog_registry_auth", ROOT / ".github/scripts/catalog_registry_auth.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def registry_profile(root, profile, identity, forbidden):
+    profile = Path(profile)
+    prefix = "catalog-registry-" + identity["sourceSHA"][:12] + "-" + identity["runID"] + "-" + identity["runAttempt"] + "-"
+    if profile.parent != root or not profile.name.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{16}", profile.name[len(prefix):]) or any(profile == path or profile.is_relative_to(path) or path.is_relative_to(profile) for path in forbidden):
+        raise ValueError("registry profile overlaps target mounts/context or lacks run ownership")
+    load_registry_auth().verify_backend(root, profile, {"source": identity["sourceSHA"], "run": identity["runID"], "attempt": identity["runAttempt"]}, authenticated=True)
+    return profile
 
 
 class CommandFailure(ValueError):
@@ -198,7 +217,7 @@ def source_identity(run, expected):
 
 
 def validate_owner(owner, identity, owner_path=None):
-    if not isinstance(owner, dict) or set(owner) != {"schema", "kind", "nonce", "network", "sourceSHA", "treeSHA", "runID", "runAttempt", "scannerMount", "derivedImage"}:
+    if not isinstance(owner, dict) or set(owner) != {"schema", "kind", "nonce", "network", "sourceSHA", "treeSHA", "runID", "runAttempt", "scannerMount", "derivedImage", "registryProfile", "registryHelperSHA256", "registryControlsSHA256"}:
         raise ValueError("invalid catalog owner record")
     if owner["schema"] != 1 or owner["kind"] != "catalog-qualification" or not re.fullmatch(r"[0-9a-f]{16}", owner["nonce"]) or owner["network"] != "kanz-catalog-" + owner["nonce"]:
         raise ValueError("invalid catalog resource ownership")
@@ -216,6 +235,10 @@ def validate_owner(owner, identity, owner_path=None):
     expected_path = owner_path or Path(mount["path"]).parent.parent / "catalog-owner.json"
     if owner["derivedImage"] != image_patch.owned_spec(owner, expected_path):
         raise ValueError("derived image source/package/owner differs")
+    profile = Path(owner["registryProfile"])
+    prefix = "catalog-registry-" + identity["sourceSHA"][:12] + "-" + identity["runID"] + "-" + identity["runAttempt"] + "-"
+    if profile.parent != expected_path.parent or not profile.name.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{16}", profile.name[len(prefix):]) or any(not re.fullmatch(r"[0-9a-f]{64}", owner[key]) for key in ("registryHelperSHA256", "registryControlsSHA256")):
+        raise ValueError("registry source/run ownership differs")
 
 
 def write_owner(path, owner):
@@ -290,10 +313,18 @@ def cleanup_owned(path, identity, run):
     return {"owner": owner, "derivedImage": derived_cleanup}
 
 
-def validate_receipt(report, identity, images):
+def validate_receipt(report, identity, images, registry_pending=False):
     if any(report.get(k) != v for k, v in identity.items()) or report.get("status") != "passed" or report.get("cleanupPassed") is not True or report.get("failure") is not None:
         raise ValueError("incomplete or mismatched catalog receipt")
     validate_owner(report.get("owner"), identity)
+    registry = report.get("registryAuth", {})
+    if registry.get("verifiedBeforeTargets") is not True or registry.get("helperSHA256") != report["owner"]["registryHelperSHA256"] or registry.get("controlsSHA256") != report["owner"]["registryControlsSHA256"] or registry.get("controlsCount") != 7:
+        raise ValueError("registry isolation/control evidence incomplete")
+    if not registry_pending:
+        cleanup = report.get("registryCleanup", {})
+        result = cleanup.get("cleanup", {})
+        if report.get("acceptanceComplete") is not True or cleanup.get("sourceVerified") is not True or any(cleanup.get(key) != value for key, value in identity.items()) or cleanup.get("profile") != report["owner"]["registryProfile"] or any(result.get(key) is not True for key in ("ownershipVerified", "fileBackend", "credentialsAbsent", "directoryRemoved", "passed")) or result.get("logout") != {"attempted": True, "exitCode": 0}:
+            raise ValueError("registry credential absence/cleanup proof incomplete")
     if report.get("cases") != list(CASES) or report.get("selectedImages") != images or set(report.get("images", {})) != set(images) or report.get("scanFindings"):
         raise ValueError("catalog case/image/scan inventory incomplete")
     for role, reference in images.items():
@@ -328,7 +359,7 @@ def validate_receipt(report, identity, images):
             raise ValueError("catalog public preparation evidence incomplete")
     if report.get("dependencies", {}).get("packages", {}).get("acryl-datahub") != "1.8.0" or report.get("projectionTests", {}).get("count") != 14:
         raise ValueError("catalog dependency/test inventory incomplete")
-    if report.get("qualificationControls", {}).get("count") != 29 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
+    if report.get("qualificationControls", {}).get("count") != 31 or report.get("requiredTests") != sorted(REQUIRED_TESTS):
         raise ValueError("catalog mandatory case evidence incomplete")
     scanner = report.get("scanner", {})
     if any(scanner.get(key) != value for key, value in {"scanner": "trivy-0.72.0", "fileLimitBytes": SCANNER_FILE_LIMIT, "cacheTempLimitBytes": SCANNER_DISK_LIMIT, "stdoutLimitBytes": OUTPUT_LIMIT, "defaultFileLimitBytes": DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": image_patch.ADVISORY_EXIT}.items()) or scanner.get("referenceObservedLayers") != REFERENCE_DB_LAYERS or set(scanner.get("databases", {})) != {"db", "java-db"}:
@@ -355,8 +386,15 @@ class Fixture:
         self.network = "kanz-catalog-" + nonce
         self.owner = dict(identity or {}, schema=1, kind="catalog-qualification", nonce=nonce, network=self.network)
         self.owner["scannerMount"] = {"path": str(scanner_path(self.owner_path)), "source": self.network + "-scanner", "filesystem": "tmpfs", "bytes": SCANNER_DISK_LIMIT, "options": ["nosuid", "nodev", "noexec"], "uid": os.getuid(), "gid": os.getgid()}
-        self.environment = {"PATH": os.environ["PATH"], "HOME": str(scratch / "host-home"), "DOCKER_CONFIG": str(scratch / "docker-config"), "LANG": "C.UTF-8"}
-        for path in ("host-home", "docker-config", "home"):
+        current = expected_identity()
+        profile = registry_profile(self.owner_path.parent, os.environ["DOCKER_CONFIG"], current,
+                                   (scratch, self.owner_path.parent / (self.network + "-image-context"), HERE, binary, ROOT / ".github/workflows/catalog-verification.yml"))
+        controls = bounded_file(self.owner_path.parent / "catalog-registry-controls.txt", OUTPUT_LIMIT)
+        if not re.search(rb"Ran 7 tests in", controls) or b"skipped" in controls or not re.search(rb"(?m)^OK\s*$", controls):
+            raise ValueError("complete shared registry control inventory required")
+        self.owner.update(registryProfile=str(profile), registryHelperSHA256=hashlib.sha256((ROOT / ".github/scripts/catalog_registry_auth.py").read_bytes()).hexdigest(), registryControlsSHA256=hashlib.sha256(controls).hexdigest())
+        self.environment = {"PATH": os.environ["PATH"], "HOME": str(scratch / "host-home"), "DOCKER_CONFIG": str(profile), "LANG": "C.UTF-8"}
+        for path in ("host-home", "home"):
             (scratch / path).mkdir()
         self.secret = secrets.token_hex(32)
         self.auth = "Basic __datahub_system:" + self.secret
@@ -711,6 +749,8 @@ def qualify(scratch, binary):
               owner=fixture.owner,
               **{
               "status": "failed", "cases": [], "selectedImages": fixture.source_images,
+              "acceptanceComplete": False,
+              "registryAuth": {"verifiedBeforeTargets": True, "helperSHA256": fixture.owner["registryHelperSHA256"], "controlsSHA256": fixture.owner["registryControlsSHA256"], "controlsCount": 7},
               "testBinarySHA256": hashlib.sha256(binary.read_bytes()).hexdigest()})
     fatal_failure = None
     try:
@@ -726,11 +766,11 @@ def qualify(scratch, binary):
         fixture.go_tests("^TestCatalogFixtureExport$", "export-tests.jsonl")
         fixture.stage = "projection-negative-controls"
         unit_output = fixture.cli(["python", "-B", "-m", "unittest", "discover", "-s", "/catalog", "-p", "test_*.py", "-v"], network=False)
-        if not re.search(r"Ran 43 tests in", unit_output) or "skipped" in unit_output:
+        if not re.search(r"Ran 45 tests in", unit_output) or "skipped" in unit_output:
             raise ValueError("complete projection negative-control inventory required")
         (scratch / "projection-tests.txt").write_text(unit_output)
         report["projectionTests"] = {"count": 14, "sha256": hashlib.sha256(unit_output.encode()).hexdigest()}
-        report["qualificationControls"] = {"count": 29}
+        report["qualificationControls"] = {"count": 31}
         fixture.stage = "metadata-projection"
         fixture.cli(["python", "/catalog/projection.py", "--mapping", "/catalog/fixture_mapping.json", "--events", "/scratch/events.json", "--output", "/scratch/metadata.json"], network=False)
         fixture.stage = "actual-ingestion"
@@ -780,7 +820,7 @@ def qualify(scratch, binary):
         if report["status"] == "passed":
             try:
                 final_identity = source_identity(fixture.run, expected)
-                validate_receipt(report, final_identity, fixture.source_images)
+                validate_receipt(report, final_identity, fixture.source_images, registry_pending=True)
             except (ValueError, KeyError, TypeError):
                 report["status"] = "failed"
                 report["validationFailure"] = "final-source-or-receipt-refused"
@@ -804,14 +844,69 @@ def cleanup_main():
     cleanup_owned(path, identity, runner.run)
 
 
+def source_runner(stage):
+    runner = object.__new__(Fixture)
+    home = Path(os.environ["RUNNER_TEMP"]) / "catalog-controller-home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    runner.environment = {"PATH": os.environ["PATH"], "HOME": str(home), "DOCKER_CONFIG": str(home), "LANG": "C.UTF-8"}
+    runner.stage = stage
+    return runner
+
+
+def replace_receipt(path, report):
+    temporary = path.with_suffix(".closing.json")
+    write_owner(temporary, report)
+    os.replace(temporary, path)
+
+
+def registry_cleanup_main():
+    root = Path(os.environ["RUNNER_TEMP"])
+    expected = expected_identity()
+    identity, source_verified = dict(expected), False
+    try:
+        identity = source_identity(source_runner("registry-final-source").run, expected)
+        source_verified = True
+    except (ValueError, OSError):
+        pass  # Still remove the exact shared-owned credential profile.
+    profile = Path(os.environ["DOCKER_CONFIG"])
+    result = load_registry_auth().cleanup(root, profile, {"source": expected["sourceSHA"], "run": expected["runID"], "attempt": expected["runAttempt"]})
+    cleanup = dict(identity, profile=str(profile), sourceVerified=source_verified, cleanup=result)
+    write_owner(root / "catalog-registry-cleanup.json", cleanup)
+    path = root / "catalog-fixture" / "catalog-receipt.json"
+    target_closed = False
+    if os.path.lexists(path):
+        report = json.loads(bounded_file(path, OUTPUT_LIMIT))
+        same_source = source_verified and all(report.get(key) == value for key, value in identity.items())
+        same_profile = report.get("owner", {}).get("registryProfile") == str(profile)
+        report["registryCleanup"] = cleanup
+        report["acceptanceComplete"] = same_source and same_profile and result.get("passed") is True and not os.path.lexists(profile) and os.environ.get("KANZ_CATALOG_TARGET_CLEANUP") == "success" and report.get("status") == "passed"
+        if report["acceptanceComplete"]:
+            try:
+                validate_receipt(report, identity, json.loads((HERE / "images.json").read_text())["images"])
+            except (ValueError, KeyError, TypeError):
+                report["acceptanceComplete"] = False
+        if not report["acceptanceComplete"]:
+            report["status"] = "failed"
+        replace_receipt(path, report)
+        target_closed = report["acceptanceComplete"]
+    return 0 if source_verified and result.get("passed") is True and target_closed else 1
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--scratch", type=Path)
     parser.add_argument("--test-binary", type=Path)
     parser.add_argument("--cleanup", action="store_true")
+    parser.add_argument("--verify-source", action="store_true")
+    parser.add_argument("--registry-cleanup", action="store_true")
     args = parser.parse_args()
     if sys.platform != "linux":
         raise SystemExit("catalog qualification requires Linux")
+    if args.verify_source:
+        source_identity(source_runner("before-registry-authentication").run, expected_identity())
+        raise SystemExit(0)
+    if args.registry_cleanup:
+        raise SystemExit(registry_cleanup_main())
     if args.cleanup:
         cleanup_main()
         raise SystemExit(0)

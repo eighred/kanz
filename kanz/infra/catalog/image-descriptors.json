@@ -4,6 +4,8 @@
   "images": {
     "gms": {
       "reference": "acryldata/datahub-gms:v1.8.0@sha256:73f24aab74fe8342523b5f920bc9013e1e6891b92a23e9fc019da36f419b9e0a",
+      "publisherReference": "acryldata/datahub-gms:v1.8.0@sha256:73f24aab74fe8342523b5f920bc9013e1e6891b92a23e9fc019da36f419b9e0a",
+      "executionRepository": "docker.io/acryldata/datahub-gms",
       "repository": "acryldata/datahub-gms",
       "manifestDigest": "sha256:73f24aab74fe8342523b5f920bc9013e1e6891b92a23e9fc019da36f419b9e0a",
       "manifestBytes": 4667,
@@ -42,6 +44,8 @@
     },
     "upgrade": {
       "reference": "acryldata/datahub-upgrade:v1.8.0@sha256:560d9fb91f9cf99cddbc4ed285442f9072358687ffdbcdeea54c04d17bc17e1a",
+      "publisherReference": "acryldata/datahub-upgrade:v1.8.0@sha256:560d9fb91f9cf99cddbc4ed285442f9072358687ffdbcdeea54c04d17bc17e1a",
+      "executionRepository": "docker.io/acryldata/datahub-upgrade",
       "repository": "acryldata/datahub-upgrade",
       "manifestDigest": "sha256:560d9fb91f9cf99cddbc4ed285442f9072358687ffdbcdeea54c04d17bc17e1a",
       "manifestBytes": 4287,
@@ -78,6 +82,8 @@
     },
     "ingestion": {
       "reference": "acryldata/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
+      "publisherReference": "acryldata/datahub-ingestion:v1.8.0-locked@sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
+      "executionRepository": "docker.io/acryldata/datahub-ingestion",
       "repository": "acryldata/datahub-ingestion",
       "manifestDigest": "sha256:f46b327ba74574045f5e84f773309ffef47836b3cc00280f3e934bc611677a23",
       "manifestBytes": 3709,
@@ -111,6 +117,8 @@
     },
     "mysql": {
       "reference": "mysql:8.2@sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
+      "publisherReference": "mysql:8.2@sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
+      "executionRepository": "docker.io/library/mysql",
       "repository": "library/mysql",
       "manifestDigest": "sha256:5ba9d31938cfbfbcd6b29977181cfc246ce3f4b4923efc2af89c028d872fcc41",
       "manifestBytes": 2558,
@@ -136,6 +144,8 @@
     },
     "search": {
       "reference": "opensearchproject/opensearch:2.19.3@sha256:acc1f30665727eb5d186fd15f40079615e1c9a0ee9fd3db3a8180f41d9982f51",
+      "publisherReference": "opensearchproject/opensearch:2.19.3@sha256:acc1f30665727eb5d186fd15f40079615e1c9a0ee9fd3db3a8180f41d9982f51",
+      "executionRepository": "docker.io/opensearchproject/opensearch",
       "repository": "opensearchproject/opensearch",
       "manifestDigest": "sha256:acc1f30665727eb5d186fd15f40079615e1c9a0ee9fd3db3a8180f41d9982f51",
       "manifestBytes": 1679,
@@ -158,6 +168,8 @@
     },
     "broker": {
       "reference": "redpandadata/redpanda:v26.2.6@sha256:204f917c509123bd3add132b8d4c15f1279ff5487b646a383e980740a164d314",
+      "publisherReference": "redpandadata/redpanda:v26.2.6@sha256:204f917c509123bd3add132b8d4c15f1279ff5487b646a383e980740a164d314",
+      "executionRepository": "docker.io/redpandadata/redpanda",
       "repository": "redpandadata/redpanda",
       "manifestDigest": "sha256:204f917c509123bd3add132b8d4c15f1279ff5487b646a383e980740a164d314",
       "manifestBytes": 1574,

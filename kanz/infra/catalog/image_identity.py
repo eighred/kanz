@@ -23,7 +23,7 @@ def selections():
     if value.get("version") != 1 or value.get("platform") != "linux/amd64" or set(value.get("images", {})) != set(images["images"]):
         raise ValueError("closed public descriptor inventory differs")
     for role, item in value["images"].items():
-        if item["reference"] != images["images"][role] or item["reference"].rsplit("@", 1)[1] != item["manifestDigest"] or item["os"] != "linux" or item["architecture"] != "amd64" or item["manifestMediaType"] not in MANIFEST_TYPES or item["configMediaType"] not in CONFIG_TYPES or not DIGEST.fullmatch(item["configDigest"]) or not DIGEST.fullmatch(item["manifestDigest"]):
+        if item["reference"] != images["images"][role] or reference_identity(item["reference"]) != (item["executionRepository"], item["manifestDigest"]) or reference_identity(item["publisherReference"]) != ("docker.io/" + item["repository"], item["manifestDigest"]) or item["os"] != "linux" or item["architecture"] != "amd64" or item["manifestMediaType"] not in MANIFEST_TYPES or item["configMediaType"] not in CONFIG_TYPES or not DIGEST.fullmatch(item["configDigest"]) or not DIGEST.fullmatch(item["manifestDigest"]):
             raise ValueError("selected platform descriptor differs")
     return value["images"]
 
@@ -36,6 +36,10 @@ def canonical_repository(value):
     # Only these explicit Docker Hub aliases are equivalent. No suffix-based
     # registry/repository match can authorize an unrelated image.
     parts = value.split("/")
+    if parts[0] == "ghcr.io":
+        if len(parts) != 4 or parts[1:3] != ["eighred", "base"] or not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", parts[3]):
+            raise ValueError("unapproved private execution repository")
+        return value
     if parts[0] in {"docker.io", "index.docker.io", "registry-1.docker.io"}:
         parts = parts[1:]
     elif "." in parts[0] or ":" in parts[0] or parts[0] == "localhost":
@@ -47,10 +51,19 @@ def canonical_repository(value):
     return "docker.io/" + "/".join(parts)
 
 
+def reference_identity(value):
+    repository, digest = value.rsplit("@", 1)
+    if not DIGEST.fullmatch(digest):
+        raise ValueError("unversioned execution/publisher descriptor")
+    if ":" in repository.rsplit("/", 1)[-1]:
+        repository = repository.rsplit(":", 1)[0]
+    return canonical_repository(repository), digest
+
+
 def manifest_bound(repo_digests, selected):
     if not isinstance(repo_digests, list):
         return False
-    wanted = canonical_repository(selected["repository"])
+    wanted = selected["executionRepository"]
     for value in repo_digests:
         try:
             repository, digest = value.rsplit("@", 1)
@@ -102,7 +115,7 @@ def fetch(selected):
             raise ValueError("public descriptor request refused") from None
     try:
         repository = selected["repository"]
-        if canonical_repository(repository) != "docker.io/" + repository:
+        if canonical_repository(repository) != "docker.io/" + repository or reference_identity(selected["publisherReference"]) != ("docker.io/" + repository, selected["manifestDigest"]):
             raise ValueError("public descriptor publisher differs")
         token = json.loads(read("https://auth.docker.io/token?service=registry.docker.io&scope=repository:" + repository + ":pull"))["token"]
         headers = {"Authorization": "Bearer " + token, "Accept": ",".join(sorted(MANIFEST_TYPES))}
@@ -128,13 +141,14 @@ def verify_engine(info, selected):
         raise ValueError("Docker platform/rootfs/canonical manifest binding differs")
     return {"engineID": info["Id"], "engineIDKind": kind, "manifestDigest": selected["manifestDigest"],
             "configDigest": selected["configDigest"], "repository": selected["repository"],
+            "executionRepository": selected["executionRepository"],
             "os": selected["os"], "architecture": selected["architecture"],
             "rootFSType": selected["rootFSType"], "rootFSDiffIDs": selected["rootFSDiffIDs"], "repoManifestBound": True}
 
 
 def verify_projected(identity, selected):
     expected = {"engineID": identity.get("engineID"), "engineIDKind": engine_kind(identity.get("engineID"), selected),
-                **{key: selected[key] for key in ("manifestDigest", "configDigest", "repository", "os", "architecture", "rootFSType", "rootFSDiffIDs")}, "repoManifestBound": True}
+                **{key: selected[key] for key in ("manifestDigest", "configDigest", "repository", "executionRepository", "os", "architecture", "rootFSType", "rootFSDiffIDs")}, "repoManifestBound": True}
     if identity != expected:
         raise ValueError("projected published image identity differs")
 

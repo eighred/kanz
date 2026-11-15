@@ -26,6 +26,8 @@ on:
       - 'kanz-schemas/bootstrap-go-sdk.sh'
       - '.github/actions/setup-buf/**'
       - 'kanz-jl/qualification/install-audit.sh'
+      - '.github/scripts/catalog_registry_auth.py'
+      - '.github/scripts/test_catalog_registry_auth.py'
       - '.github/workflows/catalog-verification.yml'
   push:
     branches: [main]
@@ -53,11 +55,14 @@ on:
       - 'kanz-schemas/bootstrap-go-sdk.sh'
       - '.github/actions/setup-buf/**'
       - 'kanz-jl/qualification/install-audit.sh'
+      - '.github/scripts/catalog_registry_auth.py'
+      - '.github/scripts/test_catalog_registry_auth.py'
       - '.github/workflows/catalog-verification.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   actual-catalog:
@@ -85,16 +90,42 @@ jobs:
           cd kanz
           go test -c -race -p 1 -o "$RUNNER_TEMP/catalog.test" ./services/lineage/internal/server
           go vet ./services/lineage/...
-          go test -p 1 ./test/arch -run 'Test(WorkflowActionsArePinnedToSHA|NoWorkflowRunsAFloatingImageTag|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo|Upstream)' -count=1
+          go test -p 1 ./test/arch -run 'Test(EveryDockerfileBaseImageComesFromTheMirror|WorkflowsBuildingMirrorImagesAuthenticateFirst|WorkflowActionsArePinnedToSHA|NoWorkflowRunsAFloatingImageTag|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo|Upstream)' -count=1
       - name: Install reviewed checksum-pinned advisory tools
         run: bash kanz-jl/qualification/install-audit.sh
+      - name: Verify source-free registry lifecycle controls
+        run: |
+          umask 077
+          python3 -B -m unittest discover -s .github/scripts -p test_catalog_registry_auth.py -v > "$RUNNER_TEMP/catalog-registry-controls.txt" 2>&1
+      - name: Verify clean source before introducing registry credentials
+        run: python3 -B kanz/infra/catalog/qualify.py --verify-source
+      - name: Prepare exclusive host-only registry profile
+        id: registry-profile
+        run: python3 -B .github/scripts/catalog_registry_auth.py prepare
+      - name: Authenticate private mirror reads only
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: false
+      - name: Verify owned file-only registry backend
+        run: python3 -B .github/scripts/catalog_registry_auth.py verify
       - name: Qualify real catalog metadata and independent lineage authorization
+        id: catalog-proof
         run: |
           mkdir -m 700 "$RUNNER_TEMP/catalog-fixture"
           python3 -B kanz/infra/catalog/qualify.py --scratch "$RUNNER_TEMP/catalog-fixture" --test-binary "$RUNNER_TEMP/catalog.test"
       - name: Remove only owned resources after interruption
+        id: owned-cleanup
         if: always()
         run: python3 -B kanz/infra/catalog/qualify.py --cleanup
+      - name: Verify registry credential absence and remove the owned host profile
+        id: registry-cleanup
+        if: always() && steps.registry-profile.outcome == 'success'
+        env:
+          KANZ_CATALOG_TARGET_CLEANUP: ${{ steps.owned-cleanup.outcome }}
+        run: python3 -B kanz/infra/catalog/qualify.py --registry-cleanup
       - name: Preserve projected qualification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -106,5 +137,7 @@ jobs:
             ${{ runner.temp }}/catalog-fixture/server-tests.jsonl
             ${{ runner.temp }}/catalog-fixture/projection-tests.txt
             ${{ runner.temp }}/catalog-fixture/readback.json
+            ${{ runner.temp }}/catalog-registry-controls.txt
+            ${{ runner.temp }}/catalog-registry-cleanup.json
           if-no-files-found: error
           retention-days: 7

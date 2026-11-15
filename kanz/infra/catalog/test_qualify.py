@@ -18,6 +18,7 @@ OWNER_PATH = Path("/owned/run/catalog-owner.json")
 OWNER = dict(IDENTITY, schema=1, kind="catalog-qualification", nonce="0123456789abcdef", network="kanz-catalog-0123456789abcdef",
              scannerMount={"path": "/owned/run/catalog-fixture/scanner-state", "source": "kanz-catalog-0123456789abcdef-scanner", "filesystem": "tmpfs", "bytes": qualify.SCANNER_DISK_LIMIT, "options": ["nosuid", "nodev", "noexec"], "uid": os.getuid(), "gid": os.getgid()})
 OWNER["derivedImage"] = qualify.image_patch.owned_spec(OWNER, OWNER_PATH)
+OWNER.update(registryProfile="/owned/run/catalog-registry-" + IDENTITY["sourceSHA"][:12] + "-123-1-0123456789abcdef", registryHelperSHA256="7" * 64, registryControlsSHA256="8" * 64)
 
 
 class QualificationControls(unittest.TestCase):
@@ -36,7 +37,8 @@ class QualificationControls(unittest.TestCase):
                     "kanz-schemas/proto/observation/v1/observation.proto",
                     "kanz-schemas/proto/common/v1/decimal.proto", "kanz/go.mod", "kanz/go.sum",
                     "kanz/Makefile", "kanz-schemas/buf.yaml", "kanz-schemas/buf.gen.yaml",
-                    "kanz-schemas/bootstrap-go-sdk.sh", ".github/actions/setup-buf/action.yml")
+                    "kanz-schemas/bootstrap-go-sdk.sh", ".github/actions/setup-buf/action.yml",
+                    ".github/scripts/catalog_registry_auth.py", ".github/scripts/test_catalog_registry_auth.py")
         def validate(document):
             for event in ("pull_request", "push"):
                 patterns = document["on"][event]["paths"]
@@ -254,16 +256,80 @@ class QualificationControls(unittest.TestCase):
                         cases=list(qualify.CASES), selectedImages=images, scanFindings=[],
                         images={"gms": {"reference": images["gms"], "imageID": image_id, "identity": identity, "descriptor": dict(selected, rawManifestVerified=True, rawConfigVerified=True), "scanSHA256": "3" * 64, "scanVerdict": "passed"}},
                         dependencies={"packages": {"acryl-datahub": "1.8.0"}}, projectionTests={"count": 14},
-                        qualificationControls={"count": 29}, requiredTests=sorted(qualify.REQUIRED_TESTS),
+                        qualificationControls={"count": 31}, requiredTests=sorted(qualify.REQUIRED_TESTS),
                         testsSHA256="4" * 64, projectionSHA256="5" * 64, testBinarySHA256="6" * 64)
         original["scanner"] = {"scanner": "trivy-0.72.0", "fileLimitBytes": qualify.SCANNER_FILE_LIMIT, "cacheTempLimitBytes": qualify.SCANNER_DISK_LIMIT, "stdoutLimitBytes": qualify.OUTPUT_LIMIT, "defaultFileLimitBytes": qualify.DEFAULT_FILE_LIMIT, "commandTimeoutSeconds": 600, "releasedBeforeRuntime": True, "advisoryRoles": [], "advisoryExitCode": qualify.image_patch.ADVISORY_EXIT, "referenceObservedLayers": qualify.REFERENCE_DB_LAYERS,
                                "databases": {name: {"metadata": {"Version": version}, "metadataSHA256": "a" * 64, "database": {"bytes": 100, "sha256": "b" * 64}} for name, version in (("db", 2), ("java-db", 1))}}
+        original["registryAuth"] = {"verifiedBeforeTargets": True, "helperSHA256": OWNER["registryHelperSHA256"], "controlsSHA256": OWNER["registryControlsSHA256"], "controlsCount": 7}
+        cleanup = {"ownershipVerified": True, "fileBackend": True, "credentialsAbsent": True, "directoryRemoved": True, "passed": True, "logout": {"attempted": True, "exitCode": 0}}
+        original.update(acceptanceComplete=True, registryCleanup=dict(IDENTITY, sourceVerified=True, profile=OWNER["registryProfile"], cleanup=cleanup))
         qualify.validate_receipt(original, IDENTITY, images)
-        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"})):
+        for key, value in (("cases", list(qualify.CASES[:-1])), ("sourceSHA", "c" * 40), ("cleanupPassed", False), ("scanFindings", [{"id": "refusal"}]), ("images", {}), ("scanner", {}), ("failure", {"category": "refused"}), ("acceptanceComplete", False), ("registryAuth", {}), ("registryCleanup", {}), ("registryCleanup", dict(original["registryCleanup"], cleanup=dict(cleanup, credentialsAbsent=False)))):
             report = copy.deepcopy(original)
             report[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 qualify.validate_receipt(report, IDENTITY, images)
+
+    def test_registry_profile_is_host_only_and_never_enters_target_arguments(self):
+        root = OWNER_PATH.parent
+        profile = Path(OWNER["registryProfile"])
+        scratch = root / "catalog-fixture"
+        forbidden = (scratch, Path(OWNER["derivedImage"]["context"]), qualify.HERE, root / "catalog.test")
+        helper = mock.Mock()
+        with mock.patch.object(qualify, "load_registry_auth", return_value=helper):
+            self.assertEqual(qualify.registry_profile(root, profile, IDENTITY, forbidden), profile)
+            helper.verify_backend.assert_called_once_with(root, profile, {"source": IDENTITY["sourceSHA"], "run": "123", "attempt": "1"}, authenticated=True)
+            helper.reset_mock()
+            for changed_root, changed_profile, changed_forbidden in ((root, profile, (root,)), (root, scratch / profile.name, forbidden), (root, profile.with_name("foreign"), forbidden)):
+                with self.assertRaises(ValueError):
+                    qualify.registry_profile(changed_root, changed_profile, IDENTITY, changed_forbidden)
+            helper.verify_backend.assert_not_called()
+        fixture = object.__new__(qualify.Fixture)
+        fixture.owner, fixture.network, fixture.scratch = OWNER, OWNER["network"], scratch
+        fixture.environment = {"PATH": "/public/bin", "HOME": "/owned/host-home", "DOCKER_CONFIG": str(profile)}
+        fixture.auth, fixture.images, fixture.run = "one-run-catalog-marker", {"ingestion": "sha256:" + "9" * 64}, mock.Mock(return_value="")
+        fixture.cli(["python", "--version"], network=False)
+        args = fixture.run.call_args.args[0]
+        self.assertEqual(fixture.run.call_args.kwargs["environment"]["DOCKER_CONFIG"], str(profile))
+        self.assertNotIn(str(profile), " ".join(args))
+        self.assertFalse(any("DOCKER_CONFIG" in value or "GITHUB_TOKEN" in value for value in args))
+
+    def test_workflow_authentication_follows_host_builds_and_always_closes_profile(self):
+        path = Path(os.environ.get("KANZ_CATALOG_WORKFLOW", qualify.ROOT / ".github/workflows/catalog-verification.yml"))
+        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+        def validate(document):
+            steps = document["jobs"]["actual-catalog"]["steps"]
+            profile = next(index for index, step in enumerate(steps) if step.get("id") == "registry-profile")
+            login = next(index for index, step in enumerate(steps) if step.get("uses", "").startswith("docker/login-action@"))
+            proof = next(index for index, step in enumerate(steps) if step.get("id") == "catalog-proof")
+            target_cleanup = next(index for index, step in enumerate(steps) if step.get("id") == "owned-cleanup")
+            registry_cleanup = next(index for index, step in enumerate(steps) if step.get("id") == "registry-cleanup")
+            if document["permissions"].get("packages") != "read" or not profile < login < proof < target_cleanup < registry_cleanup or "if" in steps[login] or steps[login]["with"].get("logout") != "false" or steps[target_cleanup].get("if") != "always()" or steps[registry_cleanup].get("if") != "always() && steps.registry-profile.outcome == 'success'" or "--registry-cleanup" not in steps[registry_cleanup]["run"]:
+                raise ValueError("registry lifecycle workflow contract differs")
+            before = "\n".join(step.get("run", "") for step in steps[:profile])
+            after = "\n".join(step.get("run", "") for step in steps[profile:])
+            required = ("go test -c", "make -C kanz generate", "install-audit.sh", "test_catalog_registry_auth.py", "--verify-source", "EveryDockerfileBaseImageComesFromTheMirror", "WorkflowsBuildingMirrorImagesAuthenticateFirst")
+            if any(value not in before for value in required) or any(value in after for value in ("go test -c", "make -C kanz generate", "install-audit.sh")):
+                raise ValueError("host build or required guard crosses credential introduction")
+        validate(workflow)
+        for mutation in ("permission", "logout", "cleanup", "ordering", "guard"):
+            changed = copy.deepcopy(workflow)
+            steps = changed["jobs"]["actual-catalog"]["steps"]
+            if mutation == "permission":
+                changed["permissions"]["packages"] = "write"
+            elif mutation == "logout":
+                next(step for step in steps if step.get("uses", "").startswith("docker/login-action@"))["with"]["logout"] = "true"
+            elif mutation == "cleanup":
+                next(step for step in steps if step.get("id") == "registry-cleanup")["if"] = "success()"
+            elif mutation == "ordering":
+                selected = next(step for step in steps if step.get("id") == "registry-profile")
+                steps.remove(selected)
+                steps.insert(0, selected)
+            else:
+                for step in steps:
+                    step["run"] = step.get("run", "").replace("EveryDockerfileBaseImageComesFromTheMirror", "MissingGuard")
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                validate(changed)
 
 
 if __name__ == "__main__":

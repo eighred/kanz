@@ -74,9 +74,10 @@ resource names to that source/run/attempt. Normal and interrupted cleanup inspec
 those labels and delete verified IDs, including a container created before a
 failed start; foreign names/owners cannot authorize deletion. Cleanup or final
 receipt refusal fails acceptance. Timeout diagnostics contain only a closed
-stage/category, never subprocess arguments or one-run credentials. Twenty-nine
+stage/category, never subprocess arguments or one-run credentials. Thirty-one
 qualification controls discriminate these failures alongside the 14 projection
-controls.
+controls: 45 cases inside the CLI sandbox, plus seven shared registry lifecycle
+controls on the host before registry authentication.
 The PR/main trigger contract includes the consumed authorization/lineage
 dependencies, canonical generation inputs, Go runtime pins, setup action and
 reviewed advisory installer. A control reads the real workflow through a
@@ -200,7 +201,7 @@ cyclic ancestry, foreign labels/tags/registry references and unexpected terminal
 IDs refuse. Only verified build containers and child-to-parent image IDs are
 removed, followed by repeated inventories. Image deletion uses `--no-prune`,
 never force, the base, foreign tags or shared cache deletion. The completion ID,
-removed chain/container IDs and rechecks enter the receipt. Sixteen added controls
+removed chain/container IDs and rechecks enter the receipt. Eighteen added controls
 discriminate package/Python drift, config/OnBuild/owner mismatch, complete chain
 cleanup, late interrupted resources, actual offline build selection and advisory
 versus infrastructure exits, raw descriptor tampering, engine kind, canonical
@@ -220,3 +221,44 @@ main workflow and its full projected receipt are verified.
 
 Selected upstream source: [DataHub v1.8.0](https://github.com/datahub-project/datahub/tree/v1.8.0),
 including its metadata file source, REST sink and GMS system authenticator.
+
+## Private registry lifecycle
+
+The workflow completes generation, Go compilation/vet/architecture checks,
+source-free registry controls and audit-tool installation before introducing
+registry credentials. It then verifies the clean source against independent
+Actions identity. Only afterward does the shared
+`.github/scripts/catalog_registry_auth.py` prepare a fresh exclusive host
+profile and the pinned login action authenticate with packages-read authority.
+Its automatic logout is disabled; the shared helper owns real credential absence
+verification and removal. No host build or installer runs after authentication.
+
+The controller verifies that profile's exact source/run ownership and file-only
+backend. The profile is outside every target scratch/source/binary/workflow mount
+and the build context. Only reviewed host Docker commands receive its path;
+target arguments/environment and build inputs never receive the profile or token.
+The controller does not borrow a developer/runner's preexisting Docker profile.
+Public descriptor retrieval uses anonymous publisher-scoped access independently.
+
+Target teardown runs on the always path before shared registry cleanup. The
+shared cleanup receipt binds current source/tree/run/attempt, verifies actual
+credential absence after logout and removes the verified owned directory.
+`acceptanceComplete` remains false until both teardown and that cleanup pass,
+the source is rechecked and all mandatory metadata/authorization evidence is
+validated again. Exit zero alone cannot prove logout. Missing target evidence,
+residual credentials, stale ownership or failed profile removal refuse closure.
+Only public projected cleanup/control records are uploaded.
+
+The dedicated architecture check includes both the base-image mirror invariant
+and the existing authentication guard. Catalog controls independently check the
+indirect controller's permissions, host-build-before-login ordering, explicit
+logout ownership and always cleanup, including mutations of each. Both PR and
+main filters select the shared helper and its controls. The wider source-selected
+repository checks remain independent mandatory gates.
+
+Publisher descriptor provenance and execution repository are explicit separate
+fields. A private mirror execution reference must retain the exact verified
+publisher manifest/config bytes and match its own canonical repository in Docker
+and scanner readback. Populate and privately read-verify the existing mirror
+producer before repointing the Dockerfile/base lock/selected reference together;
+the mirror guard must pass before an overlay build is attempted.
