@@ -40,9 +40,9 @@ func TestPositionReceiptCleanupWaitsForReaderAndClearsAliases(t *testing.T) {
 		t.Fatal("cleanup did not observe the reader's join channel")
 	}
 	select {
-	case <-done:
+	case err := <-done:
 		close(reader.closed)
-		t.Fatal("cleanup returned before the reader joined")
+		t.Fatalf("cleanup returned before the reader joined: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	r.mu.Lock()

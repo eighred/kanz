@@ -54,6 +54,15 @@ def require_go_toolchain(value):
     if not isinstance(value, dict) or any(value.get(key) != item for key, item in expected.items()):
         raise ValueError("actual pinned Go Linux/cgo toolchain differs")
 
+def native_compiler_environment(driver):
+    # /usr/bin/cc may traverse /etc/alternatives, which is deliberately absent
+    # from the sandbox. Use the actual measured driver already under ro /usr.
+    if (not isinstance(driver, Path) or driver.parent != Path("/usr/bin")
+            or re.fullmatch(r"x86_64-linux-gnu-gcc-[1-9][0-9]?", driver.name) is None):
+        raise ValueError("native compiler is outside the reviewed readonly sysroot")
+    return {"CC": str(driver), "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER": str(driver)}
+
+
 PREFIX = "github.com/eighred/kanz/"
 STORE = PREFIX+"services/oms/tools/store_conformance"
 CONTROL = PREFIX+"internal/bustest"
@@ -281,6 +290,11 @@ class Proof:
         rust=Path(self.args.rustc).resolve().parent.parent
         rust_version=host(str(rust/"bin/rustc"),"--version").decode().strip()
         if not rust_version.startswith("rustc 1.90.0 "): raise ValueError("actual reviewed Rust compiler differs")
+        cc=Path("/usr/bin/cc").resolve(strict=True)
+        compiler_env=native_compiler_environment(cc)
+        cc_info=cc.stat()
+        if not stat.S_ISREG(cc_info.st_mode) or not cc_info.st_mode & 0o111:
+            raise ValueError("native compiler is not a regular executable")
         node=Path(self.args.node).resolve().parent.parent
         pg=host("psql",EXPECTED_ENDPOINTS["TEST_POSTGRES_URL"],"-tAX","-c","SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user").strip()
         if pg!=b"kanzapp|f|f": raise ValueError("actual database principal bypasses tenant RLS")
@@ -292,6 +306,7 @@ class Proof:
                (Path(self.args.browser),"/deps/browser"),(os.environ["TEST_MFA_BFF"],"/fixture/mfa-web-bff"),
                ("/tmp/kanz-mtls","/fixture/mtls")]
         env={"PATH":"/tool/go/bin:/tool/rust/bin:/tool/node/bin:/usr/bin:/bin","LANG":"C.UTF-8","HOME":"/scratch/home","TMPDIR":"/scratch/tmp","GOTMPDIR":"/scratch/tmp","GOCACHE":"/scratch/cache","GOMODCACHE":"/deps/gomod","GOPATH":"/scratch/go","GOTOOLCHAIN":"local","GOPROXY":"off","GOFLAGS":"-mod=readonly -p=1","GOMAXPROCS":"2","CARGO_HOME":"/scratch/cargo","CARGO_TARGET_DIR":"/scratch/rust-target","CARGO_NET_OFFLINE":"true","KANZ_BUILD_VERSION":self.source["sha"],"PLAYWRIGHT_BROWSERS_PATH":"/deps/browser","CI":"true","CGO_ENABLED":"1","GITHUB_ACTIONS":"true","GITHUB_SHA":self.source["sha"],"GITHUB_RUN_ID":self.source["run"],"GITHUB_RUN_ATTEMPT":self.source["attempt"],"GIT_CONFIG_COUNT":"1","GIT_CONFIG_KEY_0":"safe.directory","GIT_CONFIG_VALUE_0":"/input"}
+        env.update(compiler_env)
         env.update(EXPECTED_ENDPOINTS)
         # The unchanged native fixture deliberately accepts numeric loopback
         # only. Both names reach the same fixed namespace-local broker relay.
@@ -300,7 +315,8 @@ class Proof:
         self.box=Sandbox(self.repo,capsule=self.input_capsule,artifact_root=self.root,tools=tools,env=env)
         self.box.start()
         self.box.probe()
-        provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(Path("/usr/bin/cc").resolve().read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"loopback_ports":list(PORTS),"relay_translations":[{"outer":outer,"backend":backend,"inner":backend} for outer,backend in RELAY_PORTS]},"environment_names":sorted(effective_environment(env,"/input/kanz"))}
+        provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(cc.read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"loopback_ports":list(PORTS),"relay_translations":[{"outer":outer,"backend":backend,"inner":backend} for outer,backend in RELAY_PORTS]},"environment_names":sorted(effective_environment(env,"/input/kanz"))}
+        provenance["native_compiler"]={"driver":str(cc),"sha256":provenance["cc_sha256"],"environment":compiler_env}
         provenance["evidence_consumer_pins"]=EVIDENCE_PINS
         provenance["nats_endpoint_mapping"]={"host":"localhost:4222","sandbox":"127.0.0.1:4222","outer_transit":24222,"same_fixed_backend":4222}
         source_fd=directory(self.box.inputs/"source")

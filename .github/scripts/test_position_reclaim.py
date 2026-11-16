@@ -384,6 +384,17 @@ class LaunchPermissions(unittest.TestCase):
 
 
 class ProbeObservations(unittest.TestCase):
+    def test_native_compiler_uses_measured_driver_inside_readonly_usr(self):
+        driver=Path("/usr/bin/x86_64-linux-gnu-gcc-13")
+        self.assertEqual(proof.native_compiler_environment(driver), {
+            "CC":str(driver),"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER":str(driver)})
+        for bad in (Path("/usr/bin/cc"),Path("/etc/alternatives/cc"),
+                    Path("/scratch/x86_64-linux-gnu-gcc-13"),
+                    Path("/usr/bin/../bin/x86_64-linux-gnu-gcc-13"),
+                    Path("/usr/bin/x86_64-linux-gnu-gcc-13/extra"),str(driver)):
+            with self.subTest(driver=str(bad)),self.assertRaises(ValueError):
+                proof.native_compiler_environment(bad)
+
     def test_actual_toolchain_must_be_exact_go1274_linux_amd64_with_cgo(self):
         good = {"GOVERSION": "go1.27.4", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"}
         proof.require_go_toolchain(good)
