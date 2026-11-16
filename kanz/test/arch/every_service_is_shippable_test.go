@@ -44,9 +44,9 @@ import (
 // # What this checks
 //
 // Every services/<name>/cmd/<name> holding a main package must have a Dockerfile
-// AND an entry in the build matrix, or an argued exemption naming the issue that
-// retires it. Deny-by-default, with a dead-entry arm so an exemption cannot
-// outlive its repair.
+// AND an entry in the build matrix, or an argued exemption naming its unfinished
+// work owner or existing standing deployment decision. Deny-by-default, with the
+// same Dockerfile/matrix retirement and dead-entry checks for either disposition.
 //
 // It deliberately does NOT require a deployment manifest. An image is the
 // irreducible floor — without one there is nothing to deploy under any
