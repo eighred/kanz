@@ -32,6 +32,7 @@ on:
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - '.github/scripts/*lake_snapshot_owner*'
+      - '.github/scripts/*lake_cache_probe.py'
       - '.github/scripts/envoy_evidence.py'
       - '.github/scripts/release_ci*.py'
       - 'kanz/tools/replay/**'
@@ -72,6 +73,7 @@ on:
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - '.github/scripts/*lake_snapshot_owner*'
+      - '.github/scripts/*lake_cache_probe.py'
       - '.github/scripts/envoy_evidence.py'
       - '.github/scripts/release_ci*.py'
       - 'kanz/tools/replay/**'
@@ -198,6 +200,9 @@ jobs:
           push: false
           load: true
           cache-from: type=gha,scope=lake-sink
+          # Materialize the cook result in this builder. An imported image hit
+          # can leave only lazy references to the intermediate dependency layer.
+          no-cache-filters: rust-build
       - name: Bind actual hybrid image identity
         id: lake-image
         run: |
@@ -358,11 +363,11 @@ jobs:
             const cp = require('node:child_process');
             const tree = cp.execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {encoding: 'utf8', maxBuffer: 4096, timeout: 10000}).trim();
             const env = {};
-            for (const key of ['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_SERVICE_V2', 'ACTIONS_CACHE_MODE']) {
+            for (const key of ['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_CACHE_MODE']) {
               const value = process.env[key];
               if (value !== undefined) { if (value.length > 16384) throw new Error('cache environment bound exceeded'); env[key] = value; }
             }
-            if (!env.PATH || !env.HOME || !env.ACTIONS_RUNTIME_TOKEN || !env.ACTIONS_RESULTS_URL || env.ACTIONS_CACHE_MODE !== 'read') throw new Error('read-only cache environment missing');
+            if (!env.PATH || !env.HOME || env.ACTIONS_CACHE_MODE !== 'read') throw new Error('read-only cache environment missing');
             cp.execFileSync('python3', ['.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE, '--tree', tree, '--run', process.env.PROBE_RUN, '--attempt', process.env.PROBE_ATTEMPT, '--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER, '--output', 'snapshot-owner-proof'], {stdio: 'inherit', env});
       - name: Verify complete source-bound owner evidence
         run: |
