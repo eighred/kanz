@@ -110,13 +110,11 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 // permissions, is what makes the split mean something: kanz-mandate can no
 // longer halt the platform, and kanz-halt can no longer forge a mandate.
 //
-// None of the three non-kanz-halt tools has its own Job manifest / ServiceAccount
-// yet (see infra/operator/halt-job.yaml and infra/security/spire/registration.yaml)
-// — SPIRE issues an SVID per (namespace, ServiceAccountName) a pod actually runs
-// as, so today these three still authenticate as kanz-halt's SVID in practice
-// until a manifest exists for each. The tenancy.yaml entries below are the
-// broker-side half of the identity, ready for when that manifest half ships;
-// this map is the code-side half of the same contract.
+// Operator ServiceAccounts are now declared in halt-job.yaml and
+// cli-identities.yaml. TestOperatorCLIsHaveServiceAccounts checks those bindings
+// rather than retaining the old claim that every tool runs as kanz-halt. These
+// declarations do not prove live SPIRE issuance or a runtime operator session;
+// the read-only observer's distinct residual is documented below.
 var operatorSVIDs = map[string]string{
 	"kanz-halt":      "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
 	"kanz-mandate":   "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate",
@@ -143,11 +141,13 @@ var operatorSVIDs = map[string]string{
 // tenancy.yaml grant DENIES all business publish: the publish allow-list holds
 // ONLY the JetStream consumer machinery ($JS.API.>/$JS.ACK.>), so with an
 // allow-list present every domain subject (order.*, risk.*, everything) is
-// denied by default. It is admitted to the broker like an operator yet is
-// PROVABLY incapable of moving capital — which is exactly why it must not be an
+// denied by default. It is admitted to the broker like an operator but cannot
+// publish directly to business subjects — which is why it must not be an
 // operatorSVIDs entry: operators publish, and operatorSVIDs carries the publish
 // authority the operator plane needs. TestReadOnlyObserversCannotPublish below
-// makes "watches the loop, cannot move it" a guarded fact, not a comment.
+// checks that domain-publish boundary. It does not prove broker immutability:
+// $JS.API.> also contains administrative mutation APIs. #1749 owns the required
+// least-privilege grant/guard repair and real broker qualification.
 //
 // kanz-monitor is the read-only Bubble Tea TUI (cmd/kanz-monitor): it
 // SubscribeBroadcasts order.> and risk.position.> and publishes NO business
@@ -425,8 +425,9 @@ func TestNATSDialersHaveBrokerAccounts(t *testing.T) {
 // observer's tenancy.yaml publish allow-list may name — and nothing else. These
 // are the JetStream consumer machinery its ephemeral consumer binds ($JS.API.>
 // to resolve the stream + create the consumer, $JS.ACK.> to ack) plus the
-// reply-inbox space; none of them is a business/domain subject, so an
-// allow-list drawn only from this set cannot move capital. _INBOX.> is a
+// reply-inbox space. This proves the absence of direct business/domain publish
+// grants, not the absence of broker administration: the broad API wildcard also
+// contains stream/consumer mutation endpoints, unresolved under #1749. _INBOX.> is a
 // subscribe-side subject in practice and will not normally appear in a publish
 // allow-list, but is admitted here so the assertion stays about "only
 // machinery" rather than an over-narrow literal match.
@@ -446,8 +447,8 @@ var readOnlyObserverMachinery = map[string]bool{
 // `deny: [">"]` trap that would break the consumer's own $JS.API.>/$JS.ACK.>
 // machinery (see the risk-engine/archiver headers in tenancy.yaml). An
 // allow-list restricts by omission: with these entries present, order.*, risk.*
-// and every other subject is denied by default, which is what makes "watches the
-// loop, cannot move it" a guarded fact.
+// and every other business subject is denied by default. Administrative effects
+// through the allowed API wildcard remain a required #1749 follow-up.
 func TestReadOnlyObserversCannotPublish(t *testing.T) {
 	root := moduleRoot(t)
 	perms := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))

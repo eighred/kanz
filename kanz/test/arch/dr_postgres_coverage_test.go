@@ -361,9 +361,10 @@ var drPosture = map[string]drClassification{
 		"service had a deployment, because naming a cluster it had never been placed in would have " +
 		"been the invented exclusion this guard's header warns about; it now has one"},
 
-	"audit": {status: drExcluded, reason: "AUDIT-01b WORM store with its own tamper-resistant " +
-		"retention — object-locked, and deliberately not restorable-to-an-earlier-instant, which is " +
-		"the point of an audit log"},
+	"audit": {status: drUnresolved, reason: "#1748: the actual PostgreSQL audit log is included in " +
+		"Tokyo's database restore. Its row-mutation trigger does not establish object-locked retention " +
+		"or a non-restorable evidence store. Approved primary attribution and retention/restore semantics " +
+		"remain unresolved; #1747 separately owns the runtime credential/WORM boundary."},
 
 	"oms": {status: drCovered, cluster: "kanz-orders", reason: "holds orders, positions and " +
 		"position_fills — the order store and position book, the money path itself. Its OWN " +
