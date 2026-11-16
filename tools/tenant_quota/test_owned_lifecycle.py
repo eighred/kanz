@@ -85,7 +85,8 @@ class DummyCommands:
                 cluster="foreign" if self.capture_unknown else self.name, role="control-plane",
                 networks={"kind": {"NetworkID": NID}})).encode()
         if argv[:3] == ["docker", "network", "inspect"]:
-            return 0, (CID + "\n").encode() if self.keep_endpoint else b""
+            endpoints = {CID: {}} if self.keep_endpoint else {}
+            return 0, json.dumps(endpoints).encode() + b"\n"
         raise AssertionError("unexpected finite tool call")
 
 
@@ -578,6 +579,45 @@ class LifecycleModels(unittest.TestCase):
             self.assertNotEqual(report["cleanup_phase"], "completed")
 
 
+
+    def test_network_endpoint_object_requires_bounded_typed_exact_json(self):
+        foreign = "f" * 64
+        accepted = ((b"{}\n", set()), (b"{}\n\n", set()),
+            (json.dumps({CID: {}}).encode() + b"\n", {CID}),
+            (json.dumps({foreign: {"Name": "foreign-model-endpoint"}}).encode() + b"\n", {foreign}),
+            (json.dumps({str(n) * 64: {} for n in range(4)}).encode(), {str(n) * 64 for n in range(4)}),
+            (b"{}" + b" " * (lifecycle.MAX_OUTPUT - 2), set()))
+        for raw, wanted in accepted:
+            with self.subTest(accepted=raw):
+                self.assertEqual(lifecycle.network_endpoint_ids(raw), wanted)
+        refused = (
+            (b"\n", "network_observation_unknown"),
+            ((CID + "\n\n").encode(), "network_observation_unknown"),
+            ("{}".encode("utf-16"), "network_observation_unknown"),
+            ("{}".encode("utf-32"), "network_observation_unknown"),
+            (('{"' + CID + '":{"Name":NaN}}').encode(), "network_observation_unknown"),
+            (('{"' + CID + '":{"Name":Infinity}}').encode(), "network_observation_unknown"),
+            (b"null\n", "network_observation_unknown"),
+            (b"[]\n", "network_observation_unknown"),
+            (b"true\n", "network_observation_unknown"),
+            (b"1\n", "network_observation_unknown"),
+            (b"{\n", "network_observation_unknown"),
+            (b"{}{}\n", "network_observation_unknown"),
+            (b"\xff", "network_observation_unknown"),
+            (('{"' + CID + '":{},"' + CID + '":{}}\n').encode(), "duplicate_json_key"),
+            (json.dumps({"invalid-key": {}}).encode(), "inventory_shape"),
+            (json.dumps({CID: []}).encode(), "inventory_shape"),
+            (json.dumps({CID: None}).encode(), "inventory_shape"),
+            (json.dumps({str(n) * 64: {} for n in range(5)}).encode(), "inventory_shape"),
+            (b" " * (lifecycle.MAX_OUTPUT + 1), "output_bound"),
+            ("{}\n", "inventory_shape"))
+        for raw, category in refused:
+            with self.subTest(category=category, kind=type(raw).__name__):
+                with self.assertRaises(lifecycle.Refused) as error:
+                    lifecycle.network_endpoint_ids(raw)
+                self.assertEqual(error.exception.category, category)
+
+
 MODEL_TOOL = r'''import json,os,sys,time
 from pathlib import Path
 role,filename,name,mode=sys.argv[1:]
@@ -613,6 +653,14 @@ elif role=="endpoints":
     if mode=="network-error":
         print("private model network response")
         sys.exit(17)
+    elif mode=="network-owned":print(json.dumps({cid:{}}))
+    elif mode=="network-foreign":print(json.dumps({"f"*64:{"Name":"foreign-model-endpoint"}}))
+    elif mode=="network-null":print("null")
+    elif mode=="network-malformed":print("{")
+    elif mode=="network-duplicate":print('{"'+cid+'":{},"'+cid+'":{}}')
+    elif mode=="network-invalid-key":print(json.dumps({"invalid-key":{}}))
+    elif mode=="network-bad-value":print(json.dumps({cid:[]}))
+    else:print("{}")
 elif role=="wait":
     witness()
     while True:time.sleep(1)
@@ -801,6 +849,53 @@ class TransportLifecycleModels(unittest.TestCase):
             self.assertEqual(len(list((root / lifecycle.STATE).glob("launch-*.json"))), 20)
             self.assertIsNone(second.fd)
             self.assertIsNone(second.parent)
+
+
+    def test_real_cli_network_json_success_and_refusals_reach_both_parent_reports(self):
+        cases = (("normal", None), ("network-foreign", None),
+            ("network-owned", "owned_endpoint_remains"),
+            ("network-null", "network_observation_unknown"),
+            ("network-malformed", "network_observation_unknown"),
+            ("network-duplicate", "duplicate_json_key"),
+            ("network-invalid-key", "inventory_shape"),
+            ("network-bad-value", "inventory_shape"),
+            ("network-error", "network_observation_unknown"))
+        for mode, category in cases:
+            with self.subTest(mode=mode), self.owned(mode) as (owner, commands, root):
+                owner.prepare()
+                owner.create(owner.work / "kubeconfig")
+                result = lifecycle.finish_owner(owner, 11, None)
+                passed = category is None
+                self.assertEqual(result, dict(format="kanz-quota-outcome-v1", primary="success",
+                    cleanup="verified_absent" if passed else "refused", retention="retained",
+                    cleanup_phase="completed" if passed else "network_absence",
+                    cleanup_category="none" if passed else category))
+                second, other = self.second(root)
+                other.mode = mode
+                with patch.object(lifecycle, "OwnedLifecycle", return_value=second), \
+                        patch.object(lifecycle.sys, "argv", ["owned_lifecycle.py", "cleanup"]):
+                    if passed:
+                        lifecycle.main()
+                    else:
+                        with self.assertRaises(SystemExit) as error:
+                            lifecycle.main()
+                        self.assertEqual(str(error.exception), "quota lifecycle: cleanup refused")
+                report = json.loads((root / lifecycle.REPORT).read_bytes())
+                cleanup = json.loads((root / "quota-owned-cleanup.json").read_bytes())
+                for value in (report, cleanup):
+                    self.assertEqual(value["cleanup_error"], not passed)
+                    self.assertEqual(value["cleanup"], "verified_absent" if passed else "unknown")
+                    self.assertEqual((value["cleanup_phase"], value["cleanup_category"]),
+                        ("completed", "none") if passed else ("network_absence", category))
+                self.assertEqual(report["passed"], passed)
+                all_requested = commands.requested + other.requested
+                self.assertEqual(sum(p == ("docker", "network", "inspect") for p in all_requested), 2)
+                self.assertEqual(sum(p == ("kind", "create", "cluster") for p in all_requested), 1)
+                self.assertEqual(sum(p == ("kind", "delete", "cluster") for p in all_requested), 1)
+                self.assertEqual(len(list((root / lifecycle.STATE).glob("launch-*.json"))), 20)
+                self.assertIsNone(second.fd)
+                self.assertIsNone(second.parent)
+                self.assertNotIn("private model network response", json.dumps([result, report, cleanup]))
 
 
 if __name__ == "__main__":

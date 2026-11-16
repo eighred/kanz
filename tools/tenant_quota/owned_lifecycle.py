@@ -479,6 +479,27 @@ def lines(raw, pattern, maximum=256):
     return values
 
 
+def network_endpoint_ids(raw):
+    """Accept the exact-network CLI's bounded JSON object, never blank output."""
+    if type(raw) is not bytes:
+        raise Refused("inventory_shape")
+    if len(raw) > MAX_OUTPUT:
+        raise Refused("output_bound")
+    def refuse_nonfinite(_value):
+        raise Refused("network_observation_unknown")
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=unique_object,
+                           parse_constant=refuse_nonfinite)
+    except (ValueError, UnicodeError):
+        raise Refused("network_observation_unknown") from None
+    if type(value) is not dict:
+        raise Refused("network_observation_unknown")
+    if (len(value) > 4 or any(not HEX64.fullmatch(key) or type(endpoint) is not dict
+                             for key, endpoint in value.items())):
+        raise Refused("inventory_shape")
+    return set(value)
+
+
 def validate_claim(value, identity, node, inputs):
     if (type(value) is not dict or set(value) != CLAIM_KEYS
             or value["format"] != "kanz-quota-owned-claim-v1"
@@ -866,11 +887,11 @@ class OwnedLifecycle:
             self.cleanup_phase = "network_absence"
             for nid in self.networks:
                 code, raw = self.commands.run(["docker", "network", "inspect", "--format",
-                    '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}', nid], 10,
+                    '{{json .Containers}}', nid], 10,
                     observation=True, missing_ok=True)
                 if code != 0:
                     raise Refused("network_observation_unknown")
-                if set(lines(raw, HEX64)).intersection(self.containers):
+                if network_endpoint_ids(raw).intersection(self.containers):
                     raise Refused("owned_endpoint_remains")
             self.cleanup_phase = "work_retire"
             self.retire_work()
