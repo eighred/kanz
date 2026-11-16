@@ -144,9 +144,22 @@ for name,data in prepared.items():
 with (root/'input.json').open('x') as f:json.dump(b['payload'],f)
 '@
 $bootstrapEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
+$bootstrapBuilder = $codec + "`n" + @'
+import sys
+framed=sys.stdin.buffer.read(87387)
+if len(framed)>87386: raise ValueError('bootstrap source input bound')
+raw=base64.b64decode(framed.strip(),validate=True)
+if len(raw)>65536: raise ValueError('bootstrap source bound')
+print(json.dumps({'command':bootstrap_command(raw.decode('utf-8',errors='strict'))},separators=(',',':')))
+'@
+$bootstrapLines = $bootstrapEncoded | & $python -I -B -c $bootstrapBuilder
+if ($LASTEXITCODE -ne 0 -or @($bootstrapLines).Count -ne 1) { throw 'Bootstrap shell frame refused.' }
+$bootstrapFrame = ([string]$bootstrapLines) | ConvertFrom-Json
+if ((($bootstrapFrame.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'command' -or $bootstrapFrame.command -isnot [string] -or $bootstrapFrame.command.Length -lt 1 -or [Text.Encoding]::UTF8.GetByteCount($bootstrapFrame.command) -gt 30000) { throw 'Bootstrap shell command refused.' }
+$bootstrapCommand = [string]$bootstrapFrame.command
 $commands = @('set -eu', 'python3 -I -B -c ''import lzma; assert lzma.is_check_supported(lzma.CHECK_CRC64)''', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
     'trap ''rm -f "$work/policy_state.py" "$work/policy_client.py" "$work/rollout_scope.py" "$work/recovery_receipts.py" "$work/recovery_plan.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
-    ("printf '%s' '$bootstrapEncoded' | base64 -d > `"`$work/bootstrap.py`""),
+    $bootstrapCommand,
     ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' '$fixedEncoded' `"`$work`""),
     'chmod 400 "$work"/*.py "$work/input.json"',
     ("timeout --signal=TERM --kill-after=180s 1200s env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=`"`$work`" TMPDIR=`"`$work`" LANG=C.UTF-8 python3 -I -B `"`$work/source_loader.py`" `"`$work`" recovery_plan --tokyo-plan --source $source < `"`$work/input.json`""))

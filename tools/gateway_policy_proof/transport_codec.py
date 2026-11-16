@@ -87,6 +87,23 @@ def decode_fixed(encoded, mode):
     return raw, prepared
 
 
+def bootstrap_command(source):
+    """Quote bounded bootstrap data for one fixed owned path, without execution."""
+    if type(source) is not str:
+        raise ValueError("bootstrap heredoc source")
+    data = source.encode("utf-8", errors="strict")
+    delimiter = "KANZ_GATEWAY_FIXED_BOOTSTRAP_V1"
+    if (len(data) > 65536 or "\x00" in source
+            or any(line in (delimiter, delimiter + "\r") for line in source.split("\n"))):
+        raise ValueError("bootstrap heredoc source")
+    # The quoted body is data. Terminal X prevents command substitution from
+    # removing source newlines; %X removes only that one appended literal byte.
+    # A failing cat assignment or output redirection must stop the set -e caller.
+    return ("bootstrap=$(/usr/bin/cat <<'" + delimiter + "'\n" + source + "X\n"
+            + delimiter + "\n)\n"
+            "printf '%s' \"${bootstrap%X}\" > \"$work/bootstrap.py\"\n")
+
+
 def remote_decoder_source(source, mode):
     """Closed decoder projection from bounded, caller-supplied canonical source.
 
@@ -103,7 +120,7 @@ def remote_decoder_source(source, mode):
     assignments = {}
     gates = []
     all_functions = {"encode", "decode", "_unique_fixed", "_fixed_names",
-                     "encode_fixed", "decode_fixed", "remote_decoder_source"}
+                     "encode_fixed", "decode_fixed", "bootstrap_command", "remote_decoder_source"}
     all_imports = {"base64", "lzma", "hashlib", "json", "ast"}
     constants = {"ENCODED_LIMIT": 20000, "EXPANDED_LIMIT": 524288, "MEMORY_LIMIT": 16777216}
     for node in tree.body:

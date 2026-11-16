@@ -295,6 +295,20 @@ zero requested timeout, zero inventory duration and null process explicitly mean
 those operations were not run. The item remains UNKNOWN with no new batch.
 Six completed nonconverged batches retain their existing outcome. This source
 repair does not identify which deadline caused an earlier uninstrumented failure.
+The bootstrap writer uses one bounded canonical constructor in `transport_codec.py`.
+Its quoted POSIX here-document carries the exact bootstrap bytes as data to
+`/usr/bin/cat`; a terminal `X` and literal suffix removal preserve even absent or
+multiple trailing newlines. A delimiter-line collision, NUL, malformed UTF-8 or
+source beyond 64 KiB refuses before command construction. A cat assignment or
+file-write failure stops the existing `set -e` script before bootstrap execution;
+the exact owned cleanup trap is unchanged. This serialization does not authenticate
+source or establish OS confinement: the existing checked codec/bootstrap binding
+remains necessary. `/usr/bin/cat` is an explicit existing-node prerequisite, with
+no installation or fallback. Linux source fixtures use actual `/usr/bin/dash` and
+`/usr/bin/cat`; fresh actual wrapper geometry and CNI/transaction evidence remain
+separate requirements. The main/fixed XZ streams, decoder and native size caps do
+not change.
+
 The normal operator transports seven modules in its main XZ frame and the exact
 `source_loader.py`/`rollout_probe.py` pair in a separately encoded fixed frame.
 `bounded_process.py` remains one of the seven main-frame modules. This lossless

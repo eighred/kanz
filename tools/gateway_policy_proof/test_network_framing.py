@@ -32,6 +32,8 @@ GEOMETRY_REFUSALS = {
     "Bounded XZ encoding unavailable or refused.": "encoding_refused",
     "Rollout transfer exceeds bounded SSM payload.": "encoded_bound",
     "Complete SSM parameters exceed native command bound.": "parameters_bound",
+    "Bootstrap shell frame refused.": "bootstrap_frame_refused",
+    "Bootstrap shell command refused.": "bootstrap_command_refused",
 }
 
 
@@ -147,7 +149,12 @@ def valid_framing(wrapper, expected):
             "len(sys.argv)!=4", "len(raw)+len(fixedRaw)>524288", "len(data)>65536",
             "'$encoded' '$fixedEncoded'", "root=pathlib.Path(sys.argv[3])",
             "$encoded.Length -gt 20000", "$parameterBytes -gt 30000", "$parameters.Length -gt 30000",
-            "with (root/name).open('xb')", "-I -B -c $literalBuilder")
+            "with (root/name).open('xb')", "-I -B -c $literalBuilder",
+            "$bootstrapBuilder = $codec +", "sys.stdin.buffer.read(87387)", "len(framed)>87386",
+            "len(raw)>65536", "bootstrap_command(raw.decode('utf-8',errors='strict'))",
+            "$bootstrapEncoded | & $python -I -B -c $bootstrapBuilder",
+            "@($bootstrapLines).Count -ne 1", "-cne 'command' -or $bootstrapFrame.command",
+            "$bootstrapFrame.command -isnot [string]", "$bootstrapCommand,")
         return (fixed == expected and files.isdisjoint(fixed)
                 and "encode_fixed(values,'" + mode + "')" in wrapper
                 and "decode_fixed(sys.argv[2],'" + mode + "')" in wrapper
@@ -209,6 +216,7 @@ class NetworkFramingTests(unittest.TestCase):
     def test_closed_actual_wrapper_recipes(self):
         self.assertEqual(codec.SOURCE_BUNDLES, {'normal': {'files': ['policy_state.py', 'transaction.py', 'policy_client.py', 'bounded_process.py', 'rollout_scope.py', 'rollout_engine.py', 'network_observation.py'], 'fixed': ['source_loader.py', 'rollout_probe.py']}, 'plan': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}, 'restore': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'recovery_restore.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}})
         builders = []
+        bootstrap_builders = []
         for mode, name in WRAPPERS.items():
             wrapper = (ROOT / "tools" / name).read_text(encoding="utf-8")
             expected = {"source_loader.py"} | ({"rollout_probe.py"} if mode == "normal" else set())
@@ -226,6 +234,10 @@ class NetworkFramingTests(unittest.TestCase):
                 self.assertFalse((source_root / source_name).is_symlink(), source_name)
             builder = re.search(r"\$literalBuilder = \$codec \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
             builders.append(re.sub(r"\((values|packet\['codec'\]),'[^']+'\)", r"(\1,MODE)", builder))
+            bootstrap_builder = re.search(r"\$bootstrapBuilder = \$codec \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
+            bootstrap_builders.append(bootstrap_builder)
+            self.assertEqual(wrapper.count("    $bootstrapCommand,"), 1)
+            self.assertNotIn("| base64 -d >", wrapper)
             for marker in ("$info.LinkType", "len(raw)+len(fixedRaw)>524288", "len(sys.argv)!=4",
                            "($bytes.Length + $fixedSize) -gt 524288", "with (root/name).open('xb')",
                            "$parameters.Length -gt 30000", "-I -B -c $literalBuilder",
@@ -235,9 +247,22 @@ class NetworkFramingTests(unittest.TestCase):
                            "$fixedFrame.encoded.Length -gt 20000", "$fixedFrame.expanded -isnot [long]",
                            "'$encoded' '$fixedEncoded'", "root=pathlib.Path(sys.argv[3])",
                            "[ordered]@{ codec = $codec; files = $fixed }", "$bootstrap = $decoder +",
-                           "$fixedFrame.decoder -isnot [string]", "$decoder = [string]$fixedFrame.decoder"):
+                           "$fixedFrame.decoder -isnot [string]", "$decoder = [string]$fixedFrame.decoder",
+                           "$bootstrapBuilder = $codec +", "sys.stdin.buffer.read(87387)", "len(framed)>87386",
+                           "len(raw)>65536", "bootstrap_command(raw.decode('utf-8',errors='strict'))",
+                           "$bootstrapEncoded | & $python -I -B -c $bootstrapBuilder",
+                           "@($bootstrapLines).Count -ne 1", "-cne 'command' -or $bootstrapFrame.command",
+                           "$bootstrapFrame.command -isnot [string]", "$bootstrapCommand,"):
                 self.assertFalse(valid_framing(wrapper.replace(marker, "removed"), expected), marker)
         self.assertEqual(len(set(builders)), 1)  # Same semantics; only fixed inventory differs.
+        expected_bootstrap_builder = "\n".join((
+            "import sys", "framed=sys.stdin.buffer.read(87387)",
+            "if len(framed)>87386: raise ValueError('bootstrap source input bound')",
+            "raw=base64.b64decode(framed.strip(),validate=True)",
+            "if len(raw)>65536: raise ValueError('bootstrap source bound')",
+            "print(json.dumps({'command':bootstrap_command(raw.decode('utf-8',errors='strict'))},separators=(',',':')))",
+        ))
+        self.assertEqual(set(bootstrap_builders), {expected_bootstrap_builder})
 
     def test_exact_bootstrap_thirteen_controls(self):
         wrapper = (ROOT / "tools" / WRAPPERS["normal"]).read_text(encoding="utf-8")

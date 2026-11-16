@@ -227,12 +227,110 @@ class TransportCodecTests(unittest.TestCase):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 codec.remote_decoder_source(value, mode)
 
+    def _bootstrap_shell(self, command, directory, after=""):
+        import shlex
+        for tool in ("/usr/bin/dash", "/usr/bin/cat"):
+            self.assertTrue(Path(tool).is_file(), "canonical POSIX fixture tool unavailable")
+        script = "set -eu\nwork=" + shlex.quote(str(directory)) + "\n" + command + after
+        return subprocess.run(["/usr/bin/dash", "-c", script], cwd=directory,
+                              env={"HOME": str(directory), "TMPDIR": str(directory), "LANG": "C.UTF-8"},
+                              capture_output=True, timeout=10)
+
+    def test_bootstrap_heredoc_refuses_unsafe_or_oversized_data(self):
+        import ast
+        function = ast.parse(inspect.getsource(codec.bootstrap_command)).body[0]
+        self.assertEqual([arg.arg for arg in function.args.args], ["source"])
+        self.assertFalse(function.args.posonlyargs or function.args.kwonlyargs or function.args.defaults)
+        self.assertIsNone(function.args.vararg)
+        self.assertIsNone(function.args.kwarg)
+        delimiter = "KANZ_GATEWAY_FIXED_BOOTSTRAP_V1"
+        controls = (None, True, b"bytes", "\ud800", "\x00", "x" * 65537,
+                    delimiter, delimiter + "\n", "prefix\n" + delimiter + "\nsuffix",
+                    "prefix\r\n" + delimiter + "\r\nsuffix")
+        for index, source in enumerate(controls):
+            with self.subTest(control=index), self.assertRaises(ValueError):
+                codec.bootstrap_command(source)
+        self.assertIsInstance(codec.bootstrap_command("x" * 65536), str)
+        self.assertIsInstance(codec.bootstrap_command(delimiter + "_not_a_delimiter"), str)
+
+    def test_bootstrap_heredoc_actual_dash_preserves_bytes_without_expansion(self):
+        cases = ("", "no final newline", "one\n", "two\n\n", "CRLF\r\n", "two CRLF\r\n\r\n",
+                 "mixed\r\nLF\nlast", "terminalX", "terminalX\n", "UTF8 λ € Ω\r\n",
+                 "quotes ' \" \\ and $HOME $$ ${PATH}\n",
+                 "$(printf expanded > DOLLAR_EXPANDED) `printf expanded > BACKTICK_EXPANDED`\n")
+        for index, source in enumerate(cases):
+            with self.subTest(case=index), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)
+                result = self._bootstrap_shell(codec.bootstrap_command(source), target,
+                                               "printf 'READY\\n'\n")
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"READY\n")
+                self.assertEqual(result.stderr, b"")
+                actual = (target / "bootstrap.py").read_bytes()
+                self.assertTrue(actual == source.encode("utf-8"), "bootstrap byte identity changed")
+                self.assertEqual({path.name for path in target.iterdir()}, {"bootstrap.py"})
+
+    def test_bootstrap_heredoc_actual_cat_failure_stops_before_launch(self):
+        command = codec.bootstrap_command("# canonical writer failure fixture\n")
+        marker = "/usr/bin/cat <<'"
+        self.assertEqual(command.count(marker), 1)
+        # Fault only the fixed read input: use the real cat and its real captured
+        # stdout. No replacement binary, function, mocked stream or shell body.
+        failed = command.replace(marker, "/usr/bin/cat MISSING_OWNED_CAT_INPUT <<'", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            result = self._bootstrap_shell(failed, target,
+                "printf 'LAUNCHED\\n' > \"$work/launch-marker\"\n")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+            self.assertGreater(len(result.stderr), 0)
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_bootstrap_heredoc_actual_write_failure_stops_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            (target / "bootstrap.py").mkdir()
+            result = self._bootstrap_shell(codec.bootstrap_command("# bounded writer fixture\n"), target,
+                "printf 'LAUNCHED\\n' > \"$work/launch-marker\"\n")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertGreater(len(result.stderr), 0)
+            self.assertTrue((target / "bootstrap.py").is_dir())
+            self.assertEqual({path.name for path in target.iterdir()}, {"bootstrap.py"})
+
+    def test_bootstrap_heredoc_binds_all_three_actual_bootstrap_sources(self):
+        import re
+        tools = Path(__file__).parents[1]
+        codec_source = inspect.getsource(codec).replace("\r\n", "\n")
+        wrappers = (("normal", "Invoke-TokyoGatewayPolicy.ps1"),
+                    ("plan", "Invoke-TokyoGatewayPolicyRecoveryPlan.ps1"),
+                    ("restore", "Invoke-TokyoGatewayPolicyRetainedRestore.ps1"))
+        pattern = r"\$bootstrap = \$decoder \+ \"" + chr(96) + r"n\" \+ @'\r?\n(.*?)\r?\n'@"
+        for mode, name in wrappers:
+            canonical = (tools / name).read_bytes().decode("utf-8").replace("\r\n", "\n")
+            for ending in ("\n", "\r\n"):
+                with self.subTest(mode=mode, CRLF=ending == "\r\n"), tempfile.TemporaryDirectory() as directory:
+                    wrapper = canonical.replace("\n", ending)
+                    match = re.search(pattern, wrapper, re.S)
+                    self.assertIsNotNone(match)
+                    source = codec.remote_decoder_source(codec_source.replace("\n", ending), mode) + "\n" + match.group(1)
+                    target = Path(directory)
+                    result = self._bootstrap_shell(codec.bootstrap_command(source), target, "printf 'READY\\n'\n")
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"READY\n", b""))
+                    self.assertTrue((target / "bootstrap.py").read_bytes() == source.encode("utf-8"),
+                                    "actual canonical bootstrap bytes changed in shell transport")
+                    self.assertEqual({path.name for path in target.iterdir()}, {"bootstrap.py"})
+
     def test_wrapper_binds_same_source_and_preserves_caps(self):
         wrapper = (Path(__file__).parents[1] / "Invoke-TokyoGatewayPolicy.ps1").read_text()
         markers = ["$encode = $codec +", "$bootstrap = $decoder +", "raw=decode(sys.argv[1])",
                    "-I -B -c $encode", "ls-files --error-unmatch tools/gateway_policy_proof/transport_codec.py",
                    "$codecInfo.LinkType", "$codecInfo.PSIsContainer", "$codecInfo.Length -gt 65536", "$encoded.Length -gt 20000",
-                   "($bytes.Length + $fixedSize) -gt 524288", "len(data)>65536", "$parameterBytes -gt 30000"]
+                   "($bytes.Length + $fixedSize) -gt 524288", "len(data)>65536", "$parameterBytes -gt 30000",
+                   "$bootstrapBuilder = $codec +", "sys.stdin.buffer.read(87387)", "len(framed)>87386",
+                   "len(raw)>65536", "bootstrap_command(raw.decode('utf-8',errors='strict'))",
+                   "$bootstrapEncoded | & $python -I -B -c $bootstrapBuilder",
+                   "$bootstrapFrame.command -isnot [string]", "$bootstrapCommand,"]
         def valid(text): return all(marker in text for marker in markers)
         self.assertTrue(valid(wrapper))
         for marker in markers:
