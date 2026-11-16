@@ -203,7 +203,11 @@ class Sandbox:
             prelude = image_index + 2
             while prelude < len(arguments) and "=" in arguments[prelude] and not arguments[prelude].startswith("/"):
                 prelude += 1
-            arguments[prelude:prelude] = ["/bin/sh", "-eu", "-c", 'sleep 3; exec "$@"', "runtime-proof"]
+            environment = arguments[image_index + 2:prelude]
+            # The trusted inspection shell can add its own metadata. Clear it
+            # again immediately before the target, replaying only the exact
+            # explicit assignments already supplied before the prelude.
+            arguments[prelude:prelude] = ["/bin/sh", "-eu", "-c", 'sleep 3; exec /usr/bin/env -i "$@"', "runtime-proof", *environment]
         raw_id = checked(arguments, timeout=30).decode().strip()
         if not re.fullmatch(r"[0-9a-f]{64}", raw_id):
             raise ProofFailure("create did not return a full container identity")
