@@ -102,7 +102,7 @@ func TestStateTimeCanonicalJetStreamAndPostgresRecovery(t *testing.T) {
 		for _, entry := range []struct {
 			s     jetstream.Stream
 			topic string
-		}{{input, topic}, {parked, dlqTopic}} {
+		}{{parked, dlqTopic}} {
 			if strings.ContainsAny(entry.topic, "*>") || !strings.Contains(entry.topic, subject.Token(portfolio)) {
 				t.Error("unsafe fixture reclaim")
 				continue
@@ -117,6 +117,7 @@ func TestStateTimeCanonicalJetStreamAndPostgresRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	bustest.ReclaimSubjects(t, js, topic)
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms", ProducerVersion: "state-time-test", Tenant: tenant})
 	if err != nil {
 		t.Fatal(err)

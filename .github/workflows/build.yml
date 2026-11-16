@@ -6,72 +6,39 @@ name: kanz-build
 
 on:
   workflow_dispatch:
+  # Scope uses complete Git history, including deleted/renamed inputs.
   pull_request:
-    paths:
-      - 'kanz/**'
-      - 'rust/**'
-      - 'python/**'
-      - 'web/**'
-      - 'schemas/proto/**'
-      - 'schemas/buf.yaml'
-      - 'schemas/buf.gen.yaml'
-      - '.github/workflows/build.yml'
-      - '.github/actions/**'
-      - '.github/scripts/**'
-      - '.dockerignore'
   push:
     branches: [main]
-    # DOCS DO NOT BUILD IMAGES.
-    #
-    # The pull_request trigger above is already path-filtered; this one was not, so a
-    # commit touching only markdown ran the full matrix — for kanz-build, that is 19
-    # Docker image builds to record that a board item moved. On a private repo billing per
-    # minute, that is real money for zero signal.
-    #
-    # paths-ignore only skips a push when EVERY changed file matches, so a commit mixing
-    # docs and code still runs the gate.
-    paths-ignore:
-      - '**/*.md'
-      - '.gitignore'
 
 permissions:
   contents: read
   packages: read    # private base-image pulls; PR code cannot publish or mint OIDC
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      application: ${{ steps.scope.outputs.application }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify scope policy
+        run: python3 -B -m unittest discover -s .github/scripts -p test_required_ci.py
+      - name: Select image scope before registry or publisher authority
+        id: scope
+        run: python3 .github/scripts/required_ci.py images
+
   image:
-    if: github.event_name == 'pull_request'
+    needs: scope
+    if: github.event_name == 'pull_request' && needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     strategy: &image-strategy
       fail-fast: false
-      # BOUND THE FAN-OUT, BECAUSE THE FLAKE IS A RATE LIMIT WEARING A 403 (#320).
-      #
-      # 27 images built with no cap means up to 27 runners simultaneously doing
-      # the SAME burst of external-registry calls: a buf release download, a Go
-      # module proxy fetch, `buf generate` against buf.build, a buildkit image
-      # pull, a GHCR login, and a push. Three recent reds on main failed in three
-      # DIFFERENT steps of that list —
-      #
-      #   e81b66c  Generate schemas Go SDK  (buf: permission_denied: 403)
-      #   cf74a70  docker/setup-buildx-action
-      #   d3358f7  Log in to GHCR
-      #
-      # — each on a random ONE of the 27, each green on an identical re-run, and
-      # none of them the PUSH that push-with-retry.sh already covers. A single
-      # service failing while 26 others succeed with the same token in the same
-      # run is not an authorization problem; it is throttling surfaced as 403
-      # rather than 429, which is exactly the cause #320's own investigation notes
-      # flagged and nobody had tested.
-      #
-      # THIS REMOVES THE CAUSE RATHER THAN MASKING IT. #320 says so directly:
-      # "bounding the matrix concurrency is a smaller fix than a retry, and it
-      # removes the cause rather than masking it". Adding a retry to each of the
-      # three steps above would be three retries hiding three symptoms, and every
-      # new step in this job would need a fourth.
-      #
-      # IT DOES NOT COST BILLED MINUTES. Runners are billed per job-minute and the
-      # total work is unchanged; only wall-clock grows, and only when more than
-      # eight images actually need rebuilding.
+      # Bound simultaneous registry and dependency requests while preserving
+      # every selected image build. Intermittent 403 causes remain unqualified
+      # in #320; this cap alone does not prove throttling or repair authorization.
       max-parallel: 8
       matrix:
         include:
@@ -390,7 +357,7 @@ jobs:
       # the outcome.
       - name: Log in to GHCR
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -608,7 +575,8 @@ jobs:
           docker push "${target}"
 
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz'
+    needs: scope
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz' && needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -620,7 +588,8 @@ jobs:
     steps: *image-steps
 
   go-cache-qualification:
-    if: github.event_name == 'workflow_dispatch'
+    needs: scope
+    if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     cache-mode: read
     permissions:

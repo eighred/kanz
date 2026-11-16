@@ -121,13 +121,7 @@ func TestReevaluationJetStreamLiveCashScheduledFlatAndRestart(t *testing.T) {
 			t.Cleanup(func() { _ = client.Close() })
 			// Only this unique entity subject is reclaimed. Global cash and output
 			// history belongs to the canonical streams and must never be purged.
-			t.Cleanup(func() {
-				cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-				defer stop()
-				if err := positions.Purge(cleanup, jetstream.WithPurgeSubject(positionTopic)); err != nil {
-					t.Error(err)
-				}
-			})
+			bustest.ReclaimSubjects(t, js, positionTopic)
 			input, err := bus.NewProducer(client, bus.ProducerConfig{Source: "compliance/reevaluation-input", ProducerVersion: "test", Tenant: tenant})
 			if err != nil {
 				t.Fatal(err)

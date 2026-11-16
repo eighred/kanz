@@ -35,6 +35,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/eighred/kanz/internal/bustest/positionfixture"
 	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -89,13 +90,17 @@ func TestOverfillReachesNoBroker(t *testing.T) {
 	}
 
 	run := time.Now().UnixNano()
+	portfolio := fmt.Sprintf("binance-overfill-%d", run)
+	receipts := positionfixture.ReclaimOMSPositions(t, js, portfolio, "BTC-USD", "BINANCE")
 	okOrder := fmt.Sprintf("ovf-ok-%d", run)
 	badOrder := fmt.Sprintf("ovf-bad-%d", run)
 
 	view := newFakeOrders()
 	good := kanzOrder(okOrder)
+	good.PortfolioId = portfolio
 	good.OrderedQuantity = bdec("10")
 	bad := kanzOrder(badOrder)
+	bad.PortfolioId = portfolio
 	bad.OrderedQuantity = bdec("10")
 	for _, st := range []*orderpb.OrderState{good, bad} {
 		if rerr := view.store.Record(ctx, st); rerr != nil {
@@ -115,6 +120,7 @@ func TestOverfillReachesNoBroker(t *testing.T) {
 		OnRefused: func(string, string, string) { refused++ },
 	})
 	_ = ing.Run(ctx) // io.EOF at the end of the frames
+	receipts.AwaitFills(t, js, startSeq, okOrder)
 
 	if refused != 1 {
 		t.Fatalf("OnRefused fired %d times, want exactly 1 (the over-fill)", refused)

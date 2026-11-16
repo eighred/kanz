@@ -115,8 +115,12 @@ func lifecyclePause(t *testing.T, m *Monitor) (func(), <-chan error) {
 	t.Cleanup(func() {
 		release()
 		cancel()
+		// lifecycleJoin must assert the case's result before cleanup observes close.
 		select {
-		case <-done:
+		case err, ok := <-done:
+			if ok {
+				t.Errorf("paused evaluation result was not asserted before cleanup: %v", err)
+			}
 		case <-time.After(time.Second):
 			t.Error("paused evaluation did not join")
 		}
@@ -325,7 +329,10 @@ func TestLifecycleEmitFailureOnlyRollsBackItsReservation(t *testing.T) {
 				unblock()
 				cancel()
 				select {
-				case <-done:
+				case err, ok := <-done:
+					if ok {
+						t.Errorf("failed publication result was not asserted before cleanup: %v", err)
+					}
 				case <-time.After(time.Second):
 					t.Error("failed publication did not join")
 				}
@@ -435,7 +442,10 @@ func TestLifecycleEmitFailureOnlyRollsBackItsReservation(t *testing.T) {
 			cancel()
 			for _, done := range []chan error{oldDone, newDone} {
 				select {
-				case <-done:
+				case err, ok := <-done:
+					if ok {
+						t.Errorf("owned publication result was not asserted before cleanup: %v", err)
+					}
 				case <-time.After(time.Second):
 					t.Error("owned publication did not join")
 				}

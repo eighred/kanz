@@ -96,7 +96,9 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	if err != nil {
 		t.Fatalf("dial NATS: %v", err)
 	}
-	defer func() { _ = client.Close() }()
+	t.Cleanup(func() { _ = client.Close() })
+	portfolio := fmt.Sprintf("large-notional-%d", time.Now().UnixNano())
+	receipts, js, from := reclaimLiveOMSFixture(t, ctx, url, portfolio, "XNAS")
 
 	consumer, err := bus.NewConsumer(client)
 	if err != nil {
@@ -105,8 +107,10 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	var mu sync.Mutex
 	filled := map[string]*big.Rat{}
 	fills := make(chan string, 8)
+	done := make(chan error, 1)
+	joinLiveOMSObserver(t, cancel, done)
 	go func() {
-		_ = consumer.Subscribe(ctx, "order.order.filled", "large-notional-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+		done <- consumer.Subscribe(ctx, "order.order.filled", "large-notional-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
 			var ev orderpb.OrderFilled
 			if err := proto.Unmarshal(payload, &ev); err != nil {
 				return nil
@@ -114,7 +118,10 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 			mu.Lock()
 			filled[ev.GetOrderId()] = dec.FromProto(ev.GetState().GetFilledQuantity())
 			mu.Unlock()
-			fills <- ev.GetOrderId()
+			select {
+			case fills <- ev.GetOrderId():
+			case <-ctx.Done():
+			}
 			return nil
 		})
 	}()
@@ -139,7 +146,7 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 		t.Fatalf("ToProtoScaled produced a NEGATIVE coefficient (%d) for a positive quantity — "+
 			"that is the wrap this issue exists about, in the conversion itself", qty.GetCoefficient())
 	}
-	if err := publishLargeSubmit(ctx, producer, orderID, qty); err != nil {
+	if err := publishLargeSubmit(ctx, producer, orderID, portfolio, qty); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -193,6 +200,7 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	if err := proto.Unmarshal(stateBytes, &st); err != nil {
 		t.Fatalf("decode persisted state: %v", err)
 	}
+	receipts.AwaitFills(t, js, from, orderID)
 	stored := dec.FromProto(st.GetFilledQuantity())
 	if stored.Cmp(want) != 0 {
 		t.Errorf("the PERSISTED filled quantity is %s, want %s — the wire survived the magnitude but "+
@@ -201,11 +209,11 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	}
 }
 
-func publishLargeSubmit(ctx context.Context, p *bus.Producer, orderID string, qty *commonpb.Decimal) error {
+func publishLargeSubmit(ctx context.Context, p *bus.Producer, orderID, portfolio string, qty *commonpb.Decimal) error {
 	cmd := &orderpb.SubmitOrder{
 		Metadata:     &commandpb.CommandMetadata{Issuer: "strategy:large-notional-it", TargetId: orderID},
 		OrderId:      orderID,
-		PortfolioId:  "fund-alpha",
+		PortfolioId:  portfolio,
 		InstrumentId: "BTC-USD",
 		Side:         orderpb.Side_SIDE_BUY,
 		Quantity:     qty,

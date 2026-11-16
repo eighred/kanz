@@ -72,6 +72,35 @@ func projectorPayload(t *testing.T, kind, portfolio string, f *orderpb.Fill) []b
 		return nil
 	}
 }
+
+// newProjectorFixture registers the finite default entity before any native
+// request, including malformed/refused controls. Custom portfolio cases also
+// register their exact keys in projectorConsumers before publication.
+func newProjectorFixture(t *testing.T) *fixture {
+	t.Helper()
+	f := newFixture(t)
+	reclaimProjectorPositions(t, f, f.schema, fill())
+	return f
+}
+
+func reclaimProjectorPositions(t *testing.T, f *fixture, portfolio string, value *orderpb.Fill) {
+	t.Helper()
+	address := os.Getenv("TEST_NATS_URL")
+	if address == "" {
+		t.Fatal("TEST_NATS_URL required: actual native projector fixture connects before validation/refusal")
+	}
+	nc, err := nats.Connect(address, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bustest.ReclaimSubjects(t, js, projectorSubjects(f, portfolio, value)[:2]...)
+}
+
 func projectorRequest(t *testing.T, f *fixture, e *envelopepb.Envelope, payload []byte) map[string]any {
 	t.Helper()
 	if payload == nil {
@@ -102,6 +131,13 @@ func projectorConsumers(t *testing.T, f *fixture, subjects []string) map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
+	var positions []string
+	for _, subj := range subjects {
+		if strings.HasPrefix(subj, "risk.position.") {
+			positions = append(positions, subj)
+		}
+	}
+	bustest.ReclaimSubjects(t, js, positions...)
 	// Require the canonical topology already installed by the workflow.
 	result := map[string]relayBroker{}
 	for _, subj := range subjects {
@@ -143,7 +179,7 @@ func verifyProjectorRecords(t *testing.T, records []outbox.Record, consumers map
 }
 func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 	t.Run("filled-partial-lineage-and-restart", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		portfolio := f.schema
 		v := fill()
 		consumers := projectorConsumers(t, f, projectorSubjects(f, portfolio, v))
@@ -176,7 +212,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 		}
 	})
 	t.Run("unknown-and-nil-fill-ignore-but-foreign-refuses", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		capture := &projectorCapture{}
 		goProjector := projectorOracle(t, g, capture)
 		for _, tc := range []struct {
@@ -203,7 +239,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 		}
 	})
 	t.Run("unknown-and-duplicate-embedded-wire-journal", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		portfolio := f.schema
 		v := fill()
 		env := projectorEnvelope(f.tenant, fillfact.SubjectFilled)
@@ -234,7 +270,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 		}
 	})
 	t.Run("recovery-ack-binding-and-invalid-provenance-rollback", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		portfolio := f.schema
 		v := fill()
 		digest, err := fillfact.ExecutionDigest(v)
@@ -289,7 +325,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 		}
 	})
 	t.Run("flush-failure-keeps-committed-book-and-restart-retries", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		portfolio := f.schema
 		v := fill()
 		env := projectorEnvelope(f.tenant, fillfact.SubjectFilled)
@@ -396,7 +432,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 	})
 
 	t.Run("deep-domain-and-malformed-refuse-without-writes", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		capture := &projectorCapture{}
 		oracle := projectorOracle(t, g, capture)
 		env := projectorEnvelope(f.tenant, fillfact.SubjectFilled)
@@ -418,7 +454,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 		}
 	})
 	t.Run("commit-rollback-and-go-rust-go-handoff", func(t *testing.T) {
-		f := newFixture(t)
+		f := newProjectorFixture(t)
 		portfolio := f.schema + ".*%é"
 		v := fill()
 		capture := &projectorCapture{}
@@ -478,7 +514,7 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 	})
 
 	t.Run("whole-input-capacity-refuses-without-prefix", func(t *testing.T) {
-		f := newFixture(t)
+		f := newProjectorFixture(t)
 		env := projectorEnvelope(f.tenant, fillfact.SubjectFilled)
 		payload := projectorPayload(t, env.EventType, f.schema, fill())
 		payload = protowire.AppendTag(payload, 199, protowire.BytesType)
@@ -490,9 +526,12 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 		}
 	})
 	t.Run("legacy-system-scope-and-strict-recovery-tenant", func(t *testing.T) {
-		f, g := newFixture(t), newFixture(t)
+		f, g := newProjectorFixture(t), newFixture(t)
 		f.tenant, g.tenant = bus.SystemTenant, bus.SystemTenant
 		f.pool, g.pool = f.open(f.tenant), g.open(g.tenant)
+		// This compatibility case deliberately changes tenant after construction;
+		// its real Rust publisher uses the new system-scope subject keys.
+		reclaimProjectorPositions(t, f, f.schema, fill())
 		capture := &projectorCapture{}
 		oracle := projectorOracle(t, g, capture)
 		for _, tenant := range []string{"", "foreign"} {

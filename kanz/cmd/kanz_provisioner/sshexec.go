@@ -115,7 +115,8 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, cmd string) (
 	select {
 	case <-ctx.Done():
 		_ = client.Close()
-		<-done
+		// Cancellation is the selected result; join Run before reading its output.
+		<-done //nolint:errcheck // Cancellation already owns the terminal result.
 		return out.String(), fmt.Errorf("run %q: %w", cmd, ctx.Err())
 	case err := <-done:
 		if err != nil {

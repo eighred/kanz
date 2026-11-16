@@ -13,6 +13,8 @@ package ingest
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"testing"
@@ -22,9 +24,12 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestIntegration_ABootingPodLearnsTheBookFromTheCompactedStream(t *testing.T) {
@@ -35,13 +40,24 @@ func TestIntegration_ABootingPodLearnsTheBookFromTheCompactedStream(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	const tenant, fund, instrument = "acme", "fund-alpha", "BTC-USD"
+	const tenant, instrument = "acme", "BTC-USD"
+	fund := fmt.Sprintf("fund-alpha-%d", time.Now().UnixNano())
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "ingest-positions-it"})
 	if err != nil {
 		t.Fatalf("dial NATS: %v", err)
 	}
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
+	admin, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	js, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bustest.ReclaimSubjects(t, js, subject.VenuePositionFor(tenant, fund, "BINANCE", instrument), subject.VenuePositionFor(tenant, fund, "OKX", instrument))
 
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          "ingest-positions-it",
@@ -99,9 +115,21 @@ func TestIntegration_ABootingPodLearnsTheBookFromTheCompactedStream(t *testing.T
 	if err != nil {
 		t.Fatalf("consumer: %v", err)
 	}
+	done := make(chan error, 1)
 	go func() {
-		_ = consumer.SubscribeBroadcastReady(ctx, subject.VenuePositionAll, cache.Handle, cache.Arm)
+		done <- consumer.SubscribeBroadcastReady(ctx, subject.VenuePositionAll, cache.Handle, cache.Arm)
 	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("position subscriber did not stop before reclaim")
+		}
+	})
 
 	deadline := time.Now().Add(20 * time.Second)
 	for !cache.Armed() {

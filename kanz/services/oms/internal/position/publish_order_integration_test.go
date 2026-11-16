@@ -53,6 +53,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/subject"
@@ -169,6 +170,7 @@ func TestTheCompactedSubjectRetainsTheLastCommittedFold(t *testing.T) {
 	// what makes that an order at all rather than an interleaving.
 	fillA := buy("f795a-"+instrument, instrument, "1", "50000", now)
 	fillB := buy("f795b-"+instrument, instrument, "2", "50000", now)
+	bustest.ReclaimSubjects(t, js, subj, subject.VenuePositionFor(testTenant, portfolio, fillA.GetVenue(), instrument))
 
 	applyWith(t, ctx, podA, projA, portfolio, key, fillA, now)
 	applied := applyWith(t, ctx, podB, projB, portfolio, key, fillB, now)
@@ -216,6 +218,7 @@ func TestTheDirectPublishThisReplacesRetainsTheShortNumber(t *testing.T) {
 	portfolio, instrument := freshEntity(t)
 	subj := subject.PositionFor(testTenant, portfolio, instrument)
 	now := time.Now().UTC()
+	bustest.ReclaimSubjects(t, js, subj)
 	ctx := bus.WithTenantID(context.Background(), testTenant)
 
 	podA := NewPostgres(pool, "USD")

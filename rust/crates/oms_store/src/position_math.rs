@@ -1,7 +1,7 @@
 //! Exact weighted-average-cost model shared by this position owner and its projections.
 use crate::Error;
 use kanz_order_core::{
-    decimal,
+    decimal, exact_decimal, has_terminating_decimal,
     proto::{common::v1::Money, domain::v1::PositionState, order::v1::Fill},
     rational,
 };
@@ -120,10 +120,28 @@ pub(crate) fn aggregate(lots: &[Lot]) -> Result<Lot, Error> {
 }
 pub(crate) fn money(v: Rat, ccy: &str) -> Result<Money, Error> {
     bound(&v)?;
+    // Match Go's finite observation contract. Only repeating weighted-cost
+    // results retain the existing rounded conversion; finite overflow refuses.
+    let amount = if has_terminating_decimal(&v) {
+        exact_decimal(v)
+    } else {
+        decimal(v)
+    }
+    .ok_or(Error::Capacity)?;
     Ok(Money {
-        amount: Some(decimal(v).ok_or(Error::Capacity)?),
+        amount: Some(amount),
         currency_code: ccy.to_owned(),
     })
+}
+// Cost-marked snapshots are admission inputs. A rounded zero cannot stand for
+// a known nonzero value; refusing this view leaves committed fills untouched.
+pub(crate) fn marked_money(v: Rat, ccy: &str) -> Result<Money, Error> {
+    let nonzero = !v.is_zero();
+    let result = money(v, ccy)?;
+    if nonzero && result.amount.as_ref().is_none_or(|d| d.coefficient == 0) {
+        return Err(Error::Capacity);
+    }
+    Ok(result)
 }
 pub(crate) fn state(
     l: &Lot,
@@ -138,9 +156,9 @@ pub(crate) fn state(
         portfolio_id: portfolio.into(),
         venue: venue.into(),
         instrument_id: instrument.into(),
-        quantity: Some(decimal(l.qty.clone()).ok_or(Error::Capacity)?),
+        quantity: Some(exact_decimal(l.qty.clone()).ok_or(Error::Capacity)?),
         average_price: Some(decimal(l.avg.clone()).ok_or(Error::Capacity)?),
-        market_value: Some(money(price * &l.qty, ccy)?),
+        market_value: Some(marked_money(price * &l.qty, ccy)?),
         realized_pnl: Some(money(l.realized.clone(), ccy)?),
         unrealized_pnl: Some(money((price - &l.avg) * &l.qty, ccy)?),
         as_of: Some(at),
@@ -197,5 +215,54 @@ mod tests {
             assert!(parse(x).is_err())
         }
         assert!(parse(&"9".repeat(4097)).is_err());
+    }
+    #[test]
+    fn precision_signed_quantities_and_money() {
+        for sign in [1_i64, -1] {
+            let l = Lot::from_text(&format!("{sign}/1000000000"), "1", "0").unwrap();
+            let s = state(
+                &l,
+                "p",
+                "v",
+                "i",
+                &Rat::from_integer(1.into()),
+                prost_types::Timestamp {
+                    seconds: 1,
+                    nanos: 0,
+                },
+                "USD",
+            )
+            .unwrap();
+            assert_eq!(
+                rational(s.quantity.as_ref()).unwrap(),
+                Rat::new(sign.into(), 1_000_000_000.into())
+            );
+            assert_eq!(
+                rational(s.market_value.unwrap().amount.as_ref()).unwrap(),
+                l.qty
+            );
+        }
+        for (input, expected) in [
+            ("1/1000000000000000000", "1/1000000000000000000"),
+            ("-1/1000000000", "-1/1000000000"),
+            ("1/3", "33333333/100000000"),
+        ] {
+            let m = money(parse(input).unwrap(), "USD").unwrap();
+            assert_eq!(
+                rational(m.amount.as_ref()).unwrap(),
+                parse(expected).unwrap()
+            );
+        }
+        assert!(money(parse("9223372036854775808").unwrap(), "USD").is_err());
+        let repeating = parse("1/3000000000000000000").unwrap();
+        assert_eq!(
+            money(repeating.clone(), "USD")
+                .unwrap()
+                .amount
+                .unwrap()
+                .coefficient,
+            0
+        );
+        assert!(marked_money(repeating, "USD").is_err());
     }
 }

@@ -5,6 +5,10 @@ import sys
 from check_migration_evidence import verify
 
 AGGREGATE_CASES = {
+    *{f"exact-quantity-sequence-{i}" for i in range(1, 11)},
+    *{f"exact-quantity-domain-{e}" for e in (-61, -60, 60, 61)},
+    *{"exact-quantity-refusal-" + case for case in (
+        "ApplyFill", "Amend", "filled-sum", "OVERFILL", "INVALID_FILL")},
     *{f"matrix-{operation}-{status}" for status in (*range(9), 99)
       for operation in ("Route", "Reject", "Cancel", "Expire", "ApplyFill", "Amend", "IsTerminal")},
     *{f"reconcile-{status}-{ack}-{view}" for status in (*range(9), 99)
@@ -130,6 +134,15 @@ REQUIRED = {
         "TestRustVenueIPv6RPC",
     },
     "services/oms/internal/position": {
+        "TestPositionPrecisionAccumulatedSignedFills",
+        "TestPositionPrecisionAccumulatedSignedFills/SIDE_BUY",
+        "TestPositionPrecisionAccumulatedSignedFills/SIDE_SELL",
+        "TestPositionPrecisionFiniteMoneyAndDerivedRounding",
+        "TestPositionPrecisionPartialClosePnL",
+        "TestPositionPrecisionRefusesWithoutClaimOrMutation",
+        "TestPositionPrecisionFiniteLimitsNeverRound",
+        "TestPositionPrecisionRepeatingCostDoesNotDiscardFill",
+        "TestPositionPrecisionTinyRepeatingSnapshotRefusesWithoutLosingFill",
         "TestARedeliveredFillIsFoldedOnceByEveryStore",
         "TestARedeliveredFillStillAnnouncesInEveryStore",
         "TestApprovedPositionFeesPreserveQuantityCostAndReplayClaims",
@@ -171,6 +184,8 @@ REQUIRED = {
         "TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance",
         "TestTerminalCorpusIndependentState", "TestRustTerminalFoldProcessConformance",
         "TestRustFillThenTerminalReplay",
+        *{parent + f"/exact-quantity-sequence-{i}" for i in range(1, 11)
+          for parent in ("TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance")},
     },
     "services/oms/internal/foldshadow": {
         "TestRustOMSFillShadowActualProcess", "TestRustTransactionCandidateBinding",
@@ -183,7 +198,17 @@ REQUIRED = {
         )},
     },
     "internal/shadowprocess": set(),
+    "internal/risk/ingest": {"TestPositionPrecisionFACTOverJetStream",
+                             "TestPositionPrecisionFACTOverJetStream/long",
+                             "TestPositionPrecisionFACTOverJetStream/short"},
     "services/oms/tools/store_conformance": {
+        "TestRustPositionPrecisionPostgresNATS",
+        "TestRustPositionPrecisionTransactions",
+        *{"TestRustPositionPrecisionPostgresNATS/" + owner for owner in ("go", "rust")},
+        *{"TestRustPositionPrecisionTransactions/" + owner + suffix
+          for owner in ("go", "rust")
+          for suffix in ("", "/finite-overflow-rolls-back", "/repeating-cost-keeps-executions",
+                         "/tiny-repeating-cost-refuses-snapshot")},
         "TestRustPositionProjectorPostgresNATS",
         *{"TestRustPositionProjectorPostgresNATS/" + case for case in (
             "filled-partial-lineage-and-restart",
@@ -282,6 +307,7 @@ REQUIRED = {
         )},
         *{"TestRustFeeTermsCompatibility/" + case for case in (
             "same-actor", "blank-actor", "case-binding", "malformed-digest", "previous-digest-binding",
+            "unicode17-cyrillic-actor", "unicode17-latin-actor", "unicode17-garay-actor", "unicode17-beria-actor",
             "approval-clock", "bad-nanos", "unknown-price", "currency-change", "unchanged-fee", "outside-decimal-domain",
         )},
         "TestRustRecoveryAcknowledgements",

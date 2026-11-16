@@ -35,7 +35,7 @@ pub mod arithmetic;
 pub mod attribution;
 pub mod attribution_projection;
 pub mod schedule_identity;
-pub use arithmetic::{decimal, rational};
+pub use arithmetic::{decimal, exact_decimal, has_terminating_decimal, rational};
 
 /// Whole-message canonical Decimal domain, shared by projector and recovery
 /// preparation. Unknown fields are retained, never interpreted as money.

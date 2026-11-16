@@ -533,6 +533,7 @@ func TestRustPositionStorePostgresNATS(t *testing.T) {
 	key := subject.PositionFor(f.tenant, portfolio, v.InstrumentId)
 	subjects := []string{key, subject.VenuePositionFor(f.tenant, portfolio, v.Venue, v.InstrumentId)}
 	bustest.EnsureSubjects(t, f.ctx, js, "POSITION_"+f.schema, subjects)
+	bustest.ReclaimSubjects(t, js, subjects...)
 	consumers := make([]jetstream.Consumer, 2)
 	for i, subj := range subjects {
 		stream, err := bustest.StreamFor(f.ctx, js, subj)

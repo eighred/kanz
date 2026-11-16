@@ -201,7 +201,7 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	}
 	if mode == "partial" {
 		diagnostic.Phase = "partial"
-		if err = nativePartial(ctx, client, meta.ClusterID); err != nil {
+		if err = nativePartial(ctx, client, meta.ClusterID, diagnostic); err != nil {
 			return out, err
 		}
 		out.Passed = true
@@ -652,7 +652,7 @@ func (a *nativeLostAck) CreateTopics(ctx context.Context, r *kafka.CreateTopicsR
 	}
 	return result, e
 }
-func nativePartial(ctx context.Context, c *kafka.Client, cluster string) error {
+func nativePartial(ctx context.Context, c *kafka.Client, cluster string, diagnostic *nativeDiagnostic) error {
 	raw, e := provision.ReadManifest("/manifest/topics-job.yaml")
 	if e != nil {
 		return e
@@ -671,11 +671,13 @@ func nativePartial(ctx context.Context, c *kafka.Client, cluster string) error {
 		return e
 	}
 	wrapper := &nativeLostAck{Client: c}
+	diagnostic.Phase = "partial-lost-ack"
 	receipt, e := provision.Run(ctx, wrapper, p, "apply")
 	if !errors.Is(e, provision.ErrBroker) || !wrapper.lost || !receipt.PartialOrUnknown || receipt.TopicAttempts != 1 || receipt.ACLAttempts != 0 || receipt.Complete {
 		return provision.ErrConflict
 	}
 	// Wait for actual newly-created topic readiness before storing the sentinel.
+	diagnostic.Phase = "partial-ready"
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -700,16 +702,22 @@ func nativePartial(ctx context.Context, c *kafka.Client, cluster string) error {
 		case <-ticker.C:
 		}
 	}
+	diagnostic.Phase = "partial-produce"
 	if e = nativeProduce(ctx, c, p.Topics[0].Name, "preserved-partial-history"); e != nil {
 		return e
 	}
+	diagnostic.Phase = "partial-reapply"
 	receipt, e = provision.Run(ctx, c, p, "apply")
 	if e != nil || !receipt.Complete || receipt.TopicAttempts != len(p.Topics)-1 {
 		return provision.ErrConflict
 	}
-	if e = nativeReadContains(ctx, c, p.Topics[0].Name, "preserved-partial-history"); e != nil {
+	// Reobserve only the acknowledged sentinel. Leadership may change after
+	// the readiness observation; this never retries an ambiguous produce.
+	diagnostic.Phase = "partial-readback"
+	if e = nativeQuorumReadContains(ctx, c, p.Topics[0].Name, "preserved-partial-history"); e != nil {
 		return e
 	}
+	diagnostic.Phase = "partial-verify"
 	receipt, e = provision.Run(ctx, c, p, "verify")
 	if e != nil || !receipt.Complete || receipt.TopicAttempts != 0 || receipt.ACLAttempts != 0 {
 		return provision.ErrConflict

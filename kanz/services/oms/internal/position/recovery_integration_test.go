@@ -2,6 +2,7 @@ package position
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/fillfact"
+	"github.com/eighred/kanz/internal/platform/subject"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -37,7 +39,7 @@ func TestRecoveryProjectorReordersAndAcknowledgesOnceOverRealSpine(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
+	t.Cleanup(admin.Close)
 	js, err := jetstream.New(admin)
 	if err != nil {
 		t.Fatal(err)
@@ -53,15 +55,20 @@ func TestRecoveryProjectorReordersAndAcknowledgesOnceOverRealSpine(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = js.DeleteConsumer(context.Background(), stream, name+suffix) })
+		t.Cleanup(func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := js.DeleteConsumer(cleanup, stream, name+suffix); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+				t.Error(err)
+			}
+		})
 		return c
 	}
-	input, acks := pull("position-input-", fillfact.SubjectRecovered), pull("position-ack-", fillfact.RecoveryPositionApplied)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "position-recovery-proof"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = client.Close() }()
+	t.Cleanup(func() { _ = client.Close() })
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms", ProducerVersion: "test", Tenant: tenant})
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +79,10 @@ func TestRecoveryProjectorReordersAndAcknowledgesOnceOverRealSpine(t *testing.T)
 	last := fillAt("last", "BTC-USD", "1", "150", orderpb.Side_SIDE_SELL, start.Add(2*time.Second))
 	last.Venue = first.Venue
 	late := buy("late", "BTC-USD", "1", "200", start.Add(time.Second))
+	bustest.ReclaimSubjects(t, js, subject.PositionFor(tenant, "fund", "BTC-USD"),
+		subject.VenuePositionFor(tenant, "fund", first.GetVenue(), "BTC-USD"),
+		subject.VenuePositionFor(tenant, "fund", late.GetVenue(), "BTC-USD"))
+	input, acks := pull("position-input-", fillfact.SubjectRecovered), pull("position-ack-", fillfact.RecoveryPositionApplied)
 	for i, fill := range []*orderpb.Fill{first, last, late} {
 		fill.OrderId = "order-" + fill.FillId
 		fill.VenueAccountId = "account"
