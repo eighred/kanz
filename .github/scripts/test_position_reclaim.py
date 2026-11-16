@@ -214,6 +214,26 @@ class ProtectedFiles(unittest.TestCase):
         self.fd=sandbox.directory(self.root)
         self.addCleanup(os.close,self.fd)
 
+    def test_rejected_file_metadata_distinguishes_link_type_and_size_without_promoting_bytes(self):
+        (self.root/"source").write_bytes(b"data")
+        os.link(self.root/"source",self.root/"alias")
+        os.mkfifo(self.root/"pipe")
+        (self.root/"oversized").write_bytes(b"data!")
+        for name,regular,links,size,reason in (("source",True,2,4,"multiple-links"),
+                                              ("pipe",False,1,0,"nonregular"),
+                                              ("oversized",True,1,5,"oversized")):
+            with self.subTest(reason=reason),self.assertRaises(sandbox.EvidenceFileRefusal) as caught:
+                sandbox.read_regular(self.fd,name,4)
+            self.assertEqual(caught.exception.observation,{"regular":regular,"link_count":links,"bytes":size,"limit_bytes":4,"reason":reason})
+        box=object.__new__(sandbox.Sandbox);box.work_fd=self.fd
+        retained={}
+        box.retain=lambda name,raw:retained.update({name:json.loads(raw)})
+        with self.assertRaises(sandbox.EvidenceFileRefusal):
+            box.promote("source","oms-store",4)
+        self.assertEqual(retained,{"promotion-refusal.json":{"schema":1,"role":"rust-store-executable",
+            "regular":True,"link_count":2,"bytes":4,"limit_bytes":4,"reason":"multiple-links"}})
+        self.assertNotIn(str(self.root),json.dumps(retained))
+
     def test_regular_roundtrip_and_exclusive_destination(self):
         sandbox.new_file(self.fd,"receipt",b"actual bytes")
         self.assertEqual(sandbox.read_regular(self.fd,"receipt",12),b"actual bytes")

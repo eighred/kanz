@@ -215,6 +215,17 @@ def directory(path):
         raise
 
 
+class EvidenceFileRefusal(ValueError):
+    """Bounded metadata only; neither a pathname nor rejected file bytes."""
+    def __init__(self, info, limit):
+        super().__init__("nonregular, linked or oversized evidence refused")
+        regular=stat.S_ISREG(info.st_mode)
+        if any(type(n) is not int or not 0<=n<=2**63-1 for n in (info.st_nlink,info.st_size,limit)):
+            raise ValueError("evidence file metadata is unrepresentable")
+        self.observation={"regular":regular,"link_count":info.st_nlink,"bytes":info.st_size,"limit_bytes":limit,
+                          "reason":"nonregular" if not regular else "multiple-links" if info.st_nlink!=1 else "oversized"}
+
+
 def read_regular(root_fd, relative, limit):
     parts = Path(relative).parts
     if not parts or Path(relative).is_absolute() or any(p in (".", "..") for p in parts):
@@ -229,7 +240,7 @@ def read_regular(root_fd, relative, limit):
         try:
             before = os.fstat(leaf)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
-                raise ValueError("linked, nonregular or oversized evidence")
+                raise EvidenceFileRefusal(before,limit)
             chunks, count = [], 0
             while chunk := os.read(leaf, min(65536, limit + 1 - count)):
                 chunks.append(chunk)
@@ -912,7 +923,12 @@ os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
         return code,rest
 
     def promote(self,relative,name,limit):
-        raw = read_regular(self.work_fd,relative,limit)
+        try:
+            raw = read_regular(self.work_fd,relative,limit)
+        except EvidenceFileRefusal as error:
+            role={"oms-store":"rust-store-executable","position-reclaim":"go-fixture-controller"}.get(name,"bounded-receipt")
+            self.retain("promotion-refusal.json",json.dumps({"schema":1,"role":role,**error.observation},sort_keys=True).encode())
+            raise
         self.retain(name,raw)
         return raw
 
