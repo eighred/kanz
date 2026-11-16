@@ -466,8 +466,8 @@ func TestHarvestReadinessWaitsForAllCallbacksAndJoins(t *testing.T) {
 		t.Fatal("late callbacks resurrected cancellation")
 	}
 	select {
-	case <-result:
-		t.Fatal("returned before held workers joined")
+	case err := <-result:
+		t.Fatalf("returned before held workers joined: %v", err)
 	default:
 	}
 	releaseWorkers()
@@ -544,8 +544,8 @@ func TestHarvestFailureClosesBeforeJoinAndPreservesFirstError(t *testing.T) {
 		t.Fatal("failure gate reopened")
 	}
 	select {
-	case <-result:
-		t.Fatal("returned before peer joined")
+	case err := <-result:
+		t.Fatalf("returned before peer joined: %v", err)
 	default:
 	}
 	releaseWorkers()
