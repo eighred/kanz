@@ -165,7 +165,7 @@ const (
 // each closing over ctx + the providers. Call at engine startup after
 // DefaultRegistry; tests register against deterministic providers.
 //
-// IT HAS A PRODUCTION CALLER SINCE #572 — services/risk-engine, inside the same
+// IT HAS A PRODUCTION CALLER SINCE #572 — services/risk_engine, inside the same
 // calibration gate the FI band sits behind, because both need a discount curve
 // and neither is honest without one. Its entry in
 // test/arch/no_dark_measure_seam_test.go is deleted on the same commit; that

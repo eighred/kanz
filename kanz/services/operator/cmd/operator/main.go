@@ -1,10 +1,3 @@
-// operator binary entrypoint. Reads the Kubernetes node inventory via the
-// in-cluster ServiceAccount (a get/list-nodes ClusterRole) and serves it over
-// operator.v1 gRPC for the universe TUI. AddNode (node provisioning) is enabled
-// only when OPERATOR_PROVISIONER_IMAGE is set; otherwise the server stays
-// read-only and AddNode returns Unimplemented. SetVenueKeys/ListVenueKeys (S4a)
-// are enabled only when OPERATOR_SECRET_BACKEND selects a backend ("kube" or
-// "vault"); otherwise SetVenueKeys returns Unimplemented.
 package main
 
 import (
@@ -80,12 +73,6 @@ func run() int {
 	// only thing added is that the reason survives to the exit status (#266).
 	fatal := lifecycle.NewFatal(stop)
 
-	// Telemetry (#61). The operator ran with NO metrics surface at all: it is the
-	// control plane the TUI drives — it provisions nodes and writes venue keys —
-	// and nothing about its health was observable beyond a 200 from /healthz.
-	// OTLPEndpoint is deliberately empty: spans are still created and trace
-	// context still propagates, and startup never blocks on a collector being
-	// reachable, which a control plane must not do.
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "operator",
 		ServiceVersion: version.String(),

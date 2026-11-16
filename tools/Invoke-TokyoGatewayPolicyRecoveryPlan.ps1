@@ -10,7 +10,7 @@ $instance = 'i-0ee1235614219f089'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
-$inputs = @('tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1', 'tools/Invoke-TokyoGatewayPolicy.ps1', 'tools/gateway-policy-proof', '.github/scripts/release_ci.py', '.github/workflows', 'kanz/infra')
+$inputs = @('tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1', 'tools/Invoke-TokyoGatewayPolicy.ps1', 'tools/gateway_policy_proof', '.github/scripts/release_ci.py', '.github/workflows', 'kanz/infra')
 & git -C $repo fetch origin main --quiet
 if ($LASTEXITCODE -ne 0) { throw 'Could not refresh main.' }
 $source = (& git -C $repo rev-parse origin/main).Trim()
@@ -35,7 +35,7 @@ if ($LASTEXITCODE -ne 0 -or $caller.Account -cne $account -or $caller.Arn -cne "
 $node = & $aws ec2 describe-instances --profile $rolloutProfile --region $region --instance-ids $instance --query 'Reservations[0].Instances[0].{Id:InstanceId,State:State.Name}' --output json 2>$null | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $node.Id -cne $instance -or $node.State -cne 'running') { throw 'Fixed Tokyo instance differs.' }
 
-$render = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone (Join-Path $repo 'kanz/infra/overlays/testnet-tokyo') 2>$null
+$render = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone (Join-Path $repo 'kanz/infra/overlays/testnet_tokyo') 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Canonical policy render failed.' }
 $projector = @'
 import sys,json,yaml
@@ -66,7 +66,7 @@ $provenanceHash = ($provenanceRaw -join "`n") | & $python -I -B -c 'import hashl
 if ($LASTEXITCODE -ne 0 -or $provenanceHash -cnotmatch '^[0-9a-f]{64}$') { throw 'Verified provenance hash missing.' }
 $files = [ordered]@{}
 foreach ($name in @('policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py')) {
-    $relative = "tools/gateway-policy-proof/$name"
+    $relative = "tools/gateway_policy_proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Rollout engine is not tracked.' }
     $text = [IO.File]::ReadAllText((Join-Path $repo $relative))
@@ -77,7 +77,7 @@ $fixedNames = @('source_loader.py')
 $fixed = [ordered]@{}
 $fixedSize = 0
 foreach ($name in $fixedNames) {
-    $relative = "tools/gateway-policy-proof/$name"
+    $relative = "tools/gateway_policy_proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     $path = Join-Path $repo $relative
     $info = Get-Item -LiteralPath $path
@@ -108,7 +108,7 @@ $bundle = [ordered]@{ payload = [ordered]@{ source = $source; policies = $polici
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
 if (($bytes.Length + $fixedSize) -gt 524288) { throw 'Rollout bundle exceeds bound.' }
 $codecPath = Join-Path $proofRoot 'transport_codec.py'
-& git -C $repo ls-files --error-unmatch tools/gateway-policy-proof/transport_codec.py *> $null
+& git -C $repo ls-files --error-unmatch tools/gateway_policy_proof/transport_codec.py *> $null
 $codecInfo = Get-Item -LiteralPath $codecPath
 if ($LASTEXITCODE -ne 0 -or $codecInfo.LinkType -or $codecInfo.PSIsContainer -or $codecInfo.Length -gt 65536) { throw 'Transport codec must be bounded tracked regular source.' }
 $codec = [IO.File]::ReadAllText($codecPath)

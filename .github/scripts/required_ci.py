@@ -43,7 +43,10 @@ def commit(repo, value):
 
 def forge_path(path):
     return (path.startswith((b".agents/", b"plugins/kanz-forge/"))
-            or path in {b"AGENTS.md", b"README.md", b".github/workflows/kanz-forge.yml",
+            or path.rsplit(b"/", 1)[-1].lower() == b"readme.md"
+            or path in {b"AGENTS.md", b"CONTRIBUTING.md", b".codex/config.toml",
+                        b"tools/check_readmes.py", b"tools/test_check_readmes.py",
+                        b".github/workflows/kanz-forge.yml",
                         b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py",
                         b".github/scripts/test_required_ci.py"})
 
@@ -51,7 +54,7 @@ def forge_path(path):
 def application_path(path):
     # Only known non-runtime material may skip application CI. Unknown new
     # directories run the suite until deliberately classified in this policy.
-    if path.startswith((b"kanz/", b"kanz-py/", b"kanz-web/", b"kanz-schemas/",
+    if path.startswith((b"kanz/", b"python/", b"web/", b"schemas/",
                         b"tools/", b".github/scripts/", b".github/actions/",
                         b".github/workflows/")):
         return True
@@ -63,13 +66,31 @@ def application_path(path):
 def position_reclaim_path(path):
     # Any new test publisher must participate before we know its eventual owner.
     # This adds proof; it does not alter application/native workflow scope.
-    return ((path.startswith(b"kanz/") and path.endswith(b"_test.go"))
-            or path.startswith((b"kanz/internal/bustest/", b"kanz/test/backing/position_reclaim/",
-                                b"kanz/internal/platform/subject/", b"kanz/pkg/bus/", b"kanz/services/oms/internal/",
-                                b"kanz-rs/crates/oms-store/", b"kanz-rs/crates/oms-recovery/", b"kanz/infra/nats/", b"kanz/internal/risk/state/",
-                                b"kanz/services/compliance/", b"kanz/services/webhook-ingest/internal/ingest/",
+    # The import check compiles all ./... packages. Both passes run the full
+    # internal and services trees. Keep those owners and pkg inputs, including
+    # embedded/runtime fixtures, prebuilt boundaries and running fixture owners.
+    # Cargo resolves workspace member manifests even for a selected package;
+    # unrelated member source does not belong to this fixture's build closure.
+    return ((path.startswith(b"kanz/") and path.endswith(b".go"))
+            or (path.startswith((b"rust/crates/", b"rust/services/")) and path.endswith(b"/Cargo.toml"))
+            or path.startswith((b"kanz/internal/", b"kanz/services/", b"kanz/pkg/", b"kanz/test/backing/position_reclaim/",
+                                b"rust/crates/oms_store/", b"rust/crates/oms_recovery/", b"kanz/infra/nats/",
+                                b"kanz/cmd/kanz_migrate/", b"kanz/cmd/kanz_halt/", b"kanz/test/mtls/",
+                                b"schemas/proto/", b".github/actions/setup_buf/",
+                                b"rust/src/", b"rust/crates/order_core/", b"rust/crates/proto_wire/", b"rust/crates/browser_render/",
+                                b"web/src/", b"web/public/", b"python/kanz_inference/", b"python/kanz_bus/",
                                 b".github/scripts/position_reclaim", b".github/scripts/test_position_reclaim"))
-            or path in {b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py", b"kanz/test/backing/nats-dev.conf"})
+            or path in {b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py", b".github/scripts/test_required_ci.py",
+                        b".github/scripts/go_test_evidence.py", b".github/scripts/go_shard_evidence.py",
+                        b"kanz/test/backing/nats-dev.conf", b"kanz/go.mod", b"kanz/go.sum", b"kanz/Makefile",
+                        b"kanz/infra/deploy/venue-binance-deploy.yaml", b"kanz/infra/deploy/venue-okx-deploy.yaml",
+                        b"kanz/infra/deploy/accounting-deploy.yaml",
+                        b"schemas/buf.yaml", b"schemas/buf.gen.yaml", b"schemas/bootstrap-go-sdk.sh",
+                        b"rust/Cargo.toml", b"rust/Cargo.lock", b"rust/rust-toolchain.toml", b"rust/build.rs",
+                        b"web/.nvmrc", b"web/package.json", b"web/package-lock.json", b"web/tsconfig.json",
+                        b"web/vite.config.ts", b"web/index.html", b"web/scripts/build-renderer.mjs",
+                        b"web/scripts/build-renderer.test.mjs", b"web/e2e/sessions.cjs", b"web/e2e/mfa.cjs",
+                        b"python/requirements.txt", b"python/requirements-codegen.txt"})
 
 
 def scope(repo, event_name, event, checked_sha, *, images=False, position_reclaim=False):
@@ -184,6 +205,8 @@ def forge_workflow(text):
                 if line.startswith("        run: ")]
     required = [
         "python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked",
+        "python3 -B tools/check_readmes.py --inventory",
+        "python3 -B -m unittest discover -s tools -p test_check_readmes.py -v",
         "python3 -B .agents/plugins/kanz-forge/scripts/provenance.py",
         "node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs",
         "python3 -B -m unittest discover -s .agents/plugins/kanz-forge/scripts -p 'test_*.py' -v",

@@ -518,7 +518,7 @@ class Sandbox:
             os.close(source_fd)
         source_fd=directory(source)
         try:
-            for name in ("kanz-schemas/gen/go","kanz-web/node_modules","kanz-web/dist"):
+            for name in ("schemas/gen/go","web/node_modules","web/dist"):
                 fd=public_parents(source_fd,name)
                 os.close(fd)
         finally: os.close(source_fd)

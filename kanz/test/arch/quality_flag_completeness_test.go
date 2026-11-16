@@ -12,7 +12,7 @@ import (
 // PRODUCER (#527).
 //
 // v1.QualityFlags is the slice every exhaustiveness sweep iterates —
-// TestProtoFlags_EveryAPIFlagMaps in services/risk-engine/internal/grpcsrv most
+// TestProtoFlags_EveryAPIFlagMaps in services/risk_engine/internal/grpcsrv most
 // of all, which is what stops the gRPC translation layer dropping a flag it was
 // never taught. That makes the slice a piece of enforcement machinery, and it is
 // hand-maintained, so it has the failure mode all hand-maintained inventories

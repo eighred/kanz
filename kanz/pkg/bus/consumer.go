@@ -135,7 +135,7 @@ func WithValidator(fn func(*envelopepb.Envelope) error) ConsumerOption {
 //
 // PARKED IS NOT LOST, AND THAT IS ONLY TRUE BECAUSE OF THE DRAIN. Parking acks
 // the original delivery, so the DLQ copy is the ONLY copy. Redriver /
-// cmd/kanz-redrive (#220) is what reads it back onto the original subject; for
+// cmd/kanz_redrive (#220) is what reads it back onto the original subject; for
 // the first several years of this subsystem nothing did, and a transient
 // failure on a capital-path command was therefore unrecoverable by any supplied
 // tool. test/arch/bus_dlq_test.go's TestTheDLQNamespaceHasAReader is what keeps

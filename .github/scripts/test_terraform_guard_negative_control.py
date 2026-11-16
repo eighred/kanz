@@ -12,7 +12,7 @@ import terraform_guard_negative_control as guard
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE = ROOT / "kanz/infra/terraform-testnet"
+MODULE = ROOT / "kanz/infra/terraform_testnet"
 
 
 def transcript(negative=False):

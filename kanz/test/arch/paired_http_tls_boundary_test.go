@@ -24,7 +24,7 @@ import (
 
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/pkg/transport"
-	"github.com/eighred/kanz/services/api-gateway/internal/config"
+	"github.com/eighred/kanz/services/api_gateway/internal/config"
 )
 
 // The secure endpoint runs the same authentication/signing/authorization router.
@@ -88,7 +88,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/eighred/kanz/services/web-bff/internal/edgeconfig"
+	"github.com/eighred/kanz/services/web_bff/internal/edgeconfig"
 )
 
 // This init-container mode reads no session, signing, OIDC or tunnel credentials.
@@ -257,11 +257,11 @@ func pairedHTTPFiles(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	for name, path := range map[string]string{
-		"bff_tls.go":        "services/api-gateway/cmd/api-gateway/bff_tls.go",
-		"edge.go":           "services/web-bff/cmd/web-bff/edge.go",
-		"web-main.go":       "services/web-bff/cmd/web-bff/main.go",
+		"bff_tls.go":        "services/api_gateway/cmd/api_gateway/bff_tls.go",
+		"edge.go":           "services/web_bff/cmd/web_bff/edge.go",
+		"web-main.go":       "services/web_bff/cmd/web_bff/main.go",
 		"gateway-main.go":   gatewayServerFile,
-		"gateway-config.go": "services/api-gateway/internal/config/config.go",
+		"gateway-config.go": "services/api_gateway/internal/config/config.go",
 	} {
 		b, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if e != nil {

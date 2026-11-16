@@ -2,20 +2,20 @@ name: k3s-cni-migration
 on:
   pull_request:
     paths:
-      - 'tools/cni-proof/**'
-      - 'tools/gateway-policy-proof/**'
-      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - 'tools/cni_proof/**'
+      - 'tools/gateway_policy_proof/**'
+      - 'kanz/infra/overlays/testnet_tokyo/**'
       - 'kanz/infra/security/runtime/**'
-      - 'tools/feed-identity/install.sh'
+      - 'tools/feed_identity/install.sh'
       - '.github/workflows/k3s-cni-migration.yml'
   push:
     branches: [main]
     paths:
-      - 'tools/cni-proof/**'
-      - 'tools/gateway-policy-proof/**'
-      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - 'tools/cni_proof/**'
+      - 'tools/gateway_policy_proof/**'
+      - 'kanz/infra/overlays/testnet_tokyo/**'
       - 'kanz/infra/security/runtime/**'
-      - 'tools/feed-identity/install.sh'
+      - 'tools/feed_identity/install.sh'
       - '.github/workflows/k3s-cni-migration.yml'
   workflow_dispatch:
     inputs:
@@ -38,9 +38,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
+      - run: python3 -B -m unittest discover -s tools/cni_proof -p 'test_*.py'
       - name: Prove storage PID1 graceful termination
-        run: python3 -B tools/cni-proof/storage_signal.py
+        run: python3 -B tools/cni_proof/storage_signal.py
       - name: Retain closed PID1 diagnostic
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -48,11 +48,11 @@ jobs:
           name: storage-pid1-diagnostic
           path: ${{ runner.temp }}/storage-pid1.json
           if-no-files-found: error
-      - run: bash tools/feed-identity/install.sh
+      - run: bash tools/feed_identity/install.sh
       - name: Preserve state through actual Flannel to Cilium and rollback
-        run: python3 -B tools/cni-proof/migration.py
+        run: python3 -B tools/cni_proof/migration.py
       - name: Verify exact source and all three rendered gateway phases
-        run: python3 -B tools/cni-proof/check_migration.py "$RUNNER_TEMP/k3s-cni-migration.json"
+        run: python3 -B tools/cni_proof/check_migration.py "$RUNNER_TEMP/k3s-cni-migration.json"
       - name: Remove only disposable fixture resources after interruption
         if: always()
         run: |
@@ -87,9 +87,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
+      - run: python3 -B -m unittest discover -s tools/cni_proof -p 'test_*.py'
       - name: Prove storage PID1 graceful termination
-        run: python3 -B tools/cni-proof/storage_signal.py
+        run: python3 -B tools/cni_proof/storage_signal.py
       - name: Retain closed PID1 diagnostic
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

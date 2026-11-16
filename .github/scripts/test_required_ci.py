@@ -67,6 +67,18 @@ class GitScopeTests(unittest.TestCase):
                 self.assertEqual(selected, {"application": True, "forge": True})
                 self.git("reset", "--hard", self.base)
 
+    def test_component_guides_checker_and_discovery_config_select_forge(self):
+        for name in ("docs/deep/README.md", "kanz/services/owner/README.md",
+                     "rust/README.md", "docs/readme.md", "CONTRIBUTING.md",
+                     "tools/check_readmes.py", "tools/test_check_readmes.py",
+                     ".codex/config.toml"):
+            with self.subTest(name=name):
+                self.write(name, "reviewed documentation input")
+                head = self.save()
+                selected, _ = policy.scope(self.repo, "push", {"before": self.base, "after": head}, head)
+                self.assertTrue(selected["forge"], name)
+                self.git("reset", "--hard", self.base)
+
     def test_plugin_exemption_does_not_hide_unknown_or_deleted_runtime(self):
         for name in (".agents/new-runtime.py", "plugins/kanz-forge/commands.py", ".agents/plugins/kanz-forge_other/app.py"):
             with self.subTest(name=name):
@@ -111,9 +123,9 @@ class GitScopeTests(unittest.TestCase):
     def test_policy_and_build_helpers_cannot_skip(self):
         for name in (
             ".github/scripts/required_ci.py", ".github/scripts/release_source.py",
-            ".github/actions/setup-buf/action.yml", ".github/workflows/kanz-ci.yml",
-            "tools/Initialize-TestnetPortfolio.ps1", "kanz-schemas/packaging/go/go.mod",
-            "new-runtime/entrypoint", "kanz-web/README.md",
+            ".github/actions/setup_buf/action.yml", ".github/workflows/kanz-ci.yml",
+            "tools/Initialize-TestnetPortfolio.ps1", "schemas/packaging/go/go.mod",
+            "new-runtime/entrypoint", "web/README.md",
         ):
             with self.subTest(name=name):
                 self.write(name, "fixture")
@@ -209,12 +221,80 @@ class GitScopeTests(unittest.TestCase):
         self.assertEqual(output_file.read_text(encoding="utf-8"), "application=false\nforge=true\nposition_reclaim=false\n")
 
     def test_position_proof_scope_is_derived_from_complete_source_diff(self):
-        for name in ("kanz/internal/new/publisher_test.go", "kanz/services/oms/internal/position/projector.go", "kanz-rs/crates/oms-store/src/projector.rs"):
-            self.write(name, "source input")
-            head = self.save()
-            selected, _ = policy.scope(self.repo, "push", {"before": self.base, "after": head}, head, position_reclaim=True)
-            self.assertTrue(selected["application"])
-            self.assertTrue(selected["position_reclaim"])
+        before = self.base
+        for name in ("kanz/internal/new/publisher_test.go", "kanz/services/oms/internal/position/projector.go",
+                     "rust/crates/oms_store/src/projector.rs", "kanz/go.mod", "schemas/proto/common/v1/decimal.proto",
+                     ".github/actions/setup_buf/action.yml", "rust/Cargo.lock", "rust/crates/order_core/build.rs",
+                     "rust/services/lake_snapshot/Cargo.toml", "web/package-lock.json", "web/src/main.ts",
+                     "web/e2e/mfa.cjs", "kanz/services/web_bff/cmd/web_bff/main.go",
+                     "kanz/services/oms/migrations/0001_orders.sql", "python/kanz_bus/consumer.py",
+                     ".github/scripts/go_shard_evidence.py", "kanz/internal/dec/dec.go", "kanz/cmd/kanz_altevent/main.go",
+                     "kanz/services/accounting/migrations/0001_ledger.sql", "kanz/services/web_bff/internal/edgeconfig/image.json",
+                     "kanz/internal/new/assets/checkpoint.bin", "kanz/infra/deploy/venue-binance-deploy.yaml"):
+            with self.subTest(path=name):
+                self.write(name, "source input")
+                head = self.save()
+                selected, _ = policy.scope(self.repo, "push", {"before": before, "after": head}, head, position_reclaim=True)
+                self.assertTrue(selected["application"])
+                self.assertTrue(selected["position_reclaim"])
+                # An earlier selected path must not mask the next missing edge.
+                before = head
+
+    def test_position_proof_selects_build_and_runtime_input_closure(self):
+        for name in (
+            "kanz/go.mod", "kanz/go.sum", "kanz/Makefile",
+            "kanz/internal/dec/dec.go", "kanz/cmd/kanz_altevent/main.go", "kanz/pkg/auth/authz.go",
+            "kanz/internal/new/assets/checkpoint.bin", "kanz/services/accounting/migrations/0001_ledger.sql",
+            "kanz/services/web_bff/internal/edgeconfig/image.json",
+            "kanz/infra/deploy/venue-binance-deploy.yaml", "kanz/infra/deploy/venue-okx-deploy.yaml",
+            "kanz/infra/deploy/accounting-deploy.yaml",
+            "kanz/services/oms/cmd/oms/main.go", "kanz/services/oms/migrations/0001_orders.sql",
+            "kanz/services/web_bff/internal/session/store.go", "kanz/cmd/kanz_migrate/main.go",
+            "kanz/cmd/kanz_halt/main.go", "kanz/internal/migrate/migrate.go", "kanz/test/mtls/up.sh",
+            "schemas/proto/common/v1/decimal.proto", "schemas/buf.yaml", "schemas/buf.gen.yaml",
+            "schemas/bootstrap-go-sdk.sh", ".github/actions/setup_buf/action.yml",
+            "rust/Cargo.toml", "rust/Cargo.lock", "rust/rust-toolchain.toml", "rust/build.rs", "rust/src/lib.rs",
+            "rust/crates/order_core/build.rs", "rust/crates/proto_wire/src/lib.rs", "rust/crates/browser_render/src/lib.rs",
+            "rust/crates/market_feed/Cargo.toml", "rust/services/lake_snapshot/Cargo.toml",
+            "web/.nvmrc", "web/package.json", "web/package-lock.json", "web/tsconfig.json", "web/vite.config.ts",
+            "web/index.html", "web/scripts/build-renderer.mjs", "web/scripts/build-renderer.test.mjs",
+            "web/src/views/PositionsView.vue", "web/public/fixture.svg", "web/e2e/sessions.cjs", "web/e2e/mfa.cjs",
+            "python/kanz_inference/__main__.py", "python/kanz_bus/consumer.py",
+            "python/requirements.txt", "python/requirements-codegen.txt",
+            ".github/scripts/go_test_evidence.py", ".github/scripts/go_shard_evidence.py", ".github/scripts/test_required_ci.py",
+        ):
+            with self.subTest(path=name):
+                self.assertTrue(policy.position_reclaim_path(name.encode()))
+                self.assertTrue(policy.application_path(name.encode()))
+
+    def test_position_proof_retains_deleted_or_renamed_build_input(self):
+        self.write("kanz/go.mod", "module fixture\n")
+        created = self.save()
+        self.git("mv", "kanz/go.mod", "moved-build-input.md")
+        moved = self.save()
+        selected, _ = policy.scope(self.repo, "push", {"before": created, "after": moved}, moved, position_reclaim=True)
+        self.assertTrue(selected["position_reclaim"])
+        self.write("rust/Cargo.lock", "lock fixture\n")
+        created = self.save()
+        self.git("rm", "rust/Cargo.lock")
+        deleted = self.save()
+        selected, _ = policy.scope(self.repo, "push", {"before": created, "after": deleted}, deleted, position_reclaim=True)
+        self.assertTrue(selected["position_reclaim"])
+
+    def test_position_proof_does_not_select_unrelated_member_source_or_packaging(self):
+        before = self.base
+        for name in ("rust/services/lake_snapshot/src/main.rs", "rust/services/bond_risk_shadow/src/main.rs",
+                     "rust/crates/market_feed/src/lib.rs", "rust/services/lake_snapshot/not-Cargo.toml",
+                     "julia/Manifest.toml", "schemas/packaging/python/pyproject.toml", "schemas/registry_ingest/main.py",
+                     "web/README.md", "web/e2e/browser-renderer.cjs", "python/tests/test_unrelated.py",
+                     "kanz/cmd/kanz_altevent/Dockerfile", "kanz/dev/README.md"):
+            with self.subTest(path=name):
+                self.assertFalse(policy.position_reclaim_path(name.encode()))
+                self.write(name, "unrelated input")
+                head = self.save()
+                selected, _ = policy.scope(self.repo, "push", {"before": before, "after": head}, head, position_reclaim=True)
+                self.assertFalse(selected["position_reclaim"])
+                before = head
 
 
 class AggregateTests(unittest.TestCase):
@@ -298,6 +378,8 @@ class WorkflowContractTests(unittest.TestCase):
                          ("    runs-on: ubuntu-latest", "    runs-on: windows-latest"),
                          ("run: node --test", "run: true # node --test"),
                          ("scripts/provenance.py", "scripts/provenance.py || true"),
+                         ("tools/check_readmes.py --inventory", "tools/check_readmes.py --disabled"),
+                         ("test_check_readmes.py -v", "missing_test.py -v"),
                          ("    steps:", "    if: false\n    steps:"),
                          ("    steps:", "    continue-on-error: true\n    steps:")):
             with self.subTest(old=old), self.assertRaises(ValueError):

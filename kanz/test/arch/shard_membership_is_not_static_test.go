@@ -15,7 +15,7 @@ import (
 
 // A STATIC SHARD MEMBER LIST AND AN AUTOSCALER CANNOT BOTH BE RIGHT (#110).
 //
-// services/risk-engine/internal/shard builds a consistent-hash ring from
+// services/risk_engine/internal/shard builds a consistent-hash ring from
 // RISK_ENGINE_SHARD_MEMBERS and places this replica on it with
 // RISK_ENGINE_SHARD_SELF. Ownership is a pure function of (members, self), and
 // it is only a PARTITION — every portfolio owned by exactly one replica — when

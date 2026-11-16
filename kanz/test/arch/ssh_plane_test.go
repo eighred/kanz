@@ -11,53 +11,8 @@ import (
 	"testing"
 )
 
-// THE SSH PLANE IS CANCELLED. This test is that decision, executable.
-//
-// KANZ_BRAIN.md (2026-07-16, lead): "THE ESTATE IS KUBERNETES-MANAGED. SSH-pushed
-// hosts are CANCELLED." The sovereign blueprint still describes, at length, an
-// operator TUI pushing pre-compiled binaries to host vectors over SSH pipelines.
-// The blueprint is now deleted; the quote is dated provenance for this guard,
-// not an instruction to recover it. An old SSH design can still arrive as an
-// import from someone implementing a historical spec in good faith.
-//
-// The same file names the failure mode this guards: "A decision whose stated
-// rationale names a thing that no longer exists is not a decision any more — it is
-// a fossil, and the next engineer will read it as a requirement." A prose
-// cancellation cannot fail a build. This can.
-//
-// WHY THIS IS NOT govulncheck'S JOB. security.yml runs govulncheck, which is
-// reachability-aware and fails on a vulnerable symbol actually being called. The
-// two answer different questions and neither subsumes the other:
-//
-//   - govulncheck asks "is a known CVE reachable today?" — a moving target keyed to
-//     what has been published. It goes green the day a CVE is patched, while the
-//     architectural decision still stands.
-//   - this asks "did the cancelled plane come back?" — which is true the moment the
-//     import lands, before any vulnerable symbol is called, and stays true whether
-//     or not x/crypto/ssh currently has an advisory.
-//
-// A file behind `//go:build binance` is invisible to `go list` (and so to
-// loadPackages) unless the tag is set; parsing sidesteps build tags entirely, so
-// this sees every file including tagged and _test.go ones. A test that dials SSH is
-// still the plane arriving.
-//
-// SIDE EFFECT WORTH KNOWING: 13 Dependabot alerts against golang.org/x/crypto/ssh
-// are held open-but-unreachable on the strength of this import not existing. That
-// dismissal is currently a claim someone re-verifies by hand; below, it is the
-// build's answer.
-//
-// SCOPE, HONESTLY. This is keyed to the NAME "ssh". It catches the family that says
-// so (golang.org/x/crypto/ssh, gliderlabs/ssh, and anything under them) and would
-// miss an SSH client that never spells it — github.com/pkg/sftp is SSH-based and
-// says "sftp"; a library named goph says neither. It is a tripwire on the known
-// family, not a proof of absence. Enumerating every SSH library by name would be a
-// blacklist, and a blacklist only blocks the spellings you thought of — this
-// codebase has shipped that bug twice (SEC-M5's suffix grouping, ONBOARD-M1's echo
-// blacklist, defeated by printf). Deny-by-default plus a reasoned allowlist is the
-// shape that does not decay.
-
 // sshImportAllowed is now PATH-SCOPED (S2a): golang.org/x/crypto/ssh is permitted
-// ONLY inside cmd/kanz-provisioner/, the one-shot Job that bootstraps a node's k3s
+// ONLY inside cmd/kanz_provisioner/, the one-shot Job that bootstraps a node's k3s
 // join over SSH. SSH returns to the estate at exactly this one point (KANZ_BRAIN.md,
 // "estate is Kubernetes-managed", refined 2026-07-24: the node-join handshake). The
 // same import ANYWHERE ELSE is still the cancelled operator plane arriving and
@@ -71,7 +26,7 @@ import (
 // the opposite of the reason this test exists: it is what makes the one permitted SSH
 // session verify WHO it is talking to. That session used to run with
 // ssh.InsecureIgnoreHostKey, so it piped K3S_TOKEN — cluster admission — to whatever
-// answered the dial (see cmd/kanz-provisioner/hostkey.go for the full account). This
+// answered the dial (see cmd/kanz_provisioner/hostkey.go for the full account). This
 // entry does not widen the plane by a single call site; it narrows the one that exists.
 //
 // It needs its own entry only because this map is keyed on the EXACT import path, which
@@ -80,8 +35,8 @@ import (
 // deny-by-default shape this file argues for. Removing the insecure callback without
 // this line leaves the build red, so the two changes belong together.
 var sshImportAllowed = map[string]string{
-	"golang.org/x/crypto/ssh":            "cmd/kanz-provisioner/",
-	"golang.org/x/crypto/ssh/knownhosts": "cmd/kanz-provisioner/",
+	"golang.org/x/crypto/ssh":            "cmd/kanz_provisioner/",
+	"golang.org/x/crypto/ssh/knownhosts": "cmd/kanz_provisioner/",
 }
 
 func TestNoSSHPlane(t *testing.T) {
@@ -179,7 +134,7 @@ func TestNoSSHPlane(t *testing.T) {
 			"on this point.\n\n" +
 			"For node deployment or tenant revocation, inspect AGENTS.md, this guard,\n" +
 			"and the current operator code and Issues. The node-join SSH exception is\n" +
-			"limited to cmd/kanz-provisioner; tenant revocation remains incomplete (#108).\n\n" +
+			"limited to cmd/kanz_provisioner; tenant revocation remains incomplete (#108).\n\n" +
 			"If this import is genuinely not the operator plane returning, add it to\n" +
 			"sshImportAllowed with the reason why. Reviving the SSH plane is a lead decision\n" +
 			"recorded in an Issue with an updated guard — it is not a test edit alone.")

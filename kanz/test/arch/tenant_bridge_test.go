@@ -68,7 +68,7 @@ var bridgedSubjects = []string{"order.order.submit", "order.order.cancel", "orde
 // platformWideImports are the subjects every tenant account imports UNPREFIXED,
 // because there is exactly one of them for the whole estate (#635).
 //
-// platform.mode.changed is the kill switch. cmd/kanz-halt publishes ONE FACT,
+// platform.mode.changed is the kill switch. cmd/kanz_halt publishes ONE FACT,
 // once, and every account that runs an order path must receive THAT one — a
 // per-tenant copy would mean an operator's break-glass command reached the
 // platform account and no other, which is the failure #635 exists to close.

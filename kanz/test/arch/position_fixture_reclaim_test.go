@@ -384,7 +384,7 @@ func (p *positionFixtureProgram) checkBody(body *ast.BlockStmt, owner positionFi
 func (p *positionFixtureProgram) check() (map[string]bool, []string) {
 	inventory, problems := map[string]bool{}, []string{}
 	for path, file := range p.files {
-		if p.foreignRecoveryHasNoPositionEdge && (strings.HasPrefix(path, "services/oms/tools/recovery-conformance/") || path == "services/accounting/internal/consume/recovery_integration_test.go") {
+		if p.foreignRecoveryHasNoPositionEdge && (strings.HasPrefix(path, "services/oms/tools/recovery_conformance/") || path == "services/accounting/internal/consume/recovery_integration_test.go") {
 			continue
 		}
 		candidate := positionFixtureCandidate(file)
@@ -468,11 +468,14 @@ func (p *positionFixtureProgram) reachesPositionFixture(owner positionFixtureFun
 // absence of a runtime edge, not an exemption for a tools directory. Bind every
 // current caller, native producer and admission/configuration source byte. A new
 // file or any changed input removes the classification and requires review.
+// Main 4342bb41 moves 33 of these 38 paths; 37 file bodies are unchanged and
+// OMS main changes only a comment's source path. The tenant/admission premise
+// below is retained; the digest binds the reviewed new names and exact bytes.
 func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 	t.Helper()
 	repo := filepath.Join(root, "..")
 	paths := []string{"kanz/internal/fillfact/recovery.go", "kanz/services/oms/internal/position/projector.go", "kanz/services/oms/cmd/oms/main.go", "kanz/services/oms/internal/config/config.go", "kanz/services/accounting/internal/consume/recovery_integration_test.go"}
-	for _, owner := range []struct{ dir, suffix string }{{"kanz/services/oms/tools/recovery-conformance", "_test.go"}, {"kanz-rs/crates/oms-recovery/src", ".rs"}} {
+	for _, owner := range []struct{ dir, suffix string }{{"kanz/services/oms/tools/recovery_conformance", "_test.go"}, {"rust/crates/oms_recovery/src", ".rs"}} {
 		if err := filepath.WalkDir(filepath.Join(repo, owner.dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -501,7 +504,7 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 		_, _ = h.Write([]byte(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 		_, _ = h.Write([]byte{0})
 	}
-	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "add94ba2891da84f64fe0c56535ae4375613bfc50897ed6d5d3a2636e0f58ba9" {
+	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "5b6e77c274b410b6301df0422e2a79e9909b259d69c2ed1bf5643419f87245d7" {
 		return false
 	}
 	workflow, err := os.ReadFile(filepath.Join(repo, ".github/workflows/kanz-ci.yml"))
@@ -516,7 +519,7 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 	if strings.Count(step, "OMS_TENANT=__system__") != 1 || !strings.Contains(step, "/tmp/oms > /tmp/oms.log") {
 		return false
 	}
-	t.Log("foreign recovery owners have no POSITION admission edge: 38 unchanged reviewed source files, exact recovery tenancy, system fixture")
+	t.Log("foreign recovery owners have no POSITION admission edge: 38 exact reviewed source files, exact recovery tenancy, system fixture")
 	return true
 }
 
@@ -626,10 +629,10 @@ func TestPositionPublishersRegisterOwnedCleanup(t *testing.T) {
 		"services/compliance/internal/monitor/position_identity_integration_test.go", "services/compliance/internal/monitor/position_time_integration_test.go",
 		"services/compliance/cmd/compliance/lifecycle_integration_test.go", "services/compliance/cmd/compliance/reevaluate_snapshot_integration_test.go",
 		"services/oms/internal/position/publish_order_integration_test.go", "services/oms/internal/position/recovery_integration_test.go",
-		"services/oms/tools/store-conformance/position_test.go", "services/oms/tools/store-conformance/projector_test.go",
-		"services/webhook-ingest/internal/ingest/positions_nats_test.go", "services/webhook-ingest/internal/ingest/positions_unknown_nats_test.go",
-		"services/webhook-ingest/internal/ingest/integration_test.go", "services/webhook-ingest/internal/ingest/large_notional_integration_test.go", "services/webhook-ingest/internal/ingest/domain_boundary_integration_test.go",
-		"services/venue-binance/internal/binance/binance_overfill_broker_test.go", "services/venue-binance/internal/binance/execution_price_domain_test.go", "services/venue-okx/internal/okx/execution_price_domain_test.go",
+		"services/oms/tools/store_conformance/position_test.go", "services/oms/tools/store_conformance/projector_test.go",
+		"services/webhook_ingest/internal/ingest/positions_nats_test.go", "services/webhook_ingest/internal/ingest/positions_unknown_nats_test.go",
+		"services/webhook_ingest/internal/ingest/integration_test.go", "services/webhook_ingest/internal/ingest/large_notional_integration_test.go", "services/webhook_ingest/internal/ingest/domain_boundary_integration_test.go",
+		"services/venue_binance/internal/binance/binance_overfill_broker_test.go", "services/venue_binance/internal/binance/execution_price_domain_test.go", "services/venue_okx/internal/okx/execution_price_domain_test.go",
 		"services/oms/internal/order/recovery_service_test.go",
 	}
 	known := map[string]bool{}
@@ -655,7 +658,7 @@ func TestPositionPublishersRegisterOwnedCleanup(t *testing.T) {
 		p.foreignRecoveryHasNoPositionEdge = true
 		foreign, accounting := false, false
 		for _, problem := range unqualified {
-			foreign = foreign || strings.Contains(problem, "services/oms/tools/recovery-conformance/")
+			foreign = foreign || strings.Contains(problem, "services/oms/tools/recovery_conformance/")
 			accounting = accounting || strings.Contains(problem, "services/accounting/internal/consume/recovery_integration_test.go")
 		}
 		if !foreign || !accounting {

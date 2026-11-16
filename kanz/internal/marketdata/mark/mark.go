@@ -6,8 +6,8 @@
 // something right now — tv-sync's unrealized P&L, and the OMS pre-trade gate
 // valuing a MARKET order at admission.
 //
-// Lifted from services/tv-sync/internal/markfeed, which could not be shared:
-// Go's internal rule makes a package under services/tv-sync/internal reachable
+// Lifted from services/tv_sync/internal/markfeed, which could not be shared:
+// Go's internal rule makes a package under services/tv_sync/internal reachable
 // only from tv-sync, so the OMS could not have reused it where it sat.
 //
 // STALENESS IS THE PART THAT IS NEW, and it is why this is not just a move. A
@@ -353,7 +353,7 @@ func (s *Source) sweepLocked() {
 //
 // WHICH VARIANT AN event_type ANNOUNCES IS NOT THIS FOLD'S QUESTION, and it is
 // no longer answered here: eventtype.Of owns the taxonomy
-// services/market-data/internal/feed/bussink.go stamps, and its own test
+// services/market_data/internal/feed/bussink.go stamps, and its own test
 // derives the variant tokens from the MarketDataEvent oneof descriptor rather
 // than restating them. What IS this fold's question is which of those variants
 // a MARK can be taken from, and that is the switch below — a Trade and a Quote,

@@ -47,7 +47,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: nats-rebuild
-          # Built from kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
+          # Built from kanz/tools/natsrebuild/cmd/nats_rebuild/Dockerfile
           # (distroless static), by both build.yml's and release.yml's image
           # matrices — service: nats-rebuild is present in each. The :latest
           # tag below and its mutableTagExempt entry in

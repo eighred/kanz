@@ -132,7 +132,7 @@ func (k *KafkaClient) Publish(ctx context.Context, msg Message) error {
 // not read past it — see the handler-error branch below for why the alternative
 // loses events permanently. The caller gets a non-nil error naming the topic,
 // partition and offset it stopped on; both Kafka callers already treat that as
-// fatal to the process (services/lake-sink/cmd/lake-sink/main.go runSink,
+// fatal to the process (services/lake_sink/cmd/lake_sink/main.go runSink,
 // which cancels its sibling subscriptions and returns).
 func (k *KafkaClient) Subscribe(ctx context.Context, topic, group string, h Handler) error {
 	r := kafka.NewReader(kafka.ReaderConfig{

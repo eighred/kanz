@@ -18,7 +18,7 @@ import (
 // #1413 permits this bounded, local analytic shadow only. These lexical and
 // exact-recipe checks are not a Rust AST or transitive dependency audit. Runtime
 // numerical/oracle tests and the Go authority boundary remain separate proofs.
-const rustBondShadowPath = "services/bond-risk-shadow"
+const rustBondShadowPath = "services/bond_risk_shadow"
 
 var rustBondShadowSources = []string{"build.rs", "src/main.rs", "src/lib.rs", "src/decimal.rs"}
 
@@ -42,7 +42,7 @@ prost-build = "=0.14.1"
 protoc-bin-vendored = "=3.2.0"`
 
 const rustBondShadowBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = "../../../kanz-schemas/proto";
+    let root = "../../../schemas/proto";
     for file in [
         "quant/v1/bond_risk.proto",
         "reference/v1/fixed_income.proto",
@@ -188,12 +188,12 @@ func checkRustBondShadowBoundary(root string) error {
 }
 
 func TestRustBondShadowBoundary(t *testing.T) {
-	if err := checkRustBondShadowBoundary(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")); err != nil {
+	if err := checkRustBondShadowBoundary(filepath.Join(filepath.Dir(moduleRoot(t)), "rust")); err != nil {
 		t.Fatal(err)
 	}
 }
 func TestRustBondShadowBoundaryMutations(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
 	for _, tc := range []struct{ name, path, old, replacement string }{
 		{"dependency", "Cargo.toml", "prost =", "reqwest = \"1\"\nprost ="},
 		{"sidecar", "src/authority.rs", "", "fn start() {}"},
@@ -257,9 +257,9 @@ func TestRustBondShadowBoundaryMutations(t *testing.T) {
 // data-flow proof. Parsing drops comments so an inert example cannot satisfy it.
 var bondCloneOwners = []struct{ path, function, call string }{
 	{"internal/risk/termsource/provider.go", "toBondSpec", "CanonicalTerms: pricing.CloneBoundedBondTerms(b)"},
-	{"services/risk-engine/internal/replay/providers.go", "BondTerms", "a.Value.CanonicalTerms = pricing.CloneBoundedBondTerms(a.Value.CanonicalTerms)"},
+	{"services/risk_engine/internal/replay/providers.go", "BondTerms", "a.Value.CanonicalTerms = pricing.CloneBoundedBondTerms(a.Value.CanonicalTerms)"},
 	{"internal/risk/compute/fi.go", "positionBondRisk", "canonical = pricing.CloneBoundedBondTerms(spec.CanonicalTerms)"},
-	{"services/risk-engine/internal/bondshadow/worker.go", "Submit", "c.Terms = pricing.CloneBoundedBondTerms(c.Terms)"},
+	{"services/risk_engine/internal/bondshadow/worker.go", "Submit", "c.Terms = pricing.CloneBoundedBondTerms(c.Terms)"},
 	{"internal/risk/pricing/bond_projection.go", "ProjectBondRisk", "terms = CloneBoundedBondTerms(terms)"},
 }
 

@@ -1,12 +1,13 @@
 # Backstage portal (DEVX-01c)
 
-The internal developer portal: a single place to find every Kanz service, its
-owner, its runbooks, and its schemas — and to create a new service on-convention.
+Catalog and scaffolder templates for an optional internal developer portal.
+They describe service ownership and schemas and call the same service generator
+as the CLI. A registered catalog is an index, not operational acceptance.
 
 ## Files
 
 - `catalog-info.yaml` — the software catalog: the `kanz` System, one Component
-  per service (owner + source + TechDocs links), and the `risk-query-v1` API.
+  per service (owner and source links), and the `risk-query-v1` API.
   Register it via Backstage `catalog.locations`.
 - `template.yaml` — the "New Kanz service" software template. It runs the
   DEVX-01b scaffold generator and opens a PR, so the portal and the CLI produce
@@ -24,20 +25,18 @@ owner, its runbooks, and its schemas — and to create a new service on-conventi
 Backstage is the human index; the lineage service (LIN-01) and the schema
 registry (EVT-16) remain the live sources of truth.
 
-## Runbooks are NOT surfaced here, and were never rendered
+## Setup and limits
 
-Two Components carried `backstage.io/techdocs-ref: dir:../../docs/runbooks`.
-TechDocs renders an mkdocs site, and that directory never contained an
-`mkdocs.yml` — `git log --all --diff-filter=A` finds no such file anywhere in
-this repository's history — so the annotation named a facet the portal could not
-build. The table above claimed it worked.
+This directory supplies catalog and scaffolder templates, not a bundled or
+verified Backstage server. Register `catalog-info.yaml` and `template.yaml` in
+an existing approved Backstage deployment. The template's `run:command` action
+must be installed and allowed by that deployment; source alone does not prove
+portal execution or PR publishing authority.
 
-The `docs/` tree was retired on 2026-08-26: runbooks now live in the README of
-the component each one is about (`infra/observability/alerts/` for the generic
-pages, `infra/nats/`, `infra/dr/`, `infra/tenancy/`, `services/autopilot/`,
-`services/audit/`). The annotations were removed rather than repointed, because
-repointing a pointer that never resolved would preserve the appearance of a
-working integration.
+The generator runs in the `kanz/` Go module and maps a deployed `my-service`
+identity to `services/my_service/cmd/my_service/`. Test it independently with
+`go test -p 1 ./tools/scaffold/... -count=1` from `kanz/`.
 
-Restoring runbooks in the portal needs a TechDocs source — an `mkdocs.yml` and a
-docs tree it names — which is a decision about publishing, not a path edit.
+Component runbooks remain in their READMEs. There is no configured TechDocs
+site or rendered runbook integration here; restoring it needs a real publishing
+owner and source, not an annotation pointing at a nonexistent docs tree.

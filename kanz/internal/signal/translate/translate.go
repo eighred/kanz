@@ -2,7 +2,7 @@
 // commands, shared by every brain that can produce a signal.
 //
 // Kanz is a hybrid brain: signals arrive from external proprietary strategies
-// (TradingView webhooks, via services/webhook-ingest) and from Kanz's own native
+// (TradingView webhooks, via services/webhook_ingest) and from Kanz's own native
 // alpha engines (the off-bus L2 book, via pkg/alpha). Both must reach the venues
 // through the SAME gates — a second, parallel fan-out would be a second execution
 // path that the OMS's pre-trade compliance and risk checks could drift away from.

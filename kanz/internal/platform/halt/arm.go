@@ -111,7 +111,7 @@ func Arm(ctx context.Context, sub Subscriber, gate *Gate, logger *slog.Logger) (
 		// DENY-BY-DEFAULT SURVIVES ARMING, and this line is the only thing that
 		// makes it visible. A broker with no ModeChanged ever published arms
 		// instantly with nothing delivered, which leaves the gate exactly as
-		// NewGate built it: closed. That is the deployment sign-off cmd/kanz-halt
+		// NewGate built it: closed. That is the deployment sign-off cmd/kanz_halt
 		// documents — bringing the platform live is an explicit, attributable act
 		// — and without this WARN it looks identical to a healthy start.
 		if gate.Halted() {

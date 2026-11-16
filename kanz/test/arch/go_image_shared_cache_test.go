@@ -228,7 +228,7 @@ func TestGoImagesImportSharedDependenciesWithoutSharedWrites(t *testing.T) {
 	}
 	path := "kanz/services/accounting/Dockerfile"
 	original := files[path]
-	for _, m := range [][2]string{{"ENV GOFLAGS=-mod=mod", "ENV GOFLAGS=-mod=readonly"}, {"COPY kanz/go.mod kanz/go.sum ./kanz/", "COPY kanz/go.mod ./kanz/"}, {"COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/", "# omitted SDK"}} {
+	for _, m := range [][2]string{{"ENV GOFLAGS=-mod=mod", "ENV GOFLAGS=-mod=readonly"}, {"COPY kanz/go.mod kanz/go.sum ./kanz/", "COPY kanz/go.mod ./kanz/"}, {"COPY schemas/gen/go/ /src/schemas/gen/go/", "# omitted SDK"}} {
 		files[path] = strings.Replace(original, m[0], m[1], 1)
 		if files[path] == original {
 			t.Fatal("mutation did not apply")

@@ -28,7 +28,7 @@ import (
 const (
 	handoffStoreRel = "../../internal/risk/state/ownership.go"
 	handoffCacheRel = "../../internal/risk/degraded.go"
-	handoffMainRel  = "../../services/risk-engine/cmd/risk-engine/main.go"
+	handoffMainRel  = "../../services/risk_engine/cmd/risk_engine/main.go"
 )
 
 // TestReleaseNotifiesTheReleaseObserver holds the producer end.

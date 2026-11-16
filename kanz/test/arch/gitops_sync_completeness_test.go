@@ -167,7 +167,7 @@ var syncSurfaceExempt = map[string]string{
 
 	"controllers": "BOOTSTRAP CONTROL PLANES, APPLIED BY PINNED INSTALLERS. A controller cannot " +
 		"reconcile the custom resources that declare its own installation before its CRDs and process " +
-		"exist. infra/controllers/argo-rollouts is checksum-verified and installed through " +
+		"exist. infra/controllers/argo_rollouts is checksum-verified and installed through " +
 		"tools/Install-TestnetArgoRollouts.ps1; #1101 retires this exemption only after an independent " +
 		"cluster bootstrap reconciler owns that dependency order.",
 
@@ -204,7 +204,7 @@ var syncSurfaceExempt = map[string]string{
 		"on its own, and not as a side effect of an observability fix.",
 
 	"overlays": "EXPLICIT TESTNET PROMOTION BOUNDARIES, NOT A PRODUCTION APPLICATIONSET COMPONENT. " +
-		"infra/overlays/testnet-tokyo binds one reviewed release to the cost-bounded Tokyo cluster and " +
+		"infra/overlays/testnet_tokyo binds one reviewed release to the cost-bounded Tokyo cluster and " +
 		"is applied only after external dependency and DR gates pass. #1098 owns its server-side " +
 		"apply, rollback, and eventual GitOps registration; auto-syncing it now would bypass those gates.",
 

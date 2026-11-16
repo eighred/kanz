@@ -138,7 +138,7 @@ func (r *ModelRegistry) Arm() {
 		r.logger.Warn("model catalogue armed with NO models — every household's drift is UNEVALUABLE "+
 			"and no rebalance will ever be flagged",
 			"subject", SubjectModelAll,
-			"fix", "publish a model portfolio per risk profile with cmd/kanz-model",
+			"fix", "publish a model portfolio per risk profile with cmd/kanz_model",
 			"rejected", rejects)
 		return
 	}

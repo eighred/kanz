@@ -346,7 +346,7 @@ spec:
             # compares the two records — the escalation is invisible in exactly the trail
             # an auditor would read. validateAuth refuses to start on it.
             #
-            # UNTIL BOTH ARE SET, cmd/kanz-mandate is the only way to change a mandate in
+            # UNTIL BOTH ARE SET, cmd/kanz_mandate is the only way to change a mandate in
             # this deployment, and it takes two INVOCATIONS rather than two people: both
             # run under one operator's SVID, so a unilateral change is detectable in the
             # trail and not prevented. That is the state #562 exists to end, and it ends

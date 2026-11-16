@@ -18,7 +18,7 @@
 // is true now and what each earlier version got wrong, rather than being
 // rewritten clean.
 //
-// WIRED: services/risk-engine/internal/app/model_registry.go constructs a
+// WIRED: services/risk_engine/internal/app/model_registry.go constructs a
 // CoordinatedRegistry over BusFollower and folds platform.model.registered from
 // the oldest retained entry, for the life of the process. risk-engine publishes
 // a FeatureVector on portfolio-risk:1 on every recompute, and the question
@@ -46,16 +46,16 @@
 //   - "The other two thirds are already wired" — false. The feature publisher
 //     was wired; the inference client never has been (corrected 2026-08-15).
 //   - "platform.model is not a declared subject, the topic table removed it, and
-//     kanz-py's RegistryPublisher is a Protocol with no implementation" — all
+//     python's RegistryPublisher is a Protocol with no implementation" — all
 //     three false since #504: inference.v1.ModelRegistryEvent is the shared wire
 //     contract, BusRegistryPublisher publishes it on platform.model.registered,
 //     and the Kafka topic plus the publish grant are provisioned.
 //   - "What it needs is a composition root" — true only of the last step, and
 //     the sequencing that actually mattered was producer, then topic, then this.
 //
-// # The registrar is kanz-py; a Go replica FOLLOWS
+// # The registrar is python; a Go replica FOLLOWS
 //
-// kanz-py holds the weights and runs the MLOPS-01a validation, so it is the only
+// python holds the weights and runs the MLOPS-01a validation, so it is the only
 // thing that may write the log. BusFollower's Publish refuses with
 // ErrNotRegistrar rather than succeeding locally and being denied by the broker
 // at runtime — the failure shape this estate keeps rediscovering as "the feature
@@ -158,7 +158,7 @@ type Metadata struct {
 // codec would have removed the only thing that makes the gate mean anything over
 // time — so they are carried.
 //
-// WHAT DOES NOT HAPPEN HERE IS RE-GATING ON THEM. The registrar (kanz-py) ran
+// WHAT DOES NOT HAPPEN HERE IS RE-GATING ON THEM. The registrar (python) ran
 // the gate when it published; a Go follower that re-ran it against its own clock
 // would REFUSE a promotion the registrar allowed the moment an expiry fell
 // between the publish and the replay, and the two registries would then disagree

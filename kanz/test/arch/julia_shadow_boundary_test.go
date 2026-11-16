@@ -96,7 +96,7 @@ func juliaBoundarySources(t *testing.T) map[string]string {
 	t.Helper()
 	root := moduleRoot(t)
 	files := map[string]string{}
-	paths := map[string]string{"main": "services/risk-engine/cmd/risk-engine/main.go", "builder": "services/risk-engine/cmd/risk-engine/julia_shadow.go", "calibrate": "internal/risk/pricing/curve/calibrate.go", "ratesource": "internal/risk/pricing/livequote/ratesource.go"}
+	paths := map[string]string{"main": "services/risk_engine/cmd/risk_engine/main.go", "builder": "services/risk_engine/cmd/risk_engine/julia_shadow.go", "calibrate": "internal/risk/pricing/curve/calibrate.go", "ratesource": "internal/risk/pricing/livequote/ratesource.go"}
 	processRoot := "internal/shadowprocess"
 	processEntries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(processRoot)))
 	if err != nil {
@@ -107,7 +107,7 @@ func juliaBoundarySources(t *testing.T) map[string]string {
 			paths["process/"+e.Name()] = processRoot + "/" + e.Name()
 		}
 	}
-	worker := "services/risk-engine/internal/calibrationshadow"
+	worker := "services/risk_engine/internal/calibrationshadow"
 	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(worker)))
 	if err != nil {
 		t.Fatal(err)

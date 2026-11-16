@@ -32,7 +32,7 @@ import (
 // doc for why. A committed copy is only safe because nothing hand-maintains
 // it: this guard re-renders EVERY committed tenant manifest from the LIVE
 // base (infra/deploy/oms-deploy.yaml) via the exact same
-// internal/tenantgen.Render used by cmd/kanz-tenantgen, and diffs the WHOLE
+// internal/tenantgen.Render used by cmd/kanz_tenantgen, and diffs the WHOLE
 // document byte-for-byte. A base gaining a new env var, volume, or field
 // becomes a CI failure here, not a silently divergent tenant — and because
 // the diff is over the entire rendered output, not a blacklist of fields
@@ -232,7 +232,7 @@ func TestTenantComputeGuard(t *testing.T) {
 			if err != nil {
 				problems = append(problems, fmt.Sprintf(
 					"infra/deploy/tenants/%s has no %s-%s.yaml (%v).\n      %s\n      Render it: "+
-						"go run ./cmd/kanz-tenantgen -tenant %s, then commit the result.",
+						"go run ./cmd/kanz_tenantgen -tenant %s, then commit the result.",
 					tenant, svc.Name, tenant, err, svc.Why, tenant))
 				continue
 			}
@@ -253,7 +253,7 @@ func TestTenantComputeGuard(t *testing.T) {
 				problems = append(problems, fmt.Sprintf(
 					"infra/deploy/tenants/%s/%s-%s.yaml has DRIFTED from %s — "+
 						"the committed manifest no longer matches what internal/tenantgen.Render produces from the live "+
-						"base. Re-run: go run ./cmd/kanz-tenantgen -tenant %s, then commit the result.",
+						"base. Re-run: go run ./cmd/kanz_tenantgen -tenant %s, then commit the result.",
 					tenant, svc.Name, tenant, svc.Base, tenant))
 				continue
 			}

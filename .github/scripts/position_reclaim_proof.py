@@ -24,10 +24,10 @@ import types
 import uuid
 
 # Bind unchanged host-side evidence consumers before importing them. Pins are
-# their tracked LF bytes at canonical main 72370e66 (not a mutable Python path).
+# their tracked LF bytes at canonical main 4342bb41 (not a mutable Python path).
 EVIDENCE_PINS={
     "go_test_evidence.py":"7cc929b153cf8446def7ef80d723808e1f077e64d454512e12886109e821b5ad",
-    "go_shard_evidence.py":"d6539503f5dc992d4531cc85aa0d65f0f2353f2b6ba76468a07237e6448206ea",
+    "go_shard_evidence.py":"6728b46b990d6c3d39c18f125f346407a11e9bc2d136a857655f49a6be97dcce",
 }
 for _name,_expected in EVIDENCE_PINS.items():
     _path=Path(__file__).resolve().with_name(_name)
@@ -49,7 +49,7 @@ from go_test_evidence import check, events
 from position_reclaim_sandbox import Sandbox, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS
 
 PREFIX = "github.com/eighred/kanz/"
-STORE = PREFIX+"services/oms/tools/store-conformance"
+STORE = PREFIX+"services/oms/tools/store_conformance"
 CONTROL = PREFIX+"internal/bustest"
 HELPERS={CONTROL,CONTROL+"/positionfixture"}
 CONTROLLER = "./test/backing/position_reclaim"
@@ -66,13 +66,13 @@ DISPATCH_UNIT_TESTS.update(DISPATCH_UNIT_ROOTS[0]+"/"+backend+"/"+field for back
 DISPATCH_UNIT_TESTS.update(DISPATCH_UNIT_ROOTS[4]+"/"+name for name in ("success","handler-failure","retained-failure","parked","park-failure","backoff-canceled"))
 DISPATCH_UNIT_TESTS.update(DISPATCH_UNIT_ROOTS[5]+"/"+name for name in ("disabled","typed-nil","redis-failure","empty-key"))
 CAUSAL_CASES={
-    (PREFIX+"services/webhook-ingest/internal/ingest",name) for name in (
+    (PREFIX+"services/webhook_ingest/internal/ingest",name) for name in (
         "TestIntegration_LoopOverNATS","TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres",
         "TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming")
 } | {
-    (PREFIX+"services/venue-binance/internal/binance","TestOverfillReachesNoBroker"),
-    (PREFIX+"services/venue-binance/internal/binance","TestExecutedPriceRefusalReachesNoBroker"),
-    (PREFIX+"services/venue-okx/internal/okx","TestExecutedPriceAndSignedFeesOnRealBroker"),
+    (PREFIX+"services/venue_binance/internal/binance","TestOverfillReachesNoBroker"),
+    (PREFIX+"services/venue_binance/internal/binance","TestExecutedPriceRefusalReachesNoBroker"),
+    (PREFIX+"services/venue_okx/internal/okx","TestExecutedPriceAndSignedFeesOnRealBroker"),
     (PREFIX+"services/oms/internal/order","TestRecoveryHandlerRestartsAtFrozenEvidenceOverRealBroker"),
 }
 ALLOW = (
@@ -268,7 +268,7 @@ class Proof:
         # These are trusted tool inspections/downloaded inputs, not source builds.
         go=Path(self.args.go).resolve()
         go_env=json.loads(subprocess.check_output([str(go),"env","-json","GOROOT","GOMODCACHE","GOVERSION","GOOS","GOARCH","CGO_ENABLED"],env=dict(SAFE,GOTOOLCHAIN="local",GOMODCACHE=self.args.gomodcache)))
-        if go_env["GOVERSION"]!="go1.26.10" or go_env["GOOS"]!="linux" or go_env["GOARCH"]!="amd64" or go_env["CGO_ENABLED"]!="1": raise ValueError("actual pinned Go Linux/cgo toolchain differs")
+        if go_env["GOVERSION"]!="go1.26.11" or go_env["GOOS"]!="linux" or go_env["GOARCH"]!="amd64" or go_env["CGO_ENABLED"]!="1": raise ValueError("actual pinned Go Linux/cgo toolchain differs")
         rust=Path(self.args.rustc).resolve().parent.parent
         rust_version=host(str(rust/"bin/rustc"),"--version").decode().strip()
         if not rust_version.startswith("rustc 1.90.0 "): raise ValueError("actual reviewed Rust compiler differs")
@@ -277,9 +277,9 @@ class Proof:
         if pg!=b"kanzapp|f|f": raise ValueError("actual database principal bypasses tenant RLS")
         tools=[(go_env["GOROOT"],"/tool/go"),(rust,"/tool/rust"),(node,"/tool/node"),
                (go_env["GOMODCACHE"],"/deps/gomod"),(Path(self.args.cargo_home)/"registry","/scratch/cargo/registry"),
-               (self.repo/"kanz-schemas/gen/go","/input/kanz-schemas/gen/go"),
-               (self.repo/"kanz-web/node_modules","/input/kanz-web/node_modules"),
-               (self.repo/"kanz-web/dist","/input/kanz-web/dist"),
+               (self.repo/"schemas/gen/go","/input/schemas/gen/go"),
+               (self.repo/"web/node_modules","/input/web/node_modules"),
+               (self.repo/"web/dist","/input/web/dist"),
                (Path(self.args.browser),"/deps/browser"),(os.environ["TEST_MFA_BFF"],"/fixture/mfa-web-bff"),
                ("/tmp/kanz-mtls","/fixture/mtls")]
         env={"PATH":"/tool/go/bin:/tool/rust/bin:/tool/node/bin:/usr/bin:/bin","LANG":"C.UTF-8","HOME":"/scratch/home","TMPDIR":"/scratch/tmp","GOTMPDIR":"/scratch/tmp","GOCACHE":"/scratch/cache","GOMODCACHE":"/deps/gomod","GOPATH":"/scratch/go","GOTOOLCHAIN":"local","GOPROXY":"off","GOFLAGS":"-mod=readonly -p=1","GOMAXPROCS":"2","CARGO_HOME":"/scratch/cargo","CARGO_TARGET_DIR":"/scratch/rust-target","CARGO_NET_OFFLINE":"true","KANZ_BUILD_VERSION":self.source["sha"],"PLAYWRIGHT_BROWSERS_PATH":"/deps/browser","CI":"true","CGO_ENABLED":"1","GITHUB_ACTIONS":"true","GITHUB_SHA":self.source["sha"],"GITHUB_RUN_ID":self.source["run"],"GITHUB_RUN_ATTEMPT":self.source["attempt"],"GIT_CONFIG_COUNT":"1","GIT_CONFIG_KEY_0":"safe.directory","GIT_CONFIG_VALUE_0":"/input"}
@@ -287,7 +287,7 @@ class Proof:
         # The unchanged native fixture deliberately accepts numeric loopback
         # only. Both names reach the same fixed namespace-local broker relay.
         env["TEST_NATS_URL"]="nats://127.0.0.1:4222"
-        env.update(TEST_SESSION_BROWSER_SCRIPT="/input/kanz-web/e2e/sessions.cjs",TEST_MFA_BROWSER_SCRIPT="/input/kanz-web/e2e/mfa.cjs",TEST_MFA_PLAYWRIGHT="/input/kanz-web/node_modules/playwright",TEST_MFA_NODE="/tool/node/bin/node",TEST_MFA_BFF="/fixture/mfa-web-bff",TEST_MFA_STATIC_DIR="/input/kanz-web/dist",TEST_NATS_MTLS_CERT_DIR="/fixture/mtls")
+        env.update(TEST_SESSION_BROWSER_SCRIPT="/input/web/e2e/sessions.cjs",TEST_MFA_BROWSER_SCRIPT="/input/web/e2e/mfa.cjs",TEST_MFA_PLAYWRIGHT="/input/web/node_modules/playwright",TEST_MFA_NODE="/tool/node/bin/node",TEST_MFA_BFF="/fixture/mfa-web-bff",TEST_MFA_STATIC_DIR="/input/web/dist",TEST_NATS_MTLS_CERT_DIR="/fixture/mtls")
         self.box=Sandbox(self.repo,self.root,tools,env)
         self.box.start()
         self.box.probe()
@@ -298,19 +298,19 @@ class Proof:
         try:
             tested_sum=read_regular(source_fd,"kanz/go.sum",4*1024*1024)
             go_mod=read_regular(source_fd,"kanz/go.mod",1024*1024)
-            cargo_lock=read_regular(source_fd,"kanz-rs/Cargo.lock",4*1024*1024)
+            cargo_lock=read_regular(source_fd,"rust/Cargo.lock",4*1024*1024)
         finally: os.close(source_fd)
         tracked_sum=host("git","-c","safe.directory="+str(self.repo),"-C",str(self.repo),"show",self.source["sha"]+":kanz/go.sum")
         provenance["go_sum"]={"tested_sha256":digest(tested_sum),"tracked_sha256":digest(tracked_sum),"changed_by_provisioning":tested_sum!=tracked_sum}
         provenance["go_mod_sha256"]=digest(go_mod)
         provenance["cargo_lock_sha256"]=digest(cargo_lock)
-        sdk_fd=directory(self.repo/"kanz-schemas/gen/go")
+        sdk_fd=directory(self.repo/"schemas/gen/go")
         sdk={};total=0
         try:
-            for base,dirs,files in os.walk(self.repo/"kanz-schemas/gen/go",followlinks=False):
+            for base,dirs,files in os.walk(self.repo/"schemas/gen/go",followlinks=False):
                 if any((Path(base)/d).is_symlink() for d in dirs): raise ValueError("linked generated SDK directory")
                 for name in sorted(files):
-                    relative=str((Path(base)/name).relative_to(self.repo/"kanz-schemas/gen/go"))
+                    relative=str((Path(base)/name).relative_to(self.repo/"schemas/gen/go"))
                     raw=read_regular(sdk_fd,relative,32*1024*1024)
                     total+=len(raw)
                     if len(sdk)>=10000 or total>128*1024*1024: raise ValueError("generated SDK inventory exceeds bound")
@@ -322,7 +322,7 @@ class Proof:
         self.box.retain("sysroot-packages.txt",packages)
         provenance["sysroot_packages_sha256"]=digest(packages)
         self.box.retain("provenance.json",json.dumps(provenance,sort_keys=True).encode())
-        self.successful(["cargo","build","--frozen","-p","kanz-oms-store","--example","fixture"],cwd="/input/kanz-rs",seconds=540)
+        self.successful(["cargo","build","--frozen","-p","kanz-oms-store","--example","fixture"],cwd="/input/rust",seconds=540)
         binary=self.box.promote("rust-target/debug/examples/fixture","oms-store",128*1024*1024)
         (self.box.out/"oms-store").chmod(0o555)
         # Build products are not dependency inputs for subsequent commands.

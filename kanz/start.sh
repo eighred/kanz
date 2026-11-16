@@ -21,7 +21,7 @@ set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$SCRIPT_DIR"
 COMPOSE_FILE="dev/docker-compose.yml"
-SCHEMAS_SDK="../kanz-schemas/gen/go"
+SCHEMAS_SDK="../schemas/gen/go"
 
 # --- pretty output (degrade gracefully without a TTY) ---------------------
 if [ -t 1 ]; then
@@ -85,7 +85,7 @@ ensure_sdk() {
   fi
   warn "generated SDK missing — the service Dockerfiles COPY it, so generating now"
   if command -v buf >/dev/null 2>&1; then
-    ( cd ../kanz-schemas && buf generate ) && ok "buf generate done" || die "buf generate failed — see dev/README.md"
+    ( cd ../schemas && buf generate ) && ok "buf generate done" || die "buf generate failed — see dev/README.md"
   else
     die "buf not found and the SDK is missing. Install buf (https://buf.build/docs/installation), then run 'make generate'."
   fi
@@ -136,7 +136,7 @@ ${GREEN}${BOLD}Kanz is up.${RESET}
 
   ${BOLD}Open / poke it${RESET}
     api-gateway      ${CYAN}http://localhost:8080${RESET}   ${DIM}(authenticated — it refuses to run otherwise)${RESET}
-      get a token:   export TOKEN=\$(go run ./cmd/kanz-devtoken --secret dev-secret --tenant acme)
+      get a token:   export TOKEN=\$(go run ./cmd/kanz_devtoken --secret dev-secret --tenant acme)
       try:           curl -H "Authorization: Bearer \$TOKEN" localhost:8080/v1/portfolios/PF1/exposure
     risk-engine      ${CYAN}http://localhost:8082/healthz${RESET}   ${DIM}(gRPC query on :8081)${RESET}
     NATS monitor     ${CYAN}http://localhost:8222${RESET}

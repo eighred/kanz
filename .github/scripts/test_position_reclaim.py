@@ -358,7 +358,7 @@ class EvidenceRefusals(unittest.TestCase):
             self.assertTrue(required_ci.position_reclaim_path(path))
             self.assertTrue(required_ci.application_path(path))
         self.assertFalse(required_ci.position_reclaim_path(b"docs/readme.md"))
-        for path in (b"kanz/services/oms/internal/position/projector.go",b"kanz/pkg/bus/frame.go",b"kanz/pkg/bus/consumer.go",b"kanz/pkg/bus/consumer_dispatch_scope_test.go",b"kanz/pkg/bus/consumer_dispatch_scope_integration_test.go",b"kanz/internal/platform/subject/topic.go",b"kanz-rs/crates/oms-store/src/position.rs",b"kanz/infra/nats/bootstrap-job.yaml"):
+        for path in (b"kanz/services/oms/internal/position/projector.go",b"kanz/pkg/bus/frame.go",b"kanz/pkg/bus/consumer.go",b"kanz/pkg/bus/consumer_dispatch_scope_test.go",b"kanz/pkg/bus/consumer_dispatch_scope_integration_test.go",b"kanz/internal/platform/subject/topic.go",b"rust/crates/oms_store/src/position.rs",b"kanz/infra/nats/bootstrap-job.yaml"):
             self.assertTrue(required_ci.position_reclaim_path(path))
 
     def test_owned_broker_reset_requires_fresh_storage_and_distinct_identity(self):
