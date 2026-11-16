@@ -1307,7 +1307,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// disarmed silently while the health check said everything was fine.
 	//
 	// This mirrors webhook-ingest's position-cache wait loop
-	// (services/webhook-ingest/cmd/webhook-ingest/main.go) exactly, rather than inventing a new
+	// (services/webhook_ingest/cmd/webhook_ingest/main.go) exactly, rather than inventing a new
 	// shape: poll Armed() on a short tick with a <-ctx.Done() escape, so a shutdown signal that
 	// arrives before the replay lands falls through to graceful shutdown WITHOUT ever reporting
 	// ready — a pod that never learned which mandates are in force must not be told it is

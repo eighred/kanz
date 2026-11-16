@@ -672,11 +672,11 @@ func (rc *resolveCache) resolveParamAcrossCallSites(t *testing.T, dir string, fn
 var crossPackagePublishSurfaces = map[string][]string{
 	// risk-engine's RISK-10 output (EventTypeExposureRecomputed /
 	// EventTypeMeasuresComputed) is emitted by internal/risk/publish.Publisher,
-	// constructed and called from services/risk-engine's composition root.
+	// constructed and called from services/risk_engine's composition root.
 	"risk-engine": {"internal/risk/publish"},
 	// market-ingest's book-snapshot publish is internal/marketedge/ingest's
 	// Engine, run by pkg/alpha.Runner — itself wired from
-	// services/market-ingest/cmd/market-ingest/main.go.
+	// services/market_ingest/cmd/market_ingest/main.go.
 	//
 	// internal/marketedge/bars is the SECOND publisher on that runner (#425): the
 	// 1-minute candle collector, teed off the same trade feeds. It is listed
@@ -699,7 +699,7 @@ var crossPackagePublishSurfaces = map[string][]string{
 	"market-ingest": {"internal/marketedge/ingest", "internal/marketedge/bars", "internal/marketedge/coverage", "internal/volprofilefeed"},
 	// webhook-ingest's signal + order-command publishes are
 	// internal/signal/translate's Translator, constructed and driven from
-	// services/webhook-ingest/internal/ingest (pipeline.go's tr.Emit).
+	// services/webhook_ingest/internal/ingest (pipeline.go's tr.Emit).
 	"webhook-ingest": {"internal/signal/translate"},
 	// AUTH-01d (#352): both of these construct pkg/authbus.NewBusRecorder at their
 	// composition root, and the bus.Event for platform.authz.decision is built
@@ -744,7 +744,7 @@ var crossPackagePublishSurfaces = map[string][]string{
 // topic name as an unauthorized NATS subject.
 func servicePublishedSubjects(t *testing.T, rc *resolveCache, root, svc string) map[string][]string {
 	t.Helper()
-	dirs := []string{filepath.Join(root, "services", svc)}
+	dirs := []string{filepath.Join(root, "services", sourceDirectoryName(svc))}
 	for _, extra := range crossPackagePublishSurfaces[svc] {
 		dirs = append(dirs, filepath.Join(root, filepath.FromSlash(extra)))
 	}
@@ -851,7 +851,7 @@ func dedupStrings(in []string) []string {
 
 // TestMarketDataPublishGrantCoversItsConfigInjectedWildcard is this file's
 // other half for market-data. TestServicePublishesOnlySubjectsItsTenancy
-// PermissionsAllow cannot fold BusSink.eventType (services/market-data/
+// PermissionsAllow cannot fold BusSink.eventType (services/market_data/
 // internal/feed/bussink.go) to a literal: it's an fmt.Sprintf over
 // s.assetClass, a field NewBusSink sets from a deploy-time config value —
 // genuinely runtime-variable, never a closed set of literals an AST resolver
@@ -875,7 +875,7 @@ func TestMarketDataPublishGrantCoversItsConfigInjectedWildcard(t *testing.T) {
 	}
 
 	rc := newResolveCache(root)
-	dir := filepath.Join(root, "services", "market-data", "internal", "feed")
+	dir := filepath.Join(root, "services", "market_data", "internal", "feed")
 
 	domains := dedupStrings(rc.resolveIdentInPackage(t, dir, "domainMarket", 3))
 	if len(domains) != 1 {

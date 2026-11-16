@@ -21,7 +21,7 @@ func TestReconcileErrorsReachProductionObserver(t *testing.T) {
 		return f
 	}
 	for _, venue := range []string{"binance", "okx"} {
-		base := "services/venue-" + venue
+		base := "services/venue_" + venue
 		rec := parse(base + "/internal/" + venue + "/" + venue + "_recon.go")
 		for _, method := range []string{"Reconcile", "HealClosures"} {
 			observed := false
@@ -67,7 +67,7 @@ func TestReconcileErrorsReachProductionObserver(t *testing.T) {
 		if !forwarded {
 			t.Errorf("%s connector drops observer", venue)
 		}
-		main := parse(base + "/cmd/venue-" + venue + "/main.go")
+		main := parse(base + "/cmd/venue_" + venue + "/main.go")
 		wired := false
 		ast.Inspect(main, func(n ast.Node) bool {
 			kv, ok := n.(*ast.KeyValueExpr)

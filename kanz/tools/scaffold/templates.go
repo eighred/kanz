@@ -24,8 +24,8 @@ import (
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
-	"github.com/eighred/kanz/services/{{.Name}}/internal/config"
-	"github.com/eighred/kanz/services/{{.Name}}/internal/server"
+	"github.com/eighred/kanz/services/{{.Directory}}/internal/config"
+	"github.com/eighred/kanz/services/{{.Directory}}/internal/server"
 )
 
 func main() {
@@ -187,12 +187,12 @@ const readmeTmpl = `# {{.Name}} service
 TODO: describe what {{.Name}} does.
 
 Scaffolded by ` + "`tools/scaffold`" + ` (DEVX-01b) following the EVT-16a layout:
-` + "`cmd/{{.Name}}/`" + ` (entrypoint) + ` + "`internal/`" + ` (per-service packages).
+` + "`cmd/{{.Directory}}/`" + ` (entrypoint) + ` + "`internal/`" + ` (per-service packages).
 
 ## Run
 
 ` + "```sh" + `
-go run ./services/{{.Name}}/cmd/{{.Name}}
+go run ./services/{{.Directory}}/cmd/{{.Directory}}
 ` + "```" + `
 
 Config (env): ` + "`{{.EnvPrefix}}_LISTEN`" + ` (` + "`:8090`" + `),
@@ -201,10 +201,10 @@ Config (env): ` + "`{{.EnvPrefix}}_LISTEN`" + ` (` + "`:8090`" + `),
 
 ## Next steps
 
-- Add the service's real work in ` + "`cmd/{{.Name}}/main.go`" + ` (a bus consumer,
+- Add the service's real work in ` + "`cmd/{{.Directory}}/main.go`" + ` (a bus consumer,
   a worker pool — see ` + "`services/audit`" + ` or ` + "`services/lineage`" + ` for the
   bus-consumer pattern).
 - Register API routes in ` + "`internal/server`" + `.
-- Add a Dockerfile (copy ` + "`services/risk-engine/Dockerfile`" + `) and wire the
+- Add a Dockerfile (copy ` + "`services/risk_engine/Dockerfile`" + `) and wire the
   service into ` + "`infra/deploy`" + ` + the ` + "`infra/gitops`" + ` ApplicationSet.
 `

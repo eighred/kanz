@@ -237,7 +237,7 @@ func TestCashBufferRule_DeniesAMismatchedParamsVariantOnBothPaths(t *testing.T) 
 	}
 }
 
-// THE AUTHORING SURFACE. Both publishers of a mandate — cmd/kanz-mandate and the
+// THE AUTHORING SURFACE. Both publishers of a mandate — cmd/kanz_mandate and the
 // compliance service's propose route — protojson.Unmarshal an operator's file
 // into a compliance.v1.Mandate, so the ceiling is declarable only if the wire
 // names resolve. A rule nobody can write down is reachable in the engine and

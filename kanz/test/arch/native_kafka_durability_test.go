@@ -27,10 +27,10 @@ func TestNativeDurabilityQualificationAndMutations(t *testing.T) {
 	root := moduleRoot(t)
 	files := map[string]string{}
 	for key, path := range map[string]string{
-		"plan":      "cmd/kanz-kafka-provision/internal/provision/plan.go",
-		"fixture":   "cmd/kanz-kafka-provision/native_fixture_test.go",
-		"qualifier": "../tools/native-kafka-provision/qualify.py",
-		"topology":  "../tools/native-kafka-provision/topology.py",
+		"plan":      "cmd/kanz_kafka_provision/internal/provision/plan.go",
+		"fixture":   "cmd/kanz_kafka_provision/native_fixture_test.go",
+		"qualifier": "../tools/native_kafka_provision/qualify.py",
+		"topology":  "../tools/native_kafka_provision/topology.py",
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil {

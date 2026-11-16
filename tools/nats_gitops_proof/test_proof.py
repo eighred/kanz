@@ -47,7 +47,7 @@ class ProofTests(unittest.TestCase):
         # consumer.go and producer.go call the observability trace helpers.
         inputs = ("kanz/tools/nats_gitops_proof/main.go", "kanz/pkg/bus/consumer.go",
                   "kanz/pkg/transport/tls.go", "kanz/pkg/observability/trace.go",
-                  "kanz-schemas/proto/command/v1/command.proto", "kanz-schemas/proto/common/v1/decimal.proto",
+                  "schemas/proto/command/v1/command.proto", "schemas/proto/common/v1/decimal.proto",
                   "kanz/go.mod", "kanz/go.sum")
         for event in ("pull_request", "push"):
             patterns = triggers[event]["paths"]
@@ -57,7 +57,7 @@ class ProofTests(unittest.TestCase):
                 with self.subTest(event=event, path=path):
                     self.assertTrue((proof.ROOT / path).is_file())
             self.assertEqual(selected(patterns), set(inputs), "a resolved publisher input does not select its actual proof")
-            for selector in ("kanz/pkg/observability/**", "kanz-schemas/proto/command/**"):
+            for selector in ("kanz/pkg/observability/**", "schemas/proto/command/**"):
                 # Delete only the reviewed edge, keeping every other filter.
                 # The original missing-consumer defect must become observable.
                 narrowed = [pattern for pattern in patterns if pattern != selector]

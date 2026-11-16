@@ -128,7 +128,7 @@ func New(cfg Config) *Archiver { return &Archiver{cfg: cfg} }
 // loop over cfg.Subjects therefore blocks forever inside its first iteration,
 // leaving every subject after the first NEVER subscribed for the life of the
 // process while the service reports healthy. Each subject gets its own
-// goroutine instead — mirroring lake-sink's runSink (services/lake-sink/cmd/lake-sink/main.go).
+// goroutine instead — mirroring lake-sink's runSink (services/lake_sink/cmd/lake_sink/main.go).
 //
 // The first non-cancellation error cancels the remaining subscriptions and is
 // returned: a broken subscription must bring the archiver down, not silently
@@ -245,7 +245,7 @@ func (a *Archiver) observeFail(topic, reason string) {
 // for.
 //
 // NO DRAIN READS THIS TOPIC, AND THAT IS THE STANDING GAP (#285 item 3).
-// cmd/kanz-redrive is NATS-only; dlq.archiver is Kafka, has no consumer, and
+// cmd/kanz_redrive is NATS-only; dlq.archiver is Kafka, has no consumer, and
 // infra/kafka/topics-job.yaml deletes it after 30 days. The headers below are what
 // a drain needs — where to send it back (bus.HeaderDLQOriginalSubject), how old it
 // is (bus.HeaderDLQParkedAt, the min-age gate) and whether it may be replayed at

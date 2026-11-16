@@ -40,7 +40,7 @@ func authorityMigrations(t *testing.T, pool *pgxpool.Pool, source auditdelivery.
 	t.Helper()
 	service := "identity"
 	if source == auditdelivery.Session {
-		service = "web-bff"
+		service = "web_bff"
 	}
 	files, err := filepath.Glob(filepath.Join("../../../", service, "migrations/*.sql"))
 	if err != nil || len(files) == 0 {

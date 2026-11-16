@@ -14,14 +14,14 @@ import (
 // confinement. Real gateway/PG/NATS/worker fixtures remain independently required.
 func snapshotBoundaryWiring(files map[string]string) error {
 	required := map[string][]string{
-		"services/lake-sink/internal/config/config.go": {`if cfg.Snapshot != nil {`, `lifecycleTopic := topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")`, `if !slices.Contains(cfg.Topics, lifecycleTopic) {`, `cfg.Topics = append(cfg.Topics, lifecycleTopic)`},
-		"services/lake-sink/cmd/lake-sink/main.go": {
+		"services/lake_sink/internal/config/config.go": {`if cfg.Snapshot != nil {`, `lifecycleTopic := topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")`, `if !slices.Contains(cfg.Topics, lifecycleTopic) {`, `cfg.Topics = append(cfg.Topics, lifecycleTopic)`},
+		"services/lake_sink/cmd/lake_sink/main.go": {
 			"if cfg.Snapshot != nil {\n\t\tfileOptions = append(fileOptions, sink.EnableActiveRunCapture)\n\t}",
 			`sink.NewFileSink(cfg.OutputDir, "", fileOptions...)`,
 			"snapshot.Run(ctx, *cfg.Snapshot, mesh.Source, landing, cfg.OutputDir, logger, busMetrics, readiness.SetSnapshot)",
 			"readiness.RequireSnapshot()",
 		},
-		"services/lake-sink/internal/snapshot/runtime.go": {
+		"services/lake_sink/internal/snapshot/runtime.go": {
 			"pg.NewTenantPool(startup, cfg.DatabaseURL, cfg.Tenant)",
 			"DisableReconnect: true", "transport.AuthorizeServices(brokerID)",
 			"client.RequireAccountIdentity(startup, cfg.NATSAccount, svid.ID.String())",
@@ -31,11 +31,11 @@ func snapshotBoundaryWiring(files map[string]string) error {
 			"queue.PendingKeys(startup, 17)", "len(keys) > 16", "queue.PendingKeys(startup, 1)",
 			"bus.WithRetainedRetries(SubjectRequested)", "worker.slot <- struct{}{}",
 		},
-		"services/lake-sink/internal/snapshot/grpc.go": {
+		"services/lake_sink/internal/snapshot/grpc.go": {
 			"transport.AuthorizeServices(gateway)", "grpc.UnaryInterceptor(handler.delegate)",
 			"s.store.authorize(ctx, caller, action, id)", "context.AfterFunc(s.lifetime, cancel)", "grpc.WaitForHandlers(true)",
 		},
-		"services/api-gateway/internal/gateway/lake.go": {
+		"services/api_gateway/internal/gateway/lake.go": {
 			"len(p.Portfolios) != 0", "p.Tenant != h.lakeTenant", "Subject: p.Subject, Tenant: p.Tenant",
 			"new(lakepb.CreateSnapshotInput)", "DiscardUnknown: false",
 			`mux.Handle(authz.LakeSnapshotCreate, "POST /v1/lake/snapshots", h.createLakeSnapshot)`, `mux.Handle(authz.LakeSnapshotRead, "GET /v1/lake/snapshots/{id}", h.getLakeSnapshot)`, `mux.Handle(authz.LakeSnapshotRead, "POST /v1/lake/snapshots/{id}/query", h.queryLakeSnapshot)`,
@@ -58,7 +58,7 @@ func snapshotBoundaryWiring(files map[string]string) error {
 	}
 	// The current composition owns exactly one constructor and one conditional
 	// options append. A second assignment cannot silently enable capture by default.
-	f, _ := parser.ParseFile(token.NewFileSet(), "main.go", files["services/lake-sink/cmd/lake-sink/main.go"], 0)
+	f, _ := parser.ParseFile(token.NewFileSet(), "main.go", files["services/lake_sink/cmd/lake_sink/main.go"], 0)
 	assignments := 0
 	ast.Inspect(f, func(n ast.Node) bool {
 		if a, ok := n.(*ast.AssignStmt); ok {
@@ -73,7 +73,7 @@ func snapshotBoundaryWiring(files map[string]string) error {
 	if assignments != 1 {
 		return fmt.Errorf("snapshot options ownership changed")
 	}
-	runtimeFile, _ := parser.ParseFile(token.NewFileSet(), "runtime.go", files["services/lake-sink/internal/snapshot/runtime.go"], 0)
+	runtimeFile, _ := parser.ParseFile(token.NewFileSet(), "runtime.go", files["services/lake_sink/internal/snapshot/runtime.go"], 0)
 	serveCalls, gatedServeCalls := 0, 0
 	isServe := func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -157,7 +157,7 @@ func snapshotBoundaryWiring(files map[string]string) error {
 }
 
 func TestLakeSnapshotBoundaryWiring(t *testing.T) {
-	paths := []string{"services/lake-sink/cmd/lake-sink/main.go", "services/lake-sink/internal/snapshot/runtime.go", "services/lake-sink/internal/snapshot/grpc.go", "services/api-gateway/internal/gateway/lake.go", "infra/nats/snapshot_candidate.go", "pkg/bus/nats.go", "services/lake-sink/internal/config/config.go"}
+	paths := []string{"services/lake_sink/cmd/lake_sink/main.go", "services/lake_sink/internal/snapshot/runtime.go", "services/lake_sink/internal/snapshot/grpc.go", "services/api_gateway/internal/gateway/lake.go", "infra/nats/snapshot_candidate.go", "pkg/bus/nats.go", "services/lake_sink/internal/config/config.go"}
 	files := map[string]string{}
 	for _, path := range paths {
 		files[path] = string(mustReadArchFile(t, filepath.Join(moduleRoot(t), path)))

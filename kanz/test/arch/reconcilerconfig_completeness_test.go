@@ -61,13 +61,13 @@ var reconcilerConfigs = []struct {
 }{
 	{
 		typeName: "ReconcilerConfig",
-		decl:     "services/venue-binance/internal/binance/binance_recon.go",
-		scope:    "services/venue-binance",
+		decl:     "services/venue_binance/internal/binance/binance_recon.go",
+		scope:    "services/venue_binance",
 	},
 	{
 		typeName: "OKXReconcilerConfig",
-		decl:     "services/venue-okx/internal/okx/okx_recon.go",
-		scope:    "services/venue-okx",
+		decl:     "services/venue_okx/internal/okx/okx_recon.go",
+		scope:    "services/venue_okx",
 	},
 }
 

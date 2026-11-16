@@ -820,7 +820,7 @@ func TestProvisionTenantStorageDistinguishesCheckFailureFromRLSOff(t *testing.T)
 // already each declare once) — they are parsed out of both sources below and
 // compared.
 var serviceMigrationsRelPath = map[string]string{
-	"kanz-risk":  "services/risk-engine/migrations",
+	"kanz-risk":  "services/risk_engine/migrations",
 	"kanz-books": "services/accounting/migrations",
 }
 
@@ -849,7 +849,7 @@ func scriptForceRLSTables(content string) map[string][]string {
 }
 
 // forEachArrayForcePattern matches a `FOREACH t IN ARRAY ARRAY[...] ... END
-// LOOP` block — the form services/risk-engine/migrations/0002_tenant_rls.sql
+// LOOP` block — the form services/risk_engine/migrations/0002_tenant_rls.sql
 // and services/accounting/migrations/0001_ledger.sql both use to declare
 // their FORCE-RLS table sets, one array literal driving a dynamic
 // `EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t)` rather than
@@ -871,7 +871,7 @@ var forEachArrayForcePattern = regexp.MustCompile(`(?is)FOREACH\s+\w+\s+IN\s+ARR
 // and to find static per-table statements
 // (directForceAlterTablePattern below). `\s+` throughout, not a literal
 // single space: the actual SQL in this repo is `FORCE  ROW LEVEL SECURITY`
-// with TWO spaces (services/risk-engine/migrations/0002_tenant_rls.sql,
+// with TWO spaces (services/risk_engine/migrations/0002_tenant_rls.sql,
 // services/accounting/migrations/0001_ledger.sql and 0003_venue_account_scope.sql)
 // — a pattern hardcoding one space between FORCE and ROW would match none of
 // them and this guard would silently parse an empty set from every

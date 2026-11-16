@@ -47,7 +47,7 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			"if snapshot {\n\t\t\taction = \"snapshot\"\n\t\t\tprevious = -1\n\t\t}",
 		},
 	}
-	root := filepath.Join(moduleRoot(t), "tools", "depth-conformance")
+	root := filepath.Join(moduleRoot(t), "tools", "depth_conformance")
 	for file, required := range markers {
 		body, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {
@@ -117,7 +117,7 @@ func TestRustFeedHandoffQualificationRecipe(t *testing.T) {
 // retain their own contracts. The actual process oracle still proves execution.
 func TestRustFeedRuntimeSymbolParity(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
-	raw, err := os.ReadFile(filepath.Join(root, "kanz-rs/crates/market-feed/src/runtime.rs"))
+	raw, err := os.ReadFile(filepath.Join(root, "rust/crates/market_feed/src/runtime.rs"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,12 +2,12 @@ name: valkey-migration
 on:
   pull_request:
     paths:
-      - 'tools/valkey-migration/**'
+      - 'tools/valkey_migration/**'
       - '.github/workflows/valkey-migration.yml'
   push:
     branches: [main]
     paths:
-      - 'tools/valkey-migration/**'
+      - 'tools/valkey_migration/**'
       - '.github/workflows/valkey-migration.yml'
   workflow_dispatch:
 permissions:
@@ -23,9 +23,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - run: python3 -B -m unittest discover -s tools/valkey-migration -p 'test_*.py'
+      - run: python3 -B -m unittest discover -s tools/valkey_migration -p 'test_*.py'
       - name: Preserve replay claims through Valkey migration and Redis rollback
-        run: python3 -B tools/valkey-migration/proof.py
+        run: python3 -B tools/valkey_migration/proof.py
       - name: Preserve sanitized migration evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

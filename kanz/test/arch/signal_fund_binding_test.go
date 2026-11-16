@@ -60,7 +60,7 @@ func TestEveryTranslatorIsWiredWithAFundBinding(t *testing.T) {
 	sites := translateOptionsSites(t, root)
 
 	// NON-VACUITY. Two composition roots build a translator today —
-	// services/webhook-ingest/internal/ingest (the webhook pipeline) and pkg/alpha
+	// services/webhook_ingest/internal/ingest (the webhook pipeline) and pkg/alpha
 	// (the native engine runner). A scan finding fewer than that has lost sight of
 	// one and would stay green while it published untenanted orders.
 	if len(sites) < 2 {

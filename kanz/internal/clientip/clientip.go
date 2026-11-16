@@ -24,11 +24,11 @@
 //
 // # WHY IT LIVES IN internal/ RATHER THAN IN ONE SERVICE (#835)
 //
-// It was services/web-bff/internal/clientip while the BFF's credential login
+// It was services/web_bff/internal/clientip while the BFF's credential login
 // was the only pre-auth surface that needed it. The api-gateway's pre-auth
 // limiter (middleware.PreAuth) is the second consumer, and Go's internal rule
 // makes that promotion mandatory rather than stylistic: a package under
-// services/web-bff/internal is importable only from services/web-bff, so the
+// services/web_bff/internal is importable only from services/web_bff, so the
 // alternative to moving it is a second copy — and a copied helper is how a fix
 // stops spreading (AGENTS.md). The two callers face the same question with two
 // different edges in front of them (cloudflared for the BFF, ingress-nginx for

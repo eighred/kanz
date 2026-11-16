@@ -34,7 +34,7 @@
 #   3. SVIDs are minted by a throwaway CA here instead of SPIRE. The certs SPIRE
 #      issues differ in provenance, not in shape: same trust domain, same URI SAN,
 #      same SPIFFE-conformant key usage. This mints no production credential and
-#      is built into no image — the cmd/kanz-devtoken stance.
+#      is built into no image — the cmd/kanz_devtoken stance.
 #   4. NATS_REPLICAS=1 for the bootstrap. Every stream production creates is
 #      replicas=3; a single-node JetStream refuses that outright. The script
 #      already parameterises it for exactly this reason — see its own comment.

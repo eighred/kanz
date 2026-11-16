@@ -21,7 +21,7 @@ var replayIdentityMarkers = map[string][]string{
 		"bus.KafkaReaderDialer(bus.KafkaConfig{TLSConfig: c.TLSConfig, SASL: c.SASL})",
 		"TLSConfig: c.TLSConfig, SASL: c.SASL", "context.WithTimeout(ctx, timeout)",
 	},
-	"tools/natsrebuild/cmd/nats-rebuild/main.go": {
+	"tools/natsrebuild/cmd/nats_rebuild/main.go": {
 		"kafkaIdentityRequested(os.Getenv(\"NATS_REBUILD_KAFKA_MTLS\"), socket)",
 		"transport.NewMesh(ctx, socket)", "defer func() { _ = mesh.Close() }()",
 		"kafkaSource.TLSConfig = mesh.Client", "Checker:   kafkaSource", "Open:      kafkaSource.Open",

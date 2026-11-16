@@ -568,8 +568,6 @@ func TestCordonUnconfiguredIsUnimplemented(t *testing.T) {
 	}
 }
 
-// The ListNodes handler must carry the new estate fields to the proto, or the TUI
-// never sees drain status.
 func TestListNodesSurfacesSchedulableAndEvictable(t *testing.T) {
 	srv := New(stubReader{nodes: []estate.Node{
 		{Name: "london", Status: estate.StatusReady, Schedulable: false, EvictablePods: 3},

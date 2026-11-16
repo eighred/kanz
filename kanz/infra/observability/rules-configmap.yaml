@@ -288,7 +288,7 @@ data:
       #
       # Inflow is also the better alerting signal. Depth answers "how much is stuck",
       # which matters when a drain runs continuously; this estate's drain is an
-      # operator running cmd/kanz-redrive by hand, so what needs to reach a human is
+      # operator running cmd/kanz_redrive by hand, so what needs to reach a human is
       # THAT A MESSAGE WAS PARKED AT ALL. The count of what is waiting is a question
       # for the person already responding.
       - name: bus_dead_letters
@@ -377,7 +377,7 @@ data:
           # of the archiver's own worst outcome.
           #
           # AND IT IS WORSE HERE THAN ON THE NATS PATH. kanz-redrive is NATS-only
-          # (`grep -in kafka cmd/kanz-redrive/main.go` → nothing), so where
+          # (`grep -in kafka cmd/kanz_redrive/main.go` → nothing), so where
           # BusTerminalMessagesDeadLettered can at least say "a redrive will refuse
           # it", here there is no tool that could even refuse. infra/kafka/topics-job.yaml
           # declares dlq.archiver with `delete` retention at 2592000000ms — 30 days
@@ -1112,7 +1112,7 @@ data:
       # ---------------------------------------------------------------------------
       - name: lakehouse_ingest
         rules:
-          # PERMANENT MEANS PERMANENT. services/lake-sink/internal/cdc/sink.go
+          # PERMANENT MEANS PERMANENT. services/lake_sink/internal/cdc/sink.go
           # classifies a decode failure as "transient" (retryable) or "permanent",
           # and a permanent one is a row that will NEVER land in the lakehouse. It is
           # almost always a producer that changed a payload shape, which means every
@@ -2366,7 +2366,7 @@ data:
     # THE MARKET-DATA FRESHNESS SLO WAS REMOVED, NOT SUSPENDED. It was compiled
     # from kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
     # internal/integrity — a package deleted in DATA-M4. Nothing in the Go source
-    # has emitted that series since, and services/market-data registers no
+    # has emitted that series since, and services/market_data registers no
     # domain metric at all (only the generic bus metrics), so the SLO could not be
     # re-pointed at a renamed series either. Left in place it computed over an
     # empty vector: every windowed ratio was empty, so the generic burn-rate alerts

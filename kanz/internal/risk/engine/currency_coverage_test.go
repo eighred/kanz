@@ -17,15 +17,6 @@ import (
 	"github.com/eighred/kanz/internal/risk/state"
 )
 
-// #257 at the surface a caller actually reads.
-//
-// A USD-base portfolio holding one USD and one EUR position used to come
-// back as a well-formed MeasuresResponse in ModeNormal with zero quality
-// flags, the EUR leg absent from GrossExposure, NetExposure, VaR99 and
-// Delta with nothing saying so. The pre-trade gate, the compliance
-// monitor and the TUI all read that as the fund's risk. These tests pin
-// that the response now declares its own incompleteness.
-
 func applyPositionCcy(t *testing.T, s *state.Store, id, instrument, ccy string, value int64, asOf time.Time) {
 	t.Helper()
 	ctx := context.Background()

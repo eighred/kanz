@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// EVERY SUBJECT kanz-py PUBLISHES MUST BE GRANTED TO IT (#112).
+// EVERY SUBJECT python PUBLISHES MUST BE GRANTED TO IT (#112).
 //
 // # The gap this closes, and why it kept reopening
 //
@@ -25,16 +25,16 @@ import (
 //
 //	Every guard that checks a service has a broker account keys on
 //	servicesWithEntrypoints … The inference service is Python, lives in
-//	kanz-py/, and was therefore invisible to all of them.
+//	python/, and was therefore invisible to all of them.
 //
 // It closed the "no account at all" half. This closes the other half: an account
 // that exists and does not permit what the code actually publishes. #112 hit it
-// immediately — kanz-py gained a second publisher (the model registry's append
+// immediately — python gained a second publisher (the model registry's append
 // log) whose subject was in no allow-list, and every Go guard stayed green.
 //
 // # What it checks, and the distinction that cost a first attempt
 //
-// Subjects kanz-py hands to a producer — matched as `subject=NAME` inside an
+// Subjects python hands to a producer — matched as `subject=NAME` inside an
 // `Event(...)` construction — must appear in the inference service's
 // tenancy.yaml publish allow-list.
 //
@@ -55,17 +55,17 @@ import (
 func TestPythonPublishedSubjectsAreGranted(t *testing.T) {
 	root := moduleRoot(t)
 	repoRoot := filepath.Dir(root)
-	pyRoot := filepath.Join(repoRoot, "kanz-py")
+	pyRoot := filepath.Join(repoRoot, "python")
 
 	if _, err := os.Stat(pyRoot); err != nil {
-		t.Skipf("kanz-py is not present: %v", err)
+		t.Skipf("python is not present: %v", err)
 	}
 
 	published := pythonPublishedSubjects(t, pyRoot)
-	// NON-VACUITY: kanz-py has published inference.prediction.scored since
+	// NON-VACUITY: python has published inference.prediction.scored since
 	// PRED-05, so a scan that finds nothing is broken rather than accurate.
 	if len(published) == 0 {
-		t.Fatal("found no PUBLISHED subjects in kanz-py — the scanner is broken, not the service " +
+		t.Fatal("found no PUBLISHED subjects in python — the scanner is broken, not the service " +
 			"(inference.prediction.scored has been published since PRED-05)")
 	}
 
@@ -84,7 +84,7 @@ func TestPythonPublishedSubjectsAreGranted(t *testing.T) {
 	}
 	sort.Strings(problems)
 	if len(problems) > 0 {
-		t.Errorf("kanz-py publishes %d subject(s) its broker account does not permit:\n  %s\n\n"+
+		t.Errorf("python publishes %d subject(s) its broker account does not permit:\n  %s\n\n"+
 			"The service will authenticate fine and be DENIED at publish time, which looks like a "+
 			"broken feature rather than a missing grant — and no Go guard can see it, because they "+
 			"all key on kanz/services packages. Add the subject to the inference user's "+
@@ -93,7 +93,7 @@ func TestPythonPublishedSubjectsAreGranted(t *testing.T) {
 	}
 }
 
-// pythonPublishedSubjects returns the subjects kanz-py hands to a producer.
+// pythonPublishedSubjects returns the subjects python hands to a producer.
 //
 // TWO STEPS, because the two facts are separate in the source: collect every
 // SUBJECT_* definition, then find the ones passed as `subject=` inside an
@@ -134,19 +134,19 @@ func pythonPublishedSubjects(t *testing.T, pyRoot string) []string {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk kanz-py: %v", err)
+		t.Fatalf("walk python: %v", err)
 	}
 	// NON-VACUITY: the definition scan must have found something, or the
 	// publish scan below resolves every name to nothing and the guard passes.
 	if len(defs) == 0 {
-		t.Fatal("found no SUBJECT_* definitions in kanz-py — the scanner is broken")
+		t.Fatal("found no SUBJECT_* definitions in python — the scanner is broken")
 	}
 	seen := map[string]bool{}
 	var out []string
 	for name := range used {
 		subj, ok := defs[name]
 		if !ok {
-			t.Errorf("kanz-py publishes on %s, which is defined nowhere this guard can see — "+
+			t.Errorf("python publishes on %s, which is defined nowhere this guard can see — "+
 				"it cannot check a grant for a subject it cannot resolve", name)
 			continue
 		}

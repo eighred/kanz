@@ -44,18 +44,18 @@ import (
 // # WHAT A PASS DOES AND DOES NOT PROVE
 //
 // It proves the constructor is REFERENCED from package main under
-// services/api-gateway/cmd. It does not prove the middleware is in the chain
+// services/api_gateway/cmd. It does not prove the middleware is in the chain
 // rather than, say, assigned and dropped, and it cannot prove the ORDER is right
 // — that a limiter sits ahead of the authentication it protects. Those are
-// asserted where they can be: cmd/api-gateway's
+// asserted where they can be: cmd/api_gateway's
 // TestBuildRouterBoundsAnUnauthenticatedFloodBeforeItReachesAuth drives the real
 // router and counts how often the authenticator was asked. This guard's job is
 // narrower and is the one nothing else covers: a middleware that is never
 // mentioned at all.
 func TestEveryGatewayMiddlewareIsWiredIntoTheChain(t *testing.T) {
 	root := moduleRoot(t)
-	pkgDir := filepath.Join(root, "services", "api-gateway", "internal", "middleware")
-	rootDir := filepath.Join(root, "services", "api-gateway", "cmd")
+	pkgDir := filepath.Join(root, "services", "api_gateway", "internal", "middleware")
+	rootDir := filepath.Join(root, "services", "api_gateway", "cmd")
 
 	constructors := middlewareConstructors(t, pkgDir)
 	// NON-VACUITY, half one. A moved or renamed package would make every
@@ -95,7 +95,7 @@ func TestEveryGatewayMiddlewareIsWiredIntoTheChain(t *testing.T) {
 		}
 		if !referenced {
 			t.Errorf("middleware %s returns func(http.Handler) http.Handler and NOTHING under "+
-				"services/api-gateway/cmd names it.\n"+
+				"services/api_gateway/cmd names it.\n"+
 				"That is #835: a complete rate limiter lived in this package, called by nobody, "+
 				"while the gateway had no limit at all in front of authentication — and every "+
 				"other gate read it as a working control.\n"+

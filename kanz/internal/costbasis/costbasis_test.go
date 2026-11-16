@@ -145,7 +145,7 @@ func TestUnrealized_ShortInvertsWithTheSignedQuantity(t *testing.T) {
 // line was buried inside one of three separate copies of the arithmetic.
 //
 // Fold computes GROSS. A surface that reports net does it on its own visible line
-// (services/tv-sync/internal/projection/fold.go). This test pins that the shared
+// (services/tv_sync/internal/projection/fold.go). This test pins that the shared
 // fold does not quietly acquire a fee opinion later.
 func TestFold_ComputesGrossRealizedAndTakesNoFeeOpinion(t *testing.T) {
 	l := NewLot()

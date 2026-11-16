@@ -16,7 +16,7 @@ import (
 //
 //   - services/oms/internal/position — the OMS book, in memory and in Postgres
 //   - services/accounting/internal/ledger — the IBOR
-//   - services/tv-sync/internal/projection — the TradingView projection
+//   - services/tv_sync/internal/projection — the TradingView projection
 //
 // They had already drifted, in both directions that matter:
 //

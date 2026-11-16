@@ -57,7 +57,7 @@ var mandateSubjectPublisherAllowed = map[string]string{
 	"internal/compliance/publisher.go": "THE publisher. It reads the subject via MandateState, merges " +
 		"the new mandate into the set already there, prunes with retainSelectable and writes the " +
 		"result back conditioned on the sequence it read.",
-	"cmd/kanz-mandate/main.go": "prints the subject an approval will publish to, so the operator can " +
+	"cmd/kanz_mandate/main.go": "prints the subject an approval will publish to, so the operator can " +
 		"see it before confirming. It does NOT construct the event — it calls compliance.Publisher, " +
 		"which is the point.",
 }

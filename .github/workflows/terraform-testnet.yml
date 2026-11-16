@@ -42,7 +42,7 @@ jobs:
           else
             base_sha="$PUSH_BEFORE_SHA"
           fi
-          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform-testnet/ .github/workflows/terraform-testnet.yml .github/scripts/terraform_guard_negative_control.py .github/scripts/test_terraform_guard_negative_control.py)"
+          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform_testnet/ .github/workflows/terraform-testnet.yml .github/scripts/terraform_guard_negative_control.py .github/scripts/test_terraform_guard_negative_control.py)"
           if [[ -n "$changed" ]]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           else

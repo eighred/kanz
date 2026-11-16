@@ -51,7 +51,7 @@ BURNS = {("api-gateway", "availability"): 100.0,
          ("risk-engine", "recompute-latency"): 30.0,
          ("event-bus", "delivery-success"): 150.0}
 BUDGETS = dict(zip(BURNS, (0.001, 0.01, 0.005, 0.01, 0.001)))
-SETUP_SPEC = importlib.util.spec_from_file_location("grafana_cluster_setup", ROOT / "tools/feed-identity/proof.py")
+SETUP_SPEC = importlib.util.spec_from_file_location("grafana_cluster_setup", ROOT / "tools/feed_identity/proof.py")
 SETUP = importlib.util.module_from_spec(SETUP_SPEC)
 SETUP_SPEC.loader.exec_module(SETUP)
 
@@ -438,7 +438,7 @@ def main():
               "run": run, "attempt": attempt, "owner": owner,
               "inputs": input_hashes(), "dependencies": {"node": SETUP.NODE, "probe": BUSYBOX,
                   "exporter": PYTHON,
-                  "installerSHA256": hashlib.sha256((ROOT / "tools/feed-identity/install.sh").read_bytes()).hexdigest()},
+                  "installerSHA256": hashlib.sha256((ROOT / "tools/feed_identity/install.sh").read_bytes()).hexdigest()},
               "cases": [], "images": {}, "verdict": "FAIL", "cleanup": "unknown"}
     artifact = Path(os.environ["RUNNER_TEMP"]) / "grafana-kubernetes.json"
     def passed(case):

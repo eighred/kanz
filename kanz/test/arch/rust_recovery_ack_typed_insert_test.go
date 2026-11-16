@@ -54,8 +54,8 @@ func TestRustRecoveryAckTypedInsert(t *testing.T) {
 		}
 		return strings.ReplaceAll(string(b), "\r\n", "\n")
 	}
-	source := read("kanz-rs/crates/oms-store/src/recovery_ack.rs")
-	protocol := read("kanz-rs/crates/oms-store/tests/typed_ack_protocol.rs")
+	source := read("rust/crates/oms_store/src/recovery_ack.rs")
+	protocol := read("rust/crates/oms_store/tests/typed_ack_protocol.rs")
 	workflow := read(".github/workflows/rust-oms-fold.yml")
 	if !typedAckInsert(source, protocol, workflow) {
 		t.Fatal("typed ACK SQL/bindings or independent protocol witness missing")
@@ -78,7 +78,7 @@ func TestRustRecoveryAckTypedInsert(t *testing.T) {
 }
 
 func TestRustRecoveryAckProtocolExceptionIsExact(t *testing.T) {
-	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	source := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
 	for _, target := range []string{"src/queries.rs", "tests/unreviewed_protocol.rs"} {
 		t.Run(target, func(t *testing.T) {
 			dst := t.TempDir()

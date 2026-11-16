@@ -35,7 +35,7 @@ import (
 // against the STORED order rather than the handler's return.
 
 // amendVenueProto is the venue contract that would have to grow an amend.
-const amendVenueProto = "../kanz-schemas/proto/venue/v1/venue.proto"
+const amendVenueProto = "../schemas/proto/venue/v1/venue.proto"
 
 // amendExecutionDir is where a venue capability interface would be declared.
 const amendExecutionDir = "internal/execution"
@@ -151,7 +151,7 @@ func TestNoVenueAmendCapabilityExistsWhileTheOMSRefusesToAmend(t *testing.T) {
 // described was the bug.
 func TestAmendOrderSchemaDoesNotClaimAVenueRoundTrip(t *testing.T) {
 	root := moduleRoot(t)
-	path := filepath.Join(root, filepath.FromSlash("../kanz-schemas/proto/order/v1/order.proto"))
+	path := filepath.Join(root, filepath.FromSlash("../schemas/proto/order/v1/order.proto"))
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read order.proto: %v", err)

@@ -107,7 +107,7 @@ services:
   # THE MARKET-DATA FRESHNESS SLO WAS REMOVED HERE, NOT SUSPENDED. It bound
   # kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
   # internal/integrity — deleted in DATA-M4. No Go source has emitted that
-  # series since, and services/market-data registers no domain metric at all
+  # series since, and services/market_data registers no domain metric at all
   # (only the generic bus metrics), so there was no renamed series to re-point
   # at. An objective compiled from a series nobody emits is not a weak
   # measurement, it is the absence of one wearing a measurement's label: the
