@@ -1,202 +1,584 @@
 package arch
 
 import (
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// A uint64 THE SERVER SENDS AS A STRING MUST BE TYPED AS A STRING IN THE CLIENT
-// (#606).
+// #1307: bind integer representations to actual response types, rather than
+// every property sharing a protobuf field name. These are serializer/type edges,
+// not a second field schema: integer fields are derived from each named origin.
+// Direct builtin int64/uint64 struct fields and direct scalar 64-bit fields on
+// the bound top-level proto messages are covered. New endpoints, named Go
+// integer aliases and recursively referenced types need an explicit binding.
+// Bound proto maps/oneofs and 64-bit collections or field options refuse rather
+// than receiving inferred client types. Nested definitions have their own owner.
 //
-// # The half this closes
-//
-// uint64_json_domain_test.go holds the SERVER half: no hand-built JSON body may
-// carry a bare uint64 getter, because JSON.parse destroys anything above 2^53
-// before a browser sees it. That guard is default-deny with an empty exemption
-// list and it works.
-//
-// Nothing held the CLIENT half, and the two moved separately — twice.
-//
-// compliance made the repair: proposalJSON emits `jsonUint64(...)`, so
-// `version` became a JSON string on all four mandate bodies.
-// kanz-web was never updated. It still declared `version?: number`, and
-// renderVersion opened with `if (typeof v !== 'number') return null`. Against a
-// string that test is ALWAYS true, so the signatory's queue rendered "VERSION NOT
-// RENDERABLE" on every row — not just the ones above 2^53 the check existed to
-// protect. A signatory approving a change to what governs a portfolio could not
-// see which version they were signing.
-//
-// The client's own comment recorded the split as it happened: "(The repair is
-// server-side and is not this PR's: compliance would have to emit the version as
-// a string...)". The server-side repair landed. Nobody came back.
-//
-// # Why a guard and not a comment on each side
-//
-// Both sides already had a comment naming the other. That is precisely the
-// arrangement that failed: a comment is dated evidence, and neither file's tests
-// could see the other's contract. The client's suite was GREEN throughout,
-// because its fixtures encoded the old number contract — a test that asserts the
-// wrong wire shape passes forever and is worse than no test.
-//
-// # What this checks
-//
-// Every uint64/fixed64 field name in the schema tree is a JSON key that reaches a
-// browser as a STRING — from protojson, which has always rendered 64-bit integers
-// that way, or from the jsonUint64 wrapper the server-half guard requires. So if
-// kanz-web declares a field of that name in its API types, the declared type must
-// be `string`, never `number`.
-//
-// DERIVED FROM THE PROTOS, not listed, for uint64_json_domain_test.go's reason: a
-// hand-copied list is correct the day it is written and silently narrows every
-// time a field is added.
-//
-// # What it CANNOT check, stated plainly
-//
-//   - It matches on FIELD NAME, not on the message the field belongs to. A
-//     kanz-web interface with a `version` that is genuinely some other message's
-//     string field would be checked too — and would PASS, since the requirement
-//     is `string`. The failure direction is a TS field named after a proto uint64
-//     and typed `number`, which is the defect itself.
-//   - It reads TypeScript with a regexp. There is no TS parser here and adding a
-//     Node toolchain to the Go arch suite to get one is a cost this repository has
-//     declined before (see decimal_domain_test.go, which reads kanz-web the same
-//     way for the same reason). A field declared through a mapped type or a
-//     generic would be invisible; none exists in src/api today.
-//   - It says nothing about fields kanz-web does NOT declare. That is the correct
-//     scope: a key the client never reads cannot be misread by it.
+// This bounded source guard is not a Go/TS type checker or arbitrary data-flow
+// analysis. Named structs, explicit projections and protojson are the current
+// forms. Missing/moved required declarations fail closed. HTTP/BFF/browser tests
+// prove the real routing separately. uint64_json_domain_test.go retains the
+// independent server map/getter guard protecting the mandate surface.
+type integerStructWire struct{ origin, domain, wire, projection, client, declaration string }
 
-// uint64ClientExempt maps "<file>:<field>" to the reason a client-side field
-// named after a proto uint64 may be typed as something other than a string.
-//
-// DEFAULT-DENY, and empty: the #606 sweep found no legitimate case. An entry here
-// is somebody deciding on purpose that a browser may hold a 64-bit integer in a
-// float64, which is a decision about silent data loss and should read like one.
-var uint64ClientExempt = map[string]string{}
+var integerStructWires = []integerStructWire{
+	{"kanz/internal/identity/access.go", "Access", "kanz/services/identity/internal/server/administration_json.go", "accessJSON", "users.ts", "UserAccess"},
+	{"kanz/internal/identity/invite_lifecycle.go", "InvitationSummary", "kanz/services/identity/internal/server/administration_json.go", "invitationJSON", "invitations.ts", "InvitationSummary"},
+	{"kanz/services/accounting/internal/server/custody.go", "breakView", "", "", "custody.ts", "CustodyBreak"},
+	{"kanz/services/accounting/internal/custody/actions.go", "ActionState", "", "", "custody.ts", "ActionState"},
+	{"kanz/services/audit/internal/audit/record.go", "Record", "kanz/services/audit/internal/server/server.go", "record", "evidence.ts", "EvidenceRecord"},
+}
 
-// tsFieldRe matches an interface property declaration: `  name?: type` — the
-// shape every kanz-web API type uses. The type runs to end of line so a union is
-// captured whole.
-var tsFieldRe = regexp.MustCompile(`^\s*([a-z][a-zA-Z0-9_]*)\??:\s*(.+?)\s*$`)
+type integerProtoWire struct{ source, message, client, declaration string }
+
+var integerProtoWires = []integerProtoWire{
+	{"kanz-schemas/proto/compliance/v1/compliance.proto", "Mandate", "mandates.ts", "MandateDocument"},
+	{"kanz-schemas/proto/common/v1/decimal.proto", "Decimal", "decimal.ts", "Decimal"},
+	{"kanz-schemas/proto/order/v1/order_query.proto", "ListOrdersResponse", "risk.ts", "OrdersResponse"},
+}
+
+const integerComplianceSource = "kanz/services/compliance/internal/api/api.go"
+
+func integerWireSources(t *testing.T) map[string]string {
+	t.Helper()
+	paths := map[string]bool{integerComplianceSource: true, "kanz/services/accounting/internal/custody/custody.go": true}
+	for _, c := range integerStructWires {
+		paths[c.origin] = true
+		if c.wire != "" {
+			paths[c.wire] = true
+		}
+		paths["kanz-web/src/api/"+c.client] = true
+	}
+	for _, c := range integerProtoWires {
+		paths[c.source] = true
+		paths["kanz-web/src/api/"+c.client] = true
+	}
+	out := map[string]string{}
+	for path := range paths {
+		b, err := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[path] = string(b)
+	}
+	return out
+}
 
 func TestAUint64FieldReachesTheClientAsAString(t *testing.T) {
-	root := moduleRoot(t)
-	repoRoot := filepath.Dir(root)
-
-	// The proto-derived uint64 field names, snake_case — which is also the JSON
-	// key, because both protojson and the hand-built maps use the proto name.
-	getters := uint64GetterNames(t, filepath.Join(repoRoot, "kanz-schemas", "proto"))
-	fields := map[string]string{} // field name -> "field (proto file)"
-	for _, origin := range getters {
-		name := origin
-		if i := strings.Index(origin, " ("); i > 0 {
-			name = origin[:i]
-		}
-		fields[name] = origin
-	}
-	if len(fields) == 0 {
-		t.Fatal("derived zero uint64/fixed64 proto fields — the schema walk is broken, not the " +
-			"client. A guard that checks an empty set passes no matter what kanz-web declares")
-	}
-
-	apiDir := filepath.Join(repoRoot, "kanz-web", "src", "api")
-	entries, err := os.ReadDir(apiDir)
-	if err != nil {
-		t.Fatalf("read %s: %v — kanz-web is the browser client for these bodies, and this guard "+
-			"cannot hold the client half if it cannot find it", apiDir, err)
-	}
-
-	var problems []string
-	checked := 0
-	used := map[string]bool{}
-
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".test.ts") {
-			continue
-		}
-		rel := "kanz-web/src/api/" + e.Name()
-		b, err := os.ReadFile(filepath.Join(apiDir, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		for i, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
-			trimmed := strings.TrimSpace(line)
-			// Comment bodies quote field names constantly, and a guard that matches
-			// its own prose checks nothing.
-			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") ||
-				strings.HasPrefix(trimmed, "/*") {
-				continue
-			}
-			m := tsFieldRe.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			name, declared := m[1], strings.TrimSuffix(m[2], ",")
-			origin, isUint64 := fields[name]
-			if !isUint64 {
-				continue
-			}
-			checked++
-			key := rel + ":" + name
-			if _, ok := uint64ClientExempt[key]; ok {
-				used[key] = true
-				continue
-			}
-			if tsTypeIsString(declared) {
-				continue
-			}
-			problems = append(problems, fmt.Sprintf("%s:%d declares %q as %s — the wire carries "+
-				"%s as a STRING", rel, i+1, name, declared, origin))
-		}
-	}
-
-	// NON-VACUITY. kanz-web declares at least one proto uint64 field today
-	// (PendingMandateChange.version, on the mandate dual-control queue). A scan
-	// finding none has lost sight of the client types — through a moved directory,
-	// a renamed extension, or a declaration shape this regexp no longer matches —
-	// and would stay green while every one of them was a number.
-	if checked == 0 {
-		t.Fatalf("found zero uint64-named fields in %s — expected at least one (version). "+
-			"The client type shape moved and this guard is asserting nothing", apiDir)
-	}
-
-	if len(problems) > 0 {
-		sort.Strings(problems)
-		t.Errorf("%d client field(s) declare a 64-bit integer as something a float64 cannot "+
-			"hold:\n\n  %s\n\nJSON.parse turns every JSON number into a float64, so a value above "+
-			"2^53 is already destroyed by the time the first line of client code runs — "+
-			"18446744073709551615 arrives as 18446744073709552000, with no error and no way to "+
-			"recover it. The server sends these as strings; the client must read them as strings "+
-			"and must never Number() one (#606).",
-			len(problems), strings.Join(problems, "\n  "))
-	}
-
-	// A DEAD EXEMPTION IS A REPAIR NOBODY NOTICED.
-	for key := range uint64ClientExempt {
-		if !used[key] {
-			t.Errorf("exemption %q matches no client field — the declaration it excuses is gone, "+
-				"so remove the entry", key)
-		}
+	if problems := integerWireProblems(integerWireSources(t)); len(problems) != 0 {
+		t.Fatalf("unsafe or unresolved browser integer contracts:\n%s", strings.Join(problems, "\n"))
 	}
 }
 
-// tsTypeIsString reports whether a declared TypeScript type carries the value as
-// a string. A union is accepted only if every non-null member is a string: one
-// `number` arm is enough to put a float64 back on the path.
+type integerJSONField struct {
+	goType string
+	quoted bool
+}
+
+func integerGoFile(source string) (*ast.File, error) {
+	return parser.ParseFile(token.NewFileSet(), "contract.go", source, parser.SkipObjectResolution)
+}
+
+func integerJSONFields(source, name string) (map[string]integerJSONField, error) {
+	f, err := integerGoFile(source)
+	if err != nil {
+		return nil, err
+	}
+	var found *ast.StructType
+	ast.Inspect(f, func(n ast.Node) bool {
+		if d, ok := n.(*ast.TypeSpec); ok && d.Name.Name == name {
+			found, _ = d.Type.(*ast.StructType)
+		}
+		return true
+	})
+	if found == nil {
+		return nil, fmt.Errorf("missing struct %s", name)
+	}
+	out := map[string]integerJSONField{}
+	for _, field := range found.Fields.List {
+		if len(field.Names) == 0 {
+			continue
+		}
+		tag := ""
+		if field.Tag != nil {
+			var e error
+			tag, e = strconv.Unquote(field.Tag.Value)
+			if e != nil {
+				return nil, e
+			}
+		}
+		parts := strings.Split(reflect.StructTag(tag).Get("json"), ",")
+		if parts[0] == "-" {
+			continue
+		}
+		for _, name := range field.Names {
+			if !name.IsExported() {
+				continue
+			}
+			key := parts[0]
+			if key == "" {
+				key = name.Name
+			}
+			if _, duplicate := out[key]; duplicate {
+				return nil, fmt.Errorf("duplicate JSON key %s.%s", name, key)
+			}
+			out[key] = integerJSONField{integerExpr(field.Type), strings.Contains(","+strings.Join(parts[1:], ",")+",", ",string,")}
+		}
+	}
+	return out, nil
+}
+
+func integerExpr(n ast.Node) string {
+	var out bytes.Buffer
+	if format.Node(&out, token.NewFileSet(), n) != nil {
+		return ""
+	}
+	return out.String()
+}
+
+func integerFunction(source, name string) *ast.FuncDecl {
+	f, err := integerGoFile(source)
+	if err != nil {
+		return nil
+	}
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == name {
+			return fn
+		}
+	}
+	return nil
+}
+
+func integerWireProblems(sources map[string]string) []string {
+	var problems []string
+	check := func(path, declaration, field string, bounded bool) {
+		fields, err := integerTSFields(sources[path], declaration)
+		if err != nil {
+			problems = append(problems, path+": "+err.Error())
+			return
+		}
+		declared, ok := fields[field]
+		if !ok || bounded && declared != "number" || !bounded && !tsTypeIsString(declared) {
+			problems = append(problems, fmt.Sprintf("%s:%s.%s unsafe/missing type %q", path, declaration, field, declared))
+		}
+	}
+	for _, c := range integerStructWires {
+		origin, err := integerJSONFields(sources[c.origin], c.domain)
+		if err != nil {
+			problems = append(problems, c.origin+": "+err.Error())
+			continue
+		}
+		wire := origin
+		if c.wire != "" {
+			wire, err = integerJSONFields(sources[c.wire], c.projection)
+			if err != nil {
+				problems = append(problems, c.wire+": "+err.Error())
+				continue
+			}
+		}
+		checked := 0
+		for key, field := range origin {
+			if field.goType != "int64" && field.goType != "uint64" {
+				continue
+			}
+			checked++
+			bounded := c.domain == "breakView" && key == "age_seconds" && integerBoundedAge(sources)
+			projected, ok := wire[key]
+			if !ok || !bounded && projected.goType != "string" && !(projected.goType == field.goType && projected.quoted) {
+				problems = append(problems, c.domain+"."+key+": JSON must encode 64-bit integer as text")
+			}
+			check("kanz-web/src/api/"+c.client, c.declaration, key, bounded)
+		}
+		if checked == 0 {
+			problems = append(problems, c.domain+": no 64-bit fields; binding is vacuous")
+		}
+	}
+	for _, c := range integerProtoWires {
+		fields, err := integerProtoFields(sources[c.source], c.message)
+		if err != nil {
+			problems = append(problems, c.source+": "+err.Error())
+			continue
+		}
+		for _, field := range fields {
+			check("kanz-web/src/api/"+c.client, c.declaration, field, false)
+		}
+	}
+	// Hand-built mandate views use the same qualified Mandate.version contract.
+	for _, name := range []string{"handlePropose", "handleApprove", "proposalJSON"} {
+		fn := integerFunction(sources[integerComplianceSource], name)
+		found, safe := 0, true
+		if fn != nil {
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				kv, ok := n.(*ast.KeyValueExpr)
+				if !ok || integerExpr(kv.Key) != `"version"` {
+					return true
+				}
+				found++
+				call, ok := kv.Value.(*ast.CallExpr)
+				if !ok || integerExpr(call.Fun) != "jsonUint64" || len(call.Args) != 1 || !strings.HasSuffix(integerExpr(call.Args[0]), ".GetVersion()") {
+					safe = false
+				}
+				return true
+			})
+		}
+		if found != 1 || !safe {
+			problems = append(problems, name+": unresolved/unsafe Mandate.version map serialization")
+		}
+	}
+	fn := integerFunction(sources[integerComplianceSource], "jsonUint64")
+	if !integerUint64Formatter(fn) {
+		problems = append(problems, "jsonUint64: unsigned string conversion changed")
+	}
+	for _, declaration := range []string{"PendingMandateChange", "ProposedMandateChange"} {
+		check("kanz-web/src/api/mandates.ts", declaration, "version", false)
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+func integerUint64Formatter(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Body == nil || len(fn.Body.List) != 1 {
+		return false
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	return ok && integerExpr(call.Fun) == "strconv.FormatUint" && len(call.Args) == 2 && integerExpr(call.Args[0]) == "v" && integerExpr(call.Args[1]) == "10"
+}
+
+func integerBoundedAge(sources map[string]string) bool {
+	// time.Duration saturates within int64 nanoseconds. Whole seconds are at
+	// most 9,223,372,036, below 2^53. Tie this premise to its actual producer,
+	// rather than allowing every age_seconds or every int64 to be a number.
+	ageSource := sources["kanz/services/accounting/internal/custody/custody.go"]
+	viewSource := sources["kanz/services/accounting/internal/server/custody.go"]
+	ageFile, err := integerGoFile(ageSource)
+	if err != nil || !integerDefaultImport(ageFile, "time", "time") {
+		return false
+	}
+	viewFile, err := integerGoFile(viewSource)
+	if err != nil || !integerDefaultImport(viewFile, "time", "time") || !integerDefaultImport(viewFile, "custody", "github.com/eighred/kanz/services/accounting/internal/custody") {
+		return false
+	}
+	var age *ast.FuncDecl
+	breakStructs := 0
+	for _, declaration := range ageFile.Decls {
+		if group, ok := declaration.(*ast.GenDecl); ok {
+			for _, spec := range group.Specs {
+				if named, ok := spec.(*ast.TypeSpec); ok && named.Name.Name == "Break" {
+					if _, ok := named.Type.(*ast.StructType); !ok || named.Assign.IsValid() {
+						return false
+					}
+					breakStructs++
+				}
+			}
+		}
+		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == "Age" && fn.Recv != nil && len(fn.Recv.List) == 1 && integerExpr(fn.Recv.List[0].Type) == "Break" {
+			if age != nil {
+				return false
+			}
+			age = fn
+		}
+	}
+	view := integerFunction(viewSource, "toBreakView")
+	if breakStructs != 1 || age == nil || age.Type.Params == nil || len(age.Type.Params.List) != 1 || integerExpr(age.Type.Params.List[0].Type) != "time.Time" || age.Type.Results == nil || len(age.Type.Results.List) != 1 || integerExpr(age.Type.Results.List[0].Type) != "time.Duration" || view == nil || view.Recv != nil || view.Type.Params == nil || len(view.Type.Params.List) != 2 {
+		return false
+	}
+	for i, expected := range []struct{ name, kind string }{{"b", "custody.Break"}, {"now", "time.Time"}} {
+		parameter := view.Type.Params.List[i]
+		if len(parameter.Names) != 1 || parameter.Names[0].Name != expected.name || integerExpr(parameter.Type) != expected.kind {
+			return false
+		}
+	}
+	found, safe := 0, true
+	ast.Inspect(view.Body, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok && integerExpr(kv.Key) == "AgeSeconds" {
+			found++
+			if integerExpr(kv.Value) != "int64(b.Age(now).Seconds())" {
+				safe = false
+			}
+		}
+		return true
+	})
+	return found == 1 && safe
+}
+
+// Only the current unaliased named imports establish this narrow premise.
+// This does not infer package names or types through arbitrary Go aliases.
+func integerDefaultImport(file *ast.File, name, path string) bool {
+	found := 0
+	for _, imported := range file.Imports {
+		value, err := strconv.Unquote(imported.Path.Value)
+		if err != nil {
+			return false
+		}
+		binding := filepath.Base(value)
+		if imported.Name != nil {
+			binding = imported.Name.Name
+		}
+		if binding == name {
+			if value != path || imported.Name != nil {
+				return false
+			}
+			found++
+		}
+	}
+	return found == 1
+}
+
+var integerProtoName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func integerProtoFields(source, message string) ([]string, error) {
+	tokens, err := integerTSTokens(source)
+	if err != nil {
+		return nil, err
+	}
+	// Protobuf statements are semicolon-delimited, independent of line layout.
+	var flat []string
+	for _, token := range tokens {
+		if token != "\n" {
+			flat = append(flat, token)
+		}
+	}
+	var body []string
+	found := false
+	for i := 0; i < len(flat); i++ {
+		if flat[i] != "message" {
+			if flat[i] == "{" {
+				i, err = integerClosing(flat, i)
+				if err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		if i+2 >= len(flat) || !integerProtoName.MatchString(flat[i+1]) || flat[i+2] != "{" {
+			return nil, fmt.Errorf("unsupported protobuf message declaration")
+		}
+		end, err := integerClosing(flat, i+2)
+		if err != nil {
+			return nil, err
+		}
+		if flat[i+1] == message {
+			if found {
+				return nil, fmt.Errorf("duplicate top-level protobuf message %s", message)
+			}
+			body, found = flat[i+3:end], true
+		}
+		// Nested declarations cannot impersonate the qualified top-level type.
+		i = end
+	}
+	if !found {
+		return nil, fmt.Errorf("missing top-level protobuf message %s", message)
+	}
+	var out []string
+	seen := map[string]bool{}
+	for i := 0; i < len(body); {
+		if body[i] == ";" {
+			i++
+			continue
+		}
+		if body[i] == "message" || body[i] == "enum" {
+			if i+2 >= len(body) || !integerProtoName.MatchString(body[i+1]) || body[i+2] != "{" {
+				return nil, fmt.Errorf("unsupported nested declaration in %s", message)
+			}
+			end, err := integerClosing(body, i+2)
+			if err != nil {
+				return nil, err
+			}
+			i = end + 1
+			continue
+		}
+		// These need a separate reviewed wire shape, not scalar string inference.
+		if body[i] == "map" || body[i] == "oneof" || body[i] == "group" {
+			return nil, fmt.Errorf("unsupported %s form in bound message %s", body[i], message)
+		}
+		end := i
+		for end < len(body) && body[end] != ";" {
+			if body[end] == "{" || body[end] == "}" {
+				return nil, fmt.Errorf("unsupported field block in bound message %s", message)
+			}
+			end++
+		}
+		if end == len(body) {
+			return nil, fmt.Errorf("unterminated field in bound message %s", message)
+		}
+		field := body[i:end]
+		i = end + 1
+		label := ""
+		if len(field) > 0 && (field[0] == "optional" || field[0] == "required" || field[0] == "repeated") {
+			label, field = field[0], field[1:]
+		}
+		if len(field) == 0 {
+			return nil, fmt.Errorf("empty field in bound message %s", message)
+		}
+		switch field[0] {
+		case "int64", "sint64", "sfixed64", "uint64", "fixed64":
+			if label == "repeated" || len(field) != 4 || !integerProtoName.MatchString(field[1]) || field[2] != "=" {
+				return nil, fmt.Errorf("unsupported 64-bit field form in bound message %s", message)
+			}
+			if number, err := strconv.ParseUint(field[3], 10, 29); err != nil || number == 0 {
+				return nil, fmt.Errorf("invalid field number in bound message %s", message)
+			}
+			if seen[field[1]] {
+				return nil, fmt.Errorf("duplicate protobuf field %s.%s", message, field[1])
+			}
+			seen[field[1]] = true
+			out = append(out, field[1])
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s has no direct scalar 64-bit fields", message)
+	}
+	return out, nil
+}
+
+// Parse individual named-interface properties, including same-line semicolons,
+// comments, quoted literals and nested types. No mapped/generic type inference
+// and no Node toolchain in the Go architecture suite.
+func integerTSFields(source, declaration string) (map[string]string, error) {
+	tokens, err := integerTSTokens(source)
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i+2 < len(tokens); i++ {
+		if tokens[i] != "interface" || tokens[i+1] != declaration {
+			continue
+		}
+		start := i + 2
+		for start < len(tokens) && tokens[start] != "{" {
+			start++
+		}
+		if start == len(tokens) {
+			break
+		}
+		end, err := integerClosing(tokens, start)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		part := start + 1
+		for j := part; j <= end; j++ {
+			if j < end && (tokens[j] == "{" || tokens[j] == "[" || tokens[j] == "(") {
+				j, err = integerClosing(tokens, j)
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if j != end && tokens[j] != ";" && tokens[j] != "\n" {
+				continue
+			}
+			p := tokens[part:j]
+			if len(p) >= 3 {
+				colon := 1
+				if p[colon] == "?" {
+					colon++
+				}
+				if p[colon] == ":" {
+					if _, duplicate := out[p[0]]; duplicate {
+						return nil, fmt.Errorf("duplicate %s.%s", declaration, p[0])
+					}
+					out[p[0]] = strings.Join(p[colon+1:], " ")
+				}
+			}
+			part = j + 1
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("missing interface %s", declaration)
+}
+
+func integerClosing(tokens []string, start int) (int, error) {
+	close := map[string]string{"{": "}", "[": "]", "(": ")"}[tokens[start]]
+	for i := start + 1; i < len(tokens); i++ {
+		if tokens[i] == close {
+			return i, nil
+		}
+		if tokens[i] == "{" || tokens[i] == "[" || tokens[i] == "(" {
+			var err error
+			i, err = integerClosing(tokens, i)
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	return 0, fmt.Errorf("unterminated %s declaration", tokens[start])
+}
+
+func integerTSTokens(source string) ([]string, error) {
+	var out []string
+	for i := 0; i < len(source); {
+		c := source[i]
+		if c == ' ' || c == '\t' || c == '\r' {
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(source) && source[i+1] == '/' {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(source) && source[i+1] == '*' {
+			end := strings.Index(source[i+2:], "*/")
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated comment")
+			}
+			i += end + 4
+			continue
+		}
+		start := i
+		if c == '\'' || c == '"' || c == '`' {
+			i++
+			for i < len(source) && source[i] != c {
+				if source[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			if i >= len(source) {
+				return nil, fmt.Errorf("unterminated string")
+			}
+			i++
+		} else if integerIdentifier(c) {
+			i++
+			for i < len(source) && integerIdentifier(source[i]) {
+				i++
+			}
+		} else {
+			i++
+		}
+		out = append(out, source[start:i])
+	}
+	return out, nil
+}
+
+func integerIdentifier(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '$'
+}
+
 func tsTypeIsString(declared string) bool {
-	parts := strings.Split(declared, "|")
 	sawString := false
-	for _, p := range parts {
-		switch strings.TrimSpace(p) {
+	for _, part := range strings.Split(declared, "|") {
+		switch strings.TrimSpace(part) {
 		case "string":
 			sawString = true
 		case "null", "undefined":
-			// Absence is not a number; it is the "nothing was sent" case every
-			// renderer here already distinguishes.
 		default:
 			return false
 		}

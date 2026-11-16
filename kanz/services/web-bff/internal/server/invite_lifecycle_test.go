@@ -23,7 +23,7 @@ func TestInviteLifecycleProxyPinsRouteAuthorityAndReview(t *testing.T) {
 					t.Error("browser controlled route or authority")
 				}
 				body, err := io.ReadAll(r.Body)
-				if err != nil || string(body) != `{"revision":7}` {
+				if err != nil || string(body) != `{"revision":"9007199254740993"}` {
 					t.Error("reviewed revision changed")
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -37,7 +37,7 @@ func TestInviteLifecycleProxyPinsRouteAuthorityAndReview(t *testing.T) {
 				cookie bool
 				code   int
 			}{{"http://app", true, 201}, {"https://evil.example", true, 403}, {"http://app", false, 401}} {
-				r := httptest.NewRequest("POST", "http://app/api/identity/invites/source%2Fid/"+action, strings.NewReader(`{"revision":7}`))
+				r := httptest.NewRequest("POST", "http://app/api/identity/invites/source%2Fid/"+action, strings.NewReader(`{"revision":"9007199254740993"}`))
 				r.Header.Set("Origin", tc.origin)
 				r.Header.Set("Authorization", "Bearer forged")
 				if tc.cookie {

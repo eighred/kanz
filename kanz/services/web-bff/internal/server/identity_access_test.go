@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,10 @@ func TestIdentityAccessProxyPinsAuthorityAndRejectsForgery(t *testing.T) {
 		if r.URL.EscapedPath() != "/users/alice%2Fdesk/access" {
 			t.Errorf("subject path changed: %s", r.URL.EscapedPath())
 		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != `{"revision":"9007199254740993","roles":["kanz-user"],"portfolios":[]}` {
+			t.Error("proxy changed the reviewed decimal revision")
+		}
 		w.WriteHeader(409)
 		_, _ = w.Write([]byte(`{"error":"reload before editing"}`))
 	}))
@@ -31,7 +36,7 @@ func TestIdentityAccessProxyPinsAuthorityAndRejectsForgery(t *testing.T) {
 		cookie bool
 		status int
 	}{{"http://app", true, 409}, {"https://evil.example", true, 403}, {"http://app", false, 401}} {
-		r := httptest.NewRequest("PUT", "http://app/api/identity/users/alice%2Fdesk/access", strings.NewReader(`{"revision":0,"roles":["kanz-user"],"portfolios":[]}`))
+		r := httptest.NewRequest("PUT", "http://app/api/identity/users/alice%2Fdesk/access", strings.NewReader(`{"revision":"9007199254740993","roles":["kanz-user"],"portfolios":[]}`))
 		r.Header.Set("Origin", tc.origin)
 		r.Header.Set("Authorization", "Bearer browser-input")
 		if tc.cookie {
