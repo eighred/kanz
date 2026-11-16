@@ -76,7 +76,10 @@ func TestSnapshotActualRequestedParkingPreservesOriginalOrRetainsFailure(t *test
 				cancel()
 				if !joined {
 					select {
-					case <-done:
+					case err := <-done:
+						if err != nil {
+							t.Errorf("consumer cleanup: %v", err)
+						}
 					case <-time.After(10 * time.Second):
 						t.Error("consumer cleanup unconfirmed")
 					}
@@ -84,9 +87,9 @@ func TestSnapshotActualRequestedParkingPreservesOriginalOrRetainsFailure(t *test
 			}()
 			select {
 			case <-ready:
-			case <-done:
+			case err := <-done:
 				joined = true
-				t.Fatal("consumer stopped before registration")
+				t.Fatalf("consumer stopped before registration: %v", err)
 			case <-ctx.Done():
 				t.Fatal("consumer registration deadline")
 			}
@@ -138,8 +141,11 @@ func TestSnapshotActualRequestedParkingPreservesOriginalOrRetainsFailure(t *test
 					t.Fatal("failure did not latch owner cancellation")
 				}
 				select {
-				case <-done:
+				case err := <-done:
 					joined = true
+					if err != nil {
+						t.Fatalf("cancelled subscription join: %v", err)
+					}
 				case <-ctx.Done():
 					t.Fatal("failed consumer did not join")
 				}

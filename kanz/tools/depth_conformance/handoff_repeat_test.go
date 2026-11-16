@@ -2,14 +2,56 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"net/url"
 	"testing"
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+const handoffCIDBudget uint64 = 4096
+const handoffMaxClients = 16 // The disposable server's explicit MaxConn.
+
+// The configured SPIFFE verifier authenticates the peer during TLS. This only
+// extracts that completed TLS identity, not the client-supplied NATS name or
+// proof that the later CONNECT authorization has completed.
+func handoffTLSPrincipal(state *tls.ConnectionState) (string, bool) {
+	if state == nil || !state.HandshakeComplete || state.Version != tls.VersionTLS13 ||
+		len(state.PeerCertificates) != 1 || state.PeerCertificates[0] == nil {
+		return "", false
+	}
+	cert := state.PeerCertificates[0]
+	if len(cert.URIs) != 1 || cert.URIs[0] == nil {
+		return "", false
+	}
+	id, err := spiffeid.FromURI(cert.URIs[0])
+	if err != nil || id.TrustDomain().String() != "kanz.internal" {
+		return "", false
+	}
+	return id.String(), true
+}
+
+// A CID in both collections cannot have disconnected and been reused. Every
+// common CID therefore spanned the midpoint. Its count must exclude any other
+// registered CID there. nil represents an UNKNOWN collection, unlike known empty.
+func handoffPrincipalSnapshot(first map[uint64]string, midpoint int, second map[uint64]string) bool {
+	if first == nil || second == nil || midpoint < 0 || midpoint > handoffMaxClients ||
+		len(first) != midpoint || len(second) != midpoint {
+		return false
+	}
+	for cid, peer := range first {
+		if cid == 0 || cid > handoffCIDBudget || peer == "" || second[cid] != peer {
+			return false
+		}
+	}
+	return true
+}
 
 type handoffObservation struct {
 	deadline time.Time
@@ -54,6 +96,68 @@ func (p *handoffPrevious) remember(f *envelopepb.EventFrame, sequence uint64) {
 }
 
 func TestFeedHandoffExactRepeatControl(t *testing.T) {
+	principal := "spiffe://kanz.internal/ns/test/sa/feed"
+	observer := "spiffe://kanz.internal/ns/test/sa/observer"
+	for _, tc := range []struct {
+		name          string
+		first, second map[uint64]string
+		midpoint      int
+		want          bool
+	}{
+		{"PrincipalInventoryIdentical", map[uint64]string{1: observer, 2: principal}, map[uint64]string{1: observer, 2: principal}, 2, true},
+		{"PrincipalInventoryPairedCountABA", map[uint64]string{1: observer, 2: principal}, map[uint64]string{1: observer, 3: principal}, 2, false},
+		{"PrincipalInventoryMissedCID", map[uint64]string{1: observer}, map[uint64]string{1: observer}, 2, false},
+		{"PrincipalInventoryAboveBudget", map[uint64]string{handoffCIDBudget + 1: principal}, map[uint64]string{handoffCIDBudget + 1: principal}, 1, false},
+		{"PrincipalInventoryChangedURI", map[uint64]string{2: principal}, map[uint64]string{2: observer}, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if handoffPrincipalSnapshot(tc.first, tc.midpoint, tc.second) != tc.want {
+				t.Fatal("coherent principal snapshot outcome differs")
+			}
+		})
+	}
+	t.Run("PrincipalInventoryUnknownTLS", func(t *testing.T) {
+		// These synthetic states check extraction/refusal only. Actual SVID
+		// verification and broker authorization remain in the process rehearsal.
+		uri := spiffeid.RequireFromString(principal).URL()
+		valid := func() *tls.ConnectionState {
+			return &tls.ConnectionState{HandshakeComplete: true, Version: tls.VersionTLS13,
+				PeerCertificates: []*x509.Certificate{{URIs: []*url.URL{uri}}}}
+		}
+		if got, ok := handoffTLSPrincipal(valid()); !ok || got != principal {
+			t.Fatal("completed TLS-state identity extraction refused")
+		}
+		states := []*tls.ConnectionState{nil}
+		for _, mutate := range []func(*tls.ConnectionState){
+			func(s *tls.ConnectionState) { s.HandshakeComplete = false },
+			func(s *tls.ConnectionState) { s.Version = tls.VersionTLS12 },
+			func(s *tls.ConnectionState) { s.PeerCertificates = nil },
+			func(s *tls.ConnectionState) { s.PeerCertificates[0] = nil },
+			func(s *tls.ConnectionState) { s.PeerCertificates[0].URIs = nil },
+			func(s *tls.ConnectionState) { s.PeerCertificates[0].URIs = []*url.URL{nil} },
+			func(s *tls.ConnectionState) { s.PeerCertificates[0].URIs = []*url.URL{uri, uri} },
+			func(s *tls.ConnectionState) {
+				s.PeerCertificates[0].URIs = []*url.URL{spiffeid.RequireFromString("spiffe://foreign.test/peer").URL()}
+			},
+		} {
+			state := valid()
+			mutate(state)
+			states = append(states, state)
+		}
+		for _, state := range states {
+			if _, ok := handoffTLSPrincipal(state); ok {
+				t.Fatal("unknown TLS became a known principal")
+			}
+		}
+		known := map[uint64]string{2: principal}
+		if handoffPrincipalSnapshot(nil, 1, known) || handoffPrincipalSnapshot(known, 1, nil) ||
+			handoffPrincipalSnapshot(map[uint64]string{2: ""}, 1, map[uint64]string{2: ""}) {
+			t.Fatal("unknown collection became successful absence")
+		}
+		if !handoffPrincipalSnapshot(map[uint64]string{}, 0, map[uint64]string{}) {
+			t.Fatal("known empty snapshot confused with UNKNOWN")
+		}
+	})
 	now := time.Unix(100, 0)
 	deadline := now.Add(10 * time.Second)
 	frame := func(payload string, producer uint64) *envelopepb.EventFrame {

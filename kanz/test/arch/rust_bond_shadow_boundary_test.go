@@ -38,7 +38,7 @@ num-rational = "=0.4.2"
 num-traits = "=0.2.19"
 
 [build-dependencies]
-prost-build = "=0.14.1"
+prost-build = "=0.14.6"
 protoc-bin-vendored = "=3.3.0"`
 
 const rustBondShadowBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {

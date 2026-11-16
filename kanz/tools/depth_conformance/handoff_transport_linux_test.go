@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -132,17 +133,53 @@ func startHandoffBroker(t *testing.T, rustID string, denyRustPublish bool) *hand
 
 func (b *handoffBroker) connections(id string) []uint64 {
 	b.t.Helper()
-	state, err := b.server.Connz(&ns.ConnzOptions{Username: true, Limit: 32})
-	if err != nil || state.Total > 32 {
-		b.t.Fatal("bounded broker principal inventory unavailable")
+	// Connz in the pinned NATS server reads opts.Username while TLSMap writes
+	// it without the client lock. Read the verified TLS state through the
+	// exported, locked accessor instead; client-supplied names are not identity.
+	// Equal counts alone do not detect replacement during a scan. Equal complete
+	// CID/URI collections bracket a midpoint count instead: non-reused CIDs in
+	// both collections were all registered at that midpoint. A matching count
+	// excludes missed clients, including IDs beyond this explicit scan budget.
+	for attempt := 0; attempt < 50; attempt++ {
+		first := b.collectPrincipals()
+		if first != nil {
+			midpoint := b.server.NumClients()
+			second := b.collectPrincipals()
+			if handoffPrincipalSnapshot(first, midpoint, second) {
+				var ids []uint64
+				for cid := uint64(1); cid <= handoffCIDBudget; cid++ {
+					if peer, exists := second[cid]; exists && peer == id {
+						ids = append(ids, cid)
+					}
+				}
+				return ids
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	var ids []uint64
-	for _, c := range state.Conns {
-		if c.AuthorizedUser == id {
-			ids = append(ids, c.Cid)
+	b.t.Fatal("complete broker principal inventory unavailable")
+	return nil
+}
+
+func (b *handoffBroker) collectPrincipals() map[uint64]string {
+	peers := make(map[uint64]string)
+	for cid := uint64(1); cid <= handoffCIDBudget; cid++ {
+		client := b.server.GetClient(cid)
+		if client == nil {
+			continue
+		}
+		peer, known := handoffTLSPrincipal(client.GetTLSConnectionState())
+		if !known {
+			// A registered connection with unfinished/unknown TLS is not an
+			// absent principal. Refuse this whole collection and try again.
+			return nil
+		}
+		peers[cid] = peer
+		if len(peers) > handoffMaxClients {
+			return nil
 		}
 	}
-	return ids
+	return peers
 }
 
 func handoffWait(t *testing.T, limit time.Duration, label string, predicate func() bool) {
@@ -205,8 +242,12 @@ func startHandoffProcess(t *testing.T, b *handoffBroker, binary, principal strin
 		if !p.joined {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			select {
-			case <-p.done:
+			case err := <-p.done:
 				p.joined = true
+				var exit *exec.ExitError
+				if err != nil && !errors.As(err, &exit) {
+					t.Error("killed handoff child join failed")
+				}
 			case <-time.After(10 * time.Second):
 				t.Error("handoff child join unconfirmed")
 			}

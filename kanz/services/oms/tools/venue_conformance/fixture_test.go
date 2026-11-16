@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"github.com/eighred/kanz/internal/testidentity"
 	"google.golang.org/protobuf/proto"
 	"io"
@@ -202,7 +203,11 @@ func startWorker(t *testing.T, config map[string]any) (*worker, response) {
 			cancel()
 			_ = in.Close()
 			select {
-			case <-w.done:
+			case err := <-w.done:
+				var exit *exec.ExitError
+				if err != nil && !errors.As(err, &exit) {
+					t.Errorf("cancelled worker join: %v", err)
+				}
 			case <-time.After(6 * time.Second):
 				t.Error("Rust process did not terminate")
 			}

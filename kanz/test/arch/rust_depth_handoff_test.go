@@ -2,11 +2,31 @@ package arch
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func handoffTransportAvoidsRawPrincipalReads(source string) error {
+	file, err := parser.ParseFile(token.NewFileSet(), "handoff_transport_linux_test.go", source, 0)
+	if err != nil {
+		return err
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		if member, ok := node.(*ast.SelectorExpr); ok {
+			switch member.Sel.Name {
+			case "Connz", "AuthorizedUser", "GetOpts":
+				err = fmt.Errorf("raw broker principal observation refused")
+			}
+		}
+		return true
+	})
+	return err
+}
 
 // This is a recipe/ownership guard, not proof that a child authenticated or a
 // handoff completed. The named Linux process test must execute separately.
@@ -14,7 +34,9 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 	markers := map[string][]string{
 		"handoff_transport_linux_test.go": {
 			"//go:build linux", "TLSMap: true", "tls.VersionTLS13", "tlsconfig.AuthorizeID(spiffeid.RequireFromString(feedBrokerID))",
-			"c.AuthorizedUser == id", "exec.CommandContext(ctx, binary)", "Setpgid: true", "syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)",
+			"first := b.collectPrincipals()", "midpoint := b.server.NumClients()", "second := b.collectPrincipals()", "handoffPrincipalSnapshot(first, midpoint, second)",
+			"client := b.server.GetClient(cid)", "handoffTLSPrincipal(client.GetTLSConnectionState())", "if !known {", "peers[cid] = peer", "exists && peer == id",
+			"exec.CommandContext(ctx, binary)", "Setpgid: true", "syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)",
 			"p.done <- cmd.Wait()", "p.source.Active() == 0 && len(p.broker.connections(p.principal)) == 0", "cmd.Env = []string{",
 			"Username: feedObserverID, Permissions: permissions(\"$JS.API.>\", \"$JS.ACK.>\")", "observer-must-not-publish",
 			"rustPermissions.Publish = &ns.SubjectPermission{Deny: []string{\">\"}}", "strings.HasSuffix(format, \"Publish Violation - Subject %q\")",
@@ -38,6 +60,11 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 		},
 		"handoff_repeat_test.go": {
 			"TestFeedHandoffExactRepeatControl", "o.count >= 10000", "!now.Before(o.deadline)", "e.ProducerSequence <= p.producer",
+			"const handoffCIDBudget uint64 = 4096", "const handoffMaxClients = 16",
+			"state == nil || !state.HandshakeComplete || state.Version != tls.VersionTLS13", "len(cert.URIs) != 1 || cert.URIs[0] == nil",
+			"spiffeid.FromURI(cert.URIs[0])", "id.TrustDomain().String() != \"kanz.internal\"",
+			"first == nil || second == nil", "len(first) != midpoint || len(second) != midpoint", "cid > handoffCIDBudget || peer == \"\" || second[cid] != peer",
+			"PrincipalInventoryIdentical", "PrincipalInventoryPairedCountABA", "PrincipalInventoryMissedCID", "PrincipalInventoryAboveBudget", "PrincipalInventoryChangedURI", "PrincipalInventoryUnknownTLS",
 			"actual != p.sequence", "!bytes.Equal(f.Payload, p.frame.Payload)", "!proto.Equal(e.EventTime, p.frame.GetEnvelope().EventTime)",
 			"p.frame = proto.Clone(f).(*envelopepb.EventFrame)", "non-immediate history accepted", "ready target accepted at deadline",
 		},
@@ -62,6 +89,9 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			if strings.Contains(source, "os.Environ()") {
 				return fmt.Errorf("child inherited ambient authority")
 			}
+			if file == "handoff_transport_linux_test.go" {
+				return handoffTransportAvoidsRawPrincipalReads(source)
+			}
 			return nil
 		}
 		normalized := strings.ReplaceAll(string(body), "\r\n", "\n")
@@ -75,6 +105,18 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 		}
 		if check(normalized+"\n// os.Environ()") == nil {
 			t.Fatal("ambient environment mutation escaped")
+		}
+		if file == "handoff_transport_linux_test.go" {
+			const anchor = "first := b.collectPrincipals()"
+			for _, member := range []string{"Connz", "AuthorizedUser", "GetOpts"} {
+				changed := strings.Replace(normalized, anchor, "_ = b.server."+member+"\n\t\t"+anchor, 1)
+				if changed == normalized || check(changed) == nil {
+					t.Fatal("raw principal read mutation escaped")
+				}
+			}
+			if check(normalized+"\n// Connz AuthorizedUser GetOpts") != nil {
+				t.Fatal("comment was confused with a principal read")
+			}
 		}
 	}
 }
