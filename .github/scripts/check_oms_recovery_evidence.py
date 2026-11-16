@@ -22,7 +22,7 @@ GROUPS = {
  "TestRustFeeCommandAtomicRollback": ["proposal/outbox-insert", "proposal/deferred-commit", "approval/outbox-insert", "approval/deferred-commit"],
  "TestRustRecoveryCumulativeCommandDeadline": ["cumulative-refusal", "same-phases-positive"],
  "TestRustRecoveryCumulativeStartupDeadline": ["cumulative-refusal", "same-phases-positive"],
- "TestRustRecoveryObservation": "complete-terminal-history complete-raw-observation-unknown complete-large-history-small-facts complete-single-round-weighted-average complete-identical-redelivery-history missing-order-blocked conflicting-observation-blocked incomplete-total-blocked missing-total-blocked unknown-view-blocked duplicate-execution-conflict-blocked".split(),
+ "TestRustRecoveryObservation": "complete-terminal-history complete-sub-eight-place-quantities complete-raw-observation-unknown complete-large-history-small-facts complete-single-round-weighted-average complete-identical-redelivery-history missing-order-blocked conflicting-observation-blocked incomplete-total-blocked missing-total-blocked unknown-view-blocked duplicate-execution-conflict-blocked".split(),
  "TestRustRecoveryPersistedFeeApproval": "approved stale-approved-baseline missing-approval same-actor-approval expired-approval exact-expiry-approval immediately-before-expiry proposal-unknown-bound proposal-unknown-unbound invalid-change-before-valid duplicate-valid-change proposal-wrong-history proposal-wrong-mapping".split(),
  "TestRustRecoveryAdmissionRefusals": "foreign-tenant missing-tenant command-not-fact wrong-subject empty-payload malformed-payload oversized-observation".split(),
  "TestRustRecoveryDurableTailRollback": ["outbox-insert", "deferred-commit"],
