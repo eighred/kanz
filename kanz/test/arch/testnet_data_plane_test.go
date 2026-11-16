@@ -234,7 +234,7 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 	root := moduleRoot(t)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
 	for _, required := range []string{
-		"resourceCount -ne 37", "mutable image tag survived", "sha256sum --check --status",
+		"resourceCount -ne 38", "mutable image tag survived", "sha256sum --check --status",
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
 		"condition=complete job/postgres-provisioner", "condition=complete job/postgres-migrations", "condition=complete job/nats-bootstrap",
 		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
