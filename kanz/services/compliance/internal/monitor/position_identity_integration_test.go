@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/bustest"
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/compliancebus"
 	"github.com/eighred/kanz/internal/platform/subject"
@@ -81,15 +82,7 @@ func TestPositionIdentityJetStreamNAKRepairRestartAndDecisions(t *testing.T) {
 			t.Cleanup(func() { _ = client.Close() })
 			// Registered before publication, scoped to two unique input subjects.
 			// Subscription joins/deletion run first, while both connections are open.
-			t.Cleanup(func() {
-				cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-				defer stop()
-				for _, topic := range topics {
-					if err := input.Purge(cleanup, jetstream.WithPurgeSubject(topic)); err != nil {
-						t.Error(err)
-					}
-				}
-			})
+			bustest.ReclaimSubjects(t, js, topics...)
 			in, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms/position-identity-test", ProducerVersion: "test", Tenant: tenant})
 			if err != nil {
 				t.Fatal(err)

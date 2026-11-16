@@ -63,7 +63,37 @@ def application_path(path):
                 or path.endswith(b".md") or path == b".gitignore")
 
 
-def scope(repo, event_name, event, checked_sha, *, images=False):
+def position_reclaim_path(path):
+    # Any new test publisher must participate before we know its eventual owner.
+    # This adds proof; it does not alter application/native workflow scope.
+    # The import check compiles all ./... packages. Both passes run the full
+    # internal and services trees. Keep those owners and pkg inputs, including
+    # embedded/runtime fixtures, prebuilt boundaries and running fixture owners.
+    # Cargo resolves workspace member manifests even for a selected package;
+    # unrelated member source does not belong to this fixture's build closure.
+    return ((path.startswith(b"kanz/") and path.endswith(b".go"))
+            or (path.startswith((b"rust/crates/", b"rust/services/")) and path.endswith(b"/Cargo.toml"))
+            or path.startswith((b"kanz/internal/", b"kanz/services/", b"kanz/pkg/", b"kanz/test/backing/position_reclaim/",
+                                b"rust/crates/oms_store/", b"rust/crates/oms_recovery/", b"kanz/infra/nats/",
+                                b"kanz/cmd/kanz_migrate/", b"kanz/cmd/kanz_halt/", b"kanz/test/mtls/",
+                                b"schemas/proto/", b".github/actions/setup_buf/",
+                                b"rust/src/", b"rust/crates/order_core/", b"rust/crates/proto_wire/", b"rust/crates/browser_render/",
+                                b"web/src/", b"web/public/", b"python/kanz_inference/", b"python/kanz_bus/",
+                                b".github/scripts/position_reclaim", b".github/scripts/test_position_reclaim"))
+            or path in {b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py", b".github/scripts/test_required_ci.py",
+                        b".github/scripts/go_test_evidence.py", b".github/scripts/go_shard_evidence.py",
+                        b"kanz/test/backing/nats-dev.conf", b"kanz/go.mod", b"kanz/go.sum", b"kanz/Makefile",
+                        b"kanz/infra/deploy/venue-binance-deploy.yaml", b"kanz/infra/deploy/venue-okx-deploy.yaml",
+                        b"kanz/infra/deploy/accounting-deploy.yaml",
+                        b"schemas/buf.yaml", b"schemas/buf.gen.yaml", b"schemas/bootstrap-go-sdk.sh",
+                        b"rust/Cargo.toml", b"rust/Cargo.lock", b"rust/rust-toolchain.toml", b"rust/build.rs",
+                        b"web/.nvmrc", b"web/package.json", b"web/package-lock.json", b"web/tsconfig.json",
+                        b"web/vite.config.ts", b"web/index.html", b"web/scripts/build-renderer.mjs",
+                        b"web/scripts/build-renderer.test.mjs", b"web/e2e/sessions.cjs", b"web/e2e/mfa.cjs",
+                        b"python/requirements.txt", b"python/requirements-codegen.txt"})
+
+
+def scope(repo, event_name, event, checked_sha, *, images=False, position_reclaim=False):
     checked_sha = commit(repo, checked_sha)
     if git(repo, "rev-parse", "HEAD").decode().strip() != checked_sha:
         raise ValueError("checkout does not match the workflow commit")
@@ -83,7 +113,9 @@ def scope(repo, event_name, event, checked_sha, *, images=False):
         if head != checked_sha or event.get("deleted", False):
             raise ValueError("push does not describe the checked-out commit")
         if event["before"] == "0" * 40:
-            return {"application": True, "forge": True}, "new branch: full verification"
+            selected = {"application": True, "forge": True}
+            if position_reclaim: selected["position_reclaim"] = True
+            return selected, "new branch: full verification"
         base = commit(repo, event["before"])
     else:
         raise ValueError("unsupported workflow event")
@@ -95,7 +127,9 @@ def scope(repo, event_name, event, checked_sha, *, images=False):
         raise ValueError("incomplete Git path output")
     paths = raw.split(b"\0")[:-1] if raw else []
     needed = any(application_path(path) for path in paths)
-    return {"application": needed, "forge": any(forge_path(path) for path in paths)}, f"{len(paths)} changed paths; base={base}; head={head}"
+    selected = {"application": needed, "forge": any(forge_path(path) for path in paths)}
+    if position_reclaim: selected["position_reclaim"] = any(position_reclaim_path(path) for path in paths)
+    return selected, f"{len(paths)} changed paths; base={base}; head={head}"
 
 
 def workflow_jobs(text):
@@ -121,6 +155,7 @@ def workflow_jobs(text):
     for line in (
         "      application: ${{ steps.scope.outputs.application }}",
         "      forge: ${{ steps.scope.outputs.forge }}",
+        "      position_reclaim: ${{ steps.scope.outputs.position_reclaim }}",
         "          fetch-depth: 0",
         "        id: scope",
         "        run: python3 .github/scripts/required_ci.py scope",
@@ -128,6 +163,10 @@ def workflow_jobs(text):
         if scope_job.count(line) != 1:
             raise ValueError("scope must bind complete Git history and both verified outputs")
     expected = set(blocks) - {"scope", "kanz-ci-required"}
+    if (blocks.get("go-race", []).count("          POSITION_RECLAIM_SCOPE: ${{ needs.scope.outputs.position_reclaim }}") != 1
+            or blocks.get("go-race", []).count('          if [ "${{ matrix.shard }}" = "0" ] && [ "$POSITION_RECLAIM_SCOPE" = "true" ]; then') != 1
+            or blocks.get("go-race", []).count("              python3 -B ../.github/scripts/position_reclaim_proof.py \\") != 1):
+        raise ValueError("test-support changes must retain the scoped same-broker proof")
     if not (CORE_JOBS | {FORGE_JOB}) <= expected or not {"scope", "kanz-ci-required"} <= set(blocks):
         raise ValueError("required application or coordination job removed")
     for name in expected:
@@ -213,7 +252,7 @@ def main():
         print(aggregate(json.loads(os.environ["NEEDS_JSON"]), expected))
     else:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-        selected, reason = scope(Path.cwd(), os.environ["GITHUB_EVENT_NAME"], event, os.environ["GITHUB_SHA"], images=args.mode == "images")
+        selected, reason = scope(Path.cwd(), os.environ["GITHUB_EVENT_NAME"], event, os.environ["GITHUB_SHA"], images=args.mode == "images", position_reclaim=args.mode == "scope")
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             for name, needed in selected.items():
                 output.write(f"{name}={str(needed).lower()}\n")

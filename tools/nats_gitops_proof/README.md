@@ -63,7 +63,7 @@ source/tree hashes, run identity and actual image IDs, but no raw Pod logs, keys
 tokens or kubeconfig. Cleanup must remove the exact cluster created by the proof.
 This is disposable estate acceptance, not a Tokyo rollout or capital authority.
 
-The mandatory source inventory is 15 Python test methods in `test_proof.py` and
+The mandatory source inventory is 22 Python test methods in `test_proof.py` and
 the two Go tests in `kanz/tools/nats_gitops_proof/main_test.go`. The four recovery
 controls cover missing/transient-then-recovered inventory, permanent missing or
 unavailable inventory/FACT at the deadline, immediate configuration/FACT/auth
@@ -74,3 +74,19 @@ stream-inventory, writer-workload-api-socket, canonical-fact, empty-stream-remov
 same-revision-postsync, stream-restored, all-brokers-stopped, all-claims-retained,
 all-brokers-replaced, pvc-preserved, post-cold-stream-inventory, fact-preserved,
 cleanup. Unit controls do not establish actual broker recovery.
+
+Each sync keeps the same 600-second deadline while it observes both the fresh
+operation token and one fresh, owned hook Job. Pending or Running never passes
+and is awaited only while the matching operation is Running. Successful Argo
+completion with an incomplete actual hook is an immediate sticky refusal;
+later Complete observations cannot qualify it, even with matching timestamps.
+The Job UID and full observed spec hash remain fixed; the declared spec, Argo
+tracking identity and exact integer-nanosecond operation/Job timestamp ordering
+must match. A later Job completion cannot override an earlier contradictory
+operation finish. The receipt projects only bounded UUIDs, resource versions,
+timestamps, hashes, status enums and counters. Mock API sequences cover stale
+success, running-to-complete observations, terminal-success/incomplete-hook
+refusal, replacement, ownership/spec drift,
+failure, deadline exhaustion, changed operation identity, and one-nanosecond
+contradictions. These controls neither attribute
+the historical incomplete-hook observation to Argo nor execute a cluster proof.

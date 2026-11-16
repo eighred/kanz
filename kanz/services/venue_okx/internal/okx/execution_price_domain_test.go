@@ -14,10 +14,12 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/bustest/positionfixture"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution/tca"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -170,12 +172,20 @@ func TestExecutedPriceAndSignedFeesOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := time.Now().UnixNano()
+	portfolio := fmt.Sprintf("okx-price-%d", identity)
+	control, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts := positionfixture.ReclaimOMSPositions(t, control, portfolio, "BTC-USD", "OKX")
 	view := newOKXOrders()
 	var frames [][]byte
 	ids := make([]string, 4)
 	for i, fields := range []struct{ price, fee string }{{"0", ""}, {"-1", ""}, {"100", "-0.01"}, {"100", "0.01"}} {
 		ids[i] = fmt.Sprintf("okx-domain-%d-%d", identity, i)
-		if err := view.store.Record(ctx, okxKanzOrder(ids[i])); err != nil {
+		st := okxKanzOrder(ids[i])
+		st.PortfolioId = portfolio
+		if err := view.store.Record(ctx, st); err != nil {
 			t.Fatal(err)
 		}
 		frame := priceDomainReport(ids[i], "filled", fields.price, fields.fee)
@@ -187,6 +197,7 @@ func TestExecutedPriceAndSignedFeesOnRealBroker(t *testing.T) {
 	if err := ing.Run(ctx); !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
+	receipts.AwaitFills(t, control, start, ids[2:]...)
 	info, err = js.StreamInfo("EXECUTION")
 	if err != nil {
 		t.Fatal(err)

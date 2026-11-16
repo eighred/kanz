@@ -22,6 +22,7 @@ package monitor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -48,6 +49,56 @@ import (
 )
 
 func ratOf(n int64) *big.Rat { return big.NewRat(n, 1) }
+
+type armingConsumerID struct{ stream, name string }
+type armingTransport struct {
+	*bus.NATSClient
+	created chan armingConsumerID
+}
+
+func (a *armingTransport) SubscribeBroadcastObserved(ctx context.Context, filter string, h bus.Handler, ready func(), created bus.ConsumerCreated) error {
+	return a.NATSClient.SubscribeBroadcastObserved(ctx, filter, h, ready, func(stream, name string) {
+		a.created <- armingConsumerID{stream, name}
+		if created != nil {
+			created(stream, name)
+		}
+	})
+}
+
+func startArmingMonitor(t *testing.T, ctx context.Context, client *bus.NATSClient, js jetstream.JetStream, handle bus.EventHandler) func() {
+	t.Helper()
+	transport := &armingTransport{client, make(chan armingConsumerID, 1)}
+	consumer, err := bus.NewConsumer(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	finish := sync.OnceFunc(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("arming subscriber did not stop before POSITION reclaim")
+			return
+		}
+		select {
+		case owned := <-transport.created:
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := js.DeleteConsumer(cleanup, owned.stream, owned.name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+				t.Error(err)
+			}
+		default:
+		}
+	})
+	t.Cleanup(finish)
+	go func() { done <- consumer.SubscribeBroadcast(subCtx, subject.PositionAll, handle) }()
+	return finish
+}
 
 // oneMandate is a MandateSource holding ONE mandate, and it governs ONLY the
 // (tenant, portfolio) that mandate names.
@@ -150,10 +201,6 @@ func TestARestartedMonitorSeesTheForbiddenHolding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := bus.NewConsumer(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// UNIQUE per run: the POSITION stream is compacted and PERSISTENT, so reusing ids
 	// would let a previous run's holdings arm this one and hide the failure being
@@ -161,6 +208,7 @@ func TestARestartedMonitorSeesTheForbiddenHolding(t *testing.T) {
 	// what stops a foreign portfolio's verdict being counted as this one's.
 	portfolio := "pf-" + suffix
 	allowed, forbidden := "BTC-USD-"+suffix, "ETH-USD-"+suffix
+	bustest.ReclaimSubjects(t, js, subject.PositionFor("acme", portfolio, allowed), subject.PositionFor("acme", portfolio, forbidden))
 
 	// THE MANDATE FORBIDS ONE INSTRUMENT. The fund holds it anyway — that is the breach
 	// the monitor exists to catch.
@@ -214,11 +262,8 @@ func TestARestartedMonitorSeesTheForbiddenHolding(t *testing.T) {
 		rec := &breachRecorder{portfolio: portfolio}
 		mon := monitor.NewMonitor(comp.NewEngine(nil), oneMandate{mandate}, nil, nil, rec, nil)
 
-		subCtx, stop := context.WithCancel(ctx)
+		stop := startArmingMonitor(t, ctx, client, js, mon.Handle)
 		defer stop()
-		go func() {
-			_ = consumer.SubscribeBroadcast(subCtx, subject.PositionAll, mon.Handle)
-		}()
 
 		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
@@ -327,16 +372,13 @@ func TestAMonitorReplayingAnOldFillFindsTheMandateInForce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := bus.NewConsumer(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// UNIQUE per run: the POSITION stream is compacted and PERSISTENT, so a reused
 	// id would let a previous run's holdings arm this one. Necessary and NOT
 	// sufficient — see oneMandate.
 	portfolio := "pf-917-" + suffix
 	forbidden := "ETH-USD-" + suffix
+	bustest.ReclaimSubjects(t, js, subject.PositionFor("acme", portfolio, forbidden))
 
 	// THE FILL IS A MONTH OLD. Nothing has traded this portfolio since.
 	lastFill := time.Now().UTC().Add(-30 * 24 * time.Hour)
@@ -386,11 +428,7 @@ func TestAMonitorReplayingAnOldFillFindsTheMandateInForce(t *testing.T) {
 
 	rec := &portfolioRecorder{portfolio: portfolio}
 	mon := monitor.NewMonitor(comp.NewEngine(nil), reg, nil, nil, rec, nil)
-	subCtx, stop := context.WithCancel(ctx)
-	defer stop()
-	go func() {
-		_ = consumer.SubscribeBroadcast(subCtx, subject.PositionAll, mon.Handle)
-	}()
+	startArmingMonitor(t, ctx, client, js, mon.Handle)
 
 	deadline := time.Now().Add(20 * time.Second)
 	var got *compliancepb.ComplianceResult
@@ -532,16 +570,13 @@ func TestAMonitorReplayingAnOldFillReadsCurrentReferenceData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := bus.NewConsumer(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// UNIQUE per run: the POSITION stream is compacted and PERSISTENT, so a reused
 	// id would let a previous run's holdings arm this one. Necessary and NOT
 	// sufficient — see oneMandate.
 	portfolio := "pf-930-" + suffix
 	held := "TECH-" + suffix
+	bustest.ReclaimSubjects(t, js, subject.PositionFor("acme", portfolio, held))
 	// THE ISSUER DIMENSION, AND THE ISSUER ID IS UNIQUE TO THIS RUN. That is the
 	// point of choosing it over SECTOR here: a violation's `bucket` evidence is the
 	// resolved classification itself, so a per-run issuer makes the passing
@@ -609,11 +644,7 @@ func TestAMonitorReplayingAnOldFillReadsCurrentReferenceData(t *testing.T) {
 
 	rec := &portfolioRecorder{portfolio: portfolio}
 	mon := monitor.NewMonitor(comp.NewEngine(nil), oneMandate{mandate}, classifier, nil, rec, nil)
-	subCtx, stop := context.WithCancel(ctx)
-	defer stop()
-	go func() {
-		_ = consumer.SubscribeBroadcast(subCtx, subject.PositionAll, mon.Handle)
-	}()
+	startArmingMonitor(t, ctx, client, js, mon.Handle)
 
 	deadline := time.Now().Add(20 * time.Second)
 	var got *compliancepb.ComplianceResult

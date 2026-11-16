@@ -47,6 +47,7 @@ import (
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -63,6 +64,7 @@ const positionTestTenant = "acme"
 // tests assert the MANDATE config.
 type positionRig struct {
 	stream   jetstream.Stream
+	js       jetstream.JetStream
 	producer *bus.Producer
 }
 
@@ -111,7 +113,7 @@ func newPositionRig(t *testing.T, ctx context.Context) *positionRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &positionRig{stream: stream, producer: producer}
+	return &positionRig{stream: stream, js: js, producer: producer}
 }
 
 // publish writes ONE position FACT the way the OMS projector writes it — through
@@ -149,15 +151,7 @@ func (r *positionRig) publish(t *testing.T, ctx context.Context, subj, portfolio
 // `risk.position.changed.>` folds them. Purging by subject is exact: it touches
 // only what this run created, never another test's holdings.
 func (r *positionRig) reclaim(t *testing.T, subjects []string) {
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		for _, subj := range subjects {
-			if err := r.stream.Purge(ctx, jetstream.WithPurgeSubject(subj)); err != nil {
-				t.Logf("could not reclaim %q (%v) — a later consumer on this broker will fold it", subj, err)
-			}
-		}
-	})
+	bustest.ReclaimSubjects(t, r.js, subjects...)
 }
 
 // armBook does what a booting consumer does: DeliverLastPerSubject over the
@@ -173,6 +167,14 @@ func (r *positionRig) armBook(t *testing.T, ctx context.Context, filter string, 
 	if err != nil {
 		t.Fatalf("consumer: %v", err)
 	}
+	name := cons.CachedInfo().Name
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := r.stream.DeleteConsumer(cleanup, name); err != nil {
+			t.Error(err)
+		}
+	})
 	book := map[string]int64{}
 	batch, err := cons.Fetch(want+8, jetstream.FetchMaxWait(3*time.Second))
 	if err != nil {

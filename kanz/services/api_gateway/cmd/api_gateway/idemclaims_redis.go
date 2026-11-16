@@ -52,7 +52,7 @@ func newIdempotencyClaims(cfg config.Config, ttl time.Duration, max int, logger 
 	_ = max // the window bound is a property of the in-memory fallback only
 	return bus.NewRedisDedup(redisadapter.New(client), ttl,
 		// A SEPARATE KEY NAMESPACE from the bus deduper's "kanz:dedup:". These are
-		// two different populations — bus keys are envelope idempotency_keys, these
+		// two different populations — bus keys are opaque dispatch scopes, these
 		// are (tenant, subject, route, hash) scopes — sharing one Redis. Keeping
 		// them apart means an ops query can count either without the other, and a
 		// FLUSH of one namespace cannot silently disarm the other.

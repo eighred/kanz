@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/bustest/positionfixture"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/fillfact"
@@ -64,7 +65,7 @@ func TestRecoveryHandlerRestartsAtFrozenEvidenceOverRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
+	t.Cleanup(admin.Close)
 	js, err := jetstream.New(admin)
 	if err != nil {
 		t.Fatal(err)
@@ -79,18 +80,26 @@ func TestRecoveryHandlerRestartsAtFrozenEvidenceOverRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = js.DeleteConsumer(context.Background(), stream, "recovery-handler-"+suffix) }()
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "recovery-handler-proof"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = client.Close() }()
+	t.Cleanup(func() { _ = client.Close() })
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms", ProducerVersion: "test", Tenant: testTenant})
 	if err != nil {
 		t.Fatal(err)
 	}
 	d := func(raw string) *commonpb.Decimal { result, _ := execution.ParseDec(raw); return result }
-	st := &orderpb.OrderState{OrderId: "terminal-" + suffix, PortfolioId: "fund", Venue: "BINANCE", VenueAccountId: "account", InstrumentId: "BTC-USD", OrderedQuantity: d("2"), Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}
+	portfolioID := "recovery-fund-" + suffix
+	receipts := positionfixture.ReclaimOMSPositions(t, js, portfolioID, "BTC-USD", "BINANCE")
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := js.DeleteConsumer(cleanup, stream, "recovery-handler-"+suffix); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+			t.Error(err)
+		}
+	})
+	st := &orderpb.OrderState{OrderId: "terminal-" + suffix, PortfolioId: portfolioID, Venue: "BINANCE", VenueAccountId: "account", InstrumentId: "BTC-USD", OrderedQuantity: d("2"), Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}
 	store := NewPostgres(pool)
 	if err := store.Create(ctx, st, nil); err != nil {
 		t.Fatal(err)
@@ -113,7 +122,7 @@ func TestRecoveryHandlerRestartsAtFrozenEvidenceOverRealBroker(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	venue := execution.NewGRPCVenue("BINANCE", "account", conn, testTenant)
 	router := execution.NewRouter([]execution.Venue{venue})
-	bindings := mustBind(t, testTenant+"/fund@BINANCE=account")
+	bindings := mustBind(t, testTenant+"/"+portfolioID+"@BINANCE=account")
 	newService := func() *Service {
 		svc, err := NewService(testTenant, NewPostgres(pool), NewEmitter(producer), nil, router, nil, nil, WithAccountBindings(bindings, true, nil), WithHaltGate(halt.OpenGate(nil)))
 		if err != nil {
@@ -132,7 +141,7 @@ func TestRecoveryHandlerRestartsAtFrozenEvidenceOverRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mapping, err := store.RecordRecoveryMapping(ctx, RecoveryMapping{testTenant, "fund", "BINANCE", "account", "exchange-account"}, execution.AccountProof{Verified: true, ExchangeAccountID: "exchange-account"})
+	mapping, err := store.RecordRecoveryMapping(ctx, RecoveryMapping{testTenant, portfolioID, "BINANCE", "account", "exchange-account"}, execution.AccountProof{Verified: true, ExchangeAccountID: "exchange-account"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,9 +168,10 @@ func TestRecoveryHandlerRestartsAtFrozenEvidenceOverRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovered, portfolio, err := fillfact.DecodeRecovery(wirePayload)
-	if err != nil || portfolio != "fund" || !fillfact.SameExecution(recovered, f) || recovered.GetRecovery().GetCaseId() != c.ID {
+	if err != nil || portfolio != portfolioID || !fillfact.SameExecution(recovered, f) || recovered.GetRecovery().GetCaseId() != c.ID {
 		t.Fatalf("execution=%v portfolio=%s err=%v", recovered, portfolio, err)
 	}
+	receipts.AwaitInput(t, wireEnv.EventId, recovered.Venue)
 	// A failed book delivery must become a durable blocked lifecycle, not remain
 	// silently investigating forever. Repeated notifications are idempotent.
 	for range 2 {

@@ -1,6 +1,7 @@
 """Source-bound Argo PostSync and JetStream PVC proof in a new disposable cluster."""
 import base64
 import copy
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -30,6 +31,114 @@ CASES = ["canonical-source", "first-postsync", "canonical-runtime", "stream-inve
          "post-cold-stream-inventory", "fact-preserved", "cleanup"]
 DELETE_STREAM = "OBSERVABILITY"
 RECOVERY_SECONDS = 180
+
+
+def custody_uid(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value):
+        raise ValueError("invalid PostSync custody UID")
+    return value
+
+
+def custody_version(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+        raise ValueError("invalid PostSync custody resource version")
+    return value
+
+
+def custody_time(value):
+    """Parse bounded UTC API timestamps without rounding away nanoseconds."""
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z", value):
+        raise ValueError("invalid PostSync custody timestamp")
+    whole, _, fraction = value[:-1].partition(".")
+    try:
+        delta = datetime.datetime.fromisoformat(whole) - datetime.datetime(1970, 1, 1)
+    except ValueError:
+        raise ValueError("invalid PostSync custody timestamp") from None
+    return (delta.days * 86400 + delta.seconds) * 10**9 + int(fraction.ljust(9, "0") or "0")
+
+
+def declared_spec(wanted, actual):
+    """Project only source-declared fields; Kubernetes defaulted fields are extra."""
+    if isinstance(wanted, dict) and isinstance(actual, dict) and wanted.keys() <= actual.keys():
+        return {key: declared_spec(value, actual[key]) for key, value in wanted.items()}
+    if isinstance(wanted, list) and isinstance(actual, list) and len(wanted) == len(actual):
+        return [declared_spec(w, a) for w, a in zip(wanted, actual)]
+    if type(wanted) is type(actual) and wanted == actual:
+        return actual
+    raise ValueError("actual PostSync Job differs from its declared canonical spec")
+
+
+def spec_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def observe_hook(job, wanted, started, finished, prior_uid, latched_uid, diagnostic):
+    """Wait only for one fresh owned Job; retain hashes/statuses, never its spec."""
+    if job is None:
+        diagnostic["jobState"] = "Absent"
+        if latched_uid is not None:
+            raise ValueError("latched PostSync Job disappeared")
+        return None
+    metadata = job.get("metadata", {})
+    uid = custody_uid(metadata.get("uid"))
+    diagnostic["jobUID"] = uid
+    diagnostic["jobResourceVersion"] = custody_version(metadata.get("resourceVersion"))
+    if uid == prior_uid:
+        diagnostic["jobState"] = "Previous"
+        if latched_uid is not None:
+            raise ValueError("PostSync Job reverted to its previous UID")
+        return None
+    if latched_uid is not None and uid != latched_uid:
+        raise ValueError("latched PostSync Job was replaced")
+    annotations = metadata.get("annotations", {})
+    # Argo CD v3.6.1 defaults to annotation tracking, including this self-reference:
+    # docs/user-guide/resource_tracking.md and util/argo/resource_tracking.go.
+    owner = APP + ":batch/Job:" + NAMESPACE + "/nats-bootstrap"
+    diagnostic["ownerMatches"] = (job.get("apiVersion") == "batch/v1" and job.get("kind") == "Job"
+        and metadata.get("namespace") == NAMESPACE and metadata.get("name") == "nats-bootstrap"
+        and annotations.get("argocd.argoproj.io/tracking-id") == owner
+        and annotations.get("argocd.argoproj.io/hook") == "PostSync"
+        and annotations.get("argocd.argoproj.io/hook-delete-policy") == "BeforeHookCreation"
+        and not metadata.get("deletionTimestamp"))
+    if not diagnostic["ownerMatches"]:
+        raise ValueError("fresh PostSync Job ownership differs")
+    diagnostic["declaredSpecSHA256"] = spec_hash(wanted["spec"])
+    diagnostic["specMatches"] = False
+    projected = declared_spec(wanted["spec"], job.get("spec"))
+    diagnostic["observedSpecSHA256"] = spec_hash(projected)
+    diagnostic["specMatches"] = True
+    diagnostic["jobSpecSHA256"] = spec_hash(job["spec"])
+    if diagnostic.get("latchedJobSpecSHA256", diagnostic["jobSpecSHA256"]) != diagnostic["jobSpecSHA256"]:
+        raise ValueError("latched PostSync Job spec changed")
+    created = metadata.get("creationTimestamp")
+    diagnostic["jobCreatedAt"] = "UNKNOWN"
+    created_ns, started_ns = custody_time(created), custody_time(started)
+    diagnostic["jobCreatedAt"] = created
+    if created_ns < started_ns or (finished is not None and created_ns > custody_time(finished)):
+        raise ValueError("PostSync Job creation contradicts its operation")
+    status = job.get("status", {})
+    counts = {name: status.get(name, 0) for name in ("active", "failed", "succeeded")}
+    if any(type(value) is not int or not 0 <= value <= 64 for value in counts.values()):
+        raise ValueError("invalid PostSync Job status counters")
+    diagnostic["jobCounts"] = counts
+    conditions = status.get("conditions", [])
+    if not isinstance(conditions, list) or len(conditions) > 16 or any(not isinstance(c, dict) for c in conditions):
+        raise ValueError("invalid PostSync Job conditions")
+    if any(c.get("type") == "Failed" and c.get("status") == "True" for c in conditions):
+        diagnostic["jobState"] = "Failed"
+        raise ValueError("actual PostSync Job failed")
+    complete = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions)
+    diagnostic["jobState"] = "Complete" if complete else "Running" if counts["active"] else "Pending"
+    if complete:
+        completed, job_started = status.get("completionTime"), status.get("startTime")
+        diagnostic["jobCompletedAt"] = "UNKNOWN"
+        completed_ns, job_started_ns = custody_time(completed), custody_time(job_started)
+        diagnostic.update(jobCompletedAt=completed, jobStartedAt=job_started)
+        if (counts["succeeded"] != 1 or counts["active"] != 0
+                or not created_ns <= job_started_ns <= completed_ns
+                or (finished is not None and completed_ns > custody_time(finished))):
+            raise ValueError("actual PostSync Job completion contradicts its operation")
+    return uid
 
 
 def diagnostic_category(text):
@@ -246,6 +355,42 @@ def check_report(report):
         raise ValueError("source-bound hook evidence differs")
     if first["jobUID"] == second["jobUID"] or first["operation"] == second["operation"]:
         raise ValueError("re-sync reused the previous hook or operation")
+    if custody_time(second["startedAt"]) < custody_time(first["finishedAt"]):
+        raise ValueError("re-sync operation precedes the completed first operation")
+    canonical_job = next(d for d in documents("kanz/infra/nats/bootstrap-job.yaml") if d["kind"] == "Job")
+    for row, previous in ((first, None), (second, first["jobUID"])):
+        custody = row.get("custody", {})
+        if not isinstance(custody, dict):
+            raise ValueError("invalid completed PostSync hook custody")
+        counts = custody.get("jobCounts", {})
+        if (not isinstance(counts, dict) or set(counts) != {"active", "failed", "succeeded"}
+                or any(type(value) is not int or not 0 <= value <= 64 for value in counts.values())):
+            raise ValueError("invalid completed PostSync Job counters")
+        if (custody.get("state") != "Complete" or custody.get("jobState") != "Complete"
+                or custody.get("jobUID") != custody_uid(row["jobUID"]) or custody.get("priorJobUID") != previous
+                or custody.get("priorObservedJobUID") != previous
+                or custody.get("priorHookState") != ("Absent" if previous is None else "Complete")
+                or custody.get("applicationUID") != custody_uid(first.get("custody", {}).get("applicationUID"))
+                or custody.get("boundApplicationUID") != custody["applicationUID"]
+                or custody.get("latchedJobUID") != custody["jobUID"]
+                or custody.get("ownerMatches") is not True or custody.get("specMatches") is not True
+                or custody.get("declaredSpecSHA256") != spec_hash(canonical_job["spec"])
+                or custody.get("observedSpecSHA256") != custody["declaredSpecSHA256"]
+                or not isinstance(custody.get("jobSpecSHA256"), str) or not re.fullmatch("[0-9a-f]{64}", custody["jobSpecSHA256"])
+                or custody.get("latchedJobSpecSHA256") != custody["jobSpecSHA256"]
+                or custody.get("operationTokenSHA256") != spec_hash(row["operation"])
+                or custody.get("operationStartedAt") != row["startedAt"] or custody.get("operationFinishedAt") != row["finishedAt"]
+                or custody.get("applicationResourceVersion") != custody_version(custody.get("applicationResourceVersion"))
+                or custody.get("jobResourceVersion") != custody_version(custody.get("jobResourceVersion"))
+                or custody.get("operationHookInconsistent") is not False
+                or counts["succeeded"] != 1 or counts["active"] != 0
+                or type(custody.get("samples")) is not int or not 1 <= custody["samples"] <= 301
+                or not custody_time(row["startedAt"]) <= custody_time(custody.get("jobCreatedAt"))
+                    <= custody_time(custody.get("jobStartedAt")) <= custody_time(custody.get("jobCompletedAt"))
+                    <= custody_time(row["finishedAt"])):
+            raise ValueError("actual completed PostSync hook custody differs")
+    if report.get("hookCustody") != [first["custody"], second["custody"]]:
+        raise ValueError("complete PostSync custody inventory differs")
     check_puback(report["pubAck"], source)
     check_cold_recovery(report["coldRecovery"])
     recovery = report["postColdRecovery"]
@@ -271,6 +416,9 @@ class Fixture:
         self.environment["KUBECONFIG"] = str(self.kubeconfig)
         self.substage = "initialize"
         self.last_failure = None
+        self.application_uid = None
+        self.previous_hook_uid = None
+        self.hook_custody = []
 
     def command(self, args, data=None, timeout=300):
         try:
@@ -363,6 +511,24 @@ class Fixture:
     def sync(self, source, case):
         self.substage = "Argo-" + case
         token = [{"name": "nats-gitops-case", "value": case + "-" + uuid.uuid4().hex}]
+        if len(self.hook_custody) >= 2:
+            raise ValueError("PostSync proof accepts exactly two owned operations")
+        diagnostic = {"state": "Comparing", "samples": 0, "priorJobUID": self.previous_hook_uid,
+                      "operationTokenSHA256": spec_hash(token), "operationHookInconsistent": False}
+        self.hook_custody.append(diagnostic)
+
+        def bind_application(app):
+            metadata = app.get("metadata", {})
+            uid = custody_uid(metadata.get("uid"))
+            diagnostic["applicationUID"] = uid
+            diagnostic["applicationResourceVersion"] = custody_version(metadata.get("resourceVersion"))
+            if metadata.get("name") != APP or metadata.get("namespace") != "argocd":
+                raise ValueError("PostSync Application identity differs")
+            if self.application_uid is not None and uid != self.application_uid:
+                raise ValueError("owned PostSync Application was replaced")
+            self.application_uid = uid
+            diagnostic["boundApplicationUID"] = uid
+
         self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
             "metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}}}))
         # PR test-merge commits are advertised under refs/pull/N/merge. The
@@ -372,6 +538,7 @@ class Fixture:
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=15))
+            bind_application(app)
             status = app.get("status", {}).get("sync", {})
             if (status.get("revision") == source and status.get("status") in ("Synced", "OutOfSync")
                     and not app.get("operation") and not app["metadata"].get("annotations", {}).get("argocd.argoproj.io/refresh")):
@@ -379,19 +546,93 @@ class Fixture:
             time.sleep(2)
         else:
             raise TimeoutError("Argo source comparison did not resolve the exact workflow commit")
-        self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
-            "operation": {"info": token, "sync": {"revision": source}}}))
         deadline = time.monotonic() + 600
+
+        def remaining():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                diagnostic["state"] = "DeadlineExpired"
+                raise TimeoutError("source-bound Argo PostSync operation expired")
+            return left
+
+        def get_job():
+            raw = self.k("-n", NAMESPACE, "get", "job/nats-bootstrap", "--ignore-not-found", "-o", "json",
+                         timeout=min(15, remaining()))
+            return json.loads(raw) if raw else None
+
+        before = get_job()
+        observed_prior = None if before is None else custody_uid(before.get("metadata", {}).get("uid"))
+        diagnostic.update(priorObservedJobUID=observed_prior, state="CheckingPriorHook")
+        if observed_prior != self.previous_hook_uid:
+            raise ValueError("PostSync prior Job identity differs from the completed owned operation")
+        if before is not None and (before.get("status", {}).get("succeeded") != 1
+                or not any(c.get("type") == "Complete" and c.get("status") == "True"
+                           for c in before.get("status", {}).get("conditions", []))):
+            raise ValueError("previous owned PostSync Job is no longer complete")
+        diagnostic["priorHookState"] = "Absent" if before is None else "Complete"
+        self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
+            "operation": {"info": token, "sync": {"revision": source}}}), timeout=min(15, remaining()))
+        wanted = next(d for d in documents("kanz/infra/nats/bootstrap-job.yaml") if d["kind"] == "Job")
+        latched_uid = None
+        matched_started, matched_finished = None, None
+        diagnostic["state"] = "AwaitingOperation"
         while time.monotonic() < deadline:
-            app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=15))
+            app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=min(15, remaining())))
+            bind_application(app)
+            diagnostic["samples"] += 1
+            state = app.get("status", {}).get("operationState", {})
+            phase = state.get("phase")
+            diagnostic["operationPhase"] = phase if phase in ("Running", "Succeeded", "Failed", "Error", "Terminating") else "UNKNOWN"
+            if state.get("operation", {}).get("info") != token:
+                if matched_started is not None:
+                    raise ValueError("matched PostSync operation was replaced")
+                time.sleep(min(2, remaining()))
+                continue
+            started, finished = state.get("startedAt"), state.get("finishedAt")
+            custody_time(started)
+            if len(self.hook_custody) == 2 and custody_time(started) < custody_time(self.hook_custody[0]["operationFinishedAt"]):
+                raise ValueError("re-sync operation precedes the completed first operation")
+            if matched_started is not None and started != matched_started:
+                raise ValueError("matched PostSync operation start changed")
+            matched_started = started
+            diagnostic["operationStartedAt"] = started
+            if matched_finished is not None and finished != matched_finished:
+                raise ValueError("matched PostSync operation completion changed")
+            if finished is not None:
+                if custody_time(finished) < custody_time(started):
+                    raise ValueError("PostSync operation completion precedes its start")
+                diagnostic["operationFinishedAt"] = finished
+                matched_finished = finished
             row = check_operation(app, source, token)
+            job = get_job()
+            try:
+                observed_uid = observe_hook(job, wanted, started, finished, self.previous_hook_uid, latched_uid, diagnostic)
+            except ValueError:
+                diagnostic["state"] = "Refused"
+                if row:
+                    diagnostic.update(operationHookInconsistent=True, refusal="operation-live-hook-inconsistent")
+                raise
+            if observed_uid is not None:
+                latched_uid = observed_uid
+                diagnostic.update(latchedJobUID=observed_uid, latchedJobSpecSHA256=diagnostic["jobSpecSHA256"])
             if row:
-                job = json.loads(self.k("-n", NAMESPACE, "get", "job/nats-bootstrap", "-o", "json"))
-                if not job.get("status", {}).get("succeeded") or job["metadata"]["annotations"].get("argocd.argoproj.io/hook") != "PostSync":
-                    raise ValueError("Argo reported success without a completed actual hook")
-                row["jobUID"] = job["metadata"]["uid"]
-                return row
-            time.sleep(2)
+                if observed_uid is not None and diagnostic["jobState"] == "Complete":
+                    diagnostic["state"] = "Complete"
+                    row["jobUID"], row["custody"] = observed_uid, copy.deepcopy(diagnostic)
+                    self.previous_hook_uid = observed_uid
+                    return row
+                # A later Complete observation cannot repair attribution of an
+                # already-successful operation to this still-incomplete Job.
+                # API timestamps may be truncated; ordering alone cannot bind it.
+                diagnostic.update(state="Refused", operationHookInconsistent=True,
+                                  refusal="operation-live-hook-inconsistent")
+                raise ValueError("successful PostSync operation has no completed actual fresh hook")
+            if phase != "Running":
+                diagnostic.update(state="Refused", refusal="operation-not-running-or-complete")
+                raise ValueError("matched PostSync operation is neither running nor completely qualified")
+            diagnostic["state"] = "AwaitingActualHook"
+            time.sleep(min(2, remaining()))
+        diagnostic["state"] = "DeadlineExpired"
         raise TimeoutError("source-bound Argo PostSync operation expired")
 
     def client(self, name, namespace, service_account, workload_api=False):
@@ -597,6 +838,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="nats-gitops-", dir=os.environ["RUNNER_TEMP"]) as temporary:
         fixture = Fixture(Path(temporary), "messaging-proof-" + uuid.uuid4().hex[:12])
         report["cluster"] = fixture.name
+        report["hookCustody"] = fixture.hook_custody
         owner = Path(os.environ["RUNNER_TEMP"]) / "nats-gitops-owner.json"
         with owner.open("x", encoding="utf-8") as output:
             json.dump({"cluster": fixture.name, "source": source, "runID": report["runID"], "runAttempt": report["runAttempt"]}, output)
