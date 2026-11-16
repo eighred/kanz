@@ -15,7 +15,7 @@
 //     the problem: "this function is a hand-copy of the OMS fold … Two copies of
 //     one calculation is the standing risk; the next edit to either should not
 //     have to rediscover which one had the guard."
-//   - services/tv-sync/internal/projection (applyExecution)
+//   - services/tv_sync/internal/projection (applyExecution)
 //
 // The drift was real and visible in both directions:
 //

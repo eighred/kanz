@@ -69,7 +69,7 @@ func TestPerTenantOMSRequiresAMandate(t *testing.T) {
 	root := moduleRoot(t)
 
 	// 1. THE DECLARATION. Read from tenantgen.Services, which is what
-	//    cmd/kanz-tenantgen and test/arch/tenant_compute_test.go both render
+	//    cmd/kanz_tenantgen and test/arch/tenant_compute_test.go both render
 	//    from, so this fails the day the entry is deleted rather than the day a
 	//    tenant is onboarded without it.
 	oms, ok := tenantgen.ServiceByName("oms")
@@ -137,7 +137,7 @@ func TestPerTenantOMSRequiresAMandate(t *testing.T) {
 					"services/oms/internal/config.Load reads it as os.Getenv(...) == \"true\", so an "+
 					"absent flag is false — and this tenant's OMS then admits orders for portfolios "+
 					"no mandate governs, with no rule evaluated (#779). Regenerate: "+
-					"go run ./cmd/kanz-tenantgen -tenant %s",
+					"go run ./cmd/kanz_tenantgen -tenant %s",
 				oms.ManifestPath(tenant), key, oms.Container, tenant))
 		case got != want:
 			// EXACTLY "true", not merely truthy. config.Load compares the raw string
@@ -149,7 +149,7 @@ func TestPerTenantOMSRequiresAMandate(t *testing.T) {
 				"%s sets %s=%q, want %q. With %q this tenant trades UNCONSTRAINED against every "+
 					"portfolio nobody has published a mandate for, and the audit trail records those "+
 					"orders as having passed pre-trade compliance (#779). This file is generated — do "+
-					"not hand-patch it: go run ./cmd/kanz-tenantgen -tenant %s",
+					"not hand-patch it: go run ./cmd/kanz_tenantgen -tenant %s",
 				oms.ManifestPath(tenant), key, got, want, got, tenant))
 		}
 		checked++

@@ -59,8 +59,8 @@ import (
 // is what makes everything below a statement about both deployed adapters rather
 // than about one of them.
 const (
-	binanceMigrations = "../../../services/venue-binance/migrations"
-	okxMigrations     = "../../../services/venue-okx/migrations"
+	binanceMigrations = "../../../services/venue_binance/migrations"
+	okxMigrations     = "../../../services/venue_okx/migrations"
 )
 
 // pgFixture is one throwaway schema with the venue adapter's migrations applied.

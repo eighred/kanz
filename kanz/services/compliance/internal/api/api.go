@@ -3,7 +3,7 @@
 //
 // # What was wrong, precisely
 //
-// cmd/kanz-mandate already took two steps, and its own doc said what that could
+// cmd/kanz_mandate already took two steps, and its own doc said what that could
 // and could not buy:
 //
 //	IT DOES NOT AUTHENTICATE THE TWO HUMANS. Both invocations run on one
@@ -767,7 +767,7 @@ const alreadyDecidedBody = "this proposal has already been decided"
 
 // mintProposalID returns an unguessable proposal id.
 //
-// RANDOM, NOT DERIVED FROM THE MANDATE. cmd/kanz-mandate builds its id from the
+// RANDOM, NOT DERIVED FROM THE MANDATE. cmd/kanz_mandate builds its id from the
 // config key and the version, which is fine when the proposal travels in a file
 // the approver was handed. On a shared surface a predictable id lets a caller
 // approve a proposal they were never shown: the tenant scope and the portfolio

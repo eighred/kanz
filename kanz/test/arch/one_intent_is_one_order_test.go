@@ -37,7 +37,7 @@ import (
 // in a dozen tests. The sibling tenant-scope guard was written after a
 // Dockerfile guard was found passing on a COMMENT containing the flag it
 // checked. So every check below resolves identifiers and compares positions.
-const submitHandlerFile = "../../services/api-gateway/internal/orders/orders.go"
+const submitHandlerFile = "../../services/api_gateway/internal/orders/orders.go"
 
 func TestSubmitRefusesAnOrderItCannotDedup(t *testing.T) {
 	fset := token.NewFileSet()

@@ -405,7 +405,7 @@ func (s *Store) perAggregate(id v1.PortfolioID) (*sync.Mutex, *domain.Portfolio,
 
 // toDomainPosition is the proto→domain mapping for PositionState.
 // Lives in this package (not domain) so the domain package stays
-// independent of kanz-schemas/domain/v1 — only common/v1 leaks
+// independent of schemas/domain/v1 — only common/v1 leaks
 // through Position's fields.
 func toDomainPosition(p *domainpb.PositionState) domain.Position {
 	return domain.Position{

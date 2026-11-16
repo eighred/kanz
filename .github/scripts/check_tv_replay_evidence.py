@@ -4,7 +4,7 @@ import sys
 
 from check_migration_evidence import verify
 
-REQUIRED = {"services/tv-sync/internal/projection": {
+REQUIRED = {"services/tv_sync/internal/projection": {
     "TestReplayVerifierPostgresRestoredSnapshot",
     "TestReplayVerifierPostgresSnapshotIsolationAndReadOnly",
     "TestReplayVerifierPostgresRefusesEmptyCorruptAndOversized",

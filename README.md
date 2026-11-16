@@ -33,22 +33,18 @@ are tracked in [GitHub Issues](https://github.com/eighred/kanz/issues) and PRs.
 
 ## Repository layout
 
-| Path | Contents |
+| If you are working on | Start here |
 |---|---|
-| [`kanz/`](kanz/) | Go services, shared libraries, command-line tools, migrations, and architecture tests. |
-| [`kanz-rs/`](kanz-rs/README.md) | Rust market-data runtimes, canonical compatibility primitives, and diagnostic bond-risk and fill-fold workers. |
-| [`kanz-jl/`](kanz-jl/README.md) | Julia curve-calibration worker, compared against the existing Go calculation. |
-| [`kanz-schemas/`](kanz-schemas/README.md) | Protobuf contracts, event specifications, and generated SDK tooling. |
-| [`kanz-web/`](kanz-web/) | Vue operator interface. |
-| [`kanz-py/`](kanz-py/README.md) | Python event-bus client and inference service. |
-| [`kanz/infra/`](kanz/infra/README.md) | Deployment, infrastructure, workload identity, and operational configuration. |
-| [`tools/`](tools/) | Host and operator tooling. |
-| [`.github/workflows/`](.github/workflows/) | CI, security, schema, and release workflows. |
-| [`.agents/plugins/kanz-forge/`](.agents/plugins/kanz-forge/README.md) | The repository-owned Codex engineering assistant. |
+| Live risk decisions and financial state | [Go risk engine](kanz/services/risk_engine/), [risk calculations](kanz/internal/risk/), and [OMS](kanz/services/oms/) in the `kanz/` Go module. |
+| Market-data runtimes and Rust migration work | [Rust workspace](rust/README.md), including the feed runtimes and the diagnostic [bond-risk worker](rust/services/bond_risk_shadow/README.md). |
+| Independent curve calibration | [Julia worker](julia/README.md). It compares against the installed Go curve. |
+| Shared wire contracts and SDK generation | [Protobuf schemas](schemas/README.md) in `schemas/`. |
+| Operator interface | [Vue client](web/). |
+| Authorized inference | [Python inference service](python/README.md). |
+| Deployment, operations, and CI | [Infrastructure](kanz/infra/README.md), [operator tools](tools/), and [workflows](.github/workflows/). |
 
-Keep the Go module and schema directories as siblings: local SDK resolution
-and build contexts depend on that layout. Component runbooks stay beside their
-code.
+See [Directory responsibilities](AGENTS.md#directory-responsibilities) for naming and moving
+components as the repository evolves.
 
 The migration in [#1413](https://github.com/eighred/kanz/issues/1413) is incremental
 and incomplete. Rust feed runtimes support explicit depth ownership handoff;
@@ -59,7 +55,8 @@ do not establish production rollout.
 
 ## Development
 
-Start with [the developer guide](kanz/dev/README.md) and [AGENTS.md](AGENTS.md).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md), [the developer setup](kanz/dev/README.md)
+and [AGENTS.md](AGENTS.md).
 The latter records platform invariants, verification constraints, and Windows
 environment requirements. The current Go version is specified in
 [`kanz/go.mod`](kanz/go.mod).
@@ -87,11 +84,11 @@ The local Compose stack is a smoke environment, not complete capital-path proof.
 
 Forge helps Codex investigate, implement, review, verify, and deliver Kanz work.
 It selects specialist workflows from the task's actual changes and coordinates
-independent native workers while CI runs. Start with `Kanz /work` or
+native workers under explicit parallel-work scope while CI runs. Start with `Kanz /work` or
 `Kanz /ship #<PR>` in Codex Chat.
 
 See the [Forge guide](.agents/plugins/kanz-forge/README.md) for installation,
-parallel work, capabilities, and verification limits. Forge is development
+repository discovery, organization standards, parallel work and verification limits. Forge is development
 tooling; it does not grant trading, infrastructure, or deployment authority.
 
 ## Security and contribution boundaries

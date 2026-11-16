@@ -104,7 +104,7 @@ func TestEveryCompositionRootObservesItsBusConnection(t *testing.T) {
 // DEFAULT-DENY: an entry is permission, and the dead-entry arm removes it the
 // moment the service stops dialling or starts setting Metrics.
 var busMetricsExempt = map[string]string{
-	"archiver-drain": "A ONE-SHOT OPERATOR COMMAND, NOT A SERVICE. cmd/archiver-drain re-archives events " +
+	"archiver-drain": "A ONE-SHOT OPERATOR COMMAND, NOT A SERVICE. cmd/archiver_drain re-archives events " +
 		"parked on dlq.archiver after a human has fixed the routing table; it runs to completion under " +
 		"that operator's eye and exits. It has no observability.Provider and therefore no registry — " +
 		"and a connection gauge that is scraped by nobody, on a process whose whole lifetime is one " +
@@ -162,7 +162,7 @@ func natsConfigLiterals(t *testing.T, dir string) []natsConfigSite {
 				return true
 			}
 			site := natsConfigSite{
-				service: service,
+				service: deployedServiceName(service),
 				file:    rel,
 				pos:     fset.Position(lit.Pos()).String()[len(path)+1:],
 			}

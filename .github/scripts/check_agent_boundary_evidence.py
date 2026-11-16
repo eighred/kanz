@@ -55,20 +55,20 @@ risk_subscription_denied mandate_subscription_denied foreign_tenant_subscription
 probe_egress_denied probe_egress_positive_control
 """.split())
 SOURCE_PATHS = frozenset({
-    "kanz/test/agent_boundary/**", "tools/agent_identity/**", "tools/feed-identity/**",
+    "kanz/test/agent_boundary/**", "tools/agent_identity/**", "tools/feed_identity/**",
     ".github/scripts/check_agent_boundary_evidence.py", ".github/scripts/test_agent_boundary_evidence.py",
     ".github/scripts/test_agent_boundary_workflow.py", ".github/workflows/agent-read-plane.yml",
     ".github/workflows/kanz-ci.yml",
-    "kanz/services/api-gateway/**", "kanz/services/mcp/**", "kanz/services/copilot/**",
+    "kanz/services/api_gateway/**", "kanz/services/mcp/**", "kanz/services/copilot/**",
     "kanz/services/optimization/**", "kanz/services/identity/**", "kanz/internal/agentgate/**",
     "kanz/internal/measureread/**", "kanz/internal/identity/**", "kanz/internal/optimization/**",
     "kanz/pkg/auth/**", "kanz/pkg/authbus/**", "kanz/pkg/bus/**", "kanz/pkg/transport/**",
-    "kanz/infra/nats/**", "kanz/infra/security/spire/**", "kanz-schemas/**", "kanz/go.mod", "kanz/go.sum",
+    "kanz/infra/nats/**", "kanz/infra/security/spire/**", "schemas/**", "kanz/go.mod", "kanz/go.sum",
 })
 RUNTIME = "ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f"
 BUILD_NAMES = frozenset({"gateway", "mutant-gateway", "mcp", "optimization", "http.test"} |
                         {p.replace("/", "_") + ".test" for p in PROJECTION_TESTS})
-SOURCE_INVENTORY = ("kanz/services/api-gateway/internal/authz/arch_test.go", "kanz/services/api-gateway/internal/proxy/proxy.go")
+SOURCE_INVENTORY = ("kanz/services/api_gateway/internal/authz/arch_test.go", "kanz/services/api_gateway/internal/proxy/proxy.go")
 ARTIFACT_FILES = ("http.jsonl", "projections.jsonl", "builds.json", "http-cleanup.json", "identity/identity.json", "identity/cleanup.json", "proof.json")
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 MAX_EVENTS = 16 * 1024 * 1024
@@ -501,7 +501,7 @@ def main():
     acl_hash = hashlib.sha256(tenancy["data"]["tenants.conf"].encode("utf-8")).hexdigest()
     source_inventory = {name: hashlib.sha256(read_bounded(root / name, 1024 * 1024)).hexdigest() for name in SOURCE_INVENTORY}
     references = pinned_references(read_bounded(root / "tools/agent_identity/proof.py", 1024 * 1024).decode(),
-                                  read_bounded(root / "tools/feed-identity/proof.py", 1024 * 1024).decode())
+                                  read_bounded(root / "tools/feed_identity/proof.py", 1024 * 1024).decode())
     print(json.dumps(qualify(args.directory, expected, acl_hash, source_inventory, references, args.create), sort_keys=True))
 
 

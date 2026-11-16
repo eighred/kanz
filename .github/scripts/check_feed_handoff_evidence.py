@@ -10,7 +10,7 @@ import subprocess
 from check_migration_evidence import verify, PREFIX
 from check_oms_recovery_evidence import read_bounded, decode_events, strict
 
-PACKAGE = "tools/depth-conformance"
+PACKAGE = "tools/depth_conformance"
 TOP = "TestFeedRuntimeControlledHandoff"
 NAMES = {TOP, "TestFeedHandoffExactRepeatControl"} | {f"{TOP}/{v}" for v in ("binance", "okx")} | {
     f"{TOP}/{v}/{case}" for v in ("binance", "okx")

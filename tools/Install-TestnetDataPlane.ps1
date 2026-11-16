@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
-$overlay = Join-Path $PSScriptRoot '..\kanz\infra\overlays\testnet-tokyo\data'
+$overlay = Join-Path $PSScriptRoot '..\kanz\infra\overlays\testnet_tokyo\data'
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 & git -C $repoRoot fetch origin main --quiet
@@ -31,9 +31,9 @@ if ($PrepareTVSync) {
     if ($InstanceId -cne 'i-0ee1235614219f089') { throw 'TV preparation requires the reviewed Tokyo instance.' }
     $account = (& $aws sts get-caller-identity --profile $Profile --query Account --output text).Trim()
     if ($LASTEXITCODE -ne 0 -or $account -cne '012619468098') { throw 'TV preparation account verification failed.' }
-    $overlay = Join-Path $repoRoot 'kanz/infra/overlays/testnet-tokyo/tv-sync-preparation'
+    $overlay = Join-Path $repoRoot 'kanz/infra/overlays/testnet_tokyo/tv_sync_preparation'
     . (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
-    $lockPath = Join-Path $repoRoot 'kanz/infra/overlays/testnet-tokyo/tv-sync-release.json'
+    $lockPath = Join-Path $repoRoot 'kanz/infra/overlays/testnet_tokyo/tv-sync-release.json'
     $release = Read-ReviewedTvSyncRelease -LockPath $lockPath
     foreach ($member in $release.images.PSObject.Properties) {
         $digest = $member.Value.destination.Split('@')[1]

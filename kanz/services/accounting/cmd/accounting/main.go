@@ -444,7 +444,7 @@ func run() int {
 // the budget expires we close anyway and say so loudly: a handler that ignores
 // context cancellation must not hold the pod until the kubelet SIGKILLs it.
 //
-// Copied, not shared: services/risk-engine/internal/app/lifecycle.go is the
+// Copied, not shared: services/risk_engine/internal/app/lifecycle.go is the
 // reference implementation and the right home for this once promoted — the day
 // it moves, TestNoUndeclaredShutdownBudgetReachableFromAMain keeps it counted.
 func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
@@ -486,7 +486,7 @@ func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 // that resumes at its last ack and NEVER REPLAYS, off an ACCOUNTING stream that
 // ages out at 168h. A restart does not come back short, it comes back EMPTY, and
 // no amount of running time repairs it. That is tv-sync's argument
-// (services/tv-sync/internal/config/config.go validateBook) applied to the
+// (services/tv_sync/internal/config/config.go validateBook) applied to the
 // ledger: an ephemeral book is not a degraded mode, it is a lie with a delay
 // on it.
 //

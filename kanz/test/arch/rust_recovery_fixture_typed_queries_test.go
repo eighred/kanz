@@ -50,7 +50,7 @@ func recoveryFixtureTypedQueries(source string) bool {
 }
 
 func TestRustRecoveryFixtureTypedQueries(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "kanz-rs", "crates", "oms-recovery", "examples", "recovery-coordinator-fixture.rs"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "rust", "crates", "oms_recovery", "examples", "recovery-coordinator-fixture.rs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func recoveryFixtureDelay(source, workflow string) bool {
 }
 func TestRustRecoveryFixtureZeroDelay(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
-	raw, err := os.ReadFile(filepath.Join(root, "kanz-rs/crates/oms-recovery/examples/recovery-coordinator-fixture.rs"))
+	raw, err := os.ReadFile(filepath.Join(root, "rust/crates/oms_recovery/examples/recovery-coordinator-fixture.rs"))
 	if err != nil {
 		t.Fatal(err)
 	}

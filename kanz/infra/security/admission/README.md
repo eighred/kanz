@@ -14,7 +14,8 @@ short-lived Fulcio certificate bound to the **workflow's OIDC identity**
 (`https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v*`),
 recorded in the Rekor transparency log. Verification pins both the issuer
 (GitHub Actions) and that exact subject — the same "identity, not a stored
-secret" stance as SEC-01 (SPIRE SVIDs, Vault SPIFFE auth).
+secret" stance as SEC-01. SPIRE supplies workload SVIDs; Vault OSS separately
+authenticates the CSI consumer with a bounded Kubernetes ServiceAccount token.
 
 ## What's enforced
 
@@ -64,9 +65,12 @@ cosign verify ghcr.io/eighred/risk-engine@<digest> \
   --certificate-identity-regexp '^https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v.*'
 ```
 
-## Follow-ups
+## Scope and operational limits
 
-- Pin the distroless base + all actions/tools by digest (started here; the
-  Dockerfiles still pin the base by tag).
-- Kyverno alternative if the cluster standardizes on it instead of
-  policy-controller — the same keyless identity check expresses cleanly there too.
+This directory owns the sigstore policy-controller policy. It does not install
+the controller or prove enforcement on a live cluster. CI action revisions and
+release image digests are independent of this policy's signature and attestation
+checks. The current Dockerfiles consume mirrored base image tags; immutable
+delivery and rollback evidence remains in
+[#1098](https://github.com/eighred/kanz/issues/1098). An alternative admission
+controller requires a separately reviewed decision with equivalent enforcement.

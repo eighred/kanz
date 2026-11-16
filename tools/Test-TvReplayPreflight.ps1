@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $nativeGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$canonicalLock = 'kanz/infra/overlays/testnet-tokyo/tv-sync-release.json'
+$canonicalLock = 'kanz/infra/overlays/testnet_tokyo/tv-sync-release.json'
 $fixtureMain = 'f' * 40
 $fixtureState = [pscustomobject]@{ pair = $null; mode = ''; lockReads = 0; readLock = $false; checkedVerifier = $false }
 
@@ -22,7 +22,7 @@ function git {
         $fixtureState.readLock = $true
         return
     }
-    if ($op -ceq 'cat-file' -and $argv[3] -ceq '-e' -and $argv[4] -ceq "$($fixtureState.pair.release_sha):kanz/services/tv-sync/cmd/tv-sync-replay/main.go") {
+    if ($op -ceq 'cat-file' -and $argv[3] -ceq '-e' -and $argv[4] -ceq "$($fixtureState.pair.release_sha):kanz/services/tv_sync/cmd/tv_sync_replay/main.go") {
         $fixtureState.checkedVerifier = $true
         $global:LASTEXITCODE = 1
         return

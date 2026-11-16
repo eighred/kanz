@@ -161,9 +161,8 @@ func TestEveryInMemorySiblingOfAClaimingStoreClaimsTheSameKey(t *testing.T) {
 	var claimers []claimingType
 	// "pkgdir.Type" of every non-claiming sibling that fails, with the reason.
 	var failures []string
-	// Every sibling this run actually paired, which is what makes an exemption
-	// falsifiable rather than merely spelled.
-	reached := map[string]bool{}
+	// Keep an exemption only when at least one discovered pairing needs it.
+	usedExemption := map[string]bool{}
 	checked := 0
 
 	for _, dir := range sortedKeys(pkgs) {
@@ -197,11 +196,11 @@ func TestEveryInMemorySiblingOfAClaimingStoreClaimsTheSameKey(t *testing.T) {
 				}
 				name := dir + "." + sibling
 				checked++
-				reached[name] = true
-				if _, ok := memorySiblingExempt[name]; ok {
+				if consultsKey(p.methodsOf[sibling], c.keys) {
 					continue
 				}
-				if consultsKey(p.methodsOf[sibling], c.keys) {
+				if _, ok := memorySiblingExempt[name]; ok {
+					usedExemption[name] = true
 					continue
 				}
 				failures = append(failures, name+
@@ -224,15 +223,12 @@ func TestEveryInMemorySiblingOfAClaimingStoreClaimsTheSameKey(t *testing.T) {
 		t.Fatalf("found %d claiming store(s) but paired none with a sibling implementation — the interface matching no longer resolves, so this guard is asserting nothing", len(claimers))
 	}
 
-	// A DEAD EXEMPTION IS WORSE THAN NO EXEMPTION: it reads as a decision
-	// somebody made about code that is no longer there. The test is not "does
-	// the package exist" but "did this run actually REACH that type as a sibling"
-	// — an entry for a type the pairing no longer resolves is excusing nothing
-	// and would go on excusing nothing silently.
+	// Retire the entry when the pairing disappears or the guard can verify
+	// the claimed key in every pairing without using the exemption.
 	for name, why := range memorySiblingExempt {
-		if !reached[name] {
-			t.Errorf("memorySiblingExempt names %q, which this run never reached as a sibling of a claiming store. "+
-				"The type is gone, or the pairing stopped resolving, or the entry was never real. Delete it.\n      reason on file: %s", name, why)
+		if !usedExemption[name] {
+			t.Errorf("memorySiblingExempt names %q, but no detected sibling pairing needed the exemption. "+
+				"The pairing disappeared or the guard can now verify the claimed key. Delete it.\n      reason on file: %s", name, why)
 		}
 	}
 

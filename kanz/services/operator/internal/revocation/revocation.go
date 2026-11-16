@@ -73,7 +73,7 @@ type Request struct {
 	// the per-tenant compute manifest under infra/deploy/tenants/<tenant>/.
 	Tenant string
 	// By is the operator principal, "{type}:{id}" (e.g. operator:akif). It is
-	// the same attribution cmd/kanz-halt demands, for the same reason: taking a
+	// the same attribution cmd/kanz_halt demands, for the same reason: taking a
 	// tenant off the platform is an attributable act or it is not a record.
 	By string
 	// Reason is why the tenant is being revoked. Recorded, never defaulted.
@@ -134,10 +134,10 @@ func (s Stage) String() string {
 // Halter stops a tenant trading. It is the in-band brake, and it is the only
 // stage whose failure aborts the revocation.
 //
-// The brake this describes already exists as a binary: cmd/kanz-halt publishes
+// The brake this describes already exists as a binary: cmd/kanz_halt publishes
 // the lifecycle.v1.ModeChanged FACT on platform.mode.changed that the shared
 // halt.Gate folds. What does NOT exist is a per-tenant one — read the
-// --tenant flag's own help text in cmd/kanz-halt/main.go: "AUDIT/ROUTING ONLY.
+// --tenant flag's own help text in cmd/kanz_halt/main.go: "AUDIT/ROUTING ONLY.
 // The halt is PLATFORM-WIDE: the gate ignores this field and stops every
 // tenant's execution. There is no per-tenant halt today." An implementation of
 // this interface must either publish a signal something actually folds

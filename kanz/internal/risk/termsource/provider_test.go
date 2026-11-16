@@ -81,7 +81,7 @@ func newStoreWithPool(t *testing.T) (*terms.Postgres, *pgxpool.Pool) {
 		}
 	})
 
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market-data", "migrations",
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market_data", "migrations",
 		"0002_contract_terms.sql"))
 	if err != nil {
 		t.Fatalf("read migration: %v", err)

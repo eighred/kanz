@@ -9,8 +9,8 @@ import (
 const operatorPrefix = modulePath + "/services/operator/"
 
 // venueServicePrefix is the boundary exchangeauth (internal/venueadapter/exchangeauth)
-// exists to route around: services/venue-okx/internal/... and
-// services/venue-binance/internal/... are unimportable from services/operator today
+// exists to route around: services/venue_okx/internal/... and
+// services/venue_binance/internal/... are unimportable from services/operator today
 // only because Go's `internal/` rule happens to say so. Nothing fails the build if
 // that boundary is crossed via a venue package that ISN'T under internal/ (a future
 // services/venue-*/ helper that sits above internal/, for instance) — the compiler

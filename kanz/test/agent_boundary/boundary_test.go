@@ -45,7 +45,7 @@ func TestRealAgentBoundary(t *testing.T) {
 			t.Fatalf("TEST_AGENT_%s_BINARY must identify the compiled fixture", name)
 		}
 	}
-	routes := capabilityOracle(t, filepath.Join(root, "kanz", "services", "api-gateway", "internal", "authz", "arch_test.go"))
+	routes := capabilityOracle(t, filepath.Join(root, "kanz", "services", "api_gateway", "internal", "authz", "arch_test.go"))
 	emitRouteInventory(t, root, routes)
 	issuer := newFixtureIssuer(t)
 	risk, riskAddr := newRiskFixture(t)
@@ -305,8 +305,8 @@ func emitRouteInventory(t *testing.T, root string, routes []declaredRoute) {
 		Capabilities    map[string]string `json:"capabilities"`
 	}{Schema: 1, SourceInventory: map[string]string{}, Capabilities: map[string]string{}}
 	for _, path := range []string{
-		"kanz/services/api-gateway/internal/authz/arch_test.go",
-		"kanz/services/api-gateway/internal/proxy/proxy.go",
+		"kanz/services/api_gateway/internal/authz/arch_test.go",
+		"kanz/services/api_gateway/internal/proxy/proxy.go",
 	} {
 		file, err := os.Open(filepath.Join(root, filepath.FromSlash(path)))
 		if err != nil {
@@ -491,7 +491,7 @@ func auditRouteOracle(t *testing.T, path string) []declaredRoute {
 }
 
 func TestGatewayCapabilityOracle(t *testing.T) {
-	path := filepath.Join("..", "..", "services", "api-gateway", "internal", "authz", "arch_test.go")
+	path := filepath.Join("..", "..", "services", "api_gateway", "internal", "authz", "arch_test.go")
 	routes := capabilityOracle(t, path)
 	protected := 0
 	for _, route := range routes {

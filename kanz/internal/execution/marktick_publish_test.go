@@ -11,7 +11,7 @@
 // THE OBLIGATION MOVED HERE WITH THE CODE. This envelope used to be built inside
 // each venue adapter, where publish_test.go carried the proof; #673 folded both
 // into one publisher, so the proof belongs beside it. It mirrors
-// services/venue-okx/internal/okx/publish_test.go and its Binance twin
+// services/venue_okx/internal/okx/publish_test.go and its Binance twin
 // deliberately — a reader comparing them should find the same assertions rather
 // than a third dialect.
 //

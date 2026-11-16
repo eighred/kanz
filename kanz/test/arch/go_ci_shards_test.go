@@ -65,7 +65,7 @@ func checkGoShardMatrix(data []byte) error {
 		},
 		"Build + vet + test the `redis` tag (real Valkey)": {
 			"go build -tags redis ./...", "go vet -tags redis ./...",
-			"go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...",
+			"go test -tags redis -p 1 -race -count=1 ./services/webhook_ingest/... ./services/api_gateway/... ./pkg/redisadapter/... ./pkg/bus/...",
 		},
 	}
 	evidenceSteps := map[string]string{
@@ -190,13 +190,13 @@ func checkGoShardOMSFixture(data []byte) error {
 				return fmt.Errorf("each isolated runner must establish its own fixture posture")
 			}
 			resume = i
-			required := []string{`for i in $(seq 1 30); do`, `grep -Fq '"msg":"halt gate armed — this process now hears the platform brake"' /tmp/oms.log`, `test "$armed" = true`, `go run ./cmd/kanz-halt --nats nats://localhost:4222`, `--resume --by operator:ci-fixture`, `--reason 'disposable CI simulated OMS fixture' --tenant __system__`}
+			required := []string{`for i in $(seq 1 30); do`, `grep -Fq '"msg":"halt gate armed — this process now hears the platform brake"' /tmp/oms.log`, `test "$armed" = true`, `go run ./cmd/kanz_halt --nats nats://localhost:4222`, `--resume --by operator:ci-fixture`, `--reason 'disposable CI simulated OMS fixture' --tenant __system__`}
 			for _, part := range required {
 				if !strings.Contains(step.Run, part) {
 					return fmt.Errorf("fixture resume must preserve closed startup, confirmed subscription and exact synthetic loopback command")
 				}
 			}
-			if strings.Index(step.Run, `test "$armed" = true`) > strings.Index(step.Run, "go run ./cmd/kanz-halt") {
+			if strings.Index(step.Run, `test "$armed" = true`) > strings.Index(step.Run, "go run ./cmd/kanz_halt") {
 				return fmt.Errorf("resume precedes subscription readiness")
 			}
 		}
@@ -224,7 +224,7 @@ func TestGoCIShardsExplicitlyPrepareSimulatedOMS(t *testing.T) {
 	for _, mutation := range [][2]string{
 		{"Resume only the disposable simulated OMS fixture", "Removed fixture posture"},
 		{"name: Resume only the disposable simulated OMS fixture", "name: Resume only the disposable simulated OMS fixture\n        if: matrix.shard == 0"},
-		{"go run ./cmd/kanz-halt --nats nats://localhost:4222", "go run ./cmd/kanz-halt --nats nats://elsewhere:4222"},
+		{"go run ./cmd/kanz_halt --nats nats://localhost:4222", "go run ./cmd/kanz_halt --nats nats://elsewhere:4222"},
 		{"--resume --by operator:ci-fixture", "--resume --by system:ci-fixture"},
 		{"disposable CI simulated OMS fixture' --tenant __system__", "different reason' --tenant other"},
 		{`test "$armed" = true`, "true"},

@@ -8,7 +8,7 @@
 // is not internet-facing — the web-bff reaches it over the private network, and
 // nothing else may.
 //
-// SCHEMA IS NOT APPLIED HERE. cmd/kanz-migrate owns migrations for every service
+// SCHEMA IS NOT APPLIED HERE. cmd/kanz_migrate owns migrations for every service
 // in this estate; a service that quietly migrated its own database on boot would
 // be a second answer to "who changes the schema", and the one that runs first
 // during a rollout would win.
@@ -167,10 +167,10 @@ func run() int {
 			"audit_sink", "transactional PostgreSQL access journal; additional status projection to stdout")
 	} else {
 		// WARN, not Info. Without this the ONLY way to create an account is
-		// cmd/kanz-invite, which writes to the store directly — so every account on
+		// cmd/kanz_invite, which writes to the store directly — so every account on
 		// the estate is attributable to whoever held a DSN rather than to a person.
 		logger.Warn("authenticated provisioning is DISABLED — the only way to create an account is "+
-			"cmd/kanz-invite, which requires the database credential and records the act against "+
+			"cmd/kanz_invite, which requires the database credential and records the act against "+
 			"whoever holds it rather than against a named operator, and THERE IS NO WAY TO DISABLE "+
 			"AN ACCOUNT AT ALL: an offboarded trader or a compromised credential can be locked out "+
 			"only by a hand-run UPDATE against this database (#525)",

@@ -4,13 +4,13 @@ on:
     paths:
       - 'kanz/test/agent_boundary/**'
       - 'tools/agent_identity/**'
-      - 'tools/feed-identity/**'
+      - 'tools/feed_identity/**'
       - '.github/scripts/check_agent_boundary_evidence.py'
       - '.github/scripts/test_agent_boundary_evidence.py'
       - '.github/scripts/test_agent_boundary_workflow.py'
       - '.github/workflows/agent-read-plane.yml'
       - '.github/workflows/kanz-ci.yml'
-      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/api_gateway/**'
       - 'kanz/services/mcp/**'
       - 'kanz/services/copilot/**'
       - 'kanz/services/optimization/**'
@@ -25,7 +25,7 @@ on:
       - 'kanz/pkg/transport/**'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
-      - 'kanz-schemas/**'
+      - 'schemas/**'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
   push:
@@ -33,13 +33,13 @@ on:
     paths:
       - 'kanz/test/agent_boundary/**'
       - 'tools/agent_identity/**'
-      - 'tools/feed-identity/**'
+      - 'tools/feed_identity/**'
       - '.github/scripts/check_agent_boundary_evidence.py'
       - '.github/scripts/test_agent_boundary_evidence.py'
       - '.github/scripts/test_agent_boundary_workflow.py'
       - '.github/workflows/agent-read-plane.yml'
       - '.github/workflows/kanz-ci.yml'
-      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/api_gateway/**'
       - 'kanz/services/mcp/**'
       - 'kanz/services/copilot/**'
       - 'kanz/services/optimization/**'
@@ -54,7 +54,7 @@ on:
       - 'kanz/pkg/transport/**'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
-      - 'kanz-schemas/**'
+      - 'schemas/**'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
   workflow_dispatch:
@@ -85,7 +85,7 @@ jobs:
           python3 -B .github/scripts/test_agent_boundary_evidence.py
           python3 -B .github/scripts/test_agent_boundary_workflow.py
           python3 -B -m unittest discover -s tools/agent_identity -p 'test_*.py'
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: '1.69.0'
       - name: Generate existing canonical contracts and warm build dependencies
@@ -101,12 +101,12 @@ jobs:
         working-directory: kanz
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/agent-boundary-bin/source/kanz/services/api-gateway/internal/authz" "$RUNNER_TEMP/agent-boundary-bin/source/kanz/services/api-gateway/internal/proxy" "$RUNNER_TEMP/agent-boundary-evidence/identity"
+          mkdir -p "$RUNNER_TEMP/agent-boundary-bin/source/kanz/services/api_gateway/internal/authz" "$RUNNER_TEMP/agent-boundary-bin/source/kanz/services/api_gateway/internal/proxy" "$RUNNER_TEMP/agent-boundary-evidence/identity"
           echo "AGENT_BOUNDARY_EVIDENCE_DIR=$RUNNER_TEMP/agent-boundary-evidence" >> "$GITHUB_ENV"
           echo "AGENT_IDENTITY_EVIDENCE_DIR=$RUNNER_TEMP/agent-boundary-evidence/identity" >> "$GITHUB_ENV"
-          for service in api-gateway mcp optimization; do
+          for service in api_gateway mcp optimization; do
             target="$service"
-            if [[ "$service" == api-gateway ]]; then target=gateway; fi
+            if [[ "$service" == api_gateway ]]; then target=gateway; fi
             go build -race -trimpath -o "$RUNNER_TEMP/agent-boundary-bin/$target" "./services/$service/cmd/$service"
           done
           python3 -B - <<'PY'
@@ -114,7 +114,7 @@ jobs:
           from pathlib import Path
           root = Path.cwd()
           output = Path(os.environ['RUNNER_TEMP']) / 'agent-boundary-bin'
-          original = root / 'services/api-gateway/cmd/api-gateway/main.go'
+          original = root / 'services/api_gateway/cmd/api_gateway/main.go'
           text = original.read_text()
           anchor = 'cfg.RequiredRole: {authz.Read},'
           if text.count(anchor) != 1:
@@ -122,10 +122,10 @@ jobs:
           mutant = output / 'gateway-mutant.go'
           mutant.write_text(text.replace(anchor, 'cfg.RequiredRole: {authz.Read, authz.Trade},'), newline='\n')
           (output / 'gateway-overlay.json').write_text(json.dumps({'Replace': {str(original): str(mutant)}}))
-          for relative in (Path('kanz/services/api-gateway/internal/authz/arch_test.go'), Path('kanz/services/api-gateway/internal/proxy/proxy.go')):
+          for relative in (Path('kanz/services/api_gateway/internal/authz/arch_test.go'), Path('kanz/services/api_gateway/internal/proxy/proxy.go')):
               (output / 'source' / relative).write_bytes((root.parent / relative).read_bytes())
           PY
-          go build -race -trimpath -overlay "$RUNNER_TEMP/agent-boundary-bin/gateway-overlay.json" -o "$RUNNER_TEMP/agent-boundary-bin/mutant-gateway" ./services/api-gateway/cmd/api-gateway
+          go build -race -trimpath -overlay "$RUNNER_TEMP/agent-boundary-bin/gateway-overlay.json" -o "$RUNNER_TEMP/agent-boundary-bin/mutant-gateway" ./services/api_gateway/cmd/api_gateway
           go test -race -p 1 -c -o "$RUNNER_TEMP/agent-boundary-bin/http.test" ./test/agent_boundary
           python3 -B - <<'PY' > "$RUNNER_TEMP/agent-projection-tests.tsv"
           import re, sys
@@ -138,7 +138,7 @@ jobs:
             binary="${package//\//_}.test"
             go test -race -p 1 -c -o "$RUNNER_TEMP/agent-boundary-bin/$binary" "./$package"
           done < "$RUNNER_TEMP/agent-projection-tests.tsv"
-      - run: bash tools/feed-identity/install.sh
+      - run: bash tools/feed_identity/install.sh
       - name: Authenticate reviewed private runtime reads
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:

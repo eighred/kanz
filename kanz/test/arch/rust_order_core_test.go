@@ -18,7 +18,7 @@ publish = false
 
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
-kanz-proto-wire = { path = "../proto-wire" }
+kanz-proto-wire = { path = "../proto_wire" }
 prost-reflect = "=0.16.2"
 prost = "=0.14.1"
 prost-types = "=0.14.1"
@@ -37,7 +37,7 @@ serde_json = "=1.0.154"
 base64 = "=0.22.1"
 `
 const rustOrderCoreBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = "../../../kanz-schemas/proto";
+    let root = "../../../schemas/proto";
     println!("cargo:rerun-if-changed={root}");
     let mut config = prost_build::Config::new();
     config.file_descriptor_set_path(
@@ -62,7 +62,7 @@ const rustOrderCoreBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> 
 var rustOrderCoreSources = []string{"build.rs", "src/lib.rs", "src/aggregate.rs", "src/arithmetic.rs", "src/attribution.rs", "src/attribution_projection.rs", "src/schedule_identity.rs", "examples/order-aggregate-fixture.rs", "examples/order-attribution-fixture.rs"}
 
 func checkRustOrderCore(root string) error {
-	dir := filepath.Join(root, "crates/order-core")
+	dir := filepath.Join(root, "crates/order_core")
 	for file, want := range map[string]string{"Cargo.toml": rustOrderCoreCargo, "build.rs": rustOrderCoreBuild} {
 		raw, e := os.ReadFile(filepath.Join(dir, file))
 		if e != nil {
@@ -144,13 +144,13 @@ func checkOrderCoreMarkers(files map[string]string) error {
 	return nil
 }
 func TestRustPureOrderOwnerBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
 	if e := checkRustOrderCore(root); e != nil {
 		t.Fatal(e)
 	}
 	files := map[string]string{}
 	for _, p := range rustOrderCoreSources {
-		raw, e := os.ReadFile(filepath.Join(root, "crates/order-core", p))
+		raw, e := os.ReadFile(filepath.Join(root, "crates/order_core", p))
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -192,7 +192,7 @@ func TestRustOrderCoreActualEvidence(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	required := []string{"cargo test --locked -p kanz-order-core --all-targets", "cargo clippy --locked -p kanz-order-core --all-targets -- -D warnings", "cargo build --locked -p kanz-order-core --example order-aggregate-fixture", "KANZ_ORDER_AGGREGATE_BIN:", "KANZ_ORDER_AGGREGATE_VERSION:", "./services/oms/tools/aggregate-conformance"}
+	required := []string{"cargo test --locked -p kanz-order-core --all-targets", "cargo clippy --locked -p kanz-order-core --all-targets -- -D warnings", "cargo build --locked -p kanz-order-core --example order-aggregate-fixture", "KANZ_ORDER_AGGREGATE_BIN:", "KANZ_ORDER_AGGREGATE_VERSION:", "./services/oms/tools/aggregate_conformance"}
 	check := func(w, c string) bool {
 		for _, m := range required {
 			if !strings.Contains(w, m) {

@@ -17,7 +17,7 @@ import (
 //
 // # What went wrong without it
 //
-// cmd/kanz-halt describes itself as "the operator's break-glass handle on the
+// cmd/kanz_halt describes itself as "the operator's break-glass handle on the
 // platform kill-switch". It publishes lifecycle.v1.ModeChanged{component:
 // "system"} on platform.mode.changed, and for as long as it existed EXACTLY ONE
 // process in the estate subscribed to that subject: webhook-ingest. An operator
@@ -80,7 +80,7 @@ func TestEveryOrderPlacingServiceHonoursTheHalt(t *testing.T) {
 		if _, undeployed := notDeployed[svc]; undeployed {
 			continue
 		}
-		entry := modulePath + "/services/" + svc + "/cmd/" + svc
+		entry := modulePath + "/services/" + sourceDirectoryName(svc) + "/cmd/" + sourceDirectoryName(svc)
 		if _, ok := byPath[entry]; !ok {
 			continue // a service whose binary is not named after it; none today
 		}
@@ -101,7 +101,7 @@ func TestEveryOrderPlacingServiceHonoursTheHalt(t *testing.T) {
 				"platform would not stop it")
 			continue
 		}
-		if !callsHaltArm(t, filepath.Join(root, "services", svc, "cmd", svc)) {
+		if !callsHaltArm(t, filepath.Join(root, "services", sourceDirectoryName(svc), "cmd", sourceDirectoryName(svc))) {
 			problems = append(problems, svc+" imports "+haltPackage+" but its composition root never "+
 				"calls halt.Arm — a Gate nobody subscribes to the FACT stream stays in whatever state "+
 				"it was constructed in forever, which is a service that reports ready and honours no halt")
@@ -147,7 +147,7 @@ func TestEveryOrderPlacingServiceHonoursTheHalt(t *testing.T) {
 				"capital path (or no longer exists), so it needs no exemption")
 			continue
 		}
-		dir := filepath.Join(root, "services", svc, "cmd", svc)
+		dir := filepath.Join(root, "services", sourceDirectoryName(svc), "cmd", sourceDirectoryName(svc))
 		if callsHaltArm(t, dir) {
 			problems = append(problems, "exemption for "+svc+" is DEAD: its composition root now calls "+
 				"halt.Arm, so it honours the halt and the exemption only hides it from this guard")
@@ -297,7 +297,7 @@ var orderOriginArms = []orderOriginArm{
 // update the entry to the package that took over the role, having first checked
 // that the role still exists at all.
 var knownOrderOrigins = map[string]string{
-	modulePath + "/services/api-gateway/internal/orders": "the gateway's order write surface (POST /v1/orders)",
+	modulePath + "/services/api_gateway/internal/orders": "the gateway's order write surface (POST /v1/orders)",
 	modulePath + "/internal/signal/translate":            "the signal→order translator",
 	modulePath + "/services/oms/internal/order":          "the OMS order aggregate",
 	modulePath + "/internal/venueadapter/server":         "the venue adapter's execute RPC",
@@ -717,7 +717,7 @@ func durable(group, subject string) string { return group + subject }`,
 		},
 		{
 			// THE READ-ONLY CONSUMER CASE. internal/compliance and
-			// cmd/kanz-redrive both look like this. A rule matching any mention
+			// cmd/kanz_redrive both look like this. A rule matching any mention
 			// of SubmitOrder pulls in 18 packages, most of which cannot place
 			// anything.
 			name: "reading a SubmitOrder is not minting one",
@@ -794,7 +794,7 @@ func (q *Q) Execute(ctx context.Context, sql string) error { return nil }`,
 // exemption has to go with it.
 func TestMarketIngestRegistersNoAlphaEngines(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, "services", "market-ingest", "cmd", "market-ingest")
+	dir := filepath.Join(root, "services", "market_ingest", "cmd", "market_ingest")
 
 	configs := 0
 	var offenders []string

@@ -1,7 +1,7 @@
 # Disposable copilot identity proof
 
 This Linux CI fixture creates its own kind/Cilium/SPIRE cluster through the
-existing `tools/feed-identity` installation and setup helpers. Every kubectl
+existing `tools/feed_identity` installation and setup helpers. Every kubectl
 operation names its private kubeconfig and owned context. It never selects an
 existing cluster, uses Windows-host NATS, calls an exchange or reads cloud
 credentials. Failure artifacts contain verdicts and hashes, never SVIDs/keys.
