@@ -7,11 +7,13 @@
     "predev": "node scripts/build-renderer.mjs",
     "dev": "vite",
     "prebuild": "node scripts/build-renderer.mjs",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit",
+    "typecheck": "npm run typecheck:vue && npm run typecheck:native",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck:vue": "vue-tsc --noEmit",
+    "typecheck:native": "node ./node_modules/@typescript/native/bin/tsc --noEmit --project tsconfig.native.json"
   },
   "dependencies": {
     "pinia": "4.1.0",
@@ -24,10 +26,11 @@
     "@vue/test-utils": "^2.5.1",
     "happy-dom": "^21.0.4",
     "playwright": "1.65.0",
-    "typescript": "7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
     "vite": "8.3.8",
     "vitest": "^5.1.0",
-    "vue-tsc": "3.3.14"
+    "vue-tsc": "3.3.14",
+    "@typescript/native": "npm:typescript@7.0.2"
   },
   "overrides": {
     "js-beautify": {

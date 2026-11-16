@@ -1,0 +1,76 @@
+name: typescript-compat-lock
+
+on:
+  pull_request:
+    paths:
+      - 'web/package.json'
+      - '.github/workflows/typescript-compat-lock.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+      - name: Generate data-only lock in an owned temporary copy
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          root = pathlib.Path.cwd()
+          task = pathlib.Path(os.environ['RUNNER_TEMP']) / 'typescript-compat-lock'
+          task.mkdir(mode=0o700)
+          project = task / 'project'
+          project.mkdir(mode=0o700)
+          def sha(raw):
+              return hashlib.sha256(raw).hexdigest()
+          inputs = {name: (root / 'web' / name).read_bytes() for name in ['package.json', 'package-lock.json']}
+          for name, raw in inputs.items():
+              (project / name).write_bytes(raw)
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          assert source == os.environ['GITHUB_SHA']
+          environment = {'PATH': os.environ['PATH'], 'CI': 'true', 'LANG': 'C.UTF-8', 'NPM_CONFIG_CACHE': str(task / 'npm-cache')}
+          userconfig, globalconfig = task / 'empty-user.npmrc', task / 'empty-global.npmrc'
+          userconfig.write_bytes(b'')
+          globalconfig.write_bytes(b'')
+          versions = {}
+          for name in ['node', 'npm']:
+              value = subprocess.check_output([name, '--version'], env=environment, text=True, timeout=10).strip()
+              assert re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', value), (name, value)
+              versions[name] = value
+          assert versions['node'].startswith('v24.')
+          subprocess.run(['timeout', '--signal=TERM', '--kill-after=5s', '240s', 'npm', 'install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund', '--lockfile-version=3', '--registry=https://registry.npmjs.org', '--userconfig=' + str(userconfig), '--globalconfig=' + str(globalconfig)], cwd=project, env=environment, check=True, timeout=250)
+          assert not (project / 'node_modules').exists()
+          assert (project / 'package.json').read_bytes() == inputs['package.json']
+          for name, raw in inputs.items():
+              assert (root / 'web' / name).read_bytes() == raw
+          generated = project / 'package-lock.json'
+          assert 0 < generated.stat().st_size < 2000000
+          lock = generated.read_bytes()
+          assert json.loads(lock)['lockfileVersion'] == 3
+          receipt = {'source': source, 'tree': tree, 'run': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'versions': versions, 'inputs': {name: sha(raw) for name, raw in inputs.items()}, 'generatedLockSHA256': sha(lock), 'ignoreScriptsRequested': True, 'nodeModulesAbsentAfter': True, 'scope': 'temporary lock generation only; no compiler or application qualification'}
+          (task / 'manifest.json').write_text(json.dumps(receipt, sort_keys=True) + '\n', encoding='utf-8')
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: typescript-compat-lock-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/typescript-compat-lock/manifest.json
+            ${{ runner.temp }}/typescript-compat-lock/project/package.json
+            ${{ runner.temp }}/typescript-compat-lock/project/package-lock.json
