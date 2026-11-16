@@ -14,7 +14,22 @@ the advertised PR merge ref to the exact checked-out test-merge SHA; main runs
 use the actual push SHA. A moving ref fails the proof.
 
 The receipt requires two successful revision-bound PostSync operations with
-different hook Job UIDs. The second follows deletion of the empty, designated
+different hook Job UIDs. Each operation is submitted once. One unchanged
+600-second deadline covers submission and read-only polling of both its exact
+revision/token-bound Argo result and the actual hook's completed state. A typed
+fixed-name JobList read treats an empty list as pending absence; read failures,
+foreign annotations/tracking, malformed state, a failed hook or a replacement of
+the first fresh UID refuse. The pre-operation UID, including before the first
+sync, can never qualify as fresh completion. Argo v3.6.1's default annotation
+tracking binds the Job to this fixture Application; no tracking-policy override
+is applied. The fixed raw API path preserves JobList typing that kubectl's
+generic JSON printer otherwise rewrites to List.
+
+The receipt records only closed per-operation observations: the unchanged budget,
+poll count, whether Argo success preceded actual-hook completion, whether a stale
+UID was observed, and final joint success. ArgoSucceededPendingHook is an observed
+availability transition, not a diagnosis of a previous run or a controller
+guarantee. The second sync follows deletion of the empty, designated
 OBSERVABILITY stream. All 18 stream configurations are derived from the canonical
 script and checked after creation, restoration and broker replacement. There is
 no fallback stream list, storage override or single-replica substitute.
@@ -63,7 +78,7 @@ source/tree hashes, run identity and actual image IDs, but no raw Pod logs, keys
 tokens or kubeconfig. Cleanup must remove the exact cluster created by the proof.
 This is disposable estate acceptance, not a Tokyo rollout or capital authority.
 
-The mandatory source inventory is 15 Python test methods in `test_proof.py` and
+The mandatory source inventory is 26 Python test methods in `test_proof.py` and
 the two Go tests in `kanz/tools/nats_gitops_proof/main_test.go`. The four recovery
 controls cover missing/transient-then-recovered inventory, permanent missing or
 unavailable inventory/FACT at the deadline, immediate configuration/FACT/auth
@@ -73,4 +88,8 @@ all 16 ordered cases: canonical-source, first-postsync, canonical-runtime,
 stream-inventory, writer-workload-api-socket, canonical-fact, empty-stream-removed,
 same-revision-postsync, stream-restored, all-brokers-stopped, all-claims-retained,
 all-brokers-replaced, pvc-preserved, post-cold-stream-inventory, fact-preserved,
-cleanup. Unit controls do not establish actual broker recovery.
+cleanup. Eleven additional joint-hook controls include actual sync-method calls
+through fixed fake APIs and refuse missing, stale, foreign or late evidence, as
+well as a completed Job without current-operation completion. They also validate
+the typed inventory and close the new observation fields. Unit controls do not
+establish actual broker recovery.
