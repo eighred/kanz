@@ -314,8 +314,12 @@ The normal operator transports seven modules in its main XZ frame and the exact
 `bounded_process.py` remains one of the seven main-frame modules. This lossless
 placement changes neither the nine runtime source files nor the closed loader's
 execution order; the former two-file fixed partition is refused.
-Planner and restore partitions retain their existing module inventory. Both use
-the same bounded CRC64 XZ codec; the fixed frame requires exact names, field types,
+The planner retains its six-main/one-fixed partition. Restoration transports the
+same eight modules as six main-frame sources plus the exact
+`source_loader.py`/`bounded_process.py` fixed pair; its former seven-main/one-fixed
+partition refuses. This placement leaves every module byte and the closed loader
+execution order unchanged. Both use the same bounded CRC64 XZ codec; the fixed
+frame requires exact names, field types,
 UTF8 source and SHA256 before any source write. The remote prefix contains only
 verbatim decoder/helper source segments, required imports/constants, the selected
 canonical partition and the CRC64 check. Its closed AST dependency/interface guard refuses

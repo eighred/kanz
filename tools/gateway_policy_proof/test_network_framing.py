@@ -214,12 +214,14 @@ class NetworkFramingTests(unittest.TestCase):
                 with self.subTest(command=command, change=change), self.assertRaises(ValueError): check(bad)
 
     def test_closed_actual_wrapper_recipes(self):
-        self.assertEqual(codec.SOURCE_BUNDLES, {'normal': {'files': ['policy_state.py', 'transaction.py', 'policy_client.py', 'bounded_process.py', 'rollout_scope.py', 'rollout_engine.py', 'network_observation.py'], 'fixed': ['source_loader.py', 'rollout_probe.py']}, 'plan': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}, 'restore': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'recovery_restore.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}})
+        self.assertEqual(codec.SOURCE_BUNDLES, {'normal': {'files': ['policy_state.py', 'transaction.py', 'policy_client.py', 'bounded_process.py', 'rollout_scope.py', 'rollout_engine.py', 'network_observation.py'], 'fixed': ['source_loader.py', 'rollout_probe.py']}, 'plan': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}, 'restore': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'recovery_restore.py'], 'fixed': ['source_loader.py', 'bounded_process.py']}})
         builders = []
         bootstrap_builders = []
         for mode, name in WRAPPERS.items():
             wrapper = (ROOT / "tools" / name).read_text(encoding="utf-8")
-            expected = {"source_loader.py"} | ({"rollout_probe.py"} if mode == "normal" else set())
+            expected = {"normal": {"source_loader.py", "rollout_probe.py"},
+                        "plan": {"source_loader.py"},
+                        "restore": {"source_loader.py", "bounded_process.py"}}[mode]
             self.assertTrue(valid_framing(wrapper, expected))
             canonical_root = "$proofRoot = Join-Path $PSScriptRoot 'gateway_policy_proof'"
             legacy_root = "$proofRoot = Join-Path $PSScriptRoot 'gateway-policy-proof'"
@@ -393,6 +395,75 @@ class NetworkFramingTests(unittest.TestCase):
             with self.subTest(main_control=control): run(main_raw=raw)
         for argc in (3, 5):
             with self.subTest(argc=argc): run(argc=argc)
+
+    def test_restore_bootstrap_partition_barrier_preserves_all_eight_sources(self):
+        # Execute only the actual bootstrap data writer, never the loader or
+        # restore entrypoint. This proves byte transport, not operator behavior.
+        wrapper = (ROOT / "tools" / WRAPPERS["restore"]).read_text(encoding="utf-8")
+        source = bootstrap(wrapper)
+        files, fixed_names = names(wrapper)
+        self.assertEqual((len(files), len(fixed_names)), (6, 2))
+        for ending in ("\n", "\r\n"):
+            sources = {name: (HERE / name).read_text(encoding="utf-8").replace("\n", ending).encode("utf-8")
+                       for name in files | fixed_names}
+            bundle = {"files": {name: sources[name].decode("utf-8") for name in files},
+                      "payload": {"source": "a" * 40}}
+            framed = declaration(wrapper, {name: sources[name] for name in fixed_names})
+            fixed_raw, prepared = codec.decode_fixed(framed["encoded"], "restore")
+            self.assertEqual(prepared, {name: sources[name] for name in fixed_names})
+            fixed_frame = json.loads(fixed_raw)
+
+            def run(value, frame, expected_error=None):
+                main_raw = json.dumps(value).encode("utf-8")
+                encoded_fixed = codec.encode(json.dumps(frame).encode("utf-8"))
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    with patch.object(sys, "argv", ["bootstrap", codec.encode(main_raw), encoded_fixed, directory]):
+                        if expected_error:
+                            with self.assertRaisesRegex(ValueError, expected_error):
+                                exec(compile(source, "<actual-restore-bootstrap>", "exec"), {})
+                            self.assertEqual(list(root.iterdir()), [])
+                        else:
+                            exec(compile(source, "<actual-restore-bootstrap>", "exec"), {})
+                            self.assertEqual({path.name for path in root.iterdir()}, set(sources) | {"input.json"})
+                            for name, data in sources.items():
+                                self.assertEqual((root / name).read_bytes(), data)
+                            self.assertEqual(json.loads((root / "input.json").read_text()), value["payload"])
+
+            with self.subTest(ending=repr(ending), control="exact_eight"):
+                run(bundle, fixed_frame)
+            for control in ("stale_seven_plus_one", "missing_fixed", "extra_fixed", "missing_main",
+                            "total_extra_main", "crossed_eight", "fixed_hash", "combined_bound"):
+                value = copy.deepcopy(bundle)
+                frame = copy.deepcopy(fixed_frame)
+                error = "^fixed source inventory$"
+                if control == "stale_seven_plus_one":
+                    value["files"]["bounded_process.py"] = frame["files"].pop("bounded_process.py")["text"]
+                elif control == "missing_fixed": del frame["files"]["bounded_process.py"]
+                elif control == "extra_fixed":
+                    frame["files"]["rollout_probe.py"] = {"text": "# extra\n", "sha256": hashlib.sha256(b"# extra\n").hexdigest()}
+                elif control == "missing_main":
+                    value["files"].pop("policy_client.py"); error = "^bundle shape$"
+                elif control == "total_extra_main":
+                    value["files"]["rollout_probe.py"] = "# extra\n"; error = "^bundle shape$"
+                elif control == "crossed_eight":
+                    value["files"]["bounded_process.py"] = frame["files"].pop("bounded_process.py")["text"]
+                    text = value["files"].pop("recovery_restore.py")
+                    frame["files"]["recovery_restore.py"] = {"text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+                elif control == "fixed_hash":
+                    frame["files"]["bounded_process.py"]["sha256"] = "0" * 64; error = "^fixed source binding$"
+                else:
+                    value["payload"]["pad"] = ""
+                    fixed_length = len(json.dumps(frame).encode("utf-8"))
+                    target = codec.EXPANDED_LIMIT - fixed_length + 1
+                    value["payload"]["pad"] = "x" * (target - len(json.dumps(value).encode("utf-8")))
+                    main_length = len(json.dumps(value).encode("utf-8"))
+                    self.assertLessEqual(main_length, codec.EXPANDED_LIMIT)
+                    self.assertLessEqual(fixed_length, codec.EXPANDED_LIMIT)
+                    self.assertGreater(main_length + fixed_length, codec.EXPANDED_LIMIT)
+                    error = "^combined source bound$"
+                with self.subTest(ending=repr(ending), control=control):
+                    run(value, frame, error)
 
     def test_builder_rejects_invalid_utf8_before_literal(self):
         wrapper = (ROOT / "tools" / WRAPPERS["plan"]).read_text(encoding="utf-8")

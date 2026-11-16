@@ -1,9 +1,11 @@
 """Closed restoration recipe checks; real API behavior has a separate fixture."""
 import ast
+import copy
 from pathlib import Path
 import re
 import unittest
-from test_network_framing import valid_framing, names
+from unittest.mock import patch
+from test_network_framing import valid_framing, names, codec
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = {"policy_state.py", "policy_client.py", "rollout_scope.py", "recovery_receipts.py",
@@ -26,9 +28,9 @@ def verify(wrapper, source):
         files, fixed = names(wrapper)
     except (ValueError, AttributeError, KeyError):
         return False
-    if files != FILES - {"source_loader.py"} or fixed != {"source_loader.py"}:
+    if files != FILES - {"source_loader.py", "bounded_process.py"} or fixed != {"source_loader.py", "bounded_process.py"}:
         return False
-    if not valid_framing(wrapper, {"source_loader.py"}): return False
+    if not valid_framing(wrapper, {"source_loader.py", "bounded_process.py"}): return False
     if any('"$work/' + name + '"' not in wrapper for name in FILES):
         return False
     markers = ('DIRECTORY = "/var/tmp/kanz-gateway-reconcile-nu1ezqwo"',
@@ -73,6 +75,21 @@ class RestoreWiringTests(unittest.TestCase):
             with self.subTest(source=old):
                 self.assertFalse(verify(wrapper, source.replace(old, "pass")))
 
+
+    def test_restore_partition_refuses_stale_missing_extra_and_total_extra(self):
+        wrapper = (ROOT / "tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1").read_text(encoding="utf-8")
+        source = (Path(__file__).parent / "recovery_restore.py").read_text(encoding="utf-8")
+        self.assertTrue(verify(wrapper, source))
+        for control in ("stale_seven_plus_one", "missing_main", "missing_fixed", "extra_fixed", "total_extra_main"):
+            table = copy.deepcopy(codec.SOURCE_BUNDLES)
+            inventory = table["restore"]
+            if control == "stale_seven_plus_one": inventory["files"].append(inventory["fixed"].pop())
+            elif control == "missing_main": inventory["files"].pop()
+            elif control == "missing_fixed": inventory["fixed"].pop()
+            elif control == "extra_fixed": inventory["fixed"].append("extra.py")
+            else: inventory["files"].append("extra.py")
+            with self.subTest(control=control), patch.object(codec, "SOURCE_BUNDLES", table):
+                self.assertFalse(verify(wrapper, source))
 
 if __name__ == "__main__":
     unittest.main()

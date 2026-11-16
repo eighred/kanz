@@ -1,8 +1,10 @@
 import base64
+import copy
 import json
 import lzma
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import re
 import subprocess
 import sys
@@ -142,6 +144,52 @@ class TransportCodecTests(unittest.TestCase):
                 encoded = codec.encode(json.dumps(frame).encode("utf-8"))
                 with self.assertRaisesRegex(ValueError, "^fixed source inventory$"):
                     codec.decode_fixed(encoded, "normal")
+
+    def test_restore_fixed_partition_refuses_stale_missing_and_extra_sources(self):
+        import hashlib
+        canonical = {"source_loader.py": b"# loader\n", "bounded_process.py": b"# process\n"}
+        self.assertEqual(codec.SOURCE_BUNDLES["restore"], {
+            "files": ["policy_state.py", "policy_client.py", "rollout_scope.py", "recovery_receipts.py",
+                      "recovery_plan.py", "recovery_restore.py"],
+            "fixed": ["source_loader.py", "bounded_process.py"],
+        })
+        frame = codec.encode_fixed(canonical, "restore")
+        self.assertEqual(codec.decode_fixed(frame["encoded"], "restore")[1], canonical)
+        controls = {
+            "stale_seven_plus_one": {"source_loader.py": canonical["source_loader.py"]},
+            "missing_loader": {"bounded_process.py": canonical["bounded_process.py"]},
+            "extra_fixed": {**canonical, "recovery_restore.py": b"# extra\n"},
+            "wrong_existing_module": {"source_loader.py": canonical["source_loader.py"],
+                                      "recovery_plan.py": b"# wrong placement\n"},
+        }
+        for control, values in controls.items():
+            with self.subTest(control=control):
+                with self.assertRaisesRegex(ValueError, "^fixed source inventory$"):
+                    codec.encode_fixed(values, "restore")
+                raw = json.dumps({"files": {name: {"text": value.decode("utf-8"),
+                    "sha256": hashlib.sha256(value).hexdigest()} for name, value in values.items()}}).encode()
+                with self.assertRaisesRegex(ValueError, "^fixed source inventory$"):
+                    codec.decode_fixed(codec.encode(raw), "restore")
+
+    def test_restore_decoder_shape_refuses_stale_missing_extra_and_total_extra(self):
+        source = (Path(__file__).parent / "transport_codec.py").read_text(encoding="utf-8")
+        declaration = re.search(r"(?m)^SOURCE_BUNDLES = \{[^\r\n]+\}$", source).group(0)
+        for control in ("stale_seven_plus_one", "missing_main", "missing_fixed", "extra_fixed", "total_extra_main"):
+            table = copy.deepcopy(codec.SOURCE_BUNDLES)
+            inventory = table["restore"]
+            if control == "stale_seven_plus_one":
+                inventory["files"].append(inventory["fixed"].pop())
+            elif control == "missing_main": inventory["files"].pop()
+            elif control == "missing_fixed": inventory["fixed"].pop()
+            elif control == "extra_fixed": inventory["fixed"].append("extra.py")
+            else: inventory["files"].append("extra.py")
+            changed = source.replace(declaration, "SOURCE_BUNDLES = " + json.dumps(table, separators=(",", ":")))
+            self.assertNotEqual(changed, source)
+            # Bind both inputs so this exercises the cardinality guard after
+            # source-table equality, rather than only a differing-source refusal.
+            with self.subTest(control=control), patch.object(codec, "SOURCE_BUNDLES", table):
+                with self.assertRaisesRegex(ValueError, "^remote decoder partition shape$"):
+                    codec.remote_decoder_source(changed, "restore")
 
     def test_remote_decoder_source_exact_segments_and_modes(self):
         import ast

@@ -14,7 +14,7 @@ MEMORY_LIMIT = 16777216
 
 # One literal partition for the checked Python and PowerShell source collectors.
 # Transport placement never changes the closed loader's module execution order.
-SOURCE_BUNDLES = {"normal":{"files":["policy_state.py","transaction.py","policy_client.py","bounded_process.py","rollout_scope.py","rollout_engine.py","network_observation.py"],"fixed":["source_loader.py","rollout_probe.py"]},"plan":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","bounded_process.py"],"fixed":["source_loader.py"]},"restore":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","recovery_restore.py","bounded_process.py"],"fixed":["source_loader.py"]}}
+SOURCE_BUNDLES = {"normal":{"files":["policy_state.py","transaction.py","policy_client.py","bounded_process.py","rollout_scope.py","rollout_engine.py","network_observation.py"],"fixed":["source_loader.py","rollout_probe.py"]},"plan":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","bounded_process.py"],"fixed":["source_loader.py"]},"restore":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","recovery_restore.py"],"fixed":["source_loader.py","bounded_process.py"]}}
 
 
 def encode(raw):
@@ -169,8 +169,8 @@ def remote_decoder_source(source, mode):
                 or type(inventory["files"]) is not list or type(inventory["fixed"]) is not list):
             raise ValueError("remote decoder partition shape")
         names = inventory["files"] + inventory["fixed"]
-        if (len(inventory["files"]) != (6 if name == "plan" else 7)
-                or len(inventory["fixed"]) != (2 if name == "normal" else 1)
+        if (len(inventory["files"]) != (7 if name == "normal" else 6)
+                or len(inventory["fixed"]) != (1 if name == "plan" else 2)
                 or any(type(value) is not str or not value.endswith(".py")
                        or not value[:-3] or any(c not in "abcdefghijklmnopqrstuvwxyz_" for c in value[:-3])
                        for value in names) or len(names) != len(set(names))):
