@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/subject"
@@ -92,6 +93,7 @@ func TestNATSCloseUnknownRetainedRepairAndRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			bustest.ReclaimSubjects(t, js, subject.VenuePositionFor(tenant, fund, "OKX", "BTC-USD"), subject.VenuePositionFor(tenant, fund, "BINANCE", "BTC-USD"))
 			publishPosition := func(venue string, quantity *commonpb.Decimal) {
 				t.Helper()
 				now := time.Now().UTC()

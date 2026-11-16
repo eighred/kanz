@@ -57,7 +57,9 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial NATS: %v", err)
 	}
-	defer func() { _ = client.Close() }()
+	t.Cleanup(func() { _ = client.Close() })
+	portfolio := fmt.Sprintf("m1-loop-%d", time.Now().UnixNano())
+	receipts, js, from := reclaimLiveOMSFixture(t, ctx, url, portfolio, "XNAS", "XLON")
 
 	// Observe the OMS's fills coming back on the bus.
 	consumer, err := bus.NewConsumer(client)
@@ -67,8 +69,10 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	var mu sync.Mutex
 	filled := map[string]*big.Rat{} // order_id -> filled qty
 	fills := make(chan struct{}, 8)
+	done := make(chan error, 1)
+	joinLiveOMSObserver(t, cancel, done)
 	go func() {
-		_ = consumer.Subscribe(ctx, "order.order.filled", "webhook-ingest-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+		done <- consumer.Subscribe(ctx, "order.order.filled", "webhook-ingest-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
 			var ev orderpb.OrderFilled
 			if err := proto.Unmarshal(payload, &ev); err != nil {
 				return nil
@@ -76,7 +80,10 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 			mu.Lock()
 			filled[ev.GetOrderId()] = dec.FromProto(ev.GetState().GetFilledQuantity())
 			mu.Unlock()
-			fills <- struct{}{}
+			select {
+			case fills <- struct{}{}:
+			case <-ctx.Done():
+			}
 			return nil
 		})
 	}()
@@ -89,14 +96,18 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 
 	// A limit order fills at the limit in SimVenue regardless of the OMS's price
 	// config — so the loop produces fills deterministically.
+	authority, err := NewFundAuthority(map[string]string{portfolio: "acme"}, map[string][]string{"momentum": {portfolio}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	p, err := NewPipeline(Options{
-		Authority: ingestTestAuthority(t),
+		Authority: authority,
 		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
 		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
-		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
+		Equity:    StaticEquity{portfolio: big.NewRat(1_000_000, 1)},
 		Positions: StaticPositions{},
-		Alloc: StaticAllocation{"fund-alpha": {
+		Alloc: StaticAllocation{portfolio: {
 			{Venue: "XNAS", Weight: big.NewRat(6, 10)},
 			{Venue: "XLON", Weight: big.NewRat(4, 10)},
 		}},
@@ -118,9 +129,9 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	// all. That is how it broke — the fixture predates the rule, and this is the
 	// only alert literal in the tree that CI cannot catch on a machine without a
 	// broker, because everything above gates on TEST_NATS_URL + TEST_OMS_ON_BUS.
-	raw := fmt.Sprintf(`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",`+
+	raw := fmt.Sprintf(`{"strategy_id":"momentum","fund_id":%q,"symbol":"BINANCE:BTCUSDT",`+
 		`"action":"buy","size":"1","size_type":"absolute_qty","order_type":"limit","limit_price":"50000","nonce":"it-%d",`,
-		time.Now().UnixNano()) + freshTS()
+		portfolio, time.Now().UnixNano()) + freshTS()
 	res, err := p.Process(ctx, []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if err != nil {
 		t.Fatalf("Process: %v", err)
@@ -159,6 +170,7 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 				have, len(res.OrderIDs), res.OrderIDs, url)
 		}
 	}
+	receipts.AwaitFills(t, js, from, res.OrderIDs...)
 	mu.Lock()
 	defer mu.Unlock()
 	total := new(big.Rat)

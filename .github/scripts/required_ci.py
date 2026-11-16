@@ -60,7 +60,19 @@ def application_path(path):
                 or path.endswith(b".md") or path == b".gitignore")
 
 
-def scope(repo, event_name, event, checked_sha, *, images=False):
+def position_reclaim_path(path):
+    # Any new test publisher must participate before we know its eventual owner.
+    # This adds proof; it does not alter application/native workflow scope.
+    return ((path.startswith(b"kanz/") and path.endswith(b"_test.go"))
+            or path.startswith((b"kanz/internal/bustest/", b"kanz/test/backing/position_reclaim/",
+                                b"kanz/internal/platform/subject/", b"kanz/pkg/bus/", b"kanz/services/oms/internal/",
+                                b"kanz-rs/crates/oms-store/", b"kanz-rs/crates/oms-recovery/", b"kanz/infra/nats/", b"kanz/internal/risk/state/",
+                                b"kanz/services/compliance/", b"kanz/services/webhook-ingest/internal/ingest/",
+                                b".github/scripts/position_reclaim", b".github/scripts/test_position_reclaim"))
+            or path in {b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py", b"kanz/test/backing/nats-dev.conf"})
+
+
+def scope(repo, event_name, event, checked_sha, *, images=False, position_reclaim=False):
     checked_sha = commit(repo, checked_sha)
     if git(repo, "rev-parse", "HEAD").decode().strip() != checked_sha:
         raise ValueError("checkout does not match the workflow commit")
@@ -80,7 +92,9 @@ def scope(repo, event_name, event, checked_sha, *, images=False):
         if head != checked_sha or event.get("deleted", False):
             raise ValueError("push does not describe the checked-out commit")
         if event["before"] == "0" * 40:
-            return {"application": True, "forge": True}, "new branch: full verification"
+            selected = {"application": True, "forge": True}
+            if position_reclaim: selected["position_reclaim"] = True
+            return selected, "new branch: full verification"
         base = commit(repo, event["before"])
     else:
         raise ValueError("unsupported workflow event")
@@ -92,7 +106,9 @@ def scope(repo, event_name, event, checked_sha, *, images=False):
         raise ValueError("incomplete Git path output")
     paths = raw.split(b"\0")[:-1] if raw else []
     needed = any(application_path(path) for path in paths)
-    return {"application": needed, "forge": any(forge_path(path) for path in paths)}, f"{len(paths)} changed paths; base={base}; head={head}"
+    selected = {"application": needed, "forge": any(forge_path(path) for path in paths)}
+    if position_reclaim: selected["position_reclaim"] = any(position_reclaim_path(path) for path in paths)
+    return selected, f"{len(paths)} changed paths; base={base}; head={head}"
 
 
 def workflow_jobs(text):
@@ -118,6 +134,7 @@ def workflow_jobs(text):
     for line in (
         "      application: ${{ steps.scope.outputs.application }}",
         "      forge: ${{ steps.scope.outputs.forge }}",
+        "      position_reclaim: ${{ steps.scope.outputs.position_reclaim }}",
         "          fetch-depth: 0",
         "        id: scope",
         "        run: python3 .github/scripts/required_ci.py scope",
@@ -125,6 +142,10 @@ def workflow_jobs(text):
         if scope_job.count(line) != 1:
             raise ValueError("scope must bind complete Git history and both verified outputs")
     expected = set(blocks) - {"scope", "kanz-ci-required"}
+    if (blocks.get("go-race", []).count("          POSITION_RECLAIM_SCOPE: ${{ needs.scope.outputs.position_reclaim }}") != 1
+            or blocks.get("go-race", []).count('          if [ "${{ matrix.shard }}" = "0" ] && [ "$POSITION_RECLAIM_SCOPE" = "true" ]; then') != 1
+            or blocks.get("go-race", []).count("              python3 -B ../.github/scripts/position_reclaim_proof.py \\") != 1):
+        raise ValueError("test-support changes must retain the scoped same-broker proof")
     if not (CORE_JOBS | {FORGE_JOB}) <= expected or not {"scope", "kanz-ci-required"} <= set(blocks):
         raise ValueError("required application or coordination job removed")
     for name in expected:
@@ -208,7 +229,7 @@ def main():
         print(aggregate(json.loads(os.environ["NEEDS_JSON"]), expected))
     else:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-        selected, reason = scope(Path.cwd(), os.environ["GITHUB_EVENT_NAME"], event, os.environ["GITHUB_SHA"], images=args.mode == "images")
+        selected, reason = scope(Path.cwd(), os.environ["GITHUB_EVENT_NAME"], event, os.environ["GITHUB_SHA"], images=args.mode == "images", position_reclaim=args.mode == "scope")
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             for name, needed in selected.items():
                 output.write(f"{name}={str(needed).lower()}\n")

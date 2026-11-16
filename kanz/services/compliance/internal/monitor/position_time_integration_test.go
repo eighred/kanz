@@ -111,19 +111,6 @@ func TestPositionTimeJetStreamACKReplayAndDecisionRecovery(t *testing.T) {
 	decisions := positionTimeStream(t, ctx, js, compliancebus.SubjectDecision)
 	// Register before the first publish. Never purge a shared stream or a shared
 	// breach/decision subject: only these two unique compacted input subjects.
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		for _, topic := range topics {
-			if strings.ContainsAny(topic, "*>") || !strings.Contains(topic, subject.Token(portfolio)) {
-				t.Error("unsafe fixture cleanup subject")
-				continue
-			}
-			if err := input.Purge(cleanup, jetstream.WithPurgeSubject(topic)); err != nil {
-				t.Error(err)
-			}
-		}
-	})
 	output := func(s jetstream.Stream, topic, name string) jetstream.Consumer {
 		t.Helper()
 		c, err := s.CreateConsumer(ctx, jetstream.ConsumerConfig{Name: id + name, FilterSubject: topic, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
@@ -145,6 +132,7 @@ func TestPositionTimeJetStreamACKReplayAndDecisionRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	bustest.ReclaimSubjects(t, js, topics...)
 	inProducer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms", ProducerVersion: "position-time-test", Tenant: tenant})
 	if err != nil {
 		t.Fatal(err)

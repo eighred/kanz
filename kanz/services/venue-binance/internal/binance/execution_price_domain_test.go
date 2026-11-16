@@ -12,6 +12,7 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/bustest/positionfixture"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/nats-io/nats.go"
@@ -140,8 +141,17 @@ func TestExecutedPriceRefusalReachesNoBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := time.Now().UnixNano()
+	portfolio := fmt.Sprintf("binance-price-%d", identity)
+	receipts := positionfixture.ReclaimOMSPositions(t, js, portfolio, "BTC-USD", "BINANCE")
 	zero, negative, good := fmt.Sprintf("price-zero-%d", identity), fmt.Sprintf("price-negative-%d", identity), fmt.Sprintf("price-good-%d", identity)
-	view := newFakeOrders(zero, negative, good)
+	view := newFakeOrders()
+	for _, id := range []string{zero, negative, good} {
+		st := kanzOrder(id)
+		st.PortfolioId = portfolio
+		if err := view.store.Record(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
 	refused := 0
 	ing := newUserDataIngester(UserDataConfig{
 		Stream: &fakeStream{frames: [][]byte{priceDomainReport(zero, "FILLED", "0"), priceDomainReport(negative, "FILLED", "-1"), priceDomainReport(good, "FILLED", "1")}},
@@ -150,6 +160,7 @@ func TestExecutedPriceRefusalReachesNoBroker(t *testing.T) {
 	if err := ing.Run(ctx); !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
+	receipts.AwaitFills(t, js, start, good)
 	seen := fillFactsOnTheStream(ctx, t, stream, start)
 	if seen[zero] || seen[negative] || !seen[good] || refused != 2 || view.get(t, zero).GetQuarantine() == nil || view.get(t, negative).GetQuarantine() == nil {
 		t.Fatalf("broker facts zero/negative/good=%v/%v/%v; refusals=%d, want false/false/true and two quarantines", seen[zero], seen[negative], seen[good], refused)

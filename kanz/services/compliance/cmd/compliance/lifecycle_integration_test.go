@@ -118,13 +118,7 @@ func TestLifecycleCanonicalCashScheduledReopenAndRestart(t *testing.T) {
 						t.Fatal(err)
 					}
 					t.Cleanup(func() { _ = client.Close() })
-					t.Cleanup(func() {
-						cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-						defer stop()
-						if err := positions.Purge(cleanup, jetstream.WithPurgeSubject(positionTopic)); err != nil {
-							t.Error(err)
-						}
-					})
+					bustest.ReclaimSubjects(t, js, positionTopic)
 					input, err := bus.NewProducer(client, bus.ProducerConfig{Source: "compliance/lifecycle-input", ProducerVersion: "test", Tenant: tenant})
 					if err != nil {
 						t.Fatal(err)

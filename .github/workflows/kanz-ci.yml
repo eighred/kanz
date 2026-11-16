@@ -33,6 +33,7 @@ jobs:
     outputs:
       application: ${{ steps.scope.outputs.application }}
       forge: ${{ steps.scope.outputs.forge }}
+      position_reclaim: ${{ steps.scope.outputs.position_reclaim }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,6 +74,7 @@ jobs:
         run: ./tools/Test-EcrReleaseDigest.ps1
 
   go-race:
+    timeout-minutes: 180
     # One setup definition, isolated hosted stores. The third runner removes
     # tagged builds/tests and lint from the full race suite's serial tail.
     strategy:
@@ -592,10 +594,18 @@ jobs:
           go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"
           python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"
 
+      - name: Prepare unchanged reviewed Rust store fixture inputs for reused-broker proof
+        if: matrix.shard == 0 && needs.scope.outputs.position_reclaim == 'true'
+        working-directory: kanz-rs
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          cargo +1.90.0 fetch --locked
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         if: matrix.kind == 'race'
         working-directory: kanz
         env:
+          POSITION_RECLAIM_SCOPE: ${{ needs.scope.outputs.position_reclaim }}
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
           TEST_TV_NATS_URL: nats://127.0.0.1:4224
@@ -653,8 +663,17 @@ jobs:
         # JSON retains test attribution even when parallel subtests interleave.
         # The standard-library renderer preserves readable Actions output; the
         # next gate checks the original events, not neighboring text (#1352).
+        # Privileged-parent prerequisite: review this exact workflow head and both
+        # position_reclaim_proof.py and position_reclaim_sandbox.py before execution.
+        # Child isolation cannot contain a modified workflow or either parent program.
         run: |
           set -euo pipefail
+          if [ "${{ matrix.shard }}" = "0" ] && [ "$POSITION_RECLAIM_SCOPE" = "true" ]; then
+            sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS,RUNNER_TEMP,TEST_POSTGRES_URL,TEST_NATS_URL,TEST_TV_NATS_URL,TEST_KAFKA_BROKERS,TEST_OMS_ON_BUS,TEST_INFERENCE_ON_BUS,TEST_OMS_POSTGRES_URL,TEST_SESSION_BROWSER_SCRIPT,TEST_MFA_BROWSER_SCRIPT,TEST_MFA_PLAYWRIGHT,TEST_MFA_NODE,TEST_MFA_BFF,TEST_MFA_STATIC_DIR,TEST_NATS_MTLS_URL,TEST_NATS_MTLS_CERT_DIR \
+              python3 -B ../.github/scripts/position_reclaim_proof.py \
+              --go "$(command -v go)" --gomodcache "$(go env GOMODCACHE)" --rustc "$(rustup which --toolchain 1.90.0 rustc)" \
+              --node "$(command -v node)" --cargo-home "$HOME/.cargo" --browser "$HOME/.cache/ms-playwright"
+          fi
           go list -race ./... > "$RUNNER_TEMP/gotest-all-packages.txt"
           python3 ../.github/scripts/go_shard_evidence.py select --packages "$RUNNER_TEMP/gotest-all-packages.txt" --directory "$RUNNER_TEMP/go-race-proof" --shard "${{ matrix.shard }}"
           mapfile -t packages < "$RUNNER_TEMP/go-race-proof/packages.txt"
@@ -762,6 +781,15 @@ jobs:
         with:
           name: go-race-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/go-race-proof
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve bounded reused-broker proof data
+        if: ${{ always() && matrix.shard == 0 && needs.scope.outputs.position_reclaim == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: position-reclaim-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/position-reclaim-*/artifacts/
           if-no-files-found: error
           retention-days: 7
 

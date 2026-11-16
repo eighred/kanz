@@ -206,7 +206,15 @@ class GitScopeTests(unittest.TestCase):
                  "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": head},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output_file.read_text(encoding="utf-8"), "application=false\nforge=true\n")
+        self.assertEqual(output_file.read_text(encoding="utf-8"), "application=false\nforge=true\nposition_reclaim=false\n")
+
+    def test_position_proof_scope_is_derived_from_complete_source_diff(self):
+        for name in ("kanz/internal/new/publisher_test.go", "kanz/services/oms/internal/position/projector.go", "kanz-rs/crates/oms-store/src/projector.rs"):
+            self.write(name, "source input")
+            head = self.save()
+            selected, _ = policy.scope(self.repo, "push", {"before": self.base, "after": head}, head, position_reclaim=True)
+            self.assertTrue(selected["application"])
+            self.assertTrue(selected["position_reclaim"])
 
 
 class AggregateTests(unittest.TestCase):

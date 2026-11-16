@@ -88,7 +88,9 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 	if err != nil {
 		t.Fatalf("dial NATS: %v", err)
 	}
-	defer func() { _ = client.Close() }()
+	t.Cleanup(func() { _ = client.Close() })
+	portfolio := fmt.Sprintf("domain-boundary-%d", time.Now().UnixNano())
+	receipts, js, from := reclaimLiveOMSFixture(t, ctx, url, portfolio, "XNAS")
 
 	consumer, err := bus.NewConsumer(client)
 	if err != nil {
@@ -97,8 +99,10 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	fills := make(chan string, 8)
+	done := make(chan error, 1)
+	joinLiveOMSObserver(t, cancel, done)
 	go func() {
-		_ = consumer.Subscribe(ctx, "order.order.filled", "domain-boundary-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+		done <- consumer.Subscribe(ctx, "order.order.filled", "domain-boundary-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
 			var ev orderpb.OrderFilled
 			if err := proto.Unmarshal(payload, &ev); err != nil {
 				return nil
@@ -106,7 +110,10 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 			mu.Lock()
 			seen[ev.GetOrderId()] = true
 			mu.Unlock()
-			fills <- ev.GetOrderId()
+			select {
+			case fills <- ev.GetOrderId():
+			case <-ctx.Done():
+			}
 			return nil
 		})
 	}()
@@ -129,10 +136,10 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 	// price's exponent. Everything else is identical, so a refusal cannot be
 	// attributed to a missing field, a bad venue or an unroutable instrument —
 	// the domain is the only variable.
-	if err := publishSubmit(ctx, producer, poisonID, &commonpb.Decimal{Coefficient: 1, Exponent: poisonExponent}); err != nil {
+	if err := publishSubmit(ctx, producer, poisonID, portfolio, &commonpb.Decimal{Coefficient: 1, Exponent: poisonExponent}); err != nil {
 		t.Fatalf("publish poison command: %v", err)
 	}
-	if err := publishSubmit(ctx, producer, healthyID, &commonpb.Decimal{Coefficient: 5_000_000_000, Exponent: -8}); err != nil {
+	if err := publishSubmit(ctx, producer, healthyID, portfolio, &commonpb.Decimal{Coefficient: 5_000_000_000, Exponent: -8}); err != nil {
 		t.Fatalf("publish healthy command: %v", err)
 	}
 
@@ -157,6 +164,7 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 	}
 
 alive:
+	receipts.AwaitFills(t, js, from, healthyID)
 	// And the poison itself must NOT have produced a fill. Checked after liveness
 	// rather than before, because on its own this assertion is satisfied by a dead
 	// OMS — it is only meaningful once the service is known to still be working.
@@ -172,11 +180,11 @@ alive:
 // publishSubmit emits one SubmitOrder shaped exactly as internal/signal/translate
 // emits them, so this exercises the production command path rather than a shape
 // invented for a test.
-func publishSubmit(ctx context.Context, p *bus.Producer, orderID string, limit *commonpb.Decimal) error {
+func publishSubmit(ctx context.Context, p *bus.Producer, orderID, portfolio string, limit *commonpb.Decimal) error {
 	cmd := &orderpb.SubmitOrder{
 		Metadata:     &commandpb.CommandMetadata{Issuer: "strategy:domain-boundary-it", TargetId: orderID},
 		OrderId:      orderID,
-		PortfolioId:  "fund-alpha",
+		PortfolioId:  portfolio,
 		InstrumentId: "BTC-USD",
 		Side:         orderpb.Side_SIDE_BUY,
 		Quantity:     &commonpb.Decimal{Coefficient: 100_000_000, Exponent: -8}, // 1
