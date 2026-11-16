@@ -75,3 +75,22 @@ production database receipt, current runtime credential proof, historical-prefix
 completeness proof or activation gate. Existing preparation Job receipts cannot
 substitute for this comparison. Live execution, pinned-CNPG role authority,
 loaded-image readback and restore cleanup still require operational acceptance.
+
+### CloudNativePG metrics access (#1142)
+
+`postgres-prometheus-metrics` permits only pods labelled `app=prometheus` in
+`kanz-observability` to reach this cluster's TCP 9187 exporter. Both selectors
+share one NetworkPolicy peer; placing them in separate peers broadens access.
+The policy grants no database-port access and changes no Cluster settings.
+
+After a reviewed policy-only rollout, verify the discovered Pod IP, named
+`metrics` port and configured HTTP/TLS scheme against the actual instance. An
+entry in `/proc/net/tcp6` alone does not establish IPv6-only operation. Confirm
+this target stays up for at least three 30-second scrape intervals, and record
+Cluster Ready and continuous-archiving status before and after. Do not collect
+metrics bodies or credential-bearing resources in the receipt.
+
+Rollback removes only the named `postgres-prometheus-metrics` policy. It restores
+the prior metrics denial while retaining database default deny and the existing
+application/controller allow rules; it requires no primary restart. Structural
+CI guards are not evidence of CNI enforcement or live database health.

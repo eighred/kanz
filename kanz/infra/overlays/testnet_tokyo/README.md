@@ -208,7 +208,7 @@ probe behavior. No third-party Python packages run inside the fixture pods.
 
 `tv_sync_preparation/` is an explicit operator overlay. It is not referenced by
 this workload overlay or the ordinary `data/` overlay. Ordinary data installation
-retains its original 37 resources, eight databases and sixteen roles; ordinary
+retains its 38 resources, eight databases and sixteen roles; ordinary
 Vault bootstrap does not inspect or create tv-sync credentials. The shared
 provisioner script accepts only its default mode and the fixed `tv-sync` mode.
 The latter runs in a separate Job with the existing migration ServiceAccount and

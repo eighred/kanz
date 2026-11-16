@@ -26,7 +26,11 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		next = users[len(users)-1].Subject
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, 200, map[string]any{"users": users, "next_cursor": next})
+	out := make([]accessJSON, 0, len(users))
+	for _, user := range users {
+		out = append(out, accessResponse(user))
+	}
+	writeJSON(w, 200, map[string]any{"users": out, "next_cursor": next})
 }
 
 func (s *Server) setAccess(w http.ResponseWriter, r *http.Request) {
@@ -35,23 +39,23 @@ func (s *Server) setAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Revision   *int64   `json:"revision"`
-		Roles      []string `json:"roles"`
-		Portfolios []string `json:"portfolios"`
+		Revision   *revisionJSON `json:"revision"`
+		Roles      []string      `json:"roles"`
+		Portfolios []string      `json:"portfolios"`
 	}
-	if !decode(w, r, &req) {
+	if !decodeAdministration(w, r, &req) {
 		return
 	}
 	if req.Revision == nil || *req.Revision < 0 {
 		writeErr(w, 400, "a nonnegative revision is required")
 		return
 	}
-	result, err := s.provisioning.Store.SetAccess(r.Context(), administration(c), r.PathValue("subject"), *req.Revision, req.Roles, req.Portfolios, s.now().UTC())
+	result, err := s.provisioning.Store.SetAccess(r.Context(), administration(c), r.PathValue("subject"), int64(*req.Revision), req.Roles, req.Portfolios, s.now().UTC())
 	if err != nil {
 		s.accessError(w, err)
 		return
 	}
-	writeJSON(w, 200, result)
+	writeJSON(w, 200, accessResponse(result))
 }
 
 func (s *Server) accessError(w http.ResponseWriter, err error) {
