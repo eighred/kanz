@@ -69,8 +69,8 @@ class _ControllerControlAPI:
                          "preconditions": {"uid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "resourceVersion": "3"}}:
                 raise AssertionError("delete did not use the one settled snapshot")
             return "{}"
-        if args == ("-n", fixture.tx.NAMESPACE, "get", "replicasets", "--field-selector",
-                    "metadata.name=probe-adoption-control", "-o", "json"):
+        if args == ("get", "--raw", "/apis/apps/v1/namespaces/" + fixture.tx.NAMESPACE
+                    + "/replicasets?fieldSelector=metadata.name%3Dprobe-adoption-control"):
             self.absences += 1
             listing = {"apiVersion": "apps/v1", "kind": "ReplicaSetList", "items": []}
             if self.absences == 1:
@@ -270,6 +270,12 @@ class TransactionEvidenceTests(unittest.TestCase):
         self.assertEqual(report, {})
         bounded = api.calls[1:]
         self.assertEqual(len(bounded), 5)
+        raw_list = ("get", "--raw", "/apis/apps/v1/namespaces/" + fixture.tx.NAMESPACE
+                    + "/replicasets?fieldSelector=metadata.name%3Dprobe-adoption-control")
+        self.assertEqual([args for args, _, _, _ in bounded if args[:2] == ("get", "--raw")],
+                         [raw_list, raw_list])
+        self.assertFalse(any(args[:4] == ("-n", fixture.tx.NAMESPACE, "get", "replicasets")
+                             for args, _, _, _ in bounded))
         for _, _, timeout, started in bounded:
             self.assertAlmostEqual(timeout, 31 - started)
         self.assertLess(api.now, 31)
@@ -419,6 +425,7 @@ class TransactionEvidenceTests(unittest.TestCase):
     def test_controller_control_absence_must_be_typed_empty_and_not_a_replacement(self):
         changes = {
             "kind": lambda obj: obj.update(kind="List"),
+            "old-projection": lambda obj: obj.update(apiVersion="v1", kind="List"),
             "version": lambda obj: obj.update(apiVersion="v1"),
             "items": lambda obj: obj.update(items=None),
             "duplicate": lambda obj: obj["items"].append(copy.deepcopy(obj["items"][0])),

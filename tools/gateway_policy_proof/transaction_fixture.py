@@ -471,8 +471,11 @@ def controller_adoption_control(k, controller, report, *, clock=time.monotonic, 
            value={"apiVersion": "v1", "kind": "DeleteOptions",
                   "preconditions": {"uid": uid, "resourceVersion": metadata["resourceVersion"]}})
     while True:
-        listing = json.loads(invoke("controller_control_observe", "-n", tx.NAMESPACE, "get", "replicasets",
-                                    "--field-selector", "metadata.name=probe-adoption-control", "-o", "json"))
+        # Raw GET retains the server ReplicaSetList; the generic kubectl JSON
+        # printer instead wraps plural results (including absence) in v1.List.
+        listing = json.loads(invoke("controller_control_observe", "get", "--raw",
+                                    "/apis/apps/v1/namespaces/" + tx.NAMESPACE
+                                    + "/replicasets?fieldSelector=metadata.name%3Dprobe-adoption-control"))
         if (type(listing) is not dict or listing.get("apiVersion") != "apps/v1"
                 or listing.get("kind") != "ReplicaSetList" or type(listing.get("items")) is not list
                 or len(listing["items"]) > 1):
