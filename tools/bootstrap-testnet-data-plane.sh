@@ -148,18 +148,36 @@ runtime_secret_path() {
     esac
 }
 
-check_record_history() {
-    history_path=$1
-    shift
-    if ! history_versions=$("$VAULT_BIN" read -field=current_version "kv/metadata/$history_path" 2>/dev/null); then
+record_version_count() {
+    if version_result=$("$VAULT_BIN" read -field=current_version "kv/metadata/$1" 2>&1); then
+        :
+    elif [ "$2" = allow-new ] && [ "$version_result" = "No value found at kv/metadata/$1" ]; then
+        version_result=0
+    else
+        version_result=''
         printf '%s\n' 'Credential history metadata is unavailable; refusing qualification.' >&2; exit 1
     fi
     # Ask the pinned CLI for one non-secret metadata field; never parse a
     # formatted secret record. Unknown or excessive history refuses.
-    case "$history_versions" in ''|*[!0-9]*) printf '%s\n' 'Credential history version is unknown.' >&2; exit 1 ;; esac
-    if [ "$history_versions" -lt 1 ] || [ "$history_versions" -gt 16 ]; then
+    case "$version_result" in ''|*[!0-9]*) printf '%s\n' 'Credential history version is unknown.' >&2; exit 1 ;; esac
+    if [ "$version_result" -gt 16 ] || { [ "$2" != allow-new ] && [ "$version_result" -lt 1 ]; }; then
         printf '%s\n' 'Credential history exceeds the bounded preparation contract; operator review is required.' >&2; exit 1
     fi
+    printf '%s\n' "$version_result"
+    version_result=''
+}
+
+reserve_history_writes() {
+    budget_version=$(record_version_count "$1" allow-new)
+    if [ $((budget_version + $2)) -gt 16 ]; then
+        printf '%s\n' 'Credential history lacks the required write budget; refusing before preparation or policy publication.' >&2; exit 1
+    fi
+}
+
+check_record_history() {
+    history_path=$1
+    shift
+    history_versions=$(record_version_count "$history_path" existing)
     history_version=1
     while [ "$history_version" -le "$history_versions" ]; do
         for forbidden_field in "$@"; do
@@ -271,6 +289,32 @@ qualify_isolated_service() {
 }
 
 if [ "$bootstrap_mode" = runtime-isolation-prepare ]; then
+    # Reserve every selected record's exact copy/marker writes before making
+    # any write. A completed preparation must remain inside its own history
+    # bound, including on ordinary idempotent reruns.
+    for isolation_service in accounting audit identity; do
+        preparation_state=$(isolation_state "$isolation_service")
+        case "$preparation_state" in legacy|v1-prepared|v1-active) ;; *) printf '%s\n' 'Isolation cutover is incomplete; refusing preparation.' >&2; exit 1 ;; esac
+        preparation_runtime="kanz/$isolation_service-runtime"
+        if [ "$isolation_service" = identity ]; then
+            preparation_group=$(field_group_state 'identity runtime target' "$preparation_runtime:dsn" "$preparation_runtime:signing_key_pem")
+            preparation_writes=2
+        else
+            preparation_group=$(field_group_state 'runtime target' "$preparation_runtime:dsn")
+            preparation_writes=1
+        fi
+        if [ "$preparation_group" = complete ]; then preparation_writes=0; fi
+        if [ "$preparation_state" = legacy ]; then preparation_writes=$((preparation_writes + 1)); fi
+        # A prepared record must still have room for both activation markers.
+        # An already active record needs no future cutover reservation.
+        if [ "$preparation_state" != v1-active ]; then preparation_writes=$((preparation_writes + 2)); fi
+        reserve_history_writes "$preparation_runtime" "$preparation_writes"
+        preparation_migration="kanz/$isolation_service-migration"
+        preparation_group=$(field_group_state 'migration target' "$preparation_migration:migrate_dsn")
+        preparation_writes=1
+        if [ "$preparation_group" = complete ]; then preparation_writes=0; fi
+        reserve_history_writes "$preparation_migration" "$preparation_writes"
+    done
     for isolation_service in accounting audit identity; do
         isolation_current=$(isolation_state "$isolation_service")
         case "$isolation_current" in legacy|v1-prepared|v1-active) ;; *) printf '%s\n' 'Isolation cutover is incomplete; refusing preparation.' >&2; exit 1 ;; esac
@@ -299,10 +343,17 @@ if [ "$bootstrap_mode" = runtime-isolation-activate ]; then
     # caller must first perform the reviewed runbook's isolated/main and operator
     # acceptance. A partial policy write leaves an explicit refusing state.
     [ "${RUNTIME_ISOLATION_CUTOVER_APPROVED:-}" = yes ] || { printf '%s\n' 'Runtime credential cutover requires separate operator authorization and prerequisite proof.' >&2; exit 1; }
+    # Qualify and reserve both state markers across the whole selected set
+    # before publishing the first policy. Do not finish at version17/18 and
+    # leave the next ordinary bootstrap unable to qualify its own result.
     for isolation_service in accounting audit identity; do
         isolation_current=$(isolation_state "$isolation_service")
         case "$isolation_current" in v1-prepared|v1-activating|v1-active) ;; *) printf '%s\n' 'Runtime credential preparation is missing.' >&2; exit 1 ;; esac
         qualify_isolated_service "$isolation_service"
+        reserve_history_writes "$isolation_runtime" 2
+    done
+    for isolation_service in accounting audit identity; do
+        isolation_runtime="kanz/$isolation_service-runtime"
         write_field "$isolation_runtime" credential_isolation_state v1-activating
         write_read_policy "$isolation_service" "$isolation_runtime" kanz-services "$isolation_service"
         write_field "$isolation_runtime" credential_isolation_state v1-active

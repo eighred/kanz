@@ -10,10 +10,12 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,6 +235,60 @@ func (v *runtimeVaultFixture) bootstrap(mode, token, script string, approved boo
 	return err == nil
 }
 
+func (v *runtimeVaultFixture) policyState() map[string]string {
+	v.t.Helper()
+	policies := map[string]string{}
+	for _, service := range []string{"accounting", "audit", "identity"} {
+		response, status := v.request(http.MethodGet, "sys/policies/acl/"+service+"-read", v.root, nil)
+		if status != http.StatusOK {
+			v.t.Fatal("fixture policy evidence unavailable")
+		}
+		data, ok := response["data"].(map[string]any)
+		if !ok {
+			v.t.Fatal("fixture policy data absent")
+		}
+		policy, ok := data["policy"].(string)
+		if !ok {
+			v.t.Fatal("fixture policy text absent")
+		}
+		policies[service] = policy
+	}
+	return policies
+}
+
+func (v *runtimeVaultFixture) version(path string) int {
+	v.t.Helper()
+	response, status := v.request(http.MethodGet, "kv/metadata/"+path, v.root, nil)
+	if status != http.StatusOK {
+		v.t.Fatal("fixture version metadata unavailable")
+	}
+	data, ok := response["data"].(map[string]any)
+	if !ok {
+		v.t.Fatal("fixture version data absent")
+	}
+	version, ok := data["current_version"].(float64)
+	if !ok || version < 1 || version > 16 || version != float64(int(version)) {
+		v.t.Fatal("fixture version outside explicit bound")
+	}
+	return int(version)
+}
+
+func (v *runtimeVaultFixture) fillDummyHistory(path string, fields map[string]any, versions int) {
+	v.t.Helper()
+	// Fixture-only reset: each independent oracle gets the same clean dummy
+	// credential history. This is not a production recovery/cutover operation.
+	_, status := v.request(http.MethodDelete, "kv/metadata/"+path, v.root, nil)
+	if status != http.StatusNoContent {
+		v.t.Fatal("owned dummy record reset failed")
+	}
+	for range versions {
+		v.write("kv/data/"+path, map[string]any{"data": fields})
+	}
+	if v.version(path) != versions {
+		v.t.Fatal("dummy history was not the required boundary")
+	}
+}
+
 func TestRuntimeVaultIsolation(t *testing.T) {
 	address := os.Getenv("TEST_RUNTIME_VAULT_ADDR")
 	if address == "" {
@@ -249,7 +305,16 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	}
 	v := &runtimeVaultFixture{t: t, ctx: ctx, client: &http.Client{Timeout: 3 * time.Second}, address: address, root: "fixture-root-token", key: key, fixtures: map[string]*runtimeRoleFixture{}, scratch: t.TempDir(), script: filepath.Join("..", "..", "..", "tools", "bootstrap-testnet-data-plane.sh")}
 	v.trust = filepath.Join(v.scratch, "fixture-trust.pem")
-	if err := os.WriteFile(v.trust, []byte("public fixture trust placeholder\n"), 0o600); err != nil {
+	// Vault loads VAULT_CACERT while constructing its client even for HTTP.
+	// Emit only a valid generated PUBLIC certificate; the existing dummy
+	// service-account signing key stays in memory and is never encoded to disk.
+	ca := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "runtime fixture public CA"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal("create dummy public trust certificate")
+	}
+	if err := os.WriteFile(v.trust, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	v.write("sys/mounts/kv", map[string]any{"type": "kv", "options": map[string]string{"version": "2"}})
@@ -290,6 +355,30 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	if v.record(legacyToken, "kanz/audit", 1, true)["migrate_dsn"] != v.fixtures["audit"].migrationURL {
 		t.Fatal("affected mixed-record control did not expose the dummy migration credential")
 	}
+	t.Run("prepare-marker-budget", func(t *testing.T) {
+		v.fillDummyHistory("kanz/audit-runtime", map[string]any{"dsn": v.fixtures["audit"].appURL}, 14)
+		before := v.policyState()
+		if v.bootstrap("runtime-isolation-prepare", v.root, v.script, false) {
+			t.Fatal("preparation consumed future activation-marker budget")
+		}
+		after := v.policyState()
+		for service, policy := range before {
+			if after[service] != policy {
+				t.Fatal("budget refusal mutated a runtime policy")
+			}
+		}
+		for _, endpoint := range []string{"sys/policies/acl/accounting-migrate-read", "auth/kubernetes/role/accounting-migrate", "kv/data/kanz/accounting-runtime", "kv/data/kanz/accounting-migration", "kv/data/kanz/identity-runtime", "kv/data/kanz/identity-migration"} {
+			_, status := v.request(http.MethodGet, endpoint, v.root, nil)
+			if status != http.StatusNotFound {
+				t.Fatal("preparation budget refusal published another record, policy or role")
+			}
+		}
+		if v.version("kanz/audit-runtime") != 14 {
+			t.Fatal("budget refusal wrote a credential marker")
+		}
+		// Version13 plus the preparation marker leaves exactly two writes.
+		v.fillDummyHistory("kanz/audit-runtime", map[string]any{"dsn": v.fixtures["audit"].appURL}, 13)
+	})
 	// A partly copied identity record must neither manufacture a signing key
 	// nor publish runtime policy changes. Repair is explicit, not an overwrite.
 	v.write("kv/data/kanz/identity-runtime", map[string]any{"data": map[string]string{"dsn": v.fixtures["identity"].appURL}})
@@ -307,6 +396,36 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	if v.bootstrap("runtime-isolation-activate", v.root, v.script, false) {
 		t.Fatal("unapproved cutover accepted")
 	}
+	cleanAudit := v.record(v.root, "kanz/audit-runtime", 0, true)
+	t.Run("activation-marker-budget", func(t *testing.T) {
+		if v.version("kanz/audit-runtime") != 14 {
+			t.Fatal("preparation did not preserve the activation boundary")
+		}
+		v.write("kv/data/kanz/audit-runtime", map[string]any{"data": cleanAudit})
+		before := v.policyState()
+		beforeVersions := map[string]int{}
+		for _, service := range []string{"accounting", "audit", "identity"} {
+			beforeVersions[service] = v.version("kanz/" + service + "-runtime")
+		}
+		if v.bootstrap("runtime-isolation-activate", v.root, v.script, true) {
+			t.Fatal("activation exceeded the marker write budget")
+		}
+		after := v.policyState()
+		for service, policy := range before {
+			if after[service] != policy {
+				t.Fatal("activation budget refused after publishing a policy")
+			}
+		}
+		for service, version := range beforeVersions {
+			if v.version("kanz/"+service+"-runtime") != version {
+				t.Fatal("activation budget refusal wrote another service marker")
+			}
+		}
+		if v.version("kanz/audit-runtime") != 15 {
+			t.Fatal("activation budget refusal wrote a marker")
+		}
+		v.fillDummyHistory("kanz/audit-runtime", cleanAudit, 14)
+	})
 	if !v.bootstrap("runtime-isolation-activate", v.root, v.script, true) {
 		t.Fatal("fixture-authorized cutover failed")
 	}
@@ -351,9 +470,17 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	v.write("auth/token/revoke", map[string]string{"token": legacyToken})
 	v.record(legacyToken, "kanz/audit-runtime", 0, false)
 	v.record(v.login("audit", "kanz-services", "audit", true), "kanz/audit-runtime", 0, true)
-	if !v.bootstrap("base", v.root, v.script, false) {
-		t.Fatal("ordinary bootstrap could not preserve activated isolation")
-	}
+	t.Run("boundary-rerun", func(t *testing.T) {
+		if v.version("kanz/audit-runtime") != 16 {
+			t.Fatal("activation did not finish at its accepted history boundary")
+		}
+		if !v.bootstrap("base", v.root, v.script, false) {
+			t.Fatal("ordinary bootstrap could not preserve boundary isolation")
+		}
+		if v.version("kanz/audit-runtime") != 16 {
+			t.Fatal("ordinary bootstrap changed credential history")
+		}
+	})
 	v.configureKubernetes()
 	v.record(v.login("audit", "kanz-services", "audit", true), "kanz/audit", 1, false)
 	// Current data looks clean, but an older readable runtime version carries
@@ -361,6 +488,8 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	// rerun. The disabled-history mutant proves this control is load-bearing.
 	fields := v.record(v.root, "kanz/audit-runtime", 0, true)
 	fields["credential_isolation_state"] = "v1-prepared"
+	// Keep the forbidden-history oracle independent of the history-cap oracle.
+	v.fillDummyHistory("kanz/audit-runtime", fields, 1)
 	fields["migrate_dsn"] = v.fixtures["audit"].migrationURL
 	bad := v.write("kv/data/kanz/audit-runtime", map[string]any{"data": fields})
 	version := int(bad["data"].(map[string]any)["version"].(float64))

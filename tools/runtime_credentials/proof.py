@@ -35,6 +35,8 @@ REQUIRED.update(ROLE_TEST + "/" + name for name in (
     "UPDATE", "DELETE", "TRUNCATE", "ALTER", "direct-truncate", "public-truncate",
     "trigger-authority", "schema-create", "database-create", "security-definer", "assumable-owner", "assumable-truncate", "predefined-capability", "role-createrole", "downscoped-session-owner", "writable-migration-bookkeeping", "writable-migration-bookkeeping/table", "writable-migration-bookkeeping/column"))
 REQUIRED.update(VAULT_TEST + "/" + name for name in ("accounting", "audit", "identity"))
+REQUIRED.update(ROLE_TEST + "/" + name for name in ("replication-parameter-set", "replication-parameter-alter-system", "admin-default-replica", "admin-default-local", "assumable-replication-set", "catalog-shadow-refused"))
+REQUIRED.update(VAULT_TEST + "/" + name for name in ("prepare-marker-budget", "activation-marker-budget", "boundary-rerun"))
 MANIFEST_TESTS = {"test_base_separates_all_three_roles_and_preserves_callers", "test_tokyo_preserves_transformed_immutable_images_and_scopes_database_peer", "test_changed_contracts_fail_closed"}
 PROBE_FAILURES = frozenset({
     "unexpected worker environment name", "Python locale coercion added LC_CTYPE",
@@ -305,6 +307,19 @@ class Sandbox:
         self.observe_running(container_id)
         return container_id
 
+    def server_state(self, container_id):
+        name = next(name for identity,name in self.created if identity == container_id)
+        actual = self.inspect(container_id)
+        if not self.owned(actual,container_id,name):
+            raise ProofFailure("server state ownership evidence mismatch")
+        state = actual["State"]
+        if (state.get("Status") not in {"created","running","paused","restarting","removing","exited","dead"}
+                or type(state.get("Running")) is not bool or type(state.get("OOMKilled")) is not bool
+                or type(state.get("ExitCode")) is not int):
+            raise ProofFailure("server process state evidence is invalid")
+        # Never retain State.Error, command output, server logs or audit files.
+        return {"status":state["Status"],"running":state["Running"],"exit_code":state["ExitCode"],"oom_killed":state["OOMKilled"]}
+
     def cleanup(self):
         results = []
         for container_id, name in reversed(self.created):
@@ -435,13 +450,22 @@ def main():
                           "-dev-listen-address=127.0.0.1:8200", "-log-level=error"]
                 vault_id = sandbox.start(vault)
                 ready = False
-                for _ in range(30):
+                readiness = {name:{"exit_counts":{}} for name in ("postgres","vault")}
+                receipt["server_readiness"] = readiness
+                for attempt in range(30):
                     pg_ready, _, _ = bounded(["docker", "exec", postgres_id, "/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "pg_isready", "-h", "127.0.0.1", "-U", "fixture_admin", "-d", "fixture"], timeout=3)
-                    vault_ready, _, _ = bounded(["docker", "exec", vault_id, "/usr/bin/env", "-i", "VAULT_ADDR=http://127.0.0.1:8200", "/bin/vault", "status"], timeout=3)
+                    vault_ready, _, _ = bounded(["docker", "exec", vault_id, "/usr/bin/env", "-i", "HOME=/scratch", "PATH=/usr/local/bin:/usr/bin:/bin", "VAULT_ADDR=http://127.0.0.1:8200", "/bin/vault", "status"], timeout=3)
+                    for name,code,classes in (("postgres",pg_ready,{0:"accepting",1:"rejecting",2:"no-response",3:"invalid-invocation"}),("vault",vault_ready,{0:"unsealed",1:"status-command-error",2:"sealed"})):
+                        value=readiness[name]
+                        value.update({"attempts":attempt+1,"last_exit":code,"classification":classes.get(code,"command-execution-error")})
+                        key=str(code)
+                        value["exit_counts"][key]=value["exit_counts"].get(key,0)+1
                     if pg_ready == vault_ready == 0:
                         ready = True
                         break
                     time.sleep(1)
+                for name,identity in (("postgres",postgres_id),("vault",vault_id)):
+                    readiness[name]["process"]=sandbox.server_state(identity)
                 if not ready:
                     raise ProofFailure("owned dummy servers did not become ready")
                 receipt["stage"] = "actual-vault-postgres-boundary"

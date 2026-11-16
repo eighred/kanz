@@ -37,15 +37,22 @@ The bounded history check accepts 1–16 versions and fails closed on missing,
 deleted, destroyed, unknown or excessive history. An operator must review a new
 record/history transaction rather than guess around that refusal. No old record
 is deleted and no DB password or signing key is rotated by these commands.
+Preparation reserves its copy/state writes and both future activation markers;
+activation reserves its two markers for all three services before the first
+policy changes. An accepted prepared record can reach active within version16,
+and ordinary base bootstrap does not append markers to an already active record.
 
 ## Prepare a reviewable transaction
 
 First obtain accepted-main source proof, immutable release/migration provenance
 and separate operator authorization for the actual estate. The fixture workflow
-uses actual pinned Vault 1.21.4 and PG16 with dummy Kubernetes principals and a
-dummy TokenReview server. Its result does not prove real CSI/Kubernetes/CNI,
+is designed to run actual pinned Vault 1.21.4 and PG16 with dummy Kubernetes
+principals and a dummy TokenReview server. Its result does not prove real CSI/Kubernetes/CNI,
 SPIFFE/NATS continuity, rollout, or credential rotation. Ordinary applicable
 build/vet/lint/architecture/security checks still apply to the exact commit.
+The workflow and privileged parent supervisor are part of the reviewed fixed-head
+trusted computing base. Their source review is a prerequisite to execution; a
+receipt does not certify a maliciously changed workflow or parent.
 
 Render externally with the reviewed commit/tree and the approved PyYAML 6.0.3
 dependency. For base, omit `--input`. For Tokyo, supply the exact rendered Tokyo
@@ -93,6 +100,8 @@ operator file, CLI argument, transcript or artifact.
    `migration-prerequisites.yaml`. Each service has its own migration SA, one
    migration-only CSI projection, a bounded independent Job and scoped database
    egress. Do not mount the identity signing key or app credential in that Job.
+   Rendered NetworkPolicy adds a database allowance; effective CNI permissions
+   are the union of applicable policies and remain operator-unverified.
    In Tokyo, first retain/wait for the existing postgres-provisioner and
    postgres-migrations Jobs; these establish roles and the all-eight-service
    schema baseline. Base also requires its existing independently approved
@@ -114,8 +123,21 @@ operator file, CLI argument, transcript or artifact.
    Repeat this prerequisite after database recreation/recovery or any grant
    change. It does not rewrite applied migrations or the shared migration CLI.
    New runtime releases deliberately refuse still-writable bookkeeping. The
-   isolated fixture executes this same DO body with a bound dummy role and
-   distinguishes writable table/column controls from owner-revoked success.
+   isolated fixture is designed to execute this same DO body with a bound dummy
+   role and assert writable table/column controls versus owner-revoked success.
+   Separately, an authorized parameter administrator must apply the staged
+   [replication-parameter restriction](harden-runtime-replication.sql) with that
+   explicit role. Remove effective and assumable SET/ALTER SYSTEM rights to
+   `session_replication_role`, including PUBLIC or shared-role grants; the
+   template refuses remaining shared-role authority rather than guessing its
+   ownership. Inspect server, database, role and per-database role defaults and
+   reconnect as the runtime: PostgreSQL16 `origin` and `local` run ordinary WORM
+   triggers; `replica` suppresses them and is refused even without SET authority.
+   Revocation does not fix an existing session or an administrator-supplied
+   replica default. The fixture is designed to assert a SET LOCAL replica bypass
+   of the current audit trigger inside a rolled-back transaction and local-mode
+   WORM enforcement. Acceptance needs the exact-revision CI results. Applied
+   trigger migrations remain unchanged.
 4. Quiesce the affected runtimes according to the service's existing drain and
    outbox/session continuity procedures. Existing audit/accounting state must not
    be discarded. Identity must retain signing material, session epochs and audit

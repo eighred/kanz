@@ -9,31 +9,32 @@
 \quit 2
 \endif
 BEGIN;
-SELECT set_config('kanz.hardening_runtime_role', :'runtime_role', true);
+SET LOCAL search_path=pg_catalog;
+SELECT pg_catalog.set_config('kanz.hardening_runtime_role', :'runtime_role', true);
 DO $$
 DECLARE
-    runtime_name text := current_setting('kanz.hardening_runtime_role');
+    runtime_name text := pg_catalog.current_setting('kanz.hardening_runtime_role');
     runtime_oid oid;
-    bookkeeping oid := to_regclass('public.schema_migrations');
+    bookkeeping oid := pg_catalog.to_regclass('public.schema_migrations');
     column_name text;
 BEGIN
-    SELECT oid INTO runtime_oid FROM pg_roles
+    SELECT oid INTO runtime_oid FROM pg_catalog.pg_roles
       WHERE rolname=runtime_name AND rolcanlogin AND NOT rolsuper AND NOT rolbypassrls;
     IF runtime_oid IS NULL OR bookkeeping IS NULL THEN
         RAISE EXCEPTION 'actual restricted runtime role and migrated bookkeeping table are required';
     END IF;
-    IF NOT pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid=bookkeeping), 'MEMBER') OR
-       pg_has_role(runtime_oid, (SELECT relowner FROM pg_class WHERE oid=bookkeeping), 'MEMBER') THEN
+    IF NOT pg_catalog.pg_has_role(current_user, (SELECT relowner FROM pg_catalog.pg_class WHERE oid=bookkeeping), 'MEMBER') OR
+       pg_catalog.pg_has_role(runtime_oid, (SELECT relowner FROM pg_catalog.pg_class WHERE oid=bookkeeping), 'MEMBER') THEN
         RAISE EXCEPTION 'authorized owner and independent runtime role are required';
     END IF;
-    EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE public.schema_migrations FROM %I, PUBLIC', runtime_name);
-    FOR column_name IN SELECT attname FROM pg_attribute WHERE attrelid=bookkeeping AND attnum>0 AND NOT attisdropped LOOP
-        EXECUTE format('REVOKE INSERT (%I), UPDATE (%I) ON TABLE public.schema_migrations FROM %I, PUBLIC', column_name, column_name, runtime_name);
+    EXECUTE pg_catalog.format('REVOKE INSERT, UPDATE, DELETE ON TABLE public.schema_migrations FROM %I, PUBLIC', runtime_name);
+    FOR column_name IN SELECT attname FROM pg_catalog.pg_attribute WHERE attrelid=bookkeeping AND attnum>0 AND NOT attisdropped LOOP
+        EXECUTE pg_catalog.format('REVOKE INSERT (%I), UPDATE (%I) ON TABLE public.schema_migrations FROM %I, PUBLIC', column_name, column_name, runtime_name);
     END LOOP;
     -- An inherited/assumable group grant needs its own explicit owner decision.
     -- Do not silently revoke a shared group's unrelated authority.
-    IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(runtime_oid,r.oid,'MEMBER') AND
-       (has_table_privilege(r.oid,bookkeeping,'INSERT,UPDATE,DELETE') OR has_any_column_privilege(r.oid,bookkeeping,'INSERT,UPDATE'))) THEN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE pg_catalog.pg_has_role(runtime_oid,r.oid,'MEMBER') AND
+       (pg_catalog.has_table_privilege(r.oid,bookkeeping,'INSERT,UPDATE,DELETE') OR pg_catalog.has_any_column_privilege(r.oid,bookkeeping,'INSERT,UPDATE'))) THEN
         RAISE EXCEPTION 'effective migration-bookkeeping writes remain through another role; transaction refused';
     END IF;
 END $$;

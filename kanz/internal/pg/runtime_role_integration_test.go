@@ -30,8 +30,16 @@ type runtimeRoleFixture struct {
 }
 
 func hardenRuntimeBookkeeping(t *testing.T, ctx context.Context, owner *pgxpool.Pool, runtimeRole string) {
+	applyStagedRuntimeSQL(t, ctx, owner, runtimeRole, "harden-migration-bookkeeping.sql")
+}
+
+type runtimeSQLBeginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+func applyStagedRuntimeSQL(t *testing.T, ctx context.Context, authority runtimeSQLBeginner, runtimeRole, filename string) {
 	t.Helper()
-	source, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", "runtime_credentials", "harden-migration-bookkeeping.sql"))
+	source, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", "runtime_credentials", filename))
 	if err != nil {
 		t.Fatal("read staged owner-side hardening SQL")
 	}
@@ -40,11 +48,14 @@ func hardenRuntimeBookkeeping(t *testing.T, ctx context.Context, owner *pgxpool.
 	}
 	_, body, _ := strings.Cut(string(source), "DO $$")
 	body, _, _ = strings.Cut(body, "END $$;")
-	tx, err := owner.Begin(ctx)
+	tx, err := authority.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path=pg_catalog"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tx.Exec(ctx, "SELECT set_config('kanz.hardening_runtime_role',$1,true)", runtimeRole); err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +241,7 @@ func TestRuntimePrivilegesWithSeparateRoles(t *testing.T) {
  VALUES (1,'dummy-event','dummy-correlation','test','test.event','FACT','dummy-tenant','fixture',now(),now(),'event','preserve this row','','dummy-hash')`); err != nil {
 		t.Fatal("runtime INSERT failed:", err)
 	}
+	testRuntimeReplicationAuthority(t, ctx, fixture)
 	for _, tc := range []struct{ operation, sql, code string }{
 		{"UPDATE", "UPDATE audit_log SET summary='mutant'", "P0001"},
 		{"DELETE", "DELETE FROM audit_log", "P0001"},
@@ -356,4 +368,179 @@ func TestRuntimePrivilegesWithSeparateRoles(t *testing.T) {
 	if err := app.QueryRow(ctx, "SELECT count(*), min(summary) FROM audit_log").Scan(&count, &summary); err != nil || count != 1 || summary != "preserve this row" {
 		t.Fatal("a refused or rolled-back operation changed the audit row:", err)
 	}
+}
+
+func runtimeDeleteControl(t *testing.T, ctx context.Context, tx pgx.Tx, bypass bool) {
+	t.Helper()
+	result, operationErr := tx.Exec(ctx, "DELETE FROM public.audit_log")
+	rollbackErr := tx.Rollback(ctx)
+	if rollbackErr != nil {
+		t.Fatal("rollback-only trigger control failed")
+	}
+	if bypass {
+		if operationErr != nil || result.RowsAffected() != 1 {
+			t.Fatal("replica trigger-bypass control was not decisive")
+		}
+	} else {
+		pgError, ok := operationErr.(*pgconn.PgError)
+		if !ok || pgError.Code != "P0001" {
+			t.Fatal("safe trigger mode failed to enforce WORM")
+		}
+	}
+}
+
+func testRuntimeReplicationAuthority(t *testing.T, ctx context.Context, fixture *runtimeRoleFixture) {
+	t.Helper()
+	quote := func(name string) string { return pgx.Identifier{name}.Sanitize() }
+	for _, privilege := range []string{"SET", "ALTER SYSTEM"} {
+		t.Run("replication-parameter-"+strings.ToLower(strings.ReplaceAll(privilege, " ", "-")), func(t *testing.T) {
+			if _, err := fixture.admin.Exec(ctx, "GRANT "+privilege+" ON PARAMETER session_replication_role TO "+quote(fixture.appRole)); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if _, err := fixture.admin.Exec(ctx, "REVOKE "+privilege+" ON PARAMETER session_replication_role FROM "+quote(fixture.appRole)); err != nil {
+					t.Error(err)
+				}
+			}()
+			if err := CheckRuntimePrivileges(ctx, fixture.app, "public"); err == nil {
+				t.Fatal("replication-parameter authority was certified")
+			}
+			if privilege == "SET" {
+				tx, err := fixture.app.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = tx.Rollback(ctx) }()
+				if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role=replica"); err != nil {
+					t.Fatal("actual SET grant was not effective")
+				}
+				runtimeDeleteControl(t, ctx, tx, true)
+			}
+			applyStagedRuntimeSQL(t, ctx, fixture.admin, fixture.appRole, "harden-runtime-replication.sql")
+			if err := CheckRuntimePrivileges(ctx, fixture.app, "public"); err != nil {
+				t.Fatal("parameter-administrator-restricted runtime refused")
+			}
+		})
+	}
+	for _, mode := range []string{"replica", "local"} {
+		t.Run("admin-default-"+mode, func(t *testing.T) {
+			if _, err := fixture.admin.Exec(ctx, "ALTER ROLE "+quote(fixture.appRole)+" SET session_replication_role="+mode); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if _, err := fixture.admin.Exec(ctx, "ALTER ROLE "+quote(fixture.appRole)+" RESET session_replication_role"); err != nil {
+					t.Error(err)
+				}
+			}()
+			configuration, err := pgxpool.ParseConfig(fixture.appURL)
+			if err != nil {
+				t.Fatal("parse disposable runtime input")
+			}
+			configuration.MaxConns = 1
+			pool, err := pgxpool.NewWithConfig(ctx, configuration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Close()
+			var actual string
+			if err := pool.QueryRow(ctx, "SELECT pg_catalog.current_setting('session_replication_role')").Scan(&actual); err != nil || actual != mode {
+				t.Fatal("administrator-supplied session default was not applied")
+			}
+			gateErr := CheckRuntimePrivileges(ctx, pool, "public")
+			if (mode == "replica" && gateErr == nil) || (mode == "local" && gateErr != nil) {
+				t.Fatal("actual trigger-mode gate returned the wrong decision")
+			}
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeDeleteControl(t, ctx, tx, mode == "replica")
+		})
+	}
+	t.Run("assumable-replication-set", func(t *testing.T) {
+		writer := fixture.appRole + "_replication"
+		if _, err := fixture.admin.Exec(ctx, "CREATE ROLE "+quote(writer)+" NOLOGIN NOSUPERUSER NOBYPASSRLS"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			for _, statement := range []string{"REVOKE " + quote(writer) + " FROM " + quote(fixture.appRole), "ALTER ROLE " + quote(fixture.appRole) + " INHERIT", "REVOKE SET ON PARAMETER session_replication_role FROM " + quote(writer), "DROP ROLE " + quote(writer)} {
+				if _, err := fixture.admin.Exec(ctx, statement); err != nil {
+					t.Error("disposable parameter-role cleanup failed")
+				}
+			}
+		}()
+		if _, err := fixture.owner.Exec(ctx, "GRANT DELETE ON public.audit_log TO "+quote(writer)); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := fixture.owner.Exec(ctx, "REVOKE DELETE ON public.audit_log FROM "+quote(writer)); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := fixture.admin.Exec(ctx, "ALTER ROLE "+quote(fixture.appRole)+" NOINHERIT; GRANT "+quote(writer)+" TO "+quote(fixture.appRole)+"; GRANT SET ON PARAMETER session_replication_role TO "+quote(writer)); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckRuntimePrivileges(ctx, fixture.app, "public"); err == nil {
+			t.Fatal("assumable parameter-setting authority passed")
+		}
+		tx, err := fixture.app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+quote(writer)+"; SET LOCAL session_replication_role=replica"); err != nil {
+			t.Fatal("assumable SET control failed")
+		}
+		runtimeDeleteControl(t, ctx, tx, true)
+	})
+	t.Run("catalog-shadow-refused", func(t *testing.T) {
+		if _, err := fixture.owner.Exec(ctx, "CREATE SCHEMA runtime_shadow; GRANT USAGE,CREATE ON SCHEMA runtime_shadow TO "+quote(fixture.appRole)); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := fixture.owner.Exec(ctx, "DROP SCHEMA runtime_shadow CASCADE"); err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, err := fixture.app.Exec(ctx, "CREATE FUNCTION runtime_shadow.has_parameter_privilege(oid,text,text) RETURNS boolean LANGUAGE sql AS 'SELECT false'"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.admin.Exec(ctx, "GRANT SET ON PARAMETER session_replication_role TO "+quote(fixture.appRole)); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := fixture.admin.Exec(ctx, "REVOKE SET ON PARAMETER session_replication_role FROM "+quote(fixture.appRole)); err != nil {
+				t.Error(err)
+			}
+		}()
+		configuration, err := pgxpool.ParseConfig(fixture.appURL)
+		if err != nil {
+			t.Fatal("parse disposable shadow input")
+		}
+		configuration.MaxConns = 1
+		configuration.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
+			_, err := connection.Exec(ctx, "SET search_path=runtime_shadow,public,pg_catalog")
+			return err
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Close()
+		var shadow, actual bool
+		if err := pool.QueryRow(ctx, `SELECT has_parameter_privilege(r.oid,'session_replication_role','SET'),pg_catalog.has_parameter_privilege(r.oid,'session_replication_role','SET') FROM pg_catalog.pg_roles r WHERE r.rolname=current_user`).Scan(&shadow, &actual); err != nil || shadow || !actual {
+			t.Fatal("catalog shadow control did not distinguish the real authority")
+		}
+		if err := CheckRuntimePrivileges(ctx, pool, "public"); err == nil {
+			t.Fatal("caller-owned catalog-function shadow spoofed the gate")
+		}
+		applyStagedRuntimeSQL(t, ctx, fixture.admin, fixture.appRole, "harden-runtime-replication.sql")
+		if err := CheckRuntimePrivileges(ctx, pool, "public"); err != nil {
+			t.Fatal("restricted identity with harmless caller schema refused")
+		}
+		var schemas []string
+		if err := pool.QueryRow(ctx, "SELECT pg_catalog.current_schemas(false)").Scan(&schemas); err != nil || strings.Join(schemas, ",") != "runtime_shadow,public,pg_catalog" {
+			t.Fatal("catalog check changed the caller's session search path")
+		}
+	})
 }
