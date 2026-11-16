@@ -35,7 +35,27 @@ GEOMETRY_REFUSALS = {
 }
 
 
-def geometry_failure_record(output, returncode, mode, ending, variant, completed):
+def geometry_encoder_refusal(error_output):
+    """Recognize only fixed Python refusal lines, never retain the error stream."""
+    if type(error_output) is not str or len(error_output) > 16384:
+        return None
+    try:
+        if len(error_output.encode("utf-8", errors="strict")) > 16384:
+            return None
+    except ValueError:
+        return None
+    known = {"ValueError: encoded bundle bound": "encoded_bound",
+             "ValueError: bundle bound": "bundle_bound",
+             "ValueError: XZ CRC64 support required": "crc64_unavailable",
+             "ValueError: stdin bound": "stdin_bound"}
+    # PowerShell may color native stderr. Strip only ANSI CSI formatting in
+    # memory, then require an exact reviewed line, not a fragment in a traceback.
+    lines = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", error_output).splitlines()
+    found = [known[line.strip()] for line in lines if line.strip() in known]
+    return found[0] if len(found) == 1 else None
+
+
+def geometry_failure_record(output, returncode, mode, ending, variant, completed, error_output=None):
     """Failure-only scalar projection; no child output or error text is retained."""
     if (type(returncode) is not int or not -2147483648 <= returncode <= 2147483647 or returncode == 0
             or type(mode) is not str or mode not in WRAPPERS
@@ -62,6 +82,10 @@ def geometry_failure_record(output, returncode, mode, ending, variant, completed
             or any(type(number) is not int or not 0 <= number <= 2147483647 for number in value["bounds"].values())):
         return result
     result.update(category=value["category"], bounds=value["bounds"])
+    if result["category"] == "encoding_refused":
+        refusal = geometry_encoder_refusal(error_output)
+        if refusal is not None:
+            result["encoderRefusal"] = refusal
     return result
 
 
@@ -381,6 +405,28 @@ class NetworkFramingTests(unittest.TestCase):
             with self.subTest(identity=field), self.assertRaisesRegex(ValueError, "^geometry failure identity$"):
                 geometry_failure_record("{}", **bad)
 
+    def test_encoder_error_projection_retains_only_exact_refusal_labels(self):
+        frame = '{"category":"encoding_refused","bounds":{"expanded":82610}}'
+        for message, label in (("encoded bundle bound", "encoded_bound"), ("bundle bound", "bundle_bound"),
+                               ("XZ CRC64 support required", "crc64_unavailable"), ("stdin bound", "stdin_bound")):
+            output = "private path and source must not escape\n\x1b[31;1mValueError: " + message + "\x1b[0m\n"
+            record = geometry_failure_record(frame, 1, "normal", "LF", 0, 0, output)
+            self.assertEqual(record["encoderRefusal"], label)
+            self.assertEqual(record["bounds"], {"expanded": 82610})
+            self.assertNotIn("private path", json.dumps(record))
+        for output in (None, b"private", "private", "x" * 16385, "\ud800",
+                       "raise ValueError('encoded bundle bound')", "prefix ValueError: encoded bundle bound",
+                       "ValueError: unknown private text", "ValueError: encoded bundle bound\n" * 2,
+                       "ValueError: encoded bundle bound\nValueError: bundle bound"):
+            with self.subTest(kind=type(output).__name__):
+                record = geometry_failure_record(frame, 1, "normal", "LF", 0, 0, output)
+                self.assertNotIn("encoderRefusal", record)
+                self.assertNotIn("private", json.dumps(record))
+        for frame in ('{}', '{"category":"unknown","bounds":{}}',
+                      '{"category":"parameters_bound","bounds":{"parameters":30001}}'):
+            self.assertNotIn("encoderRefusal", geometry_failure_record(
+                frame, 1, "normal", "LF", 0, 0, "ValueError: encoded bundle bound"))
+
     def test_geometry_capture_preserves_reviewed_stages_and_refusals(self):
         for filename in WRAPPERS.values():
             wrapper = (ROOT / "tools" / filename).read_text(encoding="utf-8")
@@ -470,7 +516,7 @@ class NetworkFramingTests(unittest.TestCase):
                         result = subprocess.run([pwsh, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
                         if result.returncode != 0:
                             print(json.dumps(geometry_failure_record(result.stdout, result.returncode, mode,
-                                "LF" if ending == "\n" else "CRLF", variant, counts), sort_keys=True, separators=(",", ":")), flush=True)
+                                "LF" if ending == "\n" else "CRLF", variant, counts, result.stderr), sort_keys=True, separators=(",", ":")), flush=True)
                         self.assertEqual(result.returncode, 0, "actual wrapper refused geometry; no operator was executed")
                         sizes = json.loads(result.stdout.strip().splitlines()[-1])
                         for key, limit in (("encoded", 20000), ("expanded", 524288), ("parameters", 30000), ("characters", 30000)):
