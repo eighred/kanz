@@ -14,12 +14,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/feed_identity"))
 from proof import NODE
+from owned_lifecycle import OwnedLifecycle, Refused, finish_owner
 
 SOURCE = ROOT / "kanz/infra/tenancy/tenantctl.sh"
 QUOTA = {"rate_per_sec": 50, "burst": 100, "max_in_flight": 64}
@@ -211,9 +211,12 @@ def main():
     prefix, dispatch = source.decode().replace("\r\n", "\n").rsplit(marker, 1)
     if "onboard_quota" not in dispatch or "offboard_quota" not in dispatch:
         raise SystemExit("tenantctl dispatch changed; review caller extraction")
-    name = "quota-proof-" + uuid.uuid4().hex[:12]
-    with tempfile.TemporaryDirectory(prefix=name + "-") as directory:
-        root = Path(directory)
+    owner = OwnedLifecycle()
+    body_error = None
+    cases = 0
+    try:
+        root = owner.prepare()
+        name = owner.name
         config = root / "kubeconfig"
         kubectl = [str(Path(shutil.which("kubectl")).resolve()), "--kubeconfig", str(config), "--context", "kind-" + name]
         (root / "bin").mkdir()
@@ -229,21 +232,33 @@ def main():
             "KUBECONFIG": str(config), "QUOTA_CONTEXT": "kind-" + name,
             "REAL_KUBECTL": kubectl[0], "SVC_NS": "quota-proof", "QUOTA_CM": "quotas",
         }
-        try:
-            subprocess.run(["kind", "create", "cluster", "--name", name, "--image", NODE,
-                            "--kubeconfig", str(config), "--wait", "90s"], check=True, timeout=240)
-            subprocess.run(kubectl + ["create", "namespace", "quota-proof"], check=True, timeout=20)
-            result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(QuotaCases))
-            if not result.wasSuccessful() or result.skipped or result.testsRun != 11:
-                raise SystemExit("quota qualification incomplete or failed")
-            if SOURCE.read_bytes() != source:
-                raise SystemExit("source changed during qualification")
-        finally:
-            # Exact generated name only; a partial cluster creation is also ours.
-            subprocess.run(["kind", "delete", "cluster", "--name", name], check=True, timeout=90)
+        if owner.node != NODE:
+            raise Refused("node_pin")
+        owner.create(config)
+        subprocess.run(kubectl + ["create", "namespace", "quota-proof"], check=True, timeout=20)
+        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(QuotaCases))
+        if not result.wasSuccessful() or result.skipped or result.testsRun != 11:
+            raise Refused("body_failed")
+        if SOURCE.read_bytes() != source:
+            raise Refused("source_changed")
+        cases = 11
+    except BaseException as error:
+        body_error = error
+    finally:
+        outcome = finish_owner(owner, cases, body_error)
+    print(json.dumps(outcome))
+    if body_error is not None:
+        raise Refused("quota_failed") from None
+    if outcome["cleanup"] != "verified_absent":
+        raise Refused("cleanup_refused") from None
+    if outcome["retention"] != "retained":
+        raise Refused("retention_refused") from None
     print(json.dumps({"tenantctl_sha256": hashlib.sha256(source).hexdigest(),
-                      "node_image": NODE, "cases_passed": 11, "owned_cluster_removed": name}))
+                      "node_image": NODE, "cases_passed": 11, "cleanup": "verified_absent"}))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException:
+        raise SystemExit("quota qualification refused; inspect closed lifecycle evidence") from None
