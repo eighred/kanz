@@ -39,7 +39,7 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.6"`, "protoc-bin-vendored": `"=3.3.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
-	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render"]`, "resolver": `"2"`},
+	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render", "crates/ledger_replay", "crates/option_pricing", "crates/term_structure"]`, "resolver": `"2"`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
@@ -185,6 +185,15 @@ func checkRustMigrationBoundary(root string) error {
 	if err := checkRustRecoveryCoordinator(root); err != nil {
 		return err
 	}
+	if err := checkRustTermStructure(root); err != nil {
+		return err
+	}
+	if err := checkRustOptionPricing(root); err != nil {
+		return err
+	}
+	if err := checkRustLedgerReplay(root); err != nil {
+		return err
+	}
 	if err := checkRustOrderCore(root); err != nil {
 		return err
 	}
@@ -227,7 +236,7 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
-			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms_store" || rel == "crates/proto_wire" || rel == "crates/oms_venue" || rel == "crates/order_core" || rel == "crates/oms_recovery" || rel == browserRenderPath {
+			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms_store" || rel == "crates/proto_wire" || rel == "crates/oms_venue" || rel == "crates/order_core" || rel == "crates/oms_recovery" || rel == browserRenderPath || rel == rustLedgerPath || rel == rustOptionPricingPath || rel == rustTermPath {
 				return filepath.SkipDir
 			} // Separately guarded above.
 			if rel == "target" || rel == ".git" {
