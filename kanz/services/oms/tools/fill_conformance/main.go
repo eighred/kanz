@@ -76,6 +76,34 @@ func quantize(value string) *commonpb.Decimal {
 	}
 	return d(n.Int64(), exponent)
 }
+
+// exactQuantity searches canonical scales independently of both implementations.
+// No rounding tolerance is permitted for an observed quantity.
+func exactQuantity(r *big.Rat) *commonpb.Decimal {
+	if r.Sign() == 0 {
+		return &commonpb.Decimal{}
+	}
+	for exponent := int32(60); exponent >= -60; exponent-- {
+		power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absExponent(exponent))), nil)
+		scaled := new(big.Rat).Set(r)
+		if exponent >= 0 {
+			scaled.Quo(scaled, new(big.Rat).SetInt(power))
+		} else {
+			scaled.Mul(scaled, new(big.Rat).SetInt(power))
+		}
+		if scaled.IsInt() && scaled.Num().IsInt64() {
+			return &commonpb.Decimal{Coefficient: scaled.Num().Int64(), Exponent: exponent}
+		}
+	}
+	return nil
+}
+func absExponent(e int32) int32 {
+	if e < 0 {
+		return -e
+	}
+	return e
+}
+
 func examples() []example {
 	var out []example
 	add := func(name string, s *orderpb.OrderState, f *orderpb.Fill, a, b, c, code string) {
@@ -106,7 +134,7 @@ func examples() []example {
 	s.LeavesQuantity = d(9, 0)
 	s.AverageFillPrice = d(2, 20)
 	add("double-rounding", s, fill(d(1, 0), d(898, 0)), "2", "8", "100000000000000000449", "")
-	add("tiny-quantity-rounds-zero", base(), fill(d(1, -9), d(10, 0)), "1/1000000000", "9999999999/1000000000", "10", "")
+	add("tiny-quantity-preserved", base(), fill(d(1, -9), d(10, 0)), "1/1000000000", "9999999999/1000000000", "10", "")
 	for _, status := range []orderpb.OrderStatus{4, 5, 6, 7} {
 		s = base()
 		s.Status = status
@@ -138,10 +166,18 @@ func examples() []example {
 		}
 		add(fmt.Sprintf("rounded-sequence-%d", i), s, fill(d(1, 0), price), fmt.Sprint(i+1), fmt.Sprint(3-i), average, "")
 		s = proto.Clone(s).(*orderpb.OrderState)
-		s.FilledQuantity = quantize(fmt.Sprint(i + 1))
-		s.LeavesQuantity = quantize(fmt.Sprint(3 - i))
+		s.FilledQuantity = exactQuantity(big.NewRat(int64(i+1), 1))
+		s.LeavesQuantity = exactQuantity(big.NewRat(int64(3-i), 1))
 		s.AverageFillPrice = quantize(average)
 		s.Status = 3
+	}
+	for i := int64(0); i < 10; i++ {
+		s := base()
+		s.OrderedQuantity = d(1, -8)
+		s.FilledQuantity = d(i, -9)
+		s.LeavesQuantity = d(10-i, -9)
+		s.AverageFillPrice = d(1, 0)
+		add(fmt.Sprintf("exact-quantity-sequence-%d", i+1), s, fill(d(1, -9), d(1, 0)), fmt.Sprintf("%d/1000000000", i+1), fmt.Sprintf("%d/1000000000", 9-i), "1", "")
 	}
 	return out
 }
@@ -175,8 +211,10 @@ func checked(e example) (observation, error) {
 	}
 	if code == "" {
 		want := proto.Clone(e.state).(*orderpb.OrderState)
-		want.FilledQuantity = quantize(e.filled)
-		want.LeavesQuantity = quantize(e.leaves)
+		filled, _ := new(big.Rat).SetString(e.filled)
+		want.FilledQuantity = exactQuantity(filled)
+		leaves, _ := new(big.Rat).SetString(e.leaves)
+		want.LeavesQuantity = exactQuantity(leaves)
 		want.AverageFillPrice = quantize(e.average)
 		want.AsOf = timestamppb.New(instant)
 		want.Status = 3

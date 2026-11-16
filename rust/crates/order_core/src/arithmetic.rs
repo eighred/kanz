@@ -36,6 +36,50 @@ pub fn decimal(value: BigRational) -> Option<Decimal> {
     decimal_fit(value, 64)
 }
 
+/// Go dec.ToProtoExact's bounded quantity contract: a normalized i64
+/// coefficient, exponent [-60,60], and no rounding or implicit zero. Keep this
+/// distinct from the established average-price/position output conversion.
+pub(crate) fn exact_decimal(value: BigRational) -> Option<Decimal> {
+    if value.numer().bits() > 512 || value.denom().bits() > 512 {
+        return None;
+    }
+    if value.is_zero() {
+        return Some(Decimal {
+            coefficient: 0,
+            exponent: 0,
+        });
+    }
+    let mut denominator = value.denom().clone();
+    let mut twos = 0;
+    let mut fives = 0;
+    while (&denominator % 2_u32).is_zero() {
+        denominator /= 2_u32;
+        twos += 1;
+    }
+    while (&denominator % 5_u32).is_zero() {
+        denominator /= 5_u32;
+        fives += 1;
+    }
+    let places = twos.max(fives);
+    if denominator != BigInt::from(1) || places > 128 {
+        return None;
+    }
+    let mut coefficient =
+        value.numer() * BigInt::from(2).pow(places - twos) * BigInt::from(5).pow(places - fives);
+    let mut exponent = -(places as i32);
+    while (&coefficient % 10_u32).is_zero() {
+        coefficient /= 10_u32;
+        exponent += 1;
+    }
+    if !(-60..=60).contains(&exponent) {
+        return None;
+    }
+    Some(Decimal {
+        coefficient: coefficient.to_i64()?,
+        exponent,
+    })
+}
+
 /// Diagnostic Go-wire candidate only. The caller bounds rational inputs and
 /// separately classifies financial-domain refusal; no existing caller uses this.
 pub(crate) fn attribution_go_wire_decimal(value: BigRational) -> Option<Decimal> {
@@ -63,6 +107,57 @@ fn decimal_fit(value: BigRational, maximum_exponent: i32) -> Option<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_quantity_domain_preserves_or_refuses() {
+        for (n, d, coefficient, exponent) in [
+            (1_i64, 1_000_000_000_i64, 1, -9),
+            (-9, 1_000_000_000, -9, -9),
+            (10, 1, 1, 1),
+            (0, 1, 0, 0),
+            (i64::MAX, 1, i64::MAX, 0),
+            (i64::MIN, 1, i64::MIN, 0),
+        ] {
+            assert_eq!(
+                exact_decimal(BigRational::new(n.into(), d.into())),
+                Some(Decimal {
+                    coefficient,
+                    exponent
+                })
+            );
+        }
+        for exponent in [-60_i32, 60] {
+            let value = rational(Some(&Decimal {
+                coefficient: 1,
+                exponent,
+            }))
+            .unwrap();
+            assert_eq!(
+                exact_decimal(value),
+                Some(Decimal {
+                    coefficient: 1,
+                    exponent
+                })
+            );
+        }
+        for exponent in [-61_i32, 61] {
+            assert!(exact_decimal(
+                rational(Some(&Decimal {
+                    coefficient: 1,
+                    exponent
+                }))
+                .unwrap()
+            )
+            .is_none());
+        }
+        for value in [
+            BigRational::new(1.into(), 3.into()),
+            BigRational::from_integer(BigInt::from(i64::MAX) + BigInt::from(1)),
+            BigRational::from_integer(BigInt::from(1) << 512_usize),
+            BigRational::new(1.into(), BigInt::from(1) << 129_usize),
+        ] {
+            assert!(exact_decimal(value).is_none());
+        }
+    }
     #[test]
     fn go_wire_candidate_does_not_expand_existing_financial_output_domain() {
         let cost = BigRational::from_integer(BigInt::from(10).pow(132) - BigInt::from(10_000));
