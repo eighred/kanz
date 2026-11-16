@@ -13,7 +13,7 @@ const existing = {
   expires_at: '2099-01-01T00:00:00Z',
   redeemable: true,
   state: 'pending' as const,
-  revision: 0,
+  revision: '0',
 }
 
 beforeEach(() => {

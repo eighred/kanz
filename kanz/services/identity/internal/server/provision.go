@@ -179,7 +179,7 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	// impersonating an invitee — and the reason this response is the only chance
 	// to capture it.
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, issuedInvitation{InvitationSummary: inv.Summary(s.now().UTC()), Token: raw, Note: "the invite_token is shown once and is not recoverable; only its hash is stored"})
+	writeJSON(w, http.StatusCreated, issuedInvitation{invitationJSON: invitationResponse(inv.Summary(s.now().UTC())), Token: raw, Note: "the invite_token is shown once and is not recoverable; only its hash is stored"})
 }
 
 // listInvites shows the operator's tenant's outstanding invitations.
@@ -199,9 +199,9 @@ func (s *Server) listInvites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now().UTC()
-	out := make([]identity.InvitationSummary, 0, len(invites))
+	out := make([]invitationJSON, 0, len(invites))
 	for _, inv := range invites {
-		out = append(out, inv.Summary(now))
+		out = append(out, invitationResponse(inv.Summary(now)))
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, out)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -117,6 +118,11 @@ func (p *Postgres) SetAccess(ctx context.Context, actor Administration, subject 
 		return nil, err
 	}
 	if revision != before.Revision {
+		return nil, ErrAccessConflict
+	}
+	// Neither the reviewed revision nor the revocation epoch can wrap. Refuse
+	// under the existing locks, before authority or audit state is changed.
+	if before.Revision == math.MaxInt64 || before.SessionEpoch == math.MaxInt64 {
 		return nil, ErrAccessConflict
 	}
 	if before.Status == StatusActive && slices.Contains(before.Roles, AdminRole) && !slices.Contains(roles, AdminRole) {
