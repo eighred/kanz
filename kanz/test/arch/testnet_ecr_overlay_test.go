@@ -288,14 +288,18 @@ func TestTokyoMandateTemplateCannotBeMistakenForAnApprovedDecision(t *testing.T)
 	}
 }
 
-func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
-	root := moduleRoot(t)
-	overlay := filepath.Join(root, "infra", "overlays", "testnet_tokyo")
-	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
-	rendered, err := cmd.Output()
+func renderTokyoTestnetOverlay(t *testing.T) []byte {
+	t.Helper()
+	overlay := filepath.Join(moduleRoot(t), "infra", "overlays", "testnet_tokyo")
+	rendered, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay).Output()
 	if err != nil {
 		t.Fatalf("render Tokyo overlay: %v", err)
 	}
+	return rendered
+}
+
+func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
+	rendered := renderTokyoTestnetOverlay(t)
 	text := string(rendered)
 	for name, value := range map[string]string{
 		"OMS_REQUIRE_MANDATE":           "true",
@@ -340,83 +344,316 @@ func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 	}
 }
 
-func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *testing.T) {
-	root := moduleRoot(t)
-	overlayDir := filepath.Join(root, "infra", "overlays", "testnet_tokyo")
-	raw := mustReadArchFile(t, filepath.Join(overlayDir, "kustomization.yaml"))
-	var overlay testnetKustomization
-	if err := yaml.UnmarshalStrict(raw, &overlay); err != nil {
-		t.Fatal(err)
-	}
+// A class is namespaced. Matching only its name can count a foreign class as
+// satisfying a mount, and counting pre-patch sources misses overlay-added mounts.
+type tokyoCSIKey struct {
+	namespace string
+	name      string
+}
 
-	var deleted *regexp.Regexp
-	for _, patch := range overlay.Patches {
-		if patch.Target.Kind == "SecretProviderClass" && strings.Contains(patch.Patch, "$patch: delete") {
-			var err error
-			deleted, err = regexp.Compile(patch.Target.Name)
-			if err != nil {
-				t.Fatalf("compile SecretProviderClass exclusion: %v", err)
+type tokyoCSIVolume struct {
+	Name string `yaml:"name"`
+	CSI  *struct {
+		Driver           string            `yaml:"driver"`
+		VolumeAttributes map[string]string `yaml:"volumeAttributes"`
+	} `yaml:"csi"`
+}
+
+type tokyoCSIContainer struct {
+	VolumeMounts []struct {
+		Name string `yaml:"name"`
+	} `yaml:"volumeMounts"`
+}
+
+type tokyoCSIPodSpec struct {
+	Volumes             []tokyoCSIVolume    `yaml:"volumes"`
+	Containers          []tokyoCSIContainer `yaml:"containers"`
+	InitContainers      []tokyoCSIContainer `yaml:"initContainers"`
+	EphemeralContainers []tokyoCSIContainer `yaml:"ephemeralContainers"`
+}
+
+type tokyoCSIDocument struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+	Spec struct {
+		Provider string          `yaml:"provider"`
+		Pod      tokyoCSIPodSpec `yaml:",inline"`
+		Template struct {
+			Spec tokyoCSIPodSpec `yaml:"spec"`
+		} `yaml:"template"`
+		JobTemplate struct {
+			Spec struct {
+				Template struct {
+					Spec tokyoCSIPodSpec `yaml:"spec"`
+				} `yaml:"template"`
+			} `yaml:"spec"`
+		} `yaml:"jobTemplate"`
+	} `yaml:"spec"`
+}
+
+// Unknown pod-bearing APIs cannot acquire a silent exception merely by nesting
+// their CSI volume outside the standard pod-template locations.
+func containsTokyoSecretsStoreCSI(value any) bool {
+	switch node := value.(type) {
+	case map[string]any:
+		if csi, ok := node["csi"].(map[string]any); ok {
+			if csi["driver"] == "secrets-store.csi.k8s.io" {
+				return true
 			}
-		}
-	}
-	if deleted == nil {
-		t.Fatal("Tokyo overlay does not explicitly exclude unmounted canonical Vault classes")
-	}
-
-	type document struct {
-		Kind     string `yaml:"kind"`
-		Metadata struct {
-			Name string `yaml:"name"`
-		} `yaml:"metadata"`
-		Spec struct {
-			Template struct {
-				Spec struct {
-					Volumes []struct {
-						CSI struct {
-							VolumeAttributes struct {
-								SecretProviderClass string `yaml:"secretProviderClass"`
-							} `yaml:"volumeAttributes"`
-						} `yaml:"csi"`
-					} `yaml:"volumes"`
-				} `yaml:"spec"`
-			} `yaml:"template"`
-		} `yaml:"spec"`
-	}
-
-	var mounted []string
-	for _, resource := range overlay.Resources {
-		if resource == "../../security/secrets/secretproviderclass.yaml" || resource == "../../deploy/analysis-template.yaml" {
-			continue
-		}
-		body := mustReadArchFile(t, filepath.Clean(filepath.Join(overlayDir, resource)))
-		for _, part := range bytes.Split(body, []byte("\n---")) {
-			var doc document
-			if err := yaml.Unmarshal(part, &doc); err != nil {
-				t.Fatalf("decode %s: %v", resource, err)
-			}
-			for _, volume := range doc.Spec.Template.Spec.Volumes {
-				if name := volume.CSI.VolumeAttributes.SecretProviderClass; name != "" {
-					mounted = append(mounted, name)
+			if attributes, ok := csi["volumeAttributes"].(map[string]any); ok {
+				if _, present := attributes["secretProviderClass"]; present {
+					return true
 				}
 			}
 		}
+		for _, child := range node {
+			if containsTokyoSecretsStoreCSI(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range node {
+			if containsTokyoSecretsStoreCSI(child) {
+				return true
+			}
+		}
 	}
+	return false
+}
 
-	canonical := mustReadArchFile(t, filepath.Join(root, "infra", "security", "secrets", "secretproviderclass.yaml"))
-	var retained []string
-	for _, part := range bytes.Split(canonical, []byte("\n---")) {
-		var doc document
-		if err := yaml.Unmarshal(part, &doc); err != nil {
-			t.Fatalf("decode canonical Vault class: %v", err)
+func checkTokyoRenderedCSIInventory(raw []byte, expected []tokyoCSIKey) error {
+	docs, err := decodeYAMLStream[tokyoCSIDocument](raw)
+	if err != nil {
+		return fmt.Errorf("decode rendered Tokyo CSI graph: %w", err)
+	}
+	objects, err := decodeYAMLStream[map[string]any](raw)
+	if err != nil {
+		return fmt.Errorf("decode rendered Tokyo CSI graph: %w", err)
+	}
+	if len(objects) != len(docs) {
+		return fmt.Errorf("inconsistent rendered Tokyo document inventory")
+	}
+	wanted := make(map[tokyoCSIKey]bool, len(expected))
+	for _, key := range expected {
+		if key.namespace == "" || key.name == "" || wanted[key] {
+			return fmt.Errorf("invalid or duplicate expected CSI class %s/%s", key.namespace, key.name)
 		}
-		if doc.Kind == "SecretProviderClass" && !deleted.MatchString(doc.Metadata.Name) {
-			retained = append(retained, doc.Metadata.Name)
+		wanted[key] = true
+	}
+	if len(wanted) == 0 {
+		return fmt.Errorf("empty expected Tokyo CSI inventory")
+	}
+	classes := make(map[tokyoCSIKey]bool, len(expected))
+	var refs []tokyoCSIKey
+	for index, doc := range docs {
+		if doc.Kind == "SecretProviderClass" {
+			key := tokyoCSIKey{doc.Metadata.Namespace, doc.Metadata.Name}
+			if doc.APIVersion != "secrets-store.csi.x-k8s.io/v1" || doc.Spec.Provider != "vault" || key.namespace == "" || key.name == "" {
+				return fmt.Errorf("invalid rendered Vault class %s/%s", key.namespace, key.name)
+			}
+			if classes[key] {
+				return fmt.Errorf("duplicate rendered CSI class %s/%s", key.namespace, key.name)
+			}
+			classes[key] = true
+			continue
+		}
+		var pod tokyoCSIPodSpec
+		switch doc.Kind {
+		case "Pod":
+			pod = doc.Spec.Pod
+		case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "ReplicationController", "Job", "Rollout":
+			pod = doc.Spec.Template.Spec
+		case "CronJob":
+			pod = doc.Spec.JobTemplate.Spec.Template.Spec
+		default:
+			if containsTokyoSecretsStoreCSI(objects[index]) {
+				return fmt.Errorf("unsupported CSI workload kind %q", doc.Kind)
+			}
+			continue
+		}
+		mounted := map[string]bool{}
+		for _, group := range [][]tokyoCSIContainer{pod.Containers, pod.InitContainers, pod.EphemeralContainers} {
+			for _, container := range group {
+				for _, mount := range container.VolumeMounts {
+					mounted[mount.Name] = true
+				}
+			}
+		}
+		volumes := map[string]bool{}
+		for _, volume := range pod.Volumes {
+			if volume.Name == "" || volumes[volume.Name] {
+				return fmt.Errorf("invalid or duplicate volume in %s/%s", doc.Metadata.Namespace, doc.Metadata.Name)
+			}
+			volumes[volume.Name] = true
+			if volume.CSI == nil {
+				continue
+			}
+			class := volume.CSI.VolumeAttributes["secretProviderClass"]
+			if volume.CSI.Driver != "secrets-store.csi.k8s.io" {
+				if class != "" {
+					return fmt.Errorf("class reference on non-secrets-store CSI driver in %s/%s", doc.Metadata.Namespace, doc.Metadata.Name)
+				}
+				continue
+			}
+			if doc.Metadata.Name == "" || doc.Metadata.Namespace == "" || class == "" {
+				return fmt.Errorf("incomplete secrets-store CSI reference in %s/%s", doc.Metadata.Namespace, doc.Metadata.Name)
+			}
+			if !mounted[volume.Name] {
+				return fmt.Errorf("unmounted CSI volume %s in %s/%s", volume.Name, doc.Metadata.Namespace, doc.Metadata.Name)
+			}
+			refs = append(refs, tokyoCSIKey{doc.Metadata.Namespace, class})
 		}
 	}
-	assertSameStrings(t, "retained Vault classes versus mounted classes", retained, mounted)
-	if len(retained) != 13 {
-		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 13", len(retained))
+	for _, key := range expected {
+		if !classes[key] {
+			return fmt.Errorf("missing rendered CSI class %s/%s", key.namespace, key.name)
+		}
 	}
+	for key := range classes {
+		if !wanted[key] {
+			return fmt.Errorf("unexpected rendered CSI class %s/%s", key.namespace, key.name)
+		}
+	}
+	uses := make(map[tokyoCSIKey]int, len(refs))
+	for _, key := range refs {
+		if !classes[key] {
+			return fmt.Errorf("missing same-namespace CSI class for mount %s/%s", key.namespace, key.name)
+		}
+		uses[key]++
+	}
+	// Preserve the existing one-declared-volume-per-class inventory. An init
+	// and application container may share that volume; this says nothing about
+	// the credential privileges of those containers (tracked separately in #1747).
+	for _, key := range expected {
+		if uses[key] != 1 {
+			return fmt.Errorf("rendered CSI class %s/%s has %d mounted volumes, want one", key.namespace, key.name, uses[key])
+		}
+	}
+	return nil
+}
+
+func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *testing.T) {
+	// The existing thirteen canonical classes plus the two account-proof classes
+	// already declared locally. TV activation adds nothing to this source guard.
+	// The independent names preserve default-deny inventory and dead-entry checks;
+	// a count alone could accept a missing class replaced with an unrelated one.
+	var expected []tokyoCSIKey
+	for _, name := range []string{
+		"accounting-db", "api-gateway-redis", "api-gateway-secrets", "audit-db",
+		"identity-db", "identity-signing-key", "oms-db", "risk-engine-db",
+		"venue-binance-account-proof", "venue-binance-db", "venue-binance-keys",
+		"venue-okx-account-proof", "venue-okx-db", "venue-okx-keys", "web-bff-secrets",
+	} {
+		expected = append(expected, tokyoCSIKey{"kanz-services", name})
+	}
+	if err := checkTokyoRenderedCSIInventory(renderTokyoTestnetOverlay(t), expected); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTokyoRenderedCSIInventoryRejectsBrokenGraph(t *testing.T) {
+	const canonical = `apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata: {name: canonical-db, namespace: kanz-services}
+spec: {provider: vault}
+`
+	const local = `apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata: {name: local-account-proof, namespace: kanz-services}
+spec: {provider: vault}
+`
+	// local-account-proof represents a mount added by an overlay patch. The
+	// checker receives the final graph, not the pre-patch Deployment source.
+	const workload = `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: venue, namespace: kanz-services}
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          volumeMounts: [{name: db}]
+      containers:
+        - name: venue
+          volumeMounts: [{name: db}, {name: account-proof}]
+      volumes:
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            volumeAttributes: {secretProviderClass: canonical-db}
+        - name: account-proof
+          csi:
+            driver: secrets-store.csi.k8s.io
+            volumeAttributes: {secretProviderClass: local-account-proof}
+        - name: spiffe
+          csi: {driver: csi.spiffe.io}
+`
+	raw := canonical + "---\n" + local + "---\n" + workload
+	expected := []tokyoCSIKey{{"kanz-services", "canonical-db"}, {"kanz-services", "local-account-proof"}}
+	t.Run("complete patched graph", func(t *testing.T) {
+		if err := checkTokyoRenderedCSIInventory([]byte(raw), expected); err != nil {
+			t.Fatalf("complete patched graph refused: %v", err)
+		}
+	})
+	patch := func(source, before, after string) string {
+		t.Helper()
+		if strings.Count(source, before) != 1 {
+			t.Fatalf("mutation target must occur once: %q", before)
+		}
+		return strings.Replace(source, before, after, 1)
+	}
+	const localVolume = `        - name: account-proof
+          csi:
+            driver: secrets-store.csi.k8s.io
+            volumeAttributes: {secretProviderClass: local-account-proof}
+`
+	for _, tc := range []struct {
+		name, raw, diagnostic string
+	}{
+		{"missing local class", patch(raw, local+"---\n", ""), "missing rendered CSI class"},
+		{"missing canonical class", patch(raw, canonical+"---\n", ""), "missing rendered CSI class"},
+		{"unexpected local class", raw + "---\n" + patch(local, "local-account-proof", "unreviewed"), "unexpected rendered CSI class"},
+		{"patch added wrong reference", patch(raw, "secretProviderClass: local-account-proof", "secretProviderClass: foreign-account-proof"), "missing same-namespace CSI class"},
+		{"same name foreign class", patch(raw, "name: local-account-proof, namespace: kanz-services", "name: local-account-proof, namespace: another-tenant"), "missing rendered CSI class"},
+		{"foreign workload namespace", patch(raw, "name: venue, namespace: kanz-services", "name: venue, namespace: another-tenant"), "missing same-namespace CSI class"},
+		{"duplicate class", raw + "---\n" + local, "duplicate rendered CSI class"},
+		{"duplicate mounted volume", patch(raw, localVolume, localVolume+localVolume), "duplicate volume"},
+		{"duplicate class use", raw + "---\n" + patch(workload, "name: venue,", "name: second-venue,"), "mounted volumes, want one"},
+		{"unreferenced class", patch(patch(raw, localVolume, ""), ", {name: account-proof}", ""), "has 0 mounted volumes"},
+		{"declared but unmounted volume", patch(raw, ", {name: account-proof}", ""), "unmounted CSI volume"},
+		{"wrong CSI driver", patch(raw, localVolume, patch(localVolume, "secrets-store.csi.k8s.io", "csi.spiffe.io")), "non-secrets-store CSI driver"},
+		{"missing class reference", patch(raw, "volumeAttributes: {secretProviderClass: local-account-proof}", "volumeAttributes: {}"), "incomplete secrets-store CSI reference"},
+		{"unsupported workload kind", patch(raw, "kind: Deployment", "kind: UnsupportedWorkload"), "unsupported CSI workload kind"},
+		{"nested unknown pod template", raw + "---\n" + "apiVersion: fixture/v1\nkind: UnknownWorkload\nspec: {execution: {pod: {volumes: [{csi: {driver: secrets-store.csi.k8s.io, volumeAttributes: {secretProviderClass: local-account-proof}}}]}}}\n", "unsupported CSI workload kind"},
+		{"unknown typed-null class reference", raw + "---\n" + "apiVersion: fixture/v1\nkind: UnknownWorkload\nspec: {volumes: [{csi: {volumeAttributes: {secretProviderClass: null}}}]}\n", "unsupported CSI workload kind"},
+		{"wrong class API", patch(raw, local, patch(local, "secrets-store.csi.x-k8s.io/v1", "secrets-store.csi.x-k8s.io/v0")), "invalid rendered Vault class"},
+		{"wrong class provider", patch(raw, local, patch(local, "provider: vault", "provider: other")), "invalid rendered Vault class"},
+		{"invalid YAML", raw + "\ninvalid: [", "decode rendered Tokyo CSI graph"},
+		{"empty graph", "", "missing rendered CSI class"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.raw == raw {
+				t.Fatal("mutation did not change the graph")
+			}
+			if err := checkTokyoRenderedCSIInventory([]byte(tc.raw), expected); err == nil || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("broken graph did not reach %q: %v", tc.diagnostic, err)
+			}
+		})
+	}
+	t.Run("empty independent inventory", func(t *testing.T) {
+		if err := checkTokyoRenderedCSIInventory([]byte(raw), nil); err == nil {
+			t.Fatal("empty independent inventory accepted")
+		}
+	})
+	t.Run("duplicate independent inventory", func(t *testing.T) {
+		if err := checkTokyoRenderedCSIInventory([]byte(raw), append(expected, expected[0])); err == nil {
+			t.Fatal("duplicate independent inventory accepted")
+		}
+	})
 }
 
 func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T) {
