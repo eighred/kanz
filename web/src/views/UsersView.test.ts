@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import UsersView from './UsersView.vue'
 import { users, type UserAccess } from '../api/users'
 
-const alice: UserAccess = { subject: 'alice', tenant: 'acme', roles: ['kanz-user'], portfolios: ['pf-1'], status: 'active', revision: 7, created_by: 'admin', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-28T00:00:00Z' }
+const alice: UserAccess = { subject: 'alice', tenant: 'acme', roles: ['kanz-user'], portfolios: ['pf-1'], status: 'active', revision: '7', session_epoch: '0', created_by: 'admin', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-28T00:00:00Z' }
 beforeEach(() => {
   vi.restoreAllMocks()
   vi.spyOn(users, 'permissions').mockResolvedValue({ subject: 'admin', tenant: 'acme', identity_admin: true })
@@ -11,7 +11,7 @@ beforeEach(() => {
   vi.spyOn(users, 'list').mockResolvedValue({ users: [alice], next_cursor: '' })
 })
 it('renders server permissions and submits the revision that was reviewed', async () => {
-  const update = vi.spyOn(users, 'update').mockResolvedValue({ ...alice, revision: 8 })
+  const update = vi.spyOn(users, 'update').mockResolvedValue({ ...alice, revision: '8' })
   const wrapper = mount(UsersView); await flushPromises()
   expect(wrapper.text()).toContain('Gateway capabilities: read')
   expect(wrapper.text()).toContain('Identity administration: permitted')
