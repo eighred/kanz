@@ -136,7 +136,7 @@ func WithRedisDedupErrorHandler(fn func(op string, err error)) RedisDedupOption 
 // nowhere near 5s." Checked against the tree on 2026-08-07, BOTH HALVES ARE
 // FALSE:
 //
-//   - services/risk-engine/Dockerfile builds `go build -trimpath …` with NO
+//   - services/risk_engine/Dockerfile builds `go build -trimpath …` with NO
 //     `-tags redis`, so the shipped binary compiles dedup_default.go and this
 //     type is not linked into it at all.
 //   - Nothing under infra/ sets RISK_ENGINE_REDIS_URL, so even dedup_default.go's

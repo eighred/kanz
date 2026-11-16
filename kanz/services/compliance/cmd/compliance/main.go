@@ -190,7 +190,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// ACT TWO OF #410, ON ITS OWN LISTENER (#562).
 	//
 	// A mandate is the control every order is checked against, and until now
-	// changing one took two INVOCATIONS of cmd/kanz-mandate rather than two
+	// changing one took two INVOCATIONS of cmd/kanz_mandate rather than two
 	// people: both ran on one operator's machine under one SVID, so the proposal
 	// file was a carrier and not a signature. These routes are the propose/approve
 	// pair as two SEPARATELY AUTHENTICATED requests, which is what makes a
@@ -486,7 +486,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// the health check said everything was fine.
 	//
 	// This mirrors webhook-ingest's position-cache wait loop
-	// (services/webhook-ingest/cmd/webhook-ingest/main.go) exactly, rather than inventing a new
+	// (services/webhook_ingest/cmd/webhook_ingest/main.go) exactly, rather than inventing a new
 	// shape: poll Armed() on a short tick with a <-ctx.Done() escape, so a shutdown signal that
 	// arrives before the replay lands falls through to graceful shutdown WITHOUT ever reporting
 	// ready — a pod that never learned which mandates are in force must not be told it is

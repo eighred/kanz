@@ -325,11 +325,26 @@ func decodeCash(eventType string, payload []byte, envKnowledge time.Time) (*ledg
 	if le.GetCash() == nil || le.GetCashCurrency() == "" {
 		return nil, fmt.Errorf("cash entry %q missing cash leg or currency", le.GetEntryId())
 	}
-	knowledge := le.GetKnowledgeTime().AsTime()
+	// Only absence (or the existing explicit zero-time policy) selects a
+	// fallback. AsTime would turn nil into Unix epoch and normalize malformed
+	// present fields into different journal instants.
+	var knowledge time.Time
+	if stamp := le.GetKnowledgeTime(); stamp != nil {
+		if err := stamp.CheckValid(); err != nil {
+			return nil, fmt.Errorf("cash entry %q invalid knowledge_time: %w", le.GetEntryId(), err)
+		}
+		knowledge = stamp.AsTime()
+	}
 	if knowledge.IsZero() {
 		knowledge = envKnowledge
 	}
-	effective := le.GetEffectiveTime().AsTime()
+	var effective time.Time
+	if stamp := le.GetEffectiveTime(); stamp != nil {
+		if err := stamp.CheckValid(); err != nil {
+			return nil, fmt.Errorf("cash entry %q invalid effective_time: %w", le.GetEntryId(), err)
+		}
+		effective = stamp.AsTime()
+	}
 	if effective.IsZero() {
 		effective = knowledge
 	}

@@ -190,7 +190,8 @@ type shockCoverage struct {
 	cov          compute.Coverage
 	noClassifier bool
 	noRevaluer   bool
-	// seen holds the positions already accounted for, contributed or excluded.
+	// seen holds the positions already accounted for; true means excluded,
+	// false contributed. An unresolved valuation overrides a resolved sector.
 	// One decision per position per evaluation: the classification does not
 	// change between shocks in the same batch, so the second look would be the
 	// same answer counted twice.
@@ -236,7 +237,7 @@ func (s *shockCoverage) malformedShock() { s.cov.ExcludeWhole(SkipShockNamesNoSe
 // unclassified records a holding whose sector the wired classifier does not
 // know, so whether any sector shock applies to it is unknown.
 func (s *shockCoverage) unclassified(id domain.InstrumentID) {
-	if s.seen[id] {
+	if _, seen := s.seen[id]; seen {
 		return
 	}
 	s.seen[id] = true
@@ -246,10 +247,10 @@ func (s *shockCoverage) unclassified(id domain.InstrumentID) {
 // resolved records a holding whose sector WAS resolved — it either took a shock
 // or is genuinely in an unshocked sector, and both are real answers.
 func (s *shockCoverage) resolved(id domain.InstrumentID) {
-	if s.seen[id] {
+	if _, seen := s.seen[id]; seen {
 		return
 	}
-	s.seen[id] = true
+	s.seen[id] = false
 	s.cov.Contributed++
 }
 

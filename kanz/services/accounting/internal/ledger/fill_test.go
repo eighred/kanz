@@ -17,6 +17,24 @@ func d(coeff int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}
 }
 
+func TestFromFillPreservesSubEightPlaceExecution(t *testing.T) {
+	fill := &orderpb.Fill{Venue: "BINANCE", FillId: "precision1594", OrderId: "O1",
+		InstrumentId: "BTC-USDT", Side: orderpb.Side_SIDE_BUY,
+		Quantity: d(1, -9), Price: d(1000000009, -9),
+		Fee:        &commonpb.Money{Amount: d(3, -9), CurrencyCode: "USDT"},
+		ExecutedAt: timestamppb.New(day(2)),
+	}
+	event, err := FromFill("PF", fill, "USDT", day(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0.000000001 * 1.000000009 + 0.000000003 = 0.000000004000000009.
+	if event.Quantity.Cmp(big.NewRat(1, 1000000000)) != 0 ||
+		event.Cash.Cmp(big.NewRat(-4000000009, 1000000000000000000)) != 0 {
+		t.Fatalf("quantity=%s cash=%s", event.Quantity.RatString(), event.Cash.RatString())
+	}
+}
+
 func TestFromFillBuyDoubleEntry(t *testing.T) {
 	fill := &orderpb.Fill{Venue: "BINANCE",
 		FillId: "F1", OrderId: "O1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,

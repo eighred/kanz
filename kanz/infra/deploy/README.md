@@ -31,9 +31,11 @@ The pod composes the rest of the platform: the **CICD-01c/d signed image**
 **SEC-01d CSI secret** for the DB DSN (`RISK_ENGINE_DATABASE_URL_FILE`, never a
 plaintext env).
 
-> Metric dependency: the analysis queries the OBS-01 `kanz_risk_*` Prometheus
-> series (OBS-01c). Until OBS-01 ships them the queries are the contract the
-> canary asserts; wire OBS-01 before relying on auto-rollback in anger.
+The risk engine exports the `kanz_risk_*` series consumed by this analysis.
+Prometheus must scrape the canary labels and answer both queries. The template
+handles explicitly empty or idle estates using inventory, queue and cumulative
+recompute evidence; missing series and provider errors do not establish success.
+The presence of these manifests does not prove a cluster rollout.
 
 ## Operate
 
@@ -51,13 +53,15 @@ kubectl argo rollouts abort   risk-engine -n kanz-services   # force rollback
 kubectl argo rollouts undo    risk-engine -n kanz-services   # roll back to prior revision
 ```
 
-## Follow-ups
+## Scope and operational limits
 
-- schema-registry gets the same pattern (its own Rollout + analysis) — risk-engine
-  is the canonical first tenant here.
-- Pin the image by digest (GitOps) instead of `:latest`.
-- Add a bus consumer-lag analysis metric (OBS-01c) so a canary that silently
-  stops consuming also aborts, not just one that errors/slows.
+The risk engine owns the canary Rollout; schema-registry uses a plain Deployment.
+The base manifests are deployment inputs, while the Tokyo overlay and its
+reviewed release lock select immutable runtime digests. The analysis checks
+recompute success and latency; it has no bus consumer-lag gate. Separate KEDA
+scaling does not add that promotion criterion. Release and rollback proof is
+tracked in [#1098](https://github.com/eighred/kanz/issues/1098); broader
+deployment changes belong in Issues rather than a local follow-up list.
 
 ## Phase-7 read services (SVCWIRE-01a)
 

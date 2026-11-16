@@ -28,7 +28,7 @@ import (
 // at the composition root is not the zero value.
 func TestTheGatewayMuxIsBuiltWithADecisionRecorder(t *testing.T) {
 	path := filepath.Join(moduleRoot(t), filepath.FromSlash(
-		"services/api-gateway/cmd/api-gateway/main.go"))
+		"services/api_gateway/cmd/api_gateway/main.go"))
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)

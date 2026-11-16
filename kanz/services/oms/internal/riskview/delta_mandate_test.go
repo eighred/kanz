@@ -31,7 +31,7 @@ import (
 // on a number nobody can vouch for. It is also a live change in admission
 // behaviour for any tenant holding a Delta limit, and nothing in the platform
 // announced it. This test is the executable half of the statement, and
-// StateGreekModelPosture in services/risk-engine is the operational half.
+// StateGreekModelPosture in services/risk_engine is the operational half.
 //
 // # Why the assertion runs the real rule rather than stopping at the fold
 //

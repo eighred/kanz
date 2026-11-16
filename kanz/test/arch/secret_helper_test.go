@@ -19,7 +19,7 @@ const secretPkg = "pkg/secret"
 
 // ONE SECRET RESOLVER, AND NO LOCAL COPIES.
 //
-// Every service composition root plus cmd/kanz-migrate carried its own
+// Every service composition root plus cmd/kanz_migrate carried its own
 // `func secret(k string) string`, and fifteen of the seventeen discarded
 // os.ReadFile's error:
 //

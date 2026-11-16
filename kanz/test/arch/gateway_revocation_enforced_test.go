@@ -55,7 +55,7 @@ import (
 //     an authenticator somewhere else entirely, that construction is outside this
 //     scan — which is why the non-vacuity floors below assert this function is
 //     still the one place authenticators come from.
-const revocationBuilderFile = "services/api-gateway/cmd/api-gateway"
+const revocationBuilderFile = "services/api_gateway/cmd/api_gateway"
 
 // revocationBuilder is the function every gateway authenticator comes out of.
 const revocationBuilder = "buildAuthenticator"

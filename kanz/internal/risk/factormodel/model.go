@@ -247,14 +247,43 @@ func (m *Model) VaR(values map[string]float64, confidence float64) float64 {
 	return normalQuantile(confidence) * m.Risk(values).Total
 }
 
-// ShockReturn returns the model-implied return of instrument id under a factor
-// shock (factor name → factor-return shock): Σ_k loading_{i,k}·shock_k over the
-// named factors. ok=false when the instrument is outside the universe (the
-// scenario engine leaves it unshocked). The factor-space analog of the
-// price/curve/liquidity shocks.
+// SupportsShocks checks the complete requested vocabulary and finite shock
+// values before any instrument is dispatched. A partial name match cannot
+// certify a stress; an empty shock remains the documented no-op.
+func (m *Model) SupportsShocks(shocks map[string]float64) bool {
+	if len(shocks) == 0 {
+		return true
+	}
+	if m == nil {
+		return false
+	}
+	for name, value := range shocks {
+		if name == "" || !finite(value) {
+			return false
+		}
+		found := false
+		for _, factor := range m.Factors {
+			if factor.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// ShockReturn returns Σ_k loading_{i,k}·shock_k as a fractional return. ok=false
+// means the request or instrument could not be assessed. A supported zero
+// loading returns (0,true), distinct from an unknown name or instrument.
 func (m *Model) ShockReturn(id string, shocks map[string]float64) (float64, bool) {
+	if m == nil || !m.SupportsShocks(shocks) {
+		return 0, false
+	}
 	i, ok := m.index[id]
-	if !ok {
+	if !ok || i < 0 || i >= len(m.Loadings) || len(m.Loadings[i]) != len(m.Factors) {
 		return 0, false
 	}
 	row := m.Loadings[i]
@@ -262,6 +291,9 @@ func (m *Model) ShockReturn(id string, shocks map[string]float64) (float64, bool
 	for k, f := range m.Factors {
 		if s, ok := shocks[f.Name]; ok {
 			r += row[k] * s
+			if !finite(r) {
+				return 0, false
+			}
 		}
 	}
 	return r, true

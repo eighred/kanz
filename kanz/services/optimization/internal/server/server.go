@@ -299,6 +299,12 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 	if !decodeProposalRequest(w, r, &req) {
 		return
 	}
+	// The hypothetical book is caller-supplied, but the mandate is a stored
+	// portfolio resource. Check scope before taking solver capacity or reading it.
+	if !auth.PortfolioInScope(principal.Portfolios, req.PortfolioID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "portfolio outside authenticated scope"})
+		return
+	}
 	select {
 	case s.solves <- struct{}{}:
 		defer func() { <-s.solves }()

@@ -43,7 +43,10 @@ def commit(repo, value):
 
 def forge_path(path):
     return (path.startswith((b".agents/", b"plugins/kanz-forge/"))
-            or path in {b"AGENTS.md", b"README.md", b".github/workflows/kanz-forge.yml",
+            or path.rsplit(b"/", 1)[-1].lower() == b"readme.md"
+            or path in {b"AGENTS.md", b"CONTRIBUTING.md", b".codex/config.toml",
+                        b"tools/check_readmes.py", b"tools/test_check_readmes.py",
+                        b".github/workflows/kanz-forge.yml",
                         b".github/workflows/kanz-ci.yml", b".github/scripts/required_ci.py",
                         b".github/scripts/test_required_ci.py"})
 
@@ -51,7 +54,7 @@ def forge_path(path):
 def application_path(path):
     # Only known non-runtime material may skip application CI. Unknown new
     # directories run the suite until deliberately classified in this policy.
-    if path.startswith((b"kanz/", b"kanz-py/", b"kanz-web/", b"kanz-schemas/",
+    if path.startswith((b"kanz/", b"python/", b"web/", b"schemas/",
                         b"tools/", b".github/scripts/", b".github/actions/",
                         b".github/workflows/")):
         return True
@@ -163,6 +166,8 @@ def forge_workflow(text):
                 if line.startswith("        run: ")]
     required = [
         "python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked",
+        "python3 -B tools/check_readmes.py --inventory",
+        "python3 -B -m unittest discover -s tools -p test_check_readmes.py -v",
         "python3 -B .agents/plugins/kanz-forge/scripts/provenance.py",
         "node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs",
         "python3 -B -m unittest discover -s .agents/plugins/kanz-forge/scripts -p 'test_*.py' -v",

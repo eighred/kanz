@@ -55,6 +55,9 @@ var (
 	// cost; refusing is the only honest answer without an FX rate this package
 	// deliberately does not have.
 	ErrMixedFeeCurrency = errors.New("tca: fills carry fees in more than one currency")
+	// ErrMissingFeeCurrency refuses a nonzero charge or rebate whose units are
+	// unknown. A later labelled fee cannot supply units for an earlier one.
+	ErrMissingFeeCurrency = errors.New("tca: nonzero fee has no currency")
 )
 
 // Result is one order's realized cost.
@@ -131,6 +134,9 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 		if m := f.GetFee(); m != nil {
 			ccy := m.GetCurrencyCode()
 			amt := dec.FromProto(m.GetAmount())
+			if amt.Sign() != 0 && ccy == "" {
+				return Result{}, fmt.Errorf("%w: order %s", ErrMissingFeeCurrency, st.GetOrderId())
+			}
 			if amt.Sign() != 0 || ccy != "" {
 				if feeCcy == "" {
 					feeCcy = ccy

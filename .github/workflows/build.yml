@@ -36,34 +36,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy: &image-strategy
       fail-fast: false
-      # BOUND THE FAN-OUT, BECAUSE THE FLAKE IS A RATE LIMIT WEARING A 403 (#320).
-      #
-      # 27 images built with no cap means up to 27 runners simultaneously doing
-      # the SAME burst of external-registry calls: a buf release download, a Go
-      # module proxy fetch, `buf generate` against buf.build, a buildkit image
-      # pull, a GHCR login, and a push. Three recent reds on main failed in three
-      # DIFFERENT steps of that list —
-      #
-      #   e81b66c  Generate kanz-schemas Go SDK  (buf: permission_denied: 403)
-      #   cf74a70  docker/setup-buildx-action
-      #   d3358f7  Log in to GHCR
-      #
-      # — each on a random ONE of the 27, each green on an identical re-run, and
-      # none of them the PUSH that push-with-retry.sh already covers. A single
-      # service failing while 26 others succeed with the same token in the same
-      # run is not an authorization problem; it is throttling surfaced as 403
-      # rather than 429, which is exactly the cause #320's own investigation notes
-      # flagged and nobody had tested.
-      #
-      # THIS REMOVES THE CAUSE RATHER THAN MASKING IT. #320 says so directly:
-      # "bounding the matrix concurrency is a smaller fix than a retry, and it
-      # removes the cause rather than masking it". Adding a retry to each of the
-      # three steps above would be three retries hiding three symptoms, and every
-      # new step in this job would need a fourth.
-      #
-      # IT DOES NOT COST BILLED MINUTES. Runners are billed per job-minute and the
-      # total work is unchanged; only wall-clock grows, and only when more than
-      # eight images actually need rebuilding.
+      # Bound simultaneous registry and dependency requests while preserving
+      # every selected image build. Intermittent 403 causes remain unqualified
+      # in #320; this cap alone does not prove throttling or repair authorization.
       max-parallel: 8
       matrix:
         include:
@@ -72,16 +47,16 @@ jobs:
           # no image and no model. It could not be deployed, so it never ran, so the Go
           # prediction seam had no server to call and zero importers.
           - service: binance-depth
-            dockerfile: kanz-rs/services/binance-depth/Dockerfile
+            dockerfile: rust/services/binance_depth/Dockerfile
           - service: okx-depth
-            dockerfile: kanz-rs/services/okx-depth/Dockerfile
+            dockerfile: rust/services/okx_depth/Dockerfile
           - service: inference
-            dockerfile: kanz-py/Dockerfile
+            dockerfile: python/Dockerfile
           - service: risk-engine
-            dockerfile: kanz/services/risk-engine/Dockerfile
+            dockerfile: kanz/services/risk_engine/Dockerfile
             testnet_ecr: true
           - service: schema-registry
-            dockerfile: kanz/services/schema-registry/Dockerfile
+            dockerfile: kanz/services/schema_registry/Dockerfile
           # One OMS image uses typed, out-of-process venue adapters selected by
           # OMS_VENUE_ENDPOINTS. Binance and OKX have separate adapter images;
           # there are no venue build tags or exchange credentials in the OMS.
@@ -93,7 +68,7 @@ jobs:
           # every service's migrations/ (see its Dockerfile) and is selected per
           # pod with --dir /migrations/<service>.
           - service: kanz-migrate
-            dockerfile: kanz/cmd/kanz-migrate/Dockerfile
+            dockerfile: kanz/cmd/kanz_migrate/Dockerfile
             testnet_ecr: true
           # SEC-M3c: the kill-switch needs an image because it needs an IDENTITY.
           # The production broker requires a client SVID and SPIRE issues one to a
@@ -103,7 +78,7 @@ jobs:
           # gate is deny-by-default, so nothing could RESUME it and the platform
           # could not be brought live.
           - service: kanz-halt
-            dockerfile: kanz/cmd/kanz-halt/Dockerfile
+            dockerfile: kanz/cmd/kanz_halt/Dockerfile
           # Issue #71: the one-shot physical capital-path certification image.
           # Exchange secrets remain in venue adapters; this image holds only a
           # gateway principal, read-only ledger reader, and workload SVID.
@@ -114,16 +89,16 @@ jobs:
           # image this needs no GOTAGS — it IS the connector, so there is no
           # variant of it that silently trades against nothing.
           - service: venue-binance
-            dockerfile: kanz/services/venue-binance/Dockerfile
+            dockerfile: kanz/services/venue_binance/Dockerfile
             testnet_ecr: true
           - service: venue-okx
-            dockerfile: kanz/services/venue-okx/Dockerfile
+            dockerfile: kanz/services/venue_okx/Dockerfile
             testnet_ecr: true
           # INFRA-M7a-4: the market-data edge. Public quotes, no credentials, one
           # image — the venue build tags (and the silent-simulator fallback behind
           # them) are gone.
           - service: market-ingest
-            dockerfile: kanz/services/market-ingest/Dockerfile
+            dockerfile: kanz/services/market_ingest/Dockerfile
           # The last four services with a database and no deployment. schema-registry
           # already had an image; these three did not.
           - service: accounting
@@ -140,7 +115,7 @@ jobs:
           - service: copilot
             dockerfile: kanz/services/copilot/Dockerfile
           - service: market-data
-            dockerfile: kanz/services/market-data/Dockerfile
+            dockerfile: kanz/services/market_data/Dockerfile
           # The Phase-7 services. Their manifests referenced these images all along;
           # nothing built them, so the durable stores wired in 156ec19 could not deploy.
           - service: wealth
@@ -172,16 +147,16 @@ jobs:
           # a cluster, because two of its four hops had neither an image nor a
           # manifest — and the image/manifest parity check could not see them.
           - service: webhook-ingest
-            dockerfile: kanz/services/webhook-ingest/Dockerfile
+            dockerfile: kanz/services/webhook_ingest/Dockerfile
           - service: tv-sync
-            dockerfile: kanz/services/tv-sync/Dockerfile
+            dockerfile: kanz/services/tv_sync/Dockerfile
           # The pre-trade mandate authority the OMS consumes FACTs from.
           - service: compliance
             dockerfile: kanz/services/compliance/Dockerfile
             testnet_ecr: true
           # The external REST edge. It had an image target and no deployment.
           - service: api-gateway
-            dockerfile: kanz/services/api-gateway/Dockerfile
+            dockerfile: kanz/services/api_gateway/Dockerfile
             testnet_ecr: true
           # The client stack (#364, #371). Both were written, tested and merged
           # with no Dockerfile and no entry here, so the web application and the
@@ -196,7 +171,7 @@ jobs:
             dockerfile: kanz/services/identity/Dockerfile
             testnet_ecr: true
           - service: web-bff
-            dockerfile: kanz/services/web-bff/Dockerfile
+            dockerfile: kanz/services/web_bff/Dockerfile
             testnet_ecr: true
           - service: cloudflared
             dockerfile: kanz/infra/edge/Dockerfile.cloudflared
@@ -213,29 +188,25 @@ jobs:
           # deploy manifest and a PVC but no entry here, so nothing built the image
           # the manifest referenced.
           - service: lake-sink
-            dockerfile: kanz/services/lake-sink/Dockerfile
-          # The operator spine (F0+S1, SEC-M3c kanz-operator namespace): reads the
-          # cluster's node inventory read-only and serves it over operator.v1 gRPC
-          # for the universe TUI. It had a Dockerfile and a deploy manifest (Task
-          # 5) but no entry here, so nothing built the image the manifest referenced.
+            dockerfile: kanz/services/lake_sink/Dockerfile
           - service: operator
             dockerfile: kanz/services/operator/Dockerfile
           # S2a: the one-shot node-join Job the operator schedules to bring a bare host
           # into the cluster over SSH. It had no image, so AddNode had nothing to run.
           - service: kanz-provisioner
-            dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
+            dockerfile: kanz/cmd/kanz_provisioner/Dockerfile
           - service: kanz-kafka-provision
-            dockerfile: kanz/cmd/kanz-kafka-provision/Dockerfile
+            dockerfile: kanz/cmd/kanz_kafka_provision/Dockerfile
           # DR-01c. The spine-rebuild Job has referenced this image since it was
           # written and nothing built it, so infra/dr/failover.sh waited 600s on
           # an ImagePullBackOff. A disaster-recovery path that cannot pull its
           # own image is not a disaster-recovery path.
           - service: nats-rebuild
-            dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
+            dockerfile: kanz/tools/natsrebuild/cmd/nats_rebuild/Dockerfile
     steps: &image-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The image build COPYs kanz-schemas/gen/go (the generated SDK the kanz
+      # The image build COPYs schemas/gen/go (the generated SDK the kanz
       # go.mod `replace` points at, EVT-15a — never committed), so generate it
       # on the runner first, exactly as the kanz-ci Go job does. Cheaper here
       # than dragging buf + the protoc plugins into the Docker builder stage.
@@ -243,7 +214,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Install protoc plugins
@@ -267,9 +238,9 @@ jobs:
       # 24 images passed — which is what a rate limit looks like, and why it
       # reads as a flake nobody can reproduce.
       #
-      # NONE OF IT WAS EVER USED HERE. The image build COPYs kanz-schemas/gen/go
+      # NONE OF IT WAS EVER USED HERE. The image build COPYs schemas/gen/go
       # and nothing else; gen/python and gen/ts are consumed by the SDK-release
-      # path, not by any Dockerfile in this matrix (kanz-py's own Dockerfile
+      # path, not by any Dockerfile in this matrix (python's own Dockerfile
       # copies the raw protos). So this generated three languages, discarded two,
       # and took a network dependency on a registry to do it.
       #
@@ -283,8 +254,8 @@ jobs:
       #
       # This mirrors the TS-only template kanz-ci.yml already uses for the same
       # reason in the other direction — that one avoids needing the Go plugins.
-      - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
+      - name: Generate schemas Go SDK
+        working-directory: schemas
         env:
           GOFLAGS: -mod=mod
         run: |
@@ -316,7 +287,7 @@ jobs:
       # cross-site and therefore the one CSRF defences exist to prevent — plus
       # CORS-with-credentials and a cookie domain kept in step with the edge.
       #
-      # kanz-web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
+      # web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
       # and lands in the docker context, exactly as the generated Go SDK above
       # does. Without this the image builds, starts, serves /api and /auth
       # perfectly, and returns nothing at / — an application that is finished,
@@ -327,19 +298,19 @@ jobs:
         if: matrix.service == 'web-bff'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
           cache: npm
-          cache-dependency-path: kanz-web/package-lock.json
+          cache-dependency-path: web/package-lock.json
       - name: Install pinned Rust WASM target for BFF asset
         if: matrix.service == 'web-bff'
         run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
-      - name: Compile kanz-web into dist
+      - name: Build the web client
         if: matrix.service == 'web-bff'
-        working-directory: kanz-web
+        working-directory: web
         run: |
           npm ci
           npm run build
-          test -f dist/index.html || { echo "::error::kanz-web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
+          test -f dist/index.html || { echo "::error::web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
 
       # A FORK PR CANNOT PULL A PRIVATE BASE, AND MUST SAY SO IN ITS FIRST STEP.
       #

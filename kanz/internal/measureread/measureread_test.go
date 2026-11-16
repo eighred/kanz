@@ -1,11 +1,14 @@
 package measureread
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	riskv1 "github.com/eighred/kanz/internal/risk/api/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
@@ -46,6 +49,97 @@ func find(t *testing.T, s Set, name string) Measure {
 	t.Fatalf("measure %q is absent from the projection (%d measures) — a measure that cannot be "+
 		"stated must still be REPORTED as unavailable, never dropped", name, len(s.Measures))
 	return Measure{}
+}
+
+func TestProvenanceDistinguishesPlaceholderDeclaredAndUndeclared(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		provenance *domainpb.MeasureProvenance
+		status     ModelStatus
+		method     riskv1.MeasureMethod
+	}{
+		{"VaR placeholder", &domainpb.MeasureProvenance{Method: string(riskv1.MethodPlaceholder1PctGross)}, ModelPlaceholder, riskv1.MethodPlaceholder1PctGross},
+		{"Delta placeholder", &domainpb.MeasureProvenance{Method: string(riskv1.MethodNetExposurePlaceholder)}, ModelPlaceholder, riskv1.MethodNetExposurePlaceholder},
+		{"historical model", &domainpb.MeasureProvenance{Method: string(riskv1.MethodHistoricalSimulation)}, ModelDeclared, riskv1.MethodHistoricalSimulation},
+		{"portfolio arithmetic", &domainpb.MeasureProvenance{Method: string(riskv1.MethodPortfolioArithmetic)}, ModelDeclared, riskv1.MethodPortfolioArithmetic},
+		{"absent", nil, ModelUndeclared, ""},
+		{"empty", &domainpb.MeasureProvenance{}, ModelUndeclared, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := measure("VaR99", d(125, 0), &domainpb.InputCoverage{Contributed: 4})
+			m.Provenance = tc.provenance
+			m.UncertaintyAbs = d(25, -1)
+			got := find(t, ProjectMeasures(measuresResponse([]*domainpb.RiskMeasure{m}, nil, nil)), "VaR99")
+			if got.Provenance == nil || got.Provenance.Status != tc.status || got.Provenance.Method != tc.method {
+				t.Fatalf("provenance = %+v, want %s / %q", got.Provenance, tc.status, tc.method)
+			}
+			if got.Status != StatusMeasured || got.Value == nil || *got.Value != 125 || got.UncertaintyAbs == nil || *got.UncertaintyAbs != 2.5 || got.Coverage.Contributed != 4 {
+				t.Fatalf("labelling changed the governed value: %+v", got)
+			}
+		})
+	}
+}
+
+func TestProvenanceDoesNotOverrideWithholding(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    *commonpb.Decimal
+		coverage *domainpb.InputCoverage
+		flags    []querypb.QualityFlag
+	}{
+		{"partial coverage", d(125, 0), &domainpb.InputCoverage{Contributed: 4, ExcludedCount: 1}, nil},
+		{"currency exclusion", d(125, 0), nil, []querypb.QualityFlag{querypb.QualityFlag_QUALITY_FLAG_CURRENCY_EXCLUDED}},
+		{"unreadable value", unconvertible(), nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := measure("VaR99", tc.value, tc.coverage)
+			m.Provenance = &domainpb.MeasureProvenance{Method: string(riskv1.MethodPlaceholder1PctGross)}
+			m.UncertaintyAbs = d(2, 0)
+			got := find(t, ProjectMeasures(measuresResponse([]*domainpb.RiskMeasure{m}, tc.flags, nil)), "VaR99")
+			if got.Status != StatusUnavailable || got.Value != nil || got.UncertaintyAbs != nil || got.Reason == "" {
+				t.Fatalf("model label restored a withheld value: %+v", got)
+			}
+			if got.Provenance == nil || got.Provenance.Status != ModelPlaceholder {
+				t.Fatalf("withholding lost the model label: %+v", got)
+			}
+		})
+	}
+}
+
+func TestProvenanceProjectsOnlyTheAdvisoryModelLabel(t *testing.T) {
+	m := measure("VaR99", d(125, 0), nil)
+	m.Provenance = &domainpb.MeasureProvenance{
+		Method: string(riskv1.MethodHistoricalSimulation), ModelId: "private-model-id",
+		Params: map[string]string{"private-param": "private-value"}, InputDigest: "private-input-digest",
+		InputManifestDigest: "private-manifest-digest", ExcludedGross: d(987654321, 0),
+	}
+	projected := ProjectMeasures(measuresResponse([]*domainpb.RiskMeasure{m}, nil, nil))
+	raw, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Measures []struct {
+			Provenance map[string]any `json:"provenance"`
+		} `json:"measures"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	label := decoded.Measures[0].Provenance
+	if len(label) != 2 || label["status"] != "DECLARED_MODEL" || label["method"] != "historical_simulation" {
+		t.Fatalf("advisory model label = %s", raw)
+	}
+	for _, private := range []string{"private-", "987654321", "params", "model_id", "input_digest", "input_manifest_digest", "excluded_gross"} {
+		if strings.Contains(string(raw), private) {
+			t.Fatalf("projection disclosed %q: %s", private, raw)
+		}
+	}
+
+	scenario := ProjectScenario(&querypb.EvaluateScenarioResponse{Projected: &domainpb.RiskMeasureSet{Measures: []*domainpb.RiskMeasure{m}}})
+	if got := find(t, scenario, "VaR99"); got.Provenance == nil || got.Provenance.Status != ModelDeclared {
+		t.Fatalf("scenario lost the shared model label: %+v", got)
+	}
 }
 
 // THE DEFECT THIS PACKAGE EXISTS FOR (#757).

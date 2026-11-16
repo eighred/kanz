@@ -10,7 +10,7 @@ $instance = 'i-0ee1235614219f089'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
-$inputs = @('tools/Invoke-TokyoGatewayPolicy.ps1', 'tools/gateway-policy-proof', '.github/scripts/release_ci.py', '.github/workflows', 'kanz/infra')
+$inputs = @('tools/Invoke-TokyoGatewayPolicy.ps1', 'tools/gateway_policy_proof', '.github/scripts/release_ci.py', '.github/workflows', 'kanz/infra')
 & git -C $repo fetch origin main --quiet
 if ($LASTEXITCODE -ne 0) { throw 'Could not refresh main.' }
 $source = (& git -C $repo rev-parse origin/main).Trim()
@@ -40,7 +40,7 @@ if ($LASTEXITCODE -ne 0 -or $node.Id -cne $instance -or $node.State -cne 'runnin
 $identityRaw = & $python -I -B -c $sourceLoader $proofRoot image_identity 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Public probe image identity could not be qualified.' }
 $identity = ($identityRaw -join "`n") | ConvertFrom-Json
-$render = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone (Join-Path $repo 'kanz/infra/overlays/testnet-tokyo') 2>$null
+$render = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone (Join-Path $repo 'kanz/infra/overlays/testnet_tokyo') 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Canonical policy render failed.' }
 $projector = @'
 import sys,json,yaml
@@ -64,7 +64,7 @@ $projection = ($projectionRaw -join "`n") | ConvertFrom-Json
 $policies = $projection.policies
 $files = [ordered]@{}
 foreach ($name in @('policy_state.py', 'transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_scope.py', 'rollout_engine.py', 'bounded_process.py')) {
-    $relative = "tools/gateway-policy-proof/$name"
+    $relative = "tools/gateway_policy_proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Rollout engine is not tracked.' }
     $text = [IO.File]::ReadAllText((Join-Path $repo $relative))
@@ -75,7 +75,7 @@ $fixedNames = @('source_loader.py', 'network_observation.py')
 $fixed = [ordered]@{}
 $fixedSize = 0
 foreach ($name in $fixedNames) {
-    $relative = "tools/gateway-policy-proof/$name"
+    $relative = "tools/gateway_policy_proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     $path = Join-Path $repo $relative
     $info = Get-Item -LiteralPath $path
@@ -106,7 +106,7 @@ $bundle = [ordered]@{ payload = [ordered]@{ source = $source; policies = $polici
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
 if (($bytes.Length + $fixedSize) -gt 524288) { throw 'Rollout bundle exceeds bound.' }
 $codecPath = Join-Path $proofRoot 'transport_codec.py'
-& git -C $repo ls-files --error-unmatch tools/gateway-policy-proof/transport_codec.py *> $null
+& git -C $repo ls-files --error-unmatch tools/gateway_policy_proof/transport_codec.py *> $null
 $codecInfo = Get-Item -LiteralPath $codecPath
 if ($LASTEXITCODE -ne 0 -or $codecInfo.LinkType -or $codecInfo.PSIsContainer -or $codecInfo.Length -gt 65536) { throw 'Transport codec must be bounded tracked regular source.' }
 $codec = [IO.File]::ReadAllText($codecPath)

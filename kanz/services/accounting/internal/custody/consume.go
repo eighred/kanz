@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/internal/dec"
@@ -98,6 +99,8 @@ func (c *StatementConsumer) Handle(ctx context.Context, env *envelopepb.Envelope
 // statement rather than being dropped from it. A statement missing one position
 // because its quantity would not decode is a partial level with no marker saying
 // so — see Handle for why that is the worst available outcome.
+// Timestamp validity must precede AsTime: its normalization can move malformed
+// nanos into a different UTC day or transaction window before storage sees them.
 func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error) {
 	if msg == nil {
 		return Statement{}, errors.New("custody: nil statement")
@@ -108,9 +111,15 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 		PortfolioID: msg.GetPortfolioId(),
 	}
 	if bd := msg.GetBusinessDate(); bd != nil {
+		if err := bd.CheckValid(); err != nil {
+			return Statement{}, fmt.Errorf("custody: statement %s: invalid business_date: %w", stmt.StatementID, err)
+		}
 		stmt.BusinessDate = BusinessDay(bd.AsTime())
 	}
 	if ra := msg.GetReceivedAt(); ra != nil {
+		if err := ra.CheckValid(); err != nil {
+			return Statement{}, fmt.Errorf("custody: statement %s: invalid received_at: %w", stmt.StatementID, err)
+		}
 		stmt.ReceivedAt = ra.AsTime().UTC()
 	}
 	if n := len(msg.GetPositions()); n > 0 {
@@ -129,7 +138,7 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			return Statement{}, fmt.Errorf("custody: statement %s names instrument %s twice", stmt.StatementID, instrument)
 		}
 		qty, ok := dec.FromProtoChecked(p.GetQuantity())
-		if !ok {
+		if p.GetQuantity() == nil || !ok {
 			return Statement{}, fmt.Errorf("custody: statement %s: quantity for %s is not a valid Decimal", stmt.StatementID, instrument)
 		}
 		stmt.Positions[instrument] = qty
@@ -146,7 +155,7 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			return Statement{}, fmt.Errorf("custody: statement %s names currency %s twice", stmt.StatementID, code)
 		}
 		bal, ok := dec.FromProtoChecked(ccy.GetBalance())
-		if !ok {
+		if ccy.GetBalance() == nil || !ok {
 			return Statement{}, fmt.Errorf("custody: statement %s: balance for %s is not a valid Decimal", stmt.StatementID, code)
 		}
 		stmt.Cash[code] = bal
@@ -165,9 +174,9 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 		// a trade line dropped for a bad decimal leaves its reference unmatched,
 		// which is reported as an execution the custodian never saw. A decoder
 		// bug would arrive in the queue wearing a settlement failure's clothes.
-		qty, qok := dec.FromProtoChecked(tx.GetQuantity())
-		price, pok := dec.FromProtoChecked(tx.GetPrice())
-		cash, cok := dec.FromProtoChecked(tx.GetCash())
+		qty, qok := optionalStatementDecimal(tx.GetQuantity())
+		price, pok := optionalStatementDecimal(tx.GetPrice())
+		cash, cok := optionalStatementDecimal(tx.GetCash())
 		if !qok || !pok || !cok {
 			return Statement{}, fmt.Errorf("custody: statement %s: transaction %s carries a figure that is not a valid Decimal", stmt.StatementID, ref)
 		}
@@ -180,9 +189,15 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			CurrencyCode: tx.GetCurrencyCode(),
 		}
 		if td := tx.GetTradeDate(); td != nil {
+			if err := td.CheckValid(); err != nil {
+				return Statement{}, fmt.Errorf("custody: statement %s: transaction %s: invalid trade_date: %w", stmt.StatementID, ref, err)
+			}
 			out.TradeDate = td.AsTime().UTC()
 		}
 		if sd := tx.GetSettlementDate(); sd != nil {
+			if err := sd.CheckValid(); err != nil {
+				return Statement{}, fmt.Errorf("custody: statement %s: transaction %s: invalid settlement_date: %w", stmt.StatementID, ref, err)
+			}
 			out.SettlementDate = sd.AsTime().UTC()
 		}
 		stmt.Transactions = append(stmt.Transactions, out)
@@ -191,4 +206,13 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 		return Statement{}, err
 	}
 	return stmt, nil
+}
+
+// A trade reference remains comparable when its figures were not supplied.
+// Preserve that absence so its discrepancy cannot claim a measured zero.
+func optionalStatementDecimal(d *commonpb.Decimal) (*big.Rat, bool) {
+	if d == nil {
+		return nil, true
+	}
+	return dec.FromProtoChecked(d)
 }

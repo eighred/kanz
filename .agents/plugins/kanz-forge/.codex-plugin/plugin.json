@@ -1,21 +1,21 @@
 {
   "name": "kanz-forge",
-  "version": "0.13.1+codex.20261113",
-  "description": "Repository-owned workflows for Kanz investigation, implementation, verification, and delivery.",
+  "version": "0.16.0",
+  "description": "Eighred engineering and AI-agent coordination for Kanz: organize, investigate, implement, verify and deliver.",
   "author": {
     "name": "Eighred"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Kanz Forge",
-    "shortDescription": "Investigate, build, verify, and deliver Kanz changes.",
-    "longDescription": "Focused repository workflows that route to current code, guards, CI, git history, and GitHub Issues. AGENTS.md remains the authority for platform invariants and safety boundaries.",
+    "shortDescription": "Organize, build and verify Kanz with coordinated agents.",
+    "longDescription": "Eighred workflows for repository organization, source investigation, controlled implementation, explicit native-agent coordination, security and financial verification, and reviewed delivery. Uses current code, AGENTS.md, Issues and PR evidence.",
     "developerName": "Eighred",
     "category": "Productivity",
     "capabilities": [
       "Read",
       "Write"
     ],
-    "defaultPrompt": "Use Kanz Forge to investigate and deliver the next actionable Kanz issue."
+    "defaultPrompt": "Use Kanz Forge for this task, resolve its owning component and verify the result against current source."
   }
 }

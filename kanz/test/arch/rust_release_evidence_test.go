@@ -70,7 +70,7 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	if setup < 0 || sbom < 0 || goAudit < 0 || gate <= goAudit || gate <= setup || gate <= sbom || sign <= gate {
 		return fmt.Errorf("Rust evidence must precede signing")
 	}
-	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust-audit-tools/consume.py"} {
+	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust_audit_tools/consume.py"} {
 		if !strings.Contains(installer, token) {
 			return fmt.Errorf("signed immutable Rust audit tools required")
 		}
@@ -88,7 +88,7 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 		return fmt.Errorf("Rust image scope: %w", err)
 	}
 	for _, service := range []string{"binance-depth", "okx-depth"} {
-		entry := "- service: " + service + "\n            dockerfile: kanz-rs/services/" + service + "/Dockerfile"
+		entry := "- service: " + service + "\n            dockerfile: rust/services/" + sourceDirectoryName(service) + "/Dockerfile"
 		if !strings.Contains(release, entry) || !strings.Contains(build, entry) {
 			return fmt.Errorf("both Rust services must be built and released")
 		}
@@ -146,7 +146,7 @@ func TestRustReleaseEvidenceMutations(t *testing.T) {
 		{"missing-hybrid-gate", 0, " || matrix.service == 'lake-sink'", ""},
 		{"unpinned-go-audit", 0, "govulncheck@v1.6.0", "govulncheck@latest"},
 		{"floating-syft", 0, "syft-version: v1.56.0", "syft-version: latest"},
-		{"missing-consumer", 3, "tools/rust-audit-tools/consume.py", "missing.py"},
+		{"missing-consumer", 3, "tools/rust_audit_tools/consume.py", "missing.py"},
 		{"installer-fallback", 3, "consume.py", "consume.py || cargo install cargo-audit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

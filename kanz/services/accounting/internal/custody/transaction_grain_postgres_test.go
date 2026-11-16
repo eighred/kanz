@@ -153,12 +153,12 @@ func TestPostgresReconciliationNamesTheExecutionTheCustodianNeverSaw(t *testing.
 		t.Fatalf("NewBookScope: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	r, err := NewReconciler(store, LedgerBookLoader(journal, scope, logger), nil, new(big.Rat), nil, logger,
+	r, err := NewReconciler(store, LedgerBookLoader(journal, scope, logger), &capturePublisher{}, new(big.Rat), nil, logger,
 		func() time.Time { return t0 })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: settledAt})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: settledAt})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -199,12 +199,12 @@ func TestPostgresReconciliationNamesTheExecutionTheCustodianNeverSaw(t *testing.
 		t.Fatalf("SaveBreak: %v", err)
 	}
 	later := t0.Add(24 * time.Hour)
-	r2, err := NewReconciler(store, LedgerBookLoader(journal, scope, logger), nil, new(big.Rat), nil, logger,
+	r2, err := NewReconciler(store, LedgerBookLoader(journal, scope, logger), &capturePublisher{}, new(big.Rat), nil, logger,
 		func() time.Time { return later })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	if _, err := r2.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: settledAt}); err != nil {
+	if _, err := r2.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: settledAt}); err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
 	again, err := store.LoadBreak(ctx, b.BreakID)

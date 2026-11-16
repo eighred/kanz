@@ -59,7 +59,7 @@ func tokyoGatewayAllows(policies []networkingv1.NetworkPolicy, namespace, app, p
 }
 
 func TestTokyoGatewayRenderedEgressCoversColdStartAndConfiguredUpstreams(t *testing.T) {
-	raw, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(moduleRoot(t), "infra/overlays/testnet-tokyo")).Output()
+	raw, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(moduleRoot(t), "infra/overlays/testnet_tokyo")).Output()
 	if err != nil {
 		t.Fatal(err)
 	}

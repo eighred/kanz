@@ -325,7 +325,7 @@ func TestRigDevPatchRewritesDigestPinnedImagesToLocalTags(t *testing.T) {
 		// a skip here would make this suite silently assert less than it
 		// claims, which is the same class of defect the "157 pkgs / 0 fail"
 		// incident already cost this repo credibility over. Install Python 3
-		// (kanz-py already requires a Python toolchain) and PyYAML
+		// (python already requires a Python toolchain) and PyYAML
 		// (`pip install pyyaml`) and re-run.
 		t.Fatalf("python3 not found on PATH: %v — tools/rig_dev_patch.py needs a real Python "+
 			"interpreter with PyYAML installed (pip install pyyaml); this test refuses to skip "+

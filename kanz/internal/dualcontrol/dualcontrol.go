@@ -101,7 +101,7 @@ const (
 	// governs everything else. It has TWO producers, and the difference between
 	// them is the whole of #562:
 	//
-	//   - cmd/kanz-mandate (#511) takes two INVOCATIONS. Both run under one
+	//   - cmd/kanz_mandate (#511) takes two INVOCATIONS. Both run under one
 	//     operator's SVID and the proposal is a file, so a unilateral change is
 	//     DETECTABLE in the trail and not prevented. It is kept as the break-glass
 	//     path for an estate with no gateway; without it a fresh install has no way

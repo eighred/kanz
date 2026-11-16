@@ -35,7 +35,7 @@ import (
 // and the book goes on being valued off prices the system itself flagged.
 //
 // api-gateway-deploy.yaml states the hazard in a comment and ends "Set both, or
-// neither". services/api-gateway/cmd/api-gateway/main.go logs a WARN naming it.
+// neither". services/api_gateway/cmd/api_gateway/main.go logs a WARN naming it.
 // NEITHER CAN REFUSE IT: the flag lives in another service's environment and the
 // gateway process cannot read it, so config.Load has nothing to validate
 // against. A WARN in one pod's log is not a control — it is read after the

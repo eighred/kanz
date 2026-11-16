@@ -619,7 +619,7 @@ YAML
 
 # --- 3. state: purge a departed tenant's rows (MT-01d) --------------------
 # There is NOTHING per-tenant to tear down in Postgres. Tenant isolation is
-# FORCE RLS + the app.tenant_id GUC (services/risk-engine/migrations/
+# FORCE RLS + the app.tenant_id GUC (services/risk_engine/migrations/
 # 0002_tenant_rls.sql), not a per-tenant role or database, so an offboard with
 # PURGE_ROWS unset is a genuine no-op and says so. Rows are kept for audit by
 # default; PURGE_ROWS=1 is the only path here that opens a psql connection.
@@ -640,7 +640,7 @@ offboard_db() {
   # Both the SET and the WHERE are required — they are not alternatives, and
   # each covers the branch the other doesn't:
   #   - SET app.tenant_id satisfies the RLS policy predicate
-  #     (app_current_tenant(), services/risk-engine/migrations/
+  #     (app_current_tenant(), services/risk_engine/migrations/
   #     0003_tenant_scope_required.sql) so the DELETE is even permitted when
   #     ADMIN_DATABASE_URL is a non-superuser role. Without it,
   #     app_current_tenant() RAISES 42501 ("app.tenant_id is not set"), psql

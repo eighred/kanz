@@ -15,9 +15,9 @@ var tvPreparationMarkers = map[string][]string{
 	"tools/Install-TestnetDataPlane.ps1":                                     {"[switch]$PrepareTVSync", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet", "i-0ee1235614219f089", "012619468098", "if ($PrepareTVSync)", "Expected four preparation resources", "Resolve-ReviewedTestnetReleaseTag", "prepare-testnet-tv-sync.sh"},
 	"tools/prepare-testnet-tv-sync.sh":                                       {"expected_cluster_uid=86ea9839-5806-461d-b2d1-afd1ff5d87ff", "sha256sum --check --status", "terminal_job", "preparation-refused-base-job-not-complete", "preparation-refused-existing-job-not-complete", "--dry-run=server", "preconditions:{uid:$uid}", "kanz.io/preparation-owner", "batch.kubernetes.io/controller-uid=$uid", ".uid==$uid and .controller==true", ".imageID|endswith", "preparation-rollback-unverified", ".metadata=($before[0].metadata|del(.managedFields))", "tv-sync-database-preparation-verified"},
 	"tools/bootstrap-testnet-data-plane.sh":                                  {"write_read_policy tv-sync kanz/tv-sync-runtime kanz-services tv-sync", "if field_exists \"$runtime_path\" migrate_dsn; then", "absence is unverified", "if [ \"$service\" != tv-sync ]; then"},
-	"kanz/infra/overlays/testnet-tokyo/data/postgres-provisioner.yaml":       {"case \"${1:-base}\" in", "provision_database tv-sync tv_sync tv_sync", "unsupported provisioner mode", "SELECT count(*) = 16 AS roles_ok"},
-	"kanz/infra/overlays/testnet-tokyo/tv-sync-preparation/provisioner.yaml": {"command: [bash, /scripts/provision.sh, tv-sync]", "secretProviderClass: tv-sync-role-passwords", "serviceAccountName: postgres-provisioner"},
-	"kanz/infra/overlays/testnet-tokyo/data/tv-sync-migration.yaml":          {"secretProviderClass: tv-sync-role-passwords", "serviceAccountName: postgres-provisioner", "147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24"},
+	"kanz/infra/overlays/testnet_tokyo/data/postgres-provisioner.yaml":       {"case \"${1:-base}\" in", "provision_database tv-sync tv_sync tv_sync", "unsupported provisioner mode", "SELECT count(*) = 16 AS roles_ok"},
+	"kanz/infra/overlays/testnet_tokyo/tv_sync_preparation/provisioner.yaml": {"command: [bash, /scripts/provision.sh, tv-sync]", "secretProviderClass: tv-sync-role-passwords", "serviceAccountName: postgres-provisioner"},
+	"kanz/infra/overlays/testnet_tokyo/data/tv-sync-migration.yaml":          {"secretProviderClass: tv-sync-role-passwords", "serviceAccountName: postgres-provisioner", "147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24"},
 	".github/workflows/kanz-ci.yml":                                          {"-run '^TestTokyoTVSyncSeparateRolesAndRecovery$' -count=1 -json", "check_tv_sync_evidence.py"},
 }
 
@@ -66,8 +66,8 @@ func TestTokyoTVSyncPreparationDoesNotActivateWorkloads(t *testing.T) {
 		count int
 		want  []string
 	}{
-		{"infra/overlays/testnet-tokyo/data", 37, nil},
-		{"infra/overlays/testnet-tokyo/tv-sync-preparation", 4, []string{"name: tv-sync-provisioner", "name: tv-sync-migration", "name: tv-sync-role-passwords"}},
+		{"infra/overlays/testnet_tokyo/data", 37, nil},
+		{"infra/overlays/testnet_tokyo/tv_sync_preparation", 4, []string{"name: tv-sync-provisioner", "name: tv-sync-migration", "name: tv-sync-role-passwords"}},
 	} {
 		output, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(root, fixture.path)).Output()
 		if err != nil {
@@ -86,7 +86,7 @@ func TestTokyoTVSyncPreparationDoesNotActivateWorkloads(t *testing.T) {
 			t.Fatal("ordinary data install depends on unactivated tv-sync")
 		}
 	}
-	active, err := os.ReadFile(filepath.Join(root, "infra/overlays/testnet-tokyo/kustomization.yaml"))
+	active, err := os.ReadFile(filepath.Join(root, "infra/overlays/testnet_tokyo/kustomization.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,7 @@ import (
 // A repository-wide policy inventory cannot prove an overlay imports a control.
 func tokyoRenderedIngress(t *testing.T) ([]networkingv1.NetworkPolicy, map[string]appsv1.Deployment) {
 	t.Helper()
-	raw, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(moduleRoot(t), "infra/overlays/testnet-tokyo")).CombinedOutput()
+	raw, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(moduleRoot(t), "infra/overlays/testnet_tokyo")).CombinedOutput()
 	if err != nil {
 		t.Fatalf("render Tokyo: %v: %s", err, raw)
 	}

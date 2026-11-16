@@ -219,7 +219,7 @@ func TestNoOrderPlacingVenueRunsLiveWhileItsStoreIsUnbacked(t *testing.T) {
 		adapterSet[s] = true
 	}
 	for _, svc := range sortedKeys(nonOrderPlacingExchangeClients) {
-		if _, err := os.Stat(filepath.Join(root, "services", svc)); err != nil {
+		if _, err := os.Stat(filepath.Join(root, "services", sourceDirectoryName(svc))); err != nil {
 			t.Errorf("nonOrderPlacingExchangeClients names %q, which is not a service directory — "+
 				"delete the stale entry", svc)
 			continue
@@ -371,7 +371,7 @@ func configuredExchangeEndpoints(t *testing.T, root, svc string) []exchangeEndpo
 	// with a better hiding place. Test files are excluded: their fake servers are
 	// httptest URLs, and a test pointing at a real exchange is a different guard's
 	// problem.
-	svcDir := filepath.Join(root, "services", svc)
+	svcDir := filepath.Join(root, "services", sourceDirectoryName(svc))
 	err := filepath.WalkDir(svcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -423,8 +423,8 @@ func orderPlacingVenueAdapters(t *testing.T, root string) []string {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
-		werr := filepath.WalkDir(filepath.Join(servicesDir, svc), func(path string, d fs.DirEntry, err error) error {
+		svc := deployedServiceName(e.Name())
+		werr := filepath.WalkDir(filepath.Join(servicesDir, sourceDirectoryName(svc)), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -461,7 +461,7 @@ func orderPlacementSites(t *testing.T, root, svc string) []string {
 	t.Helper()
 
 	var out []string
-	err := filepath.WalkDir(filepath.Join(root, "services", svc), func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(filepath.Join(root, "services", sourceDirectoryName(svc)), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -642,7 +642,7 @@ func serviceMentions(t *testing.T, root, svc, marker string) bool {
 
 	var sources []string
 	for _, dir := range []string{
-		filepath.Join(root, "services", svc),
+		filepath.Join(root, "services", sourceDirectoryName(svc)),
 		filepath.Join(root, "internal", "venueadapter"),
 	} {
 		if err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {

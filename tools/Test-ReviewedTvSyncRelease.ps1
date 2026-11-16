@@ -1,7 +1,7 @@
 param([Parameter(Mandatory = $true)][string]$FixtureDirectory)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
-$lockPath = Join-Path $PSScriptRoot '../kanz/infra/overlays/testnet-tokyo/tv-sync-release.json'
+$lockPath = Join-Path $PSScriptRoot '../kanz/infra/overlays/testnet_tokyo/tv-sync-release.json'
 $lock = Read-ReviewedTvSyncRelease -LockPath $lockPath
 $digest = $lock.images.'tv-sync'.destination.Split('@')[1]
 if ((Resolve-ReviewedTestnetReleaseTag -LockPath $lockPath -Repository 'tv-sync' -SourceCommit $lock.release_sha -Digest $digest) -cne 'release-v2026.4.0') { throw 'signed member not resolved' }

@@ -2,7 +2,7 @@
   "/work": {
     "target": "optional",
     "description": "Complete feasible repository work, continuing existing branches and PRs where useful.",
-    "workflow": "Use references/repository-engine.md and references/validation-readiness.md. Inspect current source, main, branch/worktree ownership, open PRs and Issues. Resolve acceptance and existing work before choosing the highest-priority feasible outcome. Reuse a reviewed PR or branch within comparable priority; source-discovered defects are eligible after confirming behavior and searching existing Issues. Read known blockers and recheck their changed-input re-entry conditions before repeating a failed run. Keep unavailable prerequisites blocked and continue independent work with a validation path. Use the existing validation graph and collector when available; failed collection is unavailable evidence. Implement, test, review and deliver through the selected skills and current repository authority, preserving user limits and merged-main acceptance. For subagents N use references/parallel-work.md within host capacity; otherwise do not delegate implicitly. No deployment or capital-halt change.",
+    "workflow": "Use references/repository-engine.md and references/validation-readiness.md. Inspect current source, main, branch/worktree ownership, open PRs and Issues. Resolve acceptance and existing work before choosing the highest-priority feasible outcome. Reuse a reviewed PR or branch within comparable priority; source-discovered defects are eligible after confirming behavior and searching existing Issues. Read known blockers and recheck their changed-input re-entry conditions before repeating a failed run. Keep unavailable prerequisites blocked and continue independent work with a validation path. Use the existing validation graph and collector when available; failed collection is unavailable evidence. Implement, test, review and deliver through the selected skills and current repository authority, preserving user limits and merged-main acceptance. For subagents N use references/parallel-work.md within host capacity; otherwise do not delegate implicitly. No deployment or capital-halt change. Freeze requested existing outcomes; use references/delivery-coordination.md for bounded same-session required/related discoveries, separate repair accounting and actual-main acceptance. Report unfilled original goals rather than substituting newly found defects.",
     "primary": true,
     "skills": [
       "issue-archaeology",
@@ -59,7 +59,7 @@
   "/financial": {
     "target": "required",
     "description": "Choose and verify methods for pricing, risk or execution implementation.",
-    "workflow": "Use financial-verification as engineering methodology for the requested system behavior: identify current owner/callers, attributable method, typed input/output contract and implementation proof. Do not generate investment analysis or infer proprietary competitor algorithms. Select independent numerical references and scoped owning-package tests, enumerate completions and skips, and follow the existing admission path. External finance repositories and Python receipts are not required.",
+    "workflow": "Use financial-verification as engineering methodology for the requested system behavior: identify current owner/callers, attributable method, typed input/output contract and implementation proof. Do not generate investment analysis or infer proprietary competitor algorithms. Select independent numerical references and scoped owning-package tests, enumerate completions and skips, and follow the existing admission path. Use the owning implementation and independent numerical references.",
     "internal": true,
     "skills": [
       "financial-verification"
@@ -122,26 +122,10 @@
     ],
     "primary": true
   },
-  "/remember": {
-    "target": "optional",
-    "description": "Optionally record fresh pricing-test evidence locally.",
-    "workflow": "For this explicit receipt request run python .agents/plugins/kanz-forge/scripts/receipts.py record. It runs pricing and benchmark suites and rejects failures, skips or changed scoped inputs. This is optional test history, not general project memory, acceptance or authorization. Never store arbitrary conversation, secrets or approvals in the receipt database.",
-    "skills": [
-      "commands"
-    ]
-  },
-  "/recall": {
-    "target": "optional",
-    "description": "Read optional historical pricing-test receipts.",
-    "workflow": "Run python .agents/plugins/kanz-forge/scripts/receipts.py read if Python exists. Explain that source_unchanged_not_retested covers only the listed source scope and does not verify transitive dependencies, toolchains, external inputs or current behavior. Retrieve durable decisions separately from AGENTS.md, Issues, PRs and git history.",
-    "skills": [
-      "commands"
-    ]
-  },
   "/memory": {
     "target": "optional",
-    "description": "Retrieve durable project decisions and optional test history.",
-    "workflow": "Read the relevant stable rules in AGENTS.md, current source, git history and linked Issues/PRs. Revalidate historical conclusions against the current revision. Do not create project-state notes, a second task database or a persistent graph. Only if pricing history is relevant, optionally read scripts/receipts.py read; a receipt is not a current test or permission.",
+    "description": "Retrieve durable project decisions from source and GitHub.",
+    "workflow": "Read relevant stable rules in AGENTS.md, current source, git history and linked Issues/PRs. Revalidate historical conclusions against the current revision. Do not create project-state notes, a second task database or a persistent graph.",
     "skills": [
       "commands"
     ]
@@ -292,6 +276,18 @@
     "workflow": "Use references/repository-engine.md. Read checkout/main identities, dirty paths, branch/worktree ownership, current PR heads, relevant Issues and check metadata. Report active work, feasible continuations, blocked scopes with owners and re-entry conditions, inventory limits and the next action. Distinguish stale, pending, failed and unverified evidence. Use the existing collector when appropriate; an incomplete inventory stays incomplete. Do not execute test suites, dispatch workers, mutate trackers, rerun CI or change installation merely to show status.",
     "skills": [
       "issue-archaeology",
+      "kanz-verify"
+    ],
+    "primary": true
+  },
+  "/organize": {
+    "target": "optional",
+    "description": "Review or improve repository organization and component documentation.",
+    "workflow": "Use repository-organization to apply the Eighred organization standard. Reconcile existing layout work, account for every README in scope, resolve owners and path consumers at every depth, preserve package/runtime identities, and verify actual generation, builds, guards, CI and links. A review request alone does not authorize directory moves. An explicit organization task follows engineering-standard and kanz-verify.",
+    "skills": [
+      "repository-organization",
+      "stack-routing",
+      "engineering-standard",
       "kanz-verify"
     ],
     "primary": true

@@ -38,9 +38,9 @@ func ackReadBoundary(lib, repository, handlers string) bool {
 	return strings.Contains(rustMigrationCompact(handlers), "repository::load_ack_context(client,tenant,&ack.case_id,&ack.order_id).await?") && strings.Contains(repository, "let case = load_case_in(&tx, id).await?;") && strings.Contains(repository, "commit(tx).await?;")
 }
 func TestRustRecoveryPairedACKRead(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust", "crates")
 	var sources []string
-	for _, p := range []string{"oms-store/src/lib.rs", "oms-store/src/recovery_repository.rs", "oms-recovery/src/handlers.rs"} {
+	for _, p := range []string{"oms_store/src/lib.rs", "oms_store/src/recovery_repository.rs", "oms_recovery/src/handlers.rs"} {
 		b, e := os.ReadFile(filepath.Join(root, p))
 		if e != nil {
 			t.Fatal(e)

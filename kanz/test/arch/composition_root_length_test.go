@@ -69,8 +69,10 @@ const (
 	budgetSlack = 60
 )
 
-// compositionRootBudget is the line count each over-cap root is allowed, and may
-// only be revised DOWNWARD. Every entry names the issue that retires it.
+// compositionRootBudget is the permanent source-shape ratchet retained after
+// #643's constructor extractions. Remaining subscription and goroutine wiring
+// has no promised extraction mandate. The guard rejects growth, unearned slack,
+// unknown functions and entries whose root has fallen below the ordinary cap.
 var compositionRootBudget = map[string]int{
 	// #643. Was 1,474 lines and 61 constructors with two bare nils. All four
 	// extractions the issue named have now landed — the pre-trade gate
@@ -103,7 +105,7 @@ var compositionRootBudget = map[string]int{
 	// that this service has twice shipped a crashing root with a green suite. Two
 	// of its constructions are already extracted into named builders with tests
 	// (liquidity.go, margin.go); the rest are not.
-	"services/risk-engine/cmd/risk-engine/main.go:runEngine": 699,
+	"services/risk_engine/cmd/risk_engine/main.go:runEngine": 699,
 }
 
 func TestNoCompositionRootGrowsWithoutSaying(t *testing.T) {
@@ -137,7 +139,7 @@ func TestNoCompositionRootGrowsWithoutSaying(t *testing.T) {
 				"  Everything in it is unreachable by any test: the constructions are locals in\n"+
 				"  package main. Extract the constructions a test can assert about into named\n"+
 				"  builders that RETURN what they built (services/oms/cmd/oms/pretrade.go and\n"+
-				"  services/risk-engine/cmd/risk-engine/liquidity.go are the shape), or add a\n"+
+				"  services/risk_engine/cmd/risk_engine/liquidity.go are the shape), or add a\n"+
 				"  budget entry above naming the issue that retires it.",
 				name, lines, maxCompositionRootLines)
 		case budgeted && lines > budget:

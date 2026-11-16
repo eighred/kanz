@@ -42,7 +42,7 @@ class ShardEvidenceTests(unittest.TestCase):
 
     def test_routed_work_is_present_once_and_cannot_become_a_dead_entry(self):
         expected = {"github.com/eighred/kanz/pkg/bus": 1,
-                    "github.com/eighred/kanz/services/risk-engine/internal/app": 0}
+                    "github.com/eighred/kanz/services/risk_engine/internal/app": 0}
         routed = set(expected)
         self.assertEqual(SHARD_OWNERS, expected)
         for package, owner in expected.items():
