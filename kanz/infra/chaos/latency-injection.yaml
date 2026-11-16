@@ -15,7 +15,7 @@
 #             caller's query-latency SLO does NOT fire.
 #   - after:  delay removed → breaker closes → predictions return to NORMAL.
 #
-# Targets the inference service (kanz-py, PRED-01). Adjust the labelSelector to
+# Targets the inference service (python, PRED-01). Adjust the labelSelector to
 # the deployed inference workload; 1500ms exceeds the sync client's per-call
 # timeout so calls deterministically trip the breaker.
 apiVersion: chaos-mesh.org/v1alpha1

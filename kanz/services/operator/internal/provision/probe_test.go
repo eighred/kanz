@@ -252,9 +252,6 @@ func TestProbeIsNotRetriedAndIsReclaimed(t *testing.T) {
 	}
 }
 
-// TestProbeJobIsInvisibleToListProvisions: List selects Jobs by componentLabel, so
-// putting that label on the probe JOB (as opposed to its pod template, where it is
-// required) would surface every probe in the TUI's provisioning list as a phantom node.
 func TestProbeJobIsInvisibleToListProvisions(t *testing.T) {
 	cs, rec := probeCluster("reachable 1")
 	p := New(cs, cfg())

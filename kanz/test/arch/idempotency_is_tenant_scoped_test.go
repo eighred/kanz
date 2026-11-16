@@ -37,7 +37,7 @@ import (
 // which function derives the key, what it calls, and which value reaches the
 // claim store.
 
-const idemMiddlewareFile = "../../services/api-gateway/internal/middleware/middleware.go"
+const idemMiddlewareFile = "../../services/api_gateway/internal/middleware/middleware.go"
 
 // tenantSource is the package's ONE tenant accessor: the authenticated tenant,
 // else "anonymous". The quota limiter reads the tenant through it too, and two

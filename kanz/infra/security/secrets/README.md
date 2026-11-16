@@ -153,8 +153,12 @@ Never rotated by hand — SPIRE renews leaf SVIDs on a 1h TTL and JWT-SVIDs on 5
 (SEC-01a). A compromised credential self-expires; force-evict by deleting the
 SPIRE registration entry, which the controller-manager recreates clean.
 
-## Follow-ups
+## Scope and operational limits
 
-- Vault HA: bump the StatefulSet to ≥3 Raft peers (storage is already Raft).
-- Dynamic DB creds: move `kv/kanz/<svc>` to the Vault `database` secrets engine
-  so DSNs are short-lived and per-pod, eliminating the manual rotation above.
+The manifest runs one Raft peer with the fixed node identity `vault-0`; increasing
+the replica count alone does not establish a valid HA cluster. Database DSNs
+come from KV paths and follow the manual rotation procedure above; this setup
+does not provision dynamic per-pod database credentials. Changes to that topology
+or credential lifecycle need their own reviewed Issue and operational proof.
+Named human authentication and retirement of bootstrap root-token use remain
+tracked in [#1091](https://github.com/eighred/kanz/issues/1091).

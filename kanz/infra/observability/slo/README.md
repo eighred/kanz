@@ -24,7 +24,7 @@ That claim used to be printed here while it was false. A **market-data
 freshness ≤ 10s / 99%** row sat in this table bound to
 `kanz_data_staleness_lag_seconds`, a DATA-02 gauge emitted by
 `internal/integrity` — a package deleted in DATA-M4. The row was removed rather
-than re-pointed because `services/market-data` registers no domain metric at
+than re-pointed because `services/market_data` registers no domain metric at
 all, so there was nothing to re-point at. Freshness is currently **not
 measured**, which is a smaller lie than an objective computed over an empty
 vector: the windowed ratios were empty, the generic burn-rate alerts could

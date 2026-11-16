@@ -2,16 +2,16 @@ name: feed-identity-proof
 on:
   pull_request:
     paths:
-      - 'tools/feed-identity/**'
-      - 'kanz-rs/**'
+      - 'tools/feed_identity/**'
+      - 'rust/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/nats/**'
       - '.github/workflows/feed-identity-proof.yml'
   push:
     branches: [main]
     paths:
-      - 'tools/feed-identity/**'
-      - 'kanz-rs/**'
+      - 'tools/feed_identity/**'
+      - 'rust/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/nats/**'
       - '.github/workflows/feed-identity-proof.yml'
@@ -31,8 +31,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/feed-identity -p 'test_*.py'
-      - run: bash tools/feed-identity/install.sh
+      - run: python3 -B -m unittest discover -s tools/feed_identity -p 'test_*.py'
+      - run: bash tools/feed_identity/install.sh
       - name: Authenticate private mirrored builder reads
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -40,7 +40,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Prove real SPIRE NATS identity and Cilium enforcement
-        run: python3 -B tools/feed-identity/proof.py
+        run: python3 -B tools/feed_identity/proof.py
       - name: Remove disposable clusters after interruption
         if: always()
         run: |

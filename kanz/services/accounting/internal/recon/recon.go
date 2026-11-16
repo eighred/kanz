@@ -139,7 +139,9 @@ type Statement struct {
 // pass ran, and a caller that ignores it cannot tell "no execution breaks" from
 // "no execution comparison happened", which is the netted-grain blindness this
 // issue is about with a new coat of paint.
-func Reconcile(b *ledger.Book, executions []ledger.Execution, stmt Statement, tolerance *big.Rat) ([]Break, LegStatus) {
+// An error refuses the entire comparison: no partial netted breaks are returned
+// when execution references cannot establish an unambiguous identity match.
+func Reconcile(b *ledger.Book, executions []ledger.Execution, stmt Statement, tolerance *big.Rat) ([]Break, LegStatus, error) {
 	if tolerance == nil {
 		tolerance = new(big.Rat)
 	}
@@ -191,7 +193,10 @@ func Reconcile(b *ledger.Book, executions []ledger.Execution, stmt Statement, to
 	}
 
 	// THE TRANSACTION PASS, over the same basis and into the same break slice.
-	txBreaks, leg := transactionLeg(executions, stmt)
+	txBreaks, leg, err := transactionLeg(executions, stmt)
+	if err != nil {
+		return nil, leg, err
+	}
 	breaks = append(breaks, txBreaks...)
 
 	sort.SliceStable(breaks, func(i, j int) bool {
@@ -200,7 +205,7 @@ func Reconcile(b *ledger.Book, executions []ledger.Execution, stmt Statement, to
 		}
 		return breaks[i].Key < breaks[j].Key
 	})
-	return breaks, leg
+	return breaks, leg, nil
 }
 
 func bookQty(b *ledger.Book, inst string) *big.Rat {

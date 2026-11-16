@@ -136,7 +136,7 @@ var pinExempt = map[string]string{}
 
 // workflowFiles walks the repo root for every *.yml / *.yaml under a
 // .github/workflows directory — both the root .github/workflows and
-// kanz-schemas/.github/workflows, and any future one, without hardcoding the
+// schemas/.github/workflows, and any future one, without hardcoding the
 // path list. A ninth workflow file, or a workflows directory in a new
 // sub-repo, is picked up automatically; only .git is skipped (irrelevant and
 // large).
@@ -185,25 +185,6 @@ func workflowFiles(t *testing.T, repoRoot string) []string {
 	return files
 }
 
-// A PRIVATE REGISTRY WITH NO CREDENTIAL IS A NODE THAT CANNOT RUN ANYTHING.
-//
-// Every platform image is ghcr.io/eighred/*, and those packages are private
-// (anonymous pulls 403). A node joined through the TUI holds none of those
-// images, so a workload scheduled there dies in ErrImagePull. That was observed
-// twice during OPS-M2e — a probe Job and the operator's own rollout — and was
-// worked around by hand with ctr export/scp/ctr import across ten images.
-//
-// OPS-M2f-b attaches a `ghcr-pull` dockerconfigjson Secret at the ServiceAccount
-// rather than the pod spec, so the two Go-built provisioning Jobs inherit it via
-// ServiceAccountName with no code change. This test is the enforcement: remove
-// the attachment from any ServiceAccount that owns a pod running a private image
-// and the build fails, instead of the removal surfacing weeks later as an
-// ErrImagePull nobody connects back to this decision.
-//
-// NOTE ON automountServiceAccountToken. kanz-node-provisioner sets it false
-// (TestProvisionerServiceAccountHasNoToken). That governs the projected API
-// token only; kubelet reads imagePullSecrets off the ServiceAccount regardless.
-// The two are not in conflict.
 const pullSecretName = "ghcr-pull"
 
 // privateImagePrefix is the registry path that requires the credential. It is
@@ -434,12 +415,10 @@ const canonicalImageOrg = "eighred"
 //
 //   - spiffe:   SPIRE server/agent, the CSI driver and spiffe-helper — upstream
 //     sigstore/spiffe images.
-//   - gitleaks: the secret-scanning image security.yml runs; not built here.
 //   - cloudnative-pg: the PostgreSQL operator and operand images pinned by the
 //     Tokyo testnet release lock and data-plane architecture guard.
 var thirdPartyImageOrgs = map[string]struct{}{
 	"spiffe":         {},
-	"gitleaks":       {},
 	"cloudnative-pg": {},
 }
 
@@ -556,12 +535,16 @@ func TestImageOrgIsCanonical(t *testing.T) {
 	// GitHub Actions OIDC signing identity ("who is trusted to sign"), not a
 	// container image reference, and a message that called it an image would
 	// misdirect whoever has to act on it.
+	usedThirdParty := map[string]bool{}
 	checkOrg := func(problems *[]string, relSlash, fieldDesc, org string, isSigningIdentity bool) {
 		if org == canonicalImageOrg {
 			return
 		}
-		if _, ok := thirdPartyImageOrgs[org]; ok {
-			return
+		if !isSigningIdentity {
+			if _, ok := thirdPartyImageOrgs[org]; ok {
+				usedThirdParty[org] = true
+				return
+			}
 		}
 		if strings.HasPrefix(org, "${{") {
 			if isSigningIdentity {
@@ -580,8 +563,8 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		}
 		if isSigningIdentity {
 			*problems = append(*problems, fmt.Sprintf(
-				"%s: %s: signing-identity org %q is neither the canonical %q nor a listed third "+
-					"party — this field is the GitHub Actions OIDC subject the ClusterImagePolicy trusts "+
+				"%s: %s: signing-identity org %q is not the canonical %q; third-party image allowances "+
+					"do not delegate signing authority. This is the GitHub Actions OIDC subject the ClusterImagePolicy trusts "+
 					"to sign, not a container image reference, so a mismatch here means a genuine "+
 					"signature from the real release workflow would fail verification",
 				relSlash, fieldDesc, org, canonicalImageOrg))
@@ -654,6 +637,11 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		}
 	}
 
+	for org := range thirdPartyImageOrgs {
+		if !usedThirdParty[org] {
+			problems = append(problems, "third-party image namespace "+org+" is unused in the parsed image fields; retire the exception")
+		}
+	}
 	if workflowImageRefsChecked < workflowImageRefFloor {
 		t.Fatalf("only %d ghcr.io image references matched across workflow files (build.yml's "+
 			"images:, preview.yml's tags:, release.yml's IMAGE:) — expected at least %d; a "+
@@ -696,7 +684,7 @@ func TestImageOrgIsCanonical(t *testing.T) {
 // This test holds the two matrices identical. It compares (service, dockerfile)
 // PAIRS, not just names, because the Dockerfile path is where the old
 // release.yml was actually wrong: it hardcoded kanz/services/<service>/Dockerfile,
-// which is false for inference (kanz-py/) and for kanz-migrate, kanz-halt and
+// which is false for inference (python/) and for kanz-migrate, kanz-halt and
 // kanz-provisioner (kanz/cmd/). A name-only check would have called that correct.
 func TestReleaseMatrixCoversEveryBuiltService(t *testing.T) {
 	repoRoot := filepath.Dir(moduleRoot(t))
@@ -794,36 +782,6 @@ var mutableTagExempt = map[string]string{
 	// commit message.
 }
 
-// productionImageRef matches an image reference to our own registry, by the
-// SHAPE of the reference rather than by the YAML key that carries it.
-//
-// Keying on `image:` was the first attempt and it was WRONG THREE WAYS, all
-// found by running it:
-//   - kustomize carries a plural `images:` LIST of bare quoted strings
-//     (infra/gitops/preview-applicationset.yaml), so both preview refs
-//     were invisible — and the exemption declared for that file was therefore
-//     permanently dead, which failed the build on a clean tree;
-//   - infra/deploy/operator-deploy.yaml passes the provisioner image as an
-//     env var `value:`, not an `image:`. That is the image the operator injects
-//     into every provisioning Job spec it builds, so a mutable tag there ships
-//     an unpinned provisioner to every TUI-provisioned node — precisely the
-//     supply chain this guard exists to protect, and it was outside its view;
-//   - it silently defined "production manifest" as "whatever uses the key I
-//     thought of", which is how a guard ends up asserting less than it claims.
-//
-// A reference must carry a tag or a digest, which is what distinguishes it from
-// the sigstore GLOB at infra/security/admission/cluster-image-policy.yaml
-// (`ghcr.io/eighred/**`) — a policy pattern, not an image, and not pinnable.
-//
-// TAG-PLUS-DIGEST. The digest branch used to require `@sha256:` to immediately
-// follow the name, so a fully-pinned `name:tag@sha256:digest` fell through to
-// the tag branch, matched only as far as `:tag`, and was reported as a mutable
-// tag — a false failure on a reference that was already fully pinned, printing
-// the truncated `name:tag` while doing it. The tag branch now accepts an
-// optional trailing `@sha256:...` of its own, so `:tag`, `@sha256:...`, and
-// `:tag@sha256:...` all match, while a bare name with neither — e.g. the
-// glob's `ghcr.io/eighred/**` — still does not: at least one of tag or digest
-// is required by the alternation's construction, not by a separate check.
 var productionImageRef = regexp.MustCompile(
 	`ghcr\.io/eighred/[a-z0-9][a-z0-9._-]*(?:@sha256:[a-f0-9]{64}|:[A-Za-z0-9._{}-]+(?:@sha256:[a-f0-9]{64})?)`)
 
@@ -836,7 +794,7 @@ var productionImageRef = regexp.MustCompile(
 // nothing parsed" alarm because the file genuinely has nothing pinnable in it
 // — a policy glob, not an image.
 var coverageGapExempt = map[string]string{
-	"infra/overlays/testnet-tokyo/kustomization.yaml": "Kustomize image transforms carry each " +
+	"infra/overlays/testnet_tokyo/kustomization.yaml": "Kustomize image transforms carry each " +
 		"canonical ghcr.io/eighred source name separately from its mandatory ECR digest; " +
 		"TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR parses and cross-checks that structure (#1098)",
 	"infra/security/admission/cluster-image-policy.yaml": "carries the sigstore glob `ghcr.io/eighred/**`, " +
@@ -860,18 +818,6 @@ var coverageGapExempt = map[string]string{
 // URL fragment sharing a line with a reference survives intact.
 var yamlComment = regexp.MustCompile(`(?m)(^|\s)#.*$`)
 
-// TestProductionManifestsPinImagesByDigest is OPS-M4a's other half.
-//
-// release.yml already pins everything AFTER the build to the immutable digest —
-// trivy, cosign and the SBOM all attest one specific image — and pin-digests
-// rewrites the manifests to match. But nothing stopped a manifest drifting back
-// to a tag, and one already had: the DR Job ran ghcr.io/eighred/nats-rebuild:latest.
-//
-// A mutable tag breaks the supply chain in two distinct ways, and both are live:
-// :latest defaults imagePullPolicy to Always, so replicas rescheduled at
-// different moments can run DIFFERENT CODE under one Deployment; and there is no
-// previous digest to roll back TO, which is the primitive the TUI's rollback is
-// supposed to wrap.
 func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 	root := moduleRoot(t)
 	infra := filepath.Join(root, "infra")

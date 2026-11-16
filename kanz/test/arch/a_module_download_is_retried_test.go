@@ -7,46 +7,6 @@ import (
 	"testing"
 )
 
-// A MODULE DOWNLOAD IS RETRIED, IN ONE PLACE (#776).
-//
-// # What went wrong without it
-//
-// Every image ran a bare `RUN go mod download`. The Go module proxy and checksum
-// database intermittently drop HTTP/2 streams mid-transfer:
-//
-//	go: github.com/charmbracelet/bubbletea@v1.3.10: read
-//	  "https://proxy.golang.org/.../v1.3.10.zip": stream error; INTERNAL_ERROR
-//
-// Three of those in a single working session, on three different modules and
-// three different services, each fixed by `gh run rerun --failed` with no code
-// change. One of them turned main red immediately after a merge whose only change
-// was a shell script.
-//
-// THE COST IS THE HABIT, not the minutes. A red main that is routinely "just a
-// flake" trains the reflex to re-run without reading, and the next red — a real
-// one — gets the same reflex. This repository has already paid for that pattern
-// from the other direction: a truncated test run that exits 0 reads as green, so
-// the standing rule here is that a signal must mean what it says.
-//
-// There is a release-shaped cost too: the release matrix builds 30 images and one
-// stream error in any of them fails the job.
-//
-// # Why a guard rather than 29 careful edits
-//
-// The retry lives in ONE script that every Dockerfile copies in. That is the
-// point — 29 copies of a retry loop is how a fix stops spreading, and this
-// repository's standard names the shape directly: "17 services each had their own
-// secret() and 15 were wrong while 2 were right." This guard is what stops the
-// 30th Dockerfile being written with a bare download because it was copied from
-// one written before the fix.
-//
-// # Why it strips comments first
-//
-// Because every Dockerfile it checks now contains the words `go mod download`
-// inside the comment explaining why the bare form is gone. A guard that searched
-// the raw text would match its own rationale in every file and pass with the bare
-// call restored — the exact failure already recorded against three guards in this
-// directory.
 func TestNoDockerfileDownloadsModulesWithoutRetry(t *testing.T) {
 	root := moduleRoot(t)
 

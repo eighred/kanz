@@ -29,25 +29,66 @@ func TestRevaluer_RepricesNonlinearly(t *testing.T) {
 
 	// Price −10%: the call reprices to its BS value at the shocked spot, not a
 	// linear 10%·delta move.
-	down, ok := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{PriceFrac: -0.10})
-	if !ok {
+	down := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{PriceFrac: -0.10})
+	if down.Status != RevalPriced {
 		t.Fatal("expected option to be revalued")
 	}
 	wantDown := pricing.BlackScholesPrice(pricing.Call, spot*0.9, 100, ttm, 0, 0, sigma) * n
-	if d := math.Abs(decutil.Float64Or(down.GetAmount(), 0) - wantDown); d > 1.0 {
-		t.Fatalf("reval down: got %.2f want %.2f", decutil.Float64Or(down.GetAmount(), 0), wantDown)
+	if d := math.Abs(decutil.Float64Or(down.Value.GetAmount(), 0) - wantDown); d > 1.0 {
+		t.Fatalf("reval down: got %.2f want %.2f", decutil.Float64Or(down.Value.GetAmount(), 0), wantDown)
 	}
 
 	// Vol +5 points raises the (long) option's value — the vega effect a linear
 	// price shock cannot express.
-	volUp, _ := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{GlobalVolBump: 0.05})
-	if decutil.Float64Or(volUp.GetAmount(), 0) <= basePrice*n {
-		t.Fatalf("vol bump should raise long-call value: got %.2f base %.2f", decutil.Float64Or(volUp.GetAmount(), 0), basePrice*n)
+	volUp := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{GlobalVolBump: 0.05})
+	if volUp.Status != RevalPriced || decutil.Float64Or(volUp.Value.GetAmount(), 0) <= basePrice*n {
+		t.Fatalf("vol bump should raise long-call value: got %+v base %.2f", volUp, basePrice*n)
 	}
 
 	// A non-option instrument is not revalued (linear fallback applies upstream).
-	if _, ok := rv.RevalueOption(context.Background(), "EQ", asOf, baseMV, RevalShocks{PriceFrac: -0.1}); ok {
+	if result := rv.RevalueOption(context.Background(), "EQ", asOf, baseMV, RevalShocks{PriceFrac: -0.1}); result.Status != RevalKnownLinear {
 		t.Fatal("non-option instrument must not be revalued")
+	}
+}
+
+func TestRevalueOptionRejectsUnknownBaseAmount(t *testing.T) {
+	asOf := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	providers := GreeksProviders{
+		Terms: staticTerms{"OPT": {UnderlyingID: "UND", Strike: 100, Expiry: asOf.AddDate(1, 0, 0),
+			Type: pricing.Call, Exercise: pricing.European, Multiplier: 1}},
+		Spot: staticSpot{"UND": 100}, Vol: constVol(0.2),
+	}
+	for _, tc := range []struct {
+		name string
+		base *commonpb.Money
+	}{
+		{"missing money", nil},
+		{"missing amount", &commonpb.Money{CurrencyCode: "USD"}},
+		{"unsupported amount", &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 1, Exponent: 2_147_483_647}, CurrencyCode: "USD"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			skips := 0
+			p := providers
+			p.OnSkip = func(id, reason string) {
+				skips++
+				if id != "OPT" || reason != SkipInvalidPricing {
+					t.Errorf("unexpected exclusion %s/%s", id, reason)
+				}
+			}
+			result := NewRevaluer(p).RevalueOption(context.Background(), "OPT", asOf, tc.base, RevalShocks{})
+			if result.Status != RevalUnassessed || result.Value != nil || result.Reason != SkipInvalidPricing || skips != 1 {
+				t.Fatalf("unknown base became a priced result: %+v, exclusions=%d", result, skips)
+			}
+		})
+	}
+	for _, amount := range []int64{0, 100} {
+		base := &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: amount}, CurrencyCode: "USD"}
+		result := NewRevaluer(providers).RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{})
+		value, ok := decutil.Float64(result.Value.GetAmount())
+		// No shock means a ratio of one, including a genuinely reported zero.
+		if result.Status != RevalPriced || !ok || value != float64(amount) {
+			t.Fatalf("known base %d was not preserved: %+v", amount, result)
+		}
 	}
 }
 
@@ -102,7 +143,7 @@ func TestRevalueOption_ReportsWhenItFallsBackToLinear(t *testing.T) {
 			p.OnSkip = func(id, reason string) { got = append(got, id+":"+reason) }
 
 			rv := NewRevaluer(p)
-			if _, ok := rv.RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{PriceFrac: -0.1}); ok {
+			if result := rv.RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{PriceFrac: -0.1}); result.Status != RevalUnassessed || result.Reason != c.want {
 				t.Fatal("repriced despite a missing input — the fixture is not exercising the fallback")
 			}
 			if len(got) == 0 {

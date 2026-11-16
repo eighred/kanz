@@ -81,7 +81,7 @@ type Classifier interface {
 // TESTS ARE ITS ONLY CONSTRUCTOR AND THAT IS NOW CORRECT RATHER THAN A GAP. It
 // once carried "the engine loads it from reference data", describing a
 // composition root that had never existed; the production source is
-// refdata.Cache.Factor (#640), which services/risk-engine passes to
+// refdata.Cache.Factor (#640), which services/risk_engine passes to
 // engine.WithClassifier. A composition root reaching for this type instead
 // would make the whole named-scenario catalog report confident numbers derived
 // from a map somebody typed, which #345 rules out.

@@ -6,7 +6,7 @@
 // deferred `client.Close()` runs:
 //
 //	pkg/alpha/runner.go            wg.Wait()  — waits on Engine.Run and nothing else
-//	services/market-ingest/…/main  wg.Wait(); then LIFO defers close the bus client
+//	services/market_ingest/…/main  wg.Wait(); then LIFO defers close the bus client
 //
 // Engine.Run used to return on the fold loop's first send, leaving snapshotLoop
 // holding a live ticker outside every WaitGroup. Nothing between here and the

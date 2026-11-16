@@ -82,7 +82,7 @@ type Config struct {
 	// provisioning surface exists to be attacked; not registering the route says
 	// the truth, which is that it does not.
 	//
-	// Until this is set, cmd/kanz-invite (which needs the database credential)
+	// Until this is set, cmd/kanz_invite (which needs the database credential)
 	// remains the only path — correct for bootstrapping the first operator, and
 	// not attributable to a person, which is why this exists.
 	AdminRole string

@@ -150,7 +150,7 @@ spec:
             # logins without shortening the exposure the clamp already governs.
             #
             # THE PRECONDITION WAS CHECKED, NOT ASSUMED: expiry drives a clean
-            # re-login rather than a broken screen, and kanz-web/src/main.test.ts
+            # re-login rather than a broken screen, and web/src/main.test.ts
             # now executes that composed path — which nothing did before, so a
             # regression that dropped the wiring kept 110 tests green.
             #
@@ -192,7 +192,7 @@ spec:
             #   IDENTITY_TRUSTED_PROXIES   the web-bff's pod CIDR, comma-separated
             # AUTHENTICATED PROVISIONING (#364). Naming the role turns on
             # POST/GET /invites; leaving it unset means the ONLY way to create an
-            # account is cmd/kanz-invite, which needs the database credential and
+            # account is cmd/kanz_invite, which needs the database credential and
             # records the act against whoever holds it rather than a named person.
             - { name: IDENTITY_OPERATOR_ROLE, value: "kanz-operator" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }

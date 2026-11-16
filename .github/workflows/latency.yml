@@ -8,9 +8,9 @@
 # kanz/test/load/README.md). The in-process micro-benchmark guard is LATENCY-01d.
 #
 # Both jobs reuse the kanz-ci buf-generate prelude: the kanz module replaces
-# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# github.com/eighred/kanz/kanz-schemas-go => ../schemas/gen/go, which is
 # generated-not-committed (EVT-15a), so the SDK is generated before the service
-# images build (Dockerfiles COPY kanz-schemas/gen/go) and before `go run`.
+# images build (Dockerfiles COPY schemas/gen/go) and before `go run`.
 name: latency
 
 on:
@@ -18,10 +18,10 @@ on:
     paths:
       - 'kanz/internal/risk/**'
       - 'kanz/pkg/bus/**'
-      - 'kanz/services/risk-engine/**'
-      - 'kanz/services/api-gateway/**'
+      - 'kanz/services/risk_engine/**'
+      - 'kanz/services/api_gateway/**'
       - 'kanz/test/load/**'
-      - 'kanz-schemas/proto/**'
+      - 'schemas/proto/**'
       - '.github/workflows/latency.yml'
   workflow_dispatch:
     inputs:
@@ -57,7 +57,7 @@ jobs:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
 
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
 
@@ -67,8 +67,8 @@ jobs:
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
+      - name: Generate schemas Go SDK
+        working-directory: schemas
         run: |
           buf generate
           bash bootstrap-go-sdk.sh
@@ -126,7 +126,7 @@ jobs:
         working-directory: kanz
         run: |
           set -euo pipefail
-          token="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
+          token="$(go run ./cmd/kanz_devtoken --secret load-secret --tenant load-test --role kanz-user)"
           if [ -z "$token" ]; then echo "devtoken produced nothing"; exit 1; fi
           echo "::add-mask::$token"
           echo "TOKEN=$token" >> "$GITHUB_ENV"
@@ -191,7 +191,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Install protoc plugins
@@ -199,8 +199,8 @@ jobs:
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
+      - name: Generate schemas Go SDK
+        working-directory: schemas
         run: |
           buf generate
           bash bootstrap-go-sdk.sh

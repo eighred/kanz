@@ -1,8 +1,3 @@
-# Operator service (F0+S1): reads the Kubernetes node inventory read-only and
-# serves it over operator.v1 gRPC for the universe TUI. Deploys into the
-# SEC-M3c kanz-operator namespace. Its gRPC port is deliberately NOT fronted by
-# a Service — the TUI reaches it via `kubectl port-forward`, so RBAC on
-# pods/portforward is the access gate.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -100,11 +95,8 @@ spec:
       # is acceptable during a server upgrade and is not acceptable by surprise. Written
       # here so it is known BEFORE the next upgrade rather than during it.
       #
-      # THE LABEL VALUE IS AN ASSUMPTION, STATED HERE RATHER THAN LEFT SILENT. Nothing
-      # in infra/ used this label before, so there was no in-repo precedent to copy.
-      # Every existing reader of it is value-agnostic — estate.go's roles() matches the
-      # KEY prefix, and test/e2e/tui/oracle.go's jsonpath tests key presence — so neither
-      # pins the value. "true" is the k3s convention (k3s labels server nodes
+      # This nodeSelector requires an exact label value. "true" is the k3s
+      # convention (k3s labels server nodes
       # node-role.kubernetes.io/control-plane=true), and this estate is k3s. Note that
       # kubeadm and kind use an EMPTY value instead, and a nodeSelector is an exact
       # string match: on such a cluster this pod sits Pending with "0/N nodes are
@@ -194,19 +186,6 @@ spec:
             # and never holds a cluster credential.
             - name: OPERATOR_ALLOWED_CLIENTS
               value: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
-            # THE VENUE-KEY WRITE PATH (S4a), ON (OPS-M2d). Unset, SetVenueKeys returns
-            # Unimplemented and the TUI's API Manager can read but never write — which
-            # is what "configure credentials through the TUI rather than kubectl" was
-            # blocked on.
-            #
-            # "kube" writes a Kubernetes Secret named venue-<venue>-keys into
-            # OPERATOR_VENUE_SECRET_NAMESPACE (kanz-services, where the adapters mount
-            # it). The RBAC for that write is already declared below and is bounded to
-            # secrets in that ONE namespace, with get/create/update and no list or
-            # delete — the write-only guarantee is the interface plus that bound.
-            #
-            # Production sets "vault" instead; the same RPC, a different backend, and
-            # nothing else in the path changes.
             - name: OPERATOR_SECRET_BACKEND
               value: "kube"
             - name: OPERATOR_PROVISIONER_IMAGE
@@ -487,7 +466,7 @@ spec:
 ---
 # The provisioner Job pod's only outbound connections are DNS (to resolve the
 # operator-supplied target address) and SSH to that target. The k3s join
-# itself (`curl https://get.k3s.io | ... sh -s - agent`, cmd/kanz-provisioner/join.go)
+# itself (`curl https://get.k3s.io | ... sh -s - agent`, cmd/kanz_provisioner/join.go)
 # runs as the remote command of the SSH session — i.e. on the target node's own
 # network, not in this pod — so this policy grants neither :443 nor :6443.
 apiVersion: networking.k8s.io/v1

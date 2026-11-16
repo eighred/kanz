@@ -37,7 +37,7 @@ import (
 // there catches it before an implementation exists to argue about.
 func TestNoRuntimeAPIMutatesAPortfolioAccountBinding(t *testing.T) {
 	repoRoot := filepath.Dir(moduleRoot(t))
-	protoRoot := filepath.Join(repoRoot, "kanz-schemas", "proto")
+	protoRoot := filepath.Join(repoRoot, "schemas", "proto")
 
 	rpcs := protoRPCs(t, protoRoot)
 	// NON-VACUITY. A scan that finds no RPCs would pass however many binding

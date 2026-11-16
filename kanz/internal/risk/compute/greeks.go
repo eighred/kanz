@@ -33,15 +33,14 @@ import (
 //	Delta = Σ Δ·S·n     Gamma = Σ Γ·S²·n     Vega = Σ vega·n
 //	Theta = Σ θ·n        Rho   = Σ ρ·n
 //
-// where n = quantity × contract_multiplier. A non-option position (no contract
-// terms) is linear in its underlying: it contributes its signed MarketValue to
-// Delta (Δ≡1) and nothing to the higher-order Greeks — so a cash-equity book's
-// Delta equals its net exposure, matching the placeholder it replaces.
+// where n = quantity × contract_multiplier. A known other contract variant
+// keeps the existing linear treatment: it contributes its signed MarketValue to
+// Delta (Δ≡1) and nothing to the higher-order Greeks under the existing model.
+// A missing record cannot establish that classification for any holding.
 //
-// That linear fallback is reserved for a position with NO contract terms. An
-// option whose terms resolve but whose spot or vol does not contributes zero to
-// every Greek and is reported through GreeksProviders.OnSkip; it is never folded
-// into the linear sum, which would report a contract as Δ≡1 stock.
+// Unknown classification, unreadable/unusable terms and missing pricing inputs
+// are excluded through coverage and GreeksProviders.OnSkip. None licenses the
+// linear fallback, which would report an unassessed derivative as Δ≡1 stock.
 
 // Greek measure names (RISK-07 naming: short, CamelCase). Delta reuses the
 // existing constant — RegisterGreeks overwrites its placeholder implementation.
@@ -69,9 +68,30 @@ type OptionSpec struct {
 }
 
 // TermsProvider resolves an instrument's option contract terms as of a point in
-// time. ok=false ⇒ the instrument is not an option (priced linearly).
+// time. Only TermsOtherVariant licenses linear treatment. A lookup error keeps
+// classification unknown even if the provider also returned a resolution.
 type TermsProvider interface {
-	OptionTerms(ctx context.Context, instrumentID string, asOf time.Time) (OptionSpec, bool)
+	OptionTerms(ctx context.Context, instrumentID string, asOf time.Time) (OptionSpec, TermsResolution, error)
+}
+
+// resolveOptionTerms gives both consumers the same bounded refusal vocabulary.
+// Store error text stays within the provider boundary, never in coverage/FACTs.
+func resolveOptionTerms(ctx context.Context, provider TermsProvider, id string, asOf time.Time) (OptionSpec, TermsResolution, string) {
+	if provider == nil {
+		return OptionSpec{}, TermsUnknown, SkipNoTerms
+	}
+	spec, resolution, err := provider.OptionTerms(ctx, id, asOf)
+	if err != nil {
+		return OptionSpec{}, TermsUnknown, SkipTermsReadFailed
+	}
+	switch resolution {
+	case TermsResolved, TermsOtherVariant:
+		return spec, resolution, ""
+	case TermsUnusable:
+		return OptionSpec{}, resolution, SkipInvalidOptionTerms
+	default:
+		return OptionSpec{}, TermsUnknown, SkipNoTerms
+	}
 }
 
 // SpotProvider supplies an underlying's spot price as of a point in time.
@@ -93,9 +113,8 @@ type GreeksProviders struct {
 	Vol   VolProvider
 	Curve pricing.DiscountCurve
 
-	// OnSkip is called when a position that IS an option contributes zero to
-	// every Greek because a pricing input was unavailable. Optional; nil disables
-	// it.
+	// OnSkip reports an unassessed classification or option pricing input.
+	// Coverage records the exclusion even without this optional observer.
 	//
 	// WITHOUT IT THE DEGRADATION IS INVISIBLE, and it is invisible in the
 	// flattering direction. An option that cannot be priced contributes 0 to
@@ -106,7 +125,7 @@ type GreeksProviders struct {
 	// holding only EUR reported GrossExposure = 0) and the #509 shape (a bond
 	// dropped for want of a curve) again, one layer over.
 	//
-	// reason is one of SkipNoSpot / SkipNoVol / SkipExpired — a small closed set
+	// reason uses the bounded classification/pricing constants below — a closed set
 	// rather than free text, because the caller counts by it and a metric label
 	// must not be whatever a future edit writes.
 	//
@@ -122,9 +141,13 @@ type GreeksProviders struct {
 	OnSkip func(instrumentID, reason string)
 }
 
-// The reasons an option contributes zero to every Greek. Each of these means the
-// position is an option and was NOT priced; none of them is the linear path.
+// Reasons a classification or option pricing input was unassessed. None of them
+// licenses the known-linear path.
 const (
+	// Lookup failure and invalid stored terms remain distinct from missing terms.
+	// The underlying error text never becomes a metric label or FACT payload.
+	SkipTermsReadFailed    = "option_terms_read_failed"
+	SkipInvalidOptionTerms = "invalid_option_terms"
 	// SkipNoSpot: the option's terms resolved and no usable underlying spot did —
 	// no SpotProvider is wired at all, or it has no mark for the underlying as of
 	// the valuation time, or the mark is non-positive. Those are one reason and
@@ -215,11 +238,9 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 // positionGreekContribution prices one option position and returns its selected
 // dollar-Greek.
 //
-// isOption=false means ONLY "this instrument has no option contract terms" — the
-// caller's linear Δ≡1 fallback is correct for exactly that case and for nothing
-// else. Every failure AFTER the terms resolve returns isOption=true with a zero
-// contribution, because by then the position is known to be an option and the
-// linear fallback would be a lie about its shape.
+// isOption=false means only a recognized other contract variant. Unknown
+// classification and every pricing failure return true with a zero contribution
+// and an exclusion; they cannot enter the caller's linear Delta branch.
 //
 // It used to be a lie. A spot lookup that failed returned isOption=false, so an
 // option whose underlying was unmarked was added to Delta at its full signed
@@ -235,16 +256,13 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 // in the report. Refusing in RegisterGreeks would need it to return an error or
 // panic, which is a wider change than the defect warrants.
 func positionGreekContribution(ctx context.Context, p GreeksProviders, pos domain.Position, asOf time.Time, name v1.MeasureName, sel func(g pricing.Greeks, S, n float64) float64) (float64, bool) {
-	if p.Terms == nil {
+	spec, resolution, reason := resolveOptionTerms(ctx, p.Terms, string(pos.InstrumentID), asOf)
+	if resolution == TermsOtherVariant {
 		return 0, false
 	}
-	spec, ok := p.Terms.OptionTerms(ctx, string(pos.InstrumentID), asOf)
-	if !ok {
-		// NOT REPORTED. Most positions on any book are not options, and
-		// OptionTerms answers ok=false for every one of them — the provider's own
-		// observer is where a MISSING load is distinguished from a share, because
-		// only it can see which. Counting here would make the signal the noise.
-		return 0, false
+	if resolution != TermsResolved {
+		skipOption(p, string(pos.InstrumentID), reason)
+		return 0, true
 	}
 	spot, spotOK := 0.0, false
 	if p.Spot != nil {

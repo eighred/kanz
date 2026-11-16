@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
-$manifestDir = Join-Path $PSScriptRoot '..\kanz\infra\controllers\argo-rollouts'
+$manifestDir = Join-Path $PSScriptRoot '..\kanz\infra\controllers\argo_rollouts'
 $lockPath = Join-Path $manifestDir 'release-lock.json'
 $lock = Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json
 

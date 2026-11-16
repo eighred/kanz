@@ -55,29 +55,29 @@ jobs:
           # is worse than none, because the gap is invisible until a cluster pulls an
           # unsigned image the admission policy then refuses.
           - service: binance-depth
-            dockerfile: kanz-rs/services/binance-depth/Dockerfile
+            dockerfile: rust/services/binance_depth/Dockerfile
           - service: okx-depth
-            dockerfile: kanz-rs/services/okx-depth/Dockerfile
+            dockerfile: rust/services/okx_depth/Dockerfile
           - service: inference
-            dockerfile: kanz-py/Dockerfile
+            dockerfile: python/Dockerfile
           - service: risk-engine
-            dockerfile: kanz/services/risk-engine/Dockerfile
+            dockerfile: kanz/services/risk_engine/Dockerfile
           - service: schema-registry
-            dockerfile: kanz/services/schema-registry/Dockerfile
+            dockerfile: kanz/services/schema_registry/Dockerfile
           - service: oms
             dockerfile: kanz/services/oms/Dockerfile
           - service: kanz-migrate
-            dockerfile: kanz/cmd/kanz-migrate/Dockerfile
+            dockerfile: kanz/cmd/kanz_migrate/Dockerfile
           - service: kanz-halt
-            dockerfile: kanz/cmd/kanz-halt/Dockerfile
+            dockerfile: kanz/cmd/kanz_halt/Dockerfile
           - service: kanz-capitalpath
             dockerfile: kanz/test/live/capitalpath/Dockerfile
           - service: venue-binance
-            dockerfile: kanz/services/venue-binance/Dockerfile
+            dockerfile: kanz/services/venue_binance/Dockerfile
           - service: venue-okx
-            dockerfile: kanz/services/venue-okx/Dockerfile
+            dockerfile: kanz/services/venue_okx/Dockerfile
           - service: market-ingest
-            dockerfile: kanz/services/market-ingest/Dockerfile
+            dockerfile: kanz/services/market_ingest/Dockerfile
           - service: accounting
             dockerfile: kanz/services/accounting/Dockerfile
           - service: audit
@@ -87,7 +87,7 @@ jobs:
           - service: copilot
             dockerfile: kanz/services/copilot/Dockerfile
           - service: market-data
-            dockerfile: kanz/services/market-data/Dockerfile
+            dockerfile: kanz/services/market_data/Dockerfile
           - service: wealth
             dockerfile: kanz/services/wealth/Dockerfile
           - service: alternatives
@@ -99,13 +99,13 @@ jobs:
           - service: mcp
             dockerfile: kanz/services/mcp/Dockerfile
           - service: webhook-ingest
-            dockerfile: kanz/services/webhook-ingest/Dockerfile
+            dockerfile: kanz/services/webhook_ingest/Dockerfile
           - service: tv-sync
-            dockerfile: kanz/services/tv-sync/Dockerfile
+            dockerfile: kanz/services/tv_sync/Dockerfile
           - service: compliance
             dockerfile: kanz/services/compliance/Dockerfile
           - service: api-gateway
-            dockerfile: kanz/services/api-gateway/Dockerfile
+            dockerfile: kanz/services/api_gateway/Dockerfile
           # The client stack (#364, #371) — see build.yml. Held identical to that
           # matrix by TestReleaseMatrixCoversEveryBuiltService: a release that
           # ships a subset is worse than none, because the gap is invisible until
@@ -113,21 +113,21 @@ jobs:
           - service: identity
             dockerfile: kanz/services/identity/Dockerfile
           - service: web-bff
-            dockerfile: kanz/services/web-bff/Dockerfile
+            dockerfile: kanz/services/web_bff/Dockerfile
           - service: cloudflared
             dockerfile: kanz/infra/edge/Dockerfile.cloudflared
           - service: archiver
             dockerfile: kanz/services/archiver/Dockerfile
           - service: lake-sink
-            dockerfile: kanz/services/lake-sink/Dockerfile
+            dockerfile: kanz/services/lake_sink/Dockerfile
           - service: operator
             dockerfile: kanz/services/operator/Dockerfile
           - service: kanz-provisioner
-            dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
+            dockerfile: kanz/cmd/kanz_provisioner/Dockerfile
           - service: kanz-kafka-provision
-            dockerfile: kanz/cmd/kanz-kafka-provision/Dockerfile
+            dockerfile: kanz/cmd/kanz_kafka_provision/Dockerfile
           - service: nats-rebuild
-            dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
+            dockerfile: kanz/tools/natsrebuild/cmd/nats_rebuild/Dockerfile
     env:
       # eighred is canonical, written as a LITERAL rather than as
       # ${{ github.repository_owner }}. It equals the owner today, but a computed
@@ -147,7 +147,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Install protoc plugins
@@ -155,8 +155,8 @@ jobs:
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
+      - name: Generate schemas Go SDK
+        working-directory: schemas
         env:
           GOFLAGS: -mod=mod
         run: |
@@ -179,7 +179,7 @@ jobs:
       # cross-site and therefore the one CSRF defences exist to prevent — plus
       # CORS-with-credentials and a cookie domain kept in step with the edge.
       #
-      # kanz-web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
+      # web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
       # and lands in the docker context, exactly as the generated Go SDK above
       # does. Without this the image builds, starts, serves /api and /auth
       # perfectly, and returns nothing at / — an application that is finished,
@@ -190,19 +190,19 @@ jobs:
         if: matrix.service == 'web-bff'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
           cache: npm
-          cache-dependency-path: kanz-web/package-lock.json
+          cache-dependency-path: web/package-lock.json
       - name: Install pinned Rust WASM target for BFF asset
         if: matrix.service == 'web-bff'
         run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
-      - name: Compile kanz-web into dist
+      - name: Build the web client
         if: matrix.service == 'web-bff'
-        working-directory: kanz-web
+        working-directory: web
         run: |
           npm ci
           npm run build
-          test -f dist/index.html || { echo "::error::kanz-web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
+          test -f dist/index.html || { echo "::error::web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           # Keep release builders on the readiness fix used by kanz-build (#1192).
@@ -229,7 +229,7 @@ jobs:
         with:
           context: .
           # From the matrix, NOT kanz/services/<svc>/Dockerfile: inference lives in
-          # kanz-py/ and kanz-migrate / kanz-halt / kanz-provisioner live in kanz/cmd/,
+          # python/ and kanz-migrate / kanz-halt / kanz-provisioner live in kanz/cmd/,
           # so the old hardcoded path could only ever have worked for the two services
           # the matrix used to list.
           file: ${{ matrix.dockerfile }}
@@ -425,11 +425,11 @@ jobs:
         working-directory: kanz
         run: |
           set -euo pipefail
-          go run ./cmd/kanz-pin-digests -digests ../digests -infra infra | tee /tmp/pin-report.txt
+          go run ./cmd/kanz_pin_digests -digests ../digests -infra infra | tee /tmp/pin-report.txt
           # oms-acme.yaml is GENERATED from oms-deploy.yaml and drift-checked by
           # TestTenantComputeGuard. Re-render it from the now-pinned base rather
           # than trusting two independent rewrites to agree.
-          go run ./cmd/kanz-tenantgen -tenant acme
+          go run ./cmd/kanz_tenantgen -tenant acme
 
       - name: Open the pin pull request
         env:

@@ -54,7 +54,7 @@ func TestDatedRiskPanelThroughRealPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "services", "market-data", "migrations", "0001_price_history.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "services", "market_data", "migrations", "0001_price_history.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}

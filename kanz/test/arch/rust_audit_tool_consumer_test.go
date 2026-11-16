@@ -43,7 +43,7 @@ func rustAuditConsumerBoundary(c, installer, workflow string) error {
 	if strings.Contains(c, `os.environ["GITHUB_SHA"] =`) || strings.Contains(c, "cargo install") || strings.Contains(installer, "cargo ") || strings.Contains(installer, "||") {
 		return fmt.Errorf("source spoof/fallback")
 	}
-	for _, token := range []string{"  contents: read\n  packages: read", "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532", "test_consume.py", "tools/rust-audit-tools/**", "rust-audit-tools-installed.json"} {
+	for _, token := range []string{"  contents: read\n  packages: read", "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532", "test_consume.py", "tools/rust_audit_tools/**", "rust-audit-tools-installed.json"} {
 		if !strings.Contains(workflow, token) {
 			return fmt.Errorf("readonly consumer qualification missing")
 		}
@@ -95,7 +95,7 @@ func rustAuditConsumerBoundary(c, installer, workflow string) error {
 func TestRustAuditConsumerBoundary(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
 	inputs := make([]string, 3)
-	for i, n := range []string{"tools/rust-audit-tools/consume.py", ".github/scripts/install-rust-audit.sh", ".github/workflows/architecture-migration.yml"} {
+	for i, n := range []string{"tools/rust_audit_tools/consume.py", ".github/scripts/install-rust-audit.sh", ".github/workflows/architecture-migration.yml"} {
 		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(n)))
 		if err != nil {
 			t.Fatal(err)
@@ -159,7 +159,7 @@ func TestRustAuditConsumerJobComposition(t *testing.T) {
 		}
 		return strings.ReplaceAll(string(b), "\r\n", "\n")
 	}
-	c, installer, workflow := read("tools/rust-audit-tools/consume.py"), read(".github/scripts/install-rust-audit.sh"), read(".github/workflows/architecture-migration.yml")
+	c, installer, workflow := read("tools/rust_audit_tools/consume.py"), read(".github/scripts/install-rust-audit.sh"), read(".github/workflows/architecture-migration.yml")
 	start := strings.Index(workflow, "\n  compatibility:")
 	if start < 0 {
 		t.Fatal("compatibility missing")

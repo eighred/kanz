@@ -16,7 +16,7 @@ class AttributionEvidence(unittest.TestCase):
     def raw(self, events):
         return b"\n".join(json.dumps(e).encode() for e in events)
     def test_complete(self):
-        self.assertEqual(c.checked(self.raw(self.events())), {"required_passes": 72})
+        self.assertEqual(c.checked(self.raw(self.events())), {"required_passes": 75})
     def test_missing_duplicate_skipped_failed_or_other_package_refuses(self):
         original = self.events()
         variants = [original[1:], original + [original[0]], original + [{"Action": "pass", "Package": "foreign"}]]
@@ -32,14 +32,21 @@ class AttributionEvidence(unittest.TestCase):
         self.assertIn("TestRustAttributionScheduleEdges/long-parent-last-supported-index", c.NAMES)
         self.assertIn("TestAttributionCanonicalOutputDomainWitness", c.NAMES)
 
+    def test_duration_domain_boundaries_cannot_be_omitted(self):
+        for case in ("duration-max-minus-one", "duration-max", "duration-max-plus-one", "duration-saturation"):
+            name = "TestRustAttributionScheduleEdges/" + case
+            self.assertIn(name, c.NAMES)
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                c.checked(self.raw([e for e in self.events() if e.get("Test") != name]))
+
 class AttributionProof(unittest.TestCase):
     events = AttributionEvidence.events
     raw = AttributionEvidence.raw
     def fixture(self):
         raw = self.raw(self.events())
         expected = c.metadata("a" * 40, "b" * 40, "123", "1")
-        proof = {**expected, "stream_sha256": hashlib.sha256(raw).hexdigest(), "result": {"required_passes": 72},
-                 "build": {"profile": "debug", "features": [], "target": "kanz-rs/target/debug/examples/order-attribution-fixture", "sha256": "c" * 64}}
+        proof = {**expected, "stream_sha256": hashlib.sha256(raw).hexdigest(), "result": {"required_passes": 75},
+                 "build": {"profile": "debug", "features": [], "target": "rust/target/debug/examples/order-attribution-fixture", "sha256": "c" * 64}}
         return expected, proof, {"attribution.jsonl": raw, "binary.sha256": ("c" * 64 + "\n").encode()}
     def test_proof_bindings(self):
         expected, proof, files = self.fixture()
@@ -50,10 +57,10 @@ class AttributionProof(unittest.TestCase):
             return raw
         with patch.object(c, "read_bounded", side_effect=read):
             files["proof.json"] = json.dumps(proof).encode()
-            self.assertEqual(c.qualify(Path("unused"), expected), {"required_passes": 72})
+            self.assertEqual(c.qualify(Path("unused"), expected), {"required_passes": 75})
             changes = [("source_sha", "d" * 40), ("tree_sha", "d" * 40), ("run_id", "124"), ("run_attempt", "2"),
                        ("stream_sha256", "d" * 64), ("version", True), ("result", {"required_passes": 71}),
-                       ("result", {"required_passes": 72.0})]
+                       ("result", {"required_passes": 75.0})]
             for field, value in changes:
                 changed = copy.deepcopy(proof); changed[field] = value
                 files["proof.json"] = json.dumps(changed).encode()

@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
-$manifestDir = Join-Path $PSScriptRoot '..\kanz\infra\controllers\cloudnative-pg'
+$manifestDir = Join-Path $PSScriptRoot '..\kanz\infra\controllers\cloudnative_pg'
 $lock = Get-Content -Raw -LiteralPath (Join-Path $manifestDir 'release-lock.json') | ConvertFrom-Json
 
 if ($lock.version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or

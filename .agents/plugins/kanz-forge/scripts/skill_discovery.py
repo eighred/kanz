@@ -14,13 +14,19 @@ def discover_skills(cli, root, env=None, timeout=30):
     messages = queue.Queue()
 
     def consume():
-        for line in process.stdout:
-            try:
-                messages.put(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        try:
+            for line in process.stdout:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(message, dict):
+                    messages.put(message)
+        finally:
+            messages.put(None)
 
-    threading.Thread(target=consume, daemon=True).start()
+    reader = threading.Thread(target=consume, daemon=True)
+    reader.start()
 
     def send(message):
         process.stdin.write(json.dumps(message) + "\n")
@@ -28,10 +34,15 @@ def discover_skills(cli, root, env=None, timeout=30):
 
     def receive(identifier, deadline):
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Codex skill discovery timed out")
             try:
-                message = messages.get(timeout=max(0, deadline - time.monotonic()))
+                message = messages.get(timeout=remaining)
             except queue.Empty as exc:
                 raise TimeoutError("Codex skill discovery timed out") from exc
+            if message is None:
+                raise ValueError("Codex skill discovery ended before its response")
             if message.get("id") == identifier:
                 if "error" in message:
                     raise ValueError("Codex skill discovery returned an error")
@@ -44,7 +55,20 @@ def discover_skills(cli, root, env=None, timeout=30):
         send({"method": "initialized", "params": {}})
         send({"id": 2, "method": "skills/list", "params": {"cwds": [str(root)], "forceReload": True}})
         result = receive(2, deadline)
-        return [skill for group in result["data"] for skill in group["skills"]]
+        groups = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(groups, list) or len(groups) != 1:
+            raise ValueError("Codex skill discovery returned an incomplete workspace result")
+        group = groups[0]
+        if not isinstance(group, dict) or group.get("errors"):
+            raise ValueError("Codex skill discovery reported workspace errors")
+        skills = group.get("skills")
+        if not isinstance(skills, list) or any(
+            not isinstance(skill, dict) or not isinstance(skill.get("name"), str)
+            or not isinstance(skill.get("path"), str) or not isinstance(skill.get("enabled"), bool)
+            for skill in skills
+        ):
+            raise ValueError("Codex skill discovery returned malformed skills")
+        return skills
     finally:
         if process.stdin and not process.stdin.closed:
             try:
@@ -55,4 +79,11 @@ def discover_skills(cli, root, env=None, timeout=30):
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             process.terminate()
-            process.wait(timeout=3)
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        finally:
+            process.stdout.close()
+            reader.join(timeout=1)

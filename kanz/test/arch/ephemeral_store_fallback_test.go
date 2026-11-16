@@ -139,11 +139,11 @@ func TestNoCompositionRootSilentlyFallsBackToAnInMemoryStore(t *testing.T) {
 			"visible:\n\n"+
 			"  WARN + GAUGE where the in-memory store is CORRECT UNDER A STATED PRECONDITION. Log the "+
 			"precondition and the consequence, and Set(0) a durability gauge so the posture is alertable "+
-			"after the boot log scrolls off. See services/venue-binance/cmd/venue-binance/main.go openView "+
+			"after the boot log scrolls off. See services/venue_binance/cmd/venue_binance/main.go openView "+
 			"and services/oms/cmd/oms/main.go openStores.\n\n"+
 			"  REFUSE TO START where no deployment shape makes it acceptable. Return the error from the "+
 			"config-validation path so the pod exits 2 rather than serving. See "+
-			"services/tv-sync/internal/config/config.go validateBook (no escape hatch at all) and "+
+			"services/tv_sync/internal/config/config.go validateBook (no escape hatch at all) and "+
 			"services/audit/cmd/audit/main.go openStore (refuses unless an operator opted in OUT LOUD, and "+
 			"gauges it when they did).\n\n"+
 			"Adding an entry to silentEphemeralFallbacks means writing down that this service's state may be "+

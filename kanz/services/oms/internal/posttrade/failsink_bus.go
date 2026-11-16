@@ -21,7 +21,7 @@ import (
 // This carried a FailEncoder the composition root was meant to supply, justified
 // by "settlement.v1 is generated-not-committed (EVT-15a — it is NOT in the
 // checked-in gen/go tree, only its .proto)". THE PREMISE WAS FALSE:
-// kanz-schemas/gen is not checked in at all, so every generated package is
+// schemas/gen is not checked in at all, so every generated package is
 // generated-not-committed, and this package already imports four of them
 // (order/v1, common/v1, envelope/v1, observation/v1 — settle.go takes an
 // *orderpb.Fill). The seam was an indirection with one possible implementation,

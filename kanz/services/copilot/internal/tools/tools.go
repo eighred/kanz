@@ -101,7 +101,7 @@ func NewRegistry(authz auth.Authorizer, client governed.Client, catalog retrieva
 	r.register(Tool{
 		Def: llm.ToolDef{
 			Name:        "evaluate_scenario",
-			Description: "Evaluate a named stress scenario against a portfolio and return the projected measures. Call this for what-if / stress questions.",
+			Description: "Evaluate an exact decimal parallel-shift fraction against a portfolio and return the projected measures. Call this for what-if / stress questions.",
 			InputSchema: scenarioSchema(),
 		},
 		invoke: r.evaluateScenario,
@@ -270,10 +270,21 @@ func (r *Registry) render(ctx context.Context, label string, reading governed.Re
 	// no such risk", the same false claim the confident zero made.
 	for _, m := range reading.Measures {
 		if m.Status == measureread.StatusMeasured && m.Value != nil {
-			fmt.Fprintf(&b, "- %s = %g\n", m.Name, *m.Value)
-			continue
+			fmt.Fprintf(&b, "- %s = %g", m.Name, *m.Value)
+		} else {
+			fmt.Fprintf(&b, "- %s: UNAVAILABLE — %s", m.Name, m.Reason)
 		}
-		fmt.Fprintf(&b, "- %s: UNAVAILABLE — %s\n", m.Name, m.Reason)
+		// The shared projection classifies the model once. Keep that label on
+		// the value's own line so a placeholder does not become an unlabelled
+		// risk number on the final hop into the agent's context.
+		if m.Provenance != nil {
+			fmt.Fprintf(&b, " [model: %s", m.Provenance.Status)
+			if m.Provenance.Method != "" {
+				fmt.Fprintf(&b, "; method: %q", m.Provenance.Method)
+			}
+			b.WriteByte(']')
+		}
+		b.WriteByte('\n')
 	}
 	if len(reading.QualityFlags) > 0 {
 		// Named on the reading rather than folded into the values, because
@@ -308,7 +319,7 @@ func scenarioSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"portfolio_id": map[string]any{"type": "string", "description": "The portfolio to stress."},
-			"scenario":     map[string]any{"type": "string", "description": "The named scenario, e.g. \"GFC\" or \"RATES_+100BP\"."},
+			"scenario":     map[string]any{"type": "string", "description": "A signed decimal fraction for a parallel shift, e.g. \"-0.05\" for a 5% drop or \"1e-7\". Values must be exactly representable; named scenarios are unsupported."},
 		},
 		"required":             []any{"portfolio_id", "scenario"},
 		"additionalProperties": false,

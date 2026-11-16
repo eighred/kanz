@@ -29,7 +29,7 @@ import (
 // wired, and that the calibration it rests on is still true.
 
 const (
-	pinToolRel  = "../../cmd/kanz-pin-digests/main.go"
+	pinToolRel  = "../../cmd/kanz_pin_digests/main.go"
 	releaseYML  = "../../../.github/workflows/release.yml"
 	infraRoot   = "../../infra"
 	orgInImages = "eighred"
@@ -154,7 +154,7 @@ func referencedOwnImages(t *testing.T) map[string]bool {
 	return out
 }
 
-// rewriterPattern mirrors cmd/kanz-pin-digests's own reference pattern.
+// rewriterPattern mirrors cmd/kanz_pin_digests's own reference pattern.
 //
 // A COPY, AND THE COPY IS CHECKED. TestTheRewriterPatternHasNotDrifted below
 // fails if the tool's pattern changes, because a guard measuring a DIFFERENT set
@@ -183,14 +183,14 @@ func TestTheRewriterPatternHasNotDrifted(t *testing.T) {
 	// side then fails: narrow the tool and the substring is gone; narrow this
 	// copy and the tool no longer contains it.
 	if !strings.Contains(src, strings.TrimPrefix(rewriterKeyPattern, `(?m)^`)) {
-		t.Fatalf("cmd/kanz-pin-digests's key pattern no longer matches this guard's copy "+
+		t.Fatalf("cmd/kanz_pin_digests's key pattern no longer matches this guard's copy "+
 			"(guard: %s). The copy calibrates which images the #771 refusal can see; when the two "+
 			"diverge the calibration measures a different set from the tool, and a clean report here "+
 			"can sit beside a release that fails on every run (or the reverse). Update both in the "+
 			"same change.", rewriterKeyPattern)
 	}
 	if !strings.Contains(src, `@sha256:[0-9a-f]{64}`) {
-		t.Fatal("cmd/kanz-pin-digests's reference pattern has changed shape. This guard carries a " +
+		t.Fatal("cmd/kanz_pin_digests's reference pattern has changed shape. This guard carries a " +
 			"copy of it to calibrate which images the refusal can see; a copy that has drifted " +
 			"measures a different set from the tool and would report a clean estate while every " +
 			"release failed (#771). Update rewriterPattern here in the same change.")

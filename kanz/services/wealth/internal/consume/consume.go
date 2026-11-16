@@ -3,14 +3,8 @@
 // composition FACT decodes to a wealth.Household and is Put into the book.Store
 // (last-write-wins), so householding aggregates run over live composition.
 //
-// # Decode seam
-//
-// The wealth.v1 wire SDK is generated-not-committed (EVT-15a): the
-// internal/wealth package carries its own Go-native float shapes and the service
-// imports no wealthpb. So the payload decode is a seam — the default DecodeJSON
-// folds the Go-native Household as JSON (the shape the in-process producer emits
-// today), and the concrete wealth.v1 proto decoder wires at the composition root
-// once the SDK is generated.
+// The composition root uses DecodeProto for the canonical HouseholdValued wire
+// contract. DecodeJSON remains the in-process test seam; both carry exact values.
 package consume
 
 import (
@@ -18,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
@@ -27,9 +22,7 @@ import (
 	"github.com/eighred/kanz/services/wealth/internal/book"
 )
 
-// Decoder turns a FACT payload into a household composition. The default is
-// DecodeJSON; a composition root with the generated wealth.v1 SDK swaps in a
-// proto decoder behind this seam.
+// Decoder turns a FACT payload into a household composition.
 type Decoder func(payload []byte) (wealth.Household, error)
 
 // DecodeJSON is the default Decoder: the Go-native wealth.Household as JSON.
@@ -108,12 +101,18 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 	if err := bus.RequireTenantScope(env.GetTenantId(), f.tenant); err != nil {
 		return err
 	}
+	if env.GetEventType() != wealth.EventTypeHouseholdValued || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT {
+		return errors.New("consume: expected a household valuation FACT")
+	}
 	h, err := f.decode(payload)
 	if err != nil {
 		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)
 	}
-	if h.HouseholdID == "" {
-		return fmt.Errorf("consume: %s missing household_id", env.GetEventType())
+	// The literal household ID is the canonical ordering/compaction identity.
+	// A valid payload under another key must not overwrite that other book or
+	// attribute a drift observation to a resource the envelope never identified.
+	if strings.TrimSpace(h.HouseholdID) == "" || len(h.HouseholdID) > 256 || env.GetPartitionKey() != h.HouseholdID {
+		return errors.New("consume: household valuation identity conflicts with its envelope")
 	}
 	if err := f.store.Put(ctx, h); err != nil {
 		return err

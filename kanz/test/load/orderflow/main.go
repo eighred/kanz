@@ -178,7 +178,7 @@ func loadConfig() (config, error) {
 	if c.token == "" {
 		return config{}, errors.New("ORDERFLOW_TOKEN (or ORDERFLOW_TOKEN_FILE) is unset. The gateway refuses an unauthenticated " +
 			"caller, so an unset token measures the latency of 401s at whatever rate the runner can " +
-			"produce them. Mint one with: go run ./cmd/kanz-devtoken --secret <API_GATEWAY_JWT_SECRET> " +
+			"produce them. Mint one with: go run ./cmd/kanz_devtoken --secret <API_GATEWAY_JWT_SECRET> " +
 			"--tenant <t> --role <required-role>,<trade-role> --portfolio <PORTFOLIO>")
 	}
 	if c.stageFor <= 0 || c.drainFor <= 0 {

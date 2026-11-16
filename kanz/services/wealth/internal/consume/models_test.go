@@ -116,7 +116,7 @@ func TestModelFolderRefusesAnotherTenantsModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModelFolder: %v", err)
 	}
-	env := &envelopepb.Envelope{TenantId: "zenith", EventType: wealth.EventTypeModelPublished}
+	env := &envelopepb.Envelope{TenantId: "zenith", EventType: wealth.EventTypeModelPublished, PartitionKey: "growth-2026"}
 	if err := f.Handle(context.Background(), env, modelPayload(t, wireModel())); err == nil {
 		t.Fatal("another tenant's model was admitted to this tenant's catalogue")
 	}
@@ -136,7 +136,7 @@ func TestModelFolderReturnsAnErrorSoARefusedModelDLQs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModelFolder: %v", err)
 	}
-	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeModelPublished}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeModelPublished, PartitionKey: "growth-2026"}
 	if err := f.Handle(context.Background(), env, modelPayload(t, m)); err == nil {
 		t.Fatal("a model with a zero drift band was acked. Every household on its profile would " +
 			"read as permanently breached, and the message would never be inspectable")
@@ -163,7 +163,7 @@ func TestFolderObservesDriftAfterTheBookIsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, PartitionKey: hv.HouseholdId}
 	if err := f.Handle(context.Background(), env, b); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestFolderWithNoObserverStillFolds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeHouseholdValued, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, PartitionKey: hv.HouseholdId}
 	if err := f.Handle(context.Background(), env, b); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestLegacyModelReplacementFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeModelPublished}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeModelPublished, PartitionKey: "growth-2026"}
 	if err := f.Handle(context.Background(), env, modelPayload(t, wireModel())); err != nil {
 		t.Fatal(err)
 	}

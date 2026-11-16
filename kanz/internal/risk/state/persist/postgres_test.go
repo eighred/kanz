@@ -24,7 +24,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/domain"
 )
 
-const migrationDir = "../../../../services/risk-engine/migrations"
+const migrationDir = "../../../../services/risk_engine/migrations"
 
 // newPool connects, applies the schema clean, and pins the session tenant to
 // __system__ via the app.tenant_id GUC (MT-01d) — so RLS lets the existing

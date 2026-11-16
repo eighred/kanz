@@ -43,7 +43,7 @@ func assertLakeSinkIdentityStaged(t *testing.T, root string, want []string, curr
 	if err != nil {
 		t.Fatal(err)
 	}
-	patchPath := filepath.Join(root, "services/lake-sink/broker-identity-patch.yaml")
+	patchPath := filepath.Join(root, "services/lake_sink/broker-identity-patch.yaml")
 	patch, err := os.ReadFile(patchPath)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestLakeSinkIdentityStagingRefusesPartialPromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	patch, err := os.ReadFile(filepath.Join(root, "services/lake-sink/broker-identity-patch.yaml"))
+	patch, err := os.ReadFile(filepath.Join(root, "services/lake_sink/broker-identity-patch.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

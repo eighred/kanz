@@ -21,6 +21,7 @@ EXPECTED_SKILLS = {
     "kanz-verify",
     "pr-delivery",
     "stack-routing",
+    "repository-organization",
 }
 
 
@@ -75,15 +76,20 @@ def command_files() -> list[Path]:
     catalog_path = PLUGIN / "skills/commands/commands.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     files = [catalog_path]
-    if not {"/work", "/ship"}.issubset(catalog):
+    if not isinstance(catalog, dict) or not {
+            "/work", "/branches", "/ship", "/audit", "/secure", "/evolve",
+            "/plan", "/doctor", "/status", "/help"}.issubset(catalog):
         fail("core native commands are missing")
     for name, item in catalog.items():
-        if not re.fullmatch(r"/[a-z-]+", name) or item.get("target") not in {"optional", "required"}:
+        if (not re.fullmatch(r"/[a-z-]+", name) or not isinstance(item, dict)
+                or item.get("target") not in {"optional", "required"}):
             fail(f"invalid native command: {name}")
-        if item.get("mode") or not item.get("workflow") or not item.get("description"):
+        if ("mode" in item or not isinstance(item.get("workflow"), str) or not item["workflow"].strip()
+                or not isinstance(item.get("description"), str) or not item["description"].strip()):
             fail(f"command must have a native workflow: {name}")
         skills = item.get("skills", [])
-        if not skills or not isinstance(skills, list) or any(skill not in EXPECTED_SKILLS for skill in skills):
+        if (not skills or not isinstance(skills, list)
+                or any(not isinstance(skill, str) or skill not in EXPECTED_SKILLS for skill in skills)):
             fail(f"unknown or missing skill mapping: {name}")
         for skill in skills:
             path = PLUGIN / "skills" / skill / "SKILL.md"
@@ -103,7 +109,7 @@ def command_files() -> list[Path]:
 
 def tracked(paths: list[Path]) -> None:
     required = {path.relative_to(ROOT).as_posix() for path in paths}
-    raw = subprocess.check_output(["git", "ls-files", "-z", "--", *sorted(required)], cwd=ROOT)
+    raw = subprocess.check_output(["git", "ls-files", "-z", "--", *sorted(required)], cwd=ROOT, timeout=30)
     missing = required - set(raw.decode("utf-8").split("\0"))
     if missing:
         fail("required plugin files not tracked: " + ", ".join(sorted(missing)))
@@ -121,7 +127,7 @@ def validate(check_tracked: bool) -> None:
     source = entry.get("source", {})
     if source.get("source") != "local" or local_path(ROOT, source.get("path", "")) != PLUGIN:
         fail("marketplace source does not resolve to the repository-owned plugin")
-    if entry.get("policy") != {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}:
+    if entry.get("policy") != {"installation": "INSTALLED_BY_DEFAULT", "authentication": "ON_INSTALL"}:
         fail("marketplace installation/authentication policy is incomplete")
     if entry.get("category") != "Productivity":
         fail("marketplace category is missing")
@@ -138,7 +144,14 @@ def validate(check_tracked: bool) -> None:
     names = {path.parent.name for path in skills}
     if names != EXPECTED_SKILLS:
         fail(f"skill inventory differs: {sorted(names ^ EXPECTED_SKILLS)}")
-    files = [MARKETPLACE, MANIFEST, Path(__file__).resolve()]
+    adapter = ROOT / ".agents/skills/kanz-forge/SKILL.md"
+    project_config = ROOT / ".codex/config.toml"
+    if frontmatter(adapter)["name"] != "kanz-forge":
+        fail("repository discovery adapter has the wrong name")
+    if '[plugins."kanz-forge@kanz-local"]\nenabled = true' not in project_config.read_text(encoding="utf-8"):
+        fail("trusted-project Forge enablement is missing")
+    files = [MARKETPLACE, MANIFEST, adapter, project_config, Path(__file__).resolve()]
+    files.extend(referenced_files(adapter, ROOT))
     for skill in skills:
         if frontmatter(skill)["name"] != skill.parent.name:
             fail(f"skill name does not match its directory: {skill}")

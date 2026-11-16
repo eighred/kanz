@@ -46,7 +46,7 @@ func lakeWorkerPipeOrder(source string) error {
 }
 
 func TestLakeWorkerPipeJoinWiring(t *testing.T) {
-	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake-sink/internal/snapshot/worker.go")))
+	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake_sink/internal/snapshot/worker.go")))
 	if err := lakeWorkerPipeOrder(source); err != nil {
 		t.Fatal(err)
 	}
