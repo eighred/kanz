@@ -276,6 +276,18 @@ An exact boolean identifies the closed baseline (7 observations) or isolated
 The existing 64-receipt/2 MiB bounds remain; the original 39-record retained
 recovery reader and historical provenance remain unchanged. The transaction
 fixture independently reads the actual fsynced aggregate and checks its hash.
+An observation may carry `commandFailure` only in a refused aggregate, with its
+result still unknown. Fixed inventory/exec phases and integer microsecond budgets
+distinguish a shrinking shared allowance from an exec using its full allowance;
+inventory duration is recorded separately. Less than the unchanged batch's two
+0.2-second pauses refuses before exec, including the mandatory final BFF positive.
+These diagnostics contain only closed labels, byte counts, child exit/signal,
+kill-request, reap and stream-join facts. They retain no argv, addresses, output,
+stderr, environment or exception text. A kill request does not prove child reap
+or whole-process-group absence; cleanup uncertainty remains a failure. No cgroup
+or OOM observation is inferred. The earlier final-positive timeout has no such
+timing data, so its cause remains unknown. Budgets and every positive/negative
+observation remain mandatory; diagnostics cannot qualify a refused transaction.
 Fixed loader/network source bytes travel in the checked bootstrap while the
 remaining closed module inventory stays compressed. Per-file, combined expanded,
 encoded and native command limits are unchanged; the mandatory check retains all

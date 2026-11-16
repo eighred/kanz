@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 
-from bounded_process import run as bounded_run
+from bounded_process import run as bounded_run, command_failure
 from policy_client import KubernetesClient
 import rollout_probe as probe
 import transaction as tx
@@ -19,7 +19,7 @@ import transaction as tx
 from rollout_scope import CLUSTER_UID, APPS, snapshot, outside_policies, service_snapshot
 
 PORTS = {"accounting": (8101, 8080), "audit": (8102, 8083), "compliance": (8095, 8091)}
-from network_observation import TCP_BATCH as TCP, DENIALS, batch
+from network_observation import TCP_BATCH as TCP, TCP_BATCH_MIN_SECONDS, DENIALS, batch
 
 
 class Probes:
@@ -167,14 +167,50 @@ class Probes:
         observations.append(item)
         consecutive = 0
         end = min(deadline, time.monotonic() + 20)
+        def timing(at):
+            return {"verificationElapsedUs": int(max(0, at - self.verification_started) * 1000000),
+                    "lifetimeRemainingUs": int(max(0, self.started + 420 - at) * 1000000),
+                    "activeRemainingUs": int(max(0, deadline - at) * 1000000),
+                    "observationRemainingUs": int(max(0, end - at) * 1000000)}
+        def failure(phase, kind, attempt, before, inventory_elapsed, requested_us, process):
+            item["commandFailure"] = {"phase": phase, "kind": kind, "attempt": attempt,
+                                      **before, "inventoryElapsedUs": int(max(0, inventory_elapsed) * 1000000),
+                                      "requestedTimeoutUs": requested_us,
+                                      "process": process}
         for _ in range(6):
+            attempt = _ + 1
             if time.monotonic() >= end:
                 break
-            self.check()
+            check_started = time.monotonic()
+            before_check = timing(check_started)
+            try:
+                self.check()
+            except Exception as error:
+                process = command_failure(error)
+                if process is not None:
+                    failure("inventory", "command", attempt, before_check,
+                            time.monotonic() - check_started, process["timeoutUs"], process)
+                raise
             entry = self.peers[peer]
-            values = batch(json.loads(self.k("-n", entry["namespace"], "exec", entry["name"], "--",
-                                            "python3", "-I", "-B", "-c", TCP, address, str(port),
-                                            timeout=min(10, max(.001, end - time.monotonic())))))
+            launch_at = time.monotonic()
+            before_exec = timing(launch_at)
+            remaining = end - launch_at
+            inventory_elapsed = launch_at - check_started
+            if remaining < TCP_BATCH_MIN_SECONDS:
+                failure("tcp_exec", "insufficient_batch_budget", attempt, before_exec,
+                        inventory_elapsed, 0, None)
+                raise tx.Refusal("network observation has insufficient batch budget")
+            requested = min(10, remaining)
+            try:
+                values = batch(json.loads(self.k("-n", entry["namespace"], "exec", entry["name"], "--",
+                                                "python3", "-I", "-B", "-c", TCP, address, str(port),
+                                                timeout=requested)))
+            except Exception as error:
+                process = command_failure(error)
+                if process is not None:
+                    failure("tcp_exec", "command", attempt, before_exec,
+                            inventory_elapsed, int(requested * 1000000), process)
+                raise
             item["batches"].append(values)
             if time.monotonic() >= end or "unknown" in values:
                 raise tx.Refusal("network observation unknown or late")
@@ -193,6 +229,7 @@ class Probes:
         observations = []
         passed = False
         original = self.k
+        self.verification_started = time.monotonic()
         # Work fits inside the existing 450-second caller lifetime. Reserve a
         # separate ten seconds for the mandatory post-negative positive control.
         final_end = min(self.started + 420, time.monotonic() + 180)
