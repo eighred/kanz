@@ -36,7 +36,7 @@ var rustMigrationCargo = map[string]map[string]string{
 		"rust-version": `"1.90"`, "publish": `false`,
 	},
 	"dependencies":       {"prost": `"=0.14.6"`},
-	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.3.0"`},
+	"build-dependencies": {"prost-build": `"=0.14.6"`, "protoc-bin-vendored": `"=3.3.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
 	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render"]`, "resolver": `"2"`},
