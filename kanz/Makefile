@@ -17,6 +17,8 @@ export GOTMPDIR := $(CURDIR)/.gotmp
 SCHEMAS_DIR := ../schemas
 PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+BUF_VERSION := 1.69.0
+PYTHON ?= python3
 
 .DEFAULT_GOAL := help
 
@@ -29,10 +31,11 @@ help: ## List the available targets
 bootstrap: | $(GOTMPDIR) ## Install the protoc plugins and check for buf
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
-	@command -v buf >/dev/null || { echo "install buf: https://buf.build/docs/installation" >&2; exit 1; }
+	@test "$$(buf --version)" = "$(BUF_VERSION)" || { echo "install buf $(BUF_VERSION): https://buf.build/docs/installation" >&2; exit 1; }
 
 .PHONY: generate
 generate: | $(GOTMPDIR) ## Regenerate and initialize the schemas Go SDK
+	@test "$$(buf --version)" = "$(BUF_VERSION)" || { echo "buf $(BUF_VERSION) required" >&2; exit 1; }
 	cd $(SCHEMAS_DIR) && buf generate && bash bootstrap-go-sdk.sh
 
 .PHONY: build
@@ -85,21 +88,11 @@ release: generate | $(GOTMPDIR) ## Build stripped, trimpath production binaries 
 # where cgo is available (CI).
 .PHONY: test
 test: generate | $(GOTMPDIR) ## Run serial tests in bounded package groups
-	go test -p 1 -count=1 ./internal/...
-	go test -p 1 -count=1 ./pkg/...
-	go test -p 1 -count=1 ./services/...
-	go test -p 1 -count=1 ./cmd/...
-	go test -p 1 -count=1 ./test/...
-	go test -p 1 -count=1 ./tools/...
+	$(PYTHON) dev/check.py test
 
 .PHONY: test-race
 test-race: generate | $(GOTMPDIR) ## Run serial tests with the race detector (needs CGO_ENABLED=1)
-	go test -race -p 1 -count=1 ./internal/...
-	go test -race -p 1 -count=1 ./pkg/...
-	go test -race -p 1 -count=1 ./services/...
-	go test -race -p 1 -count=1 ./cmd/...
-	go test -race -p 1 -count=1 ./test/...
-	go test -race -p 1 -count=1 ./tools/...
+	$(PYTHON) dev/check.py test --race
 
 # #100 put venue adapters in the default build. Preserve the old target names
 # for callers outside this repository without pretending obsolete tags select them.
@@ -120,6 +113,9 @@ fmt: ## gofmt-check tracked and untracked nonignored Go files
 	@bash -o pipefail -c 'unformatted=$$(git ls-files -z --cached --others --exclude-standard "*.go" | xargs -0 gofmt -l) || exit $$?; \
 	if [ -n "$$unformatted" ]; then echo "needs gofmt:"; echo "$$unformatted"; exit 1; fi'
 
+.PHONY: fmt-check
+fmt-check: fmt ## Compatibility alias for the local formatting check
+
 .PHONY: lint
 lint: vet fmt ## vet + nonignored Go formatting + golangci-lint
 	golangci-lint run ./...
@@ -136,11 +132,18 @@ scaffold: | $(GOTMPDIR) ## Scaffold a new service: make scaffold NAME=my-service
 .PHONY: up
 up: generate | $(GOTMPDIR) ## Bring up the local dev stack (NATS+Kafka+Postgres+services+seed)
 	docker compose -f dev/docker-compose.yml up -d --build
-	go run ./test/load/seed
+	$(PYTHON) dev/wait-ready.py
+	SEED_TENANT=dev go run ./test/load/seed
+	$(PYTHON) dev/smoke.py
 
 .PHONY: down
 down: ## Tear down the local dev stack
 	docker compose -f dev/docker-compose.yml down
+
+.PHONY: reset
+reset: ## Explicitly delete this local Compose project's data (requires CONFIRM=kanz-dev)
+	@test "$(CONFIRM)" = "kanz-dev" || { echo "destructive reset requires CONFIRM=kanz-dev" >&2; exit 1; }
+	docker compose -f dev/docker-compose.yml down --volumes
 
 .PHONY: ci
 ci: generate lint build test ## Local convenience chain; see kanz-ci.yml for CI gates
