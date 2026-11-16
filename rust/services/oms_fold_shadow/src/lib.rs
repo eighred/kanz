@@ -190,8 +190,8 @@ mod tests {
         let out = evaluate(&r, "stamp");
         assert_eq!(out.status, FillFoldStatus::Ok as i32);
         let c = out.candidate.unwrap();
-        assert_eq!(c.filled_quantity, Some(d(300_000_000, -8)));
-        assert_eq!(c.leaves_quantity, Some(d(700_000_000, -8)));
+        assert_eq!(c.filled_quantity, Some(d(3, 0)));
+        assert_eq!(c.leaves_quantity, Some(d(7, 0)));
         assert_eq!(c.average_fill_price, Some(d(400_000_000, -8)));
         assert_eq!(c.portfolio_id, "portfolio");
         assert_eq!(c.as_of, r.event_time);

@@ -5,6 +5,10 @@ import sys
 from check_migration_evidence import verify
 
 AGGREGATE_CASES = {
+    *{f"exact-quantity-sequence-{i}" for i in range(1, 11)},
+    *{f"exact-quantity-domain-{e}" for e in (-61, -60, 60, 61)},
+    *{"exact-quantity-refusal-" + case for case in (
+        "ApplyFill", "Amend", "filled-sum", "OVERFILL", "INVALID_FILL")},
     *{f"matrix-{operation}-{status}" for status in (*range(9), 99)
       for operation in ("Route", "Reject", "Cancel", "Expire", "ApplyFill", "Amend", "IsTerminal")},
     *{f"reconcile-{status}-{ack}-{view}" for status in (*range(9), 99)
@@ -171,6 +175,8 @@ REQUIRED = {
         "TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance",
         "TestTerminalCorpusIndependentState", "TestRustTerminalFoldProcessConformance",
         "TestRustFillThenTerminalReplay",
+        *{parent + f"/exact-quantity-sequence-{i}" for i in range(1, 11)
+          for parent in ("TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance")},
     },
     "services/oms/internal/foldshadow": {
         "TestRustOMSFillShadowActualProcess", "TestRustTransactionCandidateBinding",

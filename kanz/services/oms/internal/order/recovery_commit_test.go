@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 	"testing"
@@ -17,6 +18,86 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestRecoveryCommitPreservesSubEightPlaceQuantities(t *testing.T) {
+	ctx := bus.WithTenantID(context.Background(), testTenant)
+	st := &orderpb.OrderState{OrderId: "nano-recovery", PortfolioId: "fund", Venue: "BINANCE", VenueAccountId: "account",
+		InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY, OrderedQuantity: d(4, -9),
+		Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}
+	fills := make([]*orderpb.Fill, 2)
+	for i := range fills {
+		id := fmt.Sprintf("nano-execution-%d", i)
+		fills[i] = &orderpb.Fill{OrderId: st.OrderId, FillId: id, VenueExecutionId: id, Venue: st.Venue,
+			VenueAccountId: st.VenueAccountId, InstrumentId: st.InstrumentId, Side: st.Side,
+			Quantity: d(1, -9), Price: d(1, 0), Fee: &commonpb.Money{Amount: d(0, 0), CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(t0)}
+	}
+	view := execution.OrderView{State: execution.OrderViewCancelled, ExecutedQuantity: d(2, -9), Fills: fills}
+	// Check the financial fixture before the optional database setup can skip.
+	if _, err := execution.CompleteHistory(st, view); err != nil {
+		t.Fatal(err)
+	}
+	pool := newPool(t)
+	s := NewPostgres(pool)
+	if err := s.Create(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	mapping := RecoveryMapping{testTenant, st.PortfolioId, st.Venue, st.VenueAccountId, "fixture-exchange-account"}
+	version, err := s.RecordRecoveryMapping(ctx, mapping, execution.AccountProof{Verified: true, ExchangeAccountID: mapping.ExchangeAccount})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.ObserveRecovery(ctx, "nano-case", st.OrderId, "fixture-source", []byte("exact sub-eight-place history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FreezeRecoveryHistory(ctx, c, version, st, view, t0); err != nil {
+		t.Fatal(err)
+	}
+	c, err = s.RecoveryCase(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitRecovery(ctx, c, t0); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.Load(ctx, st.OrderId)
+	if err != nil || got.Status != st.Status || dec.FromProto(got.FilledQuantity).Cmp(big.NewRat(2, 1000000000)) != 0 ||
+		dec.FromProto(got.LeavesQuantity).Cmp(big.NewRat(2, 1000000000)) != 0 {
+		t.Fatalf("recovered quantities/status: %v, %v", got, err)
+	}
+	var claims int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM order_fills WHERE order_id=$1`, st.OrderId).Scan(&claims); err != nil || claims != 2 {
+		t.Fatalf("execution claims=%d err=%v", claims, err)
+	}
+}
+
+func TestRecoveryRefusesPreviouslyRoundedQuantityHistory(t *testing.T) {
+	pool := newPool(t)
+	s := NewPostgres(pool)
+	ctx := bus.WithTenantID(context.Background(), testTenant)
+	st := &orderpb.OrderState{OrderId: "legacy-nano", PortfolioId: "fund", Venue: "BINANCE", VenueAccountId: "account",
+		InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY, OrderedQuantity: d(1, -8),
+		FilledQuantity: d(0, -8), LeavesQuantity: d(1, -8), Status: orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED}
+	if err := s.Create(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	fill := &orderpb.Fill{OrderId: st.OrderId, FillId: "legacy-fill", VenueExecutionId: "legacy-fill", Venue: st.Venue,
+		VenueAccountId: st.VenueAccountId, InstrumentId: st.InstrumentId, Side: st.Side,
+		Quantity: d(1, -9), Price: d(1, 0), ExecutedAt: timestamppb.New(t0)}
+	var emitter Emitter
+	record, err := emitter.FillFact(ctx, fill, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the stored output of the old rounded fold: a positive raw fill
+	// with a zero-filled snapshot. Recovery must not silently repair that history.
+	if err := s.Save(ctx, st, 0, []outbox.Record{record}, fill.FillId); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.postedRecoveryExecutions(ctx, st); !errors.Is(err, ErrPostedExecutionUnknown) {
+		t.Fatalf("contradictory stored quantity history was accepted: %v", err)
+	}
+}
 
 func TestRecoveryVerifiesExecutionsRatherThanRejectingRoundedAverage(t *testing.T) {
 	pool := newPool(t)
