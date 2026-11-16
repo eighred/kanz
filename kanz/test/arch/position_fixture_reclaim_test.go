@@ -463,24 +463,52 @@ func (p *positionFixtureProgram) reachesPositionFixture(owner positionFixtureFun
 	return position && broker && writer
 }
 
-// #1014: this existing owner publishes only strict foreign-tenant recovery
-// facts; the system OMS refuses those before its book. This is a reviewed
-// absence of a runtime edge, not an exemption for a tools directory. Bind every
-// current caller, native producer and admission/configuration source byte. A new
-// file or any changed input removes the classification and requires review.
-// Main 4342bb41 moves 33 of these 38 paths; 37 file bodies are unchanged and
-// OMS main changes only a comment's source path. The tenant/admission premise
-// below is retained; the digest binds the reviewed new names and exact bytes.
-func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
-	t.Helper()
-	repo := filepath.Join(root, "..")
+func positionForeignRecoveryInputPaths(repo string) ([]string, error) {
+	checkPath := func(relative string, directory bool) error {
+		path := repo
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		for i, part := range parts {
+			if part == "" || part == "." || part == ".." {
+				return fmt.Errorf("invalid recovery input path")
+			}
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if i < len(parts)-1 || directory {
+				if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return fmt.Errorf("recovery input directory is not ordinary")
+				}
+			} else if !info.Mode().IsRegular() {
+				return fmt.Errorf("recovery input is not regular")
+			}
+		}
+		return nil
+	}
 	paths := []string{"kanz/internal/fillfact/recovery.go", "kanz/services/oms/internal/position/projector.go", "kanz/services/oms/cmd/oms/main.go", "kanz/services/oms/internal/config/config.go", "kanz/services/accounting/internal/consume/recovery_integration_test.go"}
-	for _, owner := range []struct{ dir, suffix string }{{"kanz/services/oms/tools/recovery_conformance", "_test.go"}, {"rust/crates/oms_recovery/src", ".rs"}} {
+	for _, owner := range []struct{ dir, suffix string }{{"kanz/services/oms/tools/recovery_conformance", ".go"}, {"rust/crates/oms_recovery/src", ".rs"}} {
+		if err := checkPath(owner.dir, true); err != nil {
+			return nil, err
+		}
 		if err := filepath.WalkDir(filepath.Join(repo, owner.dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if entry.IsDir() || !strings.HasSuffix(path, owner.suffix) {
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("linked recovery input")
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("nonregular recovery input")
+			}
+			if !strings.HasSuffix(path, owner.suffix) {
 				return nil
 			}
 			relative, err := filepath.Rel(repo, path)
@@ -490,10 +518,36 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 			paths = append(paths, filepath.ToSlash(relative))
 			return nil
 		}); err != nil {
-			return false
+			return nil, err
 		}
 	}
 	sort.Strings(paths)
+	for i, path := range paths {
+		if i > 0 && path == paths[i-1] {
+			return nil, fmt.Errorf("duplicate recovery input")
+		}
+		if err := checkPath(path, false); err != nil {
+			return nil, err
+		}
+	}
+	return paths, nil
+}
+
+// #1014: this existing owner publishes only strict foreign-tenant recovery
+// facts; the system OMS refuses those before its book. This is a reviewed
+// absence of a runtime edge, not an exemption for a tools directory. Bind every
+// current caller, native producer and admission/configuration source byte.
+// #1597 adds the reviewed sub-eight-place recovery quantity assertions;
+// the other 37 inputs and the foreign-tenant admission premise remain unchanged.
+// Inventory every Go source file in the recovery owner, not only tests: a new
+// helper, linked input or changed byte removes this classification for review.
+func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
+	t.Helper()
+	repo := filepath.Join(root, "..")
+	paths, err := positionForeignRecoveryInputPaths(repo)
+	if err != nil {
+		return false
+	}
 	h := sha256.New()
 	for _, path := range paths {
 		raw, err := os.ReadFile(filepath.Join(repo, path))
@@ -505,8 +559,8 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 		_, _ = h.Write([]byte{0})
 	}
 	// Independently reconstructed from canonical Git LF blobs: sorted path,
-	// NUL, normalized source bytes, NUL. The earlier recorded digest was wrong.
-	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "344e4d9d293650df8b300b5adda28ee5d93d94d11b870b040946a46cd1aa7d56" {
+	// NUL, normalized source bytes, NUL; all Go files still total 38 inputs.
+	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "51bc442a8b9b17349e1a8aa6e720e03fac15b3b68e85d3911a4b9a26ff76f481" {
 		return false
 	}
 	workflow, err := os.ReadFile(filepath.Join(repo, ".github/workflows/kanz-ci.yml"))
@@ -523,6 +577,56 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 	}
 	t.Log("foreign recovery owners have no POSITION admission edge: 38 exact reviewed source files, exact recovery tenancy, system fixture")
 	return true
+}
+
+func TestPositionForeignRecoveryClassificationBindsNonTestHelpers(t *testing.T) {
+	source := filepath.Join(moduleRoot(t), "..")
+	paths, err := positionForeignRecoveryInputPaths(source)
+	if err != nil || len(paths) != 38 {
+		t.Fatalf("reviewed recovery input inventory: %d %v", len(paths), err)
+	}
+	repo := t.TempDir()
+	for _, path := range append(paths, ".github/workflows/kanz-ci.yml") {
+		raw, err := os.ReadFile(filepath.Join(source, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(repo, path)
+		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destination, raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := filepath.Join(repo, "kanz")
+	if !positionForeignRecoveryHasNoPositionEdge(t, root) {
+		t.Fatal("unchanged 38-input positive refused")
+	}
+	const helper = "kanz/services/oms/tools/recovery_conformance/unreviewed_helper.go"
+	if err := os.WriteFile(filepath.Join(repo, helper), []byte("package recoveryconformance\nfunc unreviewedHelper() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := positionForeignRecoveryInputPaths(repo)
+	helperIndex := sort.SearchStrings(changed, helper)
+	if err != nil || len(changed) != 39 || helperIndex == len(changed) || changed[helperIndex] != helper {
+		t.Fatal("non-test helper did not enter the complete input inventory")
+	}
+	if positionForeignRecoveryHasNoPositionEdge(t, root) {
+		t.Fatal("unreviewed non-POSITION helper retained the foreign classification")
+	}
+	if err := os.Remove(filepath.Join(repo, helper)); err != nil {
+		t.Fatal(err)
+	}
+	if !positionForeignRecoveryHasNoPositionEdge(t, root) {
+		t.Fatal("restored 38-input positive refused")
+	}
+	if err := os.Symlink("recovery_test.go", filepath.Join(repo, helper)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := positionForeignRecoveryInputPaths(repo); err == nil || positionForeignRecoveryHasNoPositionEdge(t, root) {
+		t.Fatal("linked recovery input retained the foreign classification")
+	}
 }
 
 // The one cross-process fixture has a different owner: its seed receipt survives
