@@ -53,6 +53,10 @@ build/vet/lint/architecture/security checks still apply to the exact commit.
 The workflow and privileged parent supervisor are part of the reviewed fixed-head
 trusted computing base. Their source review is a prerequisite to execution; a
 receipt does not certify a maliciously changed workflow or parent.
+The pinned Go image builds the standard `cmd/test2json` converter offline in the
+executable build sandbox. The runtime worker executes parent-qualified read-only
+ELFs from `/tools`, keeping `/scratch` noexec. Failure diagnostics retain fixed
+process/event observations and required test identities; raw output is discarded.
 
 Render externally with the reviewed commit/tree and the approved PyYAML 6.0.3
 dependency. For base, omit `--input`. For Tokyo, supply the exact rendered Tokyo

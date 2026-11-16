@@ -38,6 +38,7 @@ REQUIRED.update(VAULT_TEST + "/" + name for name in ("accounting", "audit", "ide
 REQUIRED.update(ROLE_TEST + "/" + name for name in ("replication-parameter-set", "replication-parameter-alter-system", "admin-default-replica", "admin-default-local", "assumable-replication-set", "catalog-shadow-refused"))
 REQUIRED.update(VAULT_TEST + "/" + name for name in ("prepare-marker-budget", "activation-marker-budget", "boundary-rerun"))
 MANIFEST_TESTS = {"test_base_separates_all_three_roles_and_preserves_callers", "test_tokyo_preserves_transformed_immutable_images_and_scopes_database_peer", "test_changed_contracts_fail_closed"}
+EVENT_ACTIONS = frozenset({"start", "run", "pause", "cont", "pass", "bench", "fail", "output", "skip"})
 PROBE_FAILURES = frozenset({
     "unexpected worker environment name", "Python locale coercion added LC_CTYPE",
     "scratch environment mismatch", "worker is root", "external network interface present",
@@ -107,16 +108,24 @@ def write_exclusive(directory_fd, name, data, mode=0o600):
             raise ProofFailure("owned artifact is not an exclusive regular file")
         with os.fdopen(descriptor, "wb", closefd=False) as stream:
             stream.write(data)
+        # os.open's mode is filtered by the supervisor's umask. Workers use a
+        # different UID, so the requested executable mode must be explicit.
+        os.fchmod(descriptor, mode)
+        info = os.fstat(descriptor)
+        if stat.S_IMODE(info.st_mode) != mode or info.st_size != len(data):
+            raise ProofFailure("owned artifact mode/size qualification failed")
     finally:
         os.close(descriptor)
 
 
-def verify_regular(directory_fd, name, limit):
+def verify_regular(directory_fd, name, limit, mode=None):
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= limit:
             raise ProofFailure("tool copy failed regular-file/size qualification")
+        if mode is not None and stat.S_IMODE(before.st_mode) != mode:
+            raise ProofFailure("tool copy failed exact-mode qualification")
         result = bytearray()
         while len(result) <= limit:
             chunk = os.read(descriptor, min(65536, limit + 1 - len(result)))
@@ -130,6 +139,46 @@ def verify_regular(directory_fd, name, limit):
         return bytes(result)
     finally:
         os.close(descriptor)
+
+
+def promote_elf(directory_fd, name, data):
+    limit = 96 << 20
+    if not 0 < len(data) <= limit or not data.startswith(b"\x7fELF"):
+        raise ProofFailure("isolated build did not produce its single bounded ELF input")
+    write_exclusive(directory_fd, name, data, 0o555)
+    qualified = verify_regular(directory_fd, name, limit, mode=0o555)
+    if qualified != data:
+        raise ProofFailure("promoted ELF bytes differ from isolated build output")
+    return {"sha256": hashlib.sha256(qualified).hexdigest(), "bytes": len(qualified), "mode": "0555"}
+
+
+def observe_fixture_events(events, observation):
+    """Retain fixed protocol counters and required identities, never Output."""
+    observation.update({"event_count": len(events), "event_classification": "present" if events else "empty",
+                        "event_action_counts": {name: 0 for name in sorted(EVENT_ACTIONS)},
+                        "unknown_action_count": 0, "unknown_identity_count": 0})
+    known = {}
+    for event in events:
+        if not isinstance(event, dict):
+            observation["unknown_action_count"] += 1
+            continue
+        action = event.get("Action")
+        if not isinstance(action, str) or action not in EVENT_ACTIONS:
+            observation["unknown_action_count"] += 1
+            continue
+        observation["event_action_counts"][action] += 1
+        if event.get("Package") != PACKAGE:
+            observation["unknown_identity_count"] += 1
+            continue
+        test = event.get("Test", "")
+        if test == "":
+            continue
+        if not isinstance(test, str) or test not in REQUIRED:
+            observation["unknown_identity_count"] += 1
+            continue
+        counts = known.setdefault(test, {name: 0 for name in sorted(EVENT_ACTIONS)})
+        counts[action] += 1
+    observation["required_test_events"] = [{"test": name, "actions": known[name]} for name in sorted(known)]
 
 
 class Sandbox:
@@ -297,9 +346,31 @@ class Sandbox:
                        "kernel_pids_max": pids, "kernel_cpu_max": [int(quota), int(period)],
                        "kernel_interfaces": ["lo"], "kernel_seccomp": 2, "kernel_cap_eff": 0})
 
-    def run(self, arguments, **limits):
+    def run(self, arguments, *, observation=None, **limits):
         container_id = self.create(arguments)
-        return bounded(["docker", "start", "--attach", container_id], started=lambda: self.observe_running(container_id), **limits)
+        try:
+            result = bounded(["docker", "start", "--attach", container_id], started=lambda: self.observe_running(container_id), **limits)
+            if observation is not None:
+                code, output, errors = result
+                observation.update({"docker_start_exit": code, "stdout_bytes": len(output), "stderr_bytes": len(errors),
+                                    "stderr_classification": "present" if errors else "empty"})
+            return result
+        finally:
+            if observation is not None:
+                primary_failure = sys.exc_info()[0] is not None
+                try:
+                    # The running-state inspection observes the trusted prelude;
+                    # this separate owned-ID observation records the final state.
+                    process = self.server_state(container_id)
+                except Exception:
+                    observation["process"] = {"classification": "unavailable"}
+                    if not primary_failure:
+                        raise ProofFailure("worker final process evidence unavailable") from None
+                else:
+                    observation["process"] = process
+                    if not primary_failure and (process["running"] or
+                            (result[0] == 0 and (process["exit_code"] != 0 or process["oom_killed"]))):
+                        raise ProofFailure("worker exit and process evidence disagree")
 
     def start(self, arguments):
         container_id = self.create(arguments)
@@ -429,21 +500,32 @@ def main():
                 vault_fd = os.open("vault", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=tools_fd)
                 try:
                     os.fchmod(vault_fd, 0o555)
+                    if stat.S_IMODE(os.fstat(vault_fd).st_mode) != 0o555:
+                        raise ProofFailure("approved Vault tool mode qualification failed")
                 finally:
                     os.close(vault_fd)
-                receipt["stage"] = "networkless-build"
-                build = sandbox.mounts(sandbox.arguments("build", GO, memory="3072m", scratch="3072m", cpus="2", pids="256", executable=True), modules=True)
-                build += ["GOTOOLCHAIN=local", "GOPATH=/scratch/go", "GOMODCACHE=/modules", "GOCACHE=/scratch/cache",
-                          "GOTMPDIR=/scratch", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0",
-                          "/bin/sh", "-eu", "-c", "go test -c -o /scratch/runtime-pg.test . >&2; cat /scratch/runtime-pg.test"]
-                build_code, binary, build_errors = sandbox.run(build, timeout=300, stdout_limit=96 << 20)
-                if build_code:
-                    receipt["source_diagnostic_locations"] = sorted(set(re.findall(r"(runtime_(?:role|vault)(?:_integration_test)?\.go:[0-9]{1,5})", build_errors.decode(errors="replace"))))
-                    raise ProofFailure("isolated source build failed")
-                if not binary.startswith(b"\x7fELF"):
-                    raise ProofFailure("networkless build did not produce its single ELF input")
-                receipt["test_binary_sha256"] = hashlib.sha256(binary).hexdigest()
-                write_exclusive(tools_fd, "runtime-pg.test", binary, 0o555)
+                # Go's distribution may build test2json on demand. Both ELFs
+                # belong in this executable build boundary, one per bounded
+                # transfer; the runtime worker keeps its small noexec scratch.
+                for suffix, stage, name, prefix, command in (
+                    ("build", "networkless-build", "runtime-pg.test", "test_binary",
+                     "go test -c -o /scratch/runtime-pg.test . >&2; cat /scratch/runtime-pg.test"),
+                    ("build-test2json", "networkless-converter-build", "test2json", "test2json",
+                     "go build -o /scratch/test2json cmd/test2json >&2; cat /scratch/test2json"),
+                ):
+                    receipt["stage"] = stage
+                    build = sandbox.mounts(sandbox.arguments(suffix, GO, memory="3072m", scratch="3072m", cpus="2", pids="256", executable=True), modules=True)
+                    build += ["GOTOOLCHAIN=local", "GOPATH=/scratch/go", "GOMODCACHE=/modules", "GOCACHE=/scratch/cache",
+                              "GOTMPDIR=/scratch", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0",
+                              "/bin/sh", "-eu", "-c", command]
+                    build_code, binary, build_errors = sandbox.run(build, timeout=300, stdout_limit=96 << 20)
+                    if build_code:
+                        receipt["source_diagnostic_locations"] = sorted(set(re.findall(r"(runtime_(?:role|vault)(?:_integration_test)?\.go:[0-9]{1,5})", build_errors.decode(errors="replace"))))
+                        raise ProofFailure("isolated source build failed")
+                    promoted = promote_elf(tools_fd, name, binary)
+                    for field, value in promoted.items():
+                        receipt[prefix + "_" + field] = value
+                    del binary
                 receipt["stage"] = "manifest-oracles"
                 probe = sandbox.mounts(sandbox.arguments("sandbox-probe", PYTHON), modules=True, tools=True, python=True, work="/source/tools/runtime_credentials")
                 probe += ["PYTHONPATH=/python-deps", "PYTHONDONTWRITEBYTECODE=1", "python", "-B", "sandbox_probe.py"]
@@ -511,10 +593,18 @@ def main():
                 test = sandbox.mounts(sandbox.arguments("proof", GO, network=namespace, memory="768m", scratch="128m", pids="96"), tools=True)
                 test += ["TEST_RUNTIME_ROLE_ADMIN_URL=postgresql://fixture_admin:fixture@127.0.0.1:5432/fixture?sslmode=disable",
                          "TEST_RUNTIME_VAULT_ADDR=http://127.0.0.1:8200", "TEST_RUNTIME_VAULT_ADMIN_TOKEN=fixture-root-token",
-                         "GOTOOLCHAIN=local", "GOTMPDIR=/scratch", "GOCACHE=/scratch/cache", "GOPROXY=off", "GOSUMDB=off",
-                         "go", "tool", "test2json", "-p", PACKAGE, "/tools/runtime-pg.test", "-test.v=test2json", "-test.timeout=270s", "-test.count=1", "-test.run=^(TestRuntimePrivilegesWithSeparateRoles|TestRuntimeVaultIsolation)$"]
-                code, raw_events, _ = sandbox.run(test, timeout=290, stdout_limit=2 << 20)
-                events = [json.loads(line) for line in raw_events.splitlines()]
+                         "/tools/test2json", "-t", "-p", PACKAGE, "/tools/runtime-pg.test", "-test.v=test2json", "-test.timeout=270s", "-test.count=1", "-test.run=^(TestRuntimePrivilegesWithSeparateRoles|TestRuntimeVaultIsolation)$"]
+                execution = {"docker_start_exit": None, "stdout_bytes": None, "stderr_bytes": None,
+                             "stderr_classification": "not-observed", "process": None,
+                             "event_classification": "not-parsed", "required_test_events": []}
+                receipt["fixture_execution"] = execution
+                code, raw_events, _ = sandbox.run(test, timeout=290, stdout_limit=2 << 20, observation=execution)
+                try:
+                    events = [json.loads(line) for line in raw_events.splitlines()]
+                except (ValueError, UnicodeError):
+                    execution["event_classification"] = "invalid-json"
+                    raise ProofFailure("fixture event stream is not valid JSON") from None
+                observe_fixture_events(events, execution)
                 receipt["tests"] = [{"test": event["Test"], "status": event["Action"]} for event in events
                     if event.get("Package") == PACKAGE and event.get("Test") in REQUIRED and event.get("Action") in ("pass", "fail", "skip")]
                 receipt["source_diagnostic_locations"] = sorted(set(location for event in events
@@ -538,8 +628,8 @@ def main():
                 for event in events:
                     if event.get("Package") != PACKAGE or event.get("Test") not in REQUIRED or event.get("Action") != "pass":
                         continue
-                    elapsed = event.get("Elapsed", 0)
-                    if not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or not 0 <= elapsed <= 300:
+                    elapsed = event.get("Elapsed")
+                    if elapsed is not None and (type(elapsed) not in (int, float) or not math.isfinite(elapsed) or not 0 <= elapsed <= 300):
                         raise ProofFailure("invalid bounded test event")
                     statuses.append({"test": event["Test"], "status": "pass", "elapsed": elapsed})
                 receipt["tests"] = sorted(statuses, key=lambda item: item["test"])
