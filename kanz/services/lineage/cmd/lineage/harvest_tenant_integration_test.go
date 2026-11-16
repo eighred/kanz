@@ -57,6 +57,13 @@ func (s lineageFixtureSource) GetX509BundleForTrustDomain(td spiffeid.TrustDomai
 type lineageAccount struct {
 	client *bus.NATSClient
 	js     jetstream.JetStream
+	stored nats.JetStreamContext
+}
+
+type lineageRetainedStream struct {
+	jetstream.Stream
+	stored nats.JetStreamContext
+	name   string
 }
 
 func lineageBrokerEnv(t *testing.T) (string, string) {
@@ -121,9 +128,13 @@ func lineageAccountAs(t *testing.T, ctx context.Context, url, dir, role string) 
 	if err != nil {
 		t.Fatal("canonical JetStream unavailable")
 	}
-	return &lineageAccount{client: client, js: js}
+	stored, err := nc.JetStream()
+	if err != nil {
+		t.Fatal("same-role stored-message reader unavailable")
+	}
+	return &lineageAccount{client: client, js: js, stored: stored}
 }
-func lineageCanonicalStream(t *testing.T, ctx context.Context, account *lineageAccount, subject, want string, age time.Duration, subjects []string) jetstream.Stream {
+func lineageCanonicalStream(t *testing.T, ctx context.Context, account *lineageAccount, subject, want string, age time.Duration, subjects []string) *lineageRetainedStream {
 	t.Helper()
 	name, err := account.js.StreamNameBySubject(ctx, subject)
 	if err != nil || name != want {
@@ -141,12 +152,12 @@ func lineageCanonicalStream(t *testing.T, ctx context.Context, account *lineageA
 	expected := append([]string(nil), subjects...)
 	sort.Strings(got)
 	sort.Strings(expected)
-	if strings.Join(got, "\x00") != strings.Join(expected, "\x00") || info.Config.Storage != jetstream.FileStorage ||
+	if info.Config.Name != want || strings.Join(got, "\x00") != strings.Join(expected, "\x00") || info.Config.Storage != jetstream.FileStorage ||
 		info.Config.Retention != jetstream.LimitsPolicy || info.Config.MaxAge != age || info.Config.Replicas != 1 ||
 		info.Config.Duplicates != 2*time.Minute || info.Config.Discard != jetstream.DiscardOld {
 		t.Fatal("actual canonical stream configuration differs from the reviewed fixture contract")
 	}
-	return stream
+	return &lineageRetainedStream{Stream: stream, stored: account.stored, name: name}
 }
 
 var lineageExecutionSubjects = []string{"execution.>", "strategy.>", "order.>", "optimization.>"}
@@ -208,7 +219,7 @@ type lineageRetained struct {
 	sequence uint64
 }
 
-func lineageFindRetained(t *testing.T, ctx context.Context, stream jetstream.Stream, after uint64, id string) (lineageRetained, bool) {
+func lineageFindRetained(t *testing.T, ctx context.Context, stream *lineageRetainedStream, after uint64, id string) (lineageRetained, bool) {
 	t.Helper()
 	last := lineageLastSequence(t, ctx, stream)
 	if last < after || last-after > 128 {
@@ -216,12 +227,20 @@ func lineageFindRetained(t *testing.T, ctx context.Context, stream jetstream.Str
 	}
 	for seq := after; seq < last; {
 		seq++
-		raw, err := stream.GetMsg(ctx, seq)
-		if errors.Is(err, jetstream.ErrMsgNotFound) {
+		// Direct GetMsg adds retrieval metadata to Header. Republish only the
+		// original stored headers: the same authenticated connection uses the
+		// fixed stored-message API, without DirectGet or a fallback read route.
+		readCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+		raw, err := stream.stored.GetMsg(stream.name, seq, nats.Context(readCtx))
+		stop()
+		if errors.Is(err, nats.ErrMsgNotFound) {
 			continue
 		}
 		if err != nil {
 			t.Fatal("owned retained frame readback failed")
+		}
+		if raw.Sequence != seq {
+			t.Fatal("owned retained sequence disagrees with its request")
 		}
 		env, _, err := bus.Unframe(raw.Data)
 		if err != nil || env.GetEventId() != id {
@@ -494,7 +513,7 @@ func TestCanonicalTenantFactsReachOwnedLineageHTTP(t *testing.T) {
 	lineageWait(t, ctx, run.done, func() bool { return admitted.Load() == 2 })
 	retainedViews := make([]lineageRetained, 0, 3)
 	for _, check := range []struct {
-		stream    jetstream.Stream
+		stream    *lineageRetainedStream
 		before    uint64
 		id, owner string
 	}{
@@ -513,7 +532,7 @@ func TestCanonicalTenantFactsReachOwnedLineageHTTP(t *testing.T) {
 	// Positive same-named streams alone cannot identify an account. Require
 	// the other producer's owned ID to be absent from each contrary view.
 	for _, check := range []struct {
-		stream jetstream.Stream
+		stream *lineageRetainedStream
 		after  uint64
 		id     string
 	}{
@@ -593,10 +612,11 @@ func lineageAllowedPublisherControl(t *testing.T, ctx context.Context, p *bus.Pr
 	if err != nil {
 		t.Fatal("canonical authority evidence stream unavailable")
 	}
-	stream, err := reader.js.Stream(ctx, name)
+	base, err := reader.js.Stream(ctx, name)
 	if err != nil {
 		t.Fatal("authority evidence readback unavailable")
 	}
+	stream := &lineageRetainedStream{Stream: base, stored: reader.stored, name: name}
 	before := lineageLastSequence(t, ctx, stream)
 	id := lineageUUID(t)
 	// A nonce-owned, typed envelope is only a fixture permission/transport
