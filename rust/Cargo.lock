@@ -312,6 +312,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e87acb0c6bf6237fca7a50d7b51e801c98a18a5fe6f3bb34f7d77b85ca165388"
 
 [[package]]
+name = "arrow-schema"
+version = "60.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de2c8e714b466404cdc1189e89f892426efea614d938e16c15518c340cd43ba3"
+
+[[package]]
 name = "arrow-select"
 version = "58.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2070,7 +2076,7 @@ name = "kanz-lake-snapshot"
 version = "0.1.0"
 dependencies = [
  "arrow-array 59.3.2",
- "arrow-schema 59.3.2",
+ "arrow-schema 60.1.0",
  "bytes",
  "datafusion",
  "libc",
