@@ -135,38 +135,50 @@ func (b *handoffBroker) connections(id string) []uint64 {
 	// Connz in the pinned NATS server reads opts.Username while TLSMap writes
 	// it without the client lock. Read the verified TLS state through the
 	// exported, locked accessor instead; client-supplied names are not identity.
-	// This disposable broker has one fixed stream and at most 16 connections.
-	// A scan that misses a registered client must refuse, including CID growth
-	// beyond this finite range; it must never report an incomplete empty set.
+	// Equal counts alone do not detect replacement during a scan. Equal complete
+	// CID/URI collections bracket a midpoint count instead: non-reused CIDs in
+	// both collections were all registered at that midpoint. A matching count
+	// excludes missed clients, including IDs beyond this explicit scan budget.
 	for attempt := 0; attempt < 50; attempt++ {
-		before := b.server.NumClients()
-		if before > 32 {
-			b.t.Fatal("bounded broker principal inventory exceeded")
-		}
-		var ids []uint64
-		observed := 0
-		for cid := uint64(1); cid <= 4096; cid++ {
-			client := b.server.GetClient(cid)
-			if client == nil {
-				continue
+		first := b.collectPrincipals()
+		if first != nil {
+			midpoint := b.server.NumClients()
+			second := b.collectPrincipals()
+			if handoffPrincipalSnapshot(first, midpoint, second) {
+				var ids []uint64
+				for cid := uint64(1); cid <= handoffCIDBudget; cid++ {
+					if peer, exists := second[cid]; exists && peer == id {
+						ids = append(ids, cid)
+					}
+				}
+				return ids
 			}
-			observed++
-			state := client.GetTLSConnectionState()
-			if state == nil || !state.HandshakeComplete || state.Version != tls.VersionTLS13 || len(state.PeerCertificates) != 1 {
-				continue
-			}
-			uris := state.PeerCertificates[0].URIs
-			if len(uris) == 1 && uris[0].String() == id {
-				ids = append(ids, cid)
-			}
-		}
-		if observed == before && observed == b.server.NumClients() {
-			return ids
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	b.t.Fatal("complete broker principal inventory unavailable")
 	return nil
+}
+
+func (b *handoffBroker) collectPrincipals() map[uint64]string {
+	peers := make(map[uint64]string)
+	for cid := uint64(1); cid <= handoffCIDBudget; cid++ {
+		client := b.server.GetClient(cid)
+		if client == nil {
+			continue
+		}
+		peer, known := handoffTLSPrincipal(client.GetTLSConnectionState())
+		if !known {
+			// A registered connection with unfinished/unknown TLS is not an
+			// absent principal. Refuse this whole collection and try again.
+			return nil
+		}
+		peers[cid] = peer
+		if len(peers) > handoffMaxClients {
+			return nil
+		}
+	}
+	return peers
 }
 
 func handoffWait(t *testing.T, limit time.Duration, label string, predicate func() bool) {
