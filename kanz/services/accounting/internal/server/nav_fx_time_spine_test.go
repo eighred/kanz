@@ -80,7 +80,10 @@ func TestPostgresJetStreamFXTimeThroughNAV(t *testing.T) {
 		cancel()
 		if !joined {
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("FX subscriber shutdown: %v", err)
+				}
 			case <-time.After(10 * time.Second):
 				t.Error("FX subscriber did not join")
 			}

@@ -80,7 +80,12 @@ func TestSnapshotOwnerSubprocess(t *testing.T) {
 		inputDone <- e
 		cancel()
 	}()
-	defer func() { _ = os.Stdin.Close(); <-inputDone }()
+	defer func() {
+		_ = os.Stdin.Close()
+		if err := <-inputDone; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
+			t.Error("owner input reader join failed")
+		}
+	}()
 	var line []byte
 	select {
 	case line = <-inputLine:
@@ -258,7 +263,10 @@ func startSnapshotFixtureProcess(t *testing.T, ctx context.Context, path, name, 
 		if !p.joined {
 			_ = p.stdin.Close()
 			_ = p.cmd.Process.Kill()
-			<-p.done
+			var exit *exec.ExitError
+			if err := <-p.done; err != nil && !errors.As(err, &exit) {
+				t.Error("killed owner join failed")
+			}
 			p.joined = true
 		}
 	})
@@ -317,9 +325,9 @@ func (p *snapshotOwnerProcess) close(t *testing.T) {
 		}
 	case <-timer.C:
 		_ = p.cmd.Process.Kill()
-		<-p.done
+		err := <-p.done
 		p.joined = true
-		t.Fatal("owner cleanup observation expired; killed and joined")
+		t.Fatalf("owner cleanup observation expired; killed and joined: %v", err)
 	}
 	select {
 	case state := <-p.states:
