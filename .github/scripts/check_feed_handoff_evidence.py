@@ -15,6 +15,10 @@ TOP = "TestFeedRuntimeControlledHandoff"
 NAMES = {TOP, "TestFeedHandoffExactRepeatControl"} | {f"{TOP}/{v}" for v in ("binance", "okx")} | {
     f"{TOP}/{v}/{case}" for v in ("binance", "okx")
     for case in ("authenticated-publish-denied", "duplicate-external-assignment-refused")
+} | {
+    "TestFeedHandoffExactRepeatControl/" + case for case in (
+        "PrincipalInventoryIdentical", "PrincipalInventoryPairedCountABA", "PrincipalInventoryMissedCID",
+        "PrincipalInventoryAboveBudget", "PrincipalInventoryChangedURI", "PrincipalInventoryUnknownTLS")
 }
 BINARIES = ("market-ingest", "kanz-binance-depth", "kanz-okx-depth", "handoff.test")
 HEX = re.compile(r"[0-9a-f]{40}\Z")
@@ -25,6 +29,9 @@ def checked(raw):
     if not batch or any(e.get("Package") != PREFIX + PACKAGE for e in batch):
         raise ValueError("unexpected handoff package")
     verify(batch, {PACKAGE: NAMES})
+    runs = Counter(e["Test"] for e in batch if e.get("Action") == "run" and e.get("Test"))
+    if runs != Counter({name: 1 for name in NAMES}):
+        raise ValueError("handoff run inventory differs")
     passes = Counter(e.get("Test", "") for e in batch if e.get("Action") == "pass")
     if passes != Counter({name: 1 for name in NAMES | {""}}):
         raise ValueError("handoff outcome inventory differs")

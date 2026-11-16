@@ -133,7 +133,11 @@ func startWorkerWithin(t *testing.T, config map[string]any, lifetime time.Durati
 			cancel()
 			_ = in.Close()
 			select {
-			case <-w.done:
+			case err := <-w.done:
+				var exit *exec.ExitError
+				if err != nil && !errors.As(err, &exit) {
+					t.Errorf("cancelled worker join: %v", err)
+				}
 			case <-time.After(6 * time.Second):
 				t.Error("Rust process did not terminate")
 			}
