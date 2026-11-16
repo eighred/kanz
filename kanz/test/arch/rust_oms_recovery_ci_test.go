@@ -33,7 +33,7 @@ func checkRecoveryWorkflow(raw []byte) error {
 	required := map[string][]string{
 		"Compile the actual recovery owner and fixture":        {"cargo test --locked -p kanz-oms-recovery --all-targets", "cargo test --locked -p kanz-oms-store --features qualification-diagnostics diagnostics::tests", "cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings", "cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture", "cargo clippy --locked -p kanz-oms-recovery --all-targets --features qualification-diagnostics -- -D warnings", "cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture --features qualification-diagnostics"},
 		"Start separate owned recovery dependencies":           {`docker exec -e PGPASSWORD=fixture -e PGCONNECT_TIMEOUT=2 "$container" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1`, `PGCONNECT_TIMEOUT=2`, `PGOPTIONS=-c statement_timeout=2000`, `psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1 -Atqc 'SELECT 1'`, `2>/dev/null)" = 1; then ready=true; break; fi`, "postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9", "--name oms-recovery-pg", "--name oms-recovery-default-pg", "--name oms-recovery-constrained-pg", "-c max_locks_per_transaction=10 -c max_connections=100 -c max_prepared_transactions=0", "127.0.0.1:55434:5432", "kanz.fixture.run=$GITHUB_RUN_ID", "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT", "-c max_locks_per_transaction=1024 -c max_connections=100 -c max_prepared_transactions=0", "127.0.0.1:55432:5432", "127.0.0.1:55433:5432", "NOSUPERUSER NOBYPASSRLS", "kanz/infra/nats/bootstrap-job.yaml"},
-		"Qualify actual recovery and complete large histories": {"set -euo pipefail", "qualification_status=0", `sha256sum "$KANZ_OMS_RECOVERY_BIN"`, `exit "$qualification_status"`, "go test -race -p 1 ./services/oms/tools/recovery-conformance -skip '^TestRustRecoveryComplete8000History$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/go$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/rust$' -timeout 20m", "check_oms_recovery_evidence.py", "--create --source \"$GITHUB_SHA\" --tree \"$(git rev-parse HEAD^{tree})\" --run \"$GITHUB_RUN_ID\" --attempt \"$GITHUB_RUN_ATTEMPT\""},
+		"Qualify actual recovery and complete large histories": {"set -euo pipefail", "qualification_status=0", `sha256sum "$KANZ_OMS_RECOVERY_BIN"`, `exit "$qualification_status"`, "go test -race -p 1 ./services/oms/tools/recovery_conformance -skip '^TestRustRecoveryComplete8000History$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/go$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/rust$' -timeout 20m", "check_oms_recovery_evidence.py", "--create --source \"$GITHUB_SHA\" --tree \"$(git rev-parse HEAD^{tree})\" --run \"$GITHUB_RUN_ID\" --attempt \"$GITHUB_RUN_ATTEMPT\""},
 		"Remove only owned recovery dependencies":              {"for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-constrained-pg oms-recovery-nats", "docker inspect --format", "kanz.fixture.run", "kanz.fixture.attempt", `test -z "$remaining"`, "docker rm -f \"$container\""},
 	}
 	seen := map[string]bool{}
@@ -82,7 +82,7 @@ func checkRecoveryWorkflow(raw []byte) error {
 			if invocations != 3 || strings.Count(step.Run, "|| qualification_status=1") != 4 {
 				return fmt.Errorf("recovery invocation or checker exit missing")
 			}
-			if step.Env["KANZ_OMS_RECOVERY_BIN"] != "${{ github.workspace }}/kanz-rs/target/release/examples/recovery-coordinator-fixture" || !strings.Contains(step.Env["TEST_POSTGRES_CONSTRAINED_LOCK_URL"], "@127.0.0.1:55434/") || !strings.Contains(step.Env["TEST_POSTGRES_URL"], "@127.0.0.1:55432/") || !strings.Contains(step.Env["TEST_POSTGRES_DEFAULT_LOCK_URL"], "@127.0.0.1:55433/") || step.Env["KANZ_OMS_RECOVERY_VERSION"] != "${{ github.sha }}" {
+			if step.Env["KANZ_OMS_RECOVERY_BIN"] != "${{ github.workspace }}/rust/target/release/examples/recovery-coordinator-fixture" || !strings.Contains(step.Env["TEST_POSTGRES_CONSTRAINED_LOCK_URL"], "@127.0.0.1:55434/") || !strings.Contains(step.Env["TEST_POSTGRES_URL"], "@127.0.0.1:55432/") || !strings.Contains(step.Env["TEST_POSTGRES_DEFAULT_LOCK_URL"], "@127.0.0.1:55433/") || step.Env["KANZ_OMS_RECOVERY_VERSION"] != "${{ github.sha }}" {
 				return fmt.Errorf("recovery dependency/source binding")
 			}
 		}
@@ -134,7 +134,7 @@ func checkRecoveryRuntimeProfile(cargo, store, recovery, fixture string) error {
 }
 
 func TestRustRecoveryRuntimeProfileAndCapacityCause(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
 	read := func(path string) string {
 		raw, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil {
@@ -143,9 +143,9 @@ func TestRustRecoveryRuntimeProfileAndCapacityCause(t *testing.T) {
 		return strings.ReplaceAll(string(raw), "\r\n", "\n")
 	}
 	cargo := read("Cargo.toml")
-	store := read("crates/oms-store/src/lib.rs")
-	recovery := read("crates/oms-recovery/src/lib.rs")
-	fixture := read("crates/oms-recovery/examples/recovery-coordinator-fixture.rs")
+	store := read("crates/oms_store/src/lib.rs")
+	recovery := read("crates/oms_recovery/src/lib.rs")
+	fixture := read("crates/oms_recovery/examples/recovery-coordinator-fixture.rs")
 	if err := checkRecoveryRuntimeProfile(cargo, store, recovery, fixture); err != nil {
 		t.Fatal(err)
 	}

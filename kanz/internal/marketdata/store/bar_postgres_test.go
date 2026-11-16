@@ -70,7 +70,7 @@ func newBarPool(t *testing.T) *pgxpool.Pool {
 		}
 	})
 
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market-data", "migrations",
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market_data", "migrations",
 		"0003_ohlcv_bars.sql"))
 	if err != nil {
 		t.Fatalf("read migration: %v", err)

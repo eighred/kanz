@@ -55,7 +55,7 @@ const (
 	// constructed from itself. The boundary protects every OTHER consumer;
 	// the one service that owns the module is exempt, the standard
 	// "main/wiring layer may import internals" carve-out.
-	riskComposerPrefix = modulePath + "/services/risk-engine/"
+	riskComposerPrefix = modulePath + "/services/risk_engine/"
 )
 
 // isRiskInternal reports whether an import path is the risk module's root

@@ -53,7 +53,7 @@ import (
 //     This guard is default-deny over EVERY exported method that can reach a
 //     produce, so the new door is covered on the commit that adds it rather
 //     than on the commit someone remembers it.
-//   - services/archiver/cmd/archiver-drain has no test files. It holds a live
+//   - services/archiver/cmd/archiver_drain has no test files. It holds a live
 //     *bus.KafkaClient — it dials one and passes it in as both Kafka and Reader
 //     — so a produce written there bypasses the gate entirely, and no test in
 //     the module would notice. That is the second test below.
@@ -263,7 +263,7 @@ var archiverDrainCommandPublishSites = map[string]string{}
 // no reach at all.
 func TestArchiverDrainCommandProducesOnlyThroughTheGatedDrain(t *testing.T) {
 	root := moduleRoot(t)
-	const cmdDir = "services/archiver/cmd/archiver-drain"
+	const cmdDir = "services/archiver/cmd/archiver_drain"
 	pkg := parseDrainPackage(t, root, cmdDir)
 
 	// NON-VACUITY, and it is the important half here: the expected result is "no

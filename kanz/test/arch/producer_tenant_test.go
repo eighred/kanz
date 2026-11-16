@@ -212,12 +212,12 @@ type tenantRoute struct {
 // refusal at the boundary is the better failure, and that is why these four sit
 // here rather than being "fixed".
 var producersWithoutATenantFallback = map[string]tenantRoute{
-	"cmd/kanz-halt": {
+	"cmd/kanz_halt": {
 		why: "ROUTE 2. The halt/resume CLI stamps TenantID: opt.tenant on the ModeChanged FACT " +
 			"(main.go) and REFUSES to run without --tenant (main.go, \"the bus rejects an " +
 			"envelope with no tenant_id on the live path\"). A fallback would be unreachable code " +
 			"whose only effect would be to weaken that refusal into a default.",
-		stampedIn: "cmd/kanz-halt/main.go",
+		stampedIn: "cmd/kanz_halt/main.go",
 	},
 	"services/optimization/cmd/optimization": {
 		why: "ROUTE 2, and a fallback here would be the same security defect as the gateway's, on a " +
@@ -232,7 +232,7 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"than letting a fallback rescue it.",
 		stampedIn: "services/optimization/internal/publish/publish.go",
 	},
-	"services/api-gateway/cmd/api-gateway": {
+	"services/api_gateway/cmd/api_gateway": {
 		why: "ROUTE 2, and a fallback here would be a security defect. The gateway is the platform's " +
 			"identity authority: every command it publishes goes through the single Handler.publish " +
 			"helper (orders.go), which stamps TenantID: p.Tenant — the AUTHENTICATED CALLER's " +
@@ -244,7 +244,7 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"for a decision made with no principal at all. That fallback is scoped to the recorder " +
 			"PRECISELY so it cannot reach the order path above; moving it onto ProducerConfig would " +
 			"reintroduce the defect this entry exists to prevent.",
-		stampedIn: "services/api-gateway/internal/orders/orders.go",
+		stampedIn: "services/api_gateway/internal/orders/orders.go",
 	},
 	"internal/auditdelivery": {why: "Authority journal workers scope reads with transaction-local tenant RLS and stamp the same tenant on each event (#1292).", stampedIn: "internal/auditdelivery/worker.go"},
 	"services/copilot/cmd/copilot": {
@@ -276,7 +276,7 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"the monitor keys its book on env.GetTenantId() (monitor.go), and a fallback would " +
 			"file one tenant's breach under another's mandate.",
 	},
-	"services/webhook-ingest/cmd/webhook-ingest": {
+	"services/webhook_ingest/cmd/webhook_ingest": {
 		why: "ROUTE 2, indirect. Every publish this service makes goes through " +
 			"internal/signal/translate, shared with the native alpha runners, which resolves the " +
 			"tenant from translate.Options.Authority — a FundAuthority built from configuration — " +

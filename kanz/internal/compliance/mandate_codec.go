@@ -209,6 +209,10 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 	if !strings.HasPrefix(cc.GetConfigKey(), MandateConfigKeyPrefix) {
 		return nil, nil
 	}
+	tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
+	if !ok {
+		return nil, errors.New("compliance: malformed mandate config_key")
+	}
 	ms, err := DecodeMandateValue(cc.GetNewValue())
 	if err != nil {
 		return nil, err
@@ -222,12 +226,25 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Ma
 	// dropped it quietly would leave the portfolio reading UNGOVERNED — which
 	// under OMS_REQUIRE_MANDATE=false is admitted with no constraints, not
 	// refused (#243).
+	// Validate the entire retained set before replacing any readable version.
+	for _, m := range ms {
+		if !mandateMatchesIdentity(m, tenantID, portfolioID) {
+			return nil, errors.New("compliance: retained mandate identity does not match config_key")
+		}
+		if err := ValidateMandate(m); err != nil {
+			return nil, err
+		}
+	}
 	for _, m := range ms {
 		if err := l.reg.Put(m); err != nil {
 			return nil, err
 		}
 	}
 	return ms, nil
+}
+
+func mandateMatchesIdentity(m *compliancepb.Mandate, tenantID, portfolioID string) bool {
+	return m.GetTenantId() == tenantID && m.GetPortfolioId() == portfolioID
 }
 
 // MandateConsumer is the bus handler that feeds a MandateRegistry from the
@@ -284,7 +301,7 @@ func NewMandateConsumer(reg *MandateRegistry, logger *slog.Logger, opts ...Manda
 // fails the same way, so the portfolio is not un-mandated until someone notices —
 // it is un-governable until someone REPUBLISHES. That state is now recorded
 // against the portfolio, which makes its orders refuse rather than pass (#619).
-func (c *MandateConsumer) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []byte) error {
+func (c *MandateConsumer) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var cc lifecyclepb.ConfigChanged
 	if err := proto.Unmarshal(payload, &cc); err != nil {
 		// NO config_key SURVIVES A PAYLOAD THAT DID NOT DECODE, so there is no
@@ -297,17 +314,20 @@ func (c *MandateConsumer) Handle(ctx context.Context, _ *envelopepb.Envelope, pa
 		c.reg.Drop()
 		return nil
 	}
+	if !strings.HasPrefix(cc.GetConfigKey(), MandateConfigKeyPrefix) {
+		return nil
+	}
+	tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
+	if !ok || env.GetTenantId() == "" || env.GetTenantId() != tenantID {
+		// A body cannot select a different tenant's governance or rejection mark.
+		// Without an attributable key in the authenticated envelope's tenant,
+		// count the loss; do not make an innocent portfolio unreadable.
+		c.logger.ErrorContext(ctx, "compliance: mandate config_key is not attributable to envelope tenant",
+			"config_key", cc.GetConfigKey(), "tenant_id", env.GetTenantId())
+		c.reg.Drop()
+		return nil
+	}
 	if _, err := c.loader.Apply(&cc); err != nil {
-		tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
-		if !ok {
-			// The key is outside the mandate namespace or malformed. Apply only
-			// errors on a mandate key, so this means the key itself is corrupt.
-			c.logger.ErrorContext(ctx, "compliance: a mandate could not be applied and its config_key "+
-				"does not name a (tenant, portfolio), so the portfolio it governs cannot be marked",
-				"err", err, "config_key", cc.GetConfigKey())
-			c.reg.Drop()
-			return nil
-		}
 		c.logger.ErrorContext(ctx, "UNGOVERNABLE: a published mandate could not be applied, and the "+
 			"mandate stream is compacted — this portfolio has no readable mandate until one is "+
 			"republished, and its orders are now REFUSED rather than admitted",
@@ -338,7 +358,7 @@ var ErrMandateIncomplete = errors.New("compliance: mandate is incomplete")
 // on that portfolio's subject, and every consumer that boots arms itself with it,
 // forever, until somebody publishes a good one.
 //
-// ONE IMPLEMENTATION, CALLED BY BOTH PUBLISHERS (#562). cmd/kanz-mandate had
+// ONE IMPLEMENTATION, CALLED BY BOTH PUBLISHERS (#562). cmd/kanz_mandate had
 // these checks written out in loadMandate, and the compliance service's propose
 // route needs the same ones; a second copy is how the two come to accept
 // different mandates — the divergence the shared proposal store was promoted to
@@ -372,6 +392,15 @@ func ValidateMandate(m *compliancepb.Mandate) error {
 		// refuses the input.
 		return fmt.Errorf("%w: effective_at is required: it is part of what the approval covers, "+
 			"so it cannot be defaulted per-invocation", ErrMandateIncomplete)
+	}
+	if err := validateMandateRuleContracts(m); err != nil {
+		return err
+	}
+	for _, rule := range m.GetRules() {
+		if _, valid := violationSeverity(rule); !valid {
+			return fmt.Errorf("%w: rule %q has unsupported on_violation %d", ErrMandateIncomplete,
+				rule.GetRuleId(), rule.GetOnViolation())
+		}
 	}
 	return nil
 }

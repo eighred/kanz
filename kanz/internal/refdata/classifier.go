@@ -22,7 +22,7 @@ import (
 // only internal/risk/api/v* to be imported from outside the risk module, and
 // exempts exactly one consumer — the risk-engine service, as the module's
 // composition root. So the factor.Classifier adapter lives there, in
-// services/risk-engine/internal/app, where the wiring layer is already entitled
+// services/risk_engine/internal/app, where the wiring layer is already entitled
 // to know both types. It is still ONE adapter with one caller; what moved is
 // which package is allowed to name factor.Classification.
 

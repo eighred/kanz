@@ -26,7 +26,7 @@
 # THE MARKET-DATA FRESHNESS SLO WAS REMOVED, NOT SUSPENDED. It was compiled
 # from kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
 # internal/integrity — a package deleted in DATA-M4. Nothing in the Go source
-# has emitted that series since, and services/market-data registers no
+# has emitted that series since, and services/market_data registers no
 # domain metric at all (only the generic bus metrics), so the SLO could not be
 # re-pointed at a renamed series either. Left in place it computed over an
 # empty vector: every windowed ratio was empty, so the generic burn-rate alerts

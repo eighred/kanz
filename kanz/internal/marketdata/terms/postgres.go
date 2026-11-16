@@ -144,6 +144,11 @@ func validateRecord(r Record) error {
 		r.Terms.GetInstrumentId() != r.InstrumentID {
 		return fmt.Errorf("terms: %s payload identity or effective time differs from row key", r.InstrumentID)
 	}
+	// TIMESTAMPTZ and the pinned pgx encoder keep microseconds. Refuse finer
+	// instants before append instead of making the SQL key precede its payload.
+	if r.AsOf.Nanosecond()%1000 != 0 {
+		return fmt.Errorf("terms: %s effective time has unsupported sub-microsecond precision", r.InstrumentID)
+	}
 	var matches bool
 	switch payload := r.Terms.GetTerms().(type) {
 	case *referencepb.ContractTerms_Option:
@@ -159,6 +164,22 @@ func validateRecord(r Record) error {
 	}
 	if !matches {
 		return fmt.Errorf("terms: %s row kind %q does not match its ContractTerms variant", r.InstrumentID, r.Kind)
+	}
+	// ChainAsOf selects by this column while valuation reads the payload. Keep
+	// their documented grouping keys equal before append and after decode.
+	var grouping string
+	switch r.Kind {
+	case KindOption:
+		grouping = r.Terms.GetOption().GetUnderlyingId()
+	case KindFuture:
+		grouping = r.Terms.GetFuture().GetUnderlyingId()
+	case KindStructured:
+		grouping = r.Terms.GetStructured().GetDealId()
+	default:
+		return nil // No canonical underlying/deal grouping field on a swap/bond.
+	}
+	if grouping != r.UnderlyingID {
+		return fmt.Errorf("terms: %s indexed grouping key differs from its ContractTerms payload", r.InstrumentID)
 	}
 	return nil
 }
@@ -271,6 +292,9 @@ func scanRecord(s scanner) (Record, error) {
 	rec.Terms = &referencepb.ContractTerms{}
 	if err := proto.Unmarshal(blob, rec.Terms); err != nil {
 		return Record{}, fmt.Errorf("terms: decode %s: %w", rec.InstrumentID, err)
+	}
+	if err := validateRecord(rec); err != nil {
+		return Record{}, fmt.Errorf("terms: invalid stored contract: %w", err)
 	}
 	return rec, nil
 }

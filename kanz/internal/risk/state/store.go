@@ -261,6 +261,9 @@ func (s *Store) ApplyPortfolioRevalued(ctx context.Context, env *envelopepb.Enve
 	if id == "" {
 		return ErrMissingAggregateID
 	}
+	if err := validateStateTime(p.AsOf, "portfolio.as_of"); err != nil {
+		return err
+	}
 	lock, port, dw, err := s.perAggregate(id)
 	if err != nil {
 		return err
@@ -289,6 +292,9 @@ func (s *Store) ApplyPositionChanged(ctx context.Context, env *envelopepb.Envelo
 	if id == "" || p.InstrumentId == "" {
 		return ErrMissingAggregateID
 	}
+	if err := validateStateTime(p.AsOf, "position.as_of"); err != nil {
+		return err
+	}
 	lock, port, dw, err := s.perAggregate(id)
 	if err != nil {
 		return err
@@ -313,6 +319,17 @@ func (s *Store) ApplyPortfolioSnapshot(ctx context.Context, env *envelopepb.Enve
 	id := v1.PortfolioID(p.Portfolio.PortfolioId)
 	if id == "" {
 		return ErrMissingAggregateID
+	}
+	// Validate the entire replacement before creating an aggregate, claiming
+	// its key or clearing positions. A late malformed entry must not leave a
+	// partially reset book or normalize its observation time into valid state.
+	if err := validateStateTime(p.Portfolio.AsOf, "snapshot.portfolio.as_of"); err != nil {
+		return err
+	}
+	for i, ps := range p.Positions {
+		if err := validateStateTime(ps.GetAsOf(), "snapshot.position.as_of"); err != nil {
+			return fmt.Errorf("position %d: %w", i, err)
+		}
 	}
 	lock, port, dw, err := s.perAggregate(id)
 	if err != nil {
@@ -388,7 +405,7 @@ func (s *Store) perAggregate(id v1.PortfolioID) (*sync.Mutex, *domain.Portfolio,
 
 // toDomainPosition is the proto→domain mapping for PositionState.
 // Lives in this package (not domain) so the domain package stays
-// independent of kanz-schemas/domain/v1 — only common/v1 leaks
+// independent of schemas/domain/v1 — only common/v1 leaks
 // through Position's fields.
 func toDomainPosition(p *domainpb.PositionState) domain.Position {
 	return domain.Position{
@@ -402,7 +419,19 @@ func toDomainPosition(p *domainpb.PositionState) domain.Position {
 	}
 }
 
-// tsTime converts an optional protobuf Timestamp to time.Time,
+// validateStateTime keeps absent historical observation times distinct from
+// malformed present ones. AsTime normalizes invalid seconds/nanos, so every
+// apply validates before deduplication or any mutation.
+func validateStateTime(ts *timestamppb.Timestamp, field string) error {
+	if ts != nil {
+		if err := ts.CheckValid(); err != nil {
+			return fmt.Errorf("risk state: invalid %s: %w", field, err)
+		}
+	}
+	return nil
+}
+
+// tsTime converts a validated optional protobuf Timestamp to time.Time,
 // returning the Go zero time for nil. Using the concrete pointer
 // type (rather than an AsTime interface) avoids the typed-nil-vs-
 // interface-nil trap — calling AsTime() on a nil *Timestamp returns

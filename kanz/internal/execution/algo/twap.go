@@ -52,6 +52,8 @@ var (
 	// window is not "send it all now" — it is a schedule nobody specified, and
 	// guessing which they meant is how a 1,800 BTC order goes out in one message.
 	ErrEmptyWindow = errors.New("algo: the working window must end after it starts")
+	// ErrWindowTooLong rejects a window whose exact span cannot fit time.Duration.
+	ErrWindowTooLong = errors.New("algo: the working window exceeds the time.Duration domain")
 	// ErrNoSlices rejects a plan with no slices.
 	ErrNoSlices = errors.New("algo: slice count must be positive")
 	// ErrCapUnsatisfiable is returned when the requested slice count cannot honour
@@ -59,8 +61,8 @@ var (
 	ErrCapUnsatisfiable = errors.New("algo: slice count cannot honour the participation cap")
 )
 
-// validate checks the three things every algorithm needs before it can produce a
-// single child, in the order TWAP has always checked them.
+// validate checks the shared inputs every algorithm needs before it can produce
+// a single child, preserving the order of TWAP's existing checks.
 //
 // SHARED SO THE THREE ALGORITHMS REFUSE THE SAME PLAN THE SAME WAY. A second
 // copy of these checks is a second answer to "is this schedule workable", and the
@@ -74,15 +76,35 @@ func (p Plan) validate() error {
 	if p.Slices <= 0 {
 		return ErrNoSlices
 	}
+	if err := p.validateWindow(); err != nil {
+		return err
+	}
+	if p.MaxSlice != nil && p.MaxSlice.Sign() < 0 {
+		return fmt.Errorf("%w: max slice quantity must not be negative: %s",
+			ErrCapUnsatisfiable, p.MaxSlice.RatString())
+	}
+	return nil
+}
+
+// Sub saturates at the duration limit. A round trip distinguishes that loss
+// from an exactly representable maximum, before scheduling or measurement can
+// silently shorten the parent's window.
+func (p Plan) validateWindow() error {
 	if !p.End.After(p.Start) {
 		return fmt.Errorf("%w: [%s, %s]", ErrEmptyWindow,
 			p.Start.UTC().Format(time.RFC3339), p.End.UTC().Format(time.RFC3339))
+	}
+	span := p.End.Sub(p.Start)
+	if !p.Start.Add(span).Equal(p.End) {
+		return fmt.Errorf("%w: [%s, %s]", ErrWindowTooLong,
+			p.Start.UTC().Format(time.RFC3339Nano), p.End.UTC().Format(time.RFC3339Nano))
 	}
 	return nil
 }
 
 // boundary is the instant slice i starts, for i in [0, Slices]. boundary(0) is
 // Start and boundary(Slices) is End exactly.
+// Its window has already passed validateWindow through validate or Interval.
 //
 // INTEGER NANOSECOND ARITHMETIC ON THE OFFSET, not repeated addition of a step:
 // accumulating a rounded step drifts, and the last child of a long schedule would
@@ -148,7 +170,10 @@ func (p Plan) boundary(i int) time.Time {
 // The interval is a function of the parent's durable window and slice count, so
 // two pods measuring the same finished parent measure it over the same minutes.
 func (p Plan) Interval(i int) (from, to time.Time, ok bool) {
-	if p.Slices <= 0 || i < 0 || i >= p.Slices || !p.End.After(p.Start) {
+	if p.Slices <= 0 || i < 0 || i >= p.Slices {
+		return time.Time{}, time.Time{}, false
+	}
+	if err := p.validateWindow(); err != nil {
 		return time.Time{}, time.Time{}, false
 	}
 	return p.boundary(i), p.boundary(i + 1), true
@@ -195,7 +220,7 @@ type Plan struct {
 	Slices int
 
 	// MaxSlice caps any single child's quantity — the participation cap in its
-	// schedule-time form. Nil means uncapped.
+	// schedule-time form. Nil or zero means uncapped; a negative bound is refused.
 	//
 	// IT IS A SIZE, NOT A FRACTION OF VOLUME, and that is a deliberate limitation
 	// stated rather than hidden. A true participation cap is a fraction of the

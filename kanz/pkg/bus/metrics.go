@@ -84,7 +84,7 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 		// THE INFLOW SIDE OF THE DEAD-LETTER QUEUE (#230). Incremented ONLY when
 		// Consumer.publishDLQ has actually parked the message — the DLQ publish
 		// returned nil, so a recoverable copy exists on `dlq.<subject>` for
-		// cmd/kanz-redrive to find.
+		// cmd/kanz_redrive to find.
 		//
 		// WHY NOT kanz_bus_consume_total{result="error"}, WHICH ALREADY MOVES ON
 		// EVERY ONE OF THESE. Because it moves on more than these, and the

@@ -282,7 +282,7 @@ func boundaryPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	for _, name := range []string{"0001_price_history.sql", "0003_ohlcv_bars.sql", "0004_ohlcv_trade_count_nullable.sql", "0005_ingestion_coverage.sql"} {
-		data, err := os.ReadFile(filepath.Join("..", "..", "services", "market-data", "migrations", name))
+		data, err := os.ReadFile(filepath.Join("..", "..", "services", "market_data", "migrations", name))
 		if err != nil {
 			t.Fatal(err)
 		}

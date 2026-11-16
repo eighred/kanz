@@ -3,13 +3,15 @@ package governed
 import (
 	"context"
 	"fmt"
-	"math"
+	"math/big"
+	"regexp"
 	"strconv"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	decutil "github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/measureread"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
@@ -135,17 +137,35 @@ func citation(pos *commonpb.LogPosition) string {
 	return fmt.Sprintf("%s@%d:%d", pos.GetTopic(), pos.GetPartition(), pos.GetOffset())
 }
 
+var scenarioFraction = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE]([+-]?[0-9]+))?$`)
+
 // parsePct decodes a scenario name (a signed decimal fraction) into a
 // common.v1.Decimal shock. The value is carried exactly as coefficient×10^exp.
 func parsePct(name string) (*commonpb.Decimal, error) {
-	f, err := strconv.ParseFloat(name, 64)
-	if err != nil {
-		return nil, fmt.Errorf("governed: scenario %q is not a decimal fraction: %w", name, err)
+	// Bound text and exponent work before the rational parser expands a power of
+	// ten. Unsupported input must never become a rounded or wrapped risk request.
+	if len(name) > 400 {
+		return nil, fmt.Errorf("governed: scenario fraction exceeds supported bounds")
 	}
-	// Six decimal places covers a percentage shock without float artefacts.
-	const exp = -6
-	coeff := int64(math.Round(f * math.Pow10(-exp)))
-	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}, nil
+	parts := scenarioFraction.FindStringSubmatch(name)
+	if parts == nil {
+		return nil, fmt.Errorf("governed: scenario is not a finite decimal fraction")
+	}
+	if parts[1] != "" {
+		exp, err := strconv.ParseInt(parts[1], 10, 16)
+		if err != nil || exp < -128 || exp > 128 {
+			return nil, fmt.Errorf("governed: scenario exponent exceeds supported bounds")
+		}
+	}
+	r, ok := new(big.Rat).SetString(name)
+	if !ok {
+		return nil, fmt.Errorf("governed: scenario is not a decimal fraction")
+	}
+	pct, ok := decutil.ToProtoExact(r)
+	if !ok {
+		return nil, fmt.Errorf("governed: scenario fraction cannot be represented exactly")
+	}
+	return pct, nil
 }
 func asOf(t time.Time) time.Time {
 	if t.IsZero() {

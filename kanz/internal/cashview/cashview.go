@@ -171,6 +171,11 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 	if _, in := dec.InDomainDeep(&msg); !in {
 		return nil
 	}
+	// AsTime normalizes malformed fields. Reject a present invalid observation
+	// before it can install a fresh balance; preserve the legacy absent time.
+	if at := msg.GetAsOf(); at != nil && at.CheckValid() != nil {
+		return nil
+	}
 
 	b := Balance{
 		Total:              msg.GetTotal(),

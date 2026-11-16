@@ -20,7 +20,7 @@ import (
 func lakeLandingSources(t *testing.T, service string) map[string]string {
 	t.Helper()
 	files := map[string]string{}
-	for _, dir := range []string{"internal/cdc", "internal/sink", "internal/decode", "cmd/lake-sink"} {
+	for _, dir := range []string{"internal/cdc", "internal/sink", "internal/decode", "cmd/lake_sink"} {
 		err := filepath.WalkDir(filepath.Join(service, dir), func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -56,7 +56,7 @@ func verifyMixedLakeFileLanding(files map[string]string) error {
 	allowed := map[string]bool{}
 	for _, name := range strings.Fields(`bufio context crypto/rand crypto/sha256 encoding/hex encoding/json errors fmt io log/slog net/http os path/filepath sort strings sync time
  github.com/eighred/kanz/kanz-schemas-go/envelope/v1 github.com/eighred/kanz/pkg/bus
- github.com/eighred/kanz/services/lake-sink/internal/decode github.com/eighred/kanz/services/lake-sink/internal/sink
+ github.com/eighred/kanz/services/lake_sink/internal/decode github.com/eighred/kanz/services/lake_sink/internal/sink
  github.com/prometheus/client_golang/prometheus golang.org/x/sys/unix
  google.golang.org/protobuf/encoding/protojson google.golang.org/protobuf/proto google.golang.org/protobuf/reflect/protodesc google.golang.org/protobuf/reflect/protoreflect google.golang.org/protobuf/types/descriptorpb google.golang.org/protobuf/types/dynamicpb`) {
 		allowed[name] = true
@@ -178,7 +178,7 @@ func verifyMixedLakeFileLanding(files map[string]string) error {
 	return nil
 }
 func TestMixedLakeLandingPreservesFileCustodyBoundary(t *testing.T) {
-	files := lakeLandingSources(t, filepath.Join(moduleRoot(t), "services/lake-sink"))
+	files := lakeLandingSources(t, filepath.Join(moduleRoot(t), "services/lake_sink"))
 	if err := verifyMixedLakeFileLanding(files); err != nil {
 		t.Fatal(err)
 	}
@@ -189,10 +189,10 @@ func TestMixedLakeLandingPreservesFileCustodyBoundary(t *testing.T) {
 		{"internal/cdc/sink.go", "sink: s", "sink: other"},
 		{"internal/cdc/sink.go", "if err := e.sink.Write", `row.TenantID = "foreign"; if err := e.sink.Write`},
 		{"internal/cdc/sink.go", "if err := e.sink.Write", `row = other; if err := e.sink.Write`},
-		{"cmd/lake-sink/main.go", `sink.NewFileSink(cfg.OutputDir, "", fileOptions...)`, `other.NewStore(cfg.OutputDir)`},
-		{"cmd/lake-sink/main.go", `cdc.NewEventSink(decode.NewDecoder(resolver), fileSink, time.Now, logger, metrics)`, `cdc.NewEventSink(decode.NewDecoder(resolver), tenantStore, time.Now, logger, metrics)`},
+		{"cmd/lake_sink/main.go", `sink.NewFileSink(cfg.OutputDir, "", fileOptions...)`, `other.NewStore(cfg.OutputDir)`},
+		{"cmd/lake_sink/main.go", `cdc.NewEventSink(decode.NewDecoder(resolver), fileSink, time.Now, logger, metrics)`, `cdc.NewEventSink(decode.NewDecoder(resolver), tenantStore, time.Now, logger, metrics)`},
 		{"internal/cdc/sink.go", "e.sink.Write(ctx, row)", "tenantStore.Write(ctx, row)"},
-		{"cmd/lake-sink/main.go", "eventSink := cdc.NewEventSink", "fileSink = tenantStore; eventSink := cdc.NewEventSink"},
+		{"cmd/lake_sink/main.go", "eventSink := cdc.NewEventSink", "fileSink = tenantStore; eventSink := cdc.NewEventSink"},
 	} {
 		cloned := map[string]string{}
 		for k, v := range files {

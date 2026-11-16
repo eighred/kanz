@@ -2,10 +2,10 @@ name: signed-ecr-promotion
 
 on:
   pull_request:
-    paths: ['tools/signed-promotion/**', '.github/workflows/signed-ecr-promotion.yml', 'kanz/infra/terraform-testnet/**']
+    paths: ['tools/signed_promotion/**', '.github/workflows/signed-ecr-promotion.yml', 'kanz/infra/terraform_testnet/**']
   push:
     branches: [main]
-    paths: ['tools/signed-promotion/**', '.github/workflows/signed-ecr-promotion.yml']
+    paths: ['tools/signed_promotion/**', '.github/workflows/signed-ecr-promotion.yml']
   workflow_dispatch:
     inputs:
       release_tag:
@@ -36,11 +36,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: python3 -B -m unittest discover -s tools/signed-promotion -p 'test_*.py' -v
+      - run: python3 -B -m unittest discover -s tools/signed_promotion -p 'test_*.py' -v
       - name: Install checksum-pinned CLI and disposable registry
-        run: bash tools/signed-promotion/install-tools.sh fixture
+        run: bash tools/signed_promotion/install-tools.sh fixture
       - name: Qualify actual CLI graph copy and fixed credential helper on loopback
-        run: python3 -B tools/signed-promotion/cli_fixture.py
+        run: python3 -B tools/signed_promotion/cli_fixture.py
 
   promote:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz'
@@ -60,7 +60,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install checksum-pinned registry graph copier
-        run: bash tools/signed-promotion/install-tools.sh
+        run: bash tools/signed_promotion/install-tools.sh
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.0.6
@@ -80,7 +80,7 @@ jobs:
           MIGRATE_DIGEST: ${{ inputs.migrate_digest }}
         run: |
           set -euo pipefail
-          python3 -B tools/signed-promotion/promote.py \
+          python3 -B tools/signed_promotion/promote.py \
             --account "$EXPECTED_ACCOUNT" --release-tag "$RELEASE_TAG" --release-sha "$RELEASE_SHA" \
             --tv-sync "$TV_SYNC_DIGEST" --kanz-migrate "$MIGRATE_DIGEST" \
             --evidence "$RUNNER_TEMP/signed-pair.json"

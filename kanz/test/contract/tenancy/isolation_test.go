@@ -316,7 +316,7 @@ func applySchema(t *testing.T, p *pgxpool.Pool) {
 	if _, err := p.Exec(ctx, `DROP TABLE IF EXISTS risk_evaluation_inputs, risk_evaluations, risk_input_objects, risk_model_artifacts, applied_keys, positions, portfolios CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	files, err := filepath.Glob("../../../services/risk-engine/migrations/*.sql")
+	files, err := filepath.Glob("../../../services/risk_engine/migrations/*.sql")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("glob migrations: %v (found %d)", err, len(files))
 	}

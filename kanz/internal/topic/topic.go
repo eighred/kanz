@@ -4,7 +4,7 @@
 // it arrived on: event_type carries the full three-segment logical name
 // ({domain}.{entity}.{event_type}) and the bus client already enforces that the
 // envelope's `domain` equals its first segment. The subject is a transport
-// detail; the logical name is the contract (kanz-schemas/README.md § Subject
+// detail; the logical name is the contract (schemas/README.md § Subject
 // Taxonomy).
 //
 // Every failure here is a REFUSAL, never a guess. The caller turns an error into
@@ -22,7 +22,7 @@ import (
 )
 
 // SystemTenant carries cross-cutting platform events and pre-tenancy events.
-// Its topics keep the UN-PREFIXED legacy names (kanz-schemas/README.md §
+// Its topics keep the UN-PREFIXED legacy names (schemas/README.md §
 // Subject Taxonomy §6).
 const SystemTenant = "__system__"
 
