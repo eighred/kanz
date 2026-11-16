@@ -207,6 +207,12 @@ func ApplyFill(st *orderpb.OrderState, fill *orderpb.Fill, now time.Time) (*orde
 	if !dec.IsPositive(fill.GetQuantity()) {
 		return nil, reject("INVALID_FILL", "fill quantity must be > 0")
 	}
+	for _, value := range []*commonpb.Decimal{st.GetOrderedQuantity(), st.GetLeavesQuantity(), st.GetFilledQuantity(),
+		st.GetAverageFillPrice(), fill.GetQuantity(), fill.GetPrice()} {
+		if !dec.InDomain(value) {
+			return nil, fmt.Errorf("order %s: fill arithmetic input is outside the Decimal domain", st.GetOrderId())
+		}
+	}
 	leaves := dec.FromProto(st.GetLeavesQuantity())
 	fq := dec.FromProto(fill.GetQuantity())
 	if fq.Cmp(leaves) > 0 {
@@ -216,6 +222,9 @@ func ApplyFill(st *orderpb.OrderState, fill *orderpb.Fill, now time.Time) (*orde
 	oldFilled := dec.FromProto(st.GetFilledQuantity())
 	newFilled := new(big.Rat).Add(oldFilled, fq)
 	newLeaves := new(big.Rat).Sub(dec.FromProto(st.GetOrderedQuantity()), newFilled)
+	if oldFilled.Sign() < 0 || newFilled.Sign() <= 0 || newLeaves.Sign() < 0 {
+		return nil, fmt.Errorf("order %s: inconsistent fill quantities", st.GetOrderId())
+	}
 
 	// Weighted average fill price: (oldFilled*oldAvg + fq*price) / newFilled.
 	cost := new(big.Rat).Mul(oldFilled, dec.FromProto(st.GetAverageFillPrice()))
@@ -223,11 +232,14 @@ func ApplyFill(st *orderpb.OrderState, fill *orderpb.Fill, now time.Time) (*orde
 	avg := new(big.Rat).Quo(cost, newFilled)
 
 	next := cloneState(st)
-	filled, ok := dec.ToProtoScaled(newFilled)
+	// Quantities are observations, not rounded prices. Preserve them exactly or
+	// let the caller quarantine the fill; a zeroed partial can otherwise be lost
+	// on every restart. Average-price rounding retains its existing policy.
+	filled, ok := dec.ToProtoExact(newFilled)
 	if !ok {
 		return nil, fmt.Errorf("order %s: filled quantity is not representable", st.GetOrderId())
 	}
-	newLeavesProto, ok := dec.ToProtoScaled(newLeaves)
+	newLeavesProto, ok := dec.ToProtoExact(newLeaves)
 	if !ok {
 		return nil, fmt.Errorf("order %s: leaves quantity is not representable", st.GetOrderId())
 	}
@@ -282,11 +294,14 @@ func Amend(st *orderpb.OrderState, cmd *orderpb.AmendOrder, now time.Time) (*ord
 		if !dec.IsPositive(q) {
 			return nil, reject("INVALID_QUANTITY", "new_quantity must be > 0")
 		}
+		if !dec.InDomain(q) || !dec.InDomain(st.GetFilledQuantity()) || st.GetFilledQuantity().GetCoefficient() < 0 {
+			return nil, fmt.Errorf("order %s: invalid amendment quantity input", st.GetOrderId())
+		}
 		if dec.Cmp(q, st.GetFilledQuantity()) < 0 {
 			return nil, reject("INVALID_QUANTITY", "new_quantity below filled quantity")
 		}
 		next.OrderedQuantity = q
-		remaining, ok := dec.ToProtoScaled(new(big.Rat).Sub(dec.FromProto(q), dec.FromProto(st.GetFilledQuantity())))
+		remaining, ok := dec.ToProtoExact(new(big.Rat).Sub(dec.FromProto(q), dec.FromProto(st.GetFilledQuantity())))
 		if !ok {
 			return nil, fmt.Errorf("order %s: amended leaves quantity is not representable", st.GetOrderId())
 		}

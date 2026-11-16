@@ -25,10 +25,10 @@ def wire(value):
 
 
 class CacheProbeTests(unittest.TestCase):
-    def test_synthetic_solve_imports_only_named_read_cache(self):
+    def test_synthetic_solve_uses_only_its_builder_cache(self):
         args=gate.build_args('owned-builder',Path('/owned-context'),'a'*40)
-        self.assertEqual([arg for arg in args if arg.startswith('--cache-')],
-                         ['--cache-from=type=gha,scope=lake-sink'])
+        self.assertFalse(any(arg.startswith(('--cache-', '--no-cache')) for arg in args))
+        self.assertEqual(args[args.index('--builder')+1],'owned-builder')
         self.assertIn('--output=type=cacheonly',args)
         self.assertEqual(args[args.index('--target')+1],'rust-build')
         self.assertEqual(args[args.index('--build-arg')+1],'VERSION='+'a'*40)
