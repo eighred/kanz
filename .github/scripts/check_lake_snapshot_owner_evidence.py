@@ -13,7 +13,7 @@ from check_migration_evidence import verify, PREFIX
 from envoy_evidence import validate_scan
 from rust_release_evidence import image_recipe, validate_go_audit, validate_hybrid_native
 
-PACKAGE = "services/lake-sink/internal/snapshot"
+PACKAGE = "services/lake_sink/internal/snapshot"
 VERSIONS = ("2.12.6", "2.14.5")
 NAMES = set(['TestCallerAndResourceAuthorization',
  'TestCallerAndResourceAuthorization/foreign',

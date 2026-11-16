@@ -16,7 +16,7 @@ import (
 // AUTHENTICATED PROVISIONING (#364).
 //
 // Until this route existed, the ONLY way to create an invitation was
-// cmd/kanz-invite, which writes to the store directly and therefore requires the
+// cmd/kanz_invite, which writes to the store directly and therefore requires the
 // database credential. That is correct for the FIRST operator — "can touch the
 // server's disk" is a stronger claim than "got there first" — and wrong for
 // everything after it: the act is attributable to whoever holds a DSN rather

@@ -304,7 +304,7 @@ def qualify(module, scratch_parent, terraform, runner=run_cli, emit=print):
 def main():
     root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--module", type=Path, default=root / "kanz/infra/terraform-testnet")
+    parser.add_argument("--module", type=Path, default=root / "kanz/infra/terraform_testnet")
     args = parser.parse_args()
     terraform = shutil.which("terraform")
     require(terraform is not None, "verified Terraform binary is unavailable")

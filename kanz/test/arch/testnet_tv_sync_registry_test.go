@@ -7,7 +7,7 @@ import (
 )
 
 func TestTokyoTVSyncRegistryUsesCanonicalInventory(t *testing.T) {
-	raw := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "infra", "terraform-testnet", "main.tf")))
+	raw := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "infra", "terraform_testnet", "main.tf")))
 	check := func(s string) bool {
 		_, rest, ok := strings.Cut(s, "capital_path_images = toset([")
 		if !ok {

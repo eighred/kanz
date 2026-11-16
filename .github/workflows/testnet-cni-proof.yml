@@ -2,18 +2,18 @@ name: testnet-cni-proof
 on:
   pull_request:
     paths:
-      - 'tools/cni-proof/**'
-      - 'tools/gateway-policy-proof/network_observation.py'
+      - 'tools/cni_proof/**'
+      - 'tools/gateway_policy_proof/network_observation.py'
       - 'tools/Test-TestnetCNI.ps1'
-      - 'tools/feed-identity/**'
+      - 'tools/feed_identity/**'
       - '.github/workflows/testnet-cni-proof.yml'
   push:
     branches: [main]
     paths:
-      - 'tools/cni-proof/**'
-      - 'tools/gateway-policy-proof/network_observation.py'
+      - 'tools/cni_proof/**'
+      - 'tools/gateway_policy_proof/network_observation.py'
       - 'tools/Test-TestnetCNI.ps1'
-      - 'tools/feed-identity/**'
+      - 'tools/feed_identity/**'
       - '.github/workflows/testnet-cni-proof.yml'
   workflow_dispatch:
 permissions:
@@ -30,11 +30,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
-      - run: python3 -B -m unittest discover -s tools/feed-identity -p 'test_*.py'
-      - run: bash tools/feed-identity/install.sh
+      - run: python3 -B -m unittest discover -s tools/cni_proof -p 'test_*.py'
+      - run: python3 -B -m unittest discover -s tools/feed_identity -p 'test_*.py'
+      - run: bash tools/feed_identity/install.sh
       - name: Verify synthetic policy enforcement and cleanup
-        run: python3 -B tools/cni-proof/ci.py
+        run: python3 -B tools/cni_proof/ci.py
       - name: Remove disposable CI cluster after interruption
         if: always()
         run: |

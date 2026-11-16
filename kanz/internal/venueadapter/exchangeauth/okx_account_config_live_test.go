@@ -12,7 +12,7 @@ import (
 // Physical OKX demo read of GET /api/v5/account/config — the call that backs
 // account_verified (#417, #408 control 1). Gated on TEST_OKX_TESTNET=1 plus
 // OKX_TESTNET_KEY / _SECRET / _PASSPHRASE, exactly as
-// services/venue-okx's TestOKXTestnet_SignedRoundTrip is.
+// services/venue_okx's TestOKXTestnet_SignedRoundTrip is.
 //
 // GET ONLY, AND THAT IS STRUCTURAL RATHER THAN A PROMISE: exchangeauth.AccountID
 // is a read, and this file imports nothing that can place an order. Order

@@ -114,8 +114,8 @@ require_matrix() {
 }
 
 generate_sdk() {
-  echo "==> regenerating kanz-schemas Go SDK (generated-not-committed, EVT-15a)"
-  ( cd kanz-schemas && buf generate )
+  echo "==> regenerating schemas Go SDK (generated-not-committed, EVT-15a)"
+  ( cd schemas && buf generate )
 }
 
 build() {

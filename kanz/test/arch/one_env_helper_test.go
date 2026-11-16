@@ -127,25 +127,12 @@ func TestTheEnvironmentIsReadThroughOneHelper(t *testing.T) {
 	}
 }
 
-// envHelperExempt names environment-reading wrappers allowed outside
-// internal/env, with the decision that permits each.
-//
-// The key-and-default copies were retired, including tools/scaffold's template.
-// One intentional signature collision remains: the CLI's path-and-key reader.
-var envHelperExempt = map[string]string{
-	// A SHAPE COLLISION, NOT A COPY (#692). secretFrom(path, envKey string) has
-	// two string parameters and returns (string, error), which is the same
-	// SIGNATURE as a key-and-default wrapper — but its second parameter is
-	// another KEY, not a default, and its first is a path this CLI takes from a
-	// flag. It applies no default and owns no convention this package could hold.
-	//
-	// This is a standing API-shape decision from #692. pkg/secret.Read derives
-	// a file path from KEY_FILE; this CLI takes an explicit flag path. Its
-	// actual helper contract tests file precedence and read-error refusal.
-	// Convergence onto the shared reader removes the direct environment read
-	// and makes this entry stale; no CLI unification debt is implied here.
-	"cmd/universe/main.go:secretFrom": "#692 permanent decision: the CLI's explicit (path, key) reader has no key-and-default semantics; tested in cmd/universe/secret_test.go",
-}
+// envHelperExempt names intentional API-shape exceptions, with the decision
+// that permits each. The former explicit path-and-key reader belonged to the
+// retired terminal command. Retained operator clients use pkg/secret.Read; its
+// mount-precedence and read-error refusal tests remain with that shared owner.
+// New exceptions still require a live wrapper and a named premise.
+var envHelperExempt = map[string]string{}
 
 // readsEnvironment reports whether the body calls os.Getenv or os.LookupEnv.
 func readsEnvironment(body *ast.BlockStmt) bool {

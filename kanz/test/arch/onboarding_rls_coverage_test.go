@@ -36,15 +36,15 @@ import (
 // SECURITY to its migrations directory. Derived from the migrations, not from
 // what the script happens to name.
 var allTenantScopedServices = map[string]string{
-	"web-bff":       "services/web-bff/migrations",
+	"web-bff":       "services/web_bff/migrations",
 	"accounting":    "services/accounting/migrations",
 	"alternatives":  "services/alternatives/migrations",
 	"datamaster":    "services/datamaster/migrations",
 	"oms":           "services/oms/migrations",
-	"risk-engine":   "services/risk-engine/migrations",
-	"tv-sync":       "services/tv-sync/migrations",
-	"venue-binance": "services/venue-binance/migrations",
-	"venue-okx":     "services/venue-okx/migrations",
+	"risk-engine":   "services/risk_engine/migrations",
+	"tv-sync":       "services/tv_sync/migrations",
+	"venue-binance": "services/venue_binance/migrations",
+	"venue-okx":     "services/venue_okx/migrations",
 	"wealth":        "services/wealth/migrations",
 }
 

@@ -21,7 +21,7 @@ func TestBFFRolloutPreservesSingleSessionOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(root, "infra/overlays/testnet-tokyo")).Output()
+	rendered, err := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", filepath.Join(root, "infra/overlays/testnet_tokyo")).Output()
 	if err != nil {
 		t.Fatal(err)
 	}

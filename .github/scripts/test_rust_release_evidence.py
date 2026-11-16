@@ -61,7 +61,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(recipe.rust_path, "/kanz-lake-snapshot")
         self.assertEqual(recipe.rust_root, "kanz-lake-snapshot")
         self.assertEqual(recipe.go_path, "/lake-sink")
-        self.assertEqual(recipe.go_main, "github.com/eighred/kanz/services/lake-sink/cmd/lake-sink")
+        self.assertEqual(recipe.go_main, "github.com/eighred/kanz/services/lake_sink/cmd/lake_sink")
         self.assertEqual(recipe.native_base, gate.CC_RUNTIME)
         for name in ("lake", "kanz-lake-snapshot", "../lake-sink", "lake-sink/other"):
             with self.assertRaises(ValueError):
@@ -150,7 +150,7 @@ class EvidenceTests(unittest.TestCase):
         sdk = "github.com/eighred/kanz/kanz-schemas-go"
         deps = [{"Path": "example.org/runtime", "Version": "v1.2.3", "Sum": "h1:fixture"},
                 {"Path": sdk, "Version": "v0.0.0-00010101000000-000000000000",
-                 "Replace": {"Path": "../kanz-schemas/gen/go", "Version": "(devel)"}}]
+                 "Replace": {"Path": "../schemas/gen/go", "Version": "(devel)"}}]
         info = {"Path": gate.image_recipe("lake-sink").go_main, "GoVersion": "go1.26.10",
                 "Main": {"Path": "github.com/eighred/kanz", "Version": "(devel)"}, "Deps": deps,
                 "Settings": [{"Key": k, "Value": v} for k, v in {"GOOS": "linux", "GOARCH": "amd64",
@@ -367,7 +367,7 @@ class EvidenceTests(unittest.TestCase):
 
     def orchestrate(self, fail_audit=False, fail_copy=False, service="binance-depth", fail_hybrid=False):
         data, _, sbom = fixture(service)
-        lock = tomllib.loads((Path(gate.__file__).resolve().parents[2] / "kanz-rs/Cargo.lock").read_text())
+        lock = tomllib.loads((Path(gate.__file__).resolve().parents[2] / "rust/Cargo.lock").read_text())
         versions = {p["name"]: p["version"] for p in lock["package"]}
         for package, entry in zip(data["packages"], sbom["packages"]):
             version = versions[package["name"]]

@@ -1,4 +1,17 @@
-# Archiver broker identity
+# Event archiver
+
+The archiver is the single NATS-to-Kafka-compatible archival writer. It preserves
+canonical envelope bytes and acknowledges consumed facts only after archival or
+DLQ publication. The finite `archiver-drain` command uses the same ownership
+gate during recovery; it is not an independent event authority.
+
+From `kanz/`, build with `go build ./services/archiver/...` and test with
+`go test -p 1 ./services/archiver/... -count=1`. Real transport and persistence
+tests require disposable dependencies and their explicit test settings.
+The composition roots are `cmd/archiver/` and `cmd/archiver_drain/`; shared
+service implementation and environment configuration remain under `internal/`.
+
+## Broker identity
 
 Both `archiver` and `archiver-drain` read `SPIFFE_ENDPOINT_SOCKET`. Set it to
 `unix:///run/spiffe/spire-agent.sock` with the workload socket mounted when

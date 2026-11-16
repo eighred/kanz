@@ -1,0 +1,1222 @@
+syntax = "proto3";
+
+// Package order.v1 (events half) defines the order-aggregate lifecycle FACTs
+// and the Fill records they carry — the observable effects of the order
+// COMMANDS in order.proto.
+//
+// These are FACTs (schemas/README.md § Event Class Rules §1):
+// per-aggregate ordering (partition by order_id) is a correctness requirement,
+// and each is self-contained — order_id and the resulting OrderState travel
+// with it. The command that produced a FACT is followed via the envelope
+// causation_id (set to the command's event_id); the order's full disposition is
+// always carried as the embedded OrderState snapshot so a consumer never has to
+// re-derive it.
+package order.v1;
+
+import "common/v1/decimal.proto";
+import "common/v1/money.proto";
+import "google/protobuf/timestamp.proto";
+import "order/v1/order.proto";
+
+// OrderStatus is the lifecycle state of an order aggregate. It moves
+// monotonically toward a terminal state (FILLED/CANCELLED/REJECTED/EXPIRED);
+// PARTIALLY_FILLED may repeat as fills arrive, and WORKING_SCHEDULED persists
+// for as long as a parent order is being worked as a schedule.
+enum OrderStatus {
+  // Default zero value; never set explicitly.
+  ORDER_STATUS_UNSPECIFIED = 0;
+
+  // Admitted and validated, not yet working at a venue.
+  ORDER_STATUS_PENDING_NEW = 1;
+
+  // Working at an execution venue, unfilled.
+  ORDER_STATUS_ROUTED = 2;
+
+  // Working, with one or more fills but quantity remaining.
+  ORDER_STATUS_PARTIALLY_FILLED = 3;
+
+  // Terminal: fully filled.
+  ORDER_STATUS_FILLED = 4;
+
+  // Terminal: cancelled before fully filling.
+  ORDER_STATUS_CANCELLED = 5;
+
+  // Terminal: refused before any effect (validation, authority, compliance).
+  ORDER_STATUS_REJECTED = 6;
+
+  // Terminal: time-in-force elapsed before fully filling.
+  ORDER_STATUS_EXPIRED = 7;
+
+  // Working as a SCHEDULE: admitted, and being sliced into child orders over a
+  // window rather than sent to a venue (#435).
+  //
+  // NOT TERMINAL, AND NOT AT A VENUE — which is why it is its own state rather
+  // than a flag on PENDING_NEW. An order in this state has passed every gate and
+  // is deliberately resting; an order in PENDING_NEW is one nothing has got to
+  // yet. Reconciliation treats those opposite ways, and conflating them would
+  // make the schedule driver and the interrupted-order sweep fight over the same
+  // orders.
+  //
+  // THE PARENT ITSELF NEVER FILLS. Its children do, and it reaches a terminal
+  // state on what they DID — not on what was sent to them. A consumer that folds
+  // fills must therefore ignore parents, or it double-counts every slice against
+  // the quantity the parent already represents.
+  ORDER_STATUS_WORKING_SCHEDULED = 8;
+}
+
+// OrderState is the full materialized state of one order — the payload embedded
+// in every lifecycle FACT and the element of an order STATE_SNAPSHOT. Its
+// aggregate identity is order_id.
+message OrderState {
+  // order_id is the aggregate identity. Required.
+  string order_id = 1;
+
+  // portfolio_id is the trading account. Required.
+  string portfolio_id = 2;
+
+  // instrument_id is the traded instrument. Required.
+  string instrument_id = 3;
+
+  // side, order_type, and time_in_force restate the order's static terms so the
+  // state is self-contained. Required.
+  Side side = 4;
+  OrderType order_type = 5;
+  TimeInForce time_in_force = 6;
+
+  // ordered_quantity is the current order size (post-amend). Required.
+  common.v1.Decimal ordered_quantity = 7;
+
+  // limit_price is the working limit (post-amend), set for priced orders.
+  common.v1.Decimal limit_price = 8;
+
+  // stop_price is the TRIGGER price of a STOP or STOP_LIMIT order — the level
+  // that turns a resting instruction into a live one. Set exactly when
+  // order_type is one of those two; unset otherwise.
+  //
+  // IT WAS VALIDATED AND THEN DROPPED (#405). SubmitOrder.stop_price has always
+  // existed and admission has always required it — "stop_price required for a
+  // stop order" — but OrderState had no field to carry it, so the trigger was
+  // checked at the perimeter and never reached the wire. OrderState is what
+  // Venue.Execute receives, so a connector implementing Binance
+  // STOP_LOSS_LIMIT or OKX's conditional-order endpoint had NOTHING to send as
+  // the trigger; it could place an order that would never fire, at whatever
+  // price the venue defaulted to.
+  //
+  // THIS IS THE SECOND TIME, not a coincidence. Closed #240 is the same defect
+  // one field over: `leverage` was parsed, bounds-checked, written to the
+  // immutable FACT, and then dropped before the order — so the audit root
+  // asserted 10x on a spot position. The shape is "a field the perimeter
+  // accepts and the wire never carries", and test/arch/submit_fields_reach_
+  // state_test.go now fails the build for any third instance.
+  //
+  // Field 21 and not 9: the numbers are wire identity, and 9 has been
+  // OrderStatus since this message existed.
+  common.v1.Decimal stop_price = 21;
+
+  // expire_at is WHEN A GTD ORDER STOPS BEING GOOD — required whenever
+  // time_in_force is TIME_IN_FORCE_GTD, unset otherwise.
+  //
+  // THE THIRD INSTANCE OF THE SAME DEFECT, found by writing the guard for the
+  // first two. Admission has always rejected a GTD order without it —
+  // "expire_at required for GTD" — and OrderState had no field, so before this
+  // the identifier `ExpireAt` appeared in exactly ONE place in the whole Go
+  // tree: the line that validates it. The adapters DO read time_in_force and
+  // pass it to the venue, so a Good-Til-Date order was routed as good-till-date
+  // with no date. What the venue does with that is the venue's choice, not the
+  // trader's — which is the same failure as a stop with no trigger, one field
+  // over.
+  google.protobuf.Timestamp expire_at = 22;
+
+  // arrival_price is the reference mark for this instrument AT ADMISSION, and
+  // arrival_at is when that mark was observed (#436).
+  //
+  // THIS IS THE ONE TCA INPUT THAT CANNOT BE RECONSTRUCTED LATER, which is why
+  // it is stamped before anything measures it. Transaction-cost analysis
+  // compares what an order actually paid against what the market showed when the
+  // decision was made; a mark read at analysis time is a mark from AFTER the
+  // order moved the market. That does not merely add noise — it biases every
+  // measure flatter, always in the flattering direction, and a cost number that
+  // understates cost is worse than no cost number because it will be believed.
+  //
+  // So every order admitted without this is permanently unmeasurable. The damage
+  // is retroactive in the same way #432's trade_count was: nothing reads this
+  // field today, and the orders being admitted now are the history the first TCA
+  // report will be computed over.
+  //
+  // BOTH FIELDS ARE UNSET WHEN NO MARK WAS AVAILABLE, and unset is not zero. A
+  // zero arrival price makes implementation shortfall infinite or nonsensical
+  // depending on which way it is divided, and "we could not see the market"
+  // is a real, common state — a thinly-quoted instrument, a cold start before
+  // the price spine has delivered, a mark aged out past OMS_PRICE_MAX_AGE. A
+  // consumer must skip those orders, not score them as zero-cost.
+  //
+  // arrival_at is carried separately rather than assumed equal to accepted_at:
+  // the mark has its own observation time, and the GAP between them is itself a
+  // cost input — an order priced against a mark from thirty seconds ago is
+  // measured against a market that has already moved.
+  common.v1.Decimal arrival_price = 23;
+  google.protobuf.Timestamp arrival_at = 24;
+
+  // execution_schedule is how this order is being WORKED OVER TIME, when it is a
+  // parent order rather than something sent to a venue whole (#435). Set exactly
+  // when status is ORDER_STATUS_WORKING_SCHEDULED; unset for every ordinary
+  // order and for every child.
+  //
+  // IT IS THE WHOLE DURABLE SCHEDULE, and it is here rather than in a table of
+  // its own for the reason ExecutionSchedule's own comment gives: the schedule is
+  // a pure function of these fields, so storing them on the order is storing the
+  // schedule, and there is no second record that can disagree with the order it
+  // describes. What has actually been SENT is durable separately and needs no
+  // record either — a child is an order, so the children that exist are the ones
+  // that were sent.
+  ExecutionSchedule execution_schedule = 25;
+
+  // parent_order_id names the working parent this order is a slice of (#435).
+  // Set on every child; unset on parents and on ordinary orders.
+  //
+  // IT IS THE RELATION IN THE DIRECTION THAT CAN BE INDEXED. A child's id also
+  // encodes its parent — the id is derived, which is what makes creating it
+  // idempotent — but an id is not a query. The driver asks "which children of
+  // this parent exist", every tick, and that has to be an index scan rather than
+  // a scan of every order ever placed.
+  //
+  // IT IS ALSO WHAT KEEPS FILLS FROM DOUBLE-COUNTING. A consumer aggregating by
+  // order must fold the children and skip the parent, and this is the field that
+  // tells it which is which.
+  string parent_order_id = 26;
+
+  // status is the current lifecycle state. Required; must not be
+  // ORDER_STATUS_UNSPECIFIED.
+  OrderStatus status = 9;
+
+  // filled_quantity is the cumulative executed quantity; leaves_quantity is the
+  // remaining open quantity (ordered_quantity - filled_quantity). Required.
+  common.v1.Decimal filled_quantity = 10;
+  common.v1.Decimal leaves_quantity = 11;
+
+  // average_fill_price is the quantity-weighted average price of all fills so
+  // far. Unset until the first fill.
+  common.v1.Decimal average_fill_price = 12;
+
+  // as_of is the domain time this state is effective at — the event_time of the
+  // change that produced it. Required.
+  google.protobuf.Timestamp as_of = 13;
+
+  // venue is the target execution venue MIC carried from the SubmitOrder — the
+  // multi-venue allocation matrix's routing key (M4). The router sends the order
+  // to the venue whose MIC matches; empty ⇒ smart-order-routing default. Once
+  // routed, OrderRouted.venue records the acknowledged venue. Optional.
+  string venue = 14;
+
+  // venue_account_id is the exchange account this order executes against — the
+  // COLLATERAL BOUNDARY (see SubmitOrder.venue_account_id). Stamped by the OMS at
+  // admission from the (tenant, portfolio, venue) binding, and carried on every
+  // state transition so the account that bore the risk is on the record, not
+  // reconstructed later from config that has since changed.
+  string venue_account_id = 15;
+
+  // venue_ack_at is WHEN THE VENUE CONFIRMED IT HELD THIS ORDER — the one fact
+  // that separates a recovering OMS from a guessing one.
+  //
+  // It is stamped only after Venue.Execute returns WITHOUT error, which is the
+  // venue saying "I have it". Unset means the OMS saved the order as ROUTED and
+  // never received that confirmation — the venue may hold it, or may never have
+  // seen it, and a FAILED Execute does not tell those apart.
+  //
+  // Reconciliation reads it in exactly ONE place: when the venue answers "I do
+  // not know this order". Unset then means the venue genuinely never got it and
+  // working it now is safe. SET means the venue confirmed it and is now denying
+  // it — not a recoverable state but a contradiction between two authorities —
+  // and the order is quarantined rather than re-driven. Re-driving that case is
+  // a double trade.
+  google.protobuf.Timestamp venue_ack_at = 16;
+
+  // quarantine is set when reconciliation could not safely establish what the
+  // venue did with this order. A quarantined order is FROZEN: nothing re-drives
+  // it, nothing cancels it, and clearing it takes a human. Unset on every
+  // healthy order.
+  OrderQuarantine quarantine = 17;
+
+  // cancel_announced_at is WHEN THE CANCELLATION WAS NOT MERELY PERSISTED BUT
+  // ANNOUNCED — the ORDER_CANCELLED FACT and the command outcome both
+  // published. It plays the same role for cancellation that venue_ack_at plays
+  // for routing: the one fact that separates a recovering OMS from a guessing
+  // one.
+  //
+  // Without it, a redelivery of a cancel whose announcement failed after the
+  // order was already saved CANCELLED is indistinguishable from a genuine
+  // second cancel of an already-cancelled order. The handler would take the
+  // terminal-refusal branch: the ORDER_CANCELLED FACT is never published, so
+  // tv-sync's projection, accounting, and audit never learn the cancel
+  // happened — and the caller is told REJECTED for a cancel that in fact
+  // succeeded. Unset means the store write landed but the announcement did
+  // not; the handler must complete the announcement, not refuse it. Set means
+  // this order's cancellation was already told to the world, and a further
+  // cancel command is a genuine duplicate.
+  // RETIREMENT CONDITION (#292): when the cancel pair is converted to the
+  // outbox — that is, when handleCancel commits the ORDER_CANCELLED FACT and
+  // its CommandOutcome in the same transaction as the CANCELLED state, the way
+  // admission, the fill folds, routing and amends already do.
+  //
+  // It converts WITH completeCancelAnnouncement, not separately: that function
+  // is this marker's only reader-of-record, and converting one without the
+  // other leaves a compensator looking for a marker nobody stamps.
+  //
+  // DO NOT REMOVE THIS FIELD BEFORE THEN. It is live: service.go:944 reads it
+  // to tell an interrupted cancel from a genuine duplicate, and deleting it
+  // does not merely change the wire — it deletes the only thing standing
+  // between a succeeded cancel and a caller told REJECTED.
+  google.protobuf.Timestamp cancel_announced_at = 18;
+
+  // outcome_announced_at is WHEN A TERMINAL SUBMIT-FLOW OUTCOME WAS NOT MERELY
+  // PERSISTED BUT ANNOUNCED — the order's final lifecycle FACT (OrderFilled or
+  // OrderRejected) and its CommandOutcome both published. It plays the same
+  // role for the submit flow's terminal transitions that venue_ack_at plays
+  // for routing and cancel_announced_at plays for cancellation: the one fact
+  // that separates a recovering OMS from a guessing one.
+  //
+  // Without it, a redelivery of a SubmitOrder whose terminal announcement was
+  // interrupted — a fill that made the order FILLED, or a permanent reject,
+  // Saved and then never announced because EmitFill/EmitRejected or the
+  // trailing EmitOutcome failed — is indistinguishable from a genuine
+  // duplicate of an order that finished cleanly. resume()'s terminal check
+  // would ack it on sight: the order is FILLED or REJECTED in the store, its
+  // FACT was never published, and nothing ever mentions it again. Unset means
+  // the store write landed but the announcement did not; the handler must
+  // complete the announcement, not treat the redelivery as a duplicate. Set
+  // means this order's terminal outcome was already told to the world.
+  //
+  // It does NOT cover cancellation — cancel_announced_at owns that
+  // transition on its own, because the cancel command's own redelivery path
+  // (handleCancel) is what completes it, not a SubmitOrder redelivery.
+  // RETIREMENT CONDITION (#292): when BOTH remaining submit-flow terminal
+  // pairs are converted — handleSubmit's ErrUnpriced branch (Save(rejected)
+  // then refuse()) and the trailing CommandOutcome that follows work().
+  //
+  // The second of those is not a mechanical conversion: it follows state
+  // committed in EARLIER transactions (admission's Create, the fill folds), so
+  // retiring this marker requires first deciding which transaction that outcome
+  // belongs to. That decision is the work, not the deletion.
+  //
+  // DO NOT REMOVE THIS FIELD BEFORE THEN. service.go:1430
+  // (orderOutcomeAnnounced) reads it to drive completeTerminalOutcome; without
+  // it, a redelivery of an interrupted terminal announcement is acked on sight
+  // and the FACT is never published.
+  google.protobuf.Timestamp outcome_announced_at = 19;
+
+  // accepted_announced_at is WHEN THE ADMISSION ITSELF WAS NOT MERELY COMMITTED
+  // BUT ANNOUNCED — the ORDER_ACCEPTED FACT published. It is the same fact
+  // cancel_announced_at and outcome_announced_at record for their own
+  // transitions, applied to the FIRST one, which had no marker at all (#238).
+  //
+  // Admission is two independent writes with no outbox between them: the store
+  // commits the order, then the FACT is published. When the publish fails the
+  // row is durable at PENDING_NEW and NOTHING downstream has heard of the order
+  // — risk carries no exposure for it, and tv-sync's projection drops the
+  // ORDER_ROUTED that follows, because transition() ignores a FACT for an order
+  // it never admitted. Without this field that order is INDISTINGUISHABLE from
+  // an order resting normally at PENDING_NEW in a deployment with no venue
+  // wired, so no compensator can re-announce the one without re-announcing the
+  // other on every pass. Unset means the world may never have been told this
+  // order exists and a compensator must say so; set means it was told.
+  //
+  // It is stamped only after EmitAccepted returns without error, and only for
+  // an order whose acceptance THIS process announced. It is deliberately NOT
+  // consulted for any status other than PENDING_NEW: it is an ADDITIVE field, so
+  // every order written before it existed reads back unset, and re-announcing
+  // ACCEPTED for an order that has since moved to ROUTED or PARTIALLY_FILLED
+  // would push a consumer's view of it BACKWARDS to a pre-routing snapshot. See
+  // resume() for where that restriction is enforced.
+  // RETIREMENT CONDITION (#292), AND IT IS THE ONE THAT IS NOT ABOUT CODE.
+  //
+  // The admission pair IS converted — store.Create takes the ACCEPTED record,
+  // so a live admission can no longer be committed-and-unannounced. What keeps
+  // this field is the population it was built for: orders admitted BEFORE
+  // 0006_outbox.sql existed carry it unset with NO outbox record behind them,
+  // and a direct re-publish is the only thing that can announce them.
+  //
+  // So it retires when no order predating that migration can still be in a
+  // non-terminal state — an operational claim about the DATA, which no test can
+  // make and no code change can bring about. Establishing it means querying the
+  // estate, not reading the tree, and until someone does, "it is probably fine"
+  // is the whole risk.
+  //
+  // DO NOT REMOVE THIS FIELD BEFORE THEN. service.go:1340 reads it in resume(),
+  // which is where broker redelivery, kanz-redrive off the DLQ, and the sweep
+  // all converge — so deleting it silently drops the repair for every one of
+  // those paths at once.
+  google.protobuf.Timestamp accepted_announced_at = 20;
+
+  // leverage and margin_mode are the collateral terms the order was admitted
+  // under, copied from SubmitOrder and never re-derived (#417).
+  //
+  // THEY ARE HERE BECAUSE OrderState IS WHAT Venue.Execute RECEIVES. A term the
+  // command accepts and the state does not carry is a term the venue can never
+  // be told, which is #240/#405/#486's defect family four times over: leverage
+  // written to the audit root and dropped; stop_price required at admission and
+  // discarded, so a STOP_LOSS_LIMIT connector had no trigger to send; expire_at
+  // required for GTD and discarded, so a good-till-date order reached the venue
+  // with no date; and a hardcoded good-til-cancelled that made an
+  // IMMEDIATE-OR-CANCEL order REST. test/arch's TestSubmitFieldsReachState is
+  // the guard that now refuses the fifth instance, and it is why these two
+  // fields are not optional to add.
+  //
+  // Absent ⇒ unlevered spot, matching SubmitOrder, so every order stored before
+  // this field means exactly what it meant when it was written.
+  common.v1.Decimal leverage = 27;
+  MarginMode margin_mode = 28;
+
+  // THE MARKET AS IT STOOD WHEN THIS ORDER WAS RELEASED (#866).
+  //
+  // "Released" is the instant this order became the OMS's to work: its own
+  // admission. For an ordinary order and for a scheduled PARENT that is the same
+  // instant as the decision, so release_price equals arrival_price by
+  // construction — both are stamped from ONE read of the price spine. For a
+  // CHILD it is not: the child is admitted minutes into the parent's window, and
+  // the gap between arrival_price and its own release_price is the market's own
+  // drift while the parent was being worked.
+  //
+  // THAT GAP IS THE TIMING LEG, and it is the reason these fields exist. Without
+  // them an implementation shortfall is one number: the desk learns the parent
+  // cost 14bps and cannot tell whether the algorithm traded badly or the market
+  // simply moved away while it waited. arrival_price alone cannot separate them,
+  // because it is a single observation and drift is a difference between two.
+  //
+  // A CHILD IS NEVER GIVEN ITS PARENT'S RELEASE OBSERVATION, which is the exact
+  // opposite of the rule arrival_price follows one field up. The benchmark is
+  // inherited because the DECISION was the parent's; the release observation is
+  // taken fresh because the MARKET was not.
+  //
+  // release_bid and release_ask are the touch, and they are set ONLY when the
+  // price spine's most recent observation for this instrument was a QUOTE. A
+  // last-trade mark carries no width, and an unset pair means the market's width
+  // was not observable — never a zero spread, which would report every slice as
+  // having crossed for free.
+  //
+  // All four are UNSET WHEN UNKNOWN, for the reason arrival_price is: an order
+  // nobody could see the market for is unmeasurable, and a zero would score it
+  // as free.
+  common.v1.Decimal release_price = 29;
+  google.protobuf.Timestamp release_at = 30;
+  common.v1.Decimal release_bid = 31;
+  common.v1.Decimal release_ask = 32;
+}
+
+// OrderQuarantine records an order whose true state at the venue could not be
+// established.
+//
+// It exists because the only alternative to freezing is guessing, and both
+// guesses are unacceptable on the capital path: re-driving may trade the fund
+// twice, and abandoning may leave a live exchange order nobody is watching. The
+// platform states that it does not know, loudly, and stops.
+message OrderQuarantine {
+  // at is when the order was quarantined. Required when quarantine is set.
+  google.protobuf.Timestamp at = 1;
+
+  // reason is the human-readable account of what could not be established, and
+  // it is what an operator reads first. It must name the venue's answer and the
+  // venue_ack_at state that made the pair irreconcilable.
+  string reason = 2;
+
+  // last_query_at is when the venue was last asked about this order — so an
+  // operator can tell a fresh contradiction from a stale one.
+  google.protobuf.Timestamp last_query_at = 3;
+}
+
+// Fill is one atomic execution against an order — the execution-report payload
+// (FIX ExecType=TRADE). A partial order produces several Fills, each its own
+// FACT; their quantities sum to OrderState.filled_quantity.
+message Fill {
+  // fill_id is the unique, idempotent identity of this execution (the
+  // venue/EMS execution id). Replays and dedup key on it. Required.
+  string fill_id = 1;
+
+  // order_id is the order this fill belongs to. Required.
+  string order_id = 2;
+
+  // instrument_id is the executed instrument. Required.
+  string instrument_id = 3;
+
+  // side is the fill direction (equals the order side). Required.
+  Side side = 4;
+
+  // quantity is this fill's executed size, strictly positive. Required.
+  common.v1.Decimal quantity = 5;
+
+  // price is this fill's execution price. Required.
+  common.v1.Decimal price = 6;
+
+  // fee is the commission/fees charged on this fill, in the execution currency.
+  // Drives realized P&L. Optional (zero when none).
+  common.v1.Money fee = 7;
+
+  // venue is the ISO 10383 MIC of the execution venue. Required.
+  string venue = 8;
+
+  // venue_account_id is the exchange account this fill SETTLED AGAINST — the
+  // account whose collateral moved. Required.
+  //
+  // It is stamped by the venue that executed the fill, not copied from intent: the
+  // account that actually bore the trade is the one the ledger must post to, and
+  // the whole point of segregating collateral is lost if the books record where the
+  // cash was SUPPOSED to go.
+  string venue_account_id = 11;
+
+  // venue_execution_id is the venue's own execution reference, retained for
+  // reconciliation against POST-01 confirmations. Optional.
+  string venue_execution_id = 9;
+
+  // executed_at is the venue execution timestamp. Required.
+  google.protobuf.Timestamp executed_at = 10;
+
+  // Present when this execution was recovered from verified venue history.
+  // This is provenance, never authority to place or reopen an order.
+  ExecutionRecoveryProvenance recovery = 12;
+}
+
+message ExecutionRecoveryProvenance {
+  string case_id = 1;
+  string mapping_version = 2;
+  string source_cursor = 3;
+  string payload_digest = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  string execution_digest = 6;
+  ExecutionFeeApproval fee_approval = 7;
+}
+
+// A fee-only revision authorized by two different authenticated principals.
+// Original trade economics remain immutable. Books append the fee difference.
+message ExecutionFeeApproval {
+  string proposal_id = 1;
+  string digest = 2;
+  string proposer = 3;
+  string approver = 4;
+  google.protobuf.Timestamp approved_at = 5;
+  string previous_execution_digest = 6;
+  common.v1.Money previous_fee = 7;
+}
+
+message ExecutionFeeChange {
+  Fill previous = 1;
+  Fill revised = 2;
+}
+
+// The exact reviewed terms; the authority comes from authenticated command
+// metadata and the OMS's durable dual-control claim, never from a venue.
+message ExecutionFeeCorrectionProposed {
+  string case_id = 1;
+  string order_id = 2;
+  string portfolio_id = 3;
+  string mapping_version = 4;
+  string history_digest = 5;
+  string digest = 6;
+  string proposer = 7;
+  google.protobuf.Timestamp proposed_at = 8;
+  google.protobuf.Timestamp expires_at = 9;
+  repeated ExecutionFeeChange changes = 10;
+  string reason = 11;
+}
+
+message ExecutionFeeCorrectionApproved {
+  string case_id = 1;
+  string order_id = 2;
+  string portfolio_id = 3;
+  string digest = 4;
+  string proposer = 5;
+  string approver = 6;
+  google.protobuf.Timestamp approved_at = 7;
+}
+
+// Immutable, complete history selected for one recovery case. The cumulative
+// quantity is independently observed at the venue, never calculated from fills.
+message ExecutionRecoveryHistory {
+  string order_id = 1;
+  string mapping_version = 2;
+  repeated Fill fills = 3;
+  common.v1.Decimal executed_quantity = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+// ExecutionRecoveryRecorded is the durable investigation/correction status.
+// A blocked case is unresolved even when no new discrepancy arrives.
+message ExecutionRecoveryRecorded {
+  string case_id = 1;
+  string order_id = 2;
+  string portfolio_id = 3;
+  string venue = 4;
+  string venue_account_id = 5;
+  string mapping_version = 6;
+  string source_cursor = 7;
+  string payload_digest = 8;
+  string status = 9;
+  string reason = 10;
+  uint32 checkpoint = 11;
+  google.protobuf.Timestamp recorded_at = 12;
+}
+
+// ExecutionRecovered requests idempotent book reconciliation against frozen
+// execution evidence. It is separate from a new-fill lifecycle announcement:
+// already booked executions must not count again in execution-cost consumers.
+message ExecutionRecovered {
+  Fill fill = 1;
+  OrderState state = 2;
+}
+
+// Published only after a recovered execution has committed in the named book.
+// Separate ledger/position subjects bind the acknowledgement to its producer.
+message ExecutionRecoveryApplied {
+  string case_id = 1;
+  string order_id = 2;
+  string execution_key = 3;
+  string payload_digest = 4;
+  google.protobuf.Timestamp recorded_at = 5;
+  string execution_digest = 6;
+}
+
+// OrderAccepted is the FACT that an order passed validation, authority, and
+// pre-trade compliance and was admitted (status PENDING_NEW).
+message OrderAccepted {
+  string order_id = 1;
+  OrderState state = 2;
+}
+
+// OrderPendingApproval is the FACT that an order was HELD for a second
+// signature instead of being admitted (#410, act three).
+//
+// # Why a held order needs a FACT of its own
+//
+// An order at or above OMS_DUAL_CONTROL_MIN_NOTIONAL with the control armed is
+// deliberately NOT written to the order book — it is not an admitted order, and
+// a ninth OrderStatus would have made it one to every consumer that folds
+// status. So without this FACT nothing downstream hears of it at all: the trader
+// who submitted it sees neither an ORDER_ACCEPTED nor an ORDER_REJECTED, which
+// is precisely the failure #410's acceptance names — "an order that neither
+// executes nor reports why".
+//
+// # It is NOT terminal, and that is what separates it from OrderRejected
+//
+// The order still exists, as a proposal, and becomes a live order the moment a
+// DIFFERENT authenticated subject approves it — under the SAME order_id, with
+// the ORDER_ACCEPTED that follows. A consumer must not fold this as an end
+// state, and must not treat the later ORDER_ACCEPTED as a duplicate.
+//
+// A proposal that nobody approves EXPIRES rather than resting forever looking
+// like a decision that was made; expires_at below is that deadline.
+message OrderPendingApproval {
+  string order_id = 1;
+
+  // command is the exact order proposed — the payload digest below covers.
+  //
+  // CARRIED IN FULL so an approver can be SHOWN what they are signing for. An
+  // approval bound to an id the approver cannot inspect is a signature on
+  // something unread, and the whole value of the second person is that they
+  // looked.
+  SubmitOrder command = 2;
+
+  // proposer is the AUTHENTICATED subject that submitted the order, taken from
+  // the command's issuer and never self-asserted — the forged-actor defect #444
+  // fixed on the override path arrived by exactly that route. The approver must
+  // be a different person (internal/dualcontrol), so this is the half of the
+  // pair that is knowable now.
+  string proposer = 3;
+
+  // act is the dual-control act constant, "ORDER_SUBMISSION". Carried rather
+  // than assumed so an approval collected for a pricing override or a mandate
+  // change can never be replayed against an order.
+  string act = 4;
+
+  // digest is the value an approval must cover — approval.Terms.Digest over the
+  // command above. It is on the wire because it is what CHANGING the order
+  // would change: a consumer showing a trader their pending order shows this,
+  // and an approver's client re-derives it rather than trusting it.
+  string digest = 5;
+
+  // proposed_at and expires_at bound the window in which the second signature
+  // can still be given.
+  google.protobuf.Timestamp proposed_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+// OrderApproved is the FACT that a held order received its SECOND SIGNATURE
+// (#410, act three, acceptance clause (d): "the approval is recorded as a FACT
+// carrying both identities").
+//
+// # Why the admission FACT could not carry this
+//
+// The two other acts under this control already announce their approval:
+// master.v1.ExceptionOverridden carries actor + approver, and
+// lifecycle.v1.ConfigChanged carries changed_by + approved_by. The order path
+// had nothing. ORDER_ACCEPTED carries an OrderState, which records the ORDER and
+// not who released it, and the ACCEPTED command.v1.CommandOutcome is keyed on
+// order_id and names neither party. So "who countersigned this order" was
+// answerable only from the OMS's own order_proposals row — and services/audit
+// folds bus FACTs and cannot read another service's tables. The trail could show
+// that an order was approved and could not say by whom, on the one act where the
+// capital actually moves.
+//
+// A ROW IS NOT A FACT. That is the whole of this message.
+//
+// # It rides the claim, not the admission
+//
+// This is published from the SAME transaction that writes the second signature
+// onto the proposal (ProposalStore.Claim), not from the one that admits the
+// order. Two reasons, and both are about what an examiner can be told:
+//
+//   - There must be no instant in which an order has been released and the trail
+//     cannot yet name who released it. Announcing at admission would open exactly
+//     that window, and a crash inside it loses the approval and keeps the order.
+//   - The approval is a decision in its own right. An approved order can still be
+//     refused on the replay that follows — compliance, the mandate and the venue
+//     are all re-checked against TODAY — and that refusal does not unmake the
+//     fact that a second person signed.
+//
+// So this FACT does not imply an ORDER_ACCEPTED. It says a second signature was
+// given; the order's own outcome follows under the same order_id.
+//
+// # Every field comes off the approval evidence
+//
+// The producer builds this from a dualcontrol.Approval — a value obtainable only
+// by passing the self-approval, digest and expiry checks, whose fields are
+// unexported so no other package can forge one by composite literal. Nothing
+// here is assembled from strings a caller chose independently, which is the
+// property that makes both names on one FACT worth reading: they arrived
+// together, out of a check that had already run.
+message OrderApproved {
+  string order_id = 1;
+
+  // proposer is the AUTHENTICATED subject that submitted the order, and approver
+  // is the DIFFERENT authenticated subject that released it.
+  //
+  // BOTH, ON ONE FACT, IS THE POINT. Either name alone is compatible with one
+  // person holding both signatures, which is the record an auditor is least able
+  // to check and the most valuable one to forge. They are refused as equal —
+  // normalised for case and surrounding space — by internal/dualcontrol before
+  // this message can be built, and again by a CHECK constraint on the row.
+  string proposer = 2;
+  string approver = 3;
+
+  // act is the dual-control act constant, "ORDER_SUBMISSION". Carried rather
+  // than assumed so an approval collected for a pricing override or a mandate
+  // change can never be read as one for an order — the same reason
+  // OrderPendingApproval carries it.
+  string act = 4;
+
+  // digest is the value this approval covers: approval.Terms.Digest over the
+  // command, byte-identical to the digest on the ORDER_PENDING_APPROVAL that
+  // announced the hold. It is what TIES the two FACTs together, and it is what
+  // an order edited between proposal and approval would change — so a consumer
+  // holding both can prove the thing signed is the thing proposed.
+  string digest = 5;
+
+  // approved_at is when the second signature was given, which is not the same
+  // instant as the admission that may follow it. An examiner dating the decision
+  // against the book needs this one.
+  google.protobuf.Timestamp approved_at = 6;
+}
+
+// OrderRejected is the FACT that an order was refused before any effect. No
+// state changed; the order is terminal (status REJECTED).
+message OrderRejected {
+  string order_id = 1;
+
+  // reason is human-readable; error_code is a stable machine code mirroring the
+  // command.v1 outcome vocabulary (e.g. "COMPLIANCE_BREACH", "AUTHORITY_DENIED",
+  // "INVALID_PRICE"). Required.
+  string reason = 2;
+  string error_code = 3;
+}
+
+// OrderRouted is the FACT that an admitted order was sent to an execution
+// venue and is working (status ROUTED).
+message OrderRouted {
+  string order_id = 1;
+
+  // venue is the ISO 10383 MIC the order was routed to. Required.
+  string venue = 2;
+
+  // venue_order_id is the venue's acknowledgement id, for amend/cancel routing
+  // and reconciliation. Optional.
+  string venue_order_id = 3;
+}
+
+// OrderPartiallyFilled is the FACT of a fill that leaves quantity remaining
+// (status PARTIALLY_FILLED). It carries both the atomic fill and the resulting
+// order state.
+message OrderPartiallyFilled {
+  string order_id = 1;
+  Fill fill = 2;
+  OrderState state = 3;
+}
+
+// OrderFilled is the FACT of the fill that completes an order (status FILLED,
+// terminal). It carries the final fill and the resulting order state.
+message OrderFilled {
+  string order_id = 1;
+  Fill fill = 2;
+  OrderState state = 3;
+}
+
+// OrderCancelled is the FACT that a resting order was withdrawn before fully
+// filling (status CANCELLED, terminal).
+message OrderCancelled {
+  string order_id = 1;
+
+  // cancelled_quantity is the open quantity withdrawn (the leaves at cancel
+  // time). Required.
+  common.v1.Decimal cancelled_quantity = 2;
+}
+
+// OrderExpired is the FACT that an order's time-in-force elapsed before it
+// fully filled (status EXPIRED, terminal).
+message OrderExpired {
+  string order_id = 1;
+
+  // unfilled_quantity is the open quantity that went unfilled at expiry.
+  // Required.
+  common.v1.Decimal unfilled_quantity = 2;
+}
+
+// StateHealed is the FACT emitted by the exchange reconciliation loop (M3.4)
+// when it detects that Kanz's internal order state has drifted from the venue's
+// truth — a missed websocket frame, a fill seen only on the periodic REST poll.
+// The exchange is the source of truth: the reconciler NEVER edits state
+// directly, it emits this correcting FACT carrying the venue-truth OrderState,
+// and the audit projection records it for operator investigation. This snapshot
+// lacks fill identities/prices/fees; it must not reopen a terminal order or
+// synthesize fills. OMS query reconciliation owns non-terminal recovery. It rides the
+// envelope with QUALITY_FLAG_REVISED and a causation_id back to the order.
+message StateHealed {
+  // order_id is the order whose state was healed. Required.
+  string order_id = 1;
+
+  // venue is the ISO 10383 MIC / venue code the truth came from. Required.
+  string venue = 2;
+
+  // state is the venue-observed aggregate, not an instruction to overwrite an
+  // order or journal. Static fields may be absent in close-watchdog reports.
+  OrderState state = 3;
+
+  // reason is a human-readable description of the drift that was healed (e.g.
+  // "REST poll found filled_quantity 2 vs internal 1"). Required.
+  string reason = 4;
+
+  // detected_at is when reconciliation observed the divergence. Required.
+  google.protobuf.Timestamp detected_at = 5;
+}
+
+// TransactionCostRecorded is what ONE fill actually cost, measured against the
+// decision-time mark (#436).
+//
+// # Why this is a FACT and not only a metric
+//
+// The per-venue histograms answer "which venue should we have used" for a HUMAN
+// reading a dashboard. They cannot answer it for a MACHINE: Prometheus is not
+// queryable from the routing path, it is aggregated and lossy by construction,
+// and its retention is measured in weeks. A venue ranking (#437) has to read
+// cost per venue over a long window, joined to the orders it came from — which
+// is a durable, archived record or it is nothing.
+//
+// It is also the only form in which this survives. The metric is derived state
+// that a pod restart resets and a scrape gap loses; this lands on the EXECUTION
+// stream and is archived to Kafka by the existing order.> rule, alongside the
+// fills it was computed from.
+//
+// # Per FILL, deliberately
+//
+// The individual Fill — and therefore its FEE — exists only on the fill FACT;
+// OrderState keeps a cumulative quantity and an average price and no fee total.
+// A per-ORDER record would have to accumulate fees across deliveries, and an
+// in-memory accumulator is lost on restart and wrong across replicas. Per fill
+// is stateless, and it is the better grain anyway: an order can fill across
+// several venues, and a per-order record blends exactly the thing being compared.
+//
+// # It records; it decides nothing
+//
+// Nothing on the trading path reads this. That is the property that lets it be
+// published from the OMS at all — a measurement that could refuse or reroute an
+// order would put an analytic on the capital path.
+message TransactionCostRecorded {
+  // order_id and fill_id identify what was measured. fill_id is what makes this
+  // idempotent: the same fill measured twice is the same record.
+  string order_id = 1;
+  string fill_id = 2;
+
+  string instrument_id = 3;
+  // venue is the exchange this fill executed at — the dimension the whole
+  // measurement exists to compare.
+  string venue = 4;
+  Side side = 5;
+
+  // filled_quantity and fill_price are this fill, not the parent order.
+  common.v1.Decimal filled_quantity = 6;
+  common.v1.Decimal fill_price = 7;
+
+  // arrival_price is the reference mark stamped on the order at ADMISSION
+  // (OrderState.arrival_price). It cannot be reconstructed later: a mark read
+  // after the fact is a mark from after this order moved the market, which
+  // biases every cost measure flatter and always in the flattering direction.
+  common.v1.Decimal arrival_price = 8;
+
+  // fee is what the venue charged, as the venue reported it. A negative amount
+  // is a maker rebate and reduces cost.
+  common.v1.Money fee = 9;
+
+  // shortfall_bps is the headline: implementation shortfall against arrival, in
+  // basis points of arrival notional, INCLUDING fees. Positive cost money;
+  // negative beat the benchmark. The sign is from the fund's point of view for
+  // both sides, so a report cannot average a good sell against a bad buy to zero.
+  common.v1.Decimal shortfall_bps = 10;
+
+  // price_shortfall_bps is the same measure EXCLUDING fees, so a venue's
+  // execution quality and its fee schedule can be told apart. A venue can be
+  // good at one and bad at the other, and a single blended figure hides which.
+  common.v1.Decimal price_shortfall_bps = 11;
+
+  // measured_at is when this measurement was taken, which is NOT when the fill
+  // happened. A backlogged or replayed consumer produces a late measurement of
+  // an old fill, and a reader comparing venues over a window needs to know which
+  // clock it is looking at.
+  google.protobuf.Timestamp measured_at = 12;
+
+  // arrival_at and executed_at bound the interval this fill was worked over:
+  // when the benchmark mark was observed, and when the venue executed.
+  //
+  // THEY ARE THE VWAP WINDOW, and without them this record cannot be joined to a
+  // bar series at all. Implementation shortfall answers "what did the decision
+  // cost"; slippage against interval VWAP answers the separate question "did we
+  // trade worse than the market did over the same window" — and an order can
+  // beat arrival because the market moved in its favour while still being worked
+  // worse than every other participant.
+  //
+  // THIS RECORD SHIPPED WITHOUT THEM, which is the same defect one layer over:
+  // a value present upstream (OrderState.arrival_at, Fill.executed_at) and
+  // dropped at a boundary, exactly as stop_price, expire_at and leverage were.
+  // A consumer holding only measured_at knows when the measurement ran and
+  // nothing about the market it should be compared against.
+  //
+  // Both are UNSET when their source was — an order admitted with no usable mark
+  // has no arrival_at, and unset is not the epoch. A consumer must skip that
+  // window rather than compute a VWAP from 1970.
+  google.protobuf.Timestamp arrival_at = 13;
+  google.protobuf.Timestamp executed_at = 14;
+
+  // parent_order_id names the working parent this fill's order is a slice of
+  // (#435). Set on every child's cost record; unset for an ordinary order.
+  //
+  // WITHOUT IT ONE DECISION READS AS N UNRELATED ONES. order_id here is the
+  // CHILD, because that is the order that filled — but the decision whose cost
+  // is being measured was the parent's, and an order worked in fifty slices
+  // produces fifty records with nothing tying them together. A consumer asking
+  // "what did this order cost" would get fifty answers to a question with one.
+  //
+  // It is also what lets a cost consumer WEIGHT correctly. Fifty slices of one
+  // decision are not fifty independent pieces of evidence about a venue, and a
+  // ranker that counts them as such crosses its evidence floor fifty times
+  // faster for whichever venue happens to be worked with an algorithm — then
+  // feeds that back into where the next order is sent.
+  string parent_order_id = 15;
+}
+
+// Benchmark names what an execution was measured AGAINST (#866).
+//
+// IT IS THE SEAM, and it is an enum rather than an implied constant because the
+// second benchmark is already specified: #864 wants interval VWAP (did we trade
+// worse than the market did over the same window) and participation-rate
+// tracking alongside arrival (what did the decision cost). Those are different
+// questions about the same execution, and the way this goes wrong is a SECOND
+// attribution path publishing a second FACT with the same field names and a
+// different meaning — at which point a report that unions them is averaging two
+// benchmarks and nobody can see it.
+//
+// UNSPECIFIED is not "arrival". A record that does not say what it was measured
+// against is a record nothing may aggregate.
+enum Benchmark {
+  BENCHMARK_UNSPECIFIED = 0;
+  // BENCHMARK_ARRIVAL is implementation shortfall against the mark stamped at
+  // the DECISION — OrderState.arrival_price.
+  BENCHMARK_ARRIVAL = 1;
+}
+
+// AttributionQuality says how much of the decomposition was actually OBSERVED.
+//
+// It exists because "nothing configured" and "checked, and fine" must never look
+// the same, and a three-way split is exactly where that rule gets broken: a
+// consumer handed spread=0 cannot tell a genuinely zero-width market from a
+// market nobody could see. So the legs are UNSET when unobservable and this says
+// which case a reader is holding, rather than leaving them to infer it from
+// three zeros.
+enum AttributionQuality {
+  ATTRIBUTION_QUALITY_UNSPECIFIED = 0;
+  // DECOMPOSED: every slice that traded carried a release observation and a
+  // quoted touch, so spread_bps, timing_bps and impact_bps are all present and
+  // sum to shortfall_bps exactly.
+  ATTRIBUTION_QUALITY_DECOMPOSED = 1;
+  // TOTAL_ONLY: shortfall_bps is measured and the three legs are UNSET, because
+  // at least one slice that traded had no observable touch or no release mark.
+  // The headline is still true; the attribution is not available.
+  ATTRIBUTION_QUALITY_TOTAL_ONLY = 2;
+}
+
+// ParticipationQuality says whether a decision's REALISED participation could be
+// measured at all, and how much of it was observed (#1007).
+//
+// # Why it exists
+//
+// EXECUTION_ALGO_POV enforces its cap against the volume profile's FORECAST, at
+// admission, once. Nothing measured what the cap actually turned out to be, so
+// max_participation_rate = 0.08 read from every screen, every audit record and
+// every allocator report as a rate that was honoured, with nothing anywhere able
+// to confirm or contradict it. The rates beside this field are that measurement;
+// this field is what stops the measurement being overread.
+//
+// # A ZERO RATE AND AN UNCOMPUTABLE ONE ARE DIFFERENT CLAIMS
+//
+// The denominator is the volume that actually printed in a slice's interval, and
+// the platform's only realised-volume record is the 1-minute candle series
+// (market.crypto.bar), which emits NO BAR for a minute in which nothing traded —
+// internal/marketedge/bars says at length that it cannot tell "nothing traded"
+// from "the feed was down". So an interval with no candle behind it has NO RATE,
+// not a rate of zero and not an infinite one, and the direction of that error is
+// the one that matters: a forecast is most wrong exactly when the market is
+// thinnest, which is exactly when the cap binds and exactly when a candle is
+// missing. A fabricated zero would report the calmest possible participation in
+// the state the cap exists for.
+enum ParticipationQuality {
+  PARTICIPATION_QUALITY_UNSPECIFIED = 0;
+
+  // NOT_WORKED: the decision was not worked as a schedule, so it has no
+  // intervals to participate in. It is NOT a measurement gap — an ordinary order
+  // is one message at one instant, and "what fraction of the tape was it" is a
+  // question about a working window it never had.
+  PARTICIPATION_QUALITY_NOT_WORKED = 1;
+
+  // MEASURED: every interval in which this decision traded had realised volume
+  // behind it, so realised_participation_rate and max_slice_participation_rate
+  // describe the whole of what was worked.
+  PARTICIPATION_QUALITY_MEASURED = 2;
+
+  // PARTIAL: some intervals that traded had realised volume and some did not.
+  // The rates are computed over the observed intervals ONLY, and
+  // participation_intervals / measured_participation_intervals say how much of
+  // the decision they cover.
+  //
+  // IT IS A DISTINCT VALUE RATHER THAN A DEGRADE TO UNOBSERVABLE, and that is a
+  // deliberate departure from AttributionQuality's all-or-nothing shape. The
+  // decomposition is all-or-nothing because its three legs must SUM to the
+  // headline, so one unmeasurable slice makes the identity false. Participation
+  // has no such identity: a slice measured at 40% against an 8% cap IS a breach,
+  // whatever the interval next to it could or could not be seen. Collapsing it
+  // to UNOBSERVABLE would discard a real, observed exceedance because a
+  // neighbouring minute was quiet — silencing the alarm using exactly the market
+  // thinness that caused both.
+  PARTICIPATION_QUALITY_PARTIAL = 3;
+
+  // UNOBSERVABLE: not one interval in which this decision traded had realised
+  // volume behind it, so both rates are UNSET. The cap this order carried has
+  // not been contradicted and has not been confirmed.
+  PARTICIPATION_QUALITY_UNOBSERVABLE = 4;
+}
+
+// ExecutionAttributionRecorded is what one DECISION cost, decomposed (#866).
+//
+// # The grain is the decision, not the fill
+//
+// order.cost.recorded (TransactionCostRecorded) is per FILL, and that is right
+// for the question it answers — which venue should we have used. It cannot
+// answer the other one. An order worked in fifty slices produces fifty cost
+// records, each measured against the same arrival mark, and summing them by hand
+// gives a number nobody publishes and no two consumers derive identically. This
+// is published ONCE per decision, at the moment the decision finished: a
+// scheduled parent when its last child is done, an ordinary order when it
+// reaches a terminal status having traded.
+//
+// A CHILD NEVER PRODUCES ONE. A slice is not a decision, it is a consequence of
+// one; attributing to it would report the platform working fifty decisions where
+// a desk made one.
+//
+// # Why the decomposition and not a single number
+//
+// A single slippage figure tells a desk it lost 14bps and nothing about what to
+// change. The three legs each name a different lever:
+//
+//   - spread_bps — what it cost to cross the quoted touch. Change VENUE, or
+//     change from taking to making.
+//   - timing_bps — how far the market moved on its own between the decision and
+//     the moment each slice was released. Change URGENCY: a schedule stretched
+//     over an hour is buying impact reduction with drift exposure, and this is
+//     the price of that trade.
+//   - impact_bps — the residual. What was paid beyond the touch that was quoted
+//     when the slice went out. Change ALGORITHM or slice size.
+//
+// # impact_bps is a RESIDUAL, and that is stated rather than hidden
+//
+// Market impact is not directly observable: nobody can see the counterfactual
+// price at which this order would have filled had it not been sent. Spread and
+// timing ARE observable — each is a difference between two real observations the
+// OMS recorded at defined instants — so impact is defined as what is left:
+//
+// The residual identity is `impact_bps = shortfall_bps - spread_bps - timing_bps`.
+//
+// That identity is exact, and a test pins it. What it means is only as good as
+// the two measured legs: a NEGATIVE impact_bps is the ordinary result of resting
+// inside the spread rather than crossing it, and is information, not an error.
+// What it must never be is the whole of a decomposition — three legs derived
+// from one number would be arithmetic dressing, which is why the other two are
+// measured from the record and this one is not.
+//
+// # It records; it decides nothing
+//
+// Nothing on the trading path reads this, for the reason TransactionCostRecorded
+// gives: a measurement that could refuse or reroute an order would put an
+// analytic on the capital path.
+message ExecutionAttributionRecorded {
+  // order_id is the DECISION — a scheduled parent, or an ordinary order that
+  // carries no parent. Never a child.
+  string order_id = 1;
+  string portfolio_id = 2;
+  string instrument_id = 3;
+  Side side = 4;
+  // terminal_status is how the decision ended: FILLED, CANCELLED or EXPIRED. A
+  // partially-filled order that was withdrawn is measured on what traded, and
+  // this is what tells a reader the rest was not a miss but a withdrawal.
+  OrderStatus terminal_status = 5;
+
+  common.v1.Decimal ordered_quantity = 6;
+  // filled_quantity is what this measurement covers. Never zero: an order that
+  // never traded produces no record at all, because a zero shortfall on an
+  // execution that did not happen is a datapoint claiming a perfect fill.
+  common.v1.Decimal filled_quantity = 7;
+  // average_fill_price is quantity-weighted across every slice that traded,
+  // exclusive of fees.
+  common.v1.Decimal average_fill_price = 8;
+
+  // arrival_price is the benchmark: the mark stamped on the decision at
+  // ADMISSION, never a price looked up at measurement time. A mark read after
+  // the fact is a mark from after this order moved the market, and it biases
+  // every result flatter, always in the flattering direction.
+  common.v1.Decimal arrival_price = 9;
+  google.protobuf.Timestamp arrival_at = 10;
+
+  // EVERY FIGURE BELOW IS IN BASIS POINTS OF ARRIVAL NOTIONAL AND EXCLUDES FEES,
+  // and both halves of that are deliberate.
+  //
+  // Of ARRIVAL notional, because that is the benchmark's own scale: dividing by
+  // what was actually paid makes a worse execution look proportionally smaller.
+  //
+  // EXCLUDING FEES, because a fee is not a leg of this decomposition and cannot
+  // be made into one — it is charged per fill, and the individual Fill's fee
+  // lives only in the fill FACT, never in the stored OrderState this is built
+  // from. TransactionCostRecorded.shortfall_bps is the fee-inclusive measure and
+  // it is per fill; this is the fee-exclusive one and it is per decision. A
+  // reader wanting the all-in cost of a decision sums the fills' fees from
+  // order.cost.recorded, keyed on parent_order_id.
+  //
+  // THE SIGN IS FROM THE FUND'S POINT OF VIEW ON BOTH SIDES: positive cost
+  // money, negative beat the benchmark. Chosen once so a report cannot average a
+  // good sell against a bad buy to zero.
+  common.v1.Decimal shortfall_bps = 11;
+
+  // The three legs. UNSET when quality is TOTAL_ONLY — unset, not zero, because
+  // a zero spread is a real and different claim from an unobservable one.
+  common.v1.Decimal spread_bps = 12;
+  common.v1.Decimal impact_bps = 13;
+  common.v1.Decimal timing_bps = 14;
+
+  AttributionQuality quality = 15;
+  Benchmark benchmark = 16;
+
+  // slices is how many orders traded into this decision — 1 for an ordinary
+  // order, the number of children that filled for a worked parent. measured is
+  // how many of those carried the observations the decomposition needs.
+  //
+  // THE PAIR IS THE COVERAGE SIGNAL, and it is why measured is carried even
+  // though quality already says DECOMPOSED or not. A parent whose slices were
+  // all measurable and one whose 49th slice lost its quote are both TOTAL_ONLY,
+  // and the second is a price-spine gap somebody should fix.
+  int32 slices = 17;
+  int32 measured_slices = 18;
+
+  // measured_at is when this attribution was computed, which is NOT when the
+  // decision finished — a replayed or backlogged terminal transition produces a
+  // late measurement of an old order.
+  google.protobuf.Timestamp measured_at = 19;
+
+  // THE REALISED HALF OF THE PARTICIPATION CONTROL (#1007).
+  //
+  // # What was missing, and why it is on THIS record
+  //
+  // EXECUTION_ALGO_POV refuses a parent the volume profile's FORECAST says
+  // cannot be worked inside max_participation_rate. That is a real admission
+  // control and it is the half that is decidable in advance. The other half —
+  // what the participation TURNED OUT to be once the tape printed — was measured
+  // nowhere: not in a metric, not in a FACT, not in any post-trade record. So a
+  // desk could state a participation cap to a risk committee, to a mandate and
+  // to an allocator, and the platform could neither confirm nor contradict it
+  // for a single order it had ever worked.
+  //
+  // It rides this record rather than a new one because this is already the
+  // once-per-DECISION grain, and participation is a property of the decision:
+  // the fills are the children's, the intervals are the parent's schedule, and
+  // the cap is the parent's. A second FACT would be a second answer to "how did
+  // this decision execute", joined on order_id by every reader forever.
+  //
+  // # THE RATES ARE A LOWER BOUND, AND THE DIRECTION IS THE POINT
+  //
+  // The denominator comes from the 1-minute candle series, so a slice interval
+  // that does not begin and end on a minute is measured against the candles that
+  // COVER it — a window at least as long as the interval, therefore a volume at
+  // least as large, therefore a rate no larger than the true one. An exceedance
+  // reported here is real. A rate under the cap is not proof the cap held, in
+  // the same way internal/marketedge/coverage's credited time is a floor and
+  // internal/marketdata/store/gaps.go's whole window proves nothing.
+  //
+  // # participation_cap IS COPIED SO THE RECORD IS SELF-CONTAINED
+  //
+  // Comparing a measured rate against the cap it was working under otherwise
+  // means joining back to OrderState, which a cost report, a Kafka topic and an
+  // allocator extract each do differently or not at all. The cap is what makes
+  // the two rates beside it mean anything, so it travels with them. Unset when
+  // the decision carried none — every algorithm but POV.
+  common.v1.Decimal participation_cap = 20;
+
+  // realised_participation_rate is what this decision filled, over the volume
+  // that actually printed, across the intervals it traded in and could be seen
+  // in. UNSET when participation_quality is NOT_WORKED or UNOBSERVABLE.
+  common.v1.Decimal realised_participation_rate = 21;
+
+  // max_slice_participation_rate is the worst single interval, and it is the
+  // figure a cap actually bounds. The aggregate above can sit comfortably under
+  // a cap that one thin interval blew through — averaging a busy hour against a
+  // dead one is precisely how an exceeded participation limit hides — so the
+  // maximum is carried separately and it is the one the estate alerts on.
+  common.v1.Decimal max_slice_participation_rate = 22;
+
+  // max_slice_participation_index is which slice produced that maximum, so an
+  // investigation starts at an interval rather than at a window. -1 when no
+  // interval was measurable.
+  int32 max_slice_participation_index = 23;
+
+  ParticipationQuality participation_quality = 24;
+
+  // participation_intervals is how many of the decision's intervals it actually
+  // traded in; measured_participation_intervals is how many of THOSE had
+  // realised volume behind them.
+  //
+  // THE PAIR IS THE COVERAGE SIGNAL, exactly as slices/measured_slices is for
+  // the decomposition, and it is carried even though participation_quality
+  // already says MEASURED or PARTIAL: a parent whose 49th of 50 intervals lost
+  // its candle and one where two of fifty were seen are both PARTIAL, and only
+  // one of them supports a statement about the cap.
+  int32 participation_intervals = 25;
+  int32 measured_participation_intervals = 26;
+
+  // execution_algo is the algorithm that produced this decision's schedule —
+  // EXECUTION_ALGO_UNSPECIFIED for an order that was not worked as one.
+  //
+  // WITHOUT IT AN ATTRIBUTION CANNOT BE GROUPED BY THE THING IT IS MEANT TO
+  // JUDGE. #866 exists so an execution algorithm is a change somebody can prove
+  // is an improvement, and until this field a consumer had to join back to
+  // OrderState to learn which algorithm ran — so the one comparison the whole
+  // measurement was built for was the one it could not serve on its own.
+  ExecutionAlgo execution_algo = 27;
+}

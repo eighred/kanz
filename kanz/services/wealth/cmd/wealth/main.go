@@ -214,7 +214,7 @@ func run() int {
 // the budget expires we close anyway and say so loudly: a handler that ignores
 // context cancellation must not hold the pod until the kubelet SIGKILLs it.
 //
-// Copied, not shared: services/risk-engine/internal/app/lifecycle.go is the
+// Copied, not shared: services/risk_engine/internal/app/lifecycle.go is the
 // reference implementation and the right home for this once promoted — the day
 // it moves, TestNoUndeclaredShutdownBudgetReachableFromAMain keeps it counted.
 func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from go_shard_evidence import SHARD_OWNERS, bounded_bytes, combine, inventory, partition, require_routed_owners, seal, validate_events
-from go_test_evidence import BROWSER_PROOF
+from go_test_evidence import BROWSER_PROOF, INTEGER_BROWSER_PROOF, INTEGER_BROWSER_TEST
 
 
 class ShardEvidenceTests(unittest.TestCase):
@@ -16,6 +16,7 @@ class ShardEvidenceTests(unittest.TestCase):
         self.source = {"sha": "a" * 40, "tree": "b" * 40, "run": "123", "attempt": "2"}
         self.packages = [f"github.com/eighred/kanz/pkg/p{i}" for i in range(12)]
         self.packages.extend(SHARD_OWNERS)
+        self.packages.append(INTEGER_BROWSER_TEST[0])
         self.packages.sort()
         for shard in range(2):
             d = self.directory(shard)
@@ -24,10 +25,13 @@ class ShardEvidenceTests(unittest.TestCase):
             (d / "packages.txt").write_text("\n".join(selected) + "\n", encoding="utf-8")
             rows = []
             for p in selected:
+                test = INTEGER_BROWSER_TEST[1] if p == INTEGER_BROWSER_TEST[0] else "TestReal"
                 rows.extend([{"Action": "start", "Package": p},
-                             {"Action": "run", "Package": p, "Test": "TestReal"},
-                             {"Action": "output", "Package": p, "Test": "TestReal", "Output": BROWSER_PROOF},
-                             {"Action": "pass", "Package": p, "Test": "TestReal"},
+                             {"Action": "run", "Package": p, "Test": test},
+                             {"Action": "output", "Package": p, "Test": test, "Output": BROWSER_PROOF},
+                             *([{"Action": "output", "Package": p, "Test": test, "Output": INTEGER_BROWSER_PROOF}]
+                               if p == INTEGER_BROWSER_TEST[0] else []),
+                             {"Action": "pass", "Package": p, "Test": test},
                              {"Action": "pass", "Package": p}])
             (d / "events.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
             seal(d, shard, self.source)
@@ -42,7 +46,7 @@ class ShardEvidenceTests(unittest.TestCase):
 
     def test_routed_work_is_present_once_and_cannot_become_a_dead_entry(self):
         expected = {"github.com/eighred/kanz/pkg/bus": 1,
-                    "github.com/eighred/kanz/services/risk-engine/internal/app": 0}
+                    "github.com/eighred/kanz/services/risk_engine/internal/app": 0}
         routed = set(expected)
         self.assertEqual(SHARD_OWNERS, expected)
         for package, owner in expected.items():

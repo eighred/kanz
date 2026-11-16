@@ -28,8 +28,8 @@ func TestIntegerContractUnrelatedProtoNamesDoNotChangeTheBrowserContract(t *test
 	sources := integerWireSources(t)
 	// Same spelling in an unrelated message/file must neither change identity's
 	// origin nor make evidence protocol version:2/count:number into strings.
-	sources["kanz-schemas/proto/accounting/v1/unrelated.proto"] = `message CorporateAction { uint64 revision = 1; uint64 count = 2; }`
-	path := "kanz-schemas/proto/compliance/v1/compliance.proto"
+	sources["schemas/proto/accounting/v1/unrelated.proto"] = `message CorporateAction { uint64 revision = 1; uint64 count = 2; }`
+	path := "schemas/proto/compliance/v1/compliance.proto"
 	sources[path] += "\nmessage Unrelated {\n uint64 revision = 1;\n uint64 count = 2;\n}\n"
 	if problems := integerWireProblems(sources); len(problems) != 0 {
 		t.Fatal(problems)
@@ -42,17 +42,17 @@ func TestIntegerContractActualUnsafeRepresentationsFail(t *testing.T) {
 		t.Fatal("baseline contract unresolved", problems)
 	}
 	for _, mutation := range []struct{ name, path, before, after, want string }{
-		{"signed account", "kanz-web/src/api/users.ts", "revision: string", "revision: number", "UserAccess.revision"},
-		{"signed session epoch", "kanz-web/src/api/users.ts", "session_epoch: string", "session_epoch: number", "UserAccess.session_epoch"},
-		{"signed invitation", "kanz-web/src/api/invitations.ts", "revision: string", "revision: number", "InvitationSummary.revision"},
-		{"signed custody same line", "kanz-web/src/api/custody.ts", "revision?: string;", "revision?: number;", "CustodyBreak.revision"},
-		{"signed action evidence", "kanz-web/src/api/custody.ts", "revision: string }", "revision: number }", "ActionState.revision"},
-		{"signed audit sequence", "kanz-web/src/api/evidence.ts", "seq: string;", "seq: number;", "EvidenceRecord.seq"},
-		{"signed decimal", "kanz-web/src/api/decimal.ts", "coefficient?: string", "coefficient?: number", "Decimal.coefficient"},
-		{"signed order history", "kanz-web/src/api/risk.ts", "unindexed?: string", "unindexed?: number", "OrdersResponse.unindexed"},
-		{"unsigned mandate queue", "kanz-web/src/api/mandates.ts", "version?: string", "version?: number", "PendingMandateChange.version"},
-		{"unsigned mandate document", "kanz-web/src/api/mandates.ts", "version: string", "version: number", "MandateDocument.version"},
-		{"unsigned mandate proposal", "kanz-web/src/api/mandates.ts", "version: string\n  rule_count", "version: number\n  rule_count", "ProposedMandateChange.version"},
+		{"signed account", "web/src/api/users.ts", "revision: string", "revision: number", "UserAccess.revision"},
+		{"signed session epoch", "web/src/api/users.ts", "session_epoch: string", "session_epoch: number", "UserAccess.session_epoch"},
+		{"signed invitation", "web/src/api/invitations.ts", "revision: string", "revision: number", "InvitationSummary.revision"},
+		{"signed custody same line", "web/src/api/custody.ts", "revision?: string;", "revision?: number;", "CustodyBreak.revision"},
+		{"signed action evidence", "web/src/api/custody.ts", "revision: string }", "revision: number }", "ActionState.revision"},
+		{"signed audit sequence", "web/src/api/evidence.ts", "seq: string;", "seq: number;", "EvidenceRecord.seq"},
+		{"signed decimal", "web/src/api/decimal.ts", "coefficient?: string", "coefficient?: number", "Decimal.coefficient"},
+		{"signed order history", "web/src/api/risk.ts", "unindexed?: string", "unindexed?: number", "OrdersResponse.unindexed"},
+		{"unsigned mandate queue", "web/src/api/mandates.ts", "version?: string", "version?: number", "PendingMandateChange.version"},
+		{"unsigned mandate document", "web/src/api/mandates.ts", "version: string", "version: number", "MandateDocument.version"},
+		{"unsigned mandate proposal", "web/src/api/mandates.ts", "version: string\n  rule_count", "version: number\n  rule_count", "ProposedMandateChange.version"},
 		{"signed account projection", "kanz/services/identity/internal/server/administration_json.go", "Revision     string", "Revision     int64", "Access.revision"},
 		{"signed JSON tag", "kanz/services/accounting/internal/server/custody.go", `json:"revision,string"`, `json:"revision"`, "breakView.revision"},
 		{"unsigned JSON map", integerComplianceSource, "jsonUint64(m.GetVersion())", "m.GetVersion()", "handlePropose"},
@@ -75,7 +75,7 @@ func TestIntegerContractActualUnsafeRepresentationsFail(t *testing.T) {
 
 func TestIntegerContractMissingAndNewFieldsFailClosed(t *testing.T) {
 	baseline := integerWireSources(t)
-	for _, path := range []string{"kanz/internal/identity/access.go", "kanz-web/src/api/invitations.ts", "kanz-schemas/proto/compliance/v1/compliance.proto"} {
+	for _, path := range []string{"kanz/internal/identity/access.go", "web/src/api/invitations.ts", "schemas/proto/compliance/v1/compliance.proto"} {
 		sources := maps.Clone(baseline)
 		delete(sources, path)
 		if len(integerWireProblems(sources)) == 0 {
@@ -92,8 +92,8 @@ func TestIntegerContractMissingAndNewFieldsFailClosed(t *testing.T) {
 
 func TestIntegerContractSameLineProtoFieldsKeepTheirOwnClientProperty(t *testing.T) {
 	sources := integerWireSources(t)
-	proto := "kanz-schemas/proto/compliance/v1/compliance.proto"
-	client := "kanz-web/src/api/mandates.ts"
+	proto := "schemas/proto/compliance/v1/compliance.proto"
+	client := "web/src/api/mandates.ts"
 	if !strings.Contains(sources[proto], "uint64 version = 4;") || !strings.Contains(sources[client], "version: string") {
 		t.Fatal("same-line mutation lost its actual Mandate/DTO edge")
 	}
@@ -113,7 +113,7 @@ func TestIntegerContractSameLineProtoFieldsKeepTheirOwnClientProperty(t *testing
 }
 
 func TestIntegerContractNestedProtoDefinitionsKeepTheirOwnMessageOwner(t *testing.T) {
-	proto := "kanz-schemas/proto/compliance/v1/compliance.proto"
+	proto := "schemas/proto/compliance/v1/compliance.proto"
 	for _, nested := range []string{
 		"message Nested { uint64 version = 1; uint64 count = 2; }",
 		"message Nested {\n uint64 version = 1;\n uint64 count = 2;\n}",

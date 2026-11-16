@@ -44,7 +44,7 @@ type rolloutKustomization struct {
 
 func TestArgoRolloutsControlPlaneLocksSupplyChainAndAvailability(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, "infra", "controllers", "argo-rollouts")
+	dir := filepath.Join(root, "infra", "controllers", "argo_rollouts")
 
 	lockRaw, err := os.ReadFile(filepath.Join(dir, "release-lock.json"))
 	if err != nil {

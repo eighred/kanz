@@ -44,9 +44,9 @@ var integerStructWires = []integerStructWire{
 type integerProtoWire struct{ source, message, client, declaration string }
 
 var integerProtoWires = []integerProtoWire{
-	{"kanz-schemas/proto/compliance/v1/compliance.proto", "Mandate", "mandates.ts", "MandateDocument"},
-	{"kanz-schemas/proto/common/v1/decimal.proto", "Decimal", "decimal.ts", "Decimal"},
-	{"kanz-schemas/proto/order/v1/order_query.proto", "ListOrdersResponse", "risk.ts", "OrdersResponse"},
+	{"schemas/proto/compliance/v1/compliance.proto", "Mandate", "mandates.ts", "MandateDocument"},
+	{"schemas/proto/common/v1/decimal.proto", "Decimal", "decimal.ts", "Decimal"},
+	{"schemas/proto/order/v1/order_query.proto", "ListOrdersResponse", "risk.ts", "OrdersResponse"},
 }
 
 const integerComplianceSource = "kanz/services/compliance/internal/api/api.go"
@@ -59,11 +59,11 @@ func integerWireSources(t *testing.T) map[string]string {
 		if c.wire != "" {
 			paths[c.wire] = true
 		}
-		paths["kanz-web/src/api/"+c.client] = true
+		paths["web/src/api/"+c.client] = true
 	}
 	for _, c := range integerProtoWires {
 		paths[c.source] = true
-		paths["kanz-web/src/api/"+c.client] = true
+		paths["web/src/api/"+c.client] = true
 	}
 	out := map[string]string{}
 	for path := range paths {
@@ -199,7 +199,7 @@ func integerWireProblems(sources map[string]string) []string {
 			if !ok || !bounded && projected.goType != "string" && !(projected.goType == field.goType && projected.quoted) {
 				problems = append(problems, c.domain+"."+key+": JSON must encode 64-bit integer as text")
 			}
-			check("kanz-web/src/api/"+c.client, c.declaration, key, bounded)
+			check("web/src/api/"+c.client, c.declaration, key, bounded)
 		}
 		if checked == 0 {
 			problems = append(problems, c.domain+": no 64-bit fields; binding is vacuous")
@@ -212,7 +212,7 @@ func integerWireProblems(sources map[string]string) []string {
 			continue
 		}
 		for _, field := range fields {
-			check("kanz-web/src/api/"+c.client, c.declaration, field, false)
+			check("web/src/api/"+c.client, c.declaration, field, false)
 		}
 	}
 	// Hand-built mandate views use the same qualified Mandate.version contract.
@@ -242,7 +242,7 @@ func integerWireProblems(sources map[string]string) []string {
 		problems = append(problems, "jsonUint64: unsigned string conversion changed")
 	}
 	for _, declaration := range []string{"PendingMandateChange", "ProposedMandateChange"} {
-		check("kanz-web/src/api/mandates.ts", declaration, "version", false)
+		check("web/src/api/mandates.ts", declaration, "version", false)
 	}
 	sort.Strings(problems)
 	return problems

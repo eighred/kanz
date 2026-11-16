@@ -105,7 +105,7 @@ var compositionRootBudget = map[string]int{
 	// that this service has twice shipped a crashing root with a green suite. Two
 	// of its constructions are already extracted into named builders with tests
 	// (liquidity.go, margin.go); the rest are not.
-	"services/risk-engine/cmd/risk-engine/main.go:runEngine": 699,
+	"services/risk_engine/cmd/risk_engine/main.go:runEngine": 699,
 }
 
 func TestNoCompositionRootGrowsWithoutSaying(t *testing.T) {
@@ -139,7 +139,7 @@ func TestNoCompositionRootGrowsWithoutSaying(t *testing.T) {
 				"  Everything in it is unreachable by any test: the constructions are locals in\n"+
 				"  package main. Extract the constructions a test can assert about into named\n"+
 				"  builders that RETURN what they built (services/oms/cmd/oms/pretrade.go and\n"+
-				"  services/risk-engine/cmd/risk-engine/liquidity.go are the shape), or add a\n"+
+				"  services/risk_engine/cmd/risk_engine/liquidity.go are the shape), or add a\n"+
 				"  budget entry above naming the issue that retires it.",
 				name, lines, maxCompositionRootLines)
 		case budgeted && lines > budget:

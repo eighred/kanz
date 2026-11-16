@@ -29,7 +29,7 @@
 // behind a legitimate reason. It is http.NewResponseController(w).SetWriteDeadline
 // (time.Time{}), which lifts the bound for THAT ONE CONNECTION and leaves every
 // other route on the same server bounded. Same measurement, with the deadline
-// lifted: 10 of 10 frames. services/tv-sync/internal/brokerapi is the one handler
+// lifted: 10 of 10 frames. services/tv_sync/internal/brokerapi is the one handler
 // in the estate that needs it, and test/arch/http_server_timeouts_test.go requires
 // any future one to do the same.
 //
@@ -104,7 +104,7 @@ const (
 
 	// MUST EXCEED THE IDLE TIMEOUT OF THE CLIENT THAT POOLS CONNECTIONS HERE — the
 	// gateway's proxy transport, pinned to proxyIdleConnTimeout (90s) in
-	// cmd/api-gateway so this ordering is something a test can read rather than a
+	// cmd/api_gateway so this ordering is something a test can read rather than a
 	// property of http.DefaultTransport's defaults. The gateway must be the side
 	// that retires an idle connection; if this server retires it first, the
 	// gateway sends on a socket that is already closing and the race surfaces as

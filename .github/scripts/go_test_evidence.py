@@ -13,6 +13,14 @@ BACKING = re.compile(
     r"MFA_(?:BROWSER_SCRIPT|PLAYWRIGHT|NODE|BFF|STATIC_DIR))\b"
 )
 BROWSER_PROOF = "Chromium shared-session inventory and revocation PASS"
+INTEGER_BROWSER_TEST = (
+    "github.com/eighred/kanz/services/identity/internal/server",
+    "TestMFABrowserEnrollmentLoginStepUpAndFactorRemoval",
+)
+INTEGER_BROWSER_PROOF = (
+    "integer HTTP/BFF/browser proof: adjacent signed revisions, exact mutation requests, "
+    "stale/malformed/exhausted refusal and unchanged authority"
+)
 
 
 def events(lines):
@@ -29,6 +37,7 @@ def check(lines, expected_packages=None):
     packages = set()
     cached = set()
     browser_proven = False
+    integer_browser_phase, integer_markers, integer_browser_refused = "absent", 0, False
     for event in events(lines):
         key = (event.get("Package", ""), event.get("Test", ""))
         output = event.get("Output", "")
@@ -36,6 +45,23 @@ def check(lines, expected_packages=None):
             cached.add(key[0])
         reasons[key].update(BACKING.findall(output))
         browser_proven |= BROWSER_PROOF in output
+        if key == INTEGER_BROWSER_TEST:
+            action = event["Action"]
+            if action == "run":
+                integer_browser_refused |= integer_browser_phase != "absent"
+                integer_browser_phase = "running"
+            elif action == "output":
+                markers = sum(re.fullmatch(
+                    r"(?:mfa_browser_test\.go:[1-9][0-9]*: )?" + re.escape(INTEGER_BROWSER_PROOF), line.strip()
+                ) is not None for line in output.splitlines())
+                if markers:
+                    integer_browser_refused |= integer_browser_phase != "running"
+                    integer_markers += markers
+            elif action == "pass":
+                integer_browser_refused |= integer_browser_phase != "running" or integer_markers != 1
+                integer_browser_phase = "passed"
+            elif action in ("skip", "fail"):
+                integer_browser_refused = True
         if event["Action"] == "skip":
             skipped.add(key)
         if not key[1] and event["Action"] in ("pass", "fail", "skip") and key[0]:
@@ -56,6 +82,8 @@ def check(lines, expected_packages=None):
         problems.extend(f"unexpected package result: {package}" for package in sorted(packages - expected))
     if not browser_proven:
         problems.append("shared-session Chromium proof did not run")
+    if integer_browser_phase != "passed" or integer_markers != 1 or integer_browser_refused:
+        problems.append("integer HTTP/BFF/Chromium proof lacks its exact owning test run, marker and fresh pass")
     return problems, len(skipped), len(packages)
 
 

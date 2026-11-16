@@ -134,7 +134,7 @@ func TestTheStripCoverageAlertFollowsItsProducer(t *testing.T) {
 			"unmeasured on every response (#912; #104, #105).\n"+
 			"Then update the 'ALSO DELIBERATELY ABSENT' note in "+
 			"infra/observability/alerts/operational.rules.yaml and the posture comment in "+
-			"services/risk-engine/internal/app/calibration_posture.go — both currently state that "+
+			"services/risk_engine/internal/app/calibration_posture.go — both currently state that "+
 			"NOTHING enables calibration, which your change makes false.",
 			strings.Join(enablers, ", "), strings.Join(metrics, ", "))
 
@@ -178,7 +178,7 @@ func TestTheDeliberatelyAbsentNoteNamesThisGuard(t *testing.T) {
 // because test/arch does not import the service packages — the point is that
 // nobody has to remember to update a list here when they add a kind there.
 func TestEveryCalibrationKindHasAnUnscheduledReason(t *testing.T) {
-	p := filepath.Join(moduleRoot(t), "services", "risk-engine", "internal", "app",
+	p := filepath.Join(moduleRoot(t), "services", "risk_engine", "internal", "app",
 		"calibration_posture.go")
 	body, err := os.ReadFile(p)
 	if err != nil {
@@ -219,7 +219,7 @@ func TestEveryCalibrationKindHasAnUnscheduledReason(t *testing.T) {
 // matching a name nothing exports. Sorted for a stable failure message.
 func stripCoverageMetricNames(t *testing.T, root string) []string {
 	t.Helper()
-	dir := filepath.Join(root, "services", "risk-engine")
+	dir := filepath.Join(root, "services", "risk_engine")
 	re := regexp.MustCompile(`"(kanz_risk_calibration_strip_[a-z_]+)"`)
 	seen := map[string]bool{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {

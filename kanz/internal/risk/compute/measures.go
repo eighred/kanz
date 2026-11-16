@@ -305,7 +305,7 @@ func Delta(p *domain.Portfolio) v1.Measure {
 		// the platform's ability to measure delta changed.
 		//
 		// The posture is STATED instead, at the risk-engine composition root:
-		// services/risk-engine/internal/app/greek_model_posture.go derives
+		// services/risk_engine/internal/app/greek_model_posture.go derives
 		// kanz_risk_greek_model_live from this registry rather than asserting
 		// it, so the claim flips itself the day RegisterGreeks is wired.
 		Provenance: v1.MeasureProvenance{Method: v1.MethodNetExposurePlaceholder},

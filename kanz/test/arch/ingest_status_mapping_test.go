@@ -52,13 +52,13 @@ import (
 // default nobody looked at.
 
 // ingestStatusSentinelPkg is the package whose exported sentinels must be mapped.
-const ingestStatusSentinelPkg = "services/webhook-ingest/internal/ingest"
+const ingestStatusSentinelPkg = "services/webhook_ingest/internal/ingest"
 
 // ingestStatusDeciders are the functions where a status decision counts as made.
 // Module-relative file, then the function within it.
 var ingestStatusDeciders = map[string]string{
-	"services/webhook-ingest/internal/server/server.go":   "writePipelineError",
-	"services/webhook-ingest/internal/ingest/pipeline.go": "mapTranslateErr",
+	"services/webhook_ingest/internal/server/server.go":   "writePipelineError",
+	"services/webhook_ingest/internal/ingest/pipeline.go": "mapTranslateErr",
 }
 
 // ingestStatusExempt maps a startup-only sentinel to the reason it cannot

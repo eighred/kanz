@@ -51,7 +51,7 @@ import (
 //     rather than returned. Those boundaries — risk ingest, market-data ingest,
 //     livequote, the compliance monitor, the OMS command handler — were checked by hand
 //     for #95 and carry dec.InDomainDeep, but a NEW one would not be caught here.
-//   - services/lake-sink decodes into a dynamicpb message and re-marshals it to JSON
+//   - services/lake_sink decodes into a dynamicpb message and re-marshals it to JSON
 //     without ever converting a Decimal. It is not exempted, it is genuinely outside the
 //     rule: refusing there would drop archival data to prevent an expansion that path
 //     never performs.

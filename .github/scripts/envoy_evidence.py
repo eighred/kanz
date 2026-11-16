@@ -18,21 +18,21 @@ CASES = {'anonymous', 'session_gateway_signing', 'origin_csrf', 'encoded_identif
          'principal_sanitization', 'request_body', 'cookies', 'admin_surface',
          'no_retry', 'quiet_stream', 'quiet_stream_negative_control', 'rate_limit', 'cleanup'}
 REQUIRED = {
-    'services/web-bff/internal/edgeconfig': {
+    'services/web_bff/internal/edgeconfig': {
         'TestInvalidProfilesDoNotReplaceExistingConfiguration',
         'TestWriterReplacesFinalSymlinkWithoutFollowingItsTarget'},
-    'services/web-bff/cmd/web-bff': {'TestEdgeConfigurationDoesNotLoadApplicationCredentials',
+    'services/web_bff/cmd/web_bff': {'TestEdgeConfigurationDoesNotLoadApplicationCredentials',
         'TestGatewayWorkloadTransport', *{'TestGatewayWorkloadTransport/' + name for name in (
             'exact_peers', 'wrong_server', 'wrong_client', 'untrusted_server', 'expired_server',
             'expired_client', 'identity_rotation_and_unavailability', 'disabled_is_a_nil_interface',
             'no_plaintext_or_missing_identity', 'actual_bff_session_and_signing')}},
-    'services/web-bff/internal/config': {'TestGatewayWorkloadConfiguration',
+    'services/web_bff/internal/config': {'TestGatewayWorkloadConfiguration',
         *{'TestGatewayWorkloadConfiguration/' + name for name in (
             'legacy', 'workload', 'plaintext', 'credential_url', 'query_url', 'fragment_url')}},
-    'services/api-gateway/internal/config': {'TestBFFWorkloadConfiguration',
+    'services/api_gateway/internal/config': {'TestBFFWorkloadConfiguration',
         *{'TestBFFWorkloadConfiguration/' + name for name in (
             'disabled', 'enabled', 'no_identity', 'same_listener', 'privileged', 'not_tcp', 'no_port')}},
-    'services/api-gateway/cmd/api-gateway': {'TestBFFWorkloadListener',
+    'services/api_gateway/cmd/api_gateway': {'TestBFFWorkloadListener',
         *{'TestBFFWorkloadListener/' + name for name in (
             'workload_does_not_bypass_user_controls',
             'workload_does_not_bypass_user_controls/unsigned',
@@ -40,7 +40,7 @@ REQUIRED = {
             'workload_does_not_bypass_user_controls/signed_authenticated',
             'wrong_workload_and_untrusted_certificate', 'missing_client_certificate',
             'workload_does_not_grant_role', 'missing_router_or_source')}},
-    'services/web-bff/internal/server': {'TestEnvoyEdgeActualBFF',
+    'services/web_bff/internal/server': {'TestEnvoyEdgeActualBFF',
         *{'TestEnvoyEdgeActualBFF/' + name for name in CASES}},
 }
 
@@ -98,7 +98,7 @@ def main():
     if os.environ.get('GITHUB_ACTIONS') != 'true' or sys.platform != 'linux' or os.environ.get('DOCKER_HOST') or os.environ.get('DOCKER_CONTEXT', 'default') != 'default':
         raise ValueError('requires ephemeral local Linux CI Docker')
     directory = Path(os.environ['ENVOY_EVIDENCE'])
-    lock = read_json(ROOT / 'kanz/services/web-bff/internal/edgeconfig/image.json', 4096)
+    lock = read_json(ROOT / 'kanz/services/web_bff/internal/edgeconfig/image.json', 4096)
     image = lock['reference']
     report = {'passed': False, 'sourceSHA': '', 'image': lock,
               'limitations': ['synthetic-identity-and-gateway', 'no-public-tunnel-or-OIDC-provider-proof',
@@ -149,7 +149,7 @@ def main():
                 raise ValueError('fresh credential-independent CLI configuration absent')
             report['cliSHA256'] = digest(directory / 'cli.json')
             stage = 'archive-config-identity'
-            module_path = ROOT / 'kanz/services/tv-sync/test/isolation.py'
+            module_path = ROOT / 'kanz/services/tv_sync/test/isolation.py'
             spec = importlib.util.spec_from_file_location('kanz_envoy_image_identity', module_path)
             identity = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(identity)

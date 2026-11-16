@@ -118,7 +118,7 @@ func TestVenueDiscrepanciesReachOperatorEvidence(t *testing.T) {
 		t.Error("audit projector has no live subscription")
 	}
 	for _, venue := range []string{"venue-binance", "venue-okx"} {
-		if !hasCall(parse("services/"+venue+"/cmd/"+venue+"/main.go"), "execution", "NewDiscrepancyPublisher") {
+		if !hasCall(parse("services/"+sourceDirectoryName(venue)+"/cmd/"+sourceDirectoryName(venue)+"/main.go"), "execution", "NewDiscrepancyPublisher") {
 			t.Errorf("%s lacks discrepancy publish outcomes", venue)
 		}
 	}
