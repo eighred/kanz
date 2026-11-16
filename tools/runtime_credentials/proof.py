@@ -320,6 +320,32 @@ class Sandbox:
         # Never retain State.Error, command output, server logs or audit files.
         return {"status":state["Status"],"running":state["Running"],"exit_code":state["ExitCode"],"oom_killed":state["OOMKilled"]}
 
+    def readiness(self, container_id, command, classes):
+        state = self.server_state(container_id)
+        result = {"process":state, "docker_exec_exit":None, "command_exit":None,
+                  "classification":"server-not-running"}
+        if not state["running"]:
+            return result
+        # Only a fixed numeric frame can attest that the readiness command ran.
+        # Docker's own exit status must never masquerade as pg_isready/Vault's.
+        frame = 'if /usr/bin/env -i "$@" >/dev/null 2>&1; then code=0; else code=$?; fi; printf "runtime-proof-readiness:%s\\n" "$code"'
+        code, output, _ = bounded(["docker", "exec", container_id, "/usr/bin/env", "-i",
+                                  "/bin/sh", "-eu", "-c", frame, "runtime-proof-readiness", *command],
+                                 timeout=3, stdout_limit=128, stderr_limit=4096)
+        result.update({"process":self.server_state(container_id), "docker_exec_exit":code})
+        if not result["process"]["running"]:
+            result["classification"] = "server-exited-during-readiness"
+        elif code:
+            result["classification"] = "docker-exec-error"
+        else:
+            match = re.fullmatch(rb"runtime-proof-readiness:([0-9]{1,3})\n", output)
+            if match is None or int(match[1]) > 255:
+                result["classification"] = "readiness-protocol-error"
+            else:
+                result["command_exit"] = int(match[1])
+                result["classification"] = classes.get(result["command_exit"], "readiness-command-error")
+        return result
+
     def cleanup(self):
         results = []
         for container_id, name in reversed(self.created):
@@ -439,8 +465,13 @@ def main():
                 receipt["manifest_tests"] = manifest_result
                 receipt["stage"] = "disposable-servers"
                 postgres = sandbox.arguments("postgres", POSTGRES, user="70:70", scratch="512m", pids="64")
+                # The canonical entrypoint clears PGHOST for its psql calls.
+                # Its temporary server already receives our /scratch socket;
+                # libpq's service-file seam binds those clients to the same path.
                 postgres += ["PGDATA=/scratch/pgdata", "POSTGRES_USER=fixture_admin", "POSTGRES_PASSWORD=fixture", "POSTGRES_DB=fixture",
-                             "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256", "/usr/local/bin/docker-entrypoint.sh", "postgres",
+                             "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256", "PGSERVICE=runtime_fixture_init", "PGSERVICEFILE=/scratch/pg_service.conf",
+                             "/bin/sh", "-eu", "-c", 'printf \'[runtime_fixture_init]\\nhost=/scratch\\n\' > /scratch/pg_service.conf; exec /usr/local/bin/docker-entrypoint.sh "$@"',
+                             "runtime-postgres-init", "postgres",
                              "-c", "listen_addresses=127.0.0.1", "-c", "unix_socket_directories=/scratch", "-c", "max_connections=20",
                              "-c", "log_statement=none", "-c", "fsync=off", "-c", "dynamic_shared_memory_type=mmap"]
                 postgres_id = sandbox.start(postgres)
@@ -450,22 +481,30 @@ def main():
                           "-dev-listen-address=127.0.0.1:8200", "-log-level=error"]
                 vault_id = sandbox.start(vault)
                 ready = False
-                readiness = {name:{"exit_counts":{}} for name in ("postgres","vault")}
+                readiness = {name:{"docker_exec_exit_counts":{}, "command_exit_counts":{}, "classification_counts":{}} for name in ("postgres","vault")}
                 receipt["server_readiness"] = readiness
+                checks = (
+                    ("postgres", postgres_id, ["PATH=/usr/local/bin:/usr/bin:/bin", "pg_isready", "-h", "127.0.0.1", "-U", "fixture_admin", "-d", "fixture"],
+                     {0:"accepting",1:"rejecting",2:"no-response",3:"invalid-invocation"}),
+                    ("vault", vault_id, ["HOME=/scratch", "PATH=/usr/local/bin:/usr/bin:/bin", "VAULT_ADDR=http://127.0.0.1:8200", "/bin/vault", "status"],
+                     {0:"unsealed",1:"status-command-error",2:"sealed"}),
+                )
                 for attempt in range(30):
-                    pg_ready, _, _ = bounded(["docker", "exec", postgres_id, "/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "pg_isready", "-h", "127.0.0.1", "-U", "fixture_admin", "-d", "fixture"], timeout=3)
-                    vault_ready, _, _ = bounded(["docker", "exec", vault_id, "/usr/bin/env", "-i", "HOME=/scratch", "PATH=/usr/local/bin:/usr/bin:/bin", "VAULT_ADDR=http://127.0.0.1:8200", "/bin/vault", "status"], timeout=3)
-                    for name,code,classes in (("postgres",pg_ready,{0:"accepting",1:"rejecting",2:"no-response",3:"invalid-invocation"}),("vault",vault_ready,{0:"unsealed",1:"status-command-error",2:"sealed"})):
+                    ready, stopped = True, False
+                    for name,identity,command,classes in checks:
+                        observation = sandbox.readiness(identity, command, classes)
                         value=readiness[name]
-                        value.update({"attempts":attempt+1,"last_exit":code,"classification":classes.get(code,"command-execution-error")})
-                        key=str(code)
-                        value["exit_counts"][key]=value["exit_counts"].get(key,0)+1
-                    if pg_ready == vault_ready == 0:
-                        ready = True
+                        value.update(observation, attempts=attempt+1)
+                        for field in ("docker_exec_exit", "command_exit", "classification"):
+                            if observation[field] is not None:
+                                key=str(observation[field])
+                                counts=value[field+"_counts"]
+                                counts[key]=counts.get(key,0)+1
+                        ready = ready and observation["command_exit"] == 0
+                        stopped = stopped or not observation["process"]["running"]
+                    if ready or stopped:
                         break
                     time.sleep(1)
-                for name,identity in (("postgres",postgres_id),("vault",vault_id)):
-                    readiness[name]["process"]=sandbox.server_state(identity)
                 if not ready:
                     raise ProofFailure("owned dummy servers did not become ready")
                 receipt["stage"] = "actual-vault-postgres-boundary"

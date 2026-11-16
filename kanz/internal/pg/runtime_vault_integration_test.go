@@ -29,6 +29,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const runtimeBootstrapScript = "../../../tools/bootstrap-testnet-data-plane.sh"
+
 type runtimeVaultFixture struct {
 	t        *testing.T
 	ctx      context.Context
@@ -303,7 +305,7 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal("create dummy service-account key")
 	}
-	v := &runtimeVaultFixture{t: t, ctx: ctx, client: &http.Client{Timeout: 3 * time.Second}, address: address, root: "fixture-root-token", key: key, fixtures: map[string]*runtimeRoleFixture{}, scratch: t.TempDir(), script: filepath.Join("..", "..", "..", "tools", "bootstrap-testnet-data-plane.sh")}
+	v := &runtimeVaultFixture{t: t, ctx: ctx, client: &http.Client{Timeout: 3 * time.Second}, address: address, root: "fixture-root-token", key: key, fixtures: map[string]*runtimeRoleFixture{}, scratch: t.TempDir(), script: runtimeBootstrapScript}
 	v.trust = filepath.Join(v.scratch, "fixture-trust.pem")
 	// Vault loads VAULT_CACERT while constructing its client even for HTTP.
 	// Emit only a valid generated PUBLIC certificate; the existing dummy
@@ -390,8 +392,11 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	if status != http.StatusNoContent {
 		t.Fatal("explicit dummy partial-record cleanup failed")
 	}
-	if !v.bootstrap("runtime-isolation-prepare", v.root, v.script, false) || !v.bootstrap("runtime-isolation-prepare", v.root, v.script, false) {
-		t.Fatal("preparation/idempotent rerun failed")
+	if !v.bootstrap("runtime-isolation-prepare", v.root, v.script, false) {
+		t.Fatal("preparation failed")
+	}
+	if !v.bootstrap("runtime-isolation-prepare", v.root, v.script, false) {
+		t.Fatal("idempotent preparation rerun failed")
 	}
 	if v.bootstrap("runtime-isolation-activate", v.root, v.script, false) {
 		t.Fatal("unapproved cutover accepted")
@@ -498,7 +503,7 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 	if v.bootstrap("runtime-isolation-activate", v.root, v.script, true) {
 		t.Fatal("historical migration credential was accepted")
 	}
-	source, err := os.ReadFile(v.script)
+	source, err := os.ReadFile(runtimeBootstrapScript)
 	if err != nil {
 		t.Fatal(err)
 	}
