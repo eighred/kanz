@@ -384,6 +384,19 @@ class LaunchPermissions(unittest.TestCase):
 
 
 class ProbeObservations(unittest.TestCase):
+    def test_actual_toolchain_must_be_exact_go1274_linux_amd64_with_cgo(self):
+        good = {"GOVERSION": "go1.27.4", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"}
+        proof.require_go_toolchain(good)
+        for key, value in (("GOVERSION", "go1.26.11"), ("GOVERSION", "go1.27.5"),
+                           ("GOOS", "windows"), ("GOARCH", "arm64"), ("CGO_ENABLED", "0")):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                proof.require_go_toolchain(dict(good, **{key: value}))
+        for key in good:
+            missing = dict(good)
+            missing.pop(key)
+            with self.assertRaises(ValueError):
+                proof.require_go_toolchain(missing)
+
     def test_working_directory_is_declared_per_invocation_and_cannot_be_overridden(self):
         base = {"HOME": "/scratch/home", "LANG": "C.UTF-8"}
         extra = {"TEST_NATS_URL": "nats://127.0.0.1:4222"}

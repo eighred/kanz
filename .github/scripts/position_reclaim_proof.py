@@ -48,6 +48,12 @@ from go_shard_evidence import identity, inventory, validate_events, digest, MAX_
 from go_test_evidence import check, events
 from position_reclaim_sandbox import Sandbox, VisibleInputCapsule, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS, effective_environment
 
+
+def require_go_toolchain(value):
+    expected = {"GOVERSION": "go1.27.4", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"}
+    if not isinstance(value, dict) or any(value.get(key) != item for key, item in expected.items()):
+        raise ValueError("actual pinned Go Linux/cgo toolchain differs")
+
 PREFIX = "github.com/eighred/kanz/"
 STORE = PREFIX+"services/oms/tools/store_conformance"
 CONTROL = PREFIX+"internal/bustest"
@@ -271,7 +277,7 @@ class Proof:
         # These are trusted tool inspections/downloaded inputs, not source builds.
         go=Path(self.args.go).resolve()
         go_env=json.loads(subprocess.check_output([str(go),"env","-json","GOROOT","GOMODCACHE","GOVERSION","GOOS","GOARCH","CGO_ENABLED"],env=dict(SAFE,GOTOOLCHAIN="local",GOMODCACHE=self.args.gomodcache)))
-        if go_env["GOVERSION"]!="go1.26.11" or go_env["GOOS"]!="linux" or go_env["GOARCH"]!="amd64" or go_env["CGO_ENABLED"]!="1": raise ValueError("actual pinned Go Linux/cgo toolchain differs")
+        require_go_toolchain(go_env)
         rust=Path(self.args.rustc).resolve().parent.parent
         rust_version=host(str(rust/"bin/rustc"),"--version").decode().strip()
         if not rust_version.startswith("rustc 1.90.0 "): raise ValueError("actual reviewed Rust compiler differs")
