@@ -740,6 +740,34 @@ def launch_permission_output(raw, roles):
     return result
 
 
+def observed_process_status(pid):
+    """Read only an enumerated canonical PID's kernel status.
+
+    A process may disappear between cgroup enumeration and this read. Only
+    ENOENT/ESRCH mean that sample vanished; permission and parsing failures
+    still refuse. An absent sample is never evidence of a qualified identity.
+    """
+    if type(pid) is not str or not re.fullmatch(r"[1-9][0-9]{0,9}", pid) or int(pid) > 2**31-1:
+        raise ValueError("canonical observed PID required")
+    try:
+        status = (Path("/proc")/pid/"status").read_text()
+    except (FileNotFoundError, ProcessLookupError) as error:
+        if error.errno in (errno.ENOENT, errno.ESRCH):
+            return None
+        raise
+    if type(status) is not str or len(status) > 16384:
+        raise ValueError("observed process status exceeds bound")
+    values = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+    uids = set(map(int, values["Uid"].split()))
+    if uids != {UID}:
+        raise ValueError("executed target acquired a privileged host identity")
+    namespace_pid = int(values["NSpid"].split()[-1])
+    cap_eff = values["CapEff"].strip()
+    if not 0 < namespace_pid <= 2**31-1 or not re.fullmatch(r"[0-9a-f]{16}", cap_eff):
+        raise ValueError("malformed observed process identity")
+    return {"host_pid": int(pid), "namespace_pid": namespace_pid, "host_uids": sorted(uids), "cap_eff": cap_eff}
+
+
 class FixedRelay:
     """Byte transport to one compile-time endpoint, bounded to 96 connections."""
     def __init__(self, listen, upstream, routes):
@@ -1103,13 +1131,10 @@ os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
                         if len(data)>output_limit: raise ValueError("child output exceeded bound")
                     if data.startswith(b"POSITION_OUTER_IDENTITY ") and b"\n" in data and (cg/"cgroup.procs").exists():
                         for pid in (cg/"cgroup.procs").read_text().split():
-                            try: status=(Path("/proc")/pid/"status").read_text()
-                            except FileNotFoundError: continue
-                            values=dict(line.split(":",1) for line in status.splitlines() if ":" in line)
-                            uids=set(map(int,values["Uid"].split()))
-                            if uids!={UID}: raise ValueError("executed target acquired a privileged host identity")
-                            observed_host_uids.update(uids)
-                            observed_processes[pid]={"host_pid":int(pid),"namespace_pid":int(values["NSpid"].split()[-1]),"host_uids":sorted(uids),"cap_eff":values["CapEff"].strip()}
+                            observation=observed_process_status(pid)
+                            if observation is None: continue
+                            observed_host_uids.update(observation["host_uids"])
+                            observed_processes[pid]=observation
             code = process.wait(timeout=10)
         finally:
             # Stop the entire service/cgroup before looking at any target file,

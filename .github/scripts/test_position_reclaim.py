@@ -524,6 +524,56 @@ class KernelBoundary(unittest.TestCase):
         with open("/dev/null","wb") as sink: self.assertEqual(sink.write(b"required device"),15)
 
 
+class ObservedProcessStatus(unittest.TestCase):
+    def test_actual_own_pid_receipt_uses_known_host_identity(self):
+        # This is a file-reader positive control, including ordinary CI. Only
+        # the separate strict wrapper/kernel controls establish isolation.
+        pid = os.getpid()
+        with mock.patch.object(sandbox, "UID", os.getuid()):
+            row = sandbox.observed_process_status(str(pid))
+        self.assertEqual(row["host_pid"], pid)
+        self.assertEqual(row["namespace_pid"], pid)
+        self.assertEqual(row["host_uids"], [os.getuid()])
+        self.assertGreaterEqual(int(row["cap_eff"], 16), 0)
+
+    def test_only_enoent_and_esrch_mean_the_enumerated_sample_vanished(self):
+        for error in (FileNotFoundError(errno.ENOENT, "dummy vanished PID"),
+                      ProcessLookupError(errno.ESRCH, "dummy vanished PID")):
+            with self.subTest(errno=error.errno), mock.patch.object(sandbox.Path, "read_text", autospec=True, side_effect=error) as read:
+                self.assertIsNone(sandbox.observed_process_status("1234"))
+                read.assert_called_once_with(Path("/proc/1234/status"))
+
+    def test_permission_other_os_errors_and_contradictory_errno_stay_fatal(self):
+        for error in (PermissionError(errno.EACCES, "dummy permission refusal"),
+                      OSError(errno.EIO, "dummy read failure"),
+                      FileNotFoundError(errno.EIO, "wrong disappearance errno"),
+                      ProcessLookupError(errno.EPERM, "wrong disappearance errno")):
+            with self.subTest(kind=type(error).__name__, errno=error.errno), mock.patch.object(sandbox.Path, "read_text", autospec=True, side_effect=error):
+                with self.assertRaises(type(error)) as caught:
+                    sandbox.observed_process_status("1234")
+                self.assertIs(caught.exception, error)
+
+    def test_status_receipt_and_malformed_or_privileged_identity_discriminate(self):
+        good = "Uid:\t65534\t65534\t65534\t65534\nNSpid:\t1234\t2\nCapEff:\t0000000000000000\n"
+        with mock.patch.object(sandbox.Path, "read_text", autospec=True, return_value=good) as read:
+            self.assertEqual(sandbox.observed_process_status("1234"),
+                             {"host_pid": 1234, "namespace_pid": 2, "host_uids": [65534], "cap_eff": "0000000000000000"})
+            read.assert_called_once_with(Path("/proc/1234/status"))
+        for changed in (good.replace("65534", "0"), good.replace("65534", "invalid"),
+                        good.replace("Uid:", "MissingUid:"), good.replace("NSpid:\t1234\t2", "NSpid:"),
+                        good.replace("NSpid:\t1234\t2", "NSpid:\t0"), good.replace("CapEff:", "MissingCaps:"),
+                        good.replace("0000000000000000", "malformed"), good + "x"*16385):
+            with self.subTest(status=changed[:24]), mock.patch.object(sandbox.Path, "read_text", autospec=True, return_value=changed):
+                with self.assertRaises((ValueError, KeyError, IndexError)):
+                    sandbox.observed_process_status("1234")
+
+    def test_invalid_pid_cannot_select_any_other_proc_path(self):
+        for pid in (None, True, 1, "", "0", "-1", "01", "self", "../1", "1/status", " 1", "1\n", "2147483648", "1"*100):
+            with self.subTest(pid=pid), mock.patch.object(sandbox.Path, "read_text", autospec=True) as read:
+                with self.assertRaises(ValueError): sandbox.observed_process_status(pid)
+                read.assert_not_called()
+
+
 class LaunchPermissions(unittest.TestCase):
     def test_owned_public_staging_ignores_umask_and_keeps_outputs_private(self):
         with tempfile.TemporaryDirectory() as raw:
