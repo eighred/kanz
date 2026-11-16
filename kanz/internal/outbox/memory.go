@@ -90,6 +90,10 @@ func (m *Memory) Append(records ...Record) error {
 		if r.TenantID == "" {
 			return errors.New("outbox: record with no tenant")
 		}
+	}
+	// Callers commit their state only after Append succeeds. Refuse the whole
+	// batch before retaining a prefix, advancing its counter or reading the clock.
+	for _, r := range records {
 		m.next++
 		m.rows = append(m.rows, &memRow{id: m.next, rec: r, enqueued: m.nowFunc().UTC()})
 	}
