@@ -266,8 +266,14 @@ mod tests {
         ] {
             let value = Rat::new_raw(n.into(), d.into());
             assert!(matches!(bound(&value), Err(Error::InvalidInput)));
-            assert!(matches!(money(value.clone(), "USD"), Err(Error::InvalidInput)));
-            assert!(matches!(marked_money(value, "USD"), Err(Error::InvalidInput)));
+            assert!(matches!(
+                money(value.clone(), "USD"),
+                Err(Error::InvalidInput)
+            ));
+            assert!(matches!(
+                marked_money(value, "USD"),
+                Err(Error::InvalidInput)
+            ));
         }
     }
 }
