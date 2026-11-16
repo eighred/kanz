@@ -465,7 +465,9 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 			if err != nil {
 				t.Fatal("encode dummy identity key")
 			}
-			fields["signing_key_pem"] = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: encoded}))
+			// Multiple trailing newlines must survive the actual CLI/shell copy
+			// and idempotent target check; the later comparison stays byte-exact.
+			fields["signing_key_pem"] = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: encoded})) + "\n\n"
 		}
 		v.write("kv/data/kanz/"+service, map[string]any{"data": fields})
 	}

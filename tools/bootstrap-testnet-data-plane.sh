@@ -200,16 +200,21 @@ copy_isolation_record() {
     # shellcheck disable=SC2086
     copy_state=$(field_group_state 'runtime isolation target' $copy_fields)
     for copy_key in "$@"; do
-        if ! copy_value=$("$VAULT_BIN" kv get -field="$copy_key" "kv/$copy_source" 2>/dev/null); then
+        # Command substitution strips trailing newlines. Append only after a
+        # successful read, then remove exactly our suffix so raw PEM/string
+        # bytes survive both the copy and the existing-record equality check.
+        if ! copy_value=$("$VAULT_BIN" kv get -field="$copy_key" "kv/$copy_source" 2>/dev/null && printf '%s' '__KANZ_VAULT_FIELD_END__'); then
             printf '%s\n' 'Required source credential is unreadable.' >&2; exit 1
         fi
+        copy_value=${copy_value%__KANZ_VAULT_FIELD_END__}
         test -n "$copy_value" || { printf '%s\n' 'Required source credential field is empty.' >&2; exit 1; }
         if [ "$copy_state" = absent ]; then
             write_field "$copy_target" "$copy_key" "$copy_value"
         else
-            if ! copy_existing=$("$VAULT_BIN" kv get -field="$copy_key" "kv/$copy_target" 2>/dev/null); then
+            if ! copy_existing=$("$VAULT_BIN" kv get -field="$copy_key" "kv/$copy_target" 2>/dev/null && printf '%s' '__KANZ_VAULT_FIELD_END__'); then
                 printf '%s\n' 'Prepared credential is unreadable.' >&2; exit 1
             fi
+            copy_existing=${copy_existing%__KANZ_VAULT_FIELD_END__}
             if [ "$copy_existing" != "$copy_value" ]; then
                 copy_value=''; copy_existing=''
                 printf '%s\n' 'Prepared credential differs from its approved source; refusing overwrite.' >&2; exit 1

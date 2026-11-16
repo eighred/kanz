@@ -107,6 +107,9 @@ Vault process*. Partial or different target records refuse overwrite. It creates
 new unused migration policies/roles, marks `v1-prepared`, and leaves existing
 runtime policies and workloads untouched. Never extract a record or token to an
 operator file, CLI argument, transcript or artifact.
+Field copies and existing-target comparisons preserve raw string bytes,
+including trailing PEM newlines. The dummy signing key includes multiple
+trailing newlines and retains the full byte-equality acceptance assertion.
 
 ## Authorized base/Tokyo ordering
 
