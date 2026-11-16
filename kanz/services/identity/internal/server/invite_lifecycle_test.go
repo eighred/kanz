@@ -29,7 +29,7 @@ func TestInviteLifecycleRequiresAuthorityAndReviewedRevision(t *testing.T) {
 			if f.store.inviteChanges != 0 {
 				t.Fatal("invalid body reached store")
 			}
-			body := map[string]int{"revision": 0}
+			body := map[string]string{"revision": "0"}
 			if rr := f.req(t, "POST", path, "", body, map[string]string{"X-Kanz-Principal-Roles": identity.AdminRole}); rr.Code != 401 {
 				t.Fatal("forged principal admitted")
 			}
@@ -57,7 +57,7 @@ func TestInviteLifecycleErrorsAreBoundedAndNeverReturnTokenMaterial(t *testing.T
 		}{{identity.ErrInviteNotFound, 404}, {identity.ErrInviteConflict, 409}, {identity.ErrAdminAuthority, 401}, {identity.ErrInvitePolicy, 403}, {errors.New("synthetic-token-hash-from-driver"), 503}} {
 			f := newProvServer(t, operatorClaims(), nil)
 			f.store.err = tc.err
-			rr := f.req(t, "POST", "/invites/source/"+action, "tok", map[string]int{"revision": 0}, nil)
+			rr := f.req(t, "POST", "/invites/source/"+action, "tok", map[string]string{"revision": "0"}, nil)
 			if rr.Code != tc.code || strings.Contains(rr.Body.String(), "synthetic-token") || strings.Contains(rr.Body.String(), "invite_token") {
 				t.Fatalf("unsafe error response: code=%d", rr.Code)
 			}
