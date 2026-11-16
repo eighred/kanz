@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 import uuid
@@ -19,7 +20,7 @@ from rollout_engine import Probes
 import rollout_probe
 import restore_fixture
 import network_evidence
-from bounded_process import run as bounded_run
+from bounded_process import run as bounded_run, command_failure
 
 CASES = ["bounded_xz_transport"] + ["response_loss_" + str(at) for at in range(1, 9)] + [
     "dry_run_no_write", "four_policy_success", "annotation_transport_preserved", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
@@ -304,7 +305,8 @@ def validate_report(report, source, tree, run_id, attempt, render_hash):
             or not isinstance(report.get("cluster"), str)
             or not re.fullmatch(r"cni-proof-[0-9a-f]{12}", report["cluster"])
             or report.get("cases") != CASES or report.get("passed") is not True
-            or report.get("cleanupPassed") is not True):
+            or report.get("cleanupPassed") is not True
+            or "controllerControlFailure" in report or "cleanupFailure" in report):
         raise ValueError("transaction evidence incomplete or from another execution")
     validate_network_receipt(report.get("networkReceipt"))
     restore_fixture.validate(report.get("retainedRestore"))
@@ -337,6 +339,152 @@ class LostResponse:
 
     def replace(self, obj):
         self.write("replace", obj)
+
+
+def _controller_control_spec(controller):
+    """Bind the intended zero-replica control before accepting server defaults."""
+    try:
+        labels = controller["spec"]["template"]["metadata"]["labels"]
+        nonce = labels[rollout_probe.OWNER]
+        pod = rollout_probe.caller_pod(tx.NAMESPACE, "policy-untrusted", nonce)
+        pod["spec"]["restartPolicy"] = "Always"
+        pod["spec"].pop("activeDeadlineSeconds")
+        intended = {"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                    "metadata": {"name": "probe-adoption-control", "namespace": tx.NAMESPACE},
+                    "spec": {"replicas": 0, "selector": {"matchLabels": {"app": "policy-untrusted"}},
+                             "template": {"metadata": {"labels": pod["metadata"]["labels"]}, "spec": pod["spec"]}}}
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("controller control intended shape") from None
+    if json.dumps(controller, sort_keys=True) != json.dumps(intended, sort_keys=True):
+        raise ValueError("controller control intended shape")
+    expected = copy.deepcopy(intended["spec"])
+    # Kubernetes v1.36.4 core/v1 defaults.go defaults PodSpecs and Containers
+    # inside a ReplicaSet template; this does not admit arbitrary added fields.
+    spec = expected["template"]["spec"]
+    spec.update(dnsPolicy="ClusterFirst", terminationGracePeriodSeconds=30, schedulerName="default-scheduler")
+    for container in spec["containers"]:
+        container.update(terminationMessagePath="/dev/termination-log", terminationMessagePolicy="File")
+    return expected
+
+
+def _controller_control_snapshot(value, expected_spec, uid=None, generation=None, *, deleting=False):
+    """Validate one exact owned control; only an unobserved generation is pending."""
+    if type(value) is not dict or value.get("apiVersion") != "apps/v1" or value.get("kind") != "ReplicaSet":
+        raise ValueError("controller control object shape")
+    metadata = value.get("metadata")
+    if (type(metadata) is not dict or metadata.get("name") != "probe-adoption-control"
+            or metadata.get("namespace") != tx.NAMESPACE
+            or type(metadata.get("uid")) is not str
+            or not re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", metadata["uid"])
+            or type(metadata.get("resourceVersion")) is not str or not 1 <= len(metadata["resourceVersion"]) <= 128
+            or type(metadata.get("generation")) is not int or not 1 <= metadata["generation"] <= (1 << 63) - 1
+            or (uid is not None and metadata["uid"] != uid)
+            or (generation is not None and metadata["generation"] != generation)
+            or type(metadata.get("labels", {})) is not dict or metadata.get("labels", {})
+            or type(metadata.get("annotations", {})) is not dict or metadata.get("annotations", {})
+            or type(metadata.get("ownerReferences", [])) is not list or metadata.get("ownerReferences", [])
+            or type(metadata.get("finalizers", [])) is not list or metadata.get("finalizers", [])):
+        raise ValueError("controller control identity changed")
+    deletion = metadata.get("deletionTimestamp")
+    if ((not deleting and deletion is not None)
+            or (deletion is not None and (type(deletion) is not str or not deletion))
+            or ("deletionGracePeriodSeconds" in metadata
+                and (not deleting or type(metadata["deletionGracePeriodSeconds"]) is not int
+                     or metadata["deletionGracePeriodSeconds"] < 0))):
+        raise ValueError("controller control deletion changed")
+    if json.dumps(value.get("spec"), sort_keys=True) != json.dumps(expected_spec, sort_keys=True):
+        raise ValueError("controller control spec changed")
+    status = value.get("status")
+    counts = ("fullyLabeledReplicas", "readyReplicas", "availableReplicas", "terminatingReplicas")
+    if (type(status) is not dict or set(status) - {"replicas", "observedGeneration", "conditions", *counts}
+            or type(status.get("replicas")) is not int or status["replicas"] != 0
+            or any(type(status.get(key, 0)) is not int or status.get(key, 0) != 0 for key in counts)
+            or type(status.get("conditions", [])) is not list or status.get("conditions", [])):
+        raise ValueError("controller control status shape")
+    observed = status.get("observedGeneration", 0)
+    if type(observed) is not int or not 0 <= observed <= metadata["generation"]:
+        raise ValueError("controller control observed generation")
+    return metadata, observed == metadata["generation"]
+
+
+def controller_adoption_control(k, controller, report, *, clock=time.monotonic, pause=time.sleep):
+    """Settle and delete once within the existing single thirty-second budget."""
+    intended_spec = _controller_control_spec(controller)
+    created_json = k("create", "-f", "-", "-o", "json", value=controller)
+    deadline = clock() + 30
+    created = json.loads(created_json)
+    created_spec = copy.deepcopy(created.get("spec")) if type(created) is dict else None
+    canonical = copy.deepcopy(created_spec)
+    if (type(canonical) is not dict or type(canonical.get("template")) is not dict
+            or type(canonical["template"].get("metadata")) is not dict):
+        raise ValueError("controller control created spec")
+    if type(canonical) is dict:
+        template_metadata = canonical["template"]["metadata"]
+        if "creationTimestamp" in template_metadata:
+            if template_metadata.pop("creationTimestamp") is not None:
+                raise ValueError("controller control template metadata")
+    _controller_control_snapshot({**created, "spec": canonical} if type(created) is dict else created, intended_spec)
+    initial, _ = _controller_control_snapshot(created, created_spec)
+    uid, generation = initial["uid"], initial["generation"]
+
+    def invoke(operation, *args, value=None):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise RuntimeError("controller control joint deadline exceeded")
+        try:
+            result = k(*args, value=value, timeout=remaining)
+        except Exception as error:
+            try:
+                process = command_failure(error)
+            except Exception:
+                process = None
+            report["controllerControlFailure"] = {"operation": operation, "process": process}
+            raise
+        if clock() >= deadline:
+            raise RuntimeError("controller control joint deadline exceeded")
+        return result
+
+    def wait():
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise RuntimeError("controller control joint deadline exceeded")
+        pause(min(0.1, remaining))
+
+    while True:
+        actual = json.loads(invoke("controller_control_observe", "-n", tx.NAMESPACE, "get", "replicaset",
+                                   "probe-adoption-control", "-o", "json"))
+        metadata, settled = _controller_control_snapshot(actual, created_spec, uid, generation)
+        if settled:
+            if clock() >= deadline:
+                raise RuntimeError("controller control joint deadline exceeded")
+            break
+        wait()
+    try:
+        rollout_probe.controller_boundary([actual], tx.NAMESPACE, controller["spec"]["template"]["metadata"]["labels"])
+    except ValueError as error:
+        if str(error) != "existing controller could adopt the probe":
+            raise
+    else:
+        raise AssertionError("actual adopting controller was accepted")
+    invoke("controller_control_delete", "delete", "--raw",
+           "/apis/apps/v1/namespaces/" + tx.NAMESPACE + "/replicasets/probe-adoption-control", "-f", "-",
+           value={"apiVersion": "v1", "kind": "DeleteOptions",
+                  "preconditions": {"uid": uid, "resourceVersion": metadata["resourceVersion"]}})
+    while True:
+        listing = json.loads(invoke("controller_control_observe", "-n", tx.NAMESPACE, "get", "replicasets",
+                                    "--field-selector", "metadata.name=probe-adoption-control", "-o", "json"))
+        if (type(listing) is not dict or listing.get("apiVersion") != "apps/v1"
+                or listing.get("kind") != "ReplicaSetList" or type(listing.get("items")) is not list
+                or len(listing["items"]) > 1):
+            raise ValueError("controller control absence shape")
+        if not listing["items"]:
+            if clock() >= deadline:
+                raise RuntimeError("controller control joint deadline exceeded")
+            return
+        _, settled = _controller_control_snapshot(listing["items"][0], created_spec, uid, generation, deleting=True)
+        if not settled:
+            raise ValueError("controller control generation regressed")
+        wait()
 
 
 def run_fixture(artifact):
@@ -516,19 +664,7 @@ def run_fixture(artifact):
                                    "template": {"metadata": {"labels": template["metadata"]["labels"]}, "spec": template["spec"]}}}
             if json.loads(k("-n", tx.NAMESPACE, "get", "pods", "-l", "app=policy-untrusted", "-o", "json"))["items"]:
                 raise AssertionError("controller control has matching preexisting Pods")
-            k("create", "-f", "-", value=controller)
-            actual_controller = json.loads(k("-n", tx.NAMESPACE, "get", "replicaset", "probe-adoption-control", "-o", "json"))
-            try:
-                rollout_probe.controller_boundary([actual_controller], tx.NAMESPACE, template["metadata"]["labels"])
-            except ValueError as error:
-                if str(error) != "existing controller could adopt the probe":
-                    raise
-            else:
-                raise AssertionError("actual adopting controller was accepted")
-            metadata = actual_controller["metadata"]
-            k("delete", "--raw", "/apis/apps/v1/namespaces/" + tx.NAMESPACE + "/replicasets/probe-adoption-control", "-f", "-",
-              value={"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": metadata["uid"], "resourceVersion": metadata["resourceVersion"]}})
-            k("-n", tx.NAMESPACE, "wait", "--for=delete", "replicaset/probe-adoption-control", "--timeout=30s")
+            controller_adoption_control(k, controller, report)
             if json.loads(k("-n", tx.NAMESPACE, "get", "pods", "-l", "app=policy-untrusted", "-o", "json"))["items"]:
                 raise AssertionError("zero-replica controller created a Pod")
             report["cases"].append("controller_adoption_refusal")
@@ -609,6 +745,7 @@ def run_fixture(artifact):
             report["imageIdentity"] = identity
             report["passed"] = True
         finally:
+            primary = sys.exception()
             if owned:
                 try:
                     run(["kind", "delete", "cluster", "--name", cluster])
@@ -617,7 +754,13 @@ def run_fixture(artifact):
                     report["cleanupPassed"] = True
                 except Exception:
                     report["passed"] = False
-                    raise
+                    report["cleanupFailure"] = True
+                    if primary is None:
+                        raise
+                    try:
+                        BaseException.add_note(primary, "transaction fixture cleanup failed")
+                    except Exception:
+                        pass
                 finally:
                     try:
                         if report["passed"]:
@@ -626,7 +769,16 @@ def run_fixture(artifact):
                         report["passed"] = False
                         raise
                     finally:
-                        artifact.write_text(json.dumps(report, sort_keys=True) + "\n")
+                        active = sys.exception()
+                        try:
+                            artifact.write_text(json.dumps(report, sort_keys=True) + "\n")
+                        except Exception:
+                            if active is None:
+                                raise
+                            try:
+                                BaseException.add_note(active, "transaction artifact retention failed")
+                            except Exception:
+                                pass
     if not report["cleanupPassed"]:
         raise RuntimeError("transaction cleanup missing")
     validate_report(report, report["source"], report["tree"], os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], report["renderSHA256"])
