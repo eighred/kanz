@@ -149,6 +149,100 @@ def check_operation(app, source, token):
             "finishedAt": state["finishedAt"], "operation": token}
 
 
+def sync_timeout(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("source-bound Argo PostSync operation expired")
+    return min(15, remaining)
+
+
+def hook_job_list(value):
+    # An exact-name typed empty list is absence, not a swallowed CLI error.
+    if (type(value) is not dict or value.get("apiVersion") != "batch/v1"
+            or value.get("kind") != "JobList" or type(value.get("items")) is not list
+            or len(value["items"]) > 1):
+        raise ValueError("invalid exact-name hook inventory")
+    if not value["items"]:
+        return None
+    job = value["items"][0]
+    # The typed JobList owns its []Job item type; nested TypeMeta may be
+    # omitted by the API serializer. Any explicit conflicting type refuses.
+    if (type(job) is not dict or job.get("apiVersion", "batch/v1") != "batch/v1"
+            or job.get("kind", "Job") != "Job"):
+        raise ValueError("invalid hook object")
+    metadata, status = job.get("metadata"), job.get("status", {})
+    if type(metadata) is not dict or type(status) is not dict:
+        raise ValueError("invalid hook schema")
+    annotations, labels = metadata.get("annotations"), metadata.get("labels", {})
+    tracking = f"{APP}:batch/Job:{NAMESPACE}/nats-bootstrap"
+    if (metadata.get("name") != "nats-bootstrap" or metadata.get("namespace") != NAMESPACE
+            or type(metadata.get("uid")) is not str
+            or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", metadata["uid"])
+            or type(annotations) is not dict or type(labels) is not dict
+            or annotations.get("argocd.argoproj.io/hook") != "PostSync"
+            or annotations.get("argocd.argoproj.io/hook-delete-policy") != "BeforeHookCreation"
+            or annotations.get("argocd.argoproj.io/tracking-id") != tracking
+            or labels.get("app.kubernetes.io/instance", APP) != APP
+            or ("deletionTimestamp" in metadata and metadata["deletionTimestamp"] is not None
+                and type(metadata["deletionTimestamp"]) is not str)):
+        raise ValueError("foreign hook identity or tracking")
+    succeeded, active = status.get("succeeded", 0), status.get("active", 0)
+    conditions = status.get("conditions", [])
+    if (type(succeeded) is not int or not 0 <= succeeded <= 1 or type(active) is not int
+            or not 0 <= active <= 1 or type(conditions) is not list or len(conditions) > 16):
+        raise ValueError("invalid hook completion schema")
+    seen, complete = set(), False
+    for condition in conditions:
+        if (type(condition) is not dict or condition.get("type") not in
+                ("Complete", "Failed", "FailureTarget", "SuccessCriteriaMet", "Suspended")
+                or condition["type"] in seen or condition.get("status") not in ("True", "False", "Unknown")):
+            raise ValueError("invalid hook condition")
+        seen.add(condition["type"])
+        if condition["type"] in ("Failed", "FailureTarget") and condition["status"] == "True":
+            raise ValueError("actual hook failed")
+        complete |= condition["type"] == "Complete" and condition["status"] == "True"
+    return {"uid": metadata["uid"], "complete": complete and succeeded == 1 and active == 0,
+            "deleting": metadata.get("deletionTimestamp") is not None}
+
+
+def sync_application(app, source, token, previous_token):
+    if (type(app) is not dict or app.get("apiVersion") != "argoproj.io/v1alpha1"
+            or app.get("kind") != "Application" or type(app.get("metadata")) is not dict
+            or app["metadata"].get("name") != APP or app["metadata"].get("namespace") != "argocd"
+            or type(app.get("status")) is not dict):
+        raise ValueError("invalid Argo Application observation")
+    status = app["status"].get("sync")
+    if (type(status) is not dict or status.get("revision") != source
+            or status.get("status") not in ("Synced", "OutOfSync")):
+        raise ValueError("Argo source observation differs")
+    pending = app.get("operation")
+    if pending is not None and (type(pending) is not dict or pending.get("info") != token
+            or type(pending.get("sync")) is not dict or pending["sync"].get("revision") != source):
+        raise ValueError("foreign pending Argo operation")
+    state = app["status"].get("operationState", {})
+    if state:
+        if type(state) is not dict or type(state.get("operation")) is not dict:
+            raise ValueError("invalid Argo operation state")
+        info = state["operation"].get("info")
+        if info != token and (previous_token is None or info != previous_token):
+            raise ValueError("foreign Argo operation token")
+        result = state.get("syncResult", {})
+        if type(result) is not dict or result.get("revision", source) != source:
+            raise ValueError("foreign Argo operation revision")
+        if state.get("phase", "") not in ("", "Running", "Terminating", "Failed", "Error", "Succeeded"):
+            raise ValueError("invalid Argo operation phase")
+        if info == token and state.get("phase") in ("Terminating", "Failed", "Error"):
+            raise ValueError("current Argo operation did not succeed")
+        if (any(type(state[key]) is not str or len(state[key]) > 128 for key in ("startedAt", "finishedAt") if key in state)
+                or type(result.get("resources", [])) is not list
+                or len(result.get("resources", [])) > 128
+                or any(type(resource) is not dict for resource in result.get("resources", []))):
+            raise ValueError("invalid Argo completion schema")
+    elif type(state) is not dict:
+        raise ValueError("invalid Argo operation state")
+    return check_operation(app, source, token)
+
+
 def source_ref(event_name, event, source):
     if event_name == "pull_request":
         number = event["number"]
@@ -246,6 +340,18 @@ def check_report(report):
         raise ValueError("source-bound hook evidence differs")
     if first["jobUID"] == second["jobUID"] or first["operation"] == second["operation"]:
         raise ValueError("re-sync reused the previous hook or operation")
+    observations = report.get("syncObservations")
+    if type(observations) is not list or len(observations) != 2:
+        raise ValueError("joint sync observations are incomplete")
+    for observation, case in zip(observations, ("first", "restore-empty-stream")):
+        if (type(observation) is not dict or set(observation) != {"case", "budgetSeconds", "polls",
+                "argoSucceededPendingHook", "staleUIDObserved", "passed"}
+                or observation["case"] != case or type(observation["budgetSeconds"]) is not int
+                or observation["budgetSeconds"] != 600
+                or type(observation["polls"]) is not int or not 1 <= observation["polls"] <= 300
+                or type(observation["argoSucceededPendingHook"]) is not bool
+                or type(observation["staleUIDObserved"]) is not bool or observation["passed"] is not True):
+            raise ValueError("joint sync observations are incomplete")
     check_puback(report["pubAck"], source)
     check_cold_recovery(report["coldRecovery"])
     recovery = report["postColdRecovery"]
@@ -271,6 +377,7 @@ class Fixture:
         self.environment["KUBECONFIG"] = str(self.kubeconfig)
         self.substage = "initialize"
         self.last_failure = None
+        self.sync_observations = []
 
     def command(self, args, data=None, timeout=300):
         try:
@@ -360,39 +467,94 @@ class Fixture:
                       "syncPolicy": {"syncOptions": ["CreateNamespace=true", "ApplyOutOfSyncOnly=true"]}}},
         ])
 
-    def sync(self, source, case):
+    def sync(self, source, case, previous=None):
         self.substage = "Argo-" + case
+        if case not in ("first", "restore-empty-stream") or not re.fullmatch(r"[0-9a-f]{40}", source):
+            raise ValueError("unapproved sync identity")
+        previous_token = previous_uid = None
+        if (case == "first") != (previous is None):
+            raise ValueError("unbound prior sync")
+        if previous is not None:
+            if (case != "restore-empty-stream" or type(previous) is not dict
+                    or previous.get("revision") != source or previous.get("phase") != "Succeeded"
+                    or previous.get("hookPhase") != "Succeeded" or previous.get("syncPhase") != "PostSync"
+                    or type(previous.get("operation")) is not list or len(previous["operation"]) != 1
+                    or type(previous["operation"][0]) is not dict
+                    or set(previous["operation"][0]) != {"name", "value"}
+                    or previous["operation"][0]["name"] != "nats-gitops-case"
+                    or type(previous["operation"][0]["value"]) is not str
+                    or not re.fullmatch(r"first-[0-9a-f]{32}", previous["operation"][0]["value"])
+                    or type(previous.get("jobUID")) is not str
+                    or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", previous["jobUID"])):
+                raise ValueError("unbound prior sync")
+            previous_token, previous_uid = previous["operation"], previous["jobUID"]
+        observation = {"case": case, "budgetSeconds": 600, "polls": 0,
+                       "argoSucceededPendingHook": False, "staleUIDObserved": False, "passed": False}
+        self.sync_observations.append(observation)
         token = [{"name": "nats-gitops-case", "value": case + "-" + uuid.uuid4().hex}]
+        comparison_deadline = time.monotonic() + 180
         self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
-            "metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}}}))
+            "metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}}}),
+            timeout=sync_timeout(comparison_deadline))
         # PR test-merge commits are advertised under refs/pull/N/merge. The
         # configured ref obtains that object; comparison must resolve exactly
         # the checkout before an immutable-SHA sync is requested. A moving ref
         # fails, never substitutes current main or the contributor head.
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=15))
+        while time.monotonic() < comparison_deadline:
+            app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json",
+                                    timeout=sync_timeout(comparison_deadline)))
             status = app.get("status", {}).get("sync", {})
             if (status.get("revision") == source and status.get("status") in ("Synced", "OutOfSync")
                     and not app.get("operation") and not app["metadata"].get("annotations", {}).get("argocd.argoproj.io/refresh")):
                 break
-            time.sleep(2)
+            time.sleep(min(2, sync_timeout(comparison_deadline)))
         else:
             raise TimeoutError("Argo source comparison did not resolve the exact workflow commit")
-        self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
-            "operation": {"info": token, "sync": {"revision": source}}}))
+        before = self.hook_job(comparison_deadline)
+        if before is not None:
+            if previous_uid is not None and before["uid"] != previous_uid:
+                raise ValueError("previous hook identity changed before sync")
+            previous_uid = before["uid"]
         deadline = time.monotonic() + 600
+        self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
+            "operation": {"info": token, "sync": {"revision": source}}}), timeout=sync_timeout(deadline))
+        fresh_uid = None
         while time.monotonic() < deadline:
-            app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json", timeout=15))
-            row = check_operation(app, source, token)
-            if row:
-                job = json.loads(self.k("-n", NAMESPACE, "get", "job/nats-bootstrap", "-o", "json"))
-                if not job.get("status", {}).get("succeeded") or job["metadata"]["annotations"].get("argocd.argoproj.io/hook") != "PostSync":
-                    raise ValueError("Argo reported success without a completed actual hook")
-                row["jobUID"] = job["metadata"]["uid"]
+            observation["polls"] += 1
+            app = json.loads(self.k("-n", "argocd", "get", "application", APP, "-o", "json",
+                                    timeout=sync_timeout(deadline)))
+            row = sync_application(app, source, token, previous_token)
+            job = self.hook_job(deadline)
+            if job is None:
+                if fresh_uid is not None:
+                    raise ValueError("fresh hook disappeared during sync")
+            elif job["uid"] == previous_uid:
+                if fresh_uid is not None:
+                    raise ValueError("fresh hook replaced during sync")
+                observation["staleUIDObserved"] = True
+            else:
+                if fresh_uid is not None and job["uid"] != fresh_uid:
+                    raise ValueError("fresh hook replaced during sync")
+                fresh_uid = job["uid"]
+                if job["deleting"]:
+                    raise ValueError("fresh hook is being deleted")
+            if row is not None and (job is None or job["uid"] == previous_uid or not job["complete"]):
+                # Availability observation only: not a diagnosis of the old run.
+                observation["argoSucceededPendingHook"] = True
+            if row is not None and job is not None and job["uid"] == fresh_uid and job["complete"]:
+                sync_timeout(deadline)
+                observation["passed"] = True
+                row["jobUID"] = fresh_uid
                 return row
-            time.sleep(2)
+            time.sleep(min(2, sync_timeout(deadline)))
         raise TimeoutError("source-bound Argo PostSync operation expired")
+
+    def hook_job(self, deadline):
+        # kubectl's generic JSON printer rewrites collection types to v1/List.
+        # This fixed read preserves the API's batch/v1 JobList instead.
+        return hook_job_list(json.loads(self.k("get", "--raw",
+            "/apis/batch/v1/namespaces/kanz-messaging/jobs?fieldSelector=metadata.name%3Dnats-bootstrap",
+            timeout=sync_timeout(deadline))))
 
     def client(self, name, namespace, service_account, workload_api=False):
         self.substage = "issue-client-SVID-" + name
@@ -596,6 +758,7 @@ def main():
               "sourceRef": target, "cases": [], "syncs": [], "passed": False, "cleanupPassed": False, "stage": "initialize"}
     with tempfile.TemporaryDirectory(prefix="nats-gitops-", dir=os.environ["RUNNER_TEMP"]) as temporary:
         fixture = Fixture(Path(temporary), "messaging-proof-" + uuid.uuid4().hex[:12])
+        report["syncObservations"] = fixture.sync_observations
         report["cluster"] = fixture.name
         owner = Path(os.environ["RUNNER_TEMP"]) / "nats-gitops-owner.json"
         with owner.open("x", encoding="utf-8") as output:
@@ -663,7 +826,7 @@ def main():
                 raise ValueError("designated stream was not removed")
             report["cases"].append("empty-stream-removed")
             report["stage"] = "same-revision Argo re-sync"
-            report["syncs"].append(fixture.sync(source, "restore-empty-stream"))
+            report["syncs"].append(fixture.sync(source, "restore-empty-stream", report["syncs"][0]))
             if report["syncs"][0]["jobUID"] == report["syncs"][1]["jobUID"]:
                 raise ValueError("Argo reused the completed hook")
             report["cases"].append("same-revision-postsync")
