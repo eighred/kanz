@@ -27,6 +27,10 @@ def connect_literal(address,port,timeout):
 DENIALS = frozenset(("timeout", "refused", "host_unreachable"))
 OUTCOMES = DENIALS | {"connected", "unknown"}
 
+# TCP_BATCH below makes three attempts separated by two mandatory .2s pauses.
+# This is only a necessary launch budget, not a promise about exec latency.
+TCP_BATCH_MIN_SECONDS = 2 * .2
+
 
 def batch(value):
     if not isinstance(value, list) or len(value) != 3 or any(

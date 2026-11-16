@@ -276,12 +276,64 @@ An exact boolean identifies the closed baseline (7 observations) or isolated
 The existing 64-receipt/2 MiB bounds remain; the original 39-record retained
 recovery reader and historical provenance remain unchanged. The transaction
 fixture independently reads the actual fsynced aggregate and checks its hash.
-Fixed loader/network source bytes travel in the checked bootstrap while the
-remaining closed module inventory stays compressed. Per-file, combined expanded,
-encoded and native command limits are unchanged; the mandatory check retains all
-96 variants and adds six actual-checkout-SHA cases, executing the PowerShell
-serialization for LF and CRLF inputs. Payload-first serialization and a fixed
-LZMA2 encoder profile preserve exact source bytes and the existing decoder.
+An observation may carry `commandFailure` only in a refused aggregate, with its
+result still unknown. Fixed inventory/exec phases and integer microsecond budgets
+distinguish a shrinking shared allowance from an exec using its full allowance;
+inventory duration is recorded separately. Less than the unchanged batch's two
+0.2-second pauses refuses before exec, including the mandatory final BFF positive.
+These diagnostics contain only closed labels, byte counts, child exit/signal,
+kill-request, reap and stream-join facts. They retain no argv, addresses, output,
+stderr, environment or exception text. A kill request does not prove child reap
+or whole-process-group absence; cleanup uncertainty remains a failure. No cgroup
+or OOM observation is inferred. The earlier final-positive timeout has no such
+timing data, so its cause remains unknown. Budgets and every positive/negative
+observation remain mandatory; diagnostics cannot qualify a refused transaction.
+An already-expired pre-attempt observation gate records the existing
+`tcp_exec`/`insufficient_batch_budget` refusal before inventory or exec. Its
+`attempt` is the prospective batch ordinal, not a launch or completion count;
+zero requested timeout, zero inventory duration and null process explicitly mean
+those operations were not run. The item remains UNKNOWN with no new batch.
+Six completed nonconverged batches retain their existing outcome. This source
+repair does not identify which deadline caused an earlier uninstrumented failure.
+The bootstrap writer uses one bounded canonical constructor in `transport_codec.py`.
+Its quoted POSIX here-document carries the exact bootstrap bytes as data to
+`/usr/bin/cat`; a terminal `X` and literal suffix removal preserve even absent or
+multiple trailing newlines. A delimiter-line collision, NUL, malformed UTF-8 or
+source beyond 64 KiB refuses before command construction. A cat assignment or
+file-write failure stops the existing `set -e` script before bootstrap execution;
+the exact owned cleanup trap is unchanged. This serialization does not authenticate
+source or establish OS confinement: the existing checked codec/bootstrap binding
+remains necessary. `/usr/bin/cat` is an explicit existing-node prerequisite, with
+no installation or fallback. Linux source fixtures use actual `/usr/bin/dash` and
+`/usr/bin/cat`; fresh actual wrapper geometry and CNI/transaction evidence remain
+separate requirements. The main/fixed XZ streams, decoder and native size caps do
+not change.
+
+The normal operator transports seven modules in its main XZ frame and the exact
+`source_loader.py`/`rollout_probe.py` pair in a separately encoded fixed frame.
+`bounded_process.py` remains one of the seven main-frame modules. This lossless
+placement changes neither the nine runtime source files nor the closed loader's
+execution order; the former two-file fixed partition is refused.
+The planner retains its six-main/one-fixed partition. Restoration transports the
+same eight modules as six main-frame sources plus the exact
+`source_loader.py`/`bounded_process.py` fixed pair; its former seven-main/one-fixed
+partition refuses. This placement leaves every module byte and the closed loader
+execution order unchanged. Both use the same bounded CRC64 XZ codec; the fixed
+frame requires exact names, field types,
+UTF8 source and SHA256 before any source write. The remote prefix contains only
+verbatim decoder/helper source segments, required imports/constants, the selected
+canonical partition and the CRC64 check. Its closed AST dependency/interface guard refuses
+unreviewed helper, global, binding, signature or scope changes; host encoders and source
+construction code do not travel. The operator supplies its qualified codec bytes
+as bounded data to the existing trusted Python builder, without file inspection
+or a generic source-extraction interface. Fixed/main frames and the owned
+root occupy exactly three bootstrap arguments. The wire partition preserves
+module execution order, resource bounds, operator authority and retained-history
+interpretation. The accompanying pre-attempt budget diagnostic changes only the
+rollout engine among the nine runtime modules; the other eight remain unchanged. Per-file, combined expanded, encoded and native
+command limits remain. The mandatory geometry retains all 96 variants and six
+actual-checkout-SHA cases, executing PowerShell serialization for LF and CRLF.
+Synthetic size projections are not actual rendered geometry or deployment proof.
 Passing these samples does not guarantee future source will fit: every operator
 invocation still refuses an oversized bundle before sending it.
 
