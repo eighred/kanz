@@ -18,7 +18,7 @@ From `kanz/`, with that container running:
 ```sh
 export TEST_REDIS_URL=redis://localhost:6379/0 TEST_VALKEY_VERSION=9.1.3
 set -o pipefail
-go test -tags redis -p 1 -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook-ingest/internal/ingest ./services/api-gateway/internal/middleware | tee valkey-proof.jsonl
+go test -tags redis -p 1 -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook_ingest/internal/ingest ./services/api_gateway/internal/middleware | tee valkey-proof.jsonl
 python ../.github/scripts/check_valkey_evidence.py valkey-proof.jsonl
 ```
 

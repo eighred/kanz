@@ -92,6 +92,7 @@ func TestEveryMountedConfigMapIsDefinedOrDeclared(t *testing.T) {
 	}
 
 	var dangling []string
+	usedExempt := map[string]bool{}
 	seenRef := false
 	for _, e := range entries {
 		if e.IsDir() || (filepath.Ext(e.Name()) != ".yaml" && filepath.Ext(e.Name()) != ".yml") {
@@ -108,6 +109,7 @@ func TestEveryMountedConfigMapIsDefinedOrDeclared(t *testing.T) {
 				continue
 			}
 			if _, ok := operatorSuppliedConfigMaps[name]; ok {
+				usedExempt[name] = true
 				continue
 			}
 			dangling = append(dangling, e.Name()+" → "+name)
@@ -120,6 +122,11 @@ func TestEveryMountedConfigMapIsDefinedOrDeclared(t *testing.T) {
 			"so this guard would pass whatever the manifests do")
 	}
 
+	for name := range operatorSuppliedConfigMaps {
+		if !usedExempt[name] {
+			dangling = append(dangling, "operator-supplied entry "+name+" is stale: the map is defined in git or no longer mounted")
+		}
+	}
 	if len(dangling) > 0 {
 		sort.Strings(dangling)
 		t.Fatalf("Deployments mount ConfigMaps that this repo neither defines nor declares "+

@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func mustSIMM(t *testing.T, sensitivities []Sensitivity, p SIMMParams) float64 {
+	t.Helper()
+	margin, err := SIMM(sensitivities, p)
+	if err != nil || math.IsNaN(margin) || math.IsInf(margin, 0) {
+		t.Fatalf("SIMM measurement unavailable: %v, %v", margin, err)
+	}
+	return margin
+}
+
 // TestSIMM_SingleBucket reproduces the hand-derived delta-margin aggregation for
 // one bucket with two risk factors:
 //
@@ -17,7 +26,7 @@ func TestSIMM_SingleBucket(t *testing.T) {
 		{RiskClass: "Equity", Bucket: "A", RiskFactor: "Y", Amount: -50},
 	}
 	p := SIMMParams{RiskWeight: map[string]float64{"A": 0.2}, IntraBucketCorr: 0.5}
-	if im := SIMM(sens, p); math.Abs(im-math.Sqrt(300)) > 1e-6 {
+	if im := mustSIMM(t, sens, p); math.Abs(im-math.Sqrt(300)) > 1e-6 {
 		t.Fatalf("IM: got %.6f want %.6f", im, math.Sqrt(300))
 	}
 }
@@ -37,7 +46,7 @@ func TestSIMM_TwoBuckets(t *testing.T) {
 		IntraBucketCorr: 0.5,
 		InterBucketCorr: 0.3,
 	}
-	if im := SIMM(sens, p); math.Abs(im-math.Sqrt(652)) > 1e-6 {
+	if im := mustSIMM(t, sens, p); math.Abs(im-math.Sqrt(652)) > 1e-6 {
 		t.Fatalf("IM: got %.6f want %.6f", im, math.Sqrt(652))
 	}
 }
@@ -46,8 +55,8 @@ func TestSIMM_TwoBuckets(t *testing.T) {
 // nets before weighting, lowering the margin.
 func TestSIMM_NettingReducesMargin(t *testing.T) {
 	p := SIMMParams{RiskWeight: map[string]float64{"A": 0.2}, IntraBucketCorr: 0.5}
-	gross := SIMM([]Sensitivity{{Bucket: "A", RiskFactor: "X", Amount: 100}}, p)
-	netted := SIMM([]Sensitivity{
+	gross := mustSIMM(t, []Sensitivity{{Bucket: "A", RiskFactor: "X", Amount: 100}}, p)
+	netted := mustSIMM(t, []Sensitivity{
 		{Bucket: "A", RiskFactor: "X", Amount: 100},
 		{Bucket: "A", RiskFactor: "X", Amount: -60},
 	}, p)

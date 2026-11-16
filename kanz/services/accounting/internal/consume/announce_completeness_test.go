@@ -76,6 +76,8 @@ func TestAnnounce_ADividendMovesTheAnnouncedBalance(t *testing.T) {
 			a, st := announcerOver(t, pub)
 			ctx := foldCtx()
 			at := time.Unix(1_700_000_000, 0).UTC()
+			cutoff := at
+			a.now = func() time.Time { return cutoff }
 
 			for _, e := range []*ledger.Event{
 				positionEntry("t:1", "PF1", "AAPL", tc.qty, at),
@@ -100,6 +102,13 @@ func TestAnnounce_ADividendMovesTheAnnouncedBalance(t *testing.T) {
 			}
 			if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 				t.Fatalf("Announce: %v", err)
+			}
+			if got := dec.FromProto(pub.last().GetTotal()); got.Cmp(before) != 0 {
+				t.Fatalf("future dividend changed current cash to %s, want %s", got.RatString(), before.RatString())
+			}
+			cutoff = at.Add(24 * time.Hour)
+			if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
+				t.Fatalf("Announce at dividend effective time: %v", err)
 			}
 			after := dec.FromProto(pub.last().GetTotal())
 			if after.Cmp(tc.want) != 0 {

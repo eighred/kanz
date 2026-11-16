@@ -53,7 +53,7 @@ type testnetKustomization struct {
 
 func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	root := moduleRoot(t)
-	overlayDir := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
+	overlayDir := filepath.Join(root, "infra", "overlays", "testnet_tokyo")
 	raw, err := os.ReadFile(filepath.Join(overlayDir, "kustomization.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testin
 		}
 	}
 
-	policyPath := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "governance-network-policies.yaml")
+	policyPath := filepath.Join(root, "infra", "overlays", "testnet_tokyo", "governance-network-policies.yaml")
 	policyRaw, err := os.ReadFile(policyPath)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestPortfolioBootstrapQuotesPostgresLiteralsOnce(t *testing.T) {
 
 func TestTokyoMandateTemplateCannotBeMistakenForAnApprovedDecision(t *testing.T) {
 	root := moduleRoot(t)
-	raw, err := os.ReadFile(filepath.Join(root, "infra", "overlays", "testnet-tokyo", "mandate.json.example"))
+	raw, err := os.ReadFile(filepath.Join(root, "infra", "overlays", "testnet_tokyo", "mandate.json.example"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestTokyoMandateTemplateCannotBeMistakenForAnApprovedDecision(t *testing.T)
 
 func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 	root := moduleRoot(t)
-	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
+	overlay := filepath.Join(root, "infra", "overlays", "testnet_tokyo")
 	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
 	rendered, err := cmd.Output()
 	if err != nil {
@@ -342,7 +342,7 @@ func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 
 func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *testing.T) {
 	root := moduleRoot(t)
-	overlayDir := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
+	overlayDir := filepath.Join(root, "infra", "overlays", "testnet_tokyo")
 	raw := mustReadArchFile(t, filepath.Join(overlayDir, "kustomization.yaml"))
 	var overlay testnetKustomization
 	if err := yaml.UnmarshalStrict(raw, &overlay); err != nil {
@@ -523,7 +523,7 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 
 func TestTokyoObservabilityInstallerPinsTheMinimumProviderToECR(t *testing.T) {
 	root := moduleRoot(t)
-	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo-observability")
+	overlay := filepath.Join(root, "infra", "overlays", "testnet_tokyo_observability")
 	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
 	rendered, err := cmd.Output()
 	if err != nil {

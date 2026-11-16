@@ -11,7 +11,7 @@ import (
 // THE VARIANT TOKENS ARE THE ONEOF'S FIELD NAMES, AND THIS DERIVES THEM RATHER
 // THAN RESTATING THEM.
 //
-// services/market-data/internal/feed/bussink.go builds the third event_type
+// services/market_data/internal/feed/bussink.go builds the third event_type
 // token from the arm actually set, using the field's own name. So a fourth arm
 // added to market.v1.MarketDataEvent.data ships a fourth subject variant on the
 // same day — and Of, being a closed switch over three literals, would answer

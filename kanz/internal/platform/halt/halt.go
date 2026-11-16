@@ -4,7 +4,7 @@
 //
 // WHY IT LIVES HERE RATHER THAN IN internal/signal/translate, where it was born
 // (#635). It was written for the TradingView perimeter and nothing else ever
-// imported it, so cmd/kanz-halt's "platform kill-switch" stopped exactly one
+// imported it, so cmd/kanz_halt's "platform kill-switch" stopped exactly one
 // channel: an operator halting on a risk breach stopped webhook signals while
 // POST /v1/orders, the OMS and both venue adapters carried on trading. The
 // implementation was never the defect — latching, deny-by-default, halted on a
@@ -18,7 +18,7 @@
 //
 // It sits beside internal/platform/mode rather than inside it: mode holds the
 // wire contract (the subject and the component name) and imports NOTHING, which
-// is what keeps cmd/kanz-halt — the one binary that must work while the system
+// is what keeps cmd/kanz_halt — the one binary that must work while the system
 // is on fire — free of the trading pipeline. This package folds that contract
 // and therefore depends on the schemas and the bus; keeping the two apart
 // preserves the break-glass tool's isolation.
@@ -39,7 +39,7 @@ import (
 
 // SubjectModeChanged carries the lifecycle.v1.ModeChanged FACT — the halt signal.
 // It is the operator's brake, and it is the ONLY thing that can reopen a latched
-// gate. Defined in internal/platform/mode so the publisher (cmd/kanz-halt) and
+// gate. Defined in internal/platform/mode so the publisher (cmd/kanz_halt) and
 // this consumer share ONE definition without the break-glass tool having to
 // depend on the trading pipeline.
 const SubjectModeChanged = mode.Subject

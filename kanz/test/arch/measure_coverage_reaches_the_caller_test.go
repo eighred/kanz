@@ -66,7 +66,7 @@ import (
 // It also cannot check that the field is read into the RIGHT proto field. That
 // half is behavioural and lives where behaviour belongs: input_coverage_test.go
 // in internal/risk/publish and TestMeasuresCarryTheirCoverageToTheCaller in
-// services/risk-engine/internal/grpcsrv.
+// services/risk_engine/internal/grpcsrv.
 const (
 	measureFieldsSourceFile = "internal/risk/api/v1/engine.go"
 	measureFieldsStructName = "Measure"

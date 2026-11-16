@@ -155,7 +155,7 @@ func TestSettlementPlanePostureSeedsEveryStageAtZero(t *testing.T) {
 //
 // settlementStages is hand-written, and a hand-enumerated list is the trap this
 // repository has already shipped once: the seeding loops in
-// services/risk-engine/cmd/risk-engine/liquidity.go enumerate every skip reason
+// services/risk_engine/cmd/risk_engine/liquidity.go enumerate every skip reason
 // by name, so a NEW reason added to liquiditysource ships with no series at all —
 // invisible in exactly the way the seeding exists to prevent.
 //

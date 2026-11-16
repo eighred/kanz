@@ -50,11 +50,11 @@ func checkRustOMSProposals(source, contract string) error {
 }
 func TestRustOMSProposalsBoundary(t *testing.T) {
 	root := moduleRoot(t)
-	raw, e := os.ReadFile(filepath.Join(filepath.Dir(root), "kanz-rs", "crates", "oms-store", "src", "proposals.rs"))
+	raw, e := os.ReadFile(filepath.Join(filepath.Dir(root), "rust", "crates", "oms_store", "src", "proposals.rs"))
 	if e != nil {
 		t.Fatal(e)
 	}
-	tests, e := os.ReadFile(filepath.Join(root, "services", "oms", "tools", "store-conformance", "proposals_test.go"))
+	tests, e := os.ReadFile(filepath.Join(root, "services", "oms", "tools", "store_conformance", "proposals_test.go"))
 	if e != nil {
 		t.Fatal(e)
 	}

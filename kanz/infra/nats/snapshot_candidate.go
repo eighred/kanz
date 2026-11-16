@@ -20,7 +20,9 @@ import (
 //go:embed tenancy.yaml
 var tenancyYAML []byte
 
-const baselineSHA256 = "bb9b93b765642f178ed8d90304f47da364ed37209a61bc7fe95dd4e66254d48a"
+// #1742 revokes the retired monitor principal. All remaining account semantics
+// are preserved; source-path comment corrections also change the pinned bytes.
+const baselineSHA256 = "6c06cb6b092586ce2c0feda7ffa21a709f9257f69259e23ef38e5b374227e51c"
 const SnapshotIdentity = "spiffe://kanz.internal/ns/kanz-services/sa/lake-sink"
 const SnapshotStream = snapshotprofile.Name
 const SnapshotDurable = snapshotprofile.Durable

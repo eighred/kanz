@@ -29,8 +29,8 @@ import (
 //
 //	compute.DefaultRegistry                                    Delta stays registered — the decision
 //	compute.RegisterGreeks                                     the sole registrar the inference rests on
-//	services/risk-engine/internal/app/greek_model_posture.go    the posture
-//	services/risk-engine/cmd/risk-engine/main.go                the process that registers it
+//	services/risk_engine/internal/app/greek_model_posture.go    the posture
+//	services/risk_engine/cmd/risk_engine/main.go                the process that registers it
 //
 // THE JUSTIFICATION IS DERIVED, NOT TYPED IN. The posture does not contain a
 // sentence saying "RegisterGreeks is unwired". It reads compute.Dark and infers:
@@ -54,11 +54,11 @@ import (
 // greekPostureFile is where the posture lives. Cited by path so the citation is
 // checkable: a guard pointing at a file that no longer exists asserts nothing.
 var greekPostureFile = filepath.Join(
-	"services", "risk-engine", "internal", "app", "greek_model_posture.go")
+	"services", "risk_engine", "internal", "app", "greek_model_posture.go")
 
 // riskEngineCompositionRoot is the process that must register the posture.
 var riskEngineCompositionRoot = filepath.Join(
-	"services", "risk-engine", "cmd", "risk-engine", "main.go")
+	"services", "risk_engine", "cmd", "risk_engine", "main.go")
 
 // registrarsOfGreekMeasures returns, for each measure constant in the catalogued
 // Greek family, the names of the functions under internal/risk/compute that
@@ -382,7 +382,7 @@ func TestRiskEngineCompositionRootRegistersTheGreekPostureUnconditionally(t *tes
 // it, so renaming the parameter or moving the wiring to another file leaves this
 // assertion working.
 func TestTheGreekPostureIsStatedFromARegistry(t *testing.T) {
-	dir := filepath.Join(moduleRoot(t), "services", "risk-engine", "cmd", "risk-engine")
+	dir := filepath.Join(moduleRoot(t), "services", "risk_engine", "cmd", "risk_engine")
 
 	holders := 0
 	stated := 0
@@ -429,7 +429,7 @@ func TestTheGreekPostureIsStatedFromARegistry(t *testing.T) {
 	}
 
 	if holders == 0 {
-		t.Fatalf("no function under services/risk-engine/cmd/risk-engine takes a "+
+		t.Fatalf("no function under services/risk_engine/cmd/risk_engine takes a "+
 			"*app.GreekModelPosture — the wiring moved and this guard is asserting nothing "+
 			"about whether kanz_risk_greek_model_live ever sees the registry (%s)",
 			greekPostureFile)

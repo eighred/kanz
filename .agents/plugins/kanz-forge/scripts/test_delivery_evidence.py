@@ -25,6 +25,49 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_session_acceptance_is_bound_through_adapter_to_actual_main_gate(self):
+        from test_work_session import fixture, receipt
+        data = snapshot()
+        data['work_session'] = fixture()
+        proof = receipt('original')
+        proof['merge_sha'] = MAIN
+        data['work_session']['main_acceptance'] = [proof]
+        data['validation_graph'] = dict(main_revision=MAIN, nodes=[dict(
+            id='actual-main', kind='gate', subject='main', revision=MAIN,
+            validation=dict(data['main'], inventory_evidence='reviewed complete source inventory',
+                            observed=[dict(data['main']['observed'][0], evidence='official main run/job')]))], edges=[])
+        self.assertTrue(assess(data)['work_session']['complete'])
+        data['validation_graph']['nodes'][0]['validation']['observed'][0]['status'] = 'IN_PROGRESS'
+        result = assess(data)['work_session']
+        self.assertFalse(result['complete'])
+        self.assertIn('original', result['unverified_receipts'])
+
+        data['validation_graph']['nodes'][0]['validation']['observed'][0]['status'] = 'SUCCESS'
+        data['main']['sha'] = HEAD
+        data['main']['observed'][0]['sha'] = HEAD
+        result = assess(data)['work_session']
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['initial_verified_on_main'], [])
+        self.assertIn('original', result['unverified_receipts'])
+
+        data['main']['sha'] = MAIN
+        data['main']['observed'][0]['sha'] = MAIN
+        data['main']['observed'][0]['status'] = 'FAILURE'
+        result = assess(data)['work_session']
+        self.assertFalse(result['complete'])
+        self.assertIn('original', result['unverified_receipts'])
+
+    def test_session_progress_stays_separate_from_new_finding_completion(self):
+        from test_work_session import fixture, finding, receipt
+        data = snapshot()
+        data['work_session'] = fixture()
+        data['work_session']['findings'] = [finding()]
+        data['work_session']['main_acceptance'] = [receipt('repair')]
+        result = assess(data)['work_session']
+        self.assertEqual(result['initial_verified_on_main'], [])
+        self.assertIn('repair', result['blocked_repairs'])
+        self.assertFalse(result['complete'])
+
     def test_continuation_ranking_survives_delivery_ownership_filter(self):
         from test_validation_graph import task as graph_task
         data = snapshot()

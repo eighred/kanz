@@ -2,17 +2,17 @@
 # One-shot Issue #71 capital-path certifier. It contains no exchange credential:
 # those terminate in the venue adapter. The Job receives only an authenticated
 # gateway token, a SELECT-only ledger DSN, and a SPIFFE workload identity.
-FROM ghcr.io/eighred/base/golang:1.27.4 AS build
+FROM ghcr.io/eighred/base/golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
-COPY kanz-schemas/gen/go/go.mod kanz-schemas/gen/go/go.sum ./kanz-schemas/gen/go/
+COPY schemas/gen/go/go.mod schemas/gen/go/go.sum ./schemas/gen/go/
 COPY kanz/go.mod kanz/go.sum ./kanz/
 WORKDIR /src/kanz
 COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh
 RUN sh /usr/local/bin/go-mod-download.sh
 
-COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/
+COPY schemas/gen/go/ /src/schemas/gen/go/
 COPY kanz/ ./
 ARG VERSION=
 RUN CGO_ENABLED=0 go build -trimpath \

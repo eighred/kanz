@@ -37,7 +37,7 @@ func TestTheProjectionCannotDisagreeWithItsRecord(t *testing.T) {
 	}
 
 	// The FACTOR half of this pairing is asserted in
-	// services/risk-engine/internal/app, which is the only package the RISK-02
+	// services/risk_engine/internal/app, which is the only package the RISK-02
 	// boundary lets name factor.Classification — see the note at the top of
 	// classifier.go. Lookup is what both projections read, so this pins the
 	// record they must agree about.

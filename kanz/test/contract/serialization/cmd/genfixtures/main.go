@@ -1,7 +1,7 @@
 // Command genfixtures regenerates the cross-language wire fixtures
 // consumed by EVT-21b's Go / Python / TS contract tests. CI runs this
 // once before invoking the test suites in each language; on local dev,
-// run it after editing fixtures.go (or after a kanz-schemas change that
+// run it after editing fixtures.go (or after a schemas change that
 // affects envelope.proto).
 //
 // Usage:

@@ -117,7 +117,7 @@ func TestEveryServiceMainDelegatesItsExitCode(t *testing.T) {
 		}
 		// The only pre-lifecycle mode is a closed, credential-free config emitter.
 		// Its complete recipe is checked, not a package-wide exemption.
-		if p.dir == "services/web-bff/cmd/web-bff" && reviewedEdgePrelude(p.mainDecl) {
+		if p.dir == "services/web_bff/cmd/web_bff" && reviewedEdgePrelude(p.mainDecl) {
 			if err := checkPairedHTTPRecipes(pairedHTTPFiles(t, root)); err != nil {
 				t.Fatal(err)
 			}

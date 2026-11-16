@@ -40,7 +40,7 @@ import (
 
 const (
 	barTypeFile     = "internal/marketdata/store/bar.go"
-	barMigrationDir = "services/market-data/migrations"
+	barMigrationDir = "services/market_data/migrations"
 )
 
 var (

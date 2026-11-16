@@ -45,7 +45,7 @@ func haltedService(t *testing.T, store Store, gate *halt.Gate) (*Service, *fakeB
 	return svc, fb, venue
 }
 
-// operatorHalt is the FACT cmd/kanz-halt publishes on platform.mode.changed.
+// operatorHalt is the FACT cmd/kanz_halt publishes on platform.mode.changed.
 func operatorHalt(t *testing.T) []byte {
 	t.Helper()
 	b, err := proto.Marshal(&lifecyclepb.ModeChanged{

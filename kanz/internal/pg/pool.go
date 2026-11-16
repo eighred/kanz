@@ -225,7 +225,7 @@ var Service = Profile{
 // Unbounded while Service does not. serviceStatementTimeout must sit under the
 // write bound because a service statement runs inside an HTTP handler whose
 // response is being raced. kanz-migrate serves nothing: it imports no net/http, not
-// even transitively (`go list -deps ./cmd/kanz-migrate` names no httpserver), and
+// even transitively (`go list -deps ./cmd/kanz_migrate` names no httpserver), and
 // it is an initContainer that exits. There is no response to sever, so there is no
 // ordering to respect.
 //

@@ -144,7 +144,7 @@ var evictionScopes = []evictionScope{
 		mustEvict: "DedupWindow.expiry",
 	},
 	{
-		dir:       "services/api-gateway/internal/middleware",
+		dir:       "services/api_gateway/internal/middleware",
 		minFiles:  5,
 		mustFind:  []string{"quota.inflight", "bucketSet.buckets", "replayCache.entries"},
 		mustEvict: "replayCache.entries",
@@ -346,14 +346,14 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// what the account has earned. Dropping it would change what the fund has
 	// made, not merely what it holds — which is the failure the rest of this
 	// retention work exists to avoid.
-	"services/tv-sync/internal/projection: account.live": {boundedByConstruction,
+	"services/tv_sync/internal/projection: account.live": {boundedByConstruction,
 		"SIZED BY THE BOOK: the maintained position fold, keyed by the INSTRUMENTS an account has " +
 			"traded, where an instrument reaches it only through an order FACT that already passed " +
 			"OMS entitlement. It grows with the instrument universe rather than with orders or fills, " +
 			"so a fund's whole lifetime in one instrument is one entry. A flat instrument is retained " +
 			"deliberately: its realized P&L is still part of the book, exactly as the OMS's own " +
 			"position Book.lots is retained flat above.", ""},
-	"services/tv-sync/internal/projection: account.baseline": {boundedByConstruction,
+	"services/tv_sync/internal/projection: account.baseline": {boundedByConstruction,
 		"SIZED BY THE BOOK: the fold of the executions retention has DROPPED, keyed by the same " +
 			"instrument set as account.live beside it and written only by account.evict as history " +
 			"leaves. It is what makes bounding the resident history lossless — live is baseline plus " +
@@ -386,7 +386,7 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"than adding one. The number of Subscribe calls a process makes is the length of its configured " +
 			"subject list — a package constant in most services, an env.SplitList (ACCOUNTING_FILL_SUBJECTS " +
 			"and its siblings) in the rest — read once at startup and fixed for the life of the process; " +
-			"cmd/kanz-redrive, the one operator-supplied subject in the estate, subscribes once and exits. " +
+			"cmd/kanz_redrive, the one operator-supplied subject in the estate, subscribes once and exits. " +
 			"So the key space is that list, never the traffic across it (re-measured for #1011). " +
 			"EVICTING HERE WOULD BE WRONG rather than merely unnecessary: the entry IS the record that a " +
 			"durable on the broker is bound to a subject, and that binding outlives the Subscribe that made " +
@@ -472,14 +472,14 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by currency, and the currency list is parsed once at startup from " +
 			"RISK_ENGINE_CALIBRATION_RATES — there is no runtime path that adds one. Per-key retention " +
 			"is pit.Put's horizon, enforced by TestPricingRetentionIsBounded.", ""},
-	"services/risk-engine/internal/app: CalibrationCoverage.last": {boundedByConstruction,
+	"services/risk_engine/internal/app: CalibrationCoverage.last": {boundedByConstruction,
 		"keyed by CURRENCY, and the only writer is curve.Calibrator.OnCoverage, which the composition " +
 			"root drives once per scheduled job. The job set is src.Currencies() over the strip parsed " +
 			"from RISK_ENGINE_CALIBRATION_RATES at startup, so the key space is the same one that bounds " +
 			"curve.Store.byCurrency above and is decided before the subscription exists. The VALUE is a " +
 			"short state string REPLACED on every observation rather than appended to — the map is a " +
 			"per-currency last-logged marker, so a currency whose strip flaps rewrites one entry.", ""},
-	"services/risk-engine/internal/app: MeasureMethodPosture.last": {boundedByConstruction,
+	"services/risk_engine/internal/app: MeasureMethodPosture.last": {boundedByConstruction,
 		"keyed by MEASURE NAME, and the name space is compute.Catalogue() — a package-level map " +
 			"literal of twenty-six entries fixed at compile time, which test/arch/measure_catalogue_test.go " +
 			"already pins against the registry. Both writers key on it: Seed walks Registry.Names(), " +
@@ -536,7 +536,7 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"vendor source, and an instrument out of the platform's own security master. It is also " +
 			"the human override audit trail — a compliance record must say what the operator chose, so " +
 			"evicting an entry would delete the answer rather than free memory.", ""},
-	"services/lake-sink/internal/decode: CachingResolver.cache": {boundedByConstruction,
+	"services/lake_sink/internal/decode: CachingResolver.cache": {boundedByConstruction,
 		"keyed by \"schema_id:version\", and a key is only inserted AFTER the schema registry resolved " +
 			"it — a malformed or invented ref fails the inner resolve and is never cached. The key " +
 			"space is therefore the registry's published catalogue, and (schema_id, version) is " +
@@ -553,21 +553,21 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"index() overwrites the oldest SLOT and deletes that slot's key from eventDS. It is the " +
 			"evictor for the event index rather than a thing needing one, and this guard cannot see " +
 			"that because the shrink is an indexed write paired with a delete on a SIBLING field.", ""},
-	"services/market-data/internal/feed: Gate.lastSeq": {boundedByConstruction,
+	"services/market_data/internal/feed: Gate.lastSeq": {boundedByConstruction,
 		"keyed by instrument_id, and the only wiring feeds this Gate the operator-configured " +
 			"MARKET_DATA_FEED_INSTRUMENTS list — no venue path routes arbitrary per-tick symbols " +
 			"through it.", ""},
-	"services/market-data/internal/feed: Gate.lastTime": {boundedByConstruction,
+	"services/market_data/internal/feed: Gate.lastTime": {boundedByConstruction,
 		"the timestamp half of the same per-instrument gap check as lastSeq, with the same key and the " +
 			"same operator-configured instrument list bounding it.", ""},
-	"services/market-data/internal/feed: Snapshot.latest": {boundedByConstruction,
+	"services/market_data/internal/feed: Snapshot.latest": {boundedByConstruction,
 		"keyed by instrument_id with replace-on-write semantics, so its size is the instrument count " +
 			"rather than the event count — the same bound as the Gate it sits beside.", ""},
-	"services/market-data/internal/feed: Partitioned.lanes": {boundedByConstruction,
+	"services/market_data/internal/feed: Partitioned.lanes": {boundedByConstruction,
 		"not an accumulator: a fixed-size []chan sized once at construction from cfg.lanes and " +
 			"indexed by a hash of the instrument id. Nothing appends to it, and Close drains every " +
 			"lane it holds.", ""},
-	"services/market-data/internal/feed: captureSink.evs": {boundedByConstruction,
+	"services/market_data/internal/feed: captureSink.evs": {boundedByConstruction,
 		"not long-lived at all: the sink is constructed inside Conform(), which runs under a " +
 			"five-second deadline and returns, and no field anywhere holds the value afterwards. The " +
 			"mutex is there because the adapter under conformance publishes concurrently.", ""},
@@ -575,13 +575,13 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by portfolio_id off risk.portfolio.measures_computed, which the risk engine publishes " +
 			"for portfolios it computes. A LEVEL, NOT A DELTA: each fold replaces that portfolio's " +
 			"snapshot, so only a new portfolio adds a key.", ""},
-	"services/tv-sync/internal/projection: Projection.accounts": {boundedByConstruction,
+	"services/tv_sync/internal/projection: Projection.accounts": {boundedByConstruction,
 		"keyed by TENANT — the estate's onboarded tenant roster, and the outermost of three levels " +
 			"this type nests. NOTE the scope of that claim: it covers this map's own keys only. The " +
 			"account map at each value has its own entry below; the per-account collections one level " +
 			"further down are reached through the pointer arm (#951) and carry their own entries, " +
 			"three of which #809's heap half retired by giving them an evictor.", ""},
-	"services/webhook-ingest/internal/ingest: PositionCache.byKey": {boundedByConstruction,
+	"services/webhook_ingest/internal/ingest: PositionCache.byKey": {boundedByConstruction,
 		"keyed by fund/venue/instrument off the OMS's own compacted venue-position stream. The webhook " +
 			"caller influences the READ path only — Position() looks a key up and never creates one — " +
 			"so an alert naming an invented instrument cannot add an entry.", ""},
@@ -606,7 +606,7 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"from the envelope's domain and schema ref; an event cannot mint a dataset id of its own. " +
 			"The type's own comment has said datasets and upstream are not evicted, and why, since " +
 			"#244.", ""},
-	"services/tv-sync/internal/projection: Projection.accounts[]": {boundedByConstruction,
+	"services/tv_sync/internal/projection: Projection.accounts[]": {boundedByConstruction,
 		"one entry per ACCOUNT ID within a tenant, where the account id is the portfolio off an order " +
 			"FACT that already passed OMS entitlement — the provisioned account roster, which is what " +
 			"the outer entry above used to claim on this level's behalf before the two were separable. " +
@@ -690,7 +690,7 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"each slice contains only executions also claimed by appliedFills, whose global maxPositionReplay " +
 			"capacity bounds the sum of all histories. TestMemoryExecutionHistoryCapacityRefusesWithoutEvictingEvidence " +
 			"proves refusal without losing an earlier execution or its idempotency claim.", ""},
-	"services/schema-registry/internal/storage: Memory.schemas": {isTheStore,
+	"services/schema_registry/internal/storage: Memory.schemas": {isTheStore,
 		"keyed by (schema_id, version), which is immutable once published — the registry's content, " +
 			"not a cache of it. A version that disappeared would make an already-published payload " +
 			"undecodable.", ""},
@@ -912,6 +912,8 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 				t.Errorf("%s is exempt as a KNOWN unbounded leak but names no issue (%q) — a leak with no "+
 					"issue is a leak nobody is going to fix", key, ex.issue)
 			}
+		default:
+			t.Errorf("exemption %s has unknown eviction class %d", key, ex.class)
 		case boundedByConstruction:
 			// The obligation here is the argument in `why`, which no test can
 			// check. The floor below is that there IS one, at length: the entries

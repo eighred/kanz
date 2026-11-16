@@ -71,7 +71,7 @@ func (s *Server) custodyAction(w http.ResponseWriter, r *http.Request, legacyAct
 		writeJSON(w, 400, map[string]string{"error": "expected revision required"})
 		return
 	}
-	evidence, err := s.breaks.ApplyAction(r.Context(), custody.Action{Tenant: s.tenant, Actor: actor, RequestID: body.RequestID, BreakID: r.PathValue("id"), Kind: body.Action, Explanation: body.Explanation, ExpectedRevision: revision})
+	evidence, err := s.breaks.ApplyAction(r.Context(), custody.Action{Tenant: s.tenant, Actor: actor, RequestID: body.RequestID, BreakID: r.PathValue("id"), Kind: body.Action, Explanation: body.Explanation, ExpectedRevision: revision, PortfolioScope: append([]string(nil), principal.Portfolios...)})
 	if err != nil {
 		status := http.StatusInternalServerError
 		message := "custody action could not be recorded"

@@ -19,7 +19,7 @@ import (
 
 // envelopeVersion is the Envelope schema version this client builds against.
 // Bumps once per additive change to envelope.proto (rare; see
-// kanz-schemas/README.md § Envelope Policy §6). v2 added tenant_id (MT-01a).
+// schemas/README.md § Envelope Policy §6). v2 added tenant_id (MT-01a).
 const envelopeVersion uint32 = 2
 
 // headerNatsMsgID is the header NATS JetStream keys its broker-side dedup

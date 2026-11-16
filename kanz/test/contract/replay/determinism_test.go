@@ -5,7 +5,7 @@
 // the re-marshal unchanged. Only QualityFlags is permitted to differ —
 // QUALITY_FLAG_REPLAYED is appended idempotently by EVT-20c.
 //
-// kanz-schemas/README.md § Schema Evolution §8 names this contract directly:
+// schemas/README.md § Schema Evolution §8 names this contract directly:
 // "replaying an old log with current code must produce identical output, which
 // is only true if every intervening change was genuinely non-breaking or
 // genuinely a new vN." The tests here are the runtime proof — a regression in
@@ -293,7 +293,7 @@ func TestDeterminism_OriginalEnvelopeIdentityPreserved(t *testing.T) {
 
 // --- Compatibility-during-replay link ---------------------------------
 
-// The kanz-schemas/README.md § Schema Evolution §8 link: replay determinism
+// The schemas/README.md § Schema Evolution §8 link: replay determinism
 // depends on payload schema §2 compat holding. This test exercises the link
 // directly — an envelope carrying an unknown field (simulating an event from a
 // future publisher that landed in an old Kafka log) replays without dropping

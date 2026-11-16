@@ -19,7 +19,7 @@ import (
 // and a BYPASSRLS role from RLS UNCONDITIONALLY — FORCE reaches neither.
 //
 // So the entire guarantee rested on one property of the DSN. That property was
-// asserted in fifteen comments across the deploy manifests, cmd/kanz-migrate,
+// asserted in fifteen comments across the deploy manifests, cmd/kanz_migrate,
 // secretproviderclass.yaml and AGENTS.md; it was SET by a single CREATE ROLE
 // line in a manifest labelled `kanz.eighred.com/posture: dev-only`; and it was
 // checked by nothing that runs. A repo-wide grep for the only ways to ask —

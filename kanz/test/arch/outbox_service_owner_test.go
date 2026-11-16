@@ -38,7 +38,7 @@ func outboxOwnerProblems(rel string, f *ast.File) (count int, problems []string)
 	for service, symbol := range map[string]string{
 		"oms": "ServiceOMS", "accounting": "ServiceAccounting", "datamaster": "ServiceDatamaster", "lake-sink": "ServiceLakeSink",
 	} {
-		if strings.HasPrefix(rel, "services/"+service+"/") {
+		if strings.HasPrefix(rel, "services/"+sourceDirectoryName(service)+"/") {
 			want = symbol
 		}
 	}

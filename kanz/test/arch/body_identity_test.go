@@ -80,7 +80,7 @@ var bodyIdentityExempt = map[string]string{
 		"subject is established — the body's subject is a claim verified against a credential or an " +
 		"invite token, not a name written down on somebody's behalf. Requiring a principal here " +
 		"would mean requiring a login to log in.",
-	"web-bff/internal/server/server.go": "PRE-AUTHENTICATION, same as identity's and for the same " +
+	"web_bff/internal/server/server.go": "PRE-AUTHENTICATION, same as identity's and for the same " +
 		"reason: /auth/login, /auth/redeem and /auth/logout front the identity service's routes for " +
 		"the browser. The subject is verified upstream against a credential; this tier holds the " +
 		"session cookie, it does not attribute an action to a person.",

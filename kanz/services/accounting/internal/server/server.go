@@ -10,7 +10,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -19,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/internal/requestbody"
 	"github.com/eighred/kanz/pkg/auth"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
@@ -161,6 +164,20 @@ func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) 
 	return auth.RequireCallerTenantIs(w, r, s.tenant, notFoundBody)
 }
 
+// portfolioReader preserves tenant-wide reads for an absent or empty scope,
+// while refusing malformed claims before configuration or financial state is read.
+func (s *Server) portfolioReader(w http.ResponseWriter, r *http.Request, portfolio string) (*auth.Principal, bool) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return nil, false
+	}
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok || (portfolio != "" && !auth.PortfolioInScope(principal.Portfolios, portfolio)) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": notFoundBody})
+		return nil, false
+	}
+	return principal, true
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
@@ -230,7 +247,7 @@ type navRequest struct {
 }
 
 func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
-	if !s.callerOwnsThisInstance(w, r) {
+	if _, ok := s.portfolioReader(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -243,12 +260,17 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	rates, err := toRatMap(req.FX)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	book, err := s.materialize(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	nav, err := s.computeNAV(book, prices, req)
+	nav, err := s.computeNAV(book, prices, rates, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -284,16 +306,12 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 // holding anything else is refused by name. That is the distinction between
 // "nothing configured" and "checked, and fine": the unconfigured pod now says
 // which currency it cannot value instead of silently leaving it out.
-func (s *Server) computeNAV(book *ledger.Book, prices map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
+func (s *Server) computeNAV(book *ledger.Book, prices, rates map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
 	now := time.Now().UTC()
 
 	var fx accounting.FXConverter
 	switch {
 	case len(req.FX) > 0:
-		rates, err := toRatMap(req.FX)
-		if err != nil {
-			return accounting.NAV{}, err
-		}
 		fx = accounting.NewFXTable(s.baseCcy, rates)
 	case s.fxProvider != nil:
 		fx = s.fxProvider()
@@ -361,7 +379,7 @@ type reconcileRequest struct {
 // frequent read and still counts; this route is operator-triggered and rare. If
 // that changes, the fix is a reason on the loader, not a second materialize here.
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
-	if !s.callerOwnsThisInstance(w, r) {
+	if _, ok := s.portfolioReader(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -408,13 +426,12 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// subject names the BOOK SLICE and nothing else. It carries no business date
-	// on purpose: this comparison is against a statement in the request, so there
-	// is no stored statement, run or break for a date to key — and a date invented
-	// here would be a business date on evidence nobody chose. Nothing persists or
-	// publishes it, so Subject.Validate's date requirement does not apply.
+	// This ad-hoc read compares the scoped book right now, rather than a stored
+	// statement's business close. Capture that effective cutoff explicitly once;
+	// it is not a statement date and nothing here persists a statement or run.
 	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
-	book, executions, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger)(r.Context(), subject)
+	now := time.Now().UTC()
+	book, executions, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger, custody.EffectiveCutoff{AsOf: now})(r.Context(), subject)
 	if err != nil {
 		// The loader refuses rather than returning a partial book — an exchange
 		// account no custodian claims, most often. Surface the reason: it names
@@ -430,7 +447,11 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// the whole comparison basis against it would report every execution the fund
 	// has ever made as one the custodian never saw. An operator investigating gets
 	// the netted answer, and the response says which grain it is.
-	breaks, leg := recon.Reconcile(book, executions, recon.Statement{PortfolioID: id, Positions: positions, Cash: cash}, tol)
+	breaks, leg, err := recon.Reconcile(book, executions, recon.Statement{PortfolioID: id, Positions: positions, Cash: cash}, tol)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	out := make([]map[string]string, 0, len(breaks))
 	for _, b := range breaks {
 		out = append(out, map[string]string{
@@ -494,24 +515,27 @@ func toRatMap(in map[string]string) (map[string]*big.Rat, error) {
 	return out, nil
 }
 
-func parseRat(s string) (*big.Rat, error) {
-	r, ok := new(big.Rat).SetString(s)
-	if !ok {
-		return nil, &parseError{s}
-	}
-	return r, nil
-}
-
-type parseError struct{ s string }
-
-func (e *parseError) Error() string { return "accounting: invalid decimal " + e.s }
-
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if r.ContentLength > requestbody.MaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 		return false
 	}
-	return true
+	r.Body = http.MaxBytesReader(w, r.Body, requestbody.MaxBytes)
+	d := json.NewDecoder(r.Body)
+	err := d.Decode(v)
+	if err == nil {
+		var trailing json.RawMessage
+		if err = d.Decode(&trailing); err == io.EOF {
+			return true
+		}
+	}
+	var limit *http.MaxBytesError
+	if errors.As(err, &limit) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+	} else {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

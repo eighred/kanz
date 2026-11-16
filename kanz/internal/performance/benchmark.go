@@ -2,9 +2,11 @@ package performance
 
 import (
 	"context"
-	"github.com/eighred/kanz/internal/dec"
+	"fmt"
+	"math"
 	"time"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
@@ -60,9 +62,10 @@ func ActiveReturn(portfolioReturn, benchmarkReturn float64) float64 {
 // InstrumentReturn computes a single instrument's point-in-time price return
 // over (start, end], read at knowledge horizon asOf: P_end/P_start − 1 using only
 // prices known by asOf. ok=false when either endpoint has no point-in-time
-// price. This is the shared return source feeding both the benchmark constituent
-// returns and the per-sector returns of attribution — one price basis, no future
-// leakage (a restatement after asOf is invisible).
+// price or the start price is zero. Unreadable marks or nonfinite arithmetic
+// return an error. This is the shared return source feeding both benchmark
+// constituent returns and the per-sector returns of attribution — one price
+// basis, no future leakage (a restatement after asOf is invisible).
 func InstrumentReturn(ctx context.Context, s store.Store, instrumentID string, kind store.PriceKind, start, end, asOf time.Time) (float64, bool, error) {
 	pStart, ok, err := pointInTimePrice(ctx, s, instrumentID, kind, start, asOf)
 	if err != nil || !ok || pStart == 0 {
@@ -72,7 +75,11 @@ func InstrumentReturn(ctx context.Context, s store.Store, instrumentID string, k
 	if err != nil || !ok {
 		return 0, false, err
 	}
-	return pEnd/pStart - 1, true, nil
+	value := pEnd/pStart - 1
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, false, fmt.Errorf("performance: nonfinite return for %q", instrumentID)
+	}
+	return value, true, nil
 }
 
 // pointInTimePrice is the bitemporal spot read shared by valuation + return: the
@@ -82,5 +89,9 @@ func pointInTimePrice(ctx context.Context, s store.Store, instrumentID string, k
 	if err != nil || len(hist) == 0 {
 		return 0, false, err
 	}
-	return dec.Float64Or(hist[len(hist)-1].Price, 0), true, nil
+	price, ok := dec.Float64(hist[len(hist)-1].Price)
+	if !ok {
+		return 0, false, fmt.Errorf("performance: unusable point-in-time mark for %q", instrumentID)
+	}
+	return price, true, nil
 }

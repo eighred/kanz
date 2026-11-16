@@ -435,7 +435,7 @@ func (r *Recomputer) loop() {
 			// each one skips its emit and returns almost immediately.
 			r.sem <- struct{}{}
 			r.undispatched.Store(int64(len(ready) - i - 1))
-			r.metrics.setInflight(len(r.sem))
+			r.metrics.setInflight(r.sem)
 			// Depth EXCLUDES what is now in flight — that is the other gauge — so the
 			// two series are disjoint and depth+inflight is the outstanding work.
 			r.metrics.setQueueDepth(deferred + len(ready) - i - 1)
@@ -443,7 +443,7 @@ func (r *Recomputer) loop() {
 			go func(id v1.PortfolioID) {
 				defer func() {
 					<-r.sem
-					r.metrics.setInflight(len(r.sem))
+					r.metrics.setInflight(r.sem)
 					r.wg.Done()
 				}()
 				r.recompute(id)
