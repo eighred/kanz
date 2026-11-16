@@ -31,37 +31,27 @@ fn rounded(n: BigInt, d: &BigInt) -> BigInt {
     q
 }
 // Go dec.ToProtoScaled: first round at 1e-8, then repeated half-away /10.
-/// Checked existing Go ToProtoScaled conversion shared with position outputs.
+/// Checked existing Go ToProtoScaled conversion for derived rounded outputs.
 pub fn decimal(value: BigRational) -> Option<Decimal> {
     decimal_fit(value, 64)
 }
 
-/// Go dec.ToProtoExact's bounded quantity contract: a normalized i64
+/// Go dec.ToProtoExact's bounded exact contract: a normalized i64
 /// coefficient, exponent [-60,60], and no rounding or implicit zero. Keep this
-/// distinct from the established average-price/position output conversion.
-pub(crate) fn exact_decimal(value: BigRational) -> Option<Decimal> {
+/// distinct from the established average-price output conversion.
+pub fn exact_decimal(value: BigRational) -> Option<Decimal> {
     if value.numer().bits() > 512 || value.denom().bits() > 512 {
         return None;
     }
+    let (twos, fives) = decimal_factors(&value)?;
     if value.is_zero() {
         return Some(Decimal {
             coefficient: 0,
             exponent: 0,
         });
     }
-    let mut denominator = value.denom().clone();
-    let mut twos = 0;
-    let mut fives = 0;
-    while (&denominator % 2_u32).is_zero() {
-        denominator /= 2_u32;
-        twos += 1;
-    }
-    while (&denominator % 5_u32).is_zero() {
-        denominator /= 5_u32;
-        fives += 1;
-    }
     let places = twos.max(fives);
-    if denominator != BigInt::from(1) || places > 128 {
+    if places > 128 {
         return None;
     }
     let mut coefficient =
@@ -78,6 +68,39 @@ pub(crate) fn exact_decimal(value: BigRational) -> Option<Decimal> {
         coefficient: coefficient.to_i64()?,
         exponent,
     })
+}
+
+/// Distinguishes a terminating observation from derived repeating arithmetic.
+/// This is not validation or representability: callers selecting rounded output
+/// must first bound and validate the canonical rational. Invalid raw values
+/// return false; oversized finite values still return true so exact-conversion
+/// refusal cannot fall back to a rounded success.
+pub fn has_terminating_decimal(value: &BigRational) -> bool {
+    decimal_factors(value).is_some()
+}
+
+fn decimal_factors(value: &BigRational) -> Option<(u32, u32)> {
+    // new_raw can carry invalid or unreduced representation. Validate before
+    // reduction, zero shortcuts or factor loops; a zero denominator never shrinks.
+    if !value.denom().is_positive() {
+        return None;
+    }
+    let reduced = value.reduced();
+    if reduced.numer() != value.numer() || reduced.denom() != value.denom() {
+        return None;
+    }
+    let mut denominator = value.denom().clone();
+    let mut twos = 0;
+    let mut fives = 0;
+    while (&denominator % 2_u32).is_zero() {
+        denominator /= 2_u32;
+        twos += 1;
+    }
+    while (&denominator % 5_u32).is_zero() {
+        denominator /= 5_u32;
+        fives += 1;
+    }
+    (denominator == BigInt::from(1)).then_some((twos, fives))
 }
 
 /// Diagnostic Go-wire candidate only. The caller bounds rational inputs and
@@ -157,6 +180,82 @@ mod tests {
         ] {
             assert!(exact_decimal(value).is_none());
         }
+    }
+    #[test]
+    fn termination_classification_is_not_exact_capacity() {
+        for (n, d, coefficient, exponent) in [
+            (1_i64, 8_i64, 125_i64, -3_i32),
+            (-3, 40, -75, -3),
+            (1, -8, -125, -3),
+            (6, 12, 5, -1),
+        ] {
+            let value = BigRational::new(n.into(), d.into());
+            assert!(has_terminating_decimal(&value));
+            assert_eq!(
+                exact_decimal(value),
+                Some(Decimal {
+                    coefficient,
+                    exponent
+                })
+            );
+        }
+        for exponent in [-60_i32, 60] {
+            let value = rational(Some(&Decimal {
+                coefficient: 1,
+                exponent,
+            }))
+            .unwrap();
+            assert!(has_terminating_decimal(&value));
+            assert_eq!(
+                exact_decimal(value),
+                Some(Decimal {
+                    coefficient: 1,
+                    exponent
+                })
+            );
+        }
+        for value in [
+            BigRational::new(1.into(), BigInt::from(1) << 129_usize),
+            BigRational::new(1.into(), BigInt::from(1) << 513_usize),
+            BigRational::from_integer(BigInt::from(i64::MAX) + BigInt::from(1)),
+            BigRational::from_integer(BigInt::from(i64::MIN) - BigInt::from(1)),
+            BigRational::from_integer(BigInt::from(10).pow(61)),
+        ] {
+            assert!(has_terminating_decimal(&value));
+            assert!(exact_decimal(value).is_none());
+        }
+        for denominator in [3_i64, 6, 7] {
+            let value = BigRational::new(1.into(), denominator.into());
+            assert!(!has_terminating_decimal(&value));
+            assert!(exact_decimal(value).is_none());
+        }
+    }
+
+    #[test]
+    fn exact_api_refuses_noncanonical_raw_rationals() {
+        for (n, d) in [
+            (1_i64, 0_i64),
+            (0, 0),
+            (0, -1),
+            (1, -2),
+            (-1, -2),
+            (2, 4),
+            (3, 6),
+            (0, 2),
+        ] {
+            let value = BigRational::new_raw(n.into(), d.into());
+            assert!(!has_terminating_decimal(&value));
+            assert!(exact_decimal(value).is_none());
+        }
+        let zero = BigRational::new_raw(0.into(), 1.into());
+        assert!(has_terminating_decimal(&zero));
+        assert_eq!(
+            exact_decimal(zero),
+            Some(Decimal {
+                coefficient: 0,
+                exponent: 0
+            })
+        );
     }
     #[test]
     fn go_wire_candidate_does_not_expand_existing_financial_output_domain() {
