@@ -12,6 +12,8 @@ import (
 
 const rustOMSStorePath = "crates/oms_store"
 
+var rustOMSStoreForbiddenTokens = regexp.MustCompile(`\bf(?:32|64)\b|\bunsafe\b|(?:struct|enum|type)(?:Decimal|Money|Fill|OrderState)\b`)
+
 var rustOMSStoreSources = []string{"src/lib.rs", "src/diagnostics.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/fee_commands.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs", "tests/typed_ack_protocol.rs"}
 
 const rustOMSStoreCargo = `[package]
@@ -29,10 +31,10 @@ qualification-diagnostics = []
 kanz-order-core = { path = "../order_core" }
 kanz-decimal-compat = { path = "../.." }
 kanz-proto-wire = { path = "../proto_wire" }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
-prost-reflect = "=0.16.2"
-uuid = { version = "=1.29.0", features = ["v7"] }
+prost = "=0.14.6"
+prost-types = "=0.14.6"
+prost-reflect = "=0.16.5"
+uuid = { version = "=1.29.2", features = ["v7"] }
 sha2 = "=0.10.9"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
@@ -105,7 +107,7 @@ func checkRustOMSStoreBoundary(root string) error {
 		}
 		s = rustMigrationCompact(s)
 		found[rel] = s
-		if regexp.MustCompile(`\bf(?:32|64)\b|\bunsafe\b|(?:struct|enum|type)(?:Decimal|Money|Fill|OrderState)\b`).MatchString(s) || strings.Contains(s, "include!") || strings.Contains(s, "#[path=") {
+		if rustOMSStoreForbiddenTokens.MatchString(s) || strings.Contains(s, "include!") || strings.Contains(s, "#[path=") {
 			return fmt.Errorf("store financial/unsafe/alternate-source boundary")
 		}
 		// #1413: only this immutable native protocol witness may own loopback
