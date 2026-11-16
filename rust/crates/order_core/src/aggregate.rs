@@ -1,4 +1,5 @@
 //! Existing Go aggregate rules. Admission, attribution and durable effects remain callers' owners.
+use crate::arithmetic::exact_decimal;
 use crate::proto::order::v1::{AmendOrder, Fill, OrderState, OrderStatus, SubmitOrder};
 use crate::{decimal, rational, Canonical};
 use kanz_proto_wire::{Schema, MAX_BYTES};
@@ -125,7 +126,7 @@ pub fn apply_recovered_fill(
     let leaves = rational(working.ordered_quantity.as_ref())
         .ok_or(RecoveryFoldError::PostedUnknown)?
         - rational(working.filled_quantity.as_ref()).ok_or(RecoveryFoldError::PostedUnknown)?;
-    working.leaves_quantity = Some(decimal(leaves).ok_or(RecoveryFoldError::PostedUnknown)?);
+    working.leaves_quantity = Some(exact_decimal(leaves).ok_or(RecoveryFoldError::PostedUnknown)?);
     let working = patch(st, working, &["status", "leaves_quantity"])
         .map_err(RecoveryFoldError::Representation)?;
     // Only failure of the existing ApplyFill fold enters Go's durable BlockRecovery branch.
@@ -337,13 +338,16 @@ pub fn apply_fill_values(
     }
     let filled = &old + &q;
     let remaining = ordered - &filled;
-    if filled.is_zero() {
+    if old < num_rational::BigRational::zero()
+        || filled <= num_rational::BigRational::zero()
+        || remaining < num_rational::BigRational::zero()
+    {
         return Err(Error::NumericalFailure);
     }
     let weighted = (old * avg + q * price) / &filled;
     let (Some(filled_wire), Some(leaves_wire), Some(avg_wire)) = (
-        decimal(filled),
-        decimal(remaining.clone()),
+        exact_decimal(filled),
+        exact_decimal(remaining.clone()),
         decimal(weighted),
     ) else {
         return Err(Error::NumericalFailure);
@@ -395,11 +399,15 @@ pub fn amend(
         let q_value = rational(Some(&q)).ok_or(Error::UnsupportedInput)?;
         let filled =
             rational(st.value().filled_quantity.as_ref()).ok_or(Error::UnsupportedInput)?;
+        if filled < num_rational::BigRational::zero() {
+            return Err(Error::NumericalFailure);
+        }
         if q_value < filled {
             return Err(Error::Rejected("INVALID_QUANTITY"));
         }
         next.ordered_quantity = Some(q);
-        next.leaves_quantity = Some(decimal(q_value - filled).ok_or(Error::NumericalFailure)?);
+        next.leaves_quantity =
+            Some(exact_decimal(q_value - filled).ok_or(Error::NumericalFailure)?);
         names.extend(["ordered_quantity", "leaves_quantity"]);
     }
     if let Some(p) = c.new_limit_price {
@@ -503,6 +511,136 @@ mod tests {
         }
     }
     #[test]
+    fn quantities_conserve_ten_sub_eight_place_executions() {
+        let mut st = state();
+        st.ordered_quantity = Some(Decimal {
+            coefficient: 1,
+            exponent: -8,
+        });
+        st.leaves_quantity = st.ordered_quantity;
+        st.filled_quantity = Some(d(0));
+        for i in 1..=10 {
+            let fill = Fill {
+                quantity: Some(Decimal {
+                    coefficient: 1,
+                    exponent: -9,
+                }),
+                price: Some(d(1)),
+                ..Default::default()
+            };
+            st = apply_fill_values(&st, &fill, now()).unwrap();
+            let unit = num_rational::BigRational::new(1.into(), 1_000_000_000.into());
+            assert_eq!(
+                rational(st.filled_quantity.as_ref()).unwrap(),
+                &unit * num_bigint::BigInt::from(i)
+            );
+            assert_eq!(
+                rational(st.leaves_quantity.as_ref()).unwrap(),
+                &unit * num_bigint::BigInt::from(10 - i)
+            );
+            assert_eq!(
+                st.status,
+                if i == 10 {
+                    OrderStatus::Filled
+                } else {
+                    OrderStatus::PartiallyFilled
+                } as i32
+            );
+        }
+    }
+    #[test]
+    fn amendment_retains_exact_residual_and_refuses_coefficient_loss() {
+        let st = Canonical::<OrderState>::decode(&state().encode_to_vec()).unwrap();
+        let command = AmendOrder {
+            new_quantity: Some(Decimal {
+                coefficient: 2_000_000_009,
+                exponent: -9,
+            }),
+            ..Default::default()
+        };
+        let command = Canonical::decode(&command.encode_to_vec()).unwrap();
+        let next = amend(&st, &command, now()).unwrap();
+        assert_eq!(
+            next.value().leaves_quantity,
+            Some(Decimal {
+                coefficient: 9,
+                exponent: -9
+            })
+        );
+        let fill = Fill {
+            quantity: Some(Decimal {
+                coefficient: 91,
+                exponent: -10,
+            }),
+            price: Some(d(1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_fill_values(next.value(), &fill, now()),
+            Err(Error::Rejected("OVERFILL"))
+        );
+
+        let mut large = state();
+        large.ordered_quantity = Some(d(i64::MAX));
+        large.leaves_quantity = large.ordered_quantity;
+        large.filled_quantity = Some(d(0));
+        let fill = Fill {
+            quantity: Some(Decimal {
+                coefficient: 1,
+                exponent: -9,
+            }),
+            price: Some(d(1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_fill_values(&large, &fill, now()),
+            Err(Error::NumericalFailure)
+        );
+    }
+
+    #[test]
+    fn recovered_terminal_fill_keeps_sub_eight_place_leaves() {
+        let mut st = state();
+        st.status = OrderStatus::Cancelled as i32;
+        st.ordered_quantity = Some(Decimal {
+            coefficient: 4,
+            exponent: -9,
+        });
+        st.filled_quantity = Some(d(0));
+        st.leaves_quantity = None; // terminal snapshot; verified recovery derives it
+        let original = Canonical::<OrderState>::decode(&st.encode_to_vec()).unwrap();
+        let fill = Fill {
+            quantity: Some(Decimal {
+                coefficient: 1,
+                exponent: -9,
+            }),
+            price: Some(d(1)),
+            recovery: Some(crate::proto::order::v1::ExecutionRecoveryProvenance {
+                case_id: "fixture".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let fill = Canonical::<Fill>::decode(&fill.encode_to_vec()).unwrap();
+        let next = apply_recovered_fill(&original, &fill, now()).unwrap();
+        assert_eq!(next.value().status, OrderStatus::Cancelled as i32);
+        assert_eq!(
+            next.value().filled_quantity,
+            Some(Decimal {
+                coefficient: 1,
+                exponent: -9
+            })
+        );
+        assert_eq!(
+            next.value().leaves_quantity,
+            Some(Decimal {
+                coefficient: 3,
+                exponent: -9
+            })
+        );
+        assert_eq!(original.value(), &st);
+    }
+    #[test]
     fn future_field_and_nested_unknown_survive_clone_transitions() {
         let mut raw = state().encode_to_vec();
         let mut future = vec![10, 3, b'c', b'm', b'd'];
@@ -576,7 +714,7 @@ mod tests {
             out.value().leaves_quantity,
             Some(Decimal {
                 coefficient: 0,
-                exponent: -8
+                exponent: 0
             })
         );
         assert_eq!(out.value().limit_price, Some(d(-1)));

@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 import ci_ubuntu_archive as archive
+import subprocess
+from types import SimpleNamespace
 
 SOURCE = b"""# Keep the reviewed pockets and architecture selection.
 Types: deb
@@ -22,6 +24,29 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
 
 class ArchiveTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'O_NONBLOCK'), 'Linux protected input required')
+    def test_strict_metadata_probe_and_dns_failure_never_succeed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'ubuntu.sources'
+            source.write_bytes(archive.rewrite(SOURCE))
+            with patch.object(archive, 'SOURCE', source), patch.dict('os.environ',
+                    {'GITHUB_ACTIONS':'true','RUNNER_OS':'Linux'}, clear=True):
+                with patch.object(archive.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
+                    archive.verify()
+                    command = run.call_args.args[0]
+                    self.assertIn('APT::Update::Error-Mode=any', command)
+                    self.assertIn('Acquire::Retries=2', command)
+                    self.assertEqual(run.call_args.kwargs['timeout'], 180)
+                for failures in ([SimpleNamespace(returncode=100), SimpleNamespace(returncode=2)],
+                                 [subprocess.TimeoutExpired('apt-get',180), subprocess.TimeoutExpired('getent',10)]):
+                    with patch.object(archive.subprocess, 'run', side_effect=failures):
+                        with self.assertRaisesRegex(ValueError, 'metadata unavailable'):
+                            archive.verify()
+                source.write_bytes(SOURCE)
+                with patch.object(archive.subprocess, 'run') as run:
+                    with self.assertRaises(ValueError): archive.verify()
+                    run.assert_not_called()
+
     def test_only_uri_bytes_change_and_idempotent(self):
         result = archive.rewrite(SOURCE)
         old = [v for v in SOURCE.splitlines(keepends=True) if not v.startswith(b'URIs:')]

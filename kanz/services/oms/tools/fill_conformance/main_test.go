@@ -95,7 +95,7 @@ func TestFillSequenceUsesPreviouslyRoundedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.GetFilledQuantity().GetCoefficient() != 200000000 {
+	if second.GetFilledQuantity().GetCoefficient() != 2 || second.GetFilledQuantity().GetExponent() != 0 {
 		t.Fatal("aggregate incorrectly deduplicated a fill")
 	}
 }

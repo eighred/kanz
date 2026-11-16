@@ -72,10 +72,11 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 		}
 	}
 	type step struct {
-		Run      string `yaml:"run"`
-		Continue bool   `yaml:"continue-on-error"`
-		If       string `yaml:"if"`
-		Uses     string `yaml:"uses"`
+		Run      string            `yaml:"run"`
+		Continue bool              `yaml:"continue-on-error"`
+		If       string            `yaml:"if"`
+		Uses     string            `yaml:"uses"`
+		With     map[string]string `yaml:"with"`
 	}
 	type job struct {
 		If          string            `yaml:"if"`
@@ -102,7 +103,7 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	}
 	setup := 0
 	for _, step := range p.Steps {
-		if step.Uses == "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6" && !step.Continue && step.If == "" {
+		if step.Uses == "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532" && !step.Continue && step.If == "" && step.With["cosign-release"] == "v3.0.6" {
 			setup++
 		}
 	}
@@ -151,6 +152,7 @@ func TestRustAuditToolProducerBoundary(t *testing.T) {
 		file     int
 		old, new string
 	}{
+		{"verifier-version", 2, "cosign-release: v3.0.6", "cosign-release: v3.1.4"},
 		{"source-copy", 0, "FROM scratch", "COPY kanz/ /private/\nFROM scratch"},
 		{"version-change", 0, "--version 0.22.2", "--version 0.22.1"},
 		{"source-stamp", 0, "org.opencontainers.image.revision=$SOURCE_SHA", "org.opencontainers.image.revision=unknown"},
