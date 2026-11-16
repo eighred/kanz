@@ -102,7 +102,10 @@ func TestRetainedProfilePreservesExistingDurableCursor(t *testing.T) {
 	defer func() {
 		stopNext()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("worker shutdown: %v", err)
+			}
 		case <-ctx.Done():
 			t.Error("new durable failed to drain")
 		}

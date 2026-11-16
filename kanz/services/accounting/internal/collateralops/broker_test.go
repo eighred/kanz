@@ -167,12 +167,18 @@ func TestPostgresJetStreamCollateralRoundTrip(t *testing.T) {
 	}
 	cancel()
 	select {
-	case <-confirmationDone:
+	case err := <-confirmationDone:
+		if err != nil {
+			t.Errorf("subscription shutdown: %v", err)
+		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("custody subscription did not drain")
 	}
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Errorf("subscription shutdown: %v", err)
+		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("subscription did not drain")
 	}
