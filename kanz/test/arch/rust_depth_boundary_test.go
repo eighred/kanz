@@ -62,7 +62,7 @@ spiffe-rustls = "=0.11.0"
 uuid = { version = "=1.29.2", features = ["v7"] }
 
 [build-dependencies]
-prost-build = "=0.14.1"
+prost-build = "=0.14.6"
 protoc-bin-vendored = "=3.3.0"
 
 [dev-dependencies]
@@ -109,11 +109,23 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 
 func rustBoundaryFixtureFiles() []string {
 	out := []string{"Cargo.toml", "build.rs", "src/lib.rs", "tests/go_conformance.rs"}
+	out = append(out, rustLedgerPath+"/Cargo.toml")
+	for _, file := range rustLedgerSources {
+		out = append(out, rustLedgerPath+"/"+file)
+	}
+	out = append(out, rustTermPath+"/Cargo.toml")
+	for _, file := range append(append([]string{}, rustTermSources...), rustTermArtifacts...) {
+		out = append(out, rustTermPath+"/"+file)
+	}
 	for name, spec := range rustFeedPackages {
 		out = append(out, name+"/Cargo.toml")
 		for file := range spec.sources {
 			out = append(out, name+"/"+file)
 		}
+	}
+	out = append(out, rustOptionPricingPath+"/Cargo.toml")
+	for _, file := range append(append([]string{}, rustOptionPricingSources...), rustOptionPricingArtifacts...) {
+		out = append(out, rustOptionPricingPath+"/"+file)
 	}
 	out = append(out, rustBondShadowPath+"/Cargo.toml")
 	for _, file := range rustBondShadowSources {

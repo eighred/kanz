@@ -4,15 +4,22 @@ from pathlib import Path
 import re
 import unittest
 
-from go_test_evidence import BACKING, BROWSER_PROOF, check
+from go_test_evidence import BACKING, BROWSER_PROOF, INTEGER_BROWSER_PROOF, INTEGER_BROWSER_TEST, check
 
 
 def event(action, test="", output="", package="example/store"):
     return json.dumps({"Action": action, "Package": package, "Test": test, "Output": output}) + "\n"
 
 
-def suite(*records):
-    return io.StringIO("".join(records) + event("output", "TestBrowser", BROWSER_PROOF) + event("pass"))
+def integer_browser(*, package=INTEGER_BROWSER_TEST[0], test=INTEGER_BROWSER_TEST[1]):
+    return (event("run", test, package=package) +
+            event("output", test, "    mfa_browser_test.go:204: " + INTEGER_BROWSER_PROOF + "\n", package) +
+            event("pass", test, package=package) + event("pass", package=package))
+
+
+def suite(*records, integer=True):
+    return io.StringIO("".join(records) + event("output", "TestBrowser", BROWSER_PROOF) + event("pass") +
+                       (integer_browser() if integer else ""))
 
 
 class EvidenceTests(unittest.TestCase):
@@ -27,7 +34,7 @@ class EvidenceTests(unittest.TestCase):
             event("skip", "TestPostgres"),
         ))
         self.assertIn("TEST_POSTGRES_URL", problems[0])
-        self.assertEqual((skips, packages), (1, 1))
+        self.assertEqual((skips, packages), (1, 2))
 
     def test_parallel_and_nested_tests_keep_their_own_reasons(self):
         problems, skips, _ = check(suite(
@@ -83,22 +90,60 @@ class EvidenceTests(unittest.TestCase):
         problems, _, _ = check(io.StringIO(event("pass")))
         self.assertIn("shared-session Chromium proof did not run", problems)
 
+    def test_integer_browser_proof_requires_its_exact_owner_and_marker(self):
+        package, test = INTEGER_BROWSER_TEST
+        refusal = "integer HTTP/BFF/Chromium proof lacks its exact owning test run, marker and fresh pass"
+        for records in (
+            "",
+            integer_browser(package="example/impostor"),
+            integer_browser(test="TestOtherBrowser"),
+            integer_browser(test=test + "/subcase"),
+            integer_browser().replace(INTEGER_BROWSER_PROOF, "ordinary MFA proof"),
+            integer_browser().replace(INTEGER_BROWSER_PROOF, INTEGER_BROWSER_PROOF + " incomplete"),
+            integer_browser().replace("mfa_browser_test.go:204:", "other_test.go:204:"),
+            event("run", test, package=package) + event("pass", test, package=package) +
+            event("output", "TestOtherBrowser", INTEGER_BROWSER_PROOF, package),
+        ):
+            with self.subTest(records=records):
+                problems, _, _ = check(suite(records, integer=False))
+                self.assertIn(refusal, problems)
+        problems, _, _ = check(suite())
+        self.assertEqual(problems, [])
+
+    def test_integer_browser_marker_cannot_replace_ordered_run_and_pass(self):
+        package, test = INTEGER_BROWSER_TEST
+        run = event("run", test, package=package)
+        marker = event("output", test, INTEGER_BROWSER_PROOF, package)
+        passed = event("pass", test, package=package)
+        for records in (
+            marker + passed, run + marker, run + passed + marker,
+            run + marker + event("skip", test, package=package),
+            run + marker + event("fail", test, package=package),
+            run + marker + passed + event("skip", test, package=package),
+            run + marker + passed + event("fail", test, package=package),
+            run + run + marker + passed, run + marker + marker + passed,
+            run + marker + passed + passed,
+        ):
+            with self.subTest(records=records):
+                problems, _, _ = check(suite(records, integer=False))
+                self.assertTrue(any("integer HTTP/BFF/Chromium" in problem for problem in problems))
+
     def test_cached_results_do_not_count_as_fresh_service_proof(self):
         problems, _, _ = check(suite(event("output", output="ok  example/store  (cached)\n")))
         self.assertIn("cached package result is not fresh verification", problems[0])
 
     def test_partial_and_unexpected_package_sets_are_rejected(self):
-        problems, _, _ = check(suite(), ["example/store", "example/missing"])
+        problems, _, _ = check(suite(), ["example/store", INTEGER_BROWSER_TEST[0], "example/missing"])
         self.assertEqual(problems, ["package result missing: example/missing"])
-        problems, _, _ = check(suite(), ["example/other"])
+        problems, _, _ = check(suite(), ["example/other", INTEGER_BROWSER_TEST[0]])
         self.assertIn("unexpected package result: example/store", problems)
         with self.assertRaises(ValueError):
             check(suite(), [])
 
     def test_complete_inventory_includes_packages_without_tests(self):
         records = suite(event("skip", package="example/config"))
-        problems, skips, count = check(records, ["example/store\n", "example/config\n"])
-        self.assertEqual((problems, skips, count), ([], 1, 2))
+        problems, skips, count = check(records, ["example/store\n", "example/config\n", INTEGER_BROWSER_TEST[0]])
+        self.assertEqual((problems, skips, count), ([], 1, 3))
 
 
 if __name__ == "__main__":

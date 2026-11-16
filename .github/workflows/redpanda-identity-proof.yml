@@ -85,7 +85,7 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           install-mode: goinstall
-          version: v2.12.2
+          version: v2.15.0
           working-directory: kanz
           args: --timeout=5m ./tools/redpandaidentity/...
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -153,7 +153,7 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           install-mode: goinstall
-          version: v2.12.2
+          version: v2.15.0
           working-directory: kanz
           args: --timeout=5m ./cmd/kanz_kafka_provision/...
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -161,8 +161,14 @@ jobs:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 -B -m unittest discover -s tools/native_kafka_provision -p 'test_*.py'
+      - name: Verify quota lifecycle unit models
+        run: python3 -B -m unittest discover -s tools/tenant_quota -p 'test_owned_lifecycle.py'
       - run: bash tools/feed_identity/install.sh
       - name: Qualify quota concurrency against disposable Kubernetes
+        # 20s Git identity + 20s collision + 10s image + 240s create +
+        # 90s delete + ONE shared 30s observation/group reserve = 410s,
+        # excluding unchanged namespace setup and eleven cases. Job stays 35min; no claim
+        # that worst-case case/native durations fit without actual evidence.
         run: |
           bash -n kanz/infra/tenancy/tenantctl.sh
           python3 -B tools/tenant_quota/qualify.py
@@ -189,6 +195,18 @@ jobs:
       - name: Reconcile exact owned native cluster after interruption
         if: always()
         run: python3 -B tools/native_kafka_provision/owned_cleanup.py
+      - name: Reconcile exact owned quota fixture after interruption
+        if: always()
+        run: python3 -B tools/tenant_quota/owned_lifecycle.py cleanup
+      - name: Preserve closed quota startup and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quota-owned-lifecycle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/quota-owned-lifecycle.json
+            ${{ runner.temp }}/quota-owned-cleanup.json
+          if-no-files-found: error
       - name: Remove registry authentication
         if: always()
         run: docker logout ghcr.io

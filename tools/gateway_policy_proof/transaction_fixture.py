@@ -138,9 +138,17 @@ def ipv6_slice_control(k):
 
 def qualify_codec():
     """Same checked codec on actual Linux; no alternate decoder in the oracle."""
-    files = {name: (Path(__file__).parent / name).read_text(encoding="utf-8") for name in
-             ("policy_state.py", "transaction.py", "policy_client.py", "rollout_probe.py", "rollout_scope.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")}
+    files = {name: (Path(__file__).parent / name).read_text(encoding="utf-8")
+             for name in codec.SOURCE_BUNDLES["normal"]["files"]}
+    fixed = {name: (Path(__file__).parent / name).read_bytes()
+             for name in codec.SOURCE_BUNDLES["normal"]["fixed"]}
     raw = json.dumps({"files": files, "payload": {"synthetic": True}}, ensure_ascii=False).encode()
+    framed = codec.encode_fixed(fixed, "normal")
+    fixed_raw, prepared = codec.decode_fixed(framed["encoded"], "normal")
+    if (prepared != fixed or len(fixed_raw) != framed["expanded"]
+            or len(raw) + len(fixed_raw) > codec.EXPANDED_LIMIT
+            or any(len(text.encode()) > 65536 for text in files.values())):
+        raise ValueError("combined source bound")
     encoded = codec.encode(raw)
     if codec.decode(encoded) != raw:
         raise ValueError("XZ source roundtrip differs")

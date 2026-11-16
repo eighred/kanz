@@ -20,7 +20,7 @@ if ($source -cnotmatch '^[0-9a-f]{40}$' -or $head -cne $source) { throw 'Rollout
 if ($LASTEXITCODE -ne 0) { throw 'Rollout source differs from main.' }
 $untracked = @(& git -C $repo ls-files --others --exclude-standard -- @inputs)
 if ($LASTEXITCODE -ne 0 -or $untracked.Count -ne 0) { throw 'Rollout inputs contain untracked files.' }
-$proofRoot = Join-Path $PSScriptRoot 'gateway-policy-proof'
+$proofRoot = Join-Path $PSScriptRoot 'gateway_policy_proof'
 $sourceLoader = [IO.File]::ReadAllText((Join-Path $proofRoot 'source_loader.py'))
 if ([Text.Encoding]::UTF8.GetByteCount($sourceLoader) -gt 65536) { throw 'Source loader exceeds bound.' }
 $acceptance = & $python -I -B -c $sourceLoader $proofRoot preflight --source $source 2>$null
@@ -62,8 +62,22 @@ $projectionRaw = ($render -join "`n") | & $python -I -B -c $projector
 if ($LASTEXITCODE -ne 0) { throw 'Rendered policy/workload projection failed.' }
 $projection = ($projectionRaw -join "`n") | ConvertFrom-Json
 $policies = $projection.policies
+$codecPath = Join-Path $proofRoot 'transport_codec.py'
+& git -C $repo ls-files --error-unmatch tools/gateway_policy_proof/transport_codec.py *> $null
+$codecInfo = Get-Item -LiteralPath $codecPath
+if ($LASTEXITCODE -ne 0 -or $codecInfo.LinkType -or $codecInfo.PSIsContainer -or $codecInfo.Length -gt 65536) { throw 'Transport codec must be bounded tracked regular source.' }
+$codec = [IO.File]::ReadAllText($codecPath)
+if ([Text.Encoding]::UTF8.GetByteCount($codec) -gt 65536) { throw 'Transport codec exceeds source bound.' }
+$transportMode = 'normal'
+$inventoryLines = [regex]::Matches($codec, '(?m)^SOURCE_BUNDLES = (\{[^\r\n]+\})\r?$')
+if ($inventoryLines.Count -ne 1) { throw 'Canonical transport inventory missing.' }
+$inventory = ($inventoryLines[0].Groups[1].Value | ConvertFrom-Json).PSObject.Properties[$transportMode].Value
+$sourceNames = @($inventory.files)
+$fixedNames = @($inventory.fixed)
+$allNames = @($sourceNames) + @($fixedNames)
+if ((($inventory.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'files,fixed' -or $sourceNames.Count -lt 1 -or $sourceNames.Count -gt 16 -or $fixedNames.Count -lt 1 -or $fixedNames.Count -gt 2 -or @($allNames | Sort-Object -Unique).Count -ne $allNames.Count -or @($allNames | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[a-z_]+\.py$' }).Count -ne 0) { throw 'Canonical transport inventory refused.' }
 $files = [ordered]@{}
-foreach ($name in @('policy_state.py', 'transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_scope.py', 'rollout_engine.py', 'bounded_process.py')) {
+foreach ($name in $sourceNames) {
     $relative = "tools/gateway_policy_proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Rollout engine is not tracked.' }
@@ -71,7 +85,6 @@ foreach ($name in @('policy_state.py', 'transaction.py', 'policy_client.py', 'ro
     if ([Text.Encoding]::UTF8.GetByteCount($text) -gt 65536) { throw 'Rollout source file exceeds bound.' }
     $files[$name] = $text
 }
-$fixedNames = @('source_loader.py', 'network_observation.py')
 $fixed = [ordered]@{}
 $fixedSize = 0
 foreach ($name in $fixedNames) {
@@ -85,62 +98,68 @@ foreach ($name in $fixedNames) {
     $fixedSize += $raw.Length
     $fixed[$name] = [Convert]::ToBase64String($raw)
 }
-$literalBuilder = @'
-import base64,hashlib,json,sys
+$literalBuilder = $codec + "`n" + @'
+import base64,json,sys
 raw=sys.stdin.buffer.read(262145)
 if len(raw)>262144: raise ValueError('fixed source input bound')
-values=json.loads(raw)
-if set(values)!={'network_observation.py', 'source_loader.py'}: raise ValueError('fixed source inventory')
-fixed={}
-for name,value in values.items():
- data=base64.b64decode(value,validate=True)
- if len(data)>65536: raise ValueError('fixed source size')
- data.decode('utf-8',errors='strict')
- fixed[name]=(data,hashlib.sha256(data).hexdigest())
-print('fixed='+repr(fixed))
+packet=json.loads(raw)
+if type(packet) is not dict or set(packet)!={'codec','files'} or type(packet['files']) is not dict: raise ValueError('fixed source packet')
+values={name:base64.b64decode(value,validate=True) for name,value in packet['files'].items()}
+framed=encode_fixed(values,'normal')
+framed['decoder']=remote_decoder_source(packet['codec'],'normal')
+print(json.dumps(framed,separators=(',',':')))
 '@
-$literalLines = ($fixed | ConvertTo-Json -Compress) | & $python -I -B -c $literalBuilder
+$literalLines = ([ordered]@{ codec = $codec; files = $fixed } | ConvertTo-Json -Compress -Depth 3) | & $python -I -B -c $literalBuilder
 if ($LASTEXITCODE -ne 0 -or @($literalLines).Count -ne 1) { throw 'Fixed UTF8 source literal refused.' }
-$fixedDeclaration = [string]$literalLines
+$fixedFrame = ([string]$literalLines) | ConvertFrom-Json
+if ((($fixedFrame.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'decoder,encoded,expanded' -or $fixedFrame.decoder -isnot [string] -or $fixedFrame.decoder.Length -lt 1 -or [Text.Encoding]::UTF8.GetByteCount($fixedFrame.decoder) -gt 65536 -or $fixedFrame.encoded -isnot [string] -or $fixedFrame.encoded.Length -gt 20000 -or $fixedFrame.encoded -cnotmatch '^[A-Za-z0-9+/]+={0,2}$' -or ($fixedFrame.expanded -isnot [int] -and $fixedFrame.expanded -isnot [long]) -or $fixedFrame.expanded -lt 1 -or $fixedFrame.expanded -gt 524288) { throw 'Fixed source frame refused.' }
+$decoder = [string]$fixedFrame.decoder
+$fixedEncoded = [string]$fixedFrame.encoded
+$fixedSize = [long]$fixedFrame.expanded
 $bundle = [ordered]@{ payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads }; files = $files } | ConvertTo-Json -Depth 60 -Compress
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
 if (($bytes.Length + $fixedSize) -gt 524288) { throw 'Rollout bundle exceeds bound.' }
-$codecPath = Join-Path $proofRoot 'transport_codec.py'
-& git -C $repo ls-files --error-unmatch tools/gateway_policy_proof/transport_codec.py *> $null
-$codecInfo = Get-Item -LiteralPath $codecPath
-if ($LASTEXITCODE -ne 0 -or $codecInfo.LinkType -or $codecInfo.PSIsContainer -or $codecInfo.Length -gt 65536) { throw 'Transport codec must be bounded tracked regular source.' }
-$codec = [IO.File]::ReadAllText($codecPath)
-if ([Text.Encoding]::UTF8.GetByteCount($codec) -gt 65536) { throw 'Transport codec exceeds source bound.' }
 $encode = $codec + "`nimport sys`nframed=sys.stdin.buffer.read(699055)`nif len(framed)>699054: raise ValueError('stdin bound')`nraw=base64.b64decode(framed.strip(),validate=True)`nprint(encode(raw))"
 $encodedLines = [Convert]::ToBase64String($bytes) | & $python -I -B -c $encode
 if ($LASTEXITCODE -ne 0 -or @($encodedLines).Count -ne 1) { throw 'Bounded XZ encoding unavailable or refused.' }
 $encoded = [string]$encodedLines
 if ($encoded.Length -gt 20000) { throw 'Rollout transfer exceeds bounded SSM payload.' }
-$bootstrap = $codec + "`n" + $fixedDeclaration + "`n" + @'
-import hashlib,json,os,pathlib,sys
-if set(fixed)!={'network_observation.py', 'source_loader.py'}: raise ValueError('fixed source inventory')
-for data,sha in fixed.values():
- if not isinstance(data,bytes) or len(data)>65536 or hashlib.sha256(data).hexdigest()!=sha: raise ValueError('fixed source binding')
+$bootstrap = $decoder + "`n" + @'
+import json,pathlib,sys
+if len(sys.argv)!=4: raise ValueError('bootstrap argument count')
 raw=decode(sys.argv[1])
-if len(raw)+sum(len(v[0]) for v in fixed.values())>524288: raise ValueError('combined source bound')
-b=json.loads(raw); names={'policy_state.py','transaction.py','policy_client.py','rollout_probe.py','rollout_scope.py','rollout_engine.py','bounded_process.py'}
+fixedRaw,prepared=decode_fixed(sys.argv[2],'normal')
+if len(raw)+len(fixedRaw)>524288: raise ValueError('combined source bound')
+b=json.loads(raw.decode('utf-8',errors='strict'),object_pairs_hook=_unique_fixed); names=set(SOURCE_BUNDLES['normal']['files'])
 if set(b)!={'files','payload'} or set(b['files'])!=names: raise ValueError('bundle shape')
-prepared={name:value[0] for name,value in fixed.items()}
 for name,text in b['files'].items():
  data=text.encode()
  if len(data)>65536: raise ValueError('file bound')
  prepared[name]=data
-root=pathlib.Path(sys.argv[2])
+root=pathlib.Path(sys.argv[3])
 for name,data in prepared.items():
  with (root/name).open('xb') as f:f.write(data)
 with (root/'input.json').open('x') as f:json.dump(b['payload'],f)
 '@
 $bootstrapEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
+$bootstrapBuilder = $codec + "`n" + @'
+import sys
+framed=sys.stdin.buffer.read(87387)
+if len(framed)>87386: raise ValueError('bootstrap source input bound')
+raw=base64.b64decode(framed.strip(),validate=True)
+if len(raw)>65536: raise ValueError('bootstrap source bound')
+print(json.dumps({'command':bootstrap_command(raw.decode('utf-8',errors='strict'))},separators=(',',':')))
+'@
+$bootstrapLines = $bootstrapEncoded | & $python -I -B -c $bootstrapBuilder
+if ($LASTEXITCODE -ne 0 -or @($bootstrapLines).Count -ne 1) { throw 'Bootstrap shell frame refused.' }
+$bootstrapFrame = ([string]$bootstrapLines) | ConvertFrom-Json
+if ((($bootstrapFrame.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'command' -or $bootstrapFrame.command -isnot [string] -or $bootstrapFrame.command.Length -lt 1 -or [Text.Encoding]::UTF8.GetByteCount($bootstrapFrame.command) -gt 30000) { throw 'Bootstrap shell command refused.' }
+$bootstrapCommand = [string]$bootstrapFrame.command
 $applyArg = if ($Apply) { ' --apply' } else { '' }
 $commands = @('set -eu', 'python3 -I -B -c ''import lzma; assert lzma.is_check_supported(lzma.CHECK_CRC64)''', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
     'trap ''rm -f "$work/network_observation.py" "$work/policy_state.py" "$work/transaction.py" "$work/policy_client.py" "$work/rollout_probe.py" "$work/rollout_scope.py" "$work/rollout_engine.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
-    ("printf '%s' '$bootstrapEncoded' | base64 -d > `"`$work/bootstrap.py`""),
-    ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' `"`$work`""),
+    $bootstrapCommand,
+    ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' '$fixedEncoded' `"`$work`""),
     'chmod 400 "$work"/*.py "$work/input.json"',
     ("timeout --signal=TERM --kill-after=180s 1200s env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=`"`$work`" TMPDIR=`"`$work`" LANG=C.UTF-8 python3 -I -B `"`$work/source_loader.py`" `"`$work`" rollout_engine --tokyo --source $source$applyArg < `"`$work/input.json`""))
 $parameters = @{ executionTimeout = @('1500'); commands = $commands } | ConvertTo-Json -Compress -Depth 5

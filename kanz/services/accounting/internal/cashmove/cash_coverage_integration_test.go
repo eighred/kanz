@@ -90,7 +90,10 @@ func TestCashBalanceAnnouncePostgresJetStreamBuyingPower(t *testing.T) {
 	defer func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("worker shutdown: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("consumer did not stop")
 		}

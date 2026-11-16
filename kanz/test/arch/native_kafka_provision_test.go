@@ -188,11 +188,14 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 		Jobs map[string]struct {
 			If       any `yaml:"if"`
 			Continue any `yaml:"continue-on-error"`
+			Timeout  int `yaml:"timeout-minutes"`
 			Steps    []struct {
-				Name     string `yaml:"name"`
-				Run      string `yaml:"run"`
-				If       any    `yaml:"if"`
-				Continue any    `yaml:"continue-on-error"`
+				Name     string            `yaml:"name"`
+				Run      string            `yaml:"run"`
+				If       any               `yaml:"if"`
+				Continue any               `yaml:"continue-on-error"`
+				Uses     string            `yaml:"uses"`
+				With     map[string]string `yaml:"with"`
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
@@ -200,7 +203,7 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 		return false
 	}
 	job, ok := w.Jobs["native-topic-provisioning"]
-	if !ok || job.If != nativeFullCondition || job.Continue != nil {
+	if !ok || job.If != nativeFullCondition || job.Continue != nil || job.Timeout != 35 {
 		return false
 	}
 	original, ok := w.Jobs["developmental-redpanda-identity"]
@@ -221,8 +224,29 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 	if diagnosticRuns != 1 {
 		return false
 	}
-	seen, cleanup, quota := 0, 0, 0
+	seen, cleanup, quota, quotaModels, quotaCleanup, quotaArtifact := 0, 0, 0, 0, 0, 0
 	for _, step := range job.Steps {
+		if step.Run == "python3 -B -m unittest discover -s tools/tenant_quota -p 'test_owned_lifecycle.py'" {
+			if step.If != nil || step.Continue != nil {
+				return false
+			}
+			quotaModels++
+		}
+		if step.Run == "python3 -B tools/tenant_quota/owned_lifecycle.py cleanup" {
+			if step.If != "always()" || step.Continue != nil {
+				return false
+			}
+			quotaCleanup++
+		}
+		if step.Name == "Preserve closed quota startup and cleanup evidence" {
+			if step.If != "always()" || step.Continue != nil || step.Uses != "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" ||
+				step.With["name"] != "quota-owned-lifecycle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" ||
+				strings.TrimSpace(step.With["path"]) != "${{ runner.temp }}/quota-owned-lifecycle.json\n${{ runner.temp }}/quota-owned-cleanup.json" ||
+				step.With["if-no-files-found"] != "error" {
+				return false
+			}
+			quotaArtifact++
+		}
 		if strings.TrimSpace(step.Run) == "bash -n kanz/infra/tenancy/tenantctl.sh\npython3 -B tools/tenant_quota/qualify.py" {
 			if step.If != nil || step.Continue != nil {
 				return false
@@ -242,7 +266,7 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 			cleanup++
 		}
 	}
-	return seen == 1 && cleanup == 1 && quota == 1
+	return seen == 1 && cleanup == 1 && quota == 1 && quotaModels == 1 && quotaCleanup == 1 && quotaArtifact == 1
 }
 
 func TestNativeKafkaQualificationCannotBeOptional(t *testing.T) {
@@ -266,6 +290,11 @@ func TestNativeKafkaQualificationCannotBeOptional(t *testing.T) {
 		{"run: python3 -B tools/native_kafka_provision/qualify.py", "run: echo skipped"},
 		{"run: python3 -B tools/native_kafka_provision/owned_cleanup.py", "run: echo skipped"},
 		{"python3 -B tools/tenant_quota/qualify.py", "echo skipped quota proof"},
+		{"run: python3 -B -m unittest discover -s tools/tenant_quota -p 'test_owned_lifecycle.py'", "run: echo skipped quota models"},
+		{"run: python3 -B tools/tenant_quota/owned_lifecycle.py cleanup", "run: echo skipped quota cleanup"},
+		{"run: python3 -B tools/tenant_quota/owned_lifecycle.py cleanup", "if: success()\n        run: python3 -B tools/tenant_quota/owned_lifecycle.py cleanup"},
+		{"${{ runner.temp }}/quota-owned-cleanup.json", "${{ runner.temp }}/wrong-quota-cleanup.json"},
+		{"name: Preserve closed quota startup and cleanup evidence\n        if: always()", "name: Preserve closed quota startup and cleanup evidence\n        if: success()"},
 	} {
 		if !strings.Contains(source, mutation.old) {
 			t.Fatal("mutation anchor missing")

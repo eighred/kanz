@@ -29,6 +29,7 @@ var provNow = time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 // fakeProvisioner records what was stored.
 type fakeProvisioner struct {
 	inviteChanges int
+	accessChanges int
 	created       []*identity.Invite
 	listed        []*identity.Invite
 	err           error
@@ -533,5 +534,6 @@ func (f *fakeProvisioner) UsersFor(_ context.Context, _ identity.Administration,
 	return []*identity.Access{}, nil
 }
 func (f *fakeProvisioner) SetAccess(_ context.Context, _ identity.Administration, _ string, _ int64, _, _ []string, _ time.Time) (*identity.Access, error) {
+	f.accessChanges++
 	return nil, identity.ErrUserNotFound
 }

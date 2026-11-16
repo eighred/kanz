@@ -162,8 +162,8 @@ func TestRustVenueLifetime(t *testing.T) {
 			t.Fatal("owned connection survived Close")
 		}
 		select {
-		case <-w.done:
-			t.Fatal("process exit masked connection cleanup")
+		case err := <-w.done:
+			t.Fatalf("process exit masked connection cleanup: %v", err)
 		default:
 		}
 		finishClosed(t, w)
@@ -235,8 +235,8 @@ func TestRustVenueLifetime(t *testing.T) {
 			}
 		}
 		select {
-		case <-w.done:
-			t.Fatal("process exit masked cancellation")
+		case err := <-w.done:
+			t.Fatalf("process exit masked cancellation: %v", err)
 		default:
 		}
 		w.close(source)

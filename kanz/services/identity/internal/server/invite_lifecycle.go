@@ -1,9 +1,7 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/eighred/kanz/internal/identity"
@@ -12,26 +10,23 @@ import (
 )
 
 type issuedInvitation struct {
-	identity.InvitationSummary
+	invitationJSON
 	Token string `json:"invite_token"`
 	Note  string `json:"note"`
 }
 
 func inviteRevision(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	var req struct {
-		Revision *int64 `json:"revision"`
+		Revision *revisionJSON `json:"revision"`
 	}
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	if err := d.Decode(&req); err != nil || req.Revision == nil || *req.Revision < 0 {
+	if !decodeAdministration(w, r, &req) {
+		return 0, false
+	}
+	if req.Revision == nil || *req.Revision < 0 {
 		writeErr(w, 400, "a nonnegative revision is required")
 		return 0, false
 	}
-	if err := d.Decode(new(any)); err != io.EOF {
-		writeErr(w, 400, "malformed request")
-		return 0, false
-	}
-	return *req.Revision, true
+	return int64(*req.Revision), true
 }
 
 func (s *Server) revokeInvite(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +44,7 @@ func (s *Server) revokeInvite(w http.ResponseWriter, r *http.Request) {
 		s.invitationError(w, err)
 		return
 	}
-	writeJSON(w, 200, i.Summary(s.now().UTC()))
+	writeJSON(w, 200, invitationResponse(i.Summary(s.now().UTC())))
 }
 
 func (s *Server) reissueInvite(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +67,7 @@ func (s *Server) reissueInvite(w http.ResponseWriter, r *http.Request) {
 		s.invitationError(w, err)
 		return
 	}
-	writeJSON(w, 201, issuedInvitation{InvitationSummary: i.Summary(s.now().UTC()), Token: raw, Note: "the original invitation is revoked; this token is shown once and cannot be recovered"})
+	writeJSON(w, 201, issuedInvitation{invitationJSON: invitationResponse(i.Summary(s.now().UTC())), Token: raw, Note: "the original invitation is revoked; this token is shown once and cannot be recovered"})
 }
 
 func (s *Server) invitationError(w http.ResponseWriter, err error) {

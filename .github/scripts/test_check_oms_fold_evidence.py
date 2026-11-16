@@ -21,12 +21,45 @@ class OMSEvidenceTests(unittest.TestCase):
         self.assertIn("TestRustFillFoldProcessConformance/exact-quantity-sequence-10",
                       REQUIRED["services/oms/tools/fill_conformance"])
 
+    def test_risk_ingest_and_total_nav_cases_are_mandatory(self):
+        self.assertEqual(8, len(REQUIRED))
+        self.assertEqual({
+            "TestPositionPrecisionFACTOverJetStream",
+            "TestPositionPrecisionFACTOverJetStream/long",
+            "TestPositionPrecisionFACTOverJetStream/short",
+            "TestNewIngestorRejectsNilApplier",
+            "TestHandlerDispatchesPortfolioRevalued",
+            "TestHandlerDispatchesPositionChanged",
+            "TestHandlerDispatchesPortfolioSnapshot",
+            "TestHandlerSurfacesUnknownEventType",
+            "TestHandlerSurfacesUnmarshalError",
+            "TestHandlerSurfacesApplierError",
+        }, REQUIRED["internal/risk/ingest"])
+        store = REQUIRED["services/oms/tools/store_conformance"]
+        root = "TestRustPositionStoreTransactions/total-nav-near-cancellation"
+        for name in (root, *(root + "/" + case for case in (
+                "positive-tiny-repeating", "negative-tiny-repeating", "known-zero",
+                "exact-tiny-positive"))):
+            self.assertIn(name, store)
+
     def test_every_case_and_package_must_complete(self):
         for index in range(len(self.events())):
             events = self.events()
             events.pop(index)
             with self.assertRaises(ValueError):
                 verify(events, REQUIRED)
+
+    def test_position_precision_requires_both_real_owners_and_control_path(self):
+        cases = REQUIRED["services/oms/tools/store_conformance"]
+        for side in ("long", "short"):
+            self.assertIn("TestPositionPrecisionFACTOverJetStream/" + side,
+                          REQUIRED["internal/risk/ingest"])
+        for owner in ("go", "rust"):
+            for name in ("TestRustPositionPrecisionPostgresNATS/" + owner,
+                         "TestRustPositionPrecisionTransactions/" + owner + "/finite-overflow-rolls-back",
+                         "TestRustPositionPrecisionTransactions/" + owner + "/repeating-cost-keeps-executions",
+                         "TestRustPositionPrecisionTransactions/" + owner + "/tiny-repeating-cost-refuses-snapshot"):
+                self.assertIn(name, cases)
 
     def test_skips_and_failures_refuse(self):
         for index in range(len(self.events())):

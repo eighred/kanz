@@ -1,5 +1,18 @@
 # Account access administration
 
+HTTP revisions and directory `session_epoch` values are canonical decimal
+strings in the nonnegative signed 64-bit domain (`"0"` through
+`"9223372036854775807"`). Submit the exact reviewed string, for example
+`{"revision":"9007199254740993"}`. Numeric JSON, missing revisions, malformed or
+overflowing strings, unknown fields and trailing JSON are refused. SQL/domain,
+audit evidence and signed-token integer contracts retain their existing form.
+
+Release the identity HTTP projection and browser bundle together. The BFF
+forwards these bodies unchanged. Cached older browser bundles submit numbers
+and receive 400; reload the updated bundle before another review. Roll back the
+identity service and browser bundle together as well. No database migration is
+needed for this wire representation change.
+
 ## Invitation revocation and reissue
 
 Apply `0005_invitation_lifecycle.sql` with **old identity writers stopped**, then
@@ -18,12 +31,14 @@ shows the initial or replacement link once; the application does not send email
 or attest delivery. Dismissing the panel discards its copy, not the clipboard.
 
 `POST /invites/{id}/revoke` and `POST /invites/{id}/reissue` accept only
-`{"revision": <reviewed revision>}` and require a current identity administrator
+`{"revision":"<reviewed revision>"}` and require a current identity administrator
 in the invitation's tenant. The BFF exposes those exact paths under
 `/api/identity/invites`, with its server-held bearer and same-origin guard.
 Unknown and foreign invitations both return 404. A stale revision, accepted
 invitation, already replaced source, or conflicting outstanding offer returns
 409. A reviewed repeat revoke is a no-op; it adds no duplicate audit entry.
+An exhausted revision refuses any increment with 409 and no mutation/audit
+effect; the already-revoked no-op remains available at that boundary.
 
 Reissue copies subject, tenant, roles and portfolios from the locked source,
 rechecks current domain/authority policy, assigns a fresh ID/token and current
@@ -117,6 +132,9 @@ edit returns 409; reload and review before resubmitting. Unknown and foreign-ten
 subjects both return 404. Empty/duplicate authority entries and identity-admin
 combinations other than `kanz-user` are refused. An empty portfolio list confers
 no capital entitlement; read scope follows each endpoint’s existing policy. Role names obtain meaning only through gateway policy.
+An access revision or session epoch at the signed 64-bit limit refuses an edit
+with 409 before authority or audit changes. Reloading does not make an exhausted
+counter incrementable; counters must never wrap or be reset as a routine retry.
 
 The transaction acquires the existing tenant administration lock, rechecks the
 actor's current status and session epoch, locks the target, preserves the last

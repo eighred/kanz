@@ -287,6 +287,9 @@ class ProofTests(unittest.TestCase):
         after = {name: row | {"podUID": row["podUID"] + "-new"} for name, row in before.items()}
         return {"source": SHA, "tree": "b" * 40, "passed": True, "cleanupPassed": True, "cases": proof.CASES[:],
                 "syncs": [operation | {"jobUID": "job-one", "operation": "first"}, operation | {"jobUID": "job-two", "operation": "second"}],
+                "syncObservations": [{"case": case, "budgetSeconds": 600, "polls": 2,
+                    "argoSucceededPendingHook": False, "staleUIDObserved": False, "passed": True}
+                    for case in ("first", "restore-empty-stream")],
                 "coldRecovery": {"before": before, "stopped": stopped, "after": after},
                 "streams": self.canonical(),
                 "postColdRecovery": {"passed": True, "state": "recovered", "budgetSeconds": proof.RECOVERY_SECONDS,
@@ -346,6 +349,258 @@ class ProofTests(unittest.TestCase):
             broken["postColdRecovery"][key] = value
             with self.assertRaises(ValueError):
                 proof.check_report(broken)
+
+    def test_joint_hook_observations_are_required_and_closed(self):
+        for case in ("absent", "partial", "unpassed", "case", "budget", "polls", "boolean", "extra"):
+            with self.subTest(case=case):
+                report = self.receipt()
+                if case == "absent":
+                    del report["syncObservations"]
+                elif case == "partial":
+                    report["syncObservations"].pop()
+                else:
+                    observation = report["syncObservations"][1]
+                    key, value = {"unpassed": ("passed", False), "case": ("case", "first"),
+                        "budget": ("budgetSeconds", 601), "polls": ("polls", 0),
+                        "boolean": ("argoSucceededPendingHook", "True"), "extra": ("raw", "not-retained")}[case]
+                    observation[key] = value
+                with self.assertRaises(ValueError):
+                    proof.check_report(report)
+
+
+class SyncMethodTests(unittest.TestCase):
+    OLD = "11111111-1111-1111-1111-111111111111"
+    NEW = "22222222-2222-2222-2222-222222222222"
+    OTHER = "33333333-3333-3333-3333-333333333333"
+
+    def job(self, uid=NEW, complete=False):
+        return {"apiVersion": "batch/v1", "kind": "Job", "metadata": {
+            "name": "nats-bootstrap", "namespace": proof.NAMESPACE, "uid": uid,
+            "annotations": {"argocd.argoproj.io/hook": "PostSync",
+                "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation",
+                "argocd.argoproj.io/tracking-id": f"{proof.APP}:batch/Job:{proof.NAMESPACE}/nats-bootstrap"}},
+            "status": {"succeeded": int(complete), "active": int(not complete),
+                       "conditions": [{"type": "Complete", "status": "True"}] if complete else []}}
+
+    def previous(self):
+        return {"revision": SHA, "phase": "Succeeded", "hookPhase": "Succeeded", "syncPhase": "PostSync",
+                "jobUID": self.OLD, "operation": [{"name": "nats-gitops-case", "value": "first-" + "e" * 32}]}
+
+    def exercise(self, jobs, *, previous=None, app_mutation=None, late=False):
+        fixture = object.__new__(proof.Fixture)
+        fixture.sync_observations = []
+        clock, calls, submitted, reads = [10.0], [], [], []
+        queued = iter(jobs)
+        last = [None]
+
+        def api(*args, timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 15)
+            calls.append((args, timeout))
+            if args[:4] == ("-n", "argocd", "patch", "application"):
+                self.assertEqual(args[4:7], (proof.APP, "--type=merge", "-p"))
+                patch = json.loads(args[7])
+                if "operation" in patch:
+                    submitted.append(patch["operation"])
+                    self.assertEqual(len(submitted), 1, "operation was resubmitted")
+                else:
+                    self.assertEqual(patch, {"metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}}})
+                return "{}"
+            if args == ("-n", "argocd", "get", "application", proof.APP, "-o", "json"):
+                app = {"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+                       "metadata": {"name": proof.APP, "namespace": "argocd"},
+                       "status": {"sync": {"revision": SHA, "status": "Synced"}}}
+                if submitted:
+                    app["status"]["operationState"] = {"operation": {"info": submitted[0]["info"]},
+                        "phase": "Succeeded", "startedAt": "start", "finishedAt": "finish",
+                        "syncResult": {"revision": SHA, "resources": [{"kind": "Job", "name": "nats-bootstrap",
+                            "namespace": proof.NAMESPACE, "syncPhase": "PostSync", "hookPhase": "Succeeded"}]}}
+                    if app_mutation is not None:
+                        app_mutation(app)
+                return json.dumps(app)
+            self.assertEqual(args, ("get", "--raw",
+                "/apis/batch/v1/namespaces/kanz-messaging/jobs?fieldSelector=metadata.name%3Dnats-bootstrap"))
+            try:
+                last[0] = next(queued)
+            except StopIteration:
+                pass
+            value = last[0]
+            reads.append(value)
+            if isinstance(value, Exception):
+                raise value
+            if late and submitted:
+                clock[0] = 610.0
+            if type(value) is str:
+                return value
+            return json.dumps({"apiVersion": "batch/v1", "kind": "JobList",
+                               "items": [] if value is None else [value]})
+
+        row = error = None
+        with mock.patch.object(fixture, "k", side_effect=api), \
+                mock.patch.object(proof.uuid, "uuid4", return_value=mock.Mock(hex="f" * 32)), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(proof.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            try:
+                row = fixture.sync(SHA, "first" if previous is None else "restore-empty-stream", previous)
+            except Exception as refused:
+                error = refused
+        return fixture, row, error, submitted, calls, reads, clock[0]
+
+    def test_sync_waits_for_fresh_actual_completion_and_submits_once(self):
+        fixture, row, error, submitted, calls, _, clock = self.exercise([
+            self.job(self.OLD, True), self.job(self.OLD, True), self.job(), self.job(complete=True)])
+        self.assertIsNone(error)
+        self.assertEqual(row["jobUID"], self.NEW)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(fixture.sync_observations, [{"case": "first", "budgetSeconds": 600, "polls": 3,
+            "argoSucceededPendingHook": True, "staleUIDObserved": True, "passed": True}])
+        self.assertEqual(clock, 14)
+        self.assertTrue(all(0 < timeout <= 15 for _, timeout in calls))
+
+    def test_sync_allows_only_typed_absence_before_fresh_hook(self):
+        fixture, row, error, submitted, _, _, _ = self.exercise([None, None, self.job(), self.job(complete=True)],
+                                                               previous=self.previous())
+        self.assertIsNone(error)
+        self.assertEqual(row["jobUID"], self.NEW)
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(fixture.sync_observations[0]["argoSucceededPendingHook"])
+
+    def test_sync_never_completing_or_stale_hook_exhausts_same_deadline(self):
+        for case, jobs, previous in (
+                ("pending", [None, self.job()], None),
+                ("stale", [self.job(self.OLD, True), self.job(self.OLD, True)], self.previous()),
+                ("missing-before-stale", [None, self.job(self.OLD, True)], self.previous())):
+            with self.subTest(case=case):
+                fixture, row, error, submitted, _, _, clock = self.exercise(jobs, previous=previous)
+                self.assertIsInstance(error, TimeoutError)
+                self.assertIsNone(row)
+                self.assertEqual(len(submitted), 1)
+                self.assertEqual(clock, 610)
+                self.assertFalse(fixture.sync_observations[0]["passed"])
+                self.assertEqual(fixture.sync_observations[0]["polls"], 300)
+
+    def test_sync_known_prior_operation_cannot_qualify_current_operation(self):
+        previous, polls = self.previous(), [0]
+        def prior_once(app):
+            polls[0] += 1
+            if polls[0] == 1:
+                app["status"]["operationState"]["operation"]["info"] = previous["operation"]
+        fixture, row, error, submitted, _, _, clock = self.exercise([
+            self.job(self.OLD, True), self.job(self.OLD, True), self.job(complete=True)],
+            previous=previous, app_mutation=prior_once)
+        self.assertIsNone(error)
+        self.assertEqual(row["jobUID"], self.NEW)
+        self.assertEqual(fixture.sync_observations[0]["polls"], 2)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(clock, 12)
+        self.assertFalse(fixture.sync_observations[0]["argoSucceededPendingHook"])
+
+    def test_sync_completed_job_cannot_replace_exact_operation_completion(self):
+        for case in ("running", "absent", "pending"):
+            with self.subTest(case=case):
+                def incomplete(app):
+                    if case == "absent":
+                        del app["status"]["operationState"]
+                    elif case == "running":
+                        app["status"]["operationState"]["phase"] = "Running"
+                        del app["status"]["operationState"]["finishedAt"]
+                    else:
+                        app["operation"] = {"info": app["status"]["operationState"]["operation"]["info"],
+                                            "sync": {"revision": SHA}}
+                fixture, row, error, submitted, _, _, clock = self.exercise(
+                    [None, self.job(complete=True)], app_mutation=incomplete)
+                self.assertIsInstance(error, TimeoutError)
+                self.assertIsNone(row)
+                self.assertEqual(len(submitted), 1)
+                self.assertEqual(clock, 610)
+                self.assertFalse(fixture.sync_observations[0]["passed"])
+
+    def test_sync_refuses_changed_preoperation_uid_before_submit(self):
+        _, row, error, submitted, _, _, _ = self.exercise([self.job(self.OTHER, True)], previous=self.previous())
+        self.assertIsInstance(error, ValueError)
+        self.assertIsNone(row)
+        self.assertEqual(submitted, [])
+
+    def test_typed_inventory_rejects_duplicate_and_malformed_objects(self):
+        valid = {"apiVersion": "batch/v1", "kind": "JobList", "items": [self.job(complete=True)]}
+        self.assertTrue(proof.hook_job_list(valid)["complete"])
+        nested = copy.deepcopy(valid)
+        del nested["items"][0]["apiVersion"], nested["items"][0]["kind"]
+        self.assertTrue(proof.hook_job_list(nested)["complete"])
+        for case in ("list-kind", "items-type", "multiple", "object-type", "object-kind", "status-type", "uid", "conditions", "unknown-condition"):
+            with self.subTest(case=case):
+                value = copy.deepcopy(valid)
+                if case == "list-kind": value["kind"] = "List"
+                elif case == "items-type": value["items"] = {}
+                elif case == "multiple": value["items"] *= 2
+                elif case == "object-type": value["items"] = [None]
+                elif case == "object-kind": value["items"][0]["kind"] = "Pod"
+                elif case == "status-type": value["items"][0]["status"] = None
+                elif case == "uid": value["items"][0]["metadata"]["uid"] = "unknown"
+                elif case == "conditions": value["items"][0]["status"]["conditions"] *= 2
+                else: value["items"][0]["status"]["conditions"].append({"type": "UnknownFutureCondition", "status": "True"})
+                with self.assertRaises(ValueError): proof.hook_job_list(value)
+
+    def test_sync_refuses_foreign_operation_or_hook_without_retry(self):
+        for case in ("token", "source", "pending-token", "application", "phase", "annotation", "tracking", "label", "namespace", "schema", "failed", "boolean"):
+            with self.subTest(case=case):
+                job = self.job(complete=True)
+                def change(app):
+                    state = app["status"]["operationState"]
+                    if case == "token":
+                        state["operation"]["info"] = [{"name": "foreign", "value": "foreign"}]
+                    elif case == "source":
+                        state["syncResult"]["revision"] = "b" * 40
+                    elif case == "pending-token":
+                        app["operation"] = {"info": [{"name": "foreign"}], "sync": {"revision": SHA}}
+                    elif case == "application":
+                        app["metadata"]["name"] = "foreign"
+                    elif case == "phase":
+                        state["phase"] = "Failed"
+                    elif case == "schema":
+                        state["syncResult"]["resources"] = [None]
+                if case == "annotation":
+                    job["metadata"]["annotations"]["argocd.argoproj.io/hook"] = "Sync"
+                elif case == "tracking":
+                    job["metadata"]["annotations"]["argocd.argoproj.io/tracking-id"] = "foreign"
+                elif case == "label":
+                    job["metadata"]["labels"] = {"app.kubernetes.io/instance": "foreign"}
+                elif case == "namespace":
+                    job["metadata"]["namespace"] = "foreign"
+                elif case == "failed":
+                    job["status"]["conditions"] = [{"type": "Failed", "status": "True"}]
+                elif case == "boolean":
+                    job["status"]["succeeded"] = True
+                fixture, row, error, submitted, _, _, clock = self.exercise([None, job], app_mutation=change)
+                self.assertIsInstance(error, ValueError)
+                self.assertIsNone(row)
+                self.assertEqual(len(submitted), 1)
+                self.assertEqual(clock, 10)
+                self.assertFalse(fixture.sync_observations[0]["passed"])
+
+    def test_sync_refuses_replacement_disappearance_and_late_completion(self):
+        for case, jobs, late in (
+                ("replacement", [None, self.job(), self.job(self.OTHER, True)], False),
+                ("disappearance", [None, self.job(), None], False),
+                ("late", [None, self.job(complete=True)], True)):
+            with self.subTest(case=case):
+                fixture, row, error, submitted, _, _, _ = self.exercise(jobs, late=late)
+                self.assertIsInstance(error, TimeoutError if late else ValueError)
+                self.assertIsNone(row)
+                self.assertEqual(len(submitted), 1)
+                self.assertFalse(fixture.sync_observations[0]["passed"])
+
+    def test_sync_read_error_or_malformed_inventory_is_not_absence(self):
+        for value, kind in ((RuntimeError("fixed read refusal"), RuntimeError), ("{}", ValueError),
+                            ('{"apiVersion":"batch/v1","kind":"JobList","items":{}}', ValueError)):
+            with self.subTest(kind=kind):
+                fixture, row, error, submitted, _, reads, clock = self.exercise([None, value])
+                self.assertIsInstance(error, kind)
+                self.assertIsNone(row)
+                self.assertEqual(len(submitted), 1)
+                self.assertEqual(len(reads), 2)
+                self.assertEqual(clock, 10)
+                self.assertFalse(fixture.sync_observations[0]["passed"])
 
 
 if __name__ == "__main__":
