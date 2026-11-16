@@ -168,10 +168,10 @@ var notDeployed = map[string]string{
 		"drift/SLO signals and ACTS on the platform. An autonomous remediator must not be turned on before " +
 		"the system it remediates has ever run in production and been watched by a human.",
 
-	"performance": "ANALYTICS PLANE, PARKED. Stateless return/attribution analytics with no consumer on " +
+	"performance": "#1028: ANALYTICS PLANE, PARKED. Stateless return/attribution analytics with no consumer on " +
 		"the active execution direction. It ships behind the analytics surface, not with the trading loop.",
 
-	"lineage": "ANALYTICS/GOVERNANCE PLANE, PARKED. The OpenLineage harvester and provenance catalog. Same " +
+	"lineage": "#1028: ANALYTICS/GOVERNANCE PLANE, PARKED. The OpenLineage harvester and provenance catalog. Same " +
 		"reason as performance: no consumer on the active direction.",
 }
 

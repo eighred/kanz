@@ -109,13 +109,11 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 // permissions, is what makes the split mean something: kanz-mandate can no
 // longer halt the platform, and kanz-halt can no longer forge a mandate.
 //
-// None of the three non-kanz-halt tools has its own Job manifest / ServiceAccount
-// yet (see infra/operator/halt-job.yaml and infra/security/spire/registration.yaml)
-// — SPIRE issues an SVID per (namespace, ServiceAccountName) a pod actually runs
-// as, so today these three still authenticate as kanz-halt's SVID in practice
-// until a manifest exists for each. The tenancy.yaml entries below are the
-// broker-side half of the identity, ready for when that manifest half ships;
-// this map is the code-side half of the same contract.
+// Operator ServiceAccounts are now declared in halt-job.yaml and
+// cli-identities.yaml. TestOperatorCLIsHaveServiceAccounts checks those bindings
+// rather than retaining the old claim that every tool runs as kanz-halt. These
+// declarations do not prove live SPIRE issuance or a runtime operator session.
+// Remaining service JetStream authority still needs the #1749 qualification below.
 var operatorSVIDs = map[string]string{
 	"kanz-halt":      "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
 	"kanz-mandate":   "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate",
@@ -134,6 +132,11 @@ var operatorSVIDs = map[string]string{
 	// in this plane and why platform.> is excluded from it.
 	"kanz-redrive": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-redrive",
 }
+
+// Terminal retirement removes the monitor principal and its observer-only
+// source guards. Remaining service JetStream grants are not proof of broker
+// immutability: the broad API wildcard permits administrative operations.
+// #1749 owns that least-privilege boundary and real broker qualification.
 
 // operatorServiceAccountFiles are every manifest that may declare a
 // ServiceAccount in the kanz-operator namespace. kanz-halt's lives in
