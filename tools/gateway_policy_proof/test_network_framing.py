@@ -23,6 +23,69 @@ WRAPPERS = {"normal": "Invoke-TokyoGatewayPolicy.ps1", "plan": "Invoke-TokyoGate
             "restore": "Invoke-TokyoGatewayPolicyRetainedRestore.ps1"}
 
 
+GEOMETRY_REFUSALS = {
+    "Transport codec must be bounded tracked regular source.": "codec_source_refused",
+    "Transport codec exceeds source bound.": "codec_size_refused",
+    "Canonical transport inventory missing.": "inventory_missing",
+    "Canonical transport inventory refused.": "inventory_refused",
+    "Rollout bundle exceeds bound.": "bundle_bound",
+    "Bounded XZ encoding unavailable or refused.": "encoding_refused",
+    "Rollout transfer exceeds bounded SSM payload.": "encoded_bound",
+    "Complete SSM parameters exceed native command bound.": "parameters_bound",
+}
+
+
+def geometry_failure_record(output, returncode, mode, ending, variant, completed):
+    """Failure-only scalar projection; no child output or error text is retained."""
+    if (type(returncode) is not int or not -2147483648 <= returncode <= 2147483647 or returncode == 0
+            or type(mode) is not str or mode not in WRAPPERS
+            or type(ending) is not str or ending not in ("LF", "CRLF")
+            or not ((type(variant) is int and 0 <= variant < 16) or (type(variant) is str and variant == "checkout"))
+            or type(completed) is not int or not 0 <= completed < 102):
+        raise ValueError("geometry failure identity")
+    result = {"format": "kanz-gateway-geometry-refusal-v1", "mode": mode, "ending": ending,
+              "variant": variant, "completed": completed, "returnCode": returncode,
+              "category": "unknown", "bounds": {}}
+    if type(output) is not str or len(output) > 4096:
+        return result
+    try:
+        if len(output.encode("utf-8", errors="strict")) > 4096:
+            return result
+        value = json.loads(output, object_pairs_hook=codec._unique_fixed)
+    except (ValueError, TypeError):
+        return result
+    if (type(value) is not dict or set(value) != {"category", "bounds"}
+            or type(value["category"]) is not str
+            or value["category"] not in {*GEOMETRY_REFUSALS.values(), "unknown"}
+            or type(value["bounds"]) is not dict
+            or not set(value["bounds"]) <= {"encoded", "expanded", "parameters", "characters"}
+            or any(type(number) is not int or not 0 <= number <= 2147483647 for number in value["bounds"].values())):
+        return result
+    result.update(category=value["category"], bounds=value["bounds"])
+    return result
+
+
+def geometry_measurement_stage(stage):
+    """Wrap the exact checked stage; a refusal still exits nonzero before the assertion."""
+    def literal(value): return "'" + value.replace("'", "''") + "'"
+    cases = "\n".join("        " + literal(message) + " { $geometryCategory = " + literal(category) + "; break }"
+                      for message, category in GEOMETRY_REFUSALS.items())
+    return ("$bytes=$null;$encoded=$null;$parameters=$null;$parameterBytes=$null\ntry {\n" + stage + "\n} catch {\n"
+            + "$geometryCategory='unknown'\nswitch -CaseSensitive ($_.Exception.Message) {\n" + cases + "\n}\n" + r'''
+$geometryBounds = [ordered]@{}
+if ($encoded -is [string]) { $geometryBounds['encoded'] = $encoded.Length }
+if (($bytes -is [byte[]]) -and (($fixedSize -is [int]) -or ($fixedSize -is [long])) -and ($fixedSize -ge 0) -and ($fixedSize -le 524288)) {
+    $geometryExpanded = [long]$bytes.Length + [long]$fixedSize
+    if (($geometryExpanded -ge 0) -and ($geometryExpanded -le 2147483647)) { $geometryBounds['expanded'] = $geometryExpanded }
+}
+if ((($parameterBytes -is [int]) -or ($parameterBytes -is [long])) -and ($parameterBytes -ge 0) -and ($parameterBytes -le 2147483647)) { $geometryBounds['parameters'] = $parameterBytes }
+if ($parameters -is [string]) { $geometryBounds['characters'] = $parameters.Length }
+@{category=$geometryCategory;bounds=$geometryBounds} | ConvertTo-Json -Compress -Depth 3
+exit 1
+}
+''')
+
+
 def source_inventory(wrapper):
     mode = re.search(r"^\$transportMode = '(normal|plan|restore)'$", wrapper, re.M).group(1)
     return mode, codec.SOURCE_BUNDLES[mode]
@@ -281,12 +344,71 @@ class NetworkFramingTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             declaration(wrapper, {"source_loader.py": b"\xff"})
 
+    def test_geometry_failure_projection_is_closed_and_bound(self):
+        bounds = {"encoded": 20001, "expanded": 524289, "parameters": 30001, "characters": 30001}
+        for category in (*GEOMETRY_REFUSALS.values(), "unknown"):
+            with self.subTest(category=category):
+                record = geometry_failure_record(json.dumps({"category": category, "bounds": bounds}),
+                                                 1, "normal", "LF", 0, 0)
+                self.assertEqual(record, {"format": "kanz-gateway-geometry-refusal-v1", "mode": "normal", "ending": "LF",
+                    "variant": 0, "completed": 0, "returnCode": 1, "category": category, "bounds": bounds})
+        partial = geometry_failure_record('{"category":"encoding_refused","bounds":{"expanded":70000}}',
+                                          1, "restore", "CRLF", "checkout", 101)
+        self.assertEqual(partial["bounds"], {"expanded": 70000})  # Uncomputed counters are absent, never fabricated zero.
+        invalid = [None, b"unretained-data", "unretained-data", "x" * 4097, "\ud800",
+            '{"category":"unretained-data","bounds":{}}', '{"category":null,"bounds":{}}',
+            '{"category":"encoded_bound","bounds":null}', '{"category":"encoded_bound","bounds":[]}',
+            '{"category":"encoded_bound","bounds":{},"stderr":"unretained-data"}',
+            '{"category":"encoded_bound","bounds":{"argv":"unretained-data"}}',
+            '{"category":"encoded_bound","bounds":{"encoded":true}}',
+            '{"category":"encoded_bound","bounds":{"encoded":-1}}',
+            '{"category":"encoded_bound","bounds":{"encoded":2147483648}}',
+            '{"category":"encoded_bound","bounds":{"encoded":NaN}}',
+            '{"category":"encoded_bound","bounds":{"encoded":Infinity}}',
+            '{"category":"encoded_bound","bounds":{"encoded":1.0}}',
+            '{"category":"encoded_bound","category":"encoded_bound","bounds":{}}']
+        for output in invalid:
+            with self.subTest(projection=type(output).__name__):
+                record = geometry_failure_record(output, 1, "normal", "LF", 0, 0)
+                self.assertEqual((record["category"], record["bounds"]), ("unknown", {}))
+                self.assertNotIn("unretained-data", json.dumps(record))
+        arguments = {"returncode": 1, "mode": "normal", "ending": "LF", "variant": 0, "completed": 0}
+        for field, value in (("returncode", True), ("returncode", 0), ("returncode", 2147483648),
+                             ("mode", "unretained-data"), ("ending", "unretained-data"),
+                             ("variant", True), ("variant", 16), ("variant", "unretained-data"),
+                             ("completed", True), ("completed", -1), ("completed", 102)):
+            bad = {**arguments, field: value}
+            with self.subTest(identity=field), self.assertRaisesRegex(ValueError, "^geometry failure identity$"):
+                geometry_failure_record("{}", **bad)
+
+    def test_geometry_capture_preserves_reviewed_stages_and_refusals(self):
+        for filename in WRAPPERS.values():
+            wrapper = (ROOT / "tools" / filename).read_text(encoding="utf-8")
+            stage = (wrapper[wrapper.index("$codecPath ="):wrapper.index("$files =")]
+                     + wrapper[wrapper.index("$bundle ="):wrapper.index("$latest =")])
+            self.assertEqual(set(re.findall(r"throw '([^']+)'", stage)), set(GEOMETRY_REFUSALS))
+            script = geometry_measurement_stage(stage)
+            self.assertEqual(script.count(stage), 1)
+            self.assertIn("switch -CaseSensitive ($_.Exception.Message)", script)
+            self.assertEqual(script.count("$_.Exception.Message"), 1)
+            self.assertIn("exit 1", script)
+            self.assertNotIn("Write-Error", script)
+            self.assertNotIn("Write-Host", script)
+            for message, category in GEOMETRY_REFUSALS.items():
+                self.assertIn("'" + message + "' { $geometryCategory = '" + category + "'; break }", script)
+            for marker in ("$encoded.Length -gt 20000", "($bytes.Length + $fixedSize) -gt 524288",
+                           "$parameterBytes -gt 30000", "$parameters.Length -gt 30000"):
+                self.assertEqual(script.count(marker), stage.count(marker))
+
     def test_actual_checkout_geometry_is_mandatory(self):
         source = __import__("inspect").getsource(type(self).test_actual_wrappers_all_96_source_variants)
         markers = ['["git", "rev-parse", "HEAD"]', 'for variant in [*range(16), "checkout"]:',
-                   'checkout if variant == "checkout" else digest("source")[:40]', 'self.assertEqual(counts, 102)']
+                   'checkout if variant == "checkout" else digest("source")[:40]', 'self.assertEqual(counts, 102)',
+                   'prefix + geometry_measurement_stage(stage) + suffix', 'if result.returncode != 0:',
+                   'print(json.dumps(geometry_failure_record(']
         def valid(value): return all(marker in value for marker in markers)
         self.assertTrue(valid(source))
+        self.assertLess(source.index("geometry_failure_record("), source.index("self.assertEqual(result.returncode, 0,"))
         for marker in markers:
             self.assertFalse(valid(source.replace(marker, "removed")))
 
@@ -344,8 +466,11 @@ class NetworkFramingTests(unittest.TestCase):
                         prefix += "$files=$d.files;$source=$d.source;$policies=$d.policies;$identity=$d.identity;$provenance=$d.provenance;$projection=@{workloads=$d.workloads};$decoder=$d.fixedFrame.decoder;$fixedEncoded=$d.fixedFrame.encoded;$fixedSize=$d.fixedFrame.expanded\n"
                         suffix = "\n@{encoded=$encoded.Length;expanded=($bytes.Length+$fixedSize);parameters=$parameterBytes;characters=$parameters.Length}|ConvertTo-Json -Compress\n"
                         script = Path(directory) / "measure.ps1"
-                        script.write_text(prefix + stage + suffix, encoding="utf-8")
+                        script.write_text(prefix + geometry_measurement_stage(stage) + suffix, encoding="utf-8")
                         result = subprocess.run([pwsh, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
+                        if result.returncode != 0:
+                            print(json.dumps(geometry_failure_record(result.stdout, result.returncode, mode,
+                                "LF" if ending == "\n" else "CRLF", variant, counts), sort_keys=True, separators=(",", ":")), flush=True)
                         self.assertEqual(result.returncode, 0, "actual wrapper refused geometry; no operator was executed")
                         sizes = json.loads(result.stdout.strip().splitlines()[-1])
                         for key, limit in (("encoded", 20000), ("expanded", 524288), ("parameters", 30000), ("characters", 30000)):
