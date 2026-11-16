@@ -11,7 +11,14 @@ def require(condition, message):
         raise SystemExit(message)
 
 
-require(set(os.environ) == {"PATH", "HOME", "TMPDIR", "LANG", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}, "unexpected worker environment name")
+expected_environment = {"PATH", "HOME", "TMPDIR", "LANG", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}
+environment_failure = "unexpected worker environment name"
+if set(os.environ) == expected_environment | {"LC_CTYPE"} and os.environ["LC_CTYPE"] in ("C.UTF-8", "UTF-8"):
+    # Python may coerce its C locale at startup. Classify that known addition
+    # without accepting it, printing any environment name/value, or guessing
+    # that it caused an earlier run whose diagnostic was discarded.
+    environment_failure = "Python locale coercion added LC_CTYPE"
+require(set(os.environ) == expected_environment, environment_failure)
 require(os.environ["HOME"] == os.environ["TMPDIR"] == "/scratch", "scratch environment mismatch")
 require(os.getuid() != 0, "worker is root")
 require({item.name for item in Path("/sys/class/net").iterdir()} == {"lo"}, "external network interface present")

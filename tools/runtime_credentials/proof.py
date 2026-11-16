@@ -36,6 +36,14 @@ REQUIRED.update(ROLE_TEST + "/" + name for name in (
     "trigger-authority", "schema-create", "database-create", "security-definer", "assumable-owner", "assumable-truncate", "predefined-capability", "role-createrole", "downscoped-session-owner", "writable-migration-bookkeeping", "writable-migration-bookkeeping/table", "writable-migration-bookkeeping/column"))
 REQUIRED.update(VAULT_TEST + "/" + name for name in ("accounting", "audit", "identity"))
 MANIFEST_TESTS = {"test_base_separates_all_three_roles_and_preserves_callers", "test_tokyo_preserves_transformed_immutable_images_and_scopes_database_peer", "test_changed_contracts_fail_closed"}
+PROBE_FAILURES = frozenset({
+    "unexpected worker environment name", "Python locale coercion added LC_CTYPE",
+    "scratch environment mismatch", "worker is root", "external network interface present",
+    "effective capability present", "kernel privilege/seccomp guard absent", "file limit missing",
+    "descriptor limit missing", "core dump limit missing", "memory limit missing", "process limit missing",
+    "CPU limit missing", "scratch disk limit missing", "unexpected input write refusal",
+    "input/toolchain write was permitted", "scratch write positive control failed",
+})
 
 
 class ProofFailure(Exception):
@@ -394,8 +402,13 @@ def main():
                 receipt["stage"] = "manifest-oracles"
                 probe = sandbox.mounts(sandbox.arguments("sandbox-probe", PYTHON), modules=True, tools=True, python=True, work="/source/tools/runtime_credentials")
                 probe += ["PYTHONPATH=/python-deps", "PYTHONDONTWRITEBYTECODE=1", "python", "-B", "sandbox_probe.py"]
-                probe_code, probe_output, _ = sandbox.run(probe, timeout=30)
+                probe_code, probe_output, probe_errors = sandbox.run(probe, timeout=30)
                 if probe_code or probe_output != b"Sandbox kernel controls passed\n":
+                    # SystemExit diagnostics in the probe are fixed strings.
+                    # Never retain raw output, a traceback or environment data.
+                    classification = probe_errors.decode(errors="replace").strip()
+                    receipt["sandbox_probe_failure"] = classification if classification in PROBE_FAILURES else "unclassified probe failure"
+                    receipt["sandbox_probe_exit"] = probe_code
                     raise ProofFailure("kernel sandbox negative/positive probe failed")
                 receipt["sandbox_probe"] = "kernel limits, empty environment, loopback only, read-only inputs and scratch writes passed"
                 manifests = sandbox.mounts(sandbox.arguments("manifests", PYTHON), python=True, work="/source/tools/runtime_credentials")
