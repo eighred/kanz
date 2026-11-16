@@ -288,12 +288,31 @@ or whole-process-group absence; cleanup uncertainty remains a failure. No cgroup
 or OOM observation is inferred. The earlier final-positive timeout has no such
 timing data, so its cause remains unknown. Budgets and every positive/negative
 observation remain mandatory; diagnostics cannot qualify a refused transaction.
-Fixed loader/network source bytes travel in the checked bootstrap while the
-remaining closed module inventory stays compressed. Per-file, combined expanded,
-encoded and native command limits are unchanged; the mandatory check retains all
-96 variants and adds six actual-checkout-SHA cases, executing the PowerShell
-serialization for LF and CRLF inputs. Payload-first serialization and a fixed
-LZMA2 encoder profile preserve exact source bytes and the existing decoder.
+An already-expired pre-attempt observation gate records the existing
+`tcp_exec`/`insufficient_batch_budget` refusal before inventory or exec. Its
+`attempt` is the prospective batch ordinal, not a launch or completion count;
+zero requested timeout, zero inventory duration and null process explicitly mean
+those operations were not run. The item remains UNKNOWN with no new batch.
+Six completed nonconverged batches retain their existing outcome. This source
+repair does not identify which deadline caused an earlier uninstrumented failure.
+The normal operator transports seven modules in its main XZ frame and the exact
+`source_loader.py`/`bounded_process.py` pair in a separately encoded fixed frame.
+Planner and restore partitions retain their existing module inventory. Both use
+the same bounded CRC64 XZ codec; the fixed frame requires exact names, field types,
+UTF8 source and SHA256 before any source write. The remote prefix contains only
+verbatim decoder/helper source segments, required imports/constants, the selected
+canonical partition and the CRC64 check. Its closed AST dependency/interface guard refuses
+unreviewed helper, global, binding, signature or scope changes; host encoders and source
+construction code do not travel. The operator supplies its qualified codec bytes
+as bounded data to the existing trusted Python builder, without file inspection
+or a generic source-extraction interface. Fixed/main frames and the owned
+root occupy exactly three bootstrap arguments. The wire partition preserves
+module execution order, resource bounds, operator authority and retained-history
+interpretation. The accompanying pre-attempt budget diagnostic changes only the
+rollout engine among the nine runtime modules; the other eight remain unchanged. Per-file, combined expanded, encoded and native
+command limits remain. The mandatory geometry retains all 96 variants and six
+actual-checkout-SHA cases, executing PowerShell serialization for LF and CRLF.
+Synthetic size projections are not actual rendered geometry or deployment proof.
 Passing these samples does not guarantee future source will fit: every operator
 invocation still refuses an oversized bundle before sending it.
 

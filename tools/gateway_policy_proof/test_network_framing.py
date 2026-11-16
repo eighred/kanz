@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import copy
+import transport_codec as codec
 import yaml
 from unittest.mock import patch
 
@@ -22,43 +23,70 @@ WRAPPERS = {"normal": "Invoke-TokyoGatewayPolicy.ps1", "plan": "Invoke-TokyoGate
             "restore": "Invoke-TokyoGatewayPolicyRetainedRestore.ps1"}
 
 
+def source_inventory(wrapper):
+    mode = re.search(r"^\$transportMode = '(normal|plan|restore)'$", wrapper, re.M).group(1)
+    return mode, codec.SOURCE_BUNDLES[mode]
+
+
 def names(wrapper):
-    transfer = re.search(r"foreach \(\$name in @\((.*?)\)\)", wrapper).group(1)
-    fixed = re.search(r"\$fixedNames = @\((.*?)\)", wrapper).group(1)
-    return set(re.findall("'([^']+)'", transfer)), set(re.findall("'([^']+)'", fixed))
+    _, inventory = source_inventory(wrapper)
+    return set(inventory["files"]), set(inventory["fixed"])
 
 
 def valid_framing(wrapper, expected):
     try:
+        roots = re.findall(r"^\$proofRoot = Join-Path \$PSScriptRoot '([^'\r\n]+)'\r?$", wrapper, re.M)
+        if roots != ["gateway_policy_proof"]:
+            return False
+        mode, inventory = source_inventory(wrapper)
         files, fixed = names(wrapper)
-        bootstrap_names = ast.literal_eval(re.search(r"b=json.loads\(raw\); names=(\{[^\n]+\})", wrapper).group(1))
-        fixed_checks = re.findall(r"if set\((?:values|fixed)\)!=(\{[^\n]+\}):", wrapper)
-        return (fixed == expected and files.isdisjoint(fixed) and bootstrap_names == files
-                and len(fixed_checks) == 2 and all(ast.literal_eval(v) == fixed for v in fixed_checks)
-                and all(v in wrapper for v in (
-                    "$info.LinkType", "$info.PSIsContainer", "$info.Length -gt 65536", "$raw.Length -gt 65536",
-                    "ls-files --error-unmatch $relative", "data.decode('utf-8',errors='strict')",
-                    "sys.stdin.buffer.read(262145)", "len(raw)>262144", "len(data)>65536",
-                    "hashlib.sha256(data).hexdigest()!=sha", "($bytes.Length + $fixedSize) -gt 524288",
-                    "len(raw)+sum(len(v[0]) for v in fixed.values())>524288",
-                    "$encoded.Length -gt 20000", "$parameterBytes -gt 30000", "$parameters.Length -gt 30000",
-                    "with (root/name).open('xb')", "-I -B -c $literalBuilder"))
+        markers = (
+            "$inventoryLines = [regex]::Matches($codec, '(?m)^SOURCE_BUNDLES = (\\{[^\\r\\n]+\\})\\r?$')",
+            "$inventoryLines.Count -ne 1", "ConvertFrom-Json).PSObject.Properties[$transportMode].Value",
+            "$sourceNames = @($inventory.files)", "$fixedNames = @($inventory.fixed)",
+            "foreach ($name in $sourceNames)", "$sourceNames.Count -gt 16", "$fixedNames.Count -gt 2",
+            "$allNames | Sort-Object -Unique", "$_ -isnot [string]", "^[a-z_]+\\.py$",
+            "$info.LinkType", "$info.PSIsContainer", "$info.Length -gt 65536", "$raw.Length -gt 65536",
+            "ls-files --error-unmatch $relative", "sys.stdin.buffer.read(262145)", "len(raw)>262144",
+            "$fixedFrame.PSObject.Properties.Name", "decoder,encoded,expanded",
+            "$fixedFrame.decoder -isnot [string]", "$fixedFrame.decoder.Length -lt 1",
+            "[Text.Encoding]::UTF8.GetByteCount($fixedFrame.decoder) -gt 65536",
+            "[ordered]@{ codec = $codec; files = $fixed }", "$decoder = [string]$fixedFrame.decoder",
+            "$bootstrap = $decoder +", "$fixedFrame.encoded -isnot [string]",
+            "$fixedFrame.encoded.Length -gt 20000", "^[A-Za-z0-9+/]+={0,2}$",
+            "$fixedFrame.expanded -isnot [int]", "$fixedFrame.expanded -isnot [long]",
+            "$fixedFrame.expanded -lt 1", "$fixedFrame.expanded -gt 524288",
+            "$fixedSize = [long]$fixedFrame.expanded", "($bytes.Length + $fixedSize) -gt 524288",
+            "len(sys.argv)!=4", "len(raw)+len(fixedRaw)>524288", "len(data)>65536",
+            "'$encoded' '$fixedEncoded'", "root=pathlib.Path(sys.argv[3])",
+            "$encoded.Length -gt 20000", "$parameterBytes -gt 30000", "$parameters.Length -gt 30000",
+            "with (root/name).open('xb')", "-I -B -c $literalBuilder")
+        return (fixed == expected and files.isdisjoint(fixed)
+                and "encode_fixed(values,'" + mode + "')" in wrapper
+                and "decode_fixed(sys.argv[2],'" + mode + "')" in wrapper
+                and "remote_decoder_source(packet['codec'],'" + mode + "')" in wrapper
+                and "b=json.loads(raw.decode('utf-8',errors='strict'),object_pairs_hook=_unique_fixed); names=set(SOURCE_BUNDLES['" + mode + "']['files'])" in wrapper
+                and all(value in wrapper for value in markers)
+                and wrapper.index("$codecPath =") < wrapper.index("$files =")
                 and wrapper.index("prepared[name]=data") < wrapper.index("with (root/name).open('xb')"))
-    except (ValueError, AttributeError, SyntaxError):
+    except (ValueError, AttributeError, SyntaxError, KeyError):
         return False
 
 
 def declaration(wrapper, fixed):
-    builder = re.search(r"\$literalBuilder = @'\n(.*?)\n'@", wrapper, re.S).group(1)
-    raw = json.dumps({name: base64.b64encode(data).decode() for name, data in fixed.items()}).encode()
-    result = subprocess.run([sys.executable, "-I", "-B", "-c", builder], input=raw,
+    builder = re.search(r"\$literalBuilder = \$codec \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
+    raw = json.dumps({"codec": (HERE / "transport_codec.py").read_text(encoding="utf-8"),
+                      "files": {name: base64.b64encode(data).decode() for name, data in fixed.items()}}).encode()
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", (HERE / "transport_codec.py").read_text(encoding="utf-8") + "\n" + builder], input=raw,
                             capture_output=True, timeout=10, check=True)
-    return result.stdout.decode("utf-8").strip()
+    return json.loads(result.stdout.decode("utf-8"))
 
 
-def bootstrap(wrapper, fixed):
-    body = re.search(r"\$bootstrap = \$codec \+ \"`n\" \+ \$fixedDeclaration \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
-    return (HERE / "transport_codec.py").read_text(encoding="utf-8") + "\n" + declaration(wrapper, fixed) + "\n" + body
+def bootstrap(wrapper):
+    body = re.search(r"\$bootstrap = \$decoder \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
+    mode, _ = source_inventory(wrapper)
+    source = (HERE / "transport_codec.py").read_text(encoding="utf-8")
+    return codec.remote_decoder_source(source, mode) + "\n" + body
 
 
 class NetworkFramingTests(unittest.TestCase):
@@ -92,65 +120,161 @@ class NetworkFramingTests(unittest.TestCase):
                 with self.subTest(command=command, change=change), self.assertRaises(ValueError): check(bad)
 
     def test_closed_actual_wrapper_recipes(self):
+        self.assertEqual(codec.SOURCE_BUNDLES, {'normal': {'files': ['policy_state.py', 'transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_scope.py', 'rollout_engine.py', 'network_observation.py'], 'fixed': ['source_loader.py', 'bounded_process.py']}, 'plan': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}, 'restore': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'recovery_restore.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}})
         builders = []
         for mode, name in WRAPPERS.items():
             wrapper = (ROOT / "tools" / name).read_text(encoding="utf-8")
-            expected = {"source_loader.py"} | ({"network_observation.py"} if mode == "normal" else set())
+            expected = {"source_loader.py"} | ({"bounded_process.py"} if mode == "normal" else set())
             self.assertTrue(valid_framing(wrapper, expected))
-            builder = re.search(r"\$literalBuilder = @'\n(.*?)\n'@", wrapper, re.S).group(1)
-            builders.append(re.sub(r"if set\(values\)!=\{[^\n]+\}:", "if CLOSED:", builder))
-            for marker in ("data.decode('utf-8',errors='strict')", "hashlib.sha256(data).hexdigest()!=sha",
-                           "$info.LinkType", "len(raw)+sum(len(v[0]) for v in fixed.values())>524288",
+            canonical_root = "$proofRoot = Join-Path $PSScriptRoot 'gateway_policy_proof'"
+            legacy_root = "$proofRoot = Join-Path $PSScriptRoot 'gateway-policy-proof'"
+            self.assertEqual(wrapper.count(canonical_root), 1)
+            self.assertFalse(valid_framing(wrapper.replace(canonical_root, legacy_root), expected))
+            source_root = ROOT / "tools" / "gateway_policy_proof"
+            self.assertEqual(source_root, HERE)
+            self.assertTrue(source_root.is_dir())
+            _, fixed_names = names(wrapper)
+            for source_name in sorted(fixed_names):
+                self.assertTrue((source_root / source_name).is_file(), source_name)
+                self.assertFalse((source_root / source_name).is_symlink(), source_name)
+            builder = re.search(r"\$literalBuilder = \$codec \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
+            builders.append(re.sub(r"\((values|packet\['codec'\]),'[^']+'\)", r"(\1,MODE)", builder))
+            for marker in ("$info.LinkType", "len(raw)+len(fixedRaw)>524288", "len(sys.argv)!=4",
                            "($bytes.Length + $fixedSize) -gt 524288", "with (root/name).open('xb')",
-                           "$parameters.Length -gt 30000", "-I -B -c $literalBuilder"):
+                           "$parameters.Length -gt 30000", "-I -B -c $literalBuilder",
+                           "$sourceNames = @($inventory.files)", "$fixedNames = @($inventory.fixed)",
+                           "foreach ($name in $sourceNames)", "$inventoryLines.Count -ne 1",
+                           "ConvertFrom-Json).PSObject.Properties[$transportMode].Value", "$_ -isnot [string]",
+                           "$fixedFrame.encoded.Length -gt 20000", "$fixedFrame.expanded -isnot [long]",
+                           "'$encoded' '$fixedEncoded'", "root=pathlib.Path(sys.argv[3])",
+                           "[ordered]@{ codec = $codec; files = $fixed }", "$bootstrap = $decoder +",
+                           "$fixedFrame.decoder -isnot [string]", "$decoder = [string]$fixedFrame.decoder"):
                 self.assertFalse(valid_framing(wrapper.replace(marker, "removed"), expected), marker)
         self.assertEqual(len(set(builders)), 1)  # Same semantics; only fixed inventory differs.
 
     def test_exact_bootstrap_thirteen_controls(self):
         wrapper = (ROOT / "tools" / WRAPPERS["normal"]).read_text(encoding="utf-8")
         files, fixed_names = names(wrapper)
-        fixed = {name: (HERE / name).read_bytes() for name in sorted(fixed_names)}
-        source = bootstrap(wrapper, fixed)
-        tree = ast.parse(source)
-        node = next(n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "fixed" for t in n.targets))
-        original = ast.literal_eval(node.value)
-        lines = source.splitlines(keepends=True)
-        def changed(value):
-            return "".join(lines[:node.lineno-1]) + "fixed=" + repr(value) + "\n" + "".join(lines[node.end_lineno:])
+        fixed = {name: (HERE / name).read_bytes() for name in source_inventory(wrapper)[1]["fixed"]}
+        source = bootstrap(wrapper)
+        framed = declaration(wrapper, fixed)
+        self.assertEqual(set(framed), {"decoder", "encoded", "expanded"})
+        self.assertTrue(source.startswith(framed["decoder"] + "\n"))
+        fixed_raw, original = codec.decode_fixed(framed["encoded"], "normal")
+        self.assertEqual(framed["expanded"], len(fixed_raw))
+        self.assertEqual(original, fixed)
+        frame = json.loads(fixed_raw)
         bundle = {"files": {name: "# exact UTF8 λ\r\n" for name in files}, "payload": {"source": "a" * 40}}
-        def run(value, script=source, expected=original, collision=None, good=False):
-            packed = lzma.compress(json.dumps(value).encode(), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64,
-                                   filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576}])
+        def packed(raw, check=lzma.CHECK_CRC64, dictionary=1048576):
+            return base64.b64encode(lzma.compress(raw, format=lzma.FORMAT_XZ, check=check,
+                filters=[{"id": lzma.FILTER_LZMA2, "dict_size": dictionary}])).decode()
+        def run(value=bundle, encoded=framed["encoded"], expected=original, collision=None, good=False, argc=4, main_raw=None):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory)
                 if collision: (path / collision).write_text("preserved", encoding="utf-8")
-                with patch.object(sys, "argv", ["bootstrap", base64.b64encode(packed).decode(), directory]):
-                    try: exec(compile(script, "<actual-wrapper-bootstrap>", "exec"), {})
-                    except (ValueError, FileExistsError):
+                raw = json.dumps(value).encode() if main_raw is None else main_raw
+                arguments = ["bootstrap", codec.encode(raw), encoded, directory]
+                if argc == 3: arguments.pop(2)
+                if argc == 5: arguments.append("extra")
+                with patch.object(sys, "argv", arguments):
+                    try: exec(compile(source, "<actual-wrapper-bootstrap>", "exec"), {})
+                    except (ValueError, lzma.LZMAError, FileExistsError) as error:
                         self.assertFalse(good)
-                        if collision: self.assertEqual((path / collision).read_text(), "preserved")
+                        if argc != 4: self.assertEqual(str(error), "bootstrap argument count")
+                        if collision:
+                            # xb protects this leaf; earlier owned writes may exist.
+                            # This does not qualify the operator EXIT trap's cleanup.
+                            self.assertEqual((path / collision).read_text(), "preserved")
                         else: self.assertEqual(list(path.iterdir()), [])
                     else:
                         self.assertTrue(good)
                         self.assertEqual({p.name for p in path.iterdir()}, files | fixed_names | {"input.json"})
-                        for name, (data, _) in expected.items(): self.assertEqual((path / name).read_bytes(), data)
+                        for name, data in expected.items(): self.assertEqual((path / name).read_bytes(), data)
                         for name, text in value["files"].items(): self.assertEqual((path / name).read_bytes(), text.encode())
-        run(bundle, good=True)
+        run(good=True)
         for name in original:
-            bad = dict(original); bad[name] = (bad[name][0], "0" * 64); run(bundle, changed(bad))
-            run(bundle, collision=name)
-            data = b"x" * 65537; bad[name] = (data, hashlib.sha256(data).hexdigest()); run(bundle, changed(bad))
+            bad = copy.deepcopy(frame); bad["files"][name]["sha256"] = "0" * 64
+            run(encoded=packed(json.dumps(bad).encode()))
+            run(collision=name)
+            text = "x" * 65537
+            bad["files"][name] = {"text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+            run(encoded=packed(json.dumps(bad).encode()))
         for mode in ("missing", "extra", "duplicate", "oversize", "combined"):
-            value = json.loads(json.dumps(bundle)); fixed_value = dict(original)
-            if mode == "missing": del fixed_value["network_observation.py"]
-            elif mode == "extra": fixed_value["evil.py"] = (b"", hashlib.sha256(b"").hexdigest())
+            value = copy.deepcopy(bundle); fixed_value = copy.deepcopy(frame)
+            if mode == "missing": del fixed_value["files"]["bounded_process.py"]
+            elif mode == "extra": fixed_value["files"]["evil.py"] = {"text": "", "sha256": hashlib.sha256(b"").hexdigest()}
             elif mode == "duplicate": value["files"]["source_loader.py"] = "substitute"
             elif mode == "oversize": value["files"]["rollout_engine.py"] = "x" * 65537
             else: value["payload"]["pad"] = "x" * (524000 - len(json.dumps(value)))
-            run(value, changed(fixed_value))
-        unicode_sources = {name: data + "# UTF8 λ ' \\\r\n".encode() for name, (data, _) in original.items()}
-        expected = {name: (data, hashlib.sha256(data).hexdigest()) for name, data in unicode_sources.items()}
-        run(bundle, bootstrap(wrapper, unicode_sources), expected, good=True)
+            run(value, encoded=packed(json.dumps(fixed_value).encode()))
+        unicode_sources = {name: data + "# UTF8 λ ' \\\r\n".encode() for name, data in original.items()}
+        unicode_frame = declaration(wrapper, unicode_sources)
+        run(encoded=unicode_frame["encoded"], expected=unicode_sources, good=True)
+        for control in ("corrupt", "truncated", "trailing", "concatenated", "none", "dictionary", "expanded",
+                        "encoded", "invalid_utf8", "utf16", "duplicate_field", "duplicate_name", "duplicate_record", "frame_type", "frame_extra", "files_type",
+                        "entry_type", "entry_extra", "missing_hash", "text_type", "hash_type", "surrogate"):
+            bad = copy.deepcopy(frame)
+            compressed = base64.b64decode(framed["encoded"])
+            if control == "corrupt": encoded = base64.b64encode(b"invalid").decode()
+            elif control == "truncated": encoded = base64.b64encode(compressed[:-1]).decode()
+            elif control == "trailing": encoded = base64.b64encode(compressed + b"x").decode()
+            elif control == "concatenated": encoded = base64.b64encode(compressed + compressed).decode()
+            elif control == "none": encoded = packed(fixed_raw, check=lzma.CHECK_NONE)
+            elif control == "dictionary": encoded = packed(fixed_raw, dictionary=67108864)
+            elif control == "expanded": encoded = packed(b"x" * 524289)
+            elif control == "encoded": encoded = "A" * 20001
+            elif control == "invalid_utf8": encoded = packed(b"\xff")
+            elif control == "utf16": encoded = packed(json.dumps(frame).encode("utf-16"))
+            elif control == "duplicate_field":
+                value = json.dumps(frame["files"])
+                encoded = packed(('{"files":' + value + ',"files":' + value + '}').encode())
+            elif control == "duplicate_name":
+                name = next(iter(frame["files"])); key = json.dumps(name); value = json.dumps(frame["files"][name])
+                rest = {key: value for key, value in frame["files"].items() if key != name}
+                encoded = packed(('{"files":{' + key + ':' + value + ',' + key + ':' + value + ',' + json.dumps(rest)[1:] + '}').encode())
+            elif control == "duplicate_record":
+                name = next(iter(frame["files"])); value = json.dumps(frame["files"][name]["text"])
+                text = json.dumps(frame)
+                once = '"text": ' + value
+                encoded = packed(text.replace(once, once + ',' + once, 1).encode())
+            else:
+                name = next(iter(bad["files"]))
+                if control == "frame_type": bad = []
+                elif control == "frame_extra": bad["extra"] = True
+                elif control == "files_type": bad["files"] = []
+                elif control == "entry_type": bad["files"][name] = []
+                elif control == "entry_extra": bad["files"][name]["extra"] = True
+                elif control == "missing_hash": del bad["files"][name]["sha256"]
+                elif control == "text_type": bad["files"][name]["text"] = None
+                elif control == "hash_type": bad["files"][name]["sha256"] = True
+                else: bad["files"][name]["text"] = "\ud800"
+                encoded = packed(json.dumps(bad).encode())
+            with self.subTest(fixed_control=control): run(encoded=encoded)
+        for control in ("duplicate_files", "duplicate_payload", "duplicate_name", "utf16", "utf32", "invalid_utf8", "surrogate"):
+            if control == "duplicate_files":
+                files_json = json.dumps(bundle["files"]); payload_json = json.dumps(bundle["payload"])
+                raw = ('{"files":' + files_json + ',"files":' + files_json + ',"payload":' + payload_json + '}').encode()
+            elif control == "duplicate_payload":
+                files_json = json.dumps(bundle["files"]); payload_json = json.dumps(bundle["payload"])
+                raw = ('{"files":' + files_json + ',"payload":' + payload_json + ',"payload":' + payload_json + '}').encode()
+            elif control == "duplicate_name":
+                name = next(iter(bundle["files"])); key = json.dumps(name); value = json.dumps(bundle["files"][name])
+                rest = {key: value for key, value in bundle["files"].items() if key != name}
+                raw = ('{"files":{' + key + ':' + value + ',' + key + ':' + value + ','
+                       + json.dumps(rest)[1:] + ',"payload":' + json.dumps(bundle["payload"]) + '}').encode()
+            elif control == "utf16": raw = json.dumps(bundle).encode("utf-16")
+            elif control == "utf32": raw = json.dumps(bundle).encode("utf-32")
+            elif control == "invalid_utf8": raw = b"\xff"
+            else:
+                bad = copy.deepcopy(bundle)
+                bad["files"][next(iter(bad["files"]))] = "\ud800"
+                raw = json.dumps(bad).encode()
+            if control.startswith("duplicate_"):
+                # These are valid JSON that the old last-key-wins parser accepts.
+                self.assertEqual(json.loads(raw), bundle)
+            with self.subTest(main_control=control): run(main_raw=raw)
+        for argc in (3, 5):
+            with self.subTest(argc=argc): run(argc=argc)
 
     def test_builder_rejects_invalid_utf8_before_literal(self):
         wrapper = (ROOT / "tools" / WRAPPERS["plan"]).read_text(encoding="utf-8")
@@ -192,16 +316,17 @@ class NetworkFramingTests(unittest.TestCase):
         for mode, filename in WRAPPERS.items():
             wrapper = (ROOT / "tools" / filename).read_text(encoding="utf-8")
             files, fixed_names = names(wrapper)
-            stage = wrapper[wrapper.index("$bundle ="):wrapper.index("$latest =")]
+            stage = (wrapper[wrapper.index("$codecPath ="):wrapper.index("$files =")]
+                     + wrapper[wrapper.index("$bundle ="):wrapper.index("$latest =")])
             maxima = {key: 0 for key in ("encoded", "expanded", "parameters", "characters")}
             for ending in ("\n", "\r\n"):
                 # Preserve all 96 synthetic variants and add six actual-checkout cases.
                 for variant in [*range(16), "checkout"]:
                     def digest(label): return hashlib.sha256((str(variant) + label).encode()).hexdigest()
-                    ordered_files = re.findall("'([^']+)'", re.search(r"foreach \(\$name in @\((.*?)\)\)", wrapper).group(1))
+                    ordered_files = source_inventory(wrapper)[1]["files"]
                     source_files = {name: (HERE / name).read_text(encoding="utf-8").replace("\n", ending) for name in ordered_files}
-                    fixed = {name: (HERE / name).read_text(encoding="utf-8").replace("\n", ending).encode() for name in re.findall("'([^']+)'", re.search(r"\$fixedNames = @\((.*?)\)", wrapper).group(1))}
-                    literal = declaration(wrapper, fixed)
+                    fixed = {name: (HERE / name).read_text(encoding="utf-8").replace("\n", ending).encode() for name in source_inventory(wrapper)[1]["fixed"]}
+                    fixed_frame = declaration(wrapper, fixed)
                     from rollout_probe import IMAGE
                     identity = {"root": IMAGE.split("@")[1], "manifest": IMAGE.split("@")[1],
                                 "rootMediaType": "application/vnd.oci.image.manifest.v1+json", "platform": "linux/amd64",
@@ -210,13 +335,13 @@ class NetworkFramingTests(unittest.TestCase):
                         "oldSource": "0769d36cf857993284109d03868393a0c7e0d7c8", "directory": "/var/tmp/kanz-gateway-policy-nu1ezqwo",
                         **{key: digest(key) for key in ("commandSHA256", "sourceSHA256", "bundleSHA256", "originalPoliciesSHA256", "originalWorkloadsSHA256")}}
                     data = {"files": source_files, "source": checkout if variant == "checkout" else digest("source")[:40], "policies": policies, "workloads": workloads,
-                            "identity": identity, "provenance": provenance, "literal": literal, "fixedSize": sum(map(len, fixed.values()))}
+                            "identity": identity, "provenance": provenance, "fixedFrame": fixed_frame}
                     with tempfile.TemporaryDirectory() as directory:
                         inputs = Path(directory) / "inputs.json"
                         inputs.write_text(json.dumps(data), encoding="utf-8")
                         prefix = "$ErrorActionPreference='Stop'\n$repo=" + quoted(ROOT) + "\n$proofRoot=" + quoted(HERE) + "\n$python=" + quoted(sys.executable) + "\n$Apply=$true\n"
                         prefix += "$d=Get-Content -Raw -Encoding utf8 -LiteralPath " + quoted(inputs) + " | ConvertFrom-Json -AsHashtable\n"
-                        prefix += "$files=$d.files;$source=$d.source;$policies=$d.policies;$identity=$d.identity;$provenance=$d.provenance;$projection=@{workloads=$d.workloads};$fixedDeclaration=$d.literal;$fixedSize=$d.fixedSize\n"
+                        prefix += "$files=$d.files;$source=$d.source;$policies=$d.policies;$identity=$d.identity;$provenance=$d.provenance;$projection=@{workloads=$d.workloads};$decoder=$d.fixedFrame.decoder;$fixedEncoded=$d.fixedFrame.encoded;$fixedSize=$d.fixedFrame.expanded\n"
                         suffix = "\n@{encoded=$encoded.Length;expanded=($bytes.Length+$fixedSize);parameters=$parameterBytes;characters=$parameters.Length}|ConvertTo-Json -Compress\n"
                         script = Path(directory) / "measure.ps1"
                         script.write_text(prefix + stage + suffix, encoding="utf-8")

@@ -2,7 +2,7 @@ import copy
 import json
 import ast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import network_evidence
 import network_fixture
@@ -87,7 +87,8 @@ class NetworkEvidenceTests(unittest.TestCase):
                 if (peer, target) == ("bff", "api-gateway"):
                     clock[0] = {"insufficient": 169.75, "below_minimum": 169.600001, "at_minimum": 169.6,
                                 "shared_timeout": 169.0, "full_timeout": 20.0,
-                                "inventory_insufficient": 169.5, "inventory_timeout": 20.0}.get(mode, clock[0])
+                                "inventory_insufficient": 169.5, "inventory_timeout": 20.0,
+                                "pre_attempt_expired": 170.0}.get(mode, clock[0])
                 return original_tcp(peer, address, port, expected, target, observations, deadline)
             with patch.object(probes, "tcp", side_effect=tcp):
                 if mode == "at_minimum":
@@ -96,6 +97,8 @@ class NetworkEvidenceTests(unittest.TestCase):
                     with self.assertRaises((RuntimeError, engine.tx.Refusal)):
                         probes.verify(workloads, True)
             self.assertIs(probes.k, k)
+            if mode == "pre_attempt_expired":
+                self.assertEqual(checks[0], 42)  # No inventory for the final gated observation.
         self.assertEqual(len(records), 1)
         network_evidence.validate(records[0], "a" * 32)
         return records[0], calls, failures
@@ -124,6 +127,72 @@ class NetworkEvidenceTests(unittest.TestCase):
         self.assertEqual(value["observationRemainingUs"], 250000)
         self.assertEqual(value["requestedTimeoutUs"], 0)
         self.assertIsNone(value["process"])
+
+    def test_pre_attempt_shared_deadline_expiry_keeps_final_positive_unknown(self):
+        record, calls, failures = self.timed_gate("pre_attempt_expired")
+        self.assertEqual((len(calls), failures), (42, []))
+        self.assertEqual(record["phase"], "network_refused")
+        self.assertEqual(len(record["observations"]), 43)
+        self.assertTrue(all(item["result"] == "verified" for item in record["observations"][:-1]))
+        item = record["observations"][-1]
+        self.assertEqual((item["peer"], item["target"], item["port"], item["expected"]),
+                         ("bff", "api-gateway", 8080, "connected"))
+        self.assertEqual((item["batches"], item["result"]), ([], "unknown"))
+        value = item["commandFailure"]
+        self.assertEqual((value["phase"], value["kind"], value["attempt"]),
+                         ("tcp_exec", "insufficient_batch_budget", 1))
+        self.assertEqual((value["activeRemainingUs"], value["observationRemainingUs"]), (0, 0))
+        self.assertEqual(value["lifetimeRemainingUs"], 250000000)
+        self.assertEqual((value["inventoryElapsedUs"], value["requestedTimeoutUs"]), (0, 0))
+        self.assertIsNone(value["process"])
+
+    def test_pre_attempt_observation_expiry_keeps_active_budget_without_inventory_or_exec(self):
+        k = Mock(side_effect=AssertionError("exec must not run"))
+        check = Mock(side_effect=AssertionError("inventory must not run"))
+        observations = []
+        # First read creates the fixture, second fixes its 20s observation end,
+        # third is the one pre-attempt gate observation. No later clock is read.
+        with patch.object(engine.time, "monotonic", side_effect=[0.0, 0.0, 20.0]) as clock:
+            probes = engine.Probes(k, None, None, "a" * 32)
+            probes.verification_started = 0.0
+            probes.check = check
+            with self.assertRaisesRegex(engine.tx.Refusal, "^network observation has insufficient batch budget$"):
+                probes.tcp("gateway", "192.0.2.1", 8101, "connected", "accounting", observations, 170.0)
+            self.assertEqual(clock.call_count, 3)
+        check.assert_not_called()
+        k.assert_not_called()
+        self.assertEqual(len(observations), 1)
+        item = observations[0]
+        self.assertEqual((item["batches"], item["result"]), ([], "unknown"))
+        value = item["commandFailure"]
+        self.assertEqual((value["phase"], value["kind"], value["attempt"]),
+                         ("tcp_exec", "insufficient_batch_budget", 1))
+        self.assertEqual(value["verificationElapsedUs"], 20000000)
+        self.assertEqual((value["lifetimeRemainingUs"], value["activeRemainingUs"], value["observationRemainingUs"]),
+                         (400000000, 150000000, 0))
+        self.assertEqual((value["inventoryElapsedUs"], value["requestedTimeoutUs"]), (0, 0))
+        self.assertIsNone(value["process"])
+        network_evidence.validate({"format": "kanz-gateway-network-v1", "nonce": "a" * 32,
+            "phase": "network_refused", "isolated": True, "observations": observations}, "a" * 32)
+
+    def test_six_completed_batches_retain_not_converged_without_budget_diagnostic(self):
+        # Mocked completed samples exercise control flow, not actual TCP denial.
+        k = Mock(return_value=json.dumps(["refused"] * 3))
+        check = Mock()
+        observations = []
+        with patch.object(engine.time, "monotonic", return_value=0.0):
+            probes = engine.Probes(k, None, None, "a" * 32)
+            probes.verification_started = 0.0
+            probes.check = check
+            probes.peers = {"gateway": {"namespace": "fixture", "name": "gateway"}}
+            with self.assertRaisesRegex(engine.tx.Refusal, "^network observation did not converge$"):
+                probes.tcp("gateway", "192.0.2.1", 8101, "connected", "accounting", observations, 170.0)
+        self.assertEqual((check.call_count, k.call_count), (6, 6))
+        item = observations[0]
+        self.assertEqual((item["result"], item["batches"]), ("not_converged", [["refused"] * 3] * 6))
+        self.assertNotIn("commandFailure", item)
+        network_evidence.validate({"format": "kanz-gateway-network-v1", "nonce": "a" * 32,
+            "phase": "network_refused", "isolated": True, "observations": observations}, "a" * 32)
 
     def test_full_and_shared_deadlines_retain_distinguishing_actual_allowances(self):
         for mode, remaining, granted in (("full_timeout", 150000000, 10000000), ("shared_timeout", 1000000, 1000000)):

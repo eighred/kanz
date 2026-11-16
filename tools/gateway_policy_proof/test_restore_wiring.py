@@ -3,7 +3,7 @@ import ast
 from pathlib import Path
 import re
 import unittest
-from test_network_framing import valid_framing
+from test_network_framing import valid_framing, names
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = {"policy_state.py", "policy_client.py", "rollout_scope.py", "recovery_receipts.py",
@@ -22,11 +22,11 @@ def verify(wrapper, source):
         return False
     if not wrapper.index("$proofRoot preflight") < wrapper.index("sts get-caller-identity") < wrapper.index("$proofRoot recovery_host") < wrapper.index("ssm send-command"):
         return False
-    transfer = re.search(r"foreach \(\$name in @\((.*?)\)\)", wrapper)
-    bootstrap = re.search(r"b=json\.loads\(raw\); names=(\{[^\n]+\})", wrapper)
-    if transfer is None or bootstrap is None:
+    try:
+        files, fixed = names(wrapper)
+    except (ValueError, AttributeError, KeyError):
         return False
-    if set(re.findall(r"'([^']+)'", transfer[1])) != FILES - {"source_loader.py"} or ast.literal_eval(bootstrap[1]) != FILES - {"source_loader.py"}:
+    if files != FILES - {"source_loader.py"} or fixed != {"source_loader.py"}:
         return False
     if not valid_framing(wrapper, {"source_loader.py"}): return False
     if any('"$work/' + name + '"' not in wrapper for name in FILES):

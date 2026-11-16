@@ -179,8 +179,10 @@ class Probes:
                                       "process": process}
         for _ in range(6):
             attempt = _ + 1
-            if time.monotonic() >= end:
-                break
+            gate_at = time.monotonic()
+            if gate_at >= end:
+                failure("tcp_exec", "insufficient_batch_budget", attempt, timing(gate_at), 0, 0, None)
+                raise tx.Refusal("network observation has insufficient batch budget")
             check_started = time.monotonic()
             before_check = timing(check_started)
             try:
