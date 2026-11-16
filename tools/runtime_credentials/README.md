@@ -65,6 +65,18 @@ The later owned TokenReview TLS CA, reviewer JWT and verification keys remain
 independent. Fixed bootstrap observations describe recognized error markers;
 an unclassified failure never becomes an invented cause or accepted proof.
 
+The disposable KV fixture explicitly retains 16 versions and verifies that
+setting and every seeded history version; Vault's default retention is ten.
+The existing `boundary-rerun` acceptance is designed to soft-delete owned
+version1 while current version16 remains clean/readable, require canonical
+bootstrap refusal, and then restore version1 and require a successful rerun.
+It checks unchanged effective runtime policy content and current credential
+state. Base may reassert identical policies before discovering unavailable
+history; this is not an assertion of zero API writes or a transactional global
+preflight. Production history bounds and missing-history refusal stay unchanged.
+Bootstrap diagnostics add only fixed field/history refusal classes, with the
+unknown fallback retained and no raw child text or derived text hash exported.
+
 Render externally with the reviewed commit/tree and the approved PyYAML 6.0.3
 dependency. For base, omit `--input`. For Tokyo, supply the exact rendered Tokyo
 overlay from that source (retain its digest/provenance; do not substitute base

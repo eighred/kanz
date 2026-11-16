@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -324,6 +325,20 @@ func (v *runtimeVaultFixture) observeBootstrap(mode string, command *exec.Cmd, e
 		}
 	case strings.Contains(text, "Error listing audits:") || strings.Contains(text, "Error enabling audit device:"):
 		stage, classification = "audit", "vault-refusal"
+	case strings.Contains(text, "Vault field lookup failed; absence is unverified and bootstrap is refused."):
+		stage, classification = "credential-field", "field-unverified"
+	case strings.Contains(text, "Vault metadata lookup failed; refusing an unverified write."):
+		stage, classification = "credential-field", "metadata-unverified"
+	case strings.Contains(text, "Credential history metadata is unavailable; refusing qualification."):
+		stage, classification = "credential-history", "history-metadata-unavailable"
+	case strings.Contains(text, "Credential history version is unknown."):
+		stage, classification = "credential-history", "history-version-unknown"
+	case strings.Contains(text, "Credential history exceeds the bounded preparation contract; operator review is required."):
+		stage, classification = "credential-history", "history-bounds-refused"
+	case strings.Contains(text, "Credential history lacks the required write budget; refusing before preparation or policy publication."):
+		stage, classification = "credential-history", "history-budget-refused"
+	case strings.Contains(text, "Credential record history contains authority outside its role; refusing qualification."):
+		stage, classification = "credential-history", "history-authority-refused"
 	case strings.Contains(text, "Error making API request."):
 		stage, classification = "vault", "vault-refusal"
 	}
@@ -371,6 +386,9 @@ func (v *runtimeVaultFixture) version(path string) int {
 
 func (v *runtimeVaultFixture) fillDummyHistory(path string, fields map[string]any, versions int) {
 	v.t.Helper()
+	if versions < 1 || versions > 16 {
+		v.t.Fatal("dummy history exceeds its explicit version bound")
+	}
 	// Fixture-only reset: each independent oracle gets the same clean dummy
 	// credential history. This is not a production recovery/cutover operation.
 	_, status := v.request(http.MethodDelete, "kv/metadata/"+path, v.root, nil)
@@ -382,6 +400,9 @@ func (v *runtimeVaultFixture) fillDummyHistory(path string, fields map[string]an
 	}
 	if v.version(path) != versions {
 		v.t.Fatal("dummy history was not the required boundary")
+	}
+	for version := 1; version <= versions; version++ {
+		v.record(v.root, path, version, true)
 	}
 }
 
@@ -414,6 +435,14 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.write("sys/mounts/kv", map[string]any{"type": "kv", "options": map[string]string{"version": "2"}})
+	// KV v2 defaults to retaining ten versions. This disposable fixture needs
+	// every version through the production contract's unchanged limit of 16.
+	v.write("kv/config", map[string]int{"max_versions": 16})
+	configuration, status := v.request(http.MethodGet, "kv/config", v.root, nil)
+	configurationData, ok := configuration["data"].(map[string]any)
+	if status != http.StatusOK || !ok || configurationData["max_versions"] != float64(16) {
+		t.Fatal("disposable KV did not retain the complete bounded history")
+	}
 	v.write("sys/audit/file", map[string]any{"type": "file", "options": map[string]string{"file_path": "/scratch/vault-audit.log"}})
 	v.write("sys/auth/kubernetes", map[string]string{"type": "kubernetes"})
 	v.write("auth/kubernetes/role/postgres-provisioner", map[string]any{"bound_service_account_names": []string{"postgres-provisioner"}, "bound_service_account_namespaces": []string{"kanz-data"}, "audience": "vault", "token_policies": []string{"fixture-unused"}})
@@ -482,7 +511,7 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 		t.Fatal("partial identity preparation accepted")
 	}
 	v.record(legacyToken, "kanz/audit", 1, true)
-	_, status := v.request(http.MethodDelete, "kv/metadata/kanz/identity-runtime", v.root, nil)
+	_, status = v.request(http.MethodDelete, "kv/metadata/kanz/identity-runtime", v.root, nil)
 	if status != http.StatusNoContent {
 		t.Fatal("explicit dummy partial-record cleanup failed")
 	}
@@ -578,6 +607,39 @@ func TestRuntimeVaultIsolation(t *testing.T) {
 		}
 		if v.version("kanz/audit-runtime") != 16 {
 			t.Fatal("ordinary bootstrap changed credential history")
+		}
+		beforePolicies := v.policyState()
+		current := v.record(v.root, "kanz/audit-runtime", 0, true)
+		if current["dsn"] != v.fixtures["audit"].appURL || current["migrate_dsn"] != nil || current["credential_isolation_state"] != "v1-active" {
+			t.Fatal("history refusal control lacks a clean readable current record")
+		}
+		v.record(v.root, "kanz/audit-runtime", 1, true)
+		v.write("kv/delete/kanz/audit-runtime", map[string]any{"versions": []int{1}})
+		deleted, status := v.request(http.MethodGet, "kv/data/kanz/audit-runtime?version=1", v.root, nil)
+		deletedData, hasData := deleted["data"].(map[string]any)
+		deletedMetadata, hasMetadata := deletedData["metadata"].(map[string]any)
+		deletionTime, hasDeletion := deletedMetadata["deletion_time"].(string)
+		if status != http.StatusNotFound || !hasData || !hasMetadata || !hasDeletion || deletionTime == "" || deletedData["data"] != nil {
+			t.Fatal("owned old version remained readable after soft deletion")
+		}
+		if !reflect.DeepEqual(current, v.record(v.root, "kanz/audit-runtime", 0, true)) {
+			t.Fatal("old-version deletion changed the clean current record")
+		}
+		if v.bootstrap("base", v.root, v.script, false) {
+			t.Fatal("canonical bootstrap accepted unavailable historical data")
+		}
+		// Base can reassert identical policies before discovering the history
+		// refusal. Check effective content, not absence of idempotent API writes.
+		if !reflect.DeepEqual(beforePolicies, v.policyState()) || v.version("kanz/audit-runtime") != 16 || !reflect.DeepEqual(current, v.record(v.root, "kanz/audit-runtime", 0, true)) {
+			t.Fatal("history refusal changed effective policy or current credential state")
+		}
+		v.write("kv/undelete/kanz/audit-runtime", map[string]any{"versions": []int{1}})
+		v.record(v.root, "kanz/audit-runtime", 1, true)
+		if !v.bootstrap("base", v.root, v.script, false) {
+			t.Fatal("canonical bootstrap did not recover after owned history restoration")
+		}
+		if !reflect.DeepEqual(beforePolicies, v.policyState()) || v.version("kanz/audit-runtime") != 16 {
+			t.Fatal("restored boundary rerun changed effective policy or history version")
 		}
 	})
 	v.configureKubernetes()

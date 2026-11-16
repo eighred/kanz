@@ -45,8 +45,9 @@ MANIFEST_TESTS = {"test_base_separates_all_three_roles_and_preserves_callers", "
 EVENT_ACTIONS = frozenset({"start", "run", "pause", "cont", "pass", "bench", "fail", "output", "skip"})
 KUBERNETES_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 BOOTSTRAP_MODES = frozenset({"base", "tv-sync", "runtime-isolation-prepare", "runtime-isolation-activate"})
-BOOTSTRAP_STAGES = frozenset({"unknown", "complete", "output", "process", "shell", "client", "token", "audit", "kubernetes-config", "vault"})
-BOOTSTRAP_CLASSES = frozenset({"unknown", "success", "output-limit", "context-ended", "launch-refused", "client-config", "vault-refusal", "local-ca-missing"})
+BOOTSTRAP_STAGES = frozenset({"unknown", "complete", "output", "process", "shell", "client", "token", "audit", "kubernetes-config", "vault", "credential-field", "credential-history"})
+BOOTSTRAP_CLASSES = frozenset({"unknown", "success", "output-limit", "context-ended", "launch-refused", "client-config", "vault-refusal", "local-ca-missing",
+    "field-unverified", "metadata-unverified", "history-metadata-unavailable", "history-version-unknown", "history-bounds-refused", "history-budget-refused", "history-authority-refused"})
 BOOTSTRAP_FRAME = re.compile(
     r"[ \t]*runtime_vault_integration_test\.go:[1-9][0-9]{0,4}: runtime-bootstrap-observation "
     r"mode=([a-z-]+) process=(not-started|exited|signaled) exit=(-1|0|[1-9][0-9]{0,2}) "
