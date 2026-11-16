@@ -85,79 +85,110 @@ func NewService(g graph.Graph, gov *governance.Governor) *Service {
 	return &Service{graph: g, gov: gov}
 }
 
-// ForDataset returns ds's governed provenance. Access to the QUERIED dataset is
-// deny-by-default: a PII target the principal can't read returns ErrForbidden
-// (and the denial is logged). Upstream PII nodes the principal can't read are
-// included but redacted.
-func (s *Service) ForDataset(ctx context.Context, p *auth.Principal, ds graph.DatasetID) (*Provenance, error) {
-	info, ok := s.graph.Get(ds)
-	if !ok {
-		// The dataset table is never evicted — its cardinality is the estate's
-		// schema count — so a miss here is not an eviction. It is still not
-		// conclusive: a restarted pod holds no datasets either, and the durable
-		// consumer does not replay the history that built them.
-		return nil, s.miss()
+func callerScope(p *auth.Principal) (graph.Owner, error) {
+	if p == nil || p.Tenant == "" {
+		return "", ErrForbidden
 	}
-	d, sens := s.gov.CheckAccess(ctx, p, ds, info.SchemaRef)
-	if !d.Allow {
-		return nil, ErrForbidden
-	}
-	prov := &Provenance{
-		Status:   graph.LookupRetained,
-		Target:   node(info, sens, false),
-		Coverage: s.graph.Coverage(),
-	}
-	for _, up := range s.graph.Upstream(ds) {
-		upInfo, _ := s.graph.Get(up)
-		ud, usens := s.gov.CheckAccess(ctx, p, up, upInfo.SchemaRef)
-		prov.Upstream = append(prov.Upstream, node(upInfo, usens, !ud.Allow))
-	}
-	return prov, nil
+	// Selector only. Resource ownership is independently read from stored Info.
+	return graph.Owner(p.Tenant), nil
 }
 
-// ForEvent resolves the dataset an event produced, then its provenance.
-func (s *Service) ForEvent(ctx context.Context, p *auth.Principal, eventID string) (*Provenance, error) {
-	ds, look := s.graph.DatasetOf(eventID)
-	switch look {
-	case graph.LookupRetained:
-		return s.ForDataset(ctx, p, ds)
-	case graph.LookupNotObserved:
-		return nil, ErrNotFound
-	default:
-		return nil, ErrNotRetained
-	}
+type lookupError struct {
+	status   graph.Lookup
+	coverage graph.Coverage
 }
 
-// miss maps a lookup failure to the error that says what the failure MEANS.
-func (s *Service) miss() error {
-	if s.graph.Coverage().Complete {
+func (e *lookupError) Error() string { return e.Unwrap().Error() }
+func (e *lookupError) Unwrap() error {
+	if e.status == graph.LookupNotObserved {
 		return ErrNotFound
 	}
 	return ErrNotRetained
 }
+func (s *Service) miss(owner graph.Owner) error {
+	coverage := s.graph.Coverage(owner)
+	status := graph.LookupUnknown
+	if coverage.Complete {
+		status = graph.LookupNotObserved
+	}
+	return &lookupError{status: status, coverage: coverage}
+}
+func (s *Service) ForDataset(ctx context.Context, p *auth.Principal, ds graph.DatasetID) (*Provenance, error) {
+	owner, err := callerScope(p)
+	if err != nil {
+		return nil, err
+	}
+	info, ok := s.graph.Get(owner, ds)
+	if !ok {
+		return nil, s.miss(owner)
+	}
+	d, sens := s.gov.CheckAccess(ctx, p, info)
+	if !d.Allow {
+		if d.Code.IsIsolation() {
+			return nil, s.miss(owner)
+		}
+		return nil, ErrForbidden
+	}
+	prov := &Provenance{Status: graph.LookupRetained, Target: node(info, sens, false), Coverage: s.graph.Coverage(owner)}
+	for _, up := range s.graph.Upstream(owner, ds) {
+		d, sens := s.gov.CheckAccess(ctx, p, up)
+		if !d.Allow && d.Code.IsIsolation() {
+			continue
+		}
+		prov.Upstream = append(prov.Upstream, node(up, sens, !d.Allow))
+	}
+	return prov, nil
+}
+func (s *Service) ForEvent(ctx context.Context, p *auth.Principal, eventID string) (*Provenance, error) {
+	owner, err := callerScope(p)
+	if err != nil {
+		return nil, err
+	}
+	ds, look := s.graph.DatasetOf(owner, eventID)
+	if look != graph.LookupRetained {
+		return nil, s.miss(owner)
+	}
+	return s.ForDataset(ctx, p, ds)
+}
 
-// Coverage exposes the graph's coverage so a transport can render it alongside a
-// refusal. Read through the graph rather than cached, so the number a caller is
-// handed cannot drift from the index it describes.
-func (s *Service) Coverage() graph.Coverage { return s.graph.Coverage() }
+type Catalog struct {
+	Count    int            `json:"count"`
+	Datasets []graph.Info   `json:"datasets"`
+	Coverage graph.Coverage `json:"coverage"`
+}
 
-// Explain builds the body for a miss, stating what the miss does and does not
-// establish. The two texts are deliberately not interchangeable: one is a
-// finding, the other is a refusal to make one.
-func (s *Service) Explain(status graph.Lookup) Unresolved {
-	u := Unresolved{Status: status, Coverage: s.graph.Coverage()}
-	if status == graph.LookupNotObserved {
+// Catalog preserves the existing same-owner metadata policy. Ownership is
+// enforced before listing; PII provenance keeps its separate existing gate.
+func (s *Service) Catalog(_ context.Context, p *auth.Principal) (Catalog, error) {
+	owner, err := callerScope(p)
+	if err != nil {
+		return Catalog{}, err
+	}
+	items := make([]graph.Info, 0)
+	for _, info := range s.graph.Datasets(owner) {
+		if s.gov.CheckOwner(p, info).Allow {
+			items = append(items, info)
+		}
+	}
+	return Catalog{Count: len(items), Datasets: items, Coverage: s.graph.Coverage(owner)}, nil
+}
+
+// Explain uses the scoped coverage captured with the miss, never a global
+// fallback or a second graph read at the HTTP error boundary.
+func (s *Service) Explain(err error) (Unresolved, bool) {
+	var miss *lookupError
+	if !errors.As(err, &miss) {
+		return Unresolved{}, false
+	}
+	u := Unresolved{Status: miss.status, Coverage: miss.coverage}
+	if miss.status == graph.LookupNotObserved {
 		u.Error = "not found"
-		u.Detail = "this index has observed the estate's full history and evicted nothing, " +
-			"so this identifier was never observed"
-		return u
+		u.Detail = "this explicitly declared owner-scoped history was completely observed and evicted nothing; this identifier was never observed in that scope"
+		return u, true
 	}
 	u.Error = "not retained"
-	u.Detail = "this index is bounded and does not cover the whole history: it retains " +
-		"the most recent events only, and a restart resumes at the last acked event rather " +
-		"than replaying. THIS IS NOT A FINDING THAT THE IDENTIFIER IS UNKNOWN TO THE ESTATE — " +
-		"it is this service declining to answer. See coverage for what it does cover."
-	return u
+	u.Detail = "this bounded owner-scoped index does not establish absence: history may precede this process, be unretained, or never have been observed in this scope"
+	return u, true
 }
 
 func node(info graph.Info, sens governance.Sensitivity, redacted bool) Node {

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 
@@ -91,10 +92,7 @@ func TestBuildGovernorUsesTheInjectedRecorder(t *testing.T) {
 	// Deny-by-default: no policy bundle, so this is a DENY — and a refusal
 	// nobody can reconstruct is worse than an allow nobody can, which is why
 	// AUTH-01d records both.
-	decision, sens := gov.CheckAccess(context.Background(),
-		&auth.Principal{Subject: "user:someone", Tenant: "acme"},
-		graph.DatasetID{Namespace: "pii-ns", Name: "customers"},
-		"")
+	decision, sens := gov.CheckAccess(context.Background(), &auth.Principal{Subject: "user:someone", Tenant: "acme"}, ownedInfo(t, "acme", graph.DatasetID{Namespace: "pii-ns", Name: "customers"}, ""))
 
 	// NON-VACUITY: if the dataset classified as public, CheckAccess short-circuits
 	// before the authorizer and this test would prove nothing about the recorder.
@@ -113,4 +111,24 @@ func TestBuildGovernorUsesTheInjectedRecorder(t *testing.T) {
 			"including the bus-backed one — is wired to nothing and every authorization decision " +
 			"still reaches the log only.")
 	}
+}
+
+func ownedInfo(t *testing.T, owner graph.Owner, ds graph.DatasetID, schema string) graph.Info {
+	t.Helper()
+	if schema == "" {
+		schema = "fixture.v1.Record:1"
+	}
+	g, err := graph.NewMemory(graph.Limits{EventIndexMax: 8, DatasetMax: 8, EdgeMax: 8, StringBytesMax: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Observe(graph.Observation{Owner: owner, EventID: "fixture", Dataset: ds, Domain: "fixture", SchemaRef: schema,
+		At: time.Unix(1, 0), Source: "fixture", CorrelationID: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	info, ok := g.Get(owner, ds)
+	if !ok {
+		t.Fatal("owned record missing")
+	}
+	return info
 }

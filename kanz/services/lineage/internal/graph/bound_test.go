@@ -1,4 +1,4 @@
-package graph_test
+package graph
 
 import (
 	"encoding/json"
@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
 // THE DEFECT, PINNED (#244).
@@ -18,36 +16,36 @@ import (
 // until the pod is OOMKilled, after which the durable consumer resumes at last
 // ack and the graph is never rebuilt.
 //
-// A million observations run in well under a second here, so this is the real
-// number the issue names rather than a stand-in.
+// Exercise the full million-observation count named by the issue. This is a
+// retained-state bound, not a measured timing or RSS claim.
 func TestEventIndexIsBoundedUnderAMillionObservations(t *testing.T) {
-	g := graph.NewMemory()
+	g := newGraph(t)
 	now := time.Now()
 	const n = 1_000_000
 	for i := 0; i < n; i++ {
-		g.Observe("evt-"+strconv.Itoa(i), ds("kanz.risk", "ExposureSet"), "risk",
-			"risk.v1.ExposureSet:1", now, "")
+		mustObserve(t, g, "evt-"+strconv.Itoa(i), ds("kanz.risk", "ExposureSet"), "risk",
+			"risk.v1.ExposureSet:1", now.Add(time.Duration(i)*time.Nanosecond), "")
 	}
 
-	cov := g.Coverage()
-	if cov.Retained != graph.DefaultEventIndexCapacity {
+	cov := g.Coverage("acme")
+	if cov.Retained != DefaultEventIndexCapacity {
 		t.Errorf("retained = %d after %d observations, want the cap %d",
-			cov.Retained, n, graph.DefaultEventIndexCapacity)
+			cov.Retained, n, DefaultEventIndexCapacity)
 	}
 	if cov.Retained > cov.Capacity {
 		t.Errorf("retained %d exceeds capacity %d", cov.Retained, cov.Capacity)
 	}
-	if want := uint64(n - graph.DefaultEventIndexCapacity); cov.Evicted != want {
+	if want := uint64(n - DefaultEventIndexCapacity); cov.Evicted != want {
 		t.Errorf("evicted = %d, want %d", cov.Evicted, want)
 	}
 
 	// The oldest is gone and the newest is kept: eviction is insertion-ordered.
-	if _, look := g.DatasetOf("evt-0"); look != graph.LookupUnknown {
+	if _, look := g.DatasetOf("acme", "evt-0"); look != LookupUnknown {
 		t.Errorf("DatasetOf(evt-0) = %q, want %q — the first of a million is still indexed",
-			look, graph.LookupUnknown)
+			look, LookupUnknown)
 	}
-	if _, look := g.DatasetOf("evt-" + strconv.Itoa(n-1)); look != graph.LookupRetained {
-		t.Errorf("DatasetOf(newest) = %q, want %q", look, graph.LookupRetained)
+	if _, look := g.DatasetOf("acme", "evt-"+strconv.Itoa(n-1)); look != LookupRetained {
+		t.Errorf("DatasetOf(newest) = %q, want %q", look, LookupRetained)
 	}
 }
 
@@ -59,16 +57,16 @@ func TestEventIndexIsBoundedUnderAMillionObservations(t *testing.T) {
 func TestBoundIsIndependentOfHowManyEventsArrive(t *testing.T) {
 	const cap = 1000
 	for _, n := range []int{100, 5_000, 1_000_000} {
-		g := graph.NewMemory(graph.WithEventIndexCapacity(cap))
+		g := newGraph(t, WithEventIndexCapacity(cap))
 		now := time.Now()
 		for i := 0; i < n; i++ {
-			g.Observe("e"+strconv.Itoa(i), ds("kanz.x", "A"), "x", "", now, "")
+			mustObserve(t, g, "e"+strconv.Itoa(i), ds("kanz.x", "A"), "x", "", now.Add(time.Duration(i)*time.Nanosecond), "")
 		}
 		want := n
 		if want > cap {
 			want = cap
 		}
-		if got := g.Coverage().Retained; got != want {
+		if got := g.Coverage("acme").Retained; got != want {
 			t.Errorf("n=%d: retained = %d, want %d", n, got, want)
 		}
 	}
@@ -80,21 +78,21 @@ func TestBoundIsIndependentOfHowManyEventsArrive(t *testing.T) {
 // replayed many times evicts nothing.
 func TestRedeliveryDoesNotConsumeSlots(t *testing.T) {
 	const cap = 64
-	g := graph.NewMemory(graph.WithEventIndexCapacity(cap))
+	g := newGraph(t, WithEventIndexCapacity(cap))
 	now := time.Now()
 	for round := 0; round < 50; round++ {
 		for i := 0; i < cap; i++ {
-			g.Observe("e"+strconv.Itoa(i), ds("kanz.x", "A"), "x", "", now, "")
+			mustObserve(t, g, "e"+strconv.Itoa(i), ds("kanz.x", "A"), "x", "", now, "")
 		}
 	}
-	cov := g.Coverage()
+	cov := g.Coverage("acme")
 	if cov.Evicted != 0 {
 		t.Errorf("evicted = %d after replaying the same %d ids, want 0", cov.Evicted, cap)
 	}
 	if cov.Retained != cap {
 		t.Errorf("retained = %d, want %d", cov.Retained, cap)
 	}
-	if _, look := g.DatasetOf("e0"); look != graph.LookupRetained {
+	if _, look := g.DatasetOf("acme", "e0"); look != LookupRetained {
 		t.Errorf("e0 = %q after redelivery, want retained", look)
 	}
 }
@@ -104,14 +102,14 @@ func TestRedeliveryDoesNotConsumeSlots(t *testing.T) {
 // graph — the deployed shape, whose consumer resumes at last ack — can never
 // say "never observed".
 func TestAMissOnABoundedIndexIsUnknownNotNeverObserved(t *testing.T) {
-	g := graph.NewMemory()
-	g.Observe("seen", ds("kanz.x", "A"), "x", "", time.Now(), "")
+	g := newGraph(t)
+	mustObserve(t, g, "seen", ds("kanz.x", "A"), "x", "", time.Now(), "")
 
-	if _, look := g.DatasetOf("never-published-by-anyone"); look != graph.LookupUnknown {
+	if _, look := g.DatasetOf("acme", "never-published-by-anyone"); look != LookupUnknown {
 		t.Errorf("miss on a graph that does not cover history = %q, want %q: "+
-			"'I have no record' was reported as 'there is no record'", look, graph.LookupUnknown)
+			"'I have no record' was reported as 'there is no record'", look, LookupUnknown)
 	}
-	if cov := g.Coverage(); cov.Complete {
+	if cov := g.Coverage("acme"); cov.Complete {
 		t.Error("a graph built by a last-ack-resuming consumer must never report complete coverage")
 	}
 }
@@ -119,13 +117,13 @@ func TestAMissOnABoundedIndexIsUnknownNotNeverObserved(t *testing.T) {
 // ...and the state is reachable, or the distinction would be decoration. A graph
 // declared to have observed all of history answers a miss conclusively.
 func TestACompleteGraphCanSayNeverObserved(t *testing.T) {
-	g := graph.NewMemory(graph.WithCompleteHistory())
-	g.Observe("seen", ds("kanz.x", "A"), "x", "", time.Now(), "")
+	g := newGraph(t, WithCompleteHistory("acme"))
+	mustObserve(t, g, "seen", ds("kanz.x", "A"), "x", "", time.Now(), "")
 
-	if _, look := g.DatasetOf("absent"); look != graph.LookupNotObserved {
-		t.Errorf("miss on a complete graph = %q, want %q", look, graph.LookupNotObserved)
+	if _, look := g.DatasetOf("acme", "absent"); look != LookupNotObserved {
+		t.Errorf("miss on a complete graph = %q, want %q", look, LookupNotObserved)
 	}
-	if !g.Coverage().Complete {
+	if !g.Coverage("acme").Complete {
 		t.Error("coverage.Complete = false on a complete graph that has evicted nothing")
 	}
 }
@@ -134,25 +132,25 @@ func TestACompleteGraphCanSayNeverObserved(t *testing.T) {
 // once held all of history and has since dropped part of it cannot tell an
 // evicted id from an absent one, and must stop claiming it can.
 func TestTheFirstEvictionRetiresCompleteness(t *testing.T) {
-	g := graph.NewMemory(graph.WithCompleteHistory(), graph.WithEventIndexCapacity(2))
+	g := newGraph(t, WithCompleteHistory("acme"), WithEventIndexCapacity(2))
 	now := time.Now()
-	g.Observe("a", ds("kanz.x", "A"), "x", "", now, "")
-	g.Observe("b", ds("kanz.x", "A"), "x", "", now, "")
-	if _, look := g.DatasetOf("absent"); look != graph.LookupNotObserved {
-		t.Fatalf("before eviction: %q, want %q", look, graph.LookupNotObserved)
+	mustObserve(t, g, "a", ds("kanz.x", "A"), "x", "", now, "")
+	mustObserve(t, g, "b", ds("kanz.x", "A"), "x", "", now, "")
+	if _, look := g.DatasetOf("acme", "absent"); look != LookupNotObserved {
+		t.Fatalf("before eviction: %q, want %q", look, LookupNotObserved)
 	}
 
-	g.Observe("c", ds("kanz.x", "A"), "x", "", now, "") // evicts "a"
+	mustObserve(t, g, "c", ds("kanz.x", "A"), "x", "", now, "") // evicts "a"
 
-	if cov := g.Coverage(); cov.Complete || cov.Evicted != 1 {
+	if cov := g.Coverage("acme"); cov.Complete || cov.Evicted != 1 {
 		t.Errorf("coverage after one eviction = %+v, want complete=false evicted=1", cov)
 	}
-	if _, look := g.DatasetOf("a"); look != graph.LookupUnknown {
-		t.Errorf("the evicted id = %q, want %q", look, graph.LookupUnknown)
+	if _, look := g.DatasetOf("acme", "a"); look != LookupUnknown {
+		t.Errorf("the evicted id = %q, want %q", look, LookupUnknown)
 	}
-	if _, look := g.DatasetOf("absent"); look != graph.LookupUnknown {
+	if _, look := g.DatasetOf("acme", "absent"); look != LookupUnknown {
 		t.Errorf("an absent id = %q, want %q — eviction makes EVERY miss inconclusive, "+
-			"because the index cannot tell which kind it is", look, graph.LookupUnknown)
+			"because the index cannot tell which kind it is", look, LookupUnknown)
 	}
 }
 
@@ -160,17 +158,17 @@ func TestTheFirstEvictionRetiresCompleteness(t *testing.T) {
 // list that otherwise looks complete. That has to be counted, or a truncated
 // answer is indistinguishable from a root.
 func TestAnEvictedCauseIsCountedNotShruggedOff(t *testing.T) {
-	g := graph.NewMemory(graph.WithEventIndexCapacity(1))
+	g := newGraph(t, WithEventIndexCapacity(1))
 	now := time.Now()
-	g.Observe("parent", ds("kanz.market", "MarketDataEvent"), "market", "", now, "")
+	mustObserve(t, g, "parent", ds("kanz.market", "MarketDataEvent"), "market", "", now, "")
 	// Evicts "parent", so the edge below can never be drawn.
-	g.Observe("filler", ds("kanz.x", "Filler"), "x", "", now, "")
-	g.Observe("child", ds("kanz.risk", "ExposureSet"), "risk", "", now, "parent")
+	mustObserve(t, g, "filler", ds("kanz.x", "Filler"), "x", "", now.Add(time.Nanosecond), "")
+	mustObserve(t, g, "child", ds("kanz.risk", "ExposureSet"), "risk", "", now.Add(2*time.Nanosecond), "parent")
 
-	if up := g.Upstream(ds("kanz.risk", "ExposureSet")); len(up) != 0 {
+	if up := g.Upstream("acme", ds("kanz.risk", "ExposureSet")); len(up) != 0 {
 		t.Fatalf("upstream = %v, want empty (the cause was evicted)", up)
 	}
-	if got := g.Coverage().UnlinkedCauses; got != 1 {
+	if got := g.Coverage("acme").UnlinkedCauses; got != 1 {
 		t.Errorf("UnlinkedCauses = %d, want 1: a lost edge left no trace, so a truncated "+
 			"upstream reads as a root", got)
 	}
@@ -182,22 +180,22 @@ func TestAnEvictedCauseIsCountedNotShruggedOff(t *testing.T) {
 // as "dropped something dated the year 1", which is what a plain time.Time with
 // omitempty puts on the wire.
 func TestHorizonIsAbsentUntilSomethingIsEvicted(t *testing.T) {
-	g := graph.NewMemory(graph.WithEventIndexCapacity(2))
+	g := newGraph(t, WithEventIndexCapacity(2))
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-	g.Observe("a", ds("kanz.x", "A"), "x", "", base, "")
-	g.Observe("b", ds("kanz.x", "A"), "x", "", base.Add(time.Minute), "")
+	mustObserve(t, g, "a", ds("kanz.x", "A"), "x", "", base, "")
+	mustObserve(t, g, "b", ds("kanz.x", "A"), "x", "", base.Add(time.Minute), "")
 
-	if h := g.Coverage().Horizon; h != nil {
+	if h := g.Coverage("acme").Horizon; h != nil {
 		t.Errorf("horizon = %v before anything was evicted, want absent", h)
 	}
-	if body, err := json.Marshal(g.Coverage()); err != nil {
+	if body, err := json.Marshal(g.Coverage("acme")); err != nil {
 		t.Fatal(err)
 	} else if strings.Contains(string(body), "horizon") {
 		t.Errorf("an un-evicted index put a horizon on the wire: %s", body)
 	}
 
-	g.Observe("c", ds("kanz.x", "A"), "x", "", base.Add(2*time.Minute), "") // evicts "a"
-	got := g.Coverage().Horizon
+	mustObserve(t, g, "c", ds("kanz.x", "A"), "x", "", base.Add(2*time.Minute), "") // evicts "a"
+	got := g.Coverage("acme").Horizon
 	if got == nil {
 		t.Fatal("horizon absent after an eviction")
 	}
@@ -209,10 +207,7 @@ func TestHorizonIsAbsentUntilSomethingIsEvicted(t *testing.T) {
 // A capacity of zero is a config error, not a mode. Silently treating it as
 // unbounded would put the OOMKill back one env var away.
 func TestZeroCapacityRefusesToConstruct(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Error("NewMemory(WithEventIndexCapacity(0)) returned a graph instead of refusing")
-		}
-	}()
-	graph.NewMemory(graph.WithEventIndexCapacity(0))
+	if g, err := NewMemory(fixtureLimits(), WithEventIndexCapacity(0)); err == nil || g != nil {
+		t.Fatal("zero event capacity did not refuse construction")
+	}
 }

@@ -149,6 +149,8 @@ mint bootstrap "$BOOTSTRAP_ID"
 mint gateway "$GATEWAY_ID"
 mint tenantoms "$TENANT_OMS_ID"
 mint systemoms "$SYSTEM_OMS_ID"
+# Existing admitted system reader, only for the owned lineage/bridge fixture.
+mint audit "spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/audit"
 mint marketingest "$MARKET_INGEST_ID"
 # Authority exporters have publish-only grants on their dedicated evidence stream.
 mint identity "spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/identity"
@@ -307,6 +309,70 @@ docker run --rm --network "$NETWORK" \
   "$NATS_BOX_IMAGE" sh /scripts/bootstrap.sh > bootstrap.log 2>&1 || {
     echo "FAIL: production's bootstrap script did not complete over mTLS"
     cat bootstrap.log
+    exit 1
+  }
+
+
+# --- 4a. Provision ONLY the canonical tenant EXECUTION stream -----------------
+# Full bootstrap has more streams than acme's quota. Extract the existing
+# preamble/function and ONE invocation verbatim, with no copied stream recipe.
+# This is a dummy-account fixture prerequisite, not a production grant/change.
+TENANT_EXECUTION_AWK='
+function refuse() { bad=1; exit 1 }
+{
+  if ($0 ~ /^[[:space:]]*ensure_stream[[:space:]]*[(][)]/) {
+    definitions++
+    if (definitions != 1 || $0 != "ensure_stream() {" || phase != 0) refuse()
+    phase=1
+  }
+  if (phase == 0) {
+    if (NR == 1 && $0 != "#!/bin/sh") refuse()
+    if ($0 == "#!/bin/sh") shebang++
+    else if ($0 == "set -eu") strict++
+    else if ($0 == "NATS_URL=\"${NATS_URL:-nats://nats:4222}\"") url++
+    else if ($0 == "NATS_REPLICAS=\"${NATS_REPLICAS:-3}\"") replicas++
+    else if ($0 !~ /^[[:space:]]*#/ && $0 !~ /^[[:space:]]*$/) refuse()
+    print
+    next
+  }
+  if (phase == 1) {
+    print
+    if ($0 ~ /--storage=file --retention=limits/) storage++
+    if ($0 ~ /--replicas=/ && $0 ~ /--dupe-window=2m/) delivery++
+    if ($0 ~ /discard=--discard=old/) discard++
+    if ($0 == "}") { closed++; phase=2 }
+    next
+  }
+  if ($1 == "ensure_stream" && $2 == "EXECUTION") {
+    calls++
+    if (calls != 1 || NF != 4 || $3 != "\"execution.>,strategy.>,order.>,optimization.>\"" || $4 != "24h") refuse()
+    print
+  }
+}
+END {
+  if (bad || definitions != 1 || closed != 1 || phase != 2 || calls != 1 ||
+      shebang != 1 || strict != 1 || url != 1 || replicas != 1 ||
+      storage != 1 || delivery != 1 || discard != 1) exit 1
+}
+'
+if ! awk "$TENANT_EXECUTION_AWK" bootstrap.sh > tenant-execution-bootstrap.sh; then
+  echo "FAIL: canonical tenant EXECUTION extraction refused"
+  exit 1
+fi
+test -s tenant-execution-bootstrap.sh || { echo "FAIL: empty tenant EXECUTION script"; exit 1; }
+
+docker run --rm --network "$NETWORK" \
+  -e NATS_URL="nats://nats-0:4222" \
+  -e NATS_CERT=/etc/nats-certs/svid.pem \
+  -e NATS_KEY=/etc/nats-certs/svid_key.pem \
+  -e NATS_CA=/etc/nats-certs/bundle.pem \
+  -e NATS_REPLICAS=1 \
+  -v "$(hostpath "$OUT/tenant-execution-bootstrap.sh"):/scripts/tenant-execution-bootstrap.sh:ro" \
+  -v "$(hostpath "$OUT/tenantoms.pem"):/etc/nats-certs/svid.pem:ro" \
+  -v "$(hostpath "$OUT/tenantoms.key"):/etc/nats-certs/svid_key.pem:ro" \
+  -v "$(hostpath "$OUT/bundle.pem"):/etc/nats-certs/bundle.pem:ro" \
+  "$NATS_BOX_IMAGE" sh /scripts/tenant-execution-bootstrap.sh > tenant-execution-bootstrap.log 2>&1 || {
+    echo "FAIL: canonical tenant EXECUTION setup did not complete"
     exit 1
   }
 

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -96,21 +97,17 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	// THE EVENT INDEX IS BOUNDED, AND THE ANSWERS SAY SO (#244).
-	//
-	// This subscribes to ">", so the event_id → dataset index grew with the whole
-	// estate's event rate and nothing ever removed an entry: tens of millions of
-	// map entries a day, then an OOMKill, then a pod back in its Service in
-	// milliseconds with an empty graph that the durable consumer will never
-	// rebuild — answering "no provenance" for every trade that preceded it.
-	//
-	// WithCompleteHistory is deliberately NOT set. The consumer below resumes at
-	// last ack, so this index covers "since this pod started", and every miss must
-	// come back as unknown rather than as a finding. Setting it here would restore
-	// exactly the lie the cap would otherwise have made worse.
-	g := graph.NewMemory(graph.WithEventIndexCapacity(cfg.EventIndexMax))
-	logger.Info("lineage event index bounded", "capacity", cfg.EventIndexMax,
-		"note", "misses outside the retained window answer 410 unknown, not 404 not-found")
+	// All topology and retained-string budgets are GLOBAL and explicitly chosen
+	// before rollout. No per-tenant multiplication or completeness declaration.
+	g, err := graph.NewMemory(cfg.GraphLimits)
+	if err != nil {
+		logger.Error("graph configuration refused", "err", err)
+		return 2
+	}
+	logger.Info("lineage projection bounded", "event_capacity", cfg.GraphLimits.EventIndexMax,
+		"dataset_capacity", cfg.GraphLimits.DatasetMax, "edge_capacity", cfg.GraphLimits.EdgeMax,
+		"string_bytes_capacity", cfg.GraphLimits.StringBytesMax,
+		"note", "owner-scoped misses answer unknown; topology capacity refuses admission")
 	registerCoverageMetrics(obs.Registry, g)
 
 	// THE BUS IS DIALLED ONCE, HERE, BECAUSE TWO THINGS NOW NEED IT (#352).
@@ -129,7 +126,8 @@ func run() int {
 	// service still serves the read API (see the harvest branch below), so the
 	// governor still needs a recorder — it gets the slog one, exactly as before.
 	// The bus recorder is used ONLY when a transport exists, which means this
-	// change cannot make lineage refuse to start anywhere it starts today.
+	// recorder remains optional when no bus is configured. Graph limits are a
+	// separate required startup contract and must be chosen before image adoption.
 	//
 	// THE BUS SERIES ARE REGISTERED ONLY WHEN THERE IS A BUS. Registering
 	// kanz_bus_* and kanz_lineage_auth_decisions_lost_total unconditionally would
@@ -189,7 +187,7 @@ func run() int {
 	querySvc := query.NewService(g, gov)
 
 	readiness := &server.Readiness{}
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler()), server.WithLineage(g, querySvc)), httpserver.Standard())
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler()), server.WithLineage(querySvc)), httpserver.Standard())
 	go func() {
 		logger.Info("lineage listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -226,7 +224,7 @@ func run() int {
 
 // registerCoverageMetrics exposes what the bounded index is holding and losing.
 //
-// GaugeFuncs reading through graph.Coverage, the same stance as the OMS mark
+// GaugeFuncs reading global graph.Stats, the same stance as the OMS mark
 // fold (#96): a level, not an event, and read from the structure it describes so
 // the metric cannot drift from it. Without these, "is the cap right for this
 // estate" is answerable only by watching RSS, which is the measurement that was
@@ -236,22 +234,22 @@ func registerCoverageMetrics(reg prometheus.Registerer, g graph.Graph) {
 		Name: "kanz_lineage_event_index_retained",
 		Help: "Event ids currently indexed. Sitting at kanz_lineage_event_index_capacity means " +
 			"eviction is live and provenance older than the retained window answers unknown.",
-	}, func() float64 { return float64(g.Coverage().Retained) }))
+	}, func() float64 { return float64(g.Stats().Retained) }))
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "kanz_lineage_event_index_capacity",
 		Help: "Hard ceiling on indexed event ids (LINEAGE_EVENT_INDEX_MAX).",
-	}, func() float64 { return float64(g.Coverage().Capacity) }))
+	}, func() float64 { return float64(g.Stats().Capacity) }))
 	reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
 		Name: "kanz_lineage_event_index_evicted_total",
 		Help: "Event ids dropped to stay under the cap, for this process. Non-zero means no miss " +
 			"on this pod is evidence that an event was never observed.",
-	}, func() float64 { return float64(g.Coverage().Evicted) }))
+	}, func() float64 { return float64(g.Stats().Evicted) }))
 	reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
 		Name: "kanz_lineage_unlinked_causes_total",
 		Help: "Events whose causation id was not indexed when they arrived, so the derived-from edge " +
 			"was never drawn. Sustained growth once the index is full means the cap is below the " +
 			"estate's causation latency and upstream answers are silently short.",
-	}, func() float64 { return float64(g.Coverage().UnlinkedCauses) }))
+	}, func() float64 { return float64(g.Stats().UnlinkedCauses) }))
 }
 
 // buildGovernor wires the PII classifier + the AUTH-01b authorizer, decorated so
@@ -356,10 +354,10 @@ func (denyAll) Authorize(context.Context, auth.Request) auth.Decision {
 // goroutine, first error fails fast.
 func runHarvest(ctx context.Context, cfg config.Config, g graph.Graph, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, client *bus.NATSClient, busMetrics *bus.BusMetrics) error {
 
-	var emitter openlineage.Emitter = openlineage.NewLogEmitter(logger)
 	if cfg.OpenLineageURL != "" {
-		emitter = openlineage.NewHTTPEmitter(cfg.OpenLineageURL, nil)
+		return openlineage.ErrUnscopedSink
 	}
+	var emitter openlineage.Emitter = openlineage.NewLogEmitter(logger)
 	harvester := harvest.New(g, emitter)
 
 	// THE TRANSPORT IS NO LONGER CREATED HERE (#352). run() dials it, because the
@@ -371,30 +369,103 @@ func runHarvest(ctx context.Context, cfg config.Config, g graph.Graph, readiness
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	var (
-		wg       sync.WaitGroup
-		once     sync.Once
-		firstErr error
-	)
 	for _, subject := range cfg.Subjects {
-		wg.Add(1)
+		logger.Info("lineage subscribing", "subject", subject, "group", cfg.ConsumerGroup)
+	}
+	return runHarvestSubscriptions(ctx, cfg.Subjects, cfg.ConsumerGroup, consumer.SubscribeReady, harvester.Handle, readiness)
+}
+
+type harvestSubscribeReady func(context.Context, string, string, bus.EventHandler, func()) error
+
+// runHarvestSubscriptions is the owning registration/join seam, not a new bus
+// implementation. The production call passes the SAME Consumer's SubscribeReady
+// and the real Harvester.Handle. A callback credits one subject exactly once;
+// only all actual registrations/catch-up callbacks can publish readiness.
+func runHarvestSubscriptions(parent context.Context, subjects []string, group string, subscribe harvestSubscribeReady, handle bus.EventHandler, readiness *server.Readiness) error {
+	if readiness == nil {
+		return errors.New("lineage: readiness is required")
+	}
+	readiness.Set(false)
+	if parent.Err() != nil {
+		return nil
+	}
+	if subscribe == nil || handle == nil || len(subjects) == 0 || group == "" || strings.TrimSpace(group) != group {
+		return errors.New("lineage: explicit harvest subscriptions are required")
+	}
+	seen := make(map[string]bool, len(subjects))
+	for _, subject := range subjects {
+		if subject == "" || strings.TrimSpace(subject) != subject || seen[subject] {
+			return errors.New("lineage: empty or duplicate harvest subject refused")
+		}
+		seen[subject] = true
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	var gate sync.Mutex
+	closed := false
+	readyCount := 0
+	var firstErr error
+	closeGate := func(err error) {
+		gate.Lock()
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		closed = true
+		readiness.Set(false)
+		gate.Unlock()
+		cancel()
+	}
+	observerDone := make(chan struct{})
+	stopObserver := context.AfterFunc(parent, func() { defer close(observerDone); closeGate(nil) })
+	// Stop/join the cancellation observer OUTSIDE gate; its callback owns gate.
+	defer func() {
+		if !stopObserver() {
+			<-observerDone
+		}
+	}()
+	var workers sync.WaitGroup
+	workers.Add(len(subjects))
+	for _, subject := range subjects {
 		go func(subject string) {
-			defer wg.Done()
-			logger.Info("lineage subscribing", "subject", subject, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, harvester.Handle)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				once.Do(func() {
-					firstErr = err
-					cancel()
+			defer workers.Done()
+			if ctx.Err() != nil {
+				closeGate(nil)
+				return
+			}
+			var readyOnce sync.Once
+			ready := func() {
+				readyOnce.Do(func() {
+					gate.Lock()
+					if closed || ctx.Err() != nil {
+						gate.Unlock()
+						closeGate(nil)
+						return
+					}
+					readyCount++
+					if readyCount == len(subjects) {
+						readiness.Set(true)
+					}
+					gate.Unlock()
 				})
 			}
+			err := subscribe(ctx, subject, group, handle, ready)
+			if err != nil && !(ctx.Err() != nil && errors.Is(err, ctx.Err())) {
+				closeGate(err)
+				return
+			}
+			if ctx.Err() == nil {
+				closeGate(errors.New("lineage: harvest subscription stopped unexpectedly"))
+				return
+			}
+			closeGate(nil)
 		}(subject)
 	}
-	readiness.Set(true)
-	wg.Wait()
-	readiness.Set(false)
-	return firstErr
+	// Every exit closes readiness before this join. A cancellation/failure can
+	// never be undone by a late callback; no zero-latency scheduling claim is made.
+	workers.Wait()
+	closeGate(nil)
+	gate.Lock()
+	result := firstErr
+	gate.Unlock()
+	return result
 }

@@ -1,52 +1,31 @@
-// Package openlineage maps Kanz envelope lineage into the OpenLineage standard
-// (LIN-01a). The substrate already rides every event — correlation_id (the unit
-// of work / run), causation_id (the upstream event), source (the producing job),
-// payload_schema_ref (the dataset's schema). This package harvests that into
-// spec-shaped RunEvents an OpenLineage backend (Marquez/DataHub) ingests, and
-// the in-memory graph (package graph) answers LIN-01d "where did this come from"
-// over.
-//
-// OpenLineage, not a bespoke format, because the catalog (LIN-01b) and most
-// lineage UIs speak it natively — emitting the standard is free interoperability.
+// Package openlineage builds standard RunEvents from the atomic owned graph
+// snapshot. Ownership is carried separately; canonical URNs are never prefixed.
 package openlineage
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
-	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
-// SchemaURL pins the OpenLineage spec version these events conform to.
 const SchemaURL = "https://openlineage.io/spec/2-0-2/OpenLineage.json"
-
-// Producer identifies the emitter in every event (OpenLineage `producer`).
 const Producer = "https://github.com/eighred/kanz/services/lineage"
 
-// Dataset is an OpenLineage dataset reference: a logical table in the lineage
-// graph. Facets carry extra metadata (here the Kanz payload schema ref).
 type Dataset struct {
 	Namespace string         `json:"namespace"`
 	Name      string         `json:"name"`
 	Facets    map[string]any `json:"facets,omitempty"`
 }
-
-// Job is the processing step that produced an event — the emitting service.
 type Job struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 }
-
-// Run is one execution of a job — keyed on the envelope correlation_id, so all
-// events of one logical unit of work share a run.
 type Run struct {
 	RunID string `json:"runId"`
 }
-
-// RunEvent is the OpenLineage event: a job run consuming inputs, producing
-// outputs. Kanz emits a single COMPLETE per event (each event is an atomic,
-// already-finished production — there is no separate START/COMPLETE pair).
 type RunEvent struct {
 	EventType string    `json:"eventType"`
 	EventTime time.Time `json:"eventTime"`
@@ -58,37 +37,40 @@ type RunEvent struct {
 	SchemaURL string    `json:"schemaURL"`
 }
 
-// FromEnvelope builds the RunEvent for one event. output is this event's dataset
-// (derived by the caller, which owns the domain/entity mapping); inputs are the
-// datasets of the causing events the graph has already seen (may be empty — a
-// root event, or a cause outside the harvest window).
-func FromEnvelope(env *envelopepb.Envelope, output Dataset, inputs []Dataset) RunEvent {
-	jobName := env.GetSource()
-	if jobName == "" {
-		jobName = env.GetDomain()
-	}
-	return RunEvent{
-		EventType: "COMPLETE",
-		EventTime: env.GetEventTime().AsTime(),
-		Run:       Run{RunID: env.GetCorrelationId()},
-		Job:       Job{Namespace: "kanz", Name: jobName},
-		Inputs:    inputs,
-		Outputs:   []Dataset{output},
-		Producer:  Producer,
-		SchemaURL: SchemaURL,
-	}
+// OwnedRunEvent cannot be constructed with a caller-supplied owner. Its zero
+// value is UNKNOWN and every emitter must refuse it. Event() is a wire view,
+// not evidence that an unscoped remote store can isolate its canonical URNs.
+type OwnedRunEvent struct {
+	owner graph.Owner
+	event RunEvent
 }
 
-// Emitter ships RunEvents to an OpenLineage backend. The HTTP transport
-// (POST /api/v1/lineage to Marquez/DataHub) is deployment wiring behind this
-// seam; LogEmitter is the always-available default.
+func (e OwnedRunEvent) Owner() graph.Owner { return e.owner }
+func (e OwnedRunEvent) Event() RunEvent    { return e.event }
+
+func FromSnapshot(snapshot graph.ObservationSnapshot) (OwnedRunEvent, error) {
+	if snapshot.Owner() == "" {
+		return OwnedRunEvent{}, errors.New("openlineage: snapshot owner unknown")
+	}
+	o := snapshot.Observation()
+	var inputs []Dataset
+	if parent, ok := snapshot.Input(); ok && parent != o.Dataset {
+		inputs = append(inputs, Dataset{Namespace: parent.Namespace, Name: parent.Name})
+	}
+	output := Dataset{Namespace: o.Dataset.Namespace, Name: o.Dataset.Name,
+		Facets: map[string]any{"kanzSchema": map[string]any{
+			"_producer": Producer, "_schemaURL": SchemaURL, "payloadSchemaRef": o.SchemaRef,
+		}}}
+	return OwnedRunEvent{owner: snapshot.Owner(), event: RunEvent{
+		EventType: "COMPLETE", EventTime: o.At, Run: Run{RunID: o.CorrelationID},
+		Job: Job{Namespace: "kanz", Name: o.Source}, Inputs: inputs, Outputs: []Dataset{output},
+		Producer: Producer, SchemaURL: SchemaURL,
+	}}, nil
+}
+
 type Emitter interface {
-	Emit(ctx context.Context, ev RunEvent) error
+	Emit(context.Context, OwnedRunEvent) error
 }
-
-// LogEmitter writes each RunEvent as a structured log line — kanz logs are
-// stdout JSON shipped by the platform (OBS-01a), so this is a real sink, and the
-// safe default when no OpenLineage backend is wired.
 type LogEmitter struct{ logger *slog.Logger }
 
 func NewLogEmitter(logger *slog.Logger) *LogEmitter {
@@ -97,14 +79,17 @@ func NewLogEmitter(logger *slog.Logger) *LogEmitter {
 	}
 	return &LogEmitter{logger: logger}
 }
-
-func (e *LogEmitter) Emit(ctx context.Context, ev RunEvent) error {
+func (e *LogEmitter) Emit(ctx context.Context, event OwnedRunEvent) error {
+	if event.Owner() == "" {
+		return errors.New("openlineage: emission owner unknown")
+	}
+	wire := event.Event()
 	out := "(root)"
-	if len(ev.Outputs) > 0 {
-		out = ev.Outputs[0].Namespace + "." + ev.Outputs[0].Name
+	if len(wire.Outputs) > 0 {
+		out = wire.Outputs[0].Namespace + "." + wire.Outputs[0].Name
 	}
 	e.logger.LogAttrs(ctx, slog.LevelDebug, "openlineage run",
-		slog.String("job", ev.Job.Name), slog.String("run", ev.Run.RunID),
-		slog.String("output", out), slog.Int("inputs", len(ev.Inputs)))
+		slog.String("owner", string(event.Owner())), slog.String("job", wire.Job.Name),
+		slog.String("run", wire.Run.RunID), slog.String("output", out), slog.Int("inputs", len(wire.Inputs)))
 	return nil
 }

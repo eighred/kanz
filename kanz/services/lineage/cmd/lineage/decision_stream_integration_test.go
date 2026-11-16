@@ -128,6 +128,9 @@ func TestAnAuthorizationDecisionReachesTheObservationStream(t *testing.T) {
 
 	// The service's OWN construction, with the service's OWN config defaults —
 	// including the tenant fallback this test exists to hold in place.
+	t.Setenv("LINEAGE_DATASET_MAX", "16")
+	t.Setenv("LINEAGE_EDGE_MAX", "32")
+	t.Setenv("LINEAGE_STRING_BYTES_MAX", "65536")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
@@ -147,9 +150,7 @@ func TestAnAuthorizationDecisionReachesTheObservationStream(t *testing.T) {
 	// A real access check on the PII surface: deny-by-default, since no policy
 	// bundle is mounted. A DENY is the more important one to record — a refusal
 	// nobody can reconstruct is worse than an allow nobody can.
-	decision, sens := gov.CheckAccess(ctx,
-		&auth.Principal{Subject: principal, Tenant: "acme"},
-		graph.DatasetID{Namespace: "pii-ns", Name: "customers"}, "")
+	decision, sens := gov.CheckAccess(ctx, &auth.Principal{Subject: principal, Tenant: "acme"}, ownedInfo(t, "acme", graph.DatasetID{Namespace: "pii-ns", Name: "customers"}, ""))
 
 	// NON-VACUITY: a public dataset short-circuits before the authorizer, and no
 	// decision would be recorded at all — this test would then be asserting on a

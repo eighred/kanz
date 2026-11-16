@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 
@@ -49,7 +50,7 @@ var (
 
 func TestPublicDatasetAllowedWithoutAuthOrLog(t *testing.T) {
 	g, rec := newGovernor(t)
-	d, sens := g.CheckAccess(context.Background(), viewer, publicDS, "risk.v1.ExposureSet:1")
+	d, sens := g.CheckAccess(context.Background(), viewer, ownedInfo(t, "acme", publicDS, "risk.v1.ExposureSet:1"))
 	if !d.Allow || sens != governance.SensitivityPublic {
 		t.Errorf("public access = allow:%v sens:%v, want allow public", d.Allow, sens)
 	}
@@ -66,7 +67,7 @@ func TestPublicDatasetAllowedWithoutAuthOrLog(t *testing.T) {
 func TestNilPrincipalDeniedEvenOnAPublicDataset(t *testing.T) {
 	g, _ := newGovernor(t)
 	for name, ds := range map[string]graph.DatasetID{"public": publicDS, "pii": piiDS} {
-		d, _ := g.CheckAccess(context.Background(), nil, ds, "risk.v1.ExposureSet:1")
+		d, _ := g.CheckAccess(context.Background(), nil, ownedInfo(t, "acme", ds, "risk.v1.ExposureSet:1"))
 		if d.Allow {
 			t.Errorf("%s dataset served to a nil principal (%q) — nobody is not a caller with "+
 				"no grants, and the two must not get the same answer", name, d.Reason)
@@ -79,7 +80,7 @@ func TestPIIAccessGovernedAndLogged(t *testing.T) {
 	ctx := context.Background()
 
 	// Deny-by-default: a principal without the role is denied — and logged.
-	d, sens := g.CheckAccess(ctx, viewer, piiDS, "")
+	d, sens := g.CheckAccess(ctx, viewer, ownedInfo(t, "acme", piiDS, ""))
 	if d.Allow || sens != governance.SensitivityPII {
 		t.Errorf("viewer PII access = allow:%v, want deny", d.Allow)
 	}
@@ -88,7 +89,7 @@ func TestPIIAccessGovernedAndLogged(t *testing.T) {
 	}
 
 	// Granted: the steward role carries lineage.pii.read — allowed, also logged.
-	d, _ = g.CheckAccess(ctx, steward, piiDS, "")
+	d, _ = g.CheckAccess(ctx, steward, ownedInfo(t, "acme", piiDS, ""))
 	if !d.Allow {
 		t.Errorf("steward PII access denied: %s", d.Reason)
 	}
@@ -104,5 +105,71 @@ func TestClassifyBySchemaRefSubstring(t *testing.T) {
 	}
 	if c.Classify(graph.DatasetID{Namespace: "kanz.x", Name: "Y"}, "risk.v1.Measures:1") != governance.SensitivityPublic {
 		t.Error("non-matching ref should be public")
+	}
+}
+
+func ownedInfo(t *testing.T, owner graph.Owner, ds graph.DatasetID, schema string) graph.Info {
+	t.Helper()
+	if schema == "" {
+		schema = "fixture.v1.Record:1"
+	}
+	g, err := graph.NewMemory(graph.Limits{EventIndexMax: 8, DatasetMax: 8, EdgeMax: 8, StringBytesMax: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Observe(graph.Observation{Owner: owner, EventID: "fixture", Dataset: ds, Domain: "fixture", SchemaRef: schema,
+		At: time.Unix(1, 0), Source: "fixture", CorrelationID: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	info, ok := g.Get(owner, ds)
+	if !ok {
+		t.Fatal("owned record missing")
+	}
+	return info
+}
+
+type allowEverything struct {
+	calls   int
+	request auth.Request
+}
+
+func (a *allowEverything) Authorize(_ context.Context, r auth.Request) auth.Decision {
+	a.calls++
+	a.request = r
+	return auth.Decision{Allow: true}
+}
+func TestStoredOwnershipPrecedesPublicClassificationAndWildcardRoles(t *testing.T) {
+	info := ownedInfo(t, "foreign", publicDS, "risk.v1.ExposureSet:1")
+	for name, p := range map[string]*auth.Principal{
+		"missing": nil, "empty-tenant": {Subject: "u", Roles: []string{"admin"}},
+		"foreign-admin": {Subject: "u", Tenant: "acme", Roles: []string{"admin"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			authz := &allowEverything{}
+			// nil classifier discriminates ordering: an isolation denial must
+			// return before attempting even the public/PII classification.
+			gov := governance.NewGovernor(nil, authz)
+			d, sens := gov.CheckAccess(context.Background(), p, info)
+			if d.Allow || sens != governance.SensitivityUnknown || authz.calls != 0 {
+				t.Fatal("ownership was bypassed by public/wildcard authority")
+			}
+		})
+	}
+	gov := governance.NewGovernor(nil, &allowEverything{})
+	forged := graph.Info{ID: publicDS, SchemaRef: "risk.v1.ExposureSet:1"}
+	d, _ := gov.CheckAccess(context.Background(), viewer, forged)
+	if d.Allow || d.Code != auth.DenyResourceTenantUnresolved {
+		t.Fatal("caller-constructed record fabricated ownership")
+	}
+}
+func TestAuthorizerReceivesTheStoredResourceOwner(t *testing.T) {
+	authz := &allowEverything{}
+	gov := governance.NewGovernor(governance.NewClassifier(&governance.Config{Datasets: []string{"PersonProfile"}}), authz)
+	info := ownedInfo(t, "acme", piiDS, "customer.v1.PersonProfile:1")
+	if d, _ := gov.CheckAccess(context.Background(), steward, info); !d.Allow {
+		t.Fatal("owned authorized read refused")
+	}
+	if authz.calls != 1 || authz.request.Resource.Tenant != string(info.Owner()) || authz.request.Resource.ID != piiDS.String() {
+		t.Fatal("stored resource identity was not delegated")
 	}
 }
