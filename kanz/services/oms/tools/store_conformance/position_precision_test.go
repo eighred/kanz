@@ -47,6 +47,7 @@ func TestRustPositionPrecisionPostgresNATS(t *testing.T) {
 			portfolio := f.schema
 			instrument := fill().InstrumentId
 			key := subject.PositionFor(f.tenant, portfolio, instrument)
+			bustest.ReclaimSubjects(t, js, key, subject.VenuePositionFor(f.tenant, portfolio, fill().Venue, instrument))
 			stream, err := bustest.StreamFor(f.ctx, js, key)
 			if err != nil {
 				t.Fatal(err)

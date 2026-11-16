@@ -63,6 +63,7 @@ func TestPositionPrecisionFACTOverJetStream(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			portfolio := "precision-" + uuid.NewString()
 			key := subject.PositionFor("precision", portfolio, "instrument")
+			bustest.ReclaimSubjects(t, js, key)
 			stream, err := bustest.StreamFor(ctx, js, key)
 			if err != nil {
 				t.Fatal("canonical position stream unavailable", err)
