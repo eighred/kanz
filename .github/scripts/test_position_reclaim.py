@@ -384,6 +384,62 @@ class LaunchPermissions(unittest.TestCase):
 
 
 class ProbeObservations(unittest.TestCase):
+    def test_working_directory_is_declared_per_invocation_and_cannot_be_overridden(self):
+        base = {"HOME": "/scratch/home", "LANG": "C.UTF-8"}
+        extra = {"TEST_NATS_URL": "nats://127.0.0.1:4222"}
+        with mock.patch.dict(os.environ, {"PWD": "/private-parent", "DUMMY_PRIVATE_KEY": "dummy-private-value"}):
+            for cwd in ("/input", "/input/kanz", "/input/rust"):
+                result = sandbox.effective_environment(base, cwd, extra)
+                self.assertEqual(result, {**base, **extra, "PWD": cwd})
+        self.assertEqual(base, {"HOME": "/scratch/home", "LANG": "C.UTF-8"})
+        self.assertEqual(extra, {"TEST_NATS_URL": "nats://127.0.0.1:4222"})
+        for cwd in ("/private", "/input/../private", "relative", ""):
+            with self.assertRaises(ValueError):
+                sandbox.effective_environment(base, cwd)
+        for source, added in ((dict(base, PWD="/input/kanz"), None), (base, {"PWD": "/input/kanz"})):
+            with self.assertRaises(ValueError):
+                sandbox.effective_environment(source, "/input/kanz", added)
+
+    def test_environment_difference_retains_only_closed_names_and_counts_not_success(self):
+        value = {"schema": 1, "expected_count": 4, "observed_count": 5, "missing_count": 0,
+                 "unexpected_count": 1, "known_unexpected": ["PWD"], "unknown_count": 0, "pwd_matches_cwd": True}
+        for known, unknown in ((["PWD"], 0), ([], 1)):
+            expected = dict(value, known_unexpected=known, unknown_count=unknown)
+            raw = (sandbox.PROBE_ENTRY + b"\n" + sandbox.PROBE_ENVIRONMENT + json.dumps(expected).encode()
+                   + b"\nPOSITION_PROBE_REFUSAL v1 stage environment assertion\n")
+            observation, payload = sandbox.probe_output(1, raw, len(raw))
+            self.assertIsNone(payload)
+            self.assertEqual(observation["framing"], "refusal")
+            self.assertEqual(observation["environment_difference"], expected)
+            self.assertNotIn("passed", json.dumps(observation))
+            for code, frame in ((0, raw), (1, raw.replace(b"stage environment", b"stage identity")),
+                                (1, raw.replace(b"assertion", b"os-operation")), (1, raw + b"extra\n")):
+                refused, payload = sandbox.probe_output(code, frame, len(frame))
+                self.assertIsNone(payload)
+                self.assertNotIn("environment_difference", refused)
+
+    def test_environment_metadata_rejects_private_unknown_duplicate_and_inconsistent_fields(self):
+        original = {"schema": 1, "expected_count": 4, "observed_count": 5, "missing_count": 0,
+                    "unexpected_count": 1, "known_unexpected": ["PWD"], "unknown_count": 0, "pwd_matches_cwd": True}
+        secret = "dummy-private-environment-name-or-value"
+        changes = {"schema": True, "expected_count": 0, "observed_count": 4, "missing_count": 5,
+                   "unexpected_count": 129, "unknown_count": 1, "known_unexpected": [secret],
+                   "pwd_matches_cwd": 1, "private": secret}
+        variants = [dict(original, **{key: value}) for key, value in changes.items()]
+        variants += [dict(original, known_unexpected=["PWD", "PWD"]),
+                     dict(original, expected_count=True), dict(original, observed_count=-1),
+                     dict(original, observed_count=4, unexpected_count=0, known_unexpected=[])]
+        encoded = [json.dumps(value).encode() for value in variants]
+        encoded += [b'{"schema":1,"schema":1}', b"[]", b"\xff", b"x" * 2049]
+        for content in encoded:
+            raw = (sandbox.PROBE_ENTRY + b"\n" + sandbox.PROBE_ENVIRONMENT + content
+                   + b"\nPOSITION_PROBE_REFUSAL v1 stage environment assertion\n")
+            observation, payload = sandbox.probe_output(1, raw, len(raw))
+            self.assertIsNone(payload)
+            self.assertEqual(observation["stage"], "unknown")
+            self.assertNotIn(secret, json.dumps(observation))
+            self.assertNotIn("environment_difference", observation)
+
     def test_fixed_refusal_stages_and_candidate_record_are_not_kernel_success(self):
         for stage in sorted(sandbox.PROBE_STAGES):
             for refusal in sorted(sandbox.PROBE_REFUSALS):

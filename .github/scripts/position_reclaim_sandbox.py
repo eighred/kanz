@@ -42,6 +42,8 @@ PROBE_STAGES = frozenset(("arguments","identity","uid-map","gid-map","environmen
                          "scratch-write","private-loopback","fixed-backends","egress-refusal","proc-isolation",
                          "success-record","sampling-handshake"))
 PROBE_REFUSALS = frozenset(("assertion","os-operation","unexpected"))
+PROBE_ENVIRONMENT = b"POSITION_PROBE_ENVIRONMENT v1 "
+WORKING_DIRECTORIES = frozenset(("/input", "/input/kanz", "/input/rust"))
 # Exact English marker observations only, not an inferred first cause. Verified
 # against bubblewrap v0.9.0 bubblewrap.c and util-linux v2.39.3 prlimit.c/c.h.
 # Other versions/messages remain unknown; these markers grant no recovery action.
@@ -65,6 +67,46 @@ def launch_observation(supervisor_exit, raw):
             "launcher_refusal":next(iter(markers)) if len(markers)==1 else "unknown"}
 
 
+def effective_environment(base, cwd, extra=None):
+    # bubblewrap supplies PWD for --chdir. Declare that public value ourselves;
+    # neither an ambient value nor an extra assignment may choose it.
+    if cwd not in WORKING_DIRECTORIES or "PWD" in base or (extra and "PWD" in extra):
+        raise ValueError("working-directory environment refused")
+    result = dict(base)
+    if extra:
+        result.update(extra)
+    result["PWD"] = cwd
+    return result
+
+
+def probe_environment_output(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate environment observation field")
+            result[key] = value
+        return result
+    if len(raw) > 2048 or not raw.startswith(PROBE_ENVIRONMENT):
+        raise ValueError("environment observation frame refused")
+    value = json.loads(raw[len(PROBE_ENVIRONMENT):], object_pairs_hook=unique)
+    counts = ("expected_count", "observed_count", "missing_count", "unexpected_count", "unknown_count")
+    if (not isinstance(value, dict) or set(value) != {"schema", *counts, "known_unexpected", "pwd_matches_cwd"}
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or any(type(value[key]) is not int or not 0 <= value[key] <= 128 for key in counts)
+            or type(value["pwd_matches_cwd"]) is not bool):
+        raise ValueError("environment observation fields refused")
+    known = value["known_unexpected"]
+    if (not isinstance(known, list) or any(type(key) is not str or key not in {"PWD", "LC_CTYPE", "SHLVL", "_"} for key in known)
+            or known != sorted(set(known)) or not 1 <= value["expected_count"]
+            or value["missing_count"] > value["expected_count"] or value["unexpected_count"] > value["observed_count"]
+            or value["observed_count"] != value["expected_count"] - value["missing_count"] + value["unexpected_count"]
+            or value["unexpected_count"] != len(known) + value["unknown_count"]
+            or not (value["missing_count"] or value["unexpected_count"] or not value["pwd_matches_cwd"])):
+        raise ValueError("environment observation counts refused")
+    return value
+
+
 def probe_output(supervisor_exit, raw, combined_output_bytes):
     """Project a bounded fixed child protocol; return no unknown diagnostic text."""
     observation={"schema":1,"supervisor_exit":supervisor_exit,"combined_output_bytes":combined_output_bytes,
@@ -82,6 +124,14 @@ def probe_output(supervisor_exit, raw, combined_output_bytes):
         observation["launcher_refusal"]=launch_observation(supervisor_exit,raw)["launcher_refusal"]
         return observation,None
     observation["inner_entry"]=True
+    environment = None
+    if len(lines) == 3 and supervisor_exit and lines[1].startswith(PROBE_ENVIRONMENT):
+        try:
+            environment = probe_environment_output(lines[1])
+        except (ValueError, UnicodeError, TypeError):
+            observation["framing"] = "invalid-environment"
+            return observation, None
+        lines = [lines[0], lines[2]]
     if len(lines)!=2 or lines.count(PROBE_ENTRY)!=1:
         observation["framing"]="unexpected-output"
         return observation,None
@@ -92,6 +142,11 @@ def probe_output(supervisor_exit, raw, combined_output_bytes):
             except UnicodeDecodeError: pass
             else:
                 if parts[2]==b"stage" and stage in PROBE_STAGES and refusal in PROBE_REFUSALS:
+                    if environment is not None:
+                        if stage != "environment" or refusal != "assertion":
+                            observation["framing"] = "invalid-environment"
+                            return observation, None
+                        observation["environment_difference"] = environment
                     observation.update(framing="refusal",stage=stage,refusal=refusal)
                     return observation,None
         observation["framing"]="invalid-refusal"
@@ -721,8 +776,7 @@ class Sandbox:
     def execute(self,args,*,seconds=540,cwd="/input/kanz",extra=None,mounts=(),output_limit=MAX_OUTPUT):
         self.capsule.verify()
         unit = "position-"+uuid.uuid4().hex
-        env = dict(self.environment)
-        if extra: env.update(extra)
+        env = effective_environment(self.environment, cwd, extra)
         private=os.fstat(self.out_fd)
         if not stat.S_ISDIR(private.st_mode) or private.st_uid!=os.geteuid() or stat.S_IMODE(private.st_mode)!=0o700:
             raise ValueError("private artifact directory mode refused")
@@ -882,7 +936,12 @@ try:
     stage="gid-map"
     assert open("/proc/self/gid_map").read().split()[::2]==["65534","1"]
     stage="environment"
-    assert set(os.environ)==set(expected), "ambient environment escaped"
+    actual=set(os.environ); missing=set(expected)-actual; unexpected=actual-set(expected)
+    pwd_matches=os.environ.get("PWD")==os.getcwd()
+    if missing or unexpected or not pwd_matches:
+        known=unexpected & {"PWD","LC_CTYPE","SHLVL","_"}
+        print("POSITION_PROBE_ENVIRONMENT v1 "+json.dumps({"schema":1,"expected_count":len(expected),"observed_count":len(actual),"missing_count":len(missing),"unexpected_count":len(unexpected),"known_unexpected":sorted(known),"unknown_count":len(unexpected-known),"pwd_matches_cwd":pwd_matches},sort_keys=True),flush=True)
+    assert not missing and not unexpected and pwd_matches, "ambient environment escaped"
     stage="core-limit"
     assert resource.getrlimit(resource.RLIMIT_CORE)==(0,0)
     stage="file-limit"
@@ -945,7 +1004,8 @@ except BaseException:
     raise SystemExit(1) from None
 '''
         try:
-            code,raw=self.execute(["python3","-I","-c",script,json.dumps(sorted(self.environment)),self.host_ip,str(denied.getsockname()[1])],seconds=30,output_limit=65536)
+            expected = effective_environment(self.environment, "/input/kanz")
+            code,raw=self.execute(["python3","-I","-c",script,json.dumps(sorted(expected)),self.host_ip,str(denied.getsockname()[1])],seconds=30,output_limit=65536)
             observation,raw=probe_output(code,raw,self.executions[-1]["combined_output_bytes"])
             self.retain("sandbox-probe-observation.json",json.dumps(observation,sort_keys=True).encode())
             if code: raise ValueError("kernel/mount/environment/network probes failed")

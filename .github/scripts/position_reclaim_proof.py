@@ -46,7 +46,7 @@ for _name,_expected in EVIDENCE_PINS.items():
 
 from go_shard_evidence import identity, inventory, validate_events, digest, MAX_EVENTS
 from go_test_evidence import check, events
-from position_reclaim_sandbox import Sandbox, VisibleInputCapsule, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS
+from position_reclaim_sandbox import Sandbox, VisibleInputCapsule, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS, effective_environment
 
 PREFIX = "github.com/eighred/kanz/"
 STORE = PREFIX+"services/oms/tools/store_conformance"
@@ -294,7 +294,7 @@ class Proof:
         self.box=Sandbox(self.repo,capsule=self.input_capsule,artifact_root=self.root,tools=tools,env=env)
         self.box.start()
         self.box.probe()
-        provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(Path("/usr/bin/cc").resolve().read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"loopback_ports":list(PORTS),"relay_translations":[{"outer":outer,"backend":backend,"inner":backend} for outer,backend in RELAY_PORTS]},"environment_names":sorted(env)}
+        provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(Path("/usr/bin/cc").resolve().read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"loopback_ports":list(PORTS),"relay_translations":[{"outer":outer,"backend":backend,"inner":backend} for outer,backend in RELAY_PORTS]},"environment_names":sorted(effective_environment(env,"/input/kanz"))}
         provenance["evidence_consumer_pins"]=EVIDENCE_PINS
         provenance["nats_endpoint_mapping"]={"host":"localhost:4222","sandbox":"127.0.0.1:4222","outer_transit":24222,"same_fixed_backend":4222}
         source_fd=directory(self.box.inputs/"source")

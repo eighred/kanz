@@ -537,8 +537,9 @@ func positionForeignRecoveryInputPaths(repo string) ([]string, error) {
 // facts; the system OMS refuses those before its book. This is a reviewed
 // absence of a runtime edge, not an exemption for a tools directory. Bind every
 // current caller, native producer and admission/configuration source byte.
-// #1597 adds the reviewed sub-eight-place recovery quantity assertions;
-// the other 37 inputs and the foreign-tenant admission premise remain unchanged.
+// #1597 adds sub-eight-place recovery assertions; #1610 observes startup and
+// process-join outcomes in deadline/worker controls. Those reviewed changes keep
+// the foreign-tenant admission premise; every remaining input is unchanged.
 // Inventory every Go source file in the recovery owner, not only tests: a new
 // helper, linked input or changed byte removes this classification for review.
 func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
@@ -560,7 +561,7 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 	}
 	// Independently reconstructed from canonical Git LF blobs: sorted path,
 	// NUL, normalized source bytes, NUL; all Go files still total 38 inputs.
-	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "51bc442a8b9b17349e1a8aa6e720e03fac15b3b68e85d3911a4b9a26ff76f481" {
+	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "910810599648278c6071d8da90428199ed6a6451693e8a81d748b7e352dc7b4c" {
 		return false
 	}
 	workflow, err := os.ReadFile(filepath.Join(repo, ".github/workflows/kanz-ci.yml"))
