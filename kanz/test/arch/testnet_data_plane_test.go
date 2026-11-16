@@ -2,11 +2,18 @@ package arch
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"sigs.k8s.io/yaml"
 )
@@ -284,4 +291,117 @@ func bytesBeforeNextDocument(raw []byte) int {
 		return i
 	}
 	return len(raw)
+}
+
+// The namespace and pod selectors belong to the same peer (AND). Splitting
+// them into peers would authorize every pod in observability and same-namespace
+// pods with the scraper label. This is structural proof, not CNI enforcement.
+func TestTokyoPostgresMetricsPolicy(t *testing.T) {
+	raw := mustReadArchFile(t, filepath.Join(moduleRoot(t), "infra", "overlays", "testnet_tokyo", "data", "postgres.yaml"))
+	if err := checkTokyoPostgresMetricsPolicy(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkTokyoPostgresMetricsPolicy(raw []byte) error {
+	docs, err := decodeYAMLStream[map[string]any](raw)
+	if err != nil {
+		return err
+	}
+	found := 0
+	for _, doc := range docs {
+		body, err := json.Marshal(doc)
+		if err != nil {
+			return err
+		}
+		var policy networkingv1.NetworkPolicy
+		if err := json.Unmarshal(body, &policy); err != nil {
+			return err
+		}
+		if policy.Kind != "NetworkPolicy" || policy.Name != "postgres-prometheus-metrics" {
+			continue
+		}
+		found++
+		if policy.APIVersion != "networking.k8s.io/v1" || policy.Namespace != "kanz-data" || !reflect.DeepEqual(policy.Spec, tokyoPostgresMetricsSpec()) {
+			return fmt.Errorf("Postgres metrics must admit only kanz-observability/app=prometheus to this CNPG cluster on TCP 9187, without egress or database access")
+		}
+	}
+	if found != 1 {
+		return fmt.Errorf("expected one bounded Postgres metrics policy, found %d", found)
+	}
+	return nil
+}
+
+func TestTokyoPostgresMetricsPolicyRefusesBroaderRules(t *testing.T) {
+	base := &networkingv1.NetworkPolicy{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
+		ObjectMeta: metav1.ObjectMeta{Name: "postgres-prometheus-metrics", Namespace: "kanz-data"},
+		Spec:       tokyoPostgresMetricsSpec(),
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*networkingv1.NetworkPolicy)
+	}{
+		{"any-namespace", func(p *networkingv1.NetworkPolicy) {
+			p.Spec.Ingress[0].From[0].NamespaceSelector = &metav1.LabelSelector{}
+		}},
+		{"any-observability-pod", func(p *networkingv1.NetworkPolicy) { p.Spec.Ingress[0].From[0].PodSelector = nil }},
+		{"selector-union", func(p *networkingv1.NetworkPolicy) {
+			peer := p.Spec.Ingress[0].From[0]
+			p.Spec.Ingress[0].From = []networkingv1.NetworkPolicyPeer{{NamespaceSelector: peer.NamespaceSelector}, {PodSelector: peer.PodSelector}}
+		}},
+		{"database-port", func(p *networkingv1.NetworkPolicy) { p.Spec.Ingress[0].Ports[0].Port = ptrMetricsPort(5432) }},
+		{"extra-port", func(p *networkingv1.NetworkPolicy) {
+			p.Spec.Ingress[0].Ports = append(p.Spec.Ingress[0].Ports, networkingv1.NetworkPolicyPort{Port: ptrMetricsPort(5432)})
+		}},
+		{"egress", func(p *networkingv1.NetworkPolicy) { p.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{{}} }},
+		{"all-target-pods", func(p *networkingv1.NetworkPolicy) { p.Spec.PodSelector = metav1.LabelSelector{} }},
+		{"other-namespace", func(p *networkingv1.NetworkPolicy) { p.Namespace = "tenant-acme" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := base.DeepCopy()
+			tc.mutate(policy)
+			if reflect.DeepEqual(policy, base) {
+				t.Fatal("control did not change the policy")
+			}
+			raw, err := json.Marshal(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if checkTokyoPostgresMetricsPolicy(raw) == nil {
+				t.Fatal("broader policy accepted")
+			}
+		})
+	}
+	if err := checkTokyoPostgresMetricsPolicy([]byte("---\n")); err == nil {
+		t.Fatal("missing metrics policy accepted")
+	}
+	raw, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkTokyoPostgresMetricsPolicy(append(append(append([]byte{}, raw...), []byte("\n---\n")...), raw...)); err == nil {
+		t.Fatal("duplicate metrics policies accepted")
+	}
+}
+
+func ptrMetricsPort(value int32) *intstr.IntOrString {
+	port := intstr.FromInt32(value)
+	return &port
+}
+
+func tokyoPostgresMetricsSpec() networkingv1.NetworkPolicySpec {
+	port := intstr.FromInt32(9187)
+	protocol := corev1.ProtocolTCP
+	return networkingv1.NetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"cnpg.io/cluster": "kanz-testnet-postgres"}},
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{{
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kanz-observability"}},
+				PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "prometheus"}},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{{Port: &port, Protocol: &protocol}},
+		}},
+	}
 }
