@@ -62,7 +62,7 @@ spiffe-rustls = "=0.11.0"
 uuid = { version = "=1.29.2", features = ["v7"] }
 
 [build-dependencies]
-prost-build = "=0.14.1"
+prost-build = "=0.14.6"
 protoc-bin-vendored = "=3.3.0"
 
 [dev-dependencies]

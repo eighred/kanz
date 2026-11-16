@@ -38,7 +38,7 @@ tokio = { version = "=1.54.1", default-features = false, features = ["rt", "time
 libc = "=0.2.191"
 
 [build-dependencies]
-prost-build = "=0.14.1"
+prost-build = "=0.14.6"
 protoc-bin-vendored = "=3.3.0"`
 
 // Hash reviewed startup, canonical generation and process-test seams after the

@@ -38,7 +38,7 @@ spiffe = { version = "=0.19.0", features = ["x509-source"] }
 spiffe-rustls = "=0.11.0"
 
 [build-dependencies]
-prost-build = "=0.14.1"
+prost-build = "=0.14.6"
 protoc-bin-vendored = "=3.3.0"
 
 [dev-dependencies]
