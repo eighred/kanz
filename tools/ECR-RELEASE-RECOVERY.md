@@ -62,7 +62,7 @@ trading or advance deployed versions as part of registry recovery.
 ```powershell
 python -m unittest discover -s tools -p test_ecr_release_recovery.py
 ./tools/Test-EcrReleaseDigest.ps1
-# From kanz/infra/terraform-testnet after terraform init:
+# From kanz/infra/terraform_testnet after terraform init:
 ./Invoke-Terraform.ps1 test
 ```
 

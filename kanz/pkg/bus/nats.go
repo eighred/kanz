@@ -164,7 +164,7 @@ type NATSClient struct {
 // colliding Subscribe through. The key space is one entry per Subscribe CALL —
 // never per message, order or tenant — so it is the composition root's own subject
 // list, and for the one operator-supplied subject in the estate
-// (cmd/kanz-redrive --subject) it is one entry in a process that then exits.
+// (cmd/kanz_redrive --subject) it is one entry in a process that then exits.
 // test/arch/long_lived_maps_are_evicted_test.go carries that argument as this
 // field's eviction exemption.
 type durableClaims struct {
@@ -430,7 +430,7 @@ func (c *NATSClient) subscribeDurable(ctx context.Context, subject, group string
 	// not a lint. The subject list is DEPLOYMENT CONFIGURATION in most of the
 	// estate — ACCOUNTING_FILL_SUBJECTS, AUDIT_SUBJECTS, ARCHIVER_SUBJECTS,
 	// ALTERNATIVES_SUBJECTS, AUTOPILOT_SUBJECTS are all env.SplitList — and
-	// cmd/kanz-redrive takes its subject straight off an operator's `--subject`
+	// cmd/kanz_redrive takes its subject straight off an operator's `--subject`
 	// flag, whose own help text offers `dlq.order.>` while `dlq.order.*` sanitizes
 	// to the same durable from a different invocation entirely.
 	//

@@ -116,12 +116,12 @@ jobs:
         cache: false
     - name: Set up canonical schema generator
       if: matrix.language == 'go'
-      uses: ./.github/actions/setup-buf
+      uses: ./.github/actions/setup_buf
       with:
         version: 1.69.0
     - name: Generate canonical Go SDK before extraction
       if: matrix.language == 'go'
-      working-directory: kanz-schemas
+      working-directory: schemas
       shell: bash
       run: |
         go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11

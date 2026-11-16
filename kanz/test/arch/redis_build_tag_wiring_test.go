@@ -146,7 +146,7 @@ func servicesWithRedisTaggedSource(t *testing.T, servicesDir string) []string {
 			return nil
 		}
 		rel, _ := filepath.Rel(servicesDir, path)
-		found[strings.Split(filepath.ToSlash(rel), "/")[0]] = true
+		found[deployedServiceName(strings.Split(filepath.ToSlash(rel), "/")[0])] = true
 		return nil
 	})
 	if err != nil {
@@ -177,7 +177,7 @@ func servicesBuildingWithRedisTag(t *testing.T, servicesDir string) map[string]b
 			continue // not every service ships an image
 		}
 		if reTagsRedis.Match(stripDockerfileComments(b)) {
-			out[e.Name()] = true
+			out[deployedServiceName(e.Name())] = true
 		}
 	}
 	return out

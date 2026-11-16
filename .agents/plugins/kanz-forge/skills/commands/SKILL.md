@@ -34,6 +34,7 @@ Re-evaluate after locating callers and after the diff changes scope.
 |---|---|---|
 | Existing issue/PR, stale claim, overlap or closure | [issue-archaeology](../issue-archaeology/SKILL.md) | Current acceptance matched to code and evidence |
 | Unknown owner, new file, shared contract, deletion or cross-service effect | [stack-routing](../stack-routing/SKILL.md) | Owner, resolved consumers, boundary and affected guards |
+| Repository organization, directory moves or component README reconciliation | [repository-organization](../repository-organization/SKILL.md) | Ownership, complete path consumers, documentation and migration evidence |
 | Implementation or refactor | [engineering-standard](../engineering-standard/SKILL.md) | Smallest complete change in the existing owner |
 | Identity, authorization, tenant scope, input trust, secrets, CI/release, or agent tools | [security-audit](../security-audit/SKILL.md), guidance mode | Principal → input → control → resource, reachable failure and safe evidence |
 | Pricing, money, quantities, portfolio attribution or strategy claims | [financial-verification](../financial-verification/SKILL.md) | Dated inputs, units, independent numerical reference and limits |
@@ -55,6 +56,16 @@ For example, a tenant-scoped API change combines routing, engineering,
 security and verification. A comment correction needs the owning context and
 a diff check. A pricing fix adds financial verification; it does not require
 the user to know the pricing test command. Choose the smallest sufficient set.
+
+For library APIs, dependency upgrades or toolchain/version questions, use
+[version-specific documentation](references/context-and-evidence.md#check-version-specific-documentation).
+Use the bundled public name/HTTPS repository lookup and official versioned docs/tagged source;
+no Context7 connection is required. Available releases remain candidates until qualified.
+
+For a Forge upgrade or preparation for an audit using imported methodology,
+follow [upstream maintenance](../../DEPENDENCIES.md#review-upstream-changes-during-forge-maintenance).
+Check current upstream evidence separately from local provenance; adopt changes
+only through a reviewed source update and supported installation.
 
 Financial methodology supports implementation choices and their proof; it does
 not turn an ordinary development task into an investment-analysis assignment.
@@ -97,6 +108,14 @@ from source, existing branches, PRs and Issues:
 4. Report the completed outcome and its verification, or the specific reasons
    no remaining candidate can proceed. Keep pending and partial work explicit.
 
+For a requested set of outcomes, freeze the initial issue identities and full
+acceptance after discovery. Follow
+[related-finding delivery](references/delivery-coordination.md#finish-related-discoveries)
+to repair eligible discoveries in this session, while keeping original outcomes,
+additional repairs and evidenced deferrals separate. A new finding, PR or test
+cannot replace an unfinished initial target. Report unfilled slots when fewer
+feasible existing issues satisfy the request; do not manufacture replacement work.
+
 State the outcome and material assumptions briefly, then do the authorized
 work. Carry existing permission forward; do not request it again because a
 later stage uses another skill. Resolve routine implementation choices from
@@ -115,6 +134,9 @@ issue only when the evidence covers its full acceptance. For a genuine external
 blocker, complete independent in-scope work, record the missing prerequisite
 and leave the issue open. Preserve explicit instructions to keep an issue open.
 
+Only the root coordinator dispatches workers; delegated workers never spawn or
+re-delegate, including writable coding workers. Return missing scope to the root.
+Use one shared worker budget and pass this restriction in every assignment.
 For `/work subagents N [targets]` or an explicit request for parallel agents,
 use the [native parallel-work protocol](references/parallel-work.md). Inspect
 host capacity, assign owned scopes, and collect actual worker evidence.
@@ -138,8 +160,7 @@ an unknown edge or failure. Retain a compact working summary in the chat:
 acceptance, owning paths, decisions, tested revision and next unresolved gate.
 After context loss re-check mutable facts rather than trusting that summary.
 Stable rules belong in AGENTS.md, decisions and blockers in existing Issues,
-and implementation evidence in PRs and git. Optional receipts record runs;
-they are not a second project-memory system or current verification.
+and implementation evidence in PRs and git. Historical evidence does not replace current verification.
 
 Lead updates with the result or decision. Use short, complete sentences; omit
 repeated plans, raw inventories and narration of routine tools. Preserve exact

@@ -197,14 +197,6 @@ func refusalFlags(t *testing.T, root string) []string {
 	return out
 }
 
-// decisionConsumerFiles lists non-test Go files that could hold a consumer: the
-// compliance package's own, plus every file importing it.
-//
-// THE IMPORT IS THE FILTER, and it is what keeps this from firing on unrelated
-// code. cmd/kanz-monitor aggregates counters whose FIELDS are called Ungoverned
-// and Unpriced; it does not import this package and is not a Decision consumer,
-// so it is excluded by construction rather than by an exemption somebody would
-// have to justify.
 func decisionConsumerFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string

@@ -21,6 +21,7 @@ EXPECTED_SKILLS = {
     "kanz-verify",
     "pr-delivery",
     "stack-routing",
+    "repository-organization",
 }
 
 
@@ -126,7 +127,7 @@ def validate(check_tracked: bool) -> None:
     source = entry.get("source", {})
     if source.get("source") != "local" or local_path(ROOT, source.get("path", "")) != PLUGIN:
         fail("marketplace source does not resolve to the repository-owned plugin")
-    if entry.get("policy") != {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}:
+    if entry.get("policy") != {"installation": "INSTALLED_BY_DEFAULT", "authentication": "ON_INSTALL"}:
         fail("marketplace installation/authentication policy is incomplete")
     if entry.get("category") != "Productivity":
         fail("marketplace category is missing")
@@ -143,7 +144,14 @@ def validate(check_tracked: bool) -> None:
     names = {path.parent.name for path in skills}
     if names != EXPECTED_SKILLS:
         fail(f"skill inventory differs: {sorted(names ^ EXPECTED_SKILLS)}")
-    files = [MARKETPLACE, MANIFEST, Path(__file__).resolve()]
+    adapter = ROOT / ".agents/skills/kanz-forge/SKILL.md"
+    project_config = ROOT / ".codex/config.toml"
+    if frontmatter(adapter)["name"] != "kanz-forge":
+        fail("repository discovery adapter has the wrong name")
+    if '[plugins."kanz-forge@kanz-local"]\nenabled = true' not in project_config.read_text(encoding="utf-8"):
+        fail("trusted-project Forge enablement is missing")
+    files = [MARKETPLACE, MANIFEST, adapter, project_config, Path(__file__).resolve()]
+    files.extend(referenced_files(adapter, ROOT))
     for skill in skills:
         if frontmatter(skill)["name"] != skill.parent.name:
             fail(f"skill name does not match its directory: {skill}")

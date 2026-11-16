@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
@@ -11,7 +12,10 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 )
 
-// ModelDecoder turns a FACT payload into a domain model portfolio. It is a seam
+// ModelDecoder turns a FACT payload into a domain model portfolio. A refused,
+// decoded payload may return its model identity with the error; the folder binds
+// that identity before recording rejection, never admitting partial policy.
+// It is a seam
 // for the same reason Decoder above is one — the wealth.v1 SDK is
 // generated-not-committed (EVT-15a) — and the composition root wires
 // DecodeModelProto behind it.
@@ -47,17 +51,10 @@ func NewModelFolder(tenant string, registry *wealth.ModelRegistry, decode ModelD
 	return &ModelFolder{tenant: tenant, registry: registry, decode: decode}, nil
 }
 
-// Handle decodes one model portfolio FACT and admits it to the catalogue. A
-// non-nil return nacks/DLQs the delivery.
-//
-// A REFUSED MODEL MUST DLQ, and that is not merely tidiness. This subject is
-// compacted, so a model that fails validation is the LAST message on its subject
-// and is re-delivered to every pod on every boot, forever (#619). Acking it
-// silently would leave every household on that risk profile with no target
-// allocation and no record anywhere of the message that was meant to supply one —
-// the catalogue would simply look empty. The registry records the rejection so it
-// can answer "unreadable" rather than "unpublished", and the DLQ is what makes the
-// message itself inspectable.
+// Handle decodes one model portfolio FACT and admits it to the catalogue.
+// SubscribeBroadcastReady NAKs a refusal and keeps initial replay unarmed; that
+// path has no DLQ. The registry also invalidates attributable superseded policy
+// so an already armed replica cannot keep measuring against stale targets.
 func (f *ModelFolder) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
 	// The catalogue is keyed per tenant and this instance serves exactly one, so a
 	// model from another tenant would become this tenant's target allocation —
@@ -67,8 +64,14 @@ func (f *ModelFolder) Handle(_ context.Context, env *envelopepb.Envelope, payloa
 		return err
 	}
 	m, err := f.decode(payload)
+	// The canonical publisher keys by the literal model_id, not its subject or
+	// escaped subject token. Bind both accepted and refused policy before any
+	// catalogue mutation; a decoder error alone cannot name an arbitrary victim.
+	if env.GetEventType() != wealth.EventTypeModelPublished || strings.TrimSpace(m.ModelID) == "" || len(m.ModelID) > 256 || env.GetPartitionKey() != m.ModelID {
+		return errors.Join(errors.New("consume: model event type, decoded model_id and exact partition_key must agree"), err)
+	}
 	if err != nil {
-		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)
+		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), f.registry.Reject(f.tenant, m, err))
 	}
 	return f.registry.Put(f.tenant, m)
 }

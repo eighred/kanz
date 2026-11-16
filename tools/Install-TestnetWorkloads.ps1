@@ -25,7 +25,7 @@ if ($VerifyRollback -and -not $Apply) {
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$overlay = Join-Path $repoRoot 'kanz\infra\overlays\testnet-tokyo'
+$overlay = Join-Path $repoRoot 'kanz\infra\overlays\testnet_tokyo'
 $podVerifierPath = Join-Path $repoRoot 'tools\Verify-TestnetWorkloadPods.jq'
 
 function Invoke-SsmCommands {
@@ -79,7 +79,7 @@ $provenancePaths = @(
     'tools/Resolve-EcrReleaseDigest.ps1',
     'tools/Install-TestnetWorkloads.ps1',
     'tools/Verify-TestnetWorkloadPods.jq',
-    'kanz/infra/overlays/testnet-tokyo',
+    'kanz/infra/overlays/testnet_tokyo',
     'kanz/infra/deploy/analysis-template.yaml',
     'kanz/infra/deploy/accounting-deploy.yaml',
     'kanz/infra/deploy/api-gateway-deploy.yaml',

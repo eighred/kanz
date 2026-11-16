@@ -192,7 +192,7 @@ func TestTwoCustodiansOnOnePortfolioReconcileClean(t *testing.T) {
 	}
 
 	for _, custodian := range []string{"CUST-A", "CUST-B"} {
-		run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: custodian, BusinessDate: t0})
+		run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: custodian, BusinessDate: t0})
 		if err != nil {
 			t.Fatalf("%s: Reconcile: %v", custodian, err)
 		}
@@ -231,7 +231,7 @@ func TestAnUnclaimedExchangeAccountFailsTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err == nil {
 		t.Fatal("Reconcile succeeded over a book missing an unclaimed account's holdings — it would " +
 			"break every position that account holds, at every custodian")
@@ -288,7 +288,7 @@ func TestASingleCustodianBookExcludesAnUnattributedEntry(t *testing.T) {
 		t.Fatal("a portfolio with one custodian and no declaration reports a DECLARED scope — the " +
 			"loader would then ask for accounts nobody declared and refuse the run")
 	}
-	book, _, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
+	book, _, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestAnUnattributedEntryFabricatesNoBreakAtASingleCustodian(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
 	}
 	stated := &captureLogger{}
 	if _, _, err := LedgerBookLoader(st, scope, stated.logger())(ctx,
-		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
+		Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0}); err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	for _, want := range []string{"NOTHING RECONCILES THEM", "USD 1000.00000000", BasisDerived, "PF1"} {
@@ -408,7 +408,7 @@ func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
 	seedEntry(t, clean, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
 	quiet := &captureLogger{}
 	if _, _, err := LedgerBookLoader(clean, scope, quiet.logger())(ctx,
-		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
+		Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0}); err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if quiet.sawAt(slog.LevelWarn, "NOTHING RECONCILES THEM") {
@@ -459,7 +459,7 @@ func TestAnEmptyDerivedBasisRefusesRatherThanBreakingTheWholeBook(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}
-	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	run, err := r.Reconcile(testRunContext(ctx), Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
 	if err == nil {
 		t.Fatalf("the run succeeded over an EMPTY comparison basis and reported %d break(s): %+v.\n\n"+
 			"Nothing in this journal names an exchange account, so the basis folds to nothing and every "+

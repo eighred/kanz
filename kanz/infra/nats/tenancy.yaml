@@ -69,7 +69,7 @@ data:
         # The tenant therefore has to appear in the subject SOMEWHERE. It appears
         # here and only here: the routing prefix exists inside __system__, and
         # every account resolves it back to the unchanged 3-segment logical name
-        # before any workload sees it. So kanz-schemas/README.md
+        # before any workload sees it. So schemas/README.md
         # § Subject Taxonomy still holds where it matters — inside a tenant
         # account the subject is `order.order.submit`, and oms-deploy.yaml
         # subscribes exactly that.
@@ -86,7 +86,7 @@ data:
           # THE PLATFORM KILL-SWITCH CROSSES THE SAME BOUNDARY (#635), and it is
           # the one subject here that is NOT tenant-prefixed — deliberately. A
           # halt is platform-wide by definition: one FACT, published once by
-          # cmd/kanz-halt, and every account that runs an order path must receive
+          # cmd/kanz_halt, and every account that runs an order path must receive
           # THAT one. Prefixing it per tenant would make the operator's single
           # break-glass command reach only the platform account, which is the
           # defect this export exists to close one account further out.
@@ -275,8 +275,7 @@ data:
           # bootstrap-job.yaml runs `nats stream info|add|edit|ls` and nothing
           # else, and every one of those is JetStream's management API with the
           # reply on an inbox. So these two grants are the whole job, and with an
-          # allow-list present every other subject is denied — the same argument
-          # kanz-monitor's entry makes for the read-only operator identity.
+          # allow-list present every other subject is denied by default.
           #
           # NO $JS.ACK.>, deliberately: this Job never consumes a message, so it
           # never acks one. Granting it would be copying a shape rather than
@@ -434,7 +433,7 @@ data:
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
-          # kanz-redrive is the DLQ DRAIN (#220, cmd/kanz-redrive): it reads
+          # kanz-redrive is the DLQ DRAIN (#220, cmd/kanz_redrive): it reads
           # messages parked on `dlq.<subject>` and republishes them, byte for
           # byte, onto the subject named in their Kanz-DLQ-Original-Subject
           # header. Without it the DLQ is write-only — a transient Postgres
@@ -477,25 +476,6 @@ data:
                 ]
               }
               subscribe: { allow: ["dlq.>", "_INBOX.>"] }
-            }
-          }
-          # READ-ONLY OBSERVER (kanz-monitor, test/arch/nats_identity_test.go's
-          # readOnlyObserverSVIDs). It streams order.> and risk.position.> to a
-          # terminal via SubscribeBroadcast and publishes NO business subject.
-          # The publish allow-list holds ONLY the JetStream consumer machinery its
-          # ephemeral consumer binds ($JS.API.> to resolve the stream + create the
-          # consumer, $JS.ACK.> to ack) — with an allow-list present, every other
-          # subject (order.*, risk.*, everything) is denied by default, so this
-          # identity provably cannot move capital. NOT `deny: [">"]`: that trap
-          # (see the risk-engine header above) would also deny $JS.API.>/$JS.ACK.>,
-          # breaking the consumer and silently failing every ack forever.
-          # Manifest half (a kanz-operator ServiceAccount for kanz-monitor) is not
-          # yet shipped — like the other operator tools, the broker-side half is
-          # declared here ready for when that manifest lands.
-          { user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-monitor"
-            permissions: {
-              publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
-              subscribe: { allow: ["order.>", "risk.position.>", "_INBOX.>"] }
             }
           }
           # SEC-M3e: the 15 service users below (risk-engine .. webhook-ingest —
@@ -607,7 +587,7 @@ data:
                   # nobody could read, but it means the engine cannot tell "no
                   # model is promoted" from "I was denied". READ-ONLY on purpose:
                   # there is no matching publish grant and none is wanted, because
-                  # kanz-py holds the weights and runs the MLOPS-01a validation so
+                  # python holds the weights and runs the MLOPS-01a validation so
                   # it is the only thing that may write this log. registry's
                   # BusFollower refuses a Publish in-process for the same reason.
                   #
@@ -661,7 +641,7 @@ data:
           # so it needs neither a DLQ grant nor JetStream consumer permissions,
           # only the reply inbox for the synchronous publish ack.
           #
-          #   · order.order.submit / .cancel — services/api-gateway/internal/
+          #   · order.order.submit / .cancel — services/api_gateway/internal/
           #     orders/orders.go, COMMANDs, the sole write path onto the order
           #     book (OMS-01d).
           #   · order.order.approve — the SECOND SIGNATURE that releases an order
@@ -755,7 +735,7 @@ data:
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
-          # inference is the PYTHON service (kanz-py), and until #241 it had no
+          # inference is the PYTHON service (python), and until #241 it had no
           # entry here at all — because it had no way to present an SVID. Its
           # streaming worker is the WIRED half: risk-engine publishes
           # inference.feature.computed, kanz_inference/streaming/worker.py drains
@@ -776,7 +756,7 @@ data:
               publish: {
                 allow: [
                   "inference.prediction.scored",
-                  # THE MODEL REGISTRY'S APPEND LOG (#112). kanz-py's
+                  # THE MODEL REGISTRY'S APPEND LOG (#112). python's
                   # BusRegistryPublisher writes every register / unregister /
                   # record_validation here, and it is the source of truth a
                   # replica replays from offset 0 to rebuild.
@@ -1139,7 +1119,7 @@ data:
               }
             }
           }
-          # market-data both PUBLISHES (services/market-data/internal/feed/
+          # market-data both PUBLISHES (services/market_data/internal/feed/
           # bussink.go: market.<assetClass>.<variant>, one deploy per asset
           # class) and SUBSCRIBES (MARKET_DATA_SUBJECTS, default market.>) —
           # the subject taxonomy's domain wildcard is the honest boundary for
@@ -1158,7 +1138,7 @@ data:
               subscribe: { allow: ["market.>", "order.cost.recorded", "_INBOX.>"] }
             }
           }
-          # market-ingest (services/market-ingest/cmd/market-ingest, the open
+          # market-ingest (services/market_ingest/cmd/market_ingest, the open
           # binary this image builds — infra/deploy/market-ingest-deploy.yaml)
           # registers NO alpha engines, so pkg/alpha.Runner never wires
           # internal/signal/translate's Translator and PUBLISHES ONLY the

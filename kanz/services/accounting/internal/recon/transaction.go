@@ -1,6 +1,8 @@
 package recon
 
 import (
+	"errors"
+	"fmt"
 	"math/big"
 	"sort"
 	"time"
@@ -130,6 +132,9 @@ const (
 	// whole journal against it would report every execution the fund has ever
 	// made as one the custodian never saw.
 	LegNoBusinessDate
+	// LegRefused means execution identity was ambiguous. The accompanying error
+	// must be handled before treating any part of the comparison as assessed.
+	LegRefused
 )
 
 func (s LegStatus) String() string {
@@ -142,6 +147,8 @@ func (s LegStatus) String() string {
 		return "balances_only"
 	case LegNoBusinessDate:
 		return "no_business_date"
+	case LegRefused:
+		return "refused"
 	default:
 		return "unspecified"
 	}
@@ -149,6 +156,8 @@ func (s LegStatus) String() string {
 
 // Ran reports whether the transaction pass actually compared anything.
 func (s LegStatus) Ran() bool { return s == LegRan }
+
+var ErrAmbiguousExecutionReference = errors.New("recon: ambiguous execution reference")
 
 // businessDay normalizes t to the UTC midnight naming its business date. It is
 // custody.BusinessDay's rule, applied here so this package can window without
@@ -183,33 +192,36 @@ func businessDay(t time.Time) time.Time {
 //	  reached the custodian, or reached it under a reference nobody mapped;
 //	the custodian reports it, the book has no entry  -> A FILL NEVER REACHED THE
 //	  BOOK. Observed, on a reference, rather than inferred from a balance.
-func transactionLeg(executions []ledger.Execution, stmt Statement) ([]Break, LegStatus) {
+func transactionLeg(executions []ledger.Execution, stmt Statement) ([]Break, LegStatus, error) {
 	switch stmt.Grain {
 	case GrainTransactions:
 	case GrainBalancesOnly:
-		return nil, LegBalancesOnly
+		return nil, LegBalancesOnly, nil
 	default:
-		return nil, LegGrainUnknown
+		return nil, LegGrainUnknown, nil
 	}
 	if stmt.BusinessDate.IsZero() {
-		return nil, LegNoBusinessDate
+		return nil, LegNoBusinessDate, nil
 	}
 	window := businessDay(stmt.BusinessDate)
 
-	// The book's executions for the date, by reference. A reference the journal
-	// carries twice within one window is folded to the FIRST occurrence, matching
-	// the fold's own dedup: two book rows for one reference is one execution as
-	// far as a custodian is concerned, and reporting the second as unmatched
-	// would be a break about the book's own bookkeeping wearing a custodian's
-	// name.
+	// EntryID is the immutable book identity. Raw venue references can legitimately
+	// be reused across accounts or instruments, so distinct identities cannot be
+	// matched to one statement line without an authoritative mapping. Refuse the
+	// comparison instead of selecting a winner or fabricating an execution break.
 	inBook := map[string]ledger.Execution{}
 	for _, e := range executions {
 		if e.Ref == "" || !e.CustodyDate().Equal(window) {
 			continue
 		}
-		if _, dup := inBook[e.Ref]; !dup {
-			inBook[e.Ref] = e
+		if prior, dup := inBook[e.Ref]; dup {
+			if e.EntryID == "" || prior.EntryID == "" || e.EntryID != prior.EntryID {
+				// Bound diagnostic text; the identity comparison uses the full ref.
+				return nil, LegRefused, fmt.Errorf("%w: %.128q", ErrAmbiguousExecutionReference, e.Ref)
+			}
+			continue
 		}
+		inBook[e.Ref] = e
 	}
 
 	inStatement := map[string]Transaction{}
@@ -257,5 +269,5 @@ func transactionLeg(executions []ledger.Execution, stmt Statement) ([]Break, Leg
 		}
 		return breaks[i].Key < breaks[j].Key
 	})
-	return breaks, LegRan
+	return breaks, LegRan, nil
 }

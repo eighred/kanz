@@ -39,7 +39,7 @@ import (
 //	# Postgres, then the datamaster schema
 //	test/backing/up.sh
 //	KANZ_MIGRATE_DATABASE_URL=$TEST_POSTGRES_URL \
-//	  go run ./cmd/kanz-migrate -dir services/datamaster/migrations -set datamaster
+//	  go run ./cmd/kanz_migrate -dir services/datamaster/migrations -set datamaster
 //
 //	# a vendor drop carrying sector_code/sector_name/issuer_id, then the service
 //	DATAMASTER_DATABASE_URL=$TEST_POSTGRES_URL DATAMASTER_LISTEN=:8099 \

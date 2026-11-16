@@ -70,7 +70,7 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	if setup < 0 || sbom < 0 || goAudit < 0 || gate <= goAudit || gate <= setup || gate <= sbom || sign <= gate {
 		return fmt.Errorf("Rust evidence must precede signing")
 	}
-	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust-audit-tools/consume.py"} {
+	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust_audit_tools/consume.py"} {
 		if !strings.Contains(installer, token) {
 			return fmt.Errorf("signed immutable Rust audit tools required")
 		}
@@ -78,11 +78,11 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	if strings.Contains(installer, "cargo ") || strings.Contains(installer, "||") {
 		return fmt.Errorf("source-build fallback refused")
 	}
-	if !strings.Contains(build, "- 'kanz-rs/**'") {
+	if !strings.Contains(build, "- 'rust/**'") {
 		return fmt.Errorf("Rust-only PRs must build images")
 	}
 	for _, service := range []string{"binance-depth", "okx-depth"} {
-		entry := "- service: " + service + "\n            dockerfile: kanz-rs/services/" + service + "/Dockerfile"
+		entry := "- service: " + service + "\n            dockerfile: rust/services/" + sourceDirectoryName(service) + "/Dockerfile"
 		if !strings.Contains(release, entry) || !strings.Contains(build, entry) {
 			return fmt.Errorf("both Rust services must be built and released")
 		}
@@ -135,12 +135,12 @@ func TestRustReleaseEvidenceMutations(t *testing.T) {
 		{"mutable-image", 0, "RUST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}", "RUST_IMAGE: ${{ env.IMAGE }}:latest"},
 		{"missing-binance", 0, "service: binance-depth", "service: absent"},
 		{"missing-okx", 1, "service: okx-depth", "service: absent"},
-		{"missing-rust-trigger", 1, "- 'kanz-rs/**'", "- 'other/**'"},
+		{"missing-rust-trigger", 1, "- 'rust/**'", "- 'other/**'"},
 		{"missing-ci-okx", 2, "--local --service okx-depth", "--local --service other"},
 		{"missing-hybrid-gate", 0, " || matrix.service == 'lake-sink'", ""},
 		{"unpinned-go-audit", 0, "govulncheck@v1.6.0", "govulncheck@latest"},
 		{"floating-syft", 0, "syft-version: v1.56.0", "syft-version: latest"},
-		{"missing-consumer", 3, "tools/rust-audit-tools/consume.py", "missing.py"},
+		{"missing-consumer", 3, "tools/rust_audit_tools/consume.py", "missing.py"},
 		{"installer-fallback", 3, "consume.py", "consume.py || cargo install cargo-audit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

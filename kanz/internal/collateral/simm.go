@@ -1,6 +1,12 @@
 package collateral
 
-import "math"
+import (
+	"errors"
+	"math"
+)
+
+var ErrSIMMInput = errors.New("collateral: SIMM sensitivity is nonfinite or has no calibrated bucket")
+var ErrSIMMNumerical = errors.New("collateral: SIMM arithmetic is nonfinite")
 
 // COLL-01b — initial margin via ISDA SIMM (the sensitivity-based methodology).
 // SIMM is the standard model for uncleared-derivatives IM: it takes the
@@ -48,14 +54,28 @@ type SIMMParams struct {
 //	K_b = √( Σ WSₖ² + Σ_{k≠l} ρ·WSₖ·WSₗ )              (bucket margin)
 //	S_b = clamp( Σ WSₖ, −K_b, K_b )                    (bucket sum, capped)
 //	IM  = √( Σ K_b² + Σ_{b≠c} γ·S_b·S_c )              (across buckets)
-func SIMM(sensitivities []Sensitivity, p SIMMParams) float64 {
+//
+// Invalid inputs or nonfinite arithmetic return no measurement. In particular,
+// an absent bucket cannot become a zero weight that erases its margin. These
+// checks do not qualify the representative calibration as an approved IM model.
+func SIMM(sensitivities []Sensitivity, p SIMMParams) (float64, error) {
+	if err := validateSIMMParams(p); err != nil {
+		return 0, err
+	}
 	// Aggregate raw sensitivities by (bucket, risk factor) first.
 	type fk struct{ bucket, factor string }
 	byFactor := make(map[fk]float64)
 	bucketOrder := []string{}
 	seenBucket := map[string]bool{}
 	for _, s := range sensitivities {
-		byFactor[fk{s.Bucket, s.RiskFactor}] += s.Amount
+		if _, ok := p.RiskWeight[s.Bucket]; !ok || !finiteSIMM(s.Amount) {
+			return 0, ErrSIMMInput
+		}
+		key := fk{s.Bucket, s.RiskFactor}
+		byFactor[key] += s.Amount
+		if !finiteSIMM(byFactor[key]) {
+			return 0, ErrSIMMNumerical
+		}
 		if !seenBucket[s.Bucket] {
 			seenBucket[s.Bucket] = true
 			bucketOrder = append(bucketOrder, s.Bucket)
@@ -66,13 +86,21 @@ func SIMM(sensitivities []Sensitivity, p SIMMParams) float64 {
 	wsByBucket := make(map[string][]float64)
 	for k, amt := range byFactor {
 		rw := p.RiskWeight[k.bucket]
-		wsByBucket[k.bucket] = append(wsByBucket[k.bucket], rw*amt)
+		weighted := rw * amt
+		if !finiteSIMM(weighted) {
+			return 0, ErrSIMMNumerical
+		}
+		wsByBucket[k.bucket] = append(wsByBucket[k.bucket], weighted)
 	}
 
 	kb := make(map[string]float64)
 	sb := make(map[string]float64)
 	for bucket, ws := range wsByBucket {
-		kb[bucket] = bucketMargin(ws, p.IntraBucketCorr)
+		margin, err := bucketMargin(ws, p.IntraBucketCorr)
+		if err != nil {
+			return 0, err
+		}
+		kb[bucket] = margin
 		sum := 0.0
 		for _, w := range ws {
 			sum += w
@@ -86,29 +114,43 @@ func SIMM(sensitivities []Sensitivity, p SIMMParams) float64 {
 		sumKsq += kb[bucket] * kb[bucket]
 		sumS += sb[bucket]
 		sumSsq += sb[bucket] * sb[bucket]
+		if !finiteSIMM(sumKsq) || !finiteSIMM(sumS) || !finiteSIMM(sumSsq) {
+			return 0, ErrSIMMNumerical
+		}
 	}
 	cross := p.InterBucketCorr * (sumS*sumS - sumSsq)
 	total := sumKsq + cross
+	if !finiteSIMM(cross) || !finiteSIMM(total) {
+		return 0, ErrSIMMNumerical
+	}
 	if total < 0 {
 		total = 0 // correlation round-off guard
 	}
-	return math.Sqrt(total)
+	return math.Sqrt(total), nil
 }
 
 // bucketMargin is √( Σ WSₖ² + ρ·((ΣWS)² − Σ WSₖ²) ) — the within-bucket
 // aggregation with a single intra-bucket correlation ρ.
-func bucketMargin(ws []float64, rho float64) float64 {
+func bucketMargin(ws []float64, rho float64) (float64, error) {
 	var sum, sumSq float64
 	for _, w := range ws {
 		sum += w
 		sumSq += w * w
+		if !finiteSIMM(sum) || !finiteSIMM(sumSq) {
+			return 0, ErrSIMMNumerical
+		}
 	}
 	v := sumSq + rho*(sum*sum-sumSq)
+	if !finiteSIMM(v) {
+		return 0, ErrSIMMNumerical
+	}
 	if v < 0 {
 		v = 0
 	}
-	return math.Sqrt(v)
+	return math.Sqrt(v), nil
 }
+
+func finiteSIMM(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func clamp(x, lo, hi float64) float64 {
 	if x < lo {

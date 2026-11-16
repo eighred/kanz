@@ -73,7 +73,7 @@ func TestArm_SubscribesToTheHaltSubject(t *testing.T) {
 }
 
 // AN ARMED SUBSCRIPTION ON AN EMPTY STREAM LEAVES THE GATE CLOSED. This is the
-// deployment sign-off cmd/kanz-halt documents — bringing the platform live is an
+// deployment sign-off cmd/kanz_halt documents — bringing the platform live is an
 // explicit, attributable act — and the case a "the subscription worked, so we
 // are fine" reading would get backwards.
 func TestArm_LeavesTheGateClosedWhenNothingHasBeenPublished(t *testing.T) {

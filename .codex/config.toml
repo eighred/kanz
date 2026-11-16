@@ -1,0 +1,3 @@
+# Trusted-project plugin enablement; no tool, permission or model overrides.
+[plugins."kanz-forge@kanz-local"]
+enabled = true

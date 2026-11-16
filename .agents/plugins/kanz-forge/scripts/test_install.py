@@ -46,7 +46,8 @@ def snapshot_checkout(root, destination):
     """
     raw = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
-         PLUGIN_PATH.as_posix(), ".agents/plugins/marketplace.json"], cwd=root, timeout=30)
+         PLUGIN_PATH.as_posix(), ".agents/plugins/marketplace.json",
+         ".agents/skills/kanz-forge", ".codex/config.toml"], cwd=root, timeout=30)
     for name in sorted(set(filter(None, raw.split(b"\0")))):
         relative = Path(os.fsdecode(name))
         path = root / relative
@@ -90,12 +91,21 @@ def smoke_test(root=ROOT):
         profile.mkdir()
         checkout = directory / "checkout"
         source = snapshot_checkout(root, checkout)
+        subprocess.run(["git", "init", "--quiet", str(checkout)], check=True, timeout=30)
         env = {**os.environ, "CODEX_HOME": str(profile)}
 
         def call(*args):
             return json.loads(subprocess.check_output(
                 [cli, *args, "--json"], cwd=checkout, env=env, timeout=90))
 
+        entries = discover_skills(cli, checkout, env=env)
+        adapter = checkout / ".agents/skills/kanz-forge/SKILL.md"
+        if not any(s["name"] == "kanz-forge" and s["enabled"]
+                   and Path(s["path"]).resolve() == adapter.resolve() for s in entries):
+            raise ValueError("fresh checkout repository skill was not discovered")
+        defaults = sum(s["name"].startswith("kanz-forge:") and s["enabled"] for s in entries)
+        print(f"Fresh repository discovery: checkout adapter enabled; {defaults} default plugin skills")
+        print("Repository discovery does not prove a plugin-cache install or Chat invocation")
         call("plugin", "marketplace", "add", ".")
         result = call("plugin", "add", "kanz-forge@kanz-local")
         installed = Path(result["installedPath"]).resolve()

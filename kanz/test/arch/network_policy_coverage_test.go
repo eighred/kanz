@@ -284,28 +284,25 @@ func publicInternetPeer(p netPolPeer) (public, complete bool, missing []string) 
 // get NO public-internet egress rule, each with the reason and the issue that
 // retires it.
 //
-// IT IS EMPTY, AND THAT IS THE CURRENT TRUTH rather than an oversight: all five
-// apps this guard finds in scope (api-gateway, copilot, market-ingest,
-// venue-binance, venue-okx) genuinely dial a public host in the deployed
-// configuration, and all five are covered by allow-external-https-egress /
-// allow-exchange-stream-egress. The map and its dead-entry arm below exist so the
-// next exemption has to be written down with a reason instead of being expressed
-// as a service quietly missing from the policy.
+// The identity exception is issuer metadata only. It must not waive a new
+// destination merely because the same process declares it. An entry retires
+// when no uncovered destination matches its premise, including after a rule is
+// added. SMTP delivery is a separate transport outside this HTTPS/WSS scanner.
 var externalEgressExempt = map[string]string{
 	"identity": "IDENTITY_TOKEN_ISSUER is this service's OWN identity, not a destination it dials " +
 		"(#364). OIDC requires the issuer claim to equal the URL a verifier discovered the document " +
 		"from, so it is published in /.well-known/openid-configuration and stamped into every token " +
 		"— and read by the API GATEWAY, which fetches the JWKS. The identity service never makes an " +
 		"outbound request to it. The scanner cannot tell an issuer from an endpoint, because at the " +
-		"level of an env var holding a URL they are the same thing; grep the service for an HTTP " +
-		"client and there is none. Egress for this app is Postgres and SPIRE only, both covered by " +
-		"the namespace rules.",
+		"level of an env var holding a URL they are the same thing. This exception matches only " +
+		"the manifest's IDENTITY_TOKEN_ISSUER field; other URLs require their own real egress coverage.",
 }
 
 // externalDest is one required public-internet destination for one app.
 type externalDest struct {
 	app    string
 	port   int
+	envKey string // populated only for a literal deployment environment value
 	source string // file:line-ish provenance, quoted back in failures
 	raw    string
 }
@@ -367,6 +364,7 @@ func externalDestinations(t *testing.T) []externalDest {
 				}
 				out = append(out, externalDest{
 					app: w.app(), port: port, raw: e.Value,
+					envKey: e.Name,
 					source: fmt.Sprintf("infra/deploy manifest for %s, env %s", w.Metadata.Name, e.Name),
 				})
 			}
@@ -385,7 +383,7 @@ func externalDestinations(t *testing.T) []externalDest {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
+		svc := deployedServiceName(e.Name())
 		cfgDir := filepath.Join(servicesRoot, svc, "internal", "config")
 		files, gerr := filepath.Glob(filepath.Join(cfgDir, "*.go"))
 		if gerr != nil || len(files) == 0 {
@@ -497,11 +495,13 @@ func TestInternetFacingWorkloadsHaveEgress(t *testing.T) {
 	}
 
 	var missing []string
+	usedExempt := map[string]bool{}
 	for _, d := range dests {
-		if _, ok := externalEgressExempt[d.app]; ok {
+		if granted[d.app][d.port] {
 			continue
 		}
-		if granted[d.app][d.port] {
+		if externalEgressExemptionCovers(d) {
+			usedExempt[d.app] = true
 			continue
 		}
 		missing = append(missing, fmt.Sprintf("%s → TCP:%d (%s, from %s)", d.app, d.port, d.raw, d.source))
@@ -525,13 +525,43 @@ func TestInternetFacingWorkloadsHaveEgress(t *testing.T) {
 		if reason == "" {
 			dead = append(dead, app+" (no reason recorded)")
 		}
-		if !apps[app] {
-			dead = append(dead, app+" (no external destination found — exemption is dead)")
+		if !usedExempt[app] {
+			dead = append(dead, app+" (no uncovered destination matches its premise — exemption is dead)")
 		}
 	}
 	sort.Strings(dead)
 	if len(dead) > 0 {
 		t.Errorf("externalEgressExempt has %d stale entr(y/ies):\n  %s", len(dead), strings.Join(dead, "\n  "))
+	}
+}
+
+func externalEgressExemptionCovers(d externalDest) bool {
+	if _, ok := externalEgressExempt[d.app]; !ok {
+		return false
+	}
+	switch d.app {
+	case "identity":
+		return d.envKey == "IDENTITY_TOKEN_ISSUER"
+	default:
+		return false // a new exception needs a concrete, tested destination premise
+	}
+}
+
+func TestExternalEgressExceptionCoversOnlyIssuerMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		app, key, source string
+		want             bool
+	}{
+		{"identity", "IDENTITY_TOKEN_ISSUER", "deployment", true},
+		{"identity", "IDENTITY_UNREVIEWED_ENDPOINT", "deployment", false},
+		{"identity", "", "config default", false},
+		{"identity", "", "prose mentioning IDENTITY_TOKEN_ISSUER", false},
+		{"other", "IDENTITY_TOKEN_ISSUER", "deployment", false},
+	} {
+		d := externalDest{app: tc.app, port: 443, envKey: tc.key, source: tc.source}
+		if got := externalEgressExemptionCovers(d); got != tc.want {
+			t.Errorf("%s/%s from %s covered=%v, want %v", tc.app, tc.key, tc.source, got, tc.want)
+		}
 	}
 }
 
@@ -1053,8 +1083,8 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
-		_ = filepath.WalkDir(filepath.Join(root, svc), func(path string, d fs.DirEntry, werr error) error {
+		svc := deployedServiceName(e.Name())
+		_ = filepath.WalkDir(filepath.Join(root, sourceDirectoryName(svc)), func(path string, d fs.DirEntry, werr error) error {
 			if werr != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}

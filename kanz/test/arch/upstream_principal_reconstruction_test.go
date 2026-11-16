@@ -49,7 +49,7 @@ import (
 // the rest, and are why this guard does not need to parse the wiring.
 //
 // services/ ONLY. pkg/auth defines both names, and the api-gateway populates its
-// own context in-process through services/api-gateway/internal/middleware — a
+// own context in-process through services/api_gateway/internal/middleware — a
 // different Principal type reached by a different accessor, which is why it does
 // not match and does not need an exemption.
 const upstreamPrincipalScope = "services"
@@ -224,7 +224,7 @@ func TestServicesReadingThePrincipalInstallTheReconstruction(t *testing.T) {
 			dead = append(dead, svc+" (exemption carries no reason)")
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(servicesDir, svc)); err != nil {
+		if _, err := os.Stat(filepath.Join(servicesDir, sourceDirectoryName(svc))); err != nil {
 			dead = append(dead, svc+" (no such service)")
 			continue
 		}

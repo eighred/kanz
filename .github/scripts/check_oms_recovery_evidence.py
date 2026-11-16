@@ -11,7 +11,7 @@ import stat
 import sys
 from check_migration_evidence import verify, PREFIX
 
-PACKAGE = "services/oms/tools/recovery-conformance"
+PACKAGE = "services/oms/tools/recovery_conformance"
 GROUPS = {
  "TestRustFeeCommandPublicationRestart": ["go", "rust"],
  "TestRustFeeCommandProposalParity": ["one-change", "sorted-two-changes"],
@@ -113,7 +113,7 @@ def qualify(directory, expected, create=False):
     result = checked_streams(streams)
     binary = read_bounded(directory / "binary.sha256", 65).decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", binary): raise ValueError("invalid executable digest")
-    build = {"features": ["qualification-diagnostics"], "profile": "release", "target": "kanz-rs/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
+    build = {"features": ["qualification-diagnostics"], "profile": "release", "target": "rust/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
     bound = {**expected, "streams": {name: hashlib.sha256(raw).hexdigest() for name, raw in streams.items()}, "result": result, "build": build}
     path = directory / "proof.json"
     if create:

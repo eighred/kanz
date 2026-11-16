@@ -32,7 +32,7 @@ func TestSyntheticIdentityCannotBecomeRuntimeAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !runtimeSyntheticImport(location, mutated) || runtimeSyntheticImport("services/oms/tools/recovery-conformance/recovery_test.go", mutated) {
+			if !runtimeSyntheticImport(location, mutated) || runtimeSyntheticImport("services/oms/tools/recovery_conformance/recovery_test.go", mutated) {
 				t.Fatal("synthetic transport production import mutation was misclassified")
 			}
 		}

@@ -70,13 +70,13 @@ const spotMarginMode = "MarginMode_MARGIN_MODE_UNSPECIFIED"
 // venueMarginModes returns, per venue connector type, the margin-mode enum
 // constants its MarginModes method declares.
 //
-// DISCOVERED BY WALKING services/venue-*, not listed here. A third venue adapter
+// DISCOVERED BY WALKING services/venue_*, not listed here. A third venue adapter
 // added tomorrow is checked without anyone remembering to add it, which is the
 // whole point: the posture's justification is "every wired venue is spot", and a
 // hand-written list would make that claim about the venues somebody remembered.
 func venueMarginModes(t *testing.T, root string) map[string][]string {
 	t.Helper()
-	dirs, err := filepath.Glob(filepath.Join(root, "services", "venue-*"))
+	dirs, err := filepath.Glob(filepath.Join(root, "services", "venue_*"))
 	if err != nil {
 		t.Fatalf("glob venue services: %v", err)
 	}

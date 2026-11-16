@@ -18,23 +18,31 @@ import (
 var ErrSIMMParams = errors.New("collateral: invalid SIMM calibration")
 
 // ValidateSIMMCalibration gates a loaded calibration: every class needs
-// positive risk weights and correlations in [0,1).
+// finite positive risk weights and finite correlations in [0,1).
 func ValidateSIMMCalibration(cal map[string]SIMMParams) error {
 	if len(cal) == 0 {
 		return fmt.Errorf("%w: no risk classes", ErrSIMMParams)
 	}
 	for class, p := range cal {
-		if len(p.RiskWeight) == 0 {
-			return fmt.Errorf("%w: class %s has no risk weights", ErrSIMMParams, class)
+		if err := validateSIMMParams(p); err != nil {
+			return fmt.Errorf("class %s: %w", class, err)
 		}
-		for bucket, rw := range p.RiskWeight {
-			if rw <= 0 {
-				return fmt.Errorf("%w: class %s bucket %s weight %.4g must be positive", ErrSIMMParams, class, bucket, rw)
-			}
+	}
+	return nil
+}
+
+func validateSIMMParams(p SIMMParams) error {
+	if len(p.RiskWeight) == 0 {
+		return fmt.Errorf("%w: no risk weights", ErrSIMMParams)
+	}
+	for bucket, rw := range p.RiskWeight {
+		if !finiteSIMM(rw) || rw <= 0 {
+			return fmt.Errorf("%w: bucket %s weight must be finite and positive", ErrSIMMParams, bucket)
 		}
-		if p.IntraBucketCorr < 0 || p.IntraBucketCorr >= 1 || p.InterBucketCorr < 0 || p.InterBucketCorr >= 1 {
-			return fmt.Errorf("%w: class %s correlations must be in [0,1)", ErrSIMMParams, class)
-		}
+	}
+	if !finiteSIMM(p.IntraBucketCorr) || !finiteSIMM(p.InterBucketCorr) ||
+		p.IntraBucketCorr < 0 || p.IntraBucketCorr >= 1 || p.InterBucketCorr < 0 || p.InterBucketCorr >= 1 {
+		return fmt.Errorf("%w: correlations must be finite and in [0,1)", ErrSIMMParams)
 	}
 	return nil
 }

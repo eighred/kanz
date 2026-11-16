@@ -14,12 +14,12 @@ class OMSEvidenceTests(unittest.TestCase):
         verify(self.events(), REQUIRED)
 
     def test_exact_quantity_outcomes_are_mandatory(self):
-        aggregate = REQUIRED["services/oms/tools/aggregate-conformance"]
+        aggregate = REQUIRED["services/oms/tools/aggregate_conformance"]
         for case in ("sequence-10", "domain--60", "domain-60", "refusal-ApplyFill",
                      "refusal-Amend", "refusal-filled-sum", "refusal-OVERFILL"):
             self.assertIn("TestRustOrderAggregateDifferential/exact-quantity-" + case, aggregate)
         self.assertIn("TestRustFillFoldProcessConformance/exact-quantity-sequence-10",
-                      REQUIRED["services/oms/tools/fill-conformance"])
+                      REQUIRED["services/oms/tools/fill_conformance"])
 
     def test_every_case_and_package_must_complete(self):
         for index in range(len(self.events())):
@@ -29,7 +29,7 @@ class OMSEvidenceTests(unittest.TestCase):
                 verify(events, REQUIRED)
 
     def test_position_precision_requires_both_real_owners_and_control_path(self):
-        cases = REQUIRED["services/oms/tools/store-conformance"]
+        cases = REQUIRED["services/oms/tools/store_conformance"]
         for side in ("long", "short"):
             self.assertIn("TestPositionPrecisionFACTOverJetStream/" + side,
                           REQUIRED["internal/risk/ingest"])

@@ -13,6 +13,7 @@ import (
 	"github.com/eighred/kanz/internal/outbox"
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -34,6 +35,13 @@ type Action struct {
 	Kind             string
 	Explanation      string
 	ExpectedRevision int64
+	// Current trusted authorization is rechecked on every attempt. It is not
+	// part of the immutable client decision or historical retry digest.
+	PortfolioScope []string `json:"-"`
+}
+
+func (a Action) permits(portfolio string) bool {
+	return portfolio != "" && auth.PortfolioInScope(a.PortfolioScope, portfolio)
 }
 
 type ActionState struct {
@@ -124,6 +132,12 @@ func actionFact(ctx context.Context, tenant string, e ActionEvidence) (outbox.Re
 func (m *MemoryStore) ApplyAction(_ context.Context, a Action) (ActionEvidence, error) {
 	if err := a.validate(); err != nil {
 		return ActionEvidence{}, err
+	}
+	m.mu.Lock()
+	b, ok := m.breaks[a.BreakID]
+	m.mu.Unlock()
+	if !ok || !a.permits(b.PortfolioID) {
+		return ActionEvidence{}, ErrNoBreak
 	}
 	return ActionEvidence{}, ErrDurableActionStore
 }

@@ -12,7 +12,7 @@ import (
 const goCacheAction = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 const goCacheKindPrefix = "kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-"
 const goCachePrefix = goCacheKindPrefix + "${{ matrix.shard }}-"
-const goCacheInputs = "${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}"
+const goCacheInputs = "${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'schemas/buf.gen.yaml', 'schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}"
 const goCacheWriter = "success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.compiler_cache_meta.outputs.enabled == 'true'"
 
 type goCacheStep struct {
@@ -46,7 +46,7 @@ func checkGoCacheProfile(data []byte) error {
 				return fmt.Errorf("implicit compiler cache writer enabled")
 			}
 		case step.Name == "Prepare complete MFA browser dependencies before compiler cache":
-			if native != -1 || step.If != "" || strings.TrimSpace(step.Run) != "cd kanz-web\nnpm ci --no-audit --no-fund\nnpx --no-install playwright install --with-deps chromium" {
+			if native != -1 || step.If != "" || strings.TrimSpace(step.Run) != "cd web\nnpm ci --no-audit --no-fund\nnpx --no-install playwright install --with-deps chromium" {
 				return fmt.Errorf("native dependencies no longer fully prepared")
 			}
 			native = i
@@ -117,7 +117,7 @@ func TestGoCICompilerCacheProfileIsExclusive(t *testing.T) {
 	for _, input := range []string{"runner.os", "runner.arch", "steps.compiler_cache_meta.outputs.version", "steps.compiler_cache_meta.outputs.image", "steps.compiler_cache_meta.outputs.fingerprint", "matrix.kind", "matrix.shard"} {
 		mutations = append(mutations, [2]string{"${{ " + input + " }}", "shared"})
 	}
-	for _, input := range []string{"kanz/.gotmp/go-ci-cache-profile", "kanz/go.mod", "kanz/go.sum", ".github/go-ci-cache-profile", "kanz-schemas/buf.gen.yaml", "kanz-schemas/proto/**/*.proto", ".github/scripts/go_shard_evidence.py"} {
+	for _, input := range []string{"kanz/.gotmp/go-ci-cache-profile", "kanz/go.mod", "kanz/go.sum", ".github/go-ci-cache-profile", "schemas/buf.gen.yaml", "schemas/proto/**/*.proto", ".github/scripts/go_shard_evidence.py"} {
 		mutations = append(mutations, [2]string{"'" + input + "'", "'removed'"})
 	}
 	for _, mutation := range mutations {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/execution"
+	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
 
 // Credential is a candidate exchange API key set. It is an input only: no
@@ -104,12 +105,12 @@ func AccountID(ctx context.Context, venue string, cred Credential, opt Options) 
 func do(req *http.Request, client *http.Client) ([]byte, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("exchangeauth: send REST request: %w", transporterr.Redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("exchangeauth: read REST response: %w", transporterr.Redact(err))
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("%w: %s status %d", execution.ErrEgressDenied, req.URL.Path, resp.StatusCode)

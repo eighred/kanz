@@ -21,7 +21,7 @@ import (
 // That order is a live position, or an order resting at an exchange, that this
 // platform has forgotten. The sweep is the only thing that finds it.
 //
-// The shape is tv-sync's (cmd/tv-sync/main.go): rebuild what you know before
+// The shape is tv-sync's (cmd/tv_sync/main.go): rebuild what you know before
 // anything can read it or add to it. The caller treats a failure the same way —
 // a pod that could not reconcile its in-flight orders does not know what the
 // fund holds, and starting anyway is not degraded service, it is wrong service.

@@ -23,7 +23,7 @@ $headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($headCommit -ne $releaseCommit) {
     throw "Portfolio bootstrap is refused: HEAD $headCommit is not exact origin/main $releaseCommit."
 }
-& git -C $repoRoot diff --quiet $releaseCommit -- tools/Resolve-EcrReleaseDigest.ps1 tools/Initialize-TestnetPortfolio.ps1 tools/TestnetPortfolioBootstrapJob.yaml kanz/test/live/capitalpath kanz/infra/nats/tenancy.yaml kanz/infra/overlays/testnet-tokyo
+& git -C $repoRoot diff --quiet $releaseCommit -- tools/Resolve-EcrReleaseDigest.ps1 tools/Initialize-TestnetPortfolio.ps1 tools/TestnetPortfolioBootstrapJob.yaml kanz/test/live/capitalpath kanz/infra/nats/tenancy.yaml kanz/infra/overlays/testnet_tokyo
 if ($LASTEXITCODE -ne 0) { throw 'Portfolio bootstrap inputs differ from merged origin/main.' }
 
 . (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')

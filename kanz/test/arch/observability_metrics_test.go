@@ -39,7 +39,7 @@ import (
 // test is what makes that claim checkable.
 //
 // CROSS-LANGUAGE ON PURPOSE, and the same reasoning as
-// TestEverySubjectHasAKafkaTopic. kanz-py is a scrape target like any other
+// TestEverySubjectHasAKafkaTopic. python is a scrape target like any other
 // service, so an alert or SLO over a kanz_inference_* series is exactly as
 // legitimate as one over kanz_risk_*. A truth set built only from the Go source
 // would call every one of those an orphan and fail a CORRECT configuration —
@@ -48,12 +48,12 @@ import (
 // metrics work could not land while the guard was structurally blind to the
 // language that would declare them.
 //
-// kanz-py DECLARES ZERO METRICS TODAY — it does not even depend on
+// python DECLARES ZERO METRICS TODAY — it does not even depend on
 // prometheus_client — so the Python half of the truth set is currently empty
 // and this guard is green either way. That is precisely the situation in which
 // a broken scanner is invisible, so two things stand in for the metric that
 // does not exist yet: the pyFiles floor below proves the walk still reaches
-// kanz-py's source, and TestPythonMetricScannerRecognizesPrometheusClient
+// python's source, and TestPythonMetricScannerRecognizesPrometheusClient
 // proves the extractor still matches the shapes prometheus_client uses. Zero
 // found is only meaningful when both of those hold.
 func TestEveryObservabilityMetricExistsInSource(t *testing.T) {
@@ -69,15 +69,15 @@ func TestEveryObservabilityMetricExistsInSource(t *testing.T) {
 		t.Fatal("found zero kanz_* metric literals in the Go source — the scanner is broken, not the services")
 	}
 
-	pyMetrics, pyFiles := declaredPythonMetrics(t, filepath.Join(repo, "kanz-py"))
-	// NON-VACUITY, half three — a FILE floor, not a metric floor. kanz-py has no
+	pyMetrics, pyFiles := declaredPythonMetrics(t, filepath.Join(repo, "python"))
+	// NON-VACUITY, half three — a FILE floor, not a metric floor. python has no
 	// metrics yet, so `len(pyMetrics) == 0` is the correct answer and cannot be
 	// asserted against; what can be asserted is that the walk still has source
-	// to read. Without this, moving or renaming kanz-py would silently return an
+	// to read. Without this, moving or renaming python would silently return an
 	// empty Python truth set forever, and the first inference alert to land
 	// would be blamed on the alert.
 	if pyFiles == 0 {
-		t.Fatalf("scanned zero .py files under %s — the Python scanner is broken, or kanz-py moved", filepath.Join(repo, "kanz-py"))
+		t.Fatalf("scanned zero .py files under %s — the Python scanner is broken, or python moved", filepath.Join(repo, "python"))
 	}
 	for m := range pyMetrics {
 		declared[m] = true
@@ -113,7 +113,7 @@ func TestEveryObservabilityMetricExistsInSource(t *testing.T) {
 				"A metric name here is a claim the platform exports that series. It does not. "+
 				"An alert over it can never fire, an SLO over it can never breach, and a dashboard "+
 				"panel over it renders empty — all three of which read as HEALTHY. Either instrument "+
-				"the metric in Go or in kanz-py, re-point this at the series that actually exists, or "+
+				"the metric in Go or in python, re-point this at the series that actually exists, or "+
 				"delete the rule/panel. Do not add an entry to metricSurfacesPendingRepair to make "+
 				"this pass unless there is a tracked issue that will remove it.",
 				file, len(orphans), strings.Join(orphans, ", "))
@@ -317,7 +317,7 @@ var pyMetricDecl = regexp.MustCompile(`\b(Counter|Gauge|Histogram|Summary|Info|E
 //
 // Split out from the walk so the extractor can be exercised directly against
 // known-good and known-bad shapes — see
-// TestPythonMetricScannerRecognizesPrometheusClient. With kanz-py declaring no
+// TestPythonMetricScannerRecognizesPrometheusClient. With python declaring no
 // metrics, that test is the only thing standing between "found zero, correctly"
 // and "found zero, because it is broken".
 func pythonMetricNames(body string) []string {
@@ -335,7 +335,7 @@ func pythonMetricNames(body string) []string {
 	return out
 }
 
-// declaredPythonMetrics returns every metric kanz-py declares, plus the number
+// declaredPythonMetrics returns every metric python declares, plus the number
 // of .py files scanned so the caller can tell "no metrics" apart from "no
 // source". Test files are skipped — a metric declared in a test is not one the
 // deployed service emits — matching the same exclusion in pythonSubjects.
@@ -377,7 +377,7 @@ func declaredPythonMetrics(t *testing.T, pyRoot string) (map[string]bool, int) {
 
 // THE PYTHON SCANNER MUST BE PROVEN ON A SHAPE, BECAUSE IT HAS NO DATA.
 //
-// kanz-py declares no metrics, so declaredPythonMetrics correctly returns an
+// python declares no metrics, so declaredPythonMetrics correctly returns an
 // empty set — and an extractor that matches nothing at all returns exactly the
 // same thing. Every regression this could suffer (a rename of the classes, a
 // formatter that puts the name on its own line, someone "simplifying" the

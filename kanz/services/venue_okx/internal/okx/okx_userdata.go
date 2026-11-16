@@ -1,0 +1,611 @@
+package okx
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/fillfact"
+	"log/slog"
+	"strconv"
+	"time"
+
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/coder/websocket"
+
+	"github.com/eighred/kanz/pkg/bus"
+)
+
+// okxOrdersMsg is a private "orders"-channel push. Each data element is an order
+// state change; a fill carries a non-zero fillSz (the last execution).
+type okxOrdersMsg struct {
+	Arg struct {
+		Channel string `json:"channel"`
+	} `json:"arg"`
+	Data []struct {
+		InstID  string `json:"instId"`
+		OrdID   string `json:"ordId"`
+		ClOrdID string `json:"clOrdId"`
+		// AlgoClOrdID IS OUR ID WHEN THE ORDER CAME FROM A TRIGGER (#485).
+		//
+		// A conditional or trigger order placed on /trade/order-algo does not
+		// become the order that fills — it CREATES one when it fires, and OKX
+		// gives that order a clOrdId OF ITS OWN, prefixed "O". Ours is not lost:
+		// it rides on algoClOrdId. Measured against the demo API on 2026-08-15 by
+		// firing a real trigger and reading the order back:
+		//
+		//	ordId        3833848820050333696
+		//	clOrdId      O3833848819892766720   <- OKX's, not ours
+		//	algoClOrdId  kanzfire1786759936     <- ours
+		//
+		// Without this field the fill would arrive keyed by an id this platform has
+		// never seen, Lookup would miss, and a real execution would go unbooked
+		// while the venue reported success.
+		AlgoClOrdID string `json:"algoClOrdId"`
+		State       string `json:"state"`
+		FillSz      string `json:"fillSz"`
+		FillPx      string `json:"fillPx"`
+		AccFillSz   string `json:"accFillSz"`
+		TradeID     string `json:"tradeId"`
+		FillFee     string `json:"fillFee"`
+		FillFeeCcy  string `json:"fillFeeCcy"`
+		UTime       string `json:"uTime"`
+	} `json:"data"`
+}
+
+// OKXUserDataIngester reads the OKX private orders channel and converts each
+// fill into an order.v1.OrderFilled / OrderPartiallyFilled FACT — the OKX
+// analog of the Binance user-data ingester. fill_id is deterministic
+// (instId-tradeId), identical to the OKX synchronous venue path, so downstream
+// folds dedup the two.
+//
+// THAT LAST SENTENCE WAS UNTRUE FOR AS LONG AS IT STOOD HERE, AND IT COST #923.
+// The synchronous path did not mint "<instId>-<tradeId>" — it synthesized ONE
+// CUMULATIVE fill per order named "<instId>-<ordId>", a different OKX identifier
+// space, so the same execution reached the order aggregate and the position book
+// under two names and neither could dedup it. OKXVenue.fills now builds one fill
+// per trade from /trade/fills-history and mints the id below, so the two paths
+// agree by construction rather than by claim.
+type OKXUserDataIngester struct {
+	stream UserDataStream
+	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
+	// enrich the push; written so the fill this ingester just published as a FACT
+	// is also the fill the adapter believes in — see handle.
+	orders OrderTracker
+	pub    Publisher
+	venue  string
+	tenant string
+	// refusal is the SHARED answer to an execution report this ingester will not
+	// publish (#1045): counter, ERROR log, and a freeze on the adapter's own view.
+	// Shared with the Binance connector rather than written out here, because the
+	// defect it answers was in both and a per-connector refusal is one that gets
+	// improved on one venue.
+	refusal ReportRefusal
+	// resolvedThisSession records that this websocket session got at least ONE
+	// execution report all the way to a published fill FACT (#1047).
+	//
+	// IT IS WHAT THE RECONNECT BACK-OFF RESETS ON, and nothing else may reset it.
+	// The loop used to reset its delay whenever Connect succeeded, which bounds
+	// nothing when the exchange is healthy and the order view is not: every
+	// session connected, died on the first report, and re-dialled instantly.
+	// Publishing a fill is the one event a store outage cannot fake, so it is the
+	// evidence the loop is allowed to treat as progress.
+	//
+	// Written by handle and read by the run loop, both on the goroutine that
+	// calls Run — there is no second writer and no lock.
+	resolvedThisSession bool
+}
+
+// OKXUserDataConfig configures the ingester. It is a struct rather than the
+// positional argument list it replaces for the reason the Binance one is: the
+// refusal seam and the logger are the two collaborators a caller can silently
+// omit, and a keyed literal makes leaving either out visible in a diff.
+type OKXUserDataConfig struct {
+	Stream    UserDataStream
+	Orders    OrderTracker
+	Pub       Publisher
+	Venue     string
+	Tenant    string
+	OnRefused func(mic, orderID, reason string)
+	// OnDropped counts an execution report this ingester could not resolve to an
+	// order it holds (#1047) — unknown_order or store_error. Distinct from
+	// OnRefused, which counts a report it DID resolve and will not honour.
+	OnDropped func(mic, orderID, reason string)
+	Logger    *slog.Logger
+}
+
+func newOKXUserDataIngester(cfg OKXUserDataConfig) *OKXUserDataIngester {
+	if cfg.Venue == "" {
+		cfg.Venue = "OKX"
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return &OKXUserDataIngester{
+		stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
+		refusal: ReportRefusal{
+			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused,
+			OnDropped: cfg.OnDropped, Logger: cfg.Logger,
+		},
+	}
+}
+
+// Run reads the stream until ctx is cancelled or the stream errors.
+func (i *OKXUserDataIngester) Run(ctx context.Context) error {
+	// A NEW SESSION HAS PROVED NOTHING YET. The flag is per-session on purpose:
+	// one success an hour ago must not excuse a stream that is flapping now.
+	i.resolvedThisSession = false
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		raw, err := i.stream.Recv(ctx)
+		if err != nil {
+			return err
+		}
+		if err := i.handle(ctx, raw); err != nil {
+			return err
+		}
+	}
+}
+
+func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
+	var msg okxOrdersMsg
+	if json.Unmarshal(raw, &msg) != nil || msg.Arg.Channel != "orders" {
+		return nil
+	}
+	for _, d := range msg.Data {
+		if d.FillSz == "" && d.TradeID == "" {
+			continue // order-state notification with no execution fields
+		}
+		fsz, parsed := ParseDec(d.FillSz)
+		if parsed && fsz.GetCoefficient() <= 0 {
+			continue // not a fill (state change only)
+		}
+		// OUR ID, WHICHEVER FIELD CARRIES IT. algoClOrdId when the order was
+		// created by a trigger firing, clOrdId when we placed it directly. Never
+		// both, and never OKX's own generated clOrdId — see AlgoClOrdID above.
+		orderID := d.ClOrdID
+		if d.AlgoClOrdID != "" {
+			orderID = d.AlgoClOrdID
+		}
+		st, ok, lerr := i.orders.Lookup(orderID)
+		if lerr != nil {
+			// AN UNREADABLE ORDER VIEW IS NOT "NOT OUR ORDER" (#1047).
+			//
+			// The identical collapse, in the identical shape, one connector over —
+			// which is why the drop lives in execution.ReportRefusal.Dropped and not
+			// in either ingester. A store failure came back from Lookup as the same
+			// (nil, false) an order this adapter does not hold comes back as, and the
+			// `continue` below consumed the report: no order.order.filled FACT, so the
+			// position book never books the position and the ledger never journals the
+			// cash.
+			//
+			// THE MESSAGE IS ABANDONED, NOT CONTINUED PAST. The over-fill refusal below
+			// continues, because that is a standing disagreement about ONE order and
+			// tearing the websocket down would cost every other order's fills on every
+			// repeat report. A store failure is process-wide — every order in this
+			// frame and the next one is failing the same read — so there are no other
+			// fills to preserve, and returning puts the fault where the connector's run
+			// loop can see it. It does not quarantine, for the reasons Dropped states.
+			i.refusal.Dropped(orderID, DropStoreError)
+			return fmt.Errorf("okx: order %s: the adapter's order view could not be read, so this "+
+				"execution report cannot be resolved to an order and must not be treated as another "+
+				"account's: %w", orderID, lerr)
+		}
+		if !ok {
+			// The view ANSWERED and does not hold this order — not ours, or not yet
+			// admitted. Still a skip: a shared exchange account and a second replica
+			// both produce these routinely. Counted so the store_error arm above has
+			// a baseline to be read against.
+			i.refusal.Dropped(orderID, DropUnknownOrder)
+			continue
+		}
+		// EVERY NUMBER ON THIS FILL IS CONVERTED BEFORE ANY OF IT IS PUBLISHED (#94).
+		//
+		// These become an order.order.filled FACT the ledger and the position book
+		// fold. ParseDec used to answer an unparseable string with ZERO and to wrap
+		// a large one, so a garbled FillPx published a fill at price 0 and a
+		// trillion-unit AccFillSz published 77662796314.5224192. Returning the
+		// error refuses to publish that instead.
+		//
+		// WHAT "RETURNING THE ERROR" ACTUALLY DOES, STATED CORRECTLY (#1046). This
+		// comment used to say it NACKS the websocket message. It does not, and
+		// nothing on this path can: there is no acknowledgement to withhold. handle
+		// returns to Run, Run returns to runUserData, which logs, grows
+		// execution.UserDataBackoff and re-subscribes. The orders channel pushes
+		// state changes live rather than replaying them, so THIS message is gone —
+		// and so is every other fill in the same frame, since the loop abandons the
+		// whole message. Recovery is the reconciler's next pass and the OMS sweep,
+		// and the sweep only adopts while the order is still non-terminal.
+		//
+		// The trade is still the right way round — a fill published at price 0 is a
+		// wrong number in the ledger, worse than a missing one the healing watchdog
+		// re-derives — but it is a trade against a WEAKER recovery than the
+		// sentence it replaced claimed.
+		//
+		// FillSz, NOT AccFillSz, and that distinction is load-bearing: the OMS
+		// order aggregate ADDS fill.quantity to filled_quantity, so publishing the
+		// cumulative here double-counts every partially filled order. Pinned by
+		// TestOKXUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives.
+		qty, qok := ParseDec(d.FillSz)
+		px, pok := ParseDec(d.FillPx)
+		accFilled, aok := ParseDec(d.AccFillSz)
+		if !qok || !pok || !aok {
+			return fmt.Errorf("okx: order %s fill is not representable as a Decimal "+
+				"(fillSz=%q fillPx=%q accFillSz=%q)", orderID, d.FillSz, d.FillPx, d.AccFillSz)
+		}
+		if err := execution.ValidateExecutedPrice(qty, px); err != nil {
+			i.refusal.Refuse(orderID, err)
+			continue
+		}
+		// THE BOUND BETWEEN WHAT WAS ORDERED AND WHAT OKX SAYS IT FILLED (#1045).
+		//
+		// This was SubDec and a check on its ok, which is not a bound at all: a
+		// negative result represents perfectly well and reports success, so an
+		// accFillSz of 14 against an order of 10 published an order.order.filled
+		// FACT carrying leaves −4 into the position book and the accounting
+		// ledger. The OMS order aggregate does not consume that subject, so its
+		// OVERFILL refusal was never on this path and nothing else looked.
+		//
+		// THE WHOLE REPORT IS REFUSED, NOT CLAMPED. Healing leaves to zero would
+		// record the order at a size the platform never authorised and destroy the
+		// evidence of the disagreement in the same write.
+		leaves, lerr := LeavesRemaining(st.GetOrderedQuantity(), accFilled)
+		if lerr != nil {
+			// Refused, frozen and counted — never a silent drop; see refuse. The
+			// loop CONTINUES rather than returning: a returned error tears down the
+			// websocket, and this is a standing disagreement about one order, so a
+			// reconnect would only re-derive it while every other order's fills go
+			// unseen for the duration.
+			i.refusal.Refuse(orderID, fmt.Errorf("okx: order %s: %w", orderID, lerr))
+			continue
+		}
+		feeMoney, feeOK := okxFee(d.FillFee, d.FillFeeCcy)
+		if !feeOK {
+			return fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
+				orderID, d.FillFee, d.FillFeeCcy)
+		}
+		fill := &orderpb.Fill{
+			FillId:           d.InstID + "-" + d.TradeID,
+			OrderId:          orderID,
+			InstrumentId:     st.GetInstrumentId(),
+			Side:             st.GetSide(),
+			Quantity:         qty,
+			Price:            px,
+			Fee:              feeMoney,
+			Venue:            i.venue,
+			VenueExecutionId: d.TradeID,
+			ExecutedAt:       timestamppb.New(uTime(d.UTime)),
+		}
+		healed := &orderpb.OrderState{
+			OrderId: st.GetOrderId(), PortfolioId: st.GetPortfolioId(), InstrumentId: st.GetInstrumentId(),
+			Side: st.GetSide(), OrderType: st.GetOrderType(), TimeInForce: st.GetTimeInForce(),
+			OrderedQuantity: st.GetOrderedQuantity(), LimitPrice: st.GetLimitPrice(),
+			Status:         okxStateToProto(d.State),
+			FilledQuantity: accFilled,
+			LeavesQuantity: leaves,
+			Venue:          i.venue,
+			// OKX'S OWN ORDERING TOKEN (#1046). uTime is the instant OKX last
+			// updated this order, so it is both what order.v1's as_of is defined as
+			// ("the event_time of the change that produced it") and the token
+			// orderview.Progress orders reports by: a replayed push carries its
+			// ORIGINAL uTime, which is how the view can tell it apart from a fresh
+			// one. Fill.executed_at is stamped from the same field because the
+			// orders channel offers no separate fill time; the two are one clock
+			// here, unlike Binance where E and T are different instants.
+			AsOf: timestamppb.New(uTime(d.UTime)),
+		}
+		subject := fillfact.SubjectPartiallyFilled
+		var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: orderID, Fill: fill, State: healed}
+		if d.State == "filled" {
+			subject = fillfact.SubjectFilled
+			payload = &orderpb.OrderFilled{OrderId: orderID, Fill: fill, State: healed}
+		}
+		if err := i.pub.Publish(ctx, bus.Event{
+			Subject: subject, EventType: subject,
+			EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "order",
+			EventTime: time.Now().UTC(), PartitionKey: orderID, TenantID: i.tenant,
+			CausationID: orderID, Payload: payload,
+		}); err != nil {
+			return err
+		}
+		// AND NOW THIS ADAPTER'S OWN VIEW AGREES WITH THE FACT IT JUST PUBLISHED (#904).
+		//
+		// healed carries okxStateToProto(d.State) — OKX's OWN state field, so
+		// "filled" and "partially_filled" are the venue's verdict and not an
+		// inference from accFillSz. A PARTIAL is recorded as PARTIALLY_FILLED,
+		// which orderview.Terminal does NOT treat as terminal, so the order stays
+		// in Open and the healing watchdog keeps reconciling it. Marking a
+		// partially filled order terminal would hide a LIVE order from the
+		// watchdog, which is a far worse failure than the unbounded view this
+		// closes.
+		//
+		// AFTER the publish, not before: the view must never claim an order
+		// finished on the strength of a FACT that did not reach the bus.
+		//
+		// Progressed MAY REFUSE THIS, and that is by design (#1046): healed carries
+		// OKX's own accFillSz and uTime, and orderview.Progress will not fold in a
+		// report older than the last one it recorded. The refusal is counted on
+		// kanz_venue_orderview_stale_reports_total and logged; the FACT above is
+		// already on the bus and is unaffected, because the fill's quantity is an
+		// INCREMENT and downstream dedups on fill_id.
+		i.orders.Progressed(healed)
+		// THE ONE THING THE RECONNECT BACK-OFF MAY RESET ON (#1047) — see
+		// resolvedThisSession.
+		i.resolvedThisSession = true
+	}
+	return nil
+}
+
+// okxStateToProto is the ONE table turning an OKX order state into an order.v1
+// status. The healing path off the private websocket reads it, and — through
+// okxStateWithdrawn — so does the Querier that answers the OMS's crash recovery.
+//
+// ONE TABLE, DELIBERATELY (#924). A second one inside the query path is how the
+// two would come to disagree about what "canceled" means, or how one of them
+// would learn a state the other did not.
+func okxStateToProto(s string) orderpb.OrderStatus {
+	switch s {
+	case "live":
+		return orderpb.OrderStatus_ORDER_STATUS_ROUTED
+	case "partially_filled":
+		return orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
+	case "filled":
+		return orderpb.OrderStatus_ORDER_STATUS_FILLED
+	case "canceled", "mmp_canceled":
+		// mmp_canceled is MARKET MAKER PROTECTION pulling the order. It is as
+		// terminal and as withdrawn as an ordinary cancel — the order is gone from
+		// the book and will not trade again — and it used to fall through to
+		// UNSPECIFIED here, so the healing path could not name it either.
+		return orderpb.OrderStatus_ORDER_STATUS_CANCELLED
+	default:
+		return orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED
+	}
+}
+
+func uTime(ms string) time.Time { return okxMillis(ms, time.Now) }
+
+// okxMillis reads an OKX millisecond epoch string. fallback supplies the instant
+// when OKX sent nothing this connector can read — the venue's own clock is
+// always preferred, because a fill adopted on the RECOVERY path is timestamped
+// hours after it traded otherwise, in every execution-quality measurement that
+// reads it. Injectable rather than time.Now so the connector's clock seam
+// reaches here too.
+func okxMillis(ms string, fallback func() time.Time) time.Time {
+	n, err := strconv.ParseInt(ms, 10, 64)
+	if err != nil || n <= 0 {
+		return fallback().UTC()
+	}
+	return time.UnixMilli(n).UTC()
+}
+
+// --- OKX private websocket transport (coder/websocket) ---
+
+// okxUserDataWS logs in to the OKX v5 private websocket and subscribes to the
+// orders channel; Recv returns the next frame. The ingester reconnects on error.
+type okxUserDataWS struct {
+	wsURL      string
+	apiKey     string
+	apiSecret  []byte
+	passphrase string
+	now        func() time.Time
+	conn       *websocket.Conn
+	stop       func()
+	pending    []byte
+	session    context.Context
+	// Nil uses the socket's Write. This private seam exercises a failed
+	// subscription write after a real login without changing the transport.
+	writeSubscribe func(context.Context, websocket.MessageType, []byte) error
+}
+
+func newOKXUserDataWS(wsURL, apiKey, apiSecret, passphrase string) *okxUserDataWS {
+	return &okxUserDataWS{wsURL: wsURL, apiKey: apiKey, apiSecret: []byte(apiSecret), passphrase: passphrase, now: time.Now}
+}
+
+// Connect dials, authenticates (login), and subscribes. Returns a keepalive
+// stopper.
+func (w *okxUserDataWS) Connect(ctx context.Context) (func(), error) {
+	conn, _, err := websocket.Dial(ctx, w.wsURL, nil)
+	if err != nil {
+		return nil, okxHandshakeError(ctx, "dial", err)
+	}
+	connected := false
+	defer func() {
+		if !connected {
+			_ = conn.CloseNow()
+		}
+	}()
+	conn.SetReadLimit(1 << 20)
+
+	ts := strconv.FormatInt(w.now().Unix(), 10)
+	mac := hmac.New(sha256.New, w.apiSecret)
+	mac.Write([]byte(ts + "GET" + "/users/self/verify"))
+	sign := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	login, _ := json.Marshal(map[string]any{"op": "login", "args": []map[string]string{
+		{"apiKey": w.apiKey, "passphrase": w.passphrase, "timestamp": ts, "sign": sign},
+	}})
+	if err := conn.Write(ctx, websocket.MessageText, login); err != nil {
+		return nil, okxHandshakeError(ctx, "write login", err)
+	}
+	_, ack, err := conn.Read(ctx)
+	if err != nil {
+		return nil, okxHandshakeError(ctx, "read login acknowledgement", err)
+	}
+	var loginACK struct {
+		Event string `json:"event"`
+		Code  string `json:"code"`
+	}
+	// A readable frame does not establish an authenticated orders feed. Do not
+	// reflect peer-controlled ACK fields in errors, which the reconnect loop logs.
+	if json.Unmarshal(ack, &loginACK) != nil || loginACK.Event != "login" || loginACK.Code != "0" {
+		return nil, errors.New("okx: user-data login acknowledgement refused")
+	}
+	sub, _ := json.Marshal(map[string]any{"op": "subscribe", "args": []map[string]string{
+		{"channel": "orders", "instType": "SPOT"},
+	}})
+	writeSubscribe := w.writeSubscribe
+	if writeSubscribe == nil {
+		writeSubscribe = conn.Write
+	}
+	if err := writeSubscribe(ctx, websocket.MessageText, sub); err != nil {
+		return nil, okxHandshakeError(ctx, "write subscription", err)
+	}
+	// An order push can race the subscription acknowledgement. Retain at most
+	// one read-limit-bounded frame, and require the ACK on the next read. This
+	// cannot turn an unacknowledged channel into a usable session or an unbounded
+	// buffer while the peer keeps sending data instead of confirming the request.
+	ackCtx, cancelACK := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelACK()
+	var pending []byte
+	for {
+		_, raw, err := conn.Read(ackCtx)
+		if err != nil {
+			return nil, okxHandshakeError(ackCtx, "read subscription acknowledgement", err)
+		}
+		frame, err := readOKXOrdersFrame(raw)
+		if err != nil {
+			return nil, err
+		}
+		if frame.subscriptionACK() {
+			break
+		}
+		if pending != nil || !frame.orderPush() {
+			return nil, errors.New("okx: user-data subscription acknowledgement refused")
+		}
+		pending = raw
+	}
+
+	w.conn = conn
+	w.pending = pending
+	connected = true
+	kaCtx, cancel := context.WithCancel(ctx)
+	w.session = kaCtx
+	stop := func() {
+		cancel()
+		_ = conn.CloseNow()
+	}
+	w.stop = stop
+	go w.keepAlive(kaCtx, conn)
+	return stop, nil
+}
+
+// Only control fields are decoded here; execution parsing remains the ingester's
+// responsibility. Peer-supplied error text is never returned to the reconnect log.
+type okxOrdersFrame struct {
+	Event   string `json:"event"`
+	Code    string `json:"code"`
+	Channel string `json:"channel"`
+	Arg     struct {
+		Channel    string `json:"channel"`
+		InstType   string `json:"instType"`
+		InstID     string `json:"instId"`
+		InstFamily string `json:"instFamily"`
+	} `json:"arg"`
+	Data json.RawMessage `json:"data"`
+}
+
+func readOKXOrdersFrame(raw []byte) (okxOrdersFrame, error) {
+	var frame okxOrdersFrame
+	if json.Unmarshal(raw, &frame) != nil {
+		return frame, errors.New("okx: user-data invalid orders protocol frame")
+	}
+	return frame, nil
+}
+
+func (f okxOrdersFrame) subscriptionACK() bool {
+	return f.Event == "subscribe" && (f.Code == "" || f.Code == "0") &&
+		f.Arg.Channel == "orders" && f.Arg.InstType == "SPOT" && f.Arg.InstID == "" && f.Arg.InstFamily == "" && len(f.Data) == 0
+}
+
+func (f okxOrdersFrame) orderPush() bool {
+	// Empty arrays are harmless updates; a missing/null data field is not an
+	// order push and cannot stand in for an acknowledgement with a missing event.
+	return f.Event == "" && f.Arg.Channel == "orders" &&
+		(f.Arg.InstType == "" || f.Arg.InstType == "SPOT") && len(f.Data) > 0 && f.Data[0] == '['
+}
+
+// WebSocket errors can contain a peer's close reason or a URL. Retain only
+// local stage context and standard cancellation identity, never those payloads.
+func okxHandshakeError(ctx context.Context, stage string, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("okx: user-data %s: %w", stage, err)
+	}
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(cause, err) {
+			return fmt.Errorf("okx: user-data %s: %w", stage, err)
+		}
+	}
+	return fmt.Errorf("okx: user-data %s failed", stage)
+}
+
+// Recv reads the next orders frame. Channel refusal/termination ends the session
+// so the existing connector loop backs off and reconnects instead of idling on a
+// socket that no longer delivers orders.
+func (w *okxUserDataWS) Recv(ctx context.Context) ([]byte, error) {
+	if w.conn == nil {
+		return nil, errors.New("okx: user-data stream not connected")
+	}
+	end := func(err error) ([]byte, error) {
+		w.stop()
+		w.conn, w.stop, w.pending = nil, nil, nil
+		w.session = nil
+		return nil, err
+	}
+	if err := w.session.Err(); err != nil {
+		return end(okxHandshakeError(w.session, "read orders stream", err))
+	}
+	if err := ctx.Err(); err != nil {
+		return end(okxHandshakeError(ctx, "read orders stream", err))
+	}
+	if w.pending != nil {
+		raw := w.pending
+		w.pending = nil
+		return raw, nil
+	}
+	for {
+		_, data, err := w.conn.Read(ctx)
+		if err != nil {
+			return end(okxHandshakeError(ctx, "read orders stream", err))
+		}
+		if string(data) == "pong" {
+			continue
+		}
+		frame, err := readOKXOrdersFrame(data)
+		if err != nil {
+			return end(err)
+		}
+		if frame.orderPush() {
+			return data, nil
+		}
+		if frame.subscriptionACK() || (frame.Event == "channel-conn-count" && frame.Channel == "orders" && (frame.Code == "" || frame.Code == "0")) {
+			continue
+		}
+		return end(errors.New("okx: user-data orders channel refused or terminated"))
+	}
+}
+
+func (w *okxUserDataWS) keepAlive(ctx context.Context, conn *websocket.Conn) {
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_ = conn.Write(ctx, websocket.MessageText, []byte("ping"))
+		}
+	}
+}
+
+// resolvedAReport reports whether this session published at least one fill FACT.
+// The reconnect loop resets its back-off on this and on nothing else.
+func (i *OKXUserDataIngester) resolvedAReport() bool { return i.resolvedThisSession }

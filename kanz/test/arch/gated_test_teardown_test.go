@@ -201,7 +201,7 @@ func TestGatedTestTeardownsDropEveryTableTheirMigrationsCreate(t *testing.T) {
 func migrationsDirFor(root, testFile string) string {
 	if strings.HasPrefix(testFile, "services/") {
 		svc := strings.SplitN(strings.TrimPrefix(testFile, "services/"), "/", 2)[0]
-		return filepath.Join(root, "services", svc, "migrations")
+		return filepath.Join(root, "services", sourceDirectoryName(svc), "migrations")
 	}
 	if strings.HasPrefix(testFile, "internal/outbox/") {
 		// internal/outbox owns no migrations: the table is created by each

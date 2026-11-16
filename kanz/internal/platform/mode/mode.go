@@ -7,7 +7,7 @@
 // WITHOUT sharing a dependency:
 //
 //   - internal/signal/translate consumes the FACT (the Gate both brains check).
-//   - cmd/kanz-halt publishes it (the operator's break-glass handle).
+//   - cmd/kanz_halt publishes it (the operator's break-glass handle).
 //
 // If the publisher instead imported the translator, the break-glass tool would
 // only build when the entire trading pipeline builds — the one binary that must

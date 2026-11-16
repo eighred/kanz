@@ -27,6 +27,7 @@ import (
 // seam and is only actually proven here.
 type Postgres struct {
 	pool *pgxpool.Pool
+	tx   pgx.Tx // optional owner transaction; helpers use nested savepoints
 }
 
 // NewPostgres returns a Postgres store over an existing pool. The caller owns the
@@ -69,24 +70,29 @@ INSERT INTO custody_statements
     (statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain, values_verified)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
 ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
-    custodian_id  = EXCLUDED.custodian_id,
-    portfolio_id  = EXCLUDED.portfolio_id,
-    business_date = EXCLUDED.business_date,
     positions     = EXCLUDED.positions,
     cash          = EXCLUDED.cash,
     received_at   = EXCLUDED.received_at,
     transactions  = EXCLUDED.transactions,
-    grain         = EXCLUDED.grain, values_verified = true`
+    grain         = EXCLUDED.grain, values_verified = true
+WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
+  AND custody_statements.portfolio_id = EXCLUDED.portfolio_id
+  AND custody_statements.business_date = EXCLUDED.business_date`
 	tx, err := p.exactTransaction(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, q,
+	result, err := tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
 	if err != nil {
 		return fmt.Errorf("custody: save statement %s: %w", s.StatementID, err)
+	}
+	// The unique index arbitrates concurrent writers before this condition is
+	// evaluated. Checking identity in a separate read would race another insert.
+	if result.RowsAffected() == 0 {
+		return ErrStatementIdentityConflict
 	}
 	return tx.Commit(ctx)
 }
@@ -94,10 +100,14 @@ ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
 // LatestStatement implements Store.
 func (p *Postgres) LatestStatement(ctx context.Context, subject Subject) (Statement, error) {
 	const q = `
+WITH newest AS (
 SELECT statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain, values_verified
 FROM custody_statements
 WHERE portfolio_id = $1 AND custodian_id = $2 AND business_date = $3
 ORDER BY received_at DESC
+FETCH FIRST 1 ROW WITH TIES
+)
+SELECT newest.*, count(*) OVER () FROM newest
 LIMIT 1`
 	var (
 		s                  Statement
@@ -105,16 +115,22 @@ LIMIT 1`
 		transactions       []byte
 		grain              string
 		verified           bool
+		newest             int64
 		businessDate, recv time.Time
 	)
 	err := p.pool.QueryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
 		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv,
-			&transactions, &grain, &verified)
+			&transactions, &grain, &verified, &newest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Statement{}, ErrNoStatement
 	}
 	if err != nil {
 		return Statement{}, fmt.Errorf("custody: latest statement: %w", err)
+	}
+	// Count in the same tenant-scoped query snapshot. A second query could miss
+	// a competing receipt, and ordering by an ID would invent source precedence.
+	if newest > 1 {
+		return Statement{}, ErrAmbiguousStatement
 	}
 	if !verified {
 		return Statement{}, ErrUnverifiedPrecision
@@ -282,12 +298,18 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 // OutstandingBreaks implements Store.
 func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
 	const q = `
-SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
+SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
        first_seen_at, last_seen_at, status_changed_at, revision, values_verified
 FROM custody_breaks
 WHERE status IN ('open', 'assigned', 'explained')
 ORDER BY break_id`
-	rows, err := p.pool.Query(ctx, q)
+	var rows pgx.Rows
+	var err error
+	if p.tx != nil {
+		rows, err = p.tx.Query(ctx, q)
+	} else {
+		rows, err = p.pool.Query(ctx, q)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("custody: outstanding breaks: %w", err)
 	}
@@ -298,7 +320,7 @@ ORDER BY break_id`
 // LoadBreak implements Store.
 func (p *Postgres) LoadBreak(ctx context.Context, breakID string) (Break, error) {
 	const q = `
-SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
+SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
        first_seen_at, last_seen_at, status_changed_at, revision, values_verified
 FROM custody_breaks
 WHERE break_id = $1`
@@ -348,7 +370,7 @@ func scanBreaks(rows pgx.Rows) ([]Break, error) {
 			ibor, custodian, difference        string
 			firstSeen, lastSeen, statusChanged time.Time
 		)
-		if err := rows.Scan(&b.BreakID, &kind, &b.Key, &ibor, &custodian, &difference,
+		if err := rows.Scan(&b.BreakID, &b.PortfolioID, &b.CustodianID, &kind, &b.Key, &ibor, &custodian, &difference,
 			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified); err != nil {
 			return nil, fmt.Errorf("custody: scan break: %w", err)
 		}

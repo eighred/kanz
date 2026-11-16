@@ -2,72 +2,99 @@
 
 **Eighred** is the company. **Kanz** is its institutional investment operating
 system: one financial model, controlled execution core and auditable state model
-across secure interfaces. Risk, compliance, portfolio, margin, accounting and
-audit belong to that model. The objective is to know the institutional state,
+across secure interfaces. Risk, compliance, portfolio, leverage, collateral,
+margin, accounting and audit belong to that model. Establish institutional state,
 decide what is permitted, execute deterministically, record what happened and
-explain why. An exchange connector or order router alone does not meet it.
+explain why. A venue connector or order router alone does not meet that purpose.
+
+**Kanz Forge** is Eighred's engineering and AI-agent coordination plugin. It
+helps build and verify Kanz; it has no financial, execution or production authority.
 
 ## Instruction ownership
 
-This file owns stable Kanz architecture, safety, environment and evidence rules.
-The repository-owned [Kanz Forge plugin](.agents/plugins/kanz-forge/README.md)
-owns engineering workflows, skill routing, specialist instructions and command
-usage. Its source is `.agents/plugins/kanz-forge/`; the marketplace is
-`.agents/plugins/marketplace.json`. The former private package was retired in
-#1087. Do not create a second workflow manual or copy these invariants into each
-skill. Forge cannot implicitly amend platform boundaries or grant authority.
+This file owns stable architecture, safety, environment and evidence rules.
+[CONTRIBUTING.md](CONTRIBUTING.md) routes developers to setup and the shared
+[Eighred organization standard](.agents/plugins/kanz-forge/skills/repository-organization/references/eighred-standard.md).
+The repository-owned [Kanz Forge package](.agents/plugins/kanz-forge/README.md)
+owns workflows, skill routing, specialist profiles and command usage. Its source
+is `.agents/plugins/kanz-forge/`; the marketplace is `.agents/plugins/marketplace.json`.
+The thin repository skill at `.agents/skills/kanz-forge/` supplies native checkout
+discovery. It routes to that package rather than copying its workflows.
 
-For `/work`, `/ship` and related commands, use Forge's `commands` skill, which
-selects the required investigation, engineering, verification and delivery
-skills. Read the affected code, migrations and architecture guards before
-changing a contract. Load supporting instructions for the task at hand rather
-than every skill. Missing tools or an unavailable skill must be reported; their
-presence in a manifest is not evidence of an operational capability.
+For engineering requests, read Forge's `commands` skill and the selected supporting
+entrypoints. Read affected code, migrations, callers and architecture guards before
+changing a contract. Load relevant guidance, not every skill. Missing tools and
+unavailable skills remain explicit; a manifest does not prove an operational
+capability. Forge cannot amend platform boundaries or grant authority implicitly.
 
-## Planes and layout
-
-The user-authorized architecture migration is tracked in #1413. Migrate this
-repository in place: Rust for critical execution/financial/market-data components,
-Go for orchestration and the BFF, the existing Vue client, and a JVM-free Redpanda
-event transport target. Preserve existing features, identities, canonical schemas,
-stored history and financial controls. Desktop prototypes are reference material,
-not replacement contracts or deployment sources. Each component changes ownership
-only after compatibility, recovery and rollback evidence; the current NATS spine,
-single archiver and PostgreSQL writers remain authoritative until their explicit
-cutover. Adding Rust compatibility tests does not activate a Rust trading path.
+## Planes and ownership
 
 | Plane | Owns | Boundary |
 |---|---|---|
 | Execution | OMS, router, venue adapters, fills, exchange protocol and auth | Deterministic, typed, low-latency, fail-closed, independently testable. |
-| Control | Risk, compliance, mandates, portfolio limits, leverage, margin, collateral, kill switches | Admission control: decides whether an action is permitted. |
-| Intelligence | MCP, analytics, copilot, operational investigation | Reasons over state; never owns or becomes a dependency of execution. |
+| Control | Risk, compliance, mandates, portfolio limits, leverage, margin, collateral, kill switches | Admission control decides whether an action is permitted. |
+| Intelligence | MCP, analytics, inference, copilot, operational investigation | Reasons over authorized state; never owns or becomes a dependency of execution. |
 
 Identify the owning plane before editing. If AI, prompts, tool discovery or MCP
-disappear, trading must continue. Moving execution into intelligence is an
-architecture violation even when tests pass.
+disappear, trading must continue. Moving execution into intelligence violates the
+architecture even when tests pass. Logical capabilities do not require separate
+deployments. Split owners by contracts, trust, recovery and measured operating needs.
 
-| Location | Responsibility |
+Language roles support these boundaries: Rust for critical execution, market-data
+and financial kernels; Go for enterprise APIs, BFF and orchestration; Python for
+AI/inference; isolated Julia for research/calibration; Vue and strict TypeScript
+for the operator interface. Placement does not activate a runtime. Existing Go
+writers and admission controls remain authoritative until explicit component
+compatibility, recovery and rollback acceptance transfers ownership. Diagnostic
+Rust/Julia workers and browser WASM do not acquire financial authority.
+
+PostgreSQL is the financial write authority with pgx v5 and tenant RLS. NATS
+JetStream is the current event spine; one archiver derives the Kafka-compatible
+archive/CDC path. A replacement transport, writer or derived store cannot become
+a second source of truth. Technology changes preserve canonical schemas, history,
+feature coverage and human operations; cutover decisions and acceptance live in
+Issues. Do not introduce JVM production dependencies without an approved exception.
+Desktop architecture bundles are reference material, not runtime contracts or
+instructions to replace this repository.
+
+## Directory responsibilities
+
+| Location | Responsibility and limit |
 |---|---|
-| `kanz/` | Go module `github.com/eighred/kanz`; Go 1.26.1 language / 1.26.10 toolchain. Services in `services/`, binaries in `cmd/`. |
-| `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
-| `kanz-py/` | Python inference service. |
-| `kanz-web/` | Browser client. |
-| `kanz-rs/` | Rust feed runtimes, canonical compatibility primitives and diagnostic financial workers; ownership changes require component-specific #1413 acceptance. |
-| `kanz-jl/` | Optional curve-calibration comparison worker; Go remains authoritative. |
-| `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
-| `tools/`, `.github/` | Host/operator scripts and CI. |
+| `kanz/` | Existing Go module `github.com/eighred/kanz`; language/toolchain versions come from `go.mod`. This established build anchor is one part of Kanz, not the whole product. |
+| `kanz/services/<owner>/` | Domain service, `cmd/<source_name>/` composition root, private `internal/` code, owned migrations and runbooks. |
+| `kanz/cmd/` | Operator/administrative binaries; preserve released command names. |
+| `kanz/internal/`, `kanz/pkg/` | Module-private shared owners and deliberately reusable APIs respectively; promotion requires a second actual consumer. |
+| `kanz/test/` | Cross-component tests, architecture guards and qualification fixtures. Unit tests stay beside source. |
+| `kanz/dev/` | Local smoke environment and setup; it does not certify the capital path. |
+| `kanz/infra/` | Deployment, recovery, operations and SPIFFE/SPIRE identity; not another domain implementation. |
+| `schemas/` | Canonical Protobuf/Buf contracts and SDK generation; ignored output in `gen/`. |
+| `rust/` | Cargo workspace: shared crates and explicit feed/service/diagnostic-worker owners. |
+| `python/` | Bus and inference packages; intelligence stays outside execution authority. |
+| `julia/` | Isolated calibration comparison worker; its caller controls acceptance. |
+| `web/` | Vue/TypeScript operator client and presentation-only WASM integration. |
+| `tools/` | Host/operator scripts and disposable qualification across components. |
+| `.github/` | GitHub CI, governance and release entrypoints. |
+| `.agents/` | Canonical Forge package and thin host-discovery adapters. |
+| `.codex/` | Trusted-project plugin enablement; no duplicated workflow or permission grants. |
 
-Use snake_case for new project-owned directories, except ecosystem and tool
-discovery contracts. Preserve existing package, wire and deployed identities.
-Reconcile active layout branches before migrating established paths; update and
-verify imports, generation, build, CI, deployment and guard consumers together.
+Use English snake_case for project-owned directories at every depth. Preserve
+language, upstream and tool-discovery contracts through exact documented guard
+exceptions. Package/module, binary, image, wire and deployed identities are
+separate contracts. Reconcile existing migration work and update all import,
+generation, build, CI, deployment, scaffold, guard and documentation consumers
+with each move. The naming guard is
+`kanz/test/arch/repository_directory_names_test.go`; documentation links are checked
+by `python -B tools/check_readmes.py`. Do not move a package for symmetry alone.
 
-Keep sibling directories in place: Go replacements and build contexts depend on
-them. Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
-Kafka (segmentio) is the derived archival/CDC path. Start setup at
-`kanz/dev/README.md`, schema generation at `kanz-schemas/README.md`, and Python
-setup at `kanz-py/README.md`. Keep operational runbooks beside their component;
-do not move packages merely for tidiness.
+Keep the Go module and schema SDK as siblings: `kanz/go.mod` resolves the SDK at
+`../schemas/gen/go`, and repository-root image contexts carry both. Start setup
+at `kanz/dev/README.md`, schema generation at `schemas/README.md`, and inference
+setup at `python/README.md`. Keep operational runbooks beside their component.
+Go services are `package main` under `services/<source_name>/cmd/<source_name>/`,
+with environment configuration in `internal/config`. Shared code starts in a
+service's `internal/`; promotion to module `internal/` or `pkg/` needs a real
+second consumer and common semantics.
 
 ## Execution and trust boundaries
 
@@ -79,10 +106,7 @@ strategy -> intent -> risk -> compliance -> mandate -> OMS
          -> execution router -> venue adapter -> exchange
 ```
 
-State changes flow as FACTs on the bus, without polling. Go services are
-`package main` under `services/<name>/cmd/<name>/`, with environment configuration
-in `internal/config`. Shared code starts in a service's `internal/`; promote it
-to `kanz/internal/` or `kanz/pkg/` only when a second consumer exists.
+State changes flow as FACTs on the bus, without polling.
 
 The gateway is the sole identity authority. It authenticates and injects
 `X-Kanz-Principal-*`; upstream trust is sound only while NetworkPolicy makes the
@@ -134,10 +158,10 @@ and measured behavior. Preserve security boundaries over convenience. MCP cannot
 justify rewriting execution; adapter deduplication must preserve isolation and
 venue-specific semantics.
 
-The TUI is retained until Web equivalents achieve operational parity and
-production verification, followed by deliberate retirement. A route unused by
-the web is not dead: `internal/tui/universe` owns calls to live gateway node
-provisioning routes. Preserve every required human operation throughout migration.
+The browser is the operator interface. Terminal frontends are retired; keep
+administrative commands focused on their explicit task.
+`kanz/test/arch/terminal_retirement_test.go` guards retired entrypoints, UI
+dependencies and the obsolete broker identity.
 
 Idempotent handlers are the correctness floor at every replica count. Per-process
 state is a best-effort optimization that re-baselines on restart. Shared state is
@@ -177,9 +201,9 @@ go test -p 1 ./internal/... -count=1
 go test -p 1 ./services/... -count=1
 go test -p 1 ./test/arch/ -count=1
 golangci-lint run ./...
-git ls-files -z '*.go' | xargs -0 gofmt -l
+make fmt  # tracked and untracked nonignored Go files; fails on formatter errors
 
-cd ../kanz-schemas
+cd ../schemas
 buf generate
 bash bootstrap-go-sdk.sh
 ```
@@ -235,10 +259,11 @@ Bash; use equivalent native commands in PowerShell.
    ```
 
    The Makefile overrides this with in-module `kanz/.gotmp` in CI. Use
-   `git ls-files` for gofmt, never a tree walk that includes generated test mains.
+   `make fmt` for tracked and untracked nonignored Go files. Its Git inventory
+   excludes ignored generated test mains; never format by walking the tree.
 
 2. **Generate the schema SDK.** `kanz/go.mod` replaces the SDK with
-   `../kanz-schemas/gen/go`; ignored `gen/` is never committed (EVT-15a).
+   `../schemas/gen/go`; ignored `gen/` is never committed (EVT-15a).
    Missing generated code causes unresolved imports in a fresh checkout. The
    host's downloaded `~/go/bin/buf.exe` is blocked; the established project-local
    source build is:
@@ -248,7 +273,7 @@ Bash; use equivalent native commands in PowerShell.
    ```
 
    If policy blocks that build too, report it rather than trying alternate
-   routes. Run `buf generate` and `bash bootstrap-go-sdk.sh` in `kanz-schemas`
+   routes. Run `buf generate` and `bash bootstrap-go-sdk.sh` in `schemas`
    after schema changes and on fresh checkouts.
 
 3. **Use actual build tags.** There are no `binance` or `okx` tags; venue
@@ -256,7 +281,7 @@ Bash; use equivalent native commands in PowerShell.
 
    | Tag | Selects | Default (`!tag`) |
    |---|---|---|
-   | `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
+   | `redis` | `pkg/redisadapter/goredis.go`, `risk_engine/dedup_redis.go`, `webhook_ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
    | `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
    | `openrouter` | `copilot/model_openrouter.go` and tests | Provider absent |
    | `perf` | `internal/risk/compute/latency_budget_test.go` | No performance test |

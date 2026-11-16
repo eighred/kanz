@@ -595,7 +595,7 @@ func (ix fileIndex) holds(cited string) bool {
 }
 
 // repoFileIndex indexes every file in the repository — both modules, since
-// comments in kanz/ cite kanz-schemas/ constantly — keyed by repo-relative
+// comments in kanz/ cite schemas/ constantly — keyed by repo-relative
 // path, by module-relative path, and by basename.
 func repoFileIndex(t *testing.T, repoRoot string) fileIndex {
 	t.Helper()

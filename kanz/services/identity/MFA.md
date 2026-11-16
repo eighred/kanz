@@ -76,11 +76,11 @@ With a disposable NOSUPERUSER Postgres role, run:
 
 ```sh
 TEST_POSTGRES_URL=... go test -p 1 ./internal/identity ./services/identity/internal/server -run TestMFA -count=1
-go test -p 1 ./pkg/auth ./services/api-gateway/cmd/api-gateway ./services/api-gateway/internal/authz ./services/api-gateway/internal/middleware ./services/web-bff/internal/server
+go test -p 1 ./pkg/auth ./services/api_gateway/cmd/api_gateway ./services/api_gateway/internal/authz ./services/api_gateway/internal/middleware ./services/web_bff/internal/server
 ```
 
 The browser test additionally requires `TEST_MFA_BROWSER_SCRIPT` pointing to
-`kanz-web/e2e/mfa.cjs`, `TEST_MFA_PLAYWRIGHT` to an installed Playwright module,
+`web/e2e/mfa.cjs`, `TEST_MFA_PLAYWRIGHT` to an installed Playwright module,
 `TEST_MFA_NODE`, `TEST_MFA_BFF` to the built BFF executable, and
 `TEST_MFA_STATIC_DIR` to the built web distribution. It starts real identity/BFF
 HTTP services against Postgres and drives Chromium's virtual UV authenticator:

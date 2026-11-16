@@ -14,7 +14,7 @@ export GOFLAGS := -mod=mod
 # per-target) so it holds for an ad-hoc `go test` run from this directory too.
 export GOTMPDIR := $(CURDIR)/.gotmp
 
-SCHEMAS_DIR := ../kanz-schemas
+SCHEMAS_DIR := ../schemas
 PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
@@ -32,30 +32,13 @@ bootstrap: | $(GOTMPDIR) ## Install the protoc plugins and check for buf
 	@command -v buf >/dev/null || { echo "install buf: https://buf.build/docs/installation" >&2; exit 1; }
 
 .PHONY: generate
-generate: | $(GOTMPDIR) ## Regenerate and initialize the kanz-schemas Go SDK
+generate: | $(GOTMPDIR) ## Regenerate and initialize the schemas Go SDK
 	cd $(SCHEMAS_DIR) && buf generate && bash bootstrap-go-sdk.sh
 
 .PHONY: build
-# THE BINARIES HAVE TO LAND IN ONE DIRECTORY, TOGETHER.
-#
-# This was `go build ./...`, which compiles every package and writes NOTHING:
-# with several main packages, go build discards the executables. "Build every
-# package" was true and produced nothing to run.
-#
-# That is not a tidiness problem. The kanz shell reaches kanz-monitor and
-# kanz-halt by executing them, resolved NEXT TO THE RUNNING BINARY (#161/#175) —
-# because Go refuses a bare name found via the working directory, and rightly:
-# a kanz-halt dropped in whatever directory you happened to be in would
-# otherwise become the platform kill switch. So the tools must ship together,
-# and until now no target made them do so. `make release` does not cover cmd/
-# at all; it builds ./services/... only.
-#
-# -o with a DIRECTORY writes one executable per main package and ignores the
-# rest, so `./...` stays honest: it still compiles everything, and now the
-# things that can be run can be found. bin/ is already gitignored.
 build: generate | $(GOTMPDIR) ## Build every package, emitting the binaries into bin/
 	@mkdir -p bin
-	go build -ldflags="$(VERSION_LDFLAGS)" -o bin/ ./...
+	$(call build_commands,./...,)
 
 # Production release build (IP-security mandate). -ldflags="-s -w" strips the
 # symbol table (-s) and DWARF debug info (-w) so the shipped binary resists
@@ -81,10 +64,21 @@ VERSION_LDFLAGS := $(if $(VERSION),-X github.com/eighred/kanz/internal/version.s
 GO_RELEASE_LDFLAGS := -s -w $(VERSION_LDFLAGS)
 TAGS ?=
 
+define build_commands
+@set -e; \
+	packages="$$(go list -tags "$(2)" -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' $(1))"; \
+	test -n "$$packages"; \
+	for package in $$packages; do \
+		binary=$$(printf '%s' "$${package##*/}" | tr '_' '-'); \
+		go build $(3) -ldflags="$(if $(3),$(GO_RELEASE_LDFLAGS),$(VERSION_LDFLAGS))" -tags "$(2)" -o "bin/$$binary" "$$package"; \
+	done
+endef
+
+# Source paths use snake_case; released command filenames retain their deployed names.
 .PHONY: release
 release: generate | $(GOTMPDIR) ## Build stripped, trimpath production binaries into bin/ (TAGS selects optional integrations)
 	@mkdir -p bin
-	go build -trimpath -ldflags="$(GO_RELEASE_LDFLAGS)" -tags "$(TAGS)" -o bin/ ./services/...
+	$(call build_commands,./services/...,$(TAGS),-trimpath)
 
 # NOTE: -race requires cgo (CGO_ENABLED=1). On a box without a C toolchain it
 # fails with "-race requires cgo"; run `make test` there and `make test-race`
@@ -122,12 +116,12 @@ vet: generate | $(GOTMPDIR) ## go vet
 	go vet ./...
 
 .PHONY: fmt
-fmt: ## gofmt-check tracked Go files (fails if any need formatting)
-	@unformatted=$$(git ls-files -z '*.go' | xargs -0 gofmt -l); \
-	if [ -n "$$unformatted" ]; then echo "needs gofmt:"; echo "$$unformatted"; exit 1; fi
+fmt: ## gofmt-check tracked and untracked nonignored Go files
+	@bash -o pipefail -c 'unformatted=$$(git ls-files -z --cached --others --exclude-standard "*.go" | xargs -0 gofmt -l) || exit $$?; \
+	if [ -n "$$unformatted" ]; then echo "needs gofmt:"; echo "$$unformatted"; exit 1; fi'
 
 .PHONY: lint
-lint: vet fmt ## vet + tracked gofmt + golangci-lint
+lint: vet fmt ## vet + nonignored Go formatting + golangci-lint
 	golangci-lint run ./...
 
 .PHONY: tidy

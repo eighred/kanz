@@ -431,7 +431,7 @@ func publishHalt(t *testing.T, ctx context.Context, url string) {
 		ChangedBy: "operator:akif",
 		Reason:    "risk breach on fund-alpha",
 	}
-	// The SAME envelope cmd/kanz-halt builds. A test that published a different
+	// The SAME envelope cmd/kanz_halt builds. A test that published a different
 	// shape could pass against a broker that would reject the real tool.
 	if err := producer.Publish(ctx, bus.Event{
 		Subject:          halt.SubjectModeChanged,

@@ -86,7 +86,7 @@ AGGREGATE_CASES = {
 }
 
 REQUIRED = {
-    "services/oms/tools/aggregate-conformance": {
+    "services/oms/tools/aggregate_conformance": {
         "TestAggregateIndependentOracle", "TestAggregateCanonicalBoundary",
         "TestRustOrderAggregateDifferential", "TestRustOrderAggregateRefusesMalformedWire",
         "TestRustOrderAggregateBoundedRefusals",
@@ -95,7 +95,7 @@ REQUIRED = {
         *{"TestRustOrderAggregateRefusesMalformedWire/" + op for op in ("Accept", "Route", "ApplyFill", "Amend")},
         *{"TestRustOrderAggregateBoundedRefusals/" + case for case in ("oversized-state", "invalid-nanos", "invalid-seconds", "out-of-domain-fill")},
     },
-    "services/oms/tools/venue-conformance": {
+    "services/oms/tools/venue_conformance": {
         "TestGoVenueFixtureOracle",
         "TestRustVenueWireRefusals",
         "TestRustVenueWireRefusals/malformed-request",
@@ -180,7 +180,7 @@ REQUIRED = {
         "TestTwoPodsConvergeOnOneBook",
         "TestTwoVenuesAreTwoHoldings",
     },
-    "services/oms/tools/fill-conformance": {
+    "services/oms/tools/fill_conformance": {
         "TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance",
         "TestTerminalCorpusIndependentState", "TestRustTerminalFoldProcessConformance",
         "TestRustFillThenTerminalReplay",
@@ -201,7 +201,7 @@ REQUIRED = {
     "internal/risk/ingest": {"TestPositionPrecisionFACTOverJetStream",
                              "TestPositionPrecisionFACTOverJetStream/long",
                              "TestPositionPrecisionFACTOverJetStream/short"},
-    "services/oms/tools/store-conformance": {
+    "services/oms/tools/store_conformance": {
         "TestRustPositionPrecisionPostgresNATS",
         "TestRustPositionPrecisionTransactions",
         *{"TestRustPositionPrecisionPostgresNATS/" + owner for owner in ("go", "rust")},

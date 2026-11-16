@@ -102,7 +102,7 @@ apply_deploy() {
     echo "FATAL: python3 not found. tools/rig_dev_patch.py rewrites Vault CSI" >&2
     echo "volumes into dev Secret references and needs a real YAML parser to do" >&2
     echo "it safely; a sed-based substitute would risk silently mangling a" >&2
-    echo "manifest. Install python3 (kanz-py already requires a Python" >&2
+    echo "manifest. Install python3 (python already requires a Python" >&2
     echo "toolchain) and re-run." >&2
     exit 1
   }

@@ -69,12 +69,14 @@ var publishable = map[string]bool{
 // TestNoIngressPublishesAnUnauthenticatedService fails the build if a manifest
 // exposes a service that cannot defend itself.
 func TestNoIngressPublishesAnUnauthenticatedService(t *testing.T) {
+	seen := map[string]bool{}
 	for _, f := range manifests(t) {
 		body := read(t, f)
 		if !strings.Contains(body, "kind: Ingress") {
 			continue
 		}
 		for _, svc := range ingressBackends(body) {
+			seen[svc] = true
 			if !publishable[svc] {
 				t.Errorf("%s publishes %q to the internet, and %q is not on the publishable list.\n\n"+
 					"If this is tv-sync: it authenticates NOTHING. It serves whatever tenant the "+
@@ -85,6 +87,11 @@ func TestNoIngressPublishesAnUnauthenticatedService(t *testing.T) {
 					"say in the manifest what authenticates a request before it reaches a pod.",
 					filepath.Base(f), svc, svc)
 			}
+		}
+	}
+	for svc := range publishable {
+		if !seen[svc] {
+			t.Errorf("publishable entry %q has no declared Ingress backend; retire the unused public-service permission", svc)
 		}
 	}
 }
@@ -135,7 +142,7 @@ func TestTheWebhookIngressCarriesTheClientIPPerimeter(t *testing.T) {
 //
 // The proxy.Service constants are the pod `app` labels, so this is exact.
 func TestEveryProxiedUpstreamIsReachable(t *testing.T) {
-	src := read(t, "../../services/api-gateway/internal/proxy/proxy.go")
+	src := read(t, "../../services/api_gateway/internal/proxy/proxy.go")
 	constRe := regexp.MustCompile(`Service\s*=\s*"([a-z0-9-]+)"`)
 	upstreams := constRe.FindAllStringSubmatch(src, -1)
 	if len(upstreams) == 0 {

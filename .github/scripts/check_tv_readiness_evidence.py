@@ -10,7 +10,7 @@ REQUIRED = {
                 "TestRetainedRetryValidatesEffectiveDurableProfile",
                 "TestRetainedProfilePreservesExistingDurableCursor",
                 "TestRetainedAuthorityRetriesReleaseClaimsAndKeepTerminalDLQ"},
-    "services/tv-sync/cmd/tv-sync": {"TestTVReadinessWaitsForEverySubscription",
+    "services/tv_sync/cmd/tv_sync": {"TestTVReadinessWaitsForEverySubscription",
                                       "TestTVReadinessRefusesSubscriptionFailureAndEmptySet",
                                       "TestTVReadinessClosesBeforeSiblingDrain",
                                       "TestTVRefusesOverlappingPriceFilters",
@@ -21,14 +21,14 @@ REQUIRED = {
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/ambiguous-committed-response",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/database-timeout",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/restart-unacked"},
-    "services/tv-sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
+    "services/tv_sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
                                                  "TestServingGenerationRejectsOldLeasesAfterRecovery",
                                                  "TestServingRevocationOrdersBoundedInflightWrite",
                                                  "TestEstablishedStreamClosesOnFailureAndRequiresNewGeneration",
                                                  "TestStreamHeaderAdmissionCannotRaceRevocation",
                                                  "TestFoldReadinessRequiresMatchingRecovery",
                                                  "TestFoldReadinessOverflowAndMissingIdentityStayClosed"},
-    "services/tv-sync/internal/brokerapi": {"TestStreamRefusesUnwiredServingGate", "TestStream_DeliversDeltas", "TestStream_SurvivesTheServerWriteTimeout"},
+    "services/tv_sync/internal/brokerapi": {"TestStreamRefusesUnwiredServingGate", "TestStream_DeliversDeltas", "TestStream_SurvivesTheServerWriteTimeout"},
 }
 if __name__ == "__main__":
     if sys.argv[1] == "--pattern":
@@ -36,4 +36,5 @@ if __name__ == "__main__":
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 26 required durable readiness outcomes passed in 4 complete packages")
+        print(f"All {sum(map(len, REQUIRED.values()))} required durable readiness outcomes "
+              f"passed in {len(REQUIRED)} complete packages")
