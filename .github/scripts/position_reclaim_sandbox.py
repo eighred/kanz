@@ -9,7 +9,9 @@ both privileged parent programs, position_reclaim_proof.py and this module.
 Child restrictions cannot contain a modified workflow or either parent program.
 """
 import contextlib
+import errno
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -32,6 +34,7 @@ UID = 65534
 MAX_FILE = 32 * 1024 * 1024
 MAX_SOURCE = 1024 * 1024 * 1024
 MAX_OUTPUT = 256 * 1024 * 1024
+MAX_GIT_METADATA_ENTRIES = 10000
 SAFE = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"}
 PROBE_ENTRY = b"POSITION_PROBE_ENTRY v1"
 PROBE_STAGES = frozenset(("arguments","identity","uid-map","gid-map","environment","core-limit","file-limit",
@@ -103,8 +106,8 @@ def probe_output(supervisor_exit, raw, combined_output_bytes):
     return observation,lines[1]
 
 
-def host(*args, timeout=30, input=None):
-    process=subprocess.Popen(args,stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=SAFE,start_new_session=True)
+def host(*args, timeout=30, input=None, umask=-1):
+    process=subprocess.Popen(args,stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=SAFE,start_new_session=True,umask=umask)
     result=bytearray()
     until=time.monotonic()+timeout
     try:
@@ -210,6 +213,126 @@ def new_file(root_fd, name, raw, mode=0o600):
             raise ValueError("artifact destination changed")
     finally:
         os.close(fd)
+
+
+def owned_directory_mode(fd, mode):
+    before=os.fstat(fd)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid!=os.geteuid():
+        raise ValueError("owned staging directory required")
+    os.fchmod(fd,mode)
+    after=os.fstat(fd)
+    if (before.st_dev,before.st_ino)!=(after.st_dev,after.st_ino) or stat.S_IMODE(after.st_mode)!=mode:
+        raise ValueError("owned staging directory mode differs")
+
+
+def public_parents(root_fd, relative, mode=0o755):
+    """Create only owned source-relative parents; never chmod an existing tree."""
+    parts=Path(relative).parts
+    if Path(relative).is_absolute() or any(p in (".","..") for p in parts):
+        raise ValueError("owned relative staging path required")
+    fd=os.dup(root_fd)
+    try:
+        for name in parts:
+            created=False
+            try:
+                os.mkdir(name,mode=mode,dir_fd=fd)
+                created=True
+            except FileExistsError: pass
+            child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+            try:
+                if created: owned_directory_mode(child,mode)
+                actual=os.fstat(child)
+                if actual.st_uid!=os.geteuid() or stat.S_IMODE(actual.st_mode)!=mode:
+                    raise ValueError("owned public staging mode refused")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(fd);fd=child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def check_git_metadata(source_fd):
+    """Read-only, bounded no-follow validation of newly generated metadata."""
+    count=total=0
+    def visit(fd):
+        nonlocal count,total
+        actual=os.fstat(fd)
+        if not stat.S_ISDIR(actual.st_mode) or actual.st_uid!=os.geteuid() or stat.S_IMODE(actual.st_mode)!=0o755:
+            raise ValueError("generated Git directory mode refused")
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                name=entry.name
+                count+=1
+                if count>MAX_GIT_METADATA_ENTRIES: raise ValueError("generated Git metadata count refused")
+                before=os.stat(name,dir_fd=fd,follow_symlinks=False)
+                if stat.S_ISDIR(before.st_mode):
+                    child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+                    try: visit(child)
+                    finally: os.close(child)
+                else:
+                    child=os.open(name,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+                    try:
+                        actual=os.fstat(child)
+                        total+=actual.st_size
+                        if (not stat.S_ISREG(actual.st_mode) or actual.st_uid!=os.geteuid() or actual.st_nlink!=1
+                                or stat.S_IMODE(actual.st_mode) not in (0o644,0o444) or actual.st_size>MAX_FILE or total>MAX_SOURCE):
+                            raise ValueError("generated Git file boundary refused")
+                    finally: os.close(child)
+    fd=os.open(".git",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=source_fd)
+    try: visit(fd)
+    finally: os.close(fd)
+
+
+def launch_permissions(specs):
+    """Trusted outer-identity access checks; never return a path or error text."""
+    roles={"assigned-root","input-parent","public-parent","source","git-metadata","synthetic-identity","readonly-mount","scratch"}
+    if not isinstance(specs,list) or not 1<=len(specs)<=64:
+        raise ValueError("launch input declarations refused")
+    rows=[]
+    for index,spec in enumerate(specs):
+        if (not isinstance(spec,list) or len(spec)!=5 or spec[0] not in roles
+                or not isinstance(spec[1],str) or not os.path.isabs(spec[1]) or os.path.normpath(spec[1])!=spec[1]
+                or spec[2] not in ("directory","file") or (spec[3] is not None and (type(spec[3]) is not int or not 0<=spec[3]<=0o777))
+                or spec[4] not in (os.R_OK,os.X_OK,os.R_OK|os.X_OK)):
+            raise ValueError("launch input declaration refused")
+        role,path,kind,mode,access=spec
+        row={"index":index,"role":role,"accessible":False,"mode_ok":False,"errno":None}
+        try:
+            actual=os.stat(path)
+            directory=stat.S_ISDIR(actual.st_mode)
+            row["mode_ok"]=(directory if kind=="directory" else stat.S_ISREG(actual.st_mode)) and (mode is None or stat.S_IMODE(actual.st_mode)==mode)
+            if os.access(path,access,effective_ids=True):
+                flags=os.O_CLOEXEC|os.O_NONBLOCK
+                flags|=os.O_PATH|os.O_DIRECTORY if directory and access==os.X_OK else os.O_RDONLY|(os.O_DIRECTORY if directory else 0)
+                fd=os.open(path,flags)
+                try: row.update(accessible=True,errno=0)
+                finally: os.close(fd)
+        except OSError as error:
+            row["errno"]=error.errno if type(error.errno) is int and 0<error.errno<=4095 else None
+        rows.append(row)
+    return {"schema":1,"status":"passed" if all(r["accessible"] and r["mode_ok"] and r["errno"]==0 for r in rows) else "refused","rows":rows}
+
+
+def launch_permission_output(raw, roles):
+    if type(raw) is not bytes or len(raw)>16384 or not raw.startswith(b"POSITION_LAUNCH_ACCESS "):
+        raise ValueError("launch permission frame refused")
+    try: result=json.loads(raw.removeprefix(b"POSITION_LAUNCH_ACCESS "))
+    except (ValueError,UnicodeError): raise ValueError("launch permission frame refused") from None
+    if not isinstance(result,dict) or set(result)!={"schema","status","rows"} or type(result["schema"]) is not int or result["schema"]!=1 or not isinstance(result["rows"],list) or len(result["rows"])!=len(roles):
+        raise ValueError("launch permission frame identity refused")
+    for index,(row,role) in enumerate(zip(result["rows"],roles)):
+        if (not isinstance(row,dict) or set(row)!={"index","role","accessible","mode_ok","errno"}
+                or type(row["index"]) is not int or row["index"]!=index or row["role"]!=role
+                or type(row["accessible"]) is not bool or type(row["mode_ok"]) is not bool
+                or (row["errno"] is not None and (type(row["errno"]) is not int or not 0<=row["errno"]<=4095))
+                or (row["accessible"] and row["errno"]!=0) or (not row["accessible"] and row["errno"]==0)):
+            raise ValueError("launch permission row refused")
+    expected="passed" if all(r["accessible"] and r["mode_ok"] and r["errno"]==0 for r in result["rows"]) else "refused"
+    if result["status"]!=expected: raise ValueError("launch permission status refused")
+    return result
 
 
 class FixedRelay:
@@ -350,10 +473,18 @@ class Sandbox:
         for command in ("bwrap","setpriv","systemd-run","ip","iptables","ip6tables","mount","umount","prlimit"):
             if not shutil.which(command,path=SAFE["PATH"]): raise ValueError("missing enforced isolation tool: "+command)
         for path in (self.work,self.inputs,self.out): path.mkdir(mode=0o700)
-        self.root.chmod(0o711)
-        self.inputs.chmod(0o711)
-        (self.inputs/"public").mkdir(mode=0o711)
+        for path in (self.root,self.inputs):
+            fd=directory(path)
+            try: owned_directory_mode(fd,0o711)
+            finally: os.close(fd)
+        input_fd=directory(self.inputs)
+        try:
+            fd=public_parents(input_fd,"public",mode=0o711)
+            os.close(fd)
+        finally: os.close(input_fd)
         self.out_fd = directory(self.out)
+        if stat.S_IMODE(os.fstat(self.out_fd).st_mode)!=0o700:
+            raise ValueError("private artifact directory mode refused")
         self.receipts_fd = os.dup(self.out_fd)
         host("mount","-t","tmpfs","-o","size=5G,nodev,nosuid,mode=0700,uid=65534,gid=65534","position-proof",str(self.work))
         self.mounted = True
@@ -363,7 +494,9 @@ class Sandbox:
             os.chown(self.work/name,UID,UID)
         # Source copy is parent-owned and never writable by target processes.
         source = self.inputs/"source"
-        source.mkdir(mode=0o755)
+        input_fd=directory(self.inputs)
+        try: source_fd=public_parents(input_fd,"source")
+        finally: os.close(input_fd)
         repo_fd = directory(self.repo)
         total = 0
         try:
@@ -374,26 +507,38 @@ class Sandbox:
                 data = read_regular(repo_fd,name,MAX_FILE)
                 total += len(data)
                 if total > MAX_SOURCE: raise ValueError("source copy exceeds bound")
-                dest = source/name
-                dest.parent.mkdir(parents=True,exist_ok=True)
-                dest.write_bytes(data)
-                # The tracked executable bit matters to fixtures and scripts.
-                dest.chmod(0o755 if (self.repo/name).stat().st_mode & 0o111 else 0o644)
+                dest = Path(name)
+                parent_fd=public_parents(source_fd,str(dest.parent))
+                try:
+                    # Preserve executable mode only on this exclusively created leaf.
+                    new_file(parent_fd,dest.name,data,mode=0o755 if (self.repo/name).stat().st_mode & 0o111 else 0o644)
+                finally: os.close(parent_fd)
         finally:
             os.close(repo_fd)
-        for name in ("kanz-schemas/gen/go","kanz-web/node_modules","kanz-web/dist"):
-            (source/name).mkdir(parents=True,exist_ok=True)
+            os.close(source_fd)
+        source_fd=directory(source)
+        try:
+            for name in ("kanz-schemas/gen/go","kanz-web/node_modules","kanz-web/dist"):
+                fd=public_parents(source_fd,name)
+                os.close(fd)
+        finally: os.close(source_fd)
         # A private exact-head Git object/index copy preserves VCS and index
         # tests without exposing the checkout's config, auth header or worktree.
         source_sha=host("git","-c","safe.directory="+str(self.repo),"-C",str(self.repo),"rev-parse","HEAD").decode().strip()
-        host("git","init","--template=","--quiet",str(source))
-        host("git","-c","safe.directory="+str(self.repo),"-c","core.hooksPath=/dev/null","-C",str(source),"fetch","--quiet","--no-tags","--depth=1",str(self.repo),source_sha,timeout=90)
-        host("git","-C",str(source),"reset","--quiet","--mixed",source_sha)
+        host("git","init","--template=","--quiet",str(source),umask=0o022)
+        host("git","-c","safe.directory="+str(self.repo),"-c","core.hooksPath=/dev/null","-C",str(source),"fetch","--quiet","--no-tags","--depth=1",str(self.repo),source_sha,timeout=90,umask=0o022)
+        host("git","-C",str(source),"reset","--quiet","--mixed",source_sha,umask=0o022)
         (source/".git/FETCH_HEAD").unlink()
+        source_fd=directory(source)
+        try: check_git_metadata(source_fd)
+        finally: os.close(source_fd)
         # A real sysroot is read-only; these synthetic identity files contain no
         # host accounts and make user lookup deterministic inside the boundary.
-        (self.inputs/"passwd").write_text("nobody:x:65534:65534:fixture:/scratch/home:/usr/sbin/nologin\n")
-        (self.inputs/"group").write_text("nogroup:x:65534:\n")
+        input_fd=directory(self.inputs)
+        try:
+            new_file(input_fd,"passwd",b"nobody:x:65534:65534:fixture:/scratch/home:/usr/sbin/nologin\n",mode=0o644)
+            new_file(input_fd,"group",b"nogroup:x:65534:\n",mode=0o644)
+        finally: os.close(input_fd)
         # No .git/config, ambient home, Docker socket or Actions credentials are
         # copied. Generated contracts and browser inputs are separate ro mounts.
         host("ip","netns","add",self.namespace)
@@ -432,14 +577,30 @@ class Sandbox:
         unit = "position-"+uuid.uuid4().hex
         env = dict(self.environment)
         if extra: env.update(extra)
+        private=os.fstat(self.out_fd)
+        if not stat.S_ISDIR(private.st_mode) or private.st_uid!=os.geteuid() or stat.S_IMODE(private.st_mode)!=0o700:
+            raise ValueError("private artifact directory mode refused")
+        access_specs=[["assigned-root",str(self.root),"directory",0o711,os.X_OK],
+                      ["input-parent",str(self.inputs),"directory",0o711,os.X_OK],
+                      ["public-parent",str(self.inputs/"public"),"directory",0o711,os.X_OK],
+                      ["source",str(self.inputs/"source"),"directory",0o755,os.R_OK|os.X_OK],
+                      ["git-metadata",str(self.inputs/"source/.git"),"directory",0o755,os.R_OK|os.X_OK],
+                      ["synthetic-identity",str(self.inputs/"passwd"),"file",0o644,os.R_OK],
+                      ["synthetic-identity",str(self.inputs/"group"),"file",0o644,os.R_OK],
+                      ["scratch",str(self.work),"directory",0o700,os.R_OK|os.X_OK]]
         bwrap = ["bwrap","--die-with-parent","--new-session","--unshare-user","--unshare-pid","--unshare-ipc","--unshare-uts","--unshare-cgroup","--cap-drop","ALL","--uid",str(UID),"--gid",str(UID),"--proc","/proc","--dir","/dev","--dir","/dev/shm"]
         for device in ("null","zero","random","urandom"):
             bwrap += ["--dev-bind","/dev/"+device,"/dev/"+device]
         for name,target in (("fd","/proc/self/fd"),("stdin","/proc/self/fd/0"),("stdout","/proc/self/fd/1"),("stderr","/proc/self/fd/2")):
             bwrap += ["--symlink",target,"/dev/"+name]
         for name in ("/usr","/bin","/lib","/lib64"):
-            if Path(name).exists(): bwrap += ["--ro-bind",name,name]
+            if Path(name).exists():
+                access_specs.append(["readonly-mount",name,"directory",None,os.R_OK|os.X_OK])
+                bwrap += ["--ro-bind",name,name]
         bwrap += ["--dir","/etc","--ro-bind","/etc/hosts","/etc/hosts","--ro-bind",str(self.inputs/"passwd"),"/etc/passwd","--ro-bind",str(self.inputs/"group"),"/etc/group","--dir","/etc/ssl","--ro-bind","/etc/ssl/certs","/etc/ssl/certs","--ro-bind","/etc/fonts","/etc/fonts","--ro-bind",str(self.inputs/"source"),"/input","--bind",str(self.work),"/scratch","--dir","/tool","--dir","/deps","--dir","/fixture","--dir","/receipt"]
+        access_specs += [["readonly-mount","/etc/hosts","file",None,os.R_OK],
+                         ["readonly-mount","/etc/ssl/certs","directory",None,os.R_OK|os.X_OK],
+                         ["readonly-mount","/etc/fonts","directory",None,os.R_OK|os.X_OK]]
         for source,dest in (*self.tools,*mounts):
             source=str(Path(source).resolve(strict=True))
             if source not in self.public_mounts:
@@ -450,20 +611,24 @@ class Sandbox:
                 self.public_mounts[source]=target
                 host("mount","-o","remount,bind,ro,nodev,nosuid",str(target))
             bwrap += ["--ro-bind",str(self.public_mounts[source]),dest]
+            access_specs.append(["readonly-mount",str(self.public_mounts[source]),"directory" if Path(source).is_dir() else "file",None,os.R_OK|os.X_OK if Path(source).is_dir() else os.R_OK])
         bwrap += ["--remount-ro","/proc","--remount-ro","/","--chdir",cwd,"--clearenv"]
         for key,value in sorted(env.items()): bwrap += ["--setenv",key,value]
         bwrap += ["prlimit","--core=0","--cpu="+str(seconds),"--fsize="+str(MAX_OUTPUT),"--nofile=1024","--",*args]
         gate=self.inputs/(unit+".gate")
-        outer_code='''import json,os,sys
+        outer_code='import errno,json,os,stat,sys\n'+inspect.getsource(launch_permissions)+'''
 status=dict(line.split(":",1) for line in open("/proc/self/status") if ":" in line)
 mapping=open("/proc/self/uid_map").read().split()
 assert os.getuid()==65534 and os.getgid()==65534 and os.getgroups()==[]
 assert int(status["CapEff"].strip(),16)==0 and status["NoNewPrivs"].strip()=="1"
 assert mapping[:2]==["0","0"] and int(mapping[2])>65534
 print("POSITION_OUTER_IDENTITY "+json.dumps({"uid":os.getuid(),"gid":os.getgid(),"groups":os.getgroups(),"cap_eff":status["CapEff"].strip(),"no_new_privileges":1,"uid_map":mapping},sort_keys=True),flush=True)
-os.execvpe(sys.argv[1],sys.argv[1:],os.environ)
+access=launch_permissions(json.loads(sys.argv[1]))
+print("POSITION_LAUNCH_ACCESS "+json.dumps(access,sort_keys=True),flush=True)
+if access["status"]!="passed": raise SystemExit(78)
+os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
 '''
-        command = ["systemd-run","--quiet","--wait","--pipe","--unit="+unit,"--property=MemoryMax=6G","--property=MemorySwapMax=0","--property=TasksMax=512","--property=CPUQuota=200%","--property=KillMode=control-group","--property=RuntimeMaxSec="+str(seconds),sys.executable,str(Path(__file__).resolve()),"--gated-exec",str(gate),"ip","netns","exec",self.namespace,"setpriv","--reuid=65534","--regid=65534","--clear-groups","--bounding-set=-all","--inh-caps=-all","--ambient-caps=-all","--no-new-privs","/usr/bin/python3","-I","-c",outer_code,*bwrap]
+        command = ["systemd-run","--quiet","--wait","--pipe","--unit="+unit,"--property=MemoryMax=6G","--property=MemorySwapMax=0","--property=TasksMax=512","--property=CPUQuota=200%","--property=KillMode=control-group","--property=RuntimeMaxSec="+str(seconds),sys.executable,str(Path(__file__).resolve()),"--gated-exec",str(gate),"ip","netns","exec",self.namespace,"setpriv","--reuid=65534","--regid=65534","--clear-groups","--bounding-set=-all","--inh-caps=-all","--ambient-caps=-all","--no-new-privs","/usr/bin/python3","-I","-c",outer_code,json.dumps(access_specs),*bwrap]
         self.active.add(unit)
         process = subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=SAFE,start_new_session=True)
         data = bytearray()
@@ -531,6 +696,16 @@ os.execvpe(sys.argv[1],sys.argv[1:],os.environ)
         outer=json.loads(first.removeprefix(b"POSITION_OUTER_IDENTITY "))
         if outer["uid"]!=65534 or outer["gid"]!=65534 or outer["groups"] or int(outer["cap_eff"],16)!=0 or outer["no_new_privileges"]!=1: raise ValueError("outer identity differs")
         self.executions[-1]["outer_identity"]=outer
+        access_frame,separator,rest=rest.partition(b"\n")
+        try:
+            if not separator: raise ValueError("launch permission frame absent")
+            access=launch_permission_output(access_frame,[s[0] for s in access_specs])
+        except ValueError:
+            self.retain("launch-permissions-"+unit+".json",json.dumps({"schema":1,"classification":"missing-or-invalid-frame","supervisor_exit":code,"combined_output_bytes":len(data)},sort_keys=True).encode())
+            raise ValueError("launch permission preflight framing refused") from None
+        self.retain("launch-permissions-"+unit+".json",json.dumps({**access,"private_artifacts_mode700":True},sort_keys=True).encode())
+        self.executions[-1]["launch_permissions"]=access
+        if access["status"]!="passed": raise ValueError("launch permission preflight refused")
         return code,rest
 
     def promote(self,relative,name,limit):

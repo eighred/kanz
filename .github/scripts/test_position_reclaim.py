@@ -75,6 +75,125 @@ class KernelBoundary(unittest.TestCase):
         with open("/dev/null","wb") as sink: self.assertEqual(sink.write(b"required device"),15)
 
 
+class LaunchPermissions(unittest.TestCase):
+    def test_owned_public_staging_ignores_umask_and_keeps_outputs_private(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw)
+            fd=sandbox.directory(root)
+            previous=os.umask(0o077)
+            try:
+                public=sandbox.public_parents(fd,"public",mode=0o711)
+                source=sandbox.public_parents(public,"source/nested")
+                try: sandbox.new_file(source,"source.txt",b"owned public input",mode=0o644)
+                finally: os.close(source)
+                sandbox.new_file(public,"passwd",b"synthetic identity",mode=0o644)
+                os.close(public)
+                (root/"artifacts").mkdir(mode=0o700)
+            finally: os.umask(previous);os.close(fd)
+            expected={"public":0o711,"public/source":0o755,"public/source/nested":0o755,
+                      "public/source/nested/source.txt":0o644,"public/passwd":0o644,"artifacts":0o700}
+            for name,mode in expected.items(): self.assertEqual(stat.S_IMODE((root/name).stat().st_mode),mode)
+            specs=[["public-parent",str(root/"public"),"directory",0o711,os.X_OK],
+                   ["source",str(root/"public/source"),"directory",0o755,os.R_OK|os.X_OK],
+                   ["synthetic-identity",str(root/"public/passwd"),"file",0o644,os.R_OK]]
+            result=sandbox.launch_permissions(specs)
+            self.assertEqual(result["status"],"passed")
+            self.assertNotIn(str(root),json.dumps(result))
+            self.assertEqual(stat.S_IMODE((root/"artifacts").stat().st_mode),0o700)
+
+    def test_inaccessible_or_wrong_mode_inputs_refuse_without_error_text(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);hidden=root/"private-input";hidden.mkdir(mode=0o700)
+            leaf=hidden/"data";leaf.write_bytes(b"fixture");hidden.chmod(0)
+            try:
+                specs=[["readonly-mount",str(leaf),"file",None,os.R_OK]]
+                result=sandbox.launch_permissions(specs)
+                self.assertEqual(result["status"],"refused")
+                self.assertFalse(result["rows"][0]["accessible"])
+                self.assertEqual(result["rows"][0]["errno"],errno.EACCES)
+                self.assertNotIn(str(root),json.dumps(result))
+            finally: hidden.chmod(0o700)
+            declaration=[["readonly-mount",str(hidden),"directory",0o700,os.R_OK|os.X_OK]]
+            with mock.patch.object(sandbox.os,"access",return_value=False):
+                observed=sandbox.launch_permissions(declaration)
+                self.assertEqual(observed["status"],"refused")
+                self.assertIsNone(observed["rows"][0]["errno"],"os.access supplies no errno")
+            for error in (OSError("dummy-private-error"),OSError(4096,"dummy-private-error")):
+                with mock.patch.object(sandbox.os,"stat",side_effect=error):
+                    observed=sandbox.launch_permissions(declaration)
+                    self.assertIsNone(observed["rows"][0]["errno"])
+                    self.assertNotIn("dummy-private-error",json.dumps(observed))
+            result=sandbox.launch_permissions([["source",str(hidden),"directory",0o755,os.R_OK|os.X_OK]])
+            self.assertEqual(result["status"],"refused")
+            self.assertTrue(result["rows"][0]["accessible"])
+            self.assertFalse(result["rows"][0]["mode_ok"])
+            fd=sandbox.directory(root)
+            try:
+                with self.assertRaisesRegex(ValueError,"public staging mode refused"):
+                    sandbox.public_parents(fd,"private-input")
+                self.assertEqual(stat.S_IMODE(hidden.stat().st_mode),0o700)
+            finally: os.close(fd)
+
+    def test_generated_git_metadata_checks_modes_links_and_bounds_without_chmod(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);fd=sandbox.directory(root)
+            meta=sandbox.public_parents(fd,".git/objects")
+            os.close(meta)
+            git_fd=sandbox.directory(root/".git")
+            try: sandbox.new_file(git_fd,"HEAD",b"ref: refs/heads/main\n",mode=0o644)
+            finally: os.close(git_fd)
+            try:
+                sandbox.check_git_metadata(fd)
+                (root/".git").chmod(0o700)
+                with self.assertRaises(ValueError): sandbox.check_git_metadata(fd)
+                self.assertEqual(stat.S_IMODE((root/".git").stat().st_mode),0o700)
+                (root/".git").chmod(0o755)
+                os.symlink("HEAD",root/".git/link")
+                with self.assertRaises(OSError): sandbox.check_git_metadata(fd)
+                (root/".git/link").unlink()
+                os.link(root/".git/HEAD",root/".git/hardlink")
+                with self.assertRaises(ValueError): sandbox.check_git_metadata(fd)
+                (root/".git/hardlink").unlink()
+                with mock.patch.object(sandbox,"MAX_FILE",1):
+                    with self.assertRaises(ValueError): sandbox.check_git_metadata(fd)
+                with mock.patch.object(sandbox,"MAX_GIT_METADATA_ENTRIES",0):
+                    with self.assertRaises(ValueError): sandbox.check_git_metadata(fd)
+            finally: os.close(fd)
+
+    def test_git_creation_umask_is_scoped_and_metadata_remains_public(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);fd=sandbox.directory(root)
+            previous=os.umask(0o077)
+            try:
+                source=sandbox.public_parents(fd,"source")
+                try:
+                    sandbox.host("git","init","--template=","--quiet",str(root/"source"),umask=0o022)
+                    self.assertEqual(os.umask(0o077),0o077,"subprocess changed parent umask")
+                    sandbox.check_git_metadata(source)
+                finally: os.close(source)
+            finally: os.umask(previous);os.close(fd)
+
+    def test_permission_frame_requires_exact_fixed_rows_and_consistent_result(self):
+        row={"index":0,"role":"source","accessible":True,"mode_ok":True,"errno":0}
+        result={"schema":1,"status":"passed","rows":[row]}
+        raw=lambda value:b"POSITION_LAUNCH_ACCESS "+json.dumps(value).encode()
+        self.assertEqual(sandbox.launch_permission_output(raw(result),["source"]),result)
+        denied=copy.deepcopy(result);denied["status"]="refused";denied["rows"][0].update(accessible=False,errno=errno.EACCES)
+        self.assertEqual(sandbox.launch_permission_output(raw(denied),["source"]),denied)
+        unknown=copy.deepcopy(denied);unknown["rows"][0]["errno"]=None
+        self.assertEqual(sandbox.launch_permission_output(raw(unknown),["source"]),unknown)
+        variants=[]
+        for key,value in (("index",1),("role","arbitrary"),("accessible",1),("mode_ok","true"),("errno",True),("errno",4096),("errno",None),("unknown","dummy-private-error")):
+            variant=copy.deepcopy(result);variant["rows"][0][key]=value;variants.append(variant)
+        variants += [dict(result,rows=[]),dict(result,rows=[row,row]),dict(result,status="refused"),dict(result,unknown="dummy-private-error"),dict(result,schema=True)]
+        false_zero=copy.deepcopy(denied);false_zero["rows"][0]["errno"]=0;variants.append(false_zero)
+        false_success=copy.deepcopy(unknown);false_success["status"]="passed";variants.append(false_success)
+        for variant in variants:
+            with self.assertRaises(ValueError): sandbox.launch_permission_output(raw(variant),["source"])
+        for value in (b"",b"dummy-private-error",raw(result)+b"\nextra",b"x"*16385):
+            with self.assertRaises(ValueError): sandbox.launch_permission_output(value,["source"])
+
+
 class ProbeObservations(unittest.TestCase):
     def test_fixed_refusal_stages_and_candidate_record_are_not_kernel_success(self):
         for stage in sorted(sandbox.PROBE_STAGES):
