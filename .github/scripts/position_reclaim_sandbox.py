@@ -225,6 +225,121 @@ def owned_directory_mode(fd, mode):
         raise ValueError("owned staging directory mode differs")
 
 
+class VisibleInputCapsule:
+    """One initial /run input allocation; never a retry location or artifact root."""
+    def __init__(self):
+        self.nonce=uuid.uuid4().hex
+        self.name="position-reclaim-inputs-"+self.nonce
+        self.path=Path("/run")/self.name
+        self.root_fd=self.run_fd=self.fd=None
+        self.identity=None
+        self.created=False
+        self.absent=None
+        self.stage="unallocated"
+        self.ancestors={}
+
+    def ancestor(self, role, fd):
+        actual=os.fstat(fd)
+        self.ancestors[role]={"role":role,"uid":actual.st_uid,"gid":actual.st_gid,
+                              "mode":stat.S_IMODE(actual.st_mode),"directory":stat.S_ISDIR(actual.st_mode)}
+        if not stat.S_ISDIR(actual.st_mode) or actual.st_uid!=0 or actual.st_gid!=0 or stat.S_IMODE(actual.st_mode)!=0o755:
+            raise ValueError("fixed visible input ancestor refused")
+        return actual
+
+    def allocate(self):
+        if sys.platform!="linux" or os.geteuid()!=0 or self.stage!="unallocated":
+            raise ValueError("one privileged initial capsule allocation required")
+        self.declaration()
+        self.stage="filesystem-root"
+        self.root_fd=directory("/")
+        self.ancestor("filesystem-root",self.root_fd)
+        self.stage="runtime-parent"
+        self.run_fd=os.open("run",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=self.root_fd)
+        self.ancestor("runtime-parent",self.run_fd)
+        self.stage="exclusive-allocation"
+        # One UUID and one exclusive attempt. Never adopt an existing leaf.
+        os.mkdir(self.name,mode=0o700,dir_fd=self.run_fd)
+        self.created=True
+        actual=os.stat(self.name,dir_fd=self.run_fd,follow_symlinks=False)
+        if not stat.S_ISDIR(actual.st_mode) or actual.st_uid!=0 or actual.st_gid!=0:
+            raise ValueError("allocated visible input owner refused")
+        self.identity=(actual.st_dev,actual.st_ino)
+        self.fd=os.open(self.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=self.run_fd)
+        actual=os.fstat(self.fd)
+        if not stat.S_ISDIR(actual.st_mode) or actual.st_uid!=0 or actual.st_gid!=0 or (actual.st_dev,actual.st_ino)!=self.identity:
+            raise ValueError("allocated visible input owner refused")
+        owned_directory_mode(self.fd,0o711)
+        self.stage="allocated"
+        self.verify()
+
+    def declaration(self):
+        if len(self.nonce)!=32 or any(c not in "0123456789abcdef" for c in self.nonce) or self.name!="position-reclaim-inputs-"+self.nonce or self.path!=Path("/run")/self.name:
+            raise ValueError("visible input nonce refused")
+
+    def verify(self):
+        if self.stage!="allocated" or not self.created or self.fd is None or self.identity is None:
+            raise ValueError("allocated visible input custody required")
+        self.owned_entry((0o711,))
+
+    def owned_entry(self, modes):
+        if not self.created or self.identity is None or self.root_fd is None or self.run_fd is None:
+            raise ValueError("visible input entry custody unproven")
+        self.declaration()
+        self.ancestor("filesystem-root",self.root_fd)
+        parent=self.ancestor("runtime-parent",self.run_fd)
+        linked_parent=os.stat("run",dir_fd=self.root_fd,follow_symlinks=False)
+        if not stat.S_ISDIR(linked_parent.st_mode) or (parent.st_dev,parent.st_ino)!=(linked_parent.st_dev,linked_parent.st_ino):
+            raise ValueError("fixed visible input parent changed")
+        linked=os.stat(self.name,dir_fd=self.run_fd,follow_symlinks=False)
+        checks=(linked,) if self.fd is None else (os.fstat(self.fd),linked)
+        for actual in checks:
+            if not stat.S_ISDIR(actual.st_mode) or (actual.st_dev,actual.st_ino)!=self.identity or actual.st_uid!=0 or actual.st_gid!=0 or stat.S_IMODE(actual.st_mode) not in modes:
+                raise ValueError("visible input capsule changed")
+
+    def metadata(self):
+        return {"schema":1,"stage":self.stage,"nonce":self.nonce,"created":self.created,
+                "identity":list(self.identity) if self.identity is not None else None,
+                "absence_observed":self.absent,"ancestors":[self.ancestors[k] for k in sorted(self.ancestors)]}
+
+    def retire(self, *, resources_absent):
+        if resources_absent is not True:
+            raise ValueError("capsule retirement requires observed resource teardown")
+        if not self.created:
+            self.release()
+            return # No owned allocation exists; an exclusive collision is never adopted.
+        partial=self.stage!="allocated"
+        if partial: self.owned_entry((0o700,0o711))
+        else: self.verify()
+        # Failed initial allocation has created no child tree. Remove only its
+        # identity-checked empty directory, without retrying a failed open/chmod.
+        entries=[] if partial else os.listdir(self.fd)
+        if entries and shutil.rmtree.avoids_symlink_attacks is not True:
+            raise ValueError("no-follow capsule retirement unavailable")
+        if not set(entries)<={"inputs","scratch"}:
+            raise ValueError("undeclared visible input child")
+        for name in entries:
+            actual=os.stat(name,dir_fd=self.fd,follow_symlinks=False)
+            if not stat.S_ISDIR(actual.st_mode) or actual.st_uid!=0 or actual.st_gid!=0 or stat.S_IMODE(actual.st_mode)!={"inputs":0o711,"scratch":0o700}[name]:
+                raise ValueError("visible input child owner refused")
+        # All target processes and every mount are gone. Python's fd-relative
+        # no-follow removal stays beneath the retained, identity-checked capsule.
+        for name in entries: shutil.rmtree(name,dir_fd=self.fd)
+        self.owned_entry((0o700,0o711) if partial else (0o711,))
+        os.rmdir(self.name,dir_fd=self.run_fd)
+        try: os.stat(self.name,dir_fd=self.run_fd,follow_symlinks=False)
+        except FileNotFoundError: self.absent=True
+        else: raise ValueError("retired visible input absence unproven")
+        self.stage="retired"
+        self.release()
+
+    def release(self):
+        for name in ("fd","run_fd","root_fd"):
+            fd=getattr(self,name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self,name,None)
+
+
 def public_parents(root_fd, relative, mode=0o755):
     """Create only owned source-relative parents; never chmod an existing tree."""
     parts=Path(relative).parts
@@ -288,7 +403,7 @@ def check_git_metadata(source_fd):
 
 def launch_permissions(specs):
     """Trusted outer-identity access checks; never return a path or error text."""
-    roles={"assigned-root","input-parent","public-parent","source","git-metadata","synthetic-identity","readonly-mount","scratch"}
+    roles={"filesystem-root","runtime-parent","assigned-root","input-parent","public-parent","source","git-metadata","synthetic-identity","readonly-mount","scratch"}
     if not isinstance(specs,list) or not 1<=len(specs)<=64:
         raise ValueError("launch input declarations refused")
     rows=[]
@@ -443,10 +558,19 @@ class FixedRelay:
 
 
 class Sandbox:
-    def __init__(self, repo, root, tools, env):
+    def __init__(self, repo, *, capsule, artifact_root, tools, env):
         if sys.platform != "linux" or os.geteuid()!=0:
             raise ValueError("Linux root parent orchestration required")
-        self.repo, self.root, self.tools = Path(repo), Path(root), tools
+        if not isinstance(capsule,VisibleInputCapsule):
+            raise ValueError("explicit visible input capsule required")
+        self.capsule=capsule
+        self.repo, self.root, self.tools = Path(repo), capsule.path, tools
+        self.artifact_root=Path(artifact_root)
+        if not self.artifact_root.is_absolute() or self.artifact_root.is_relative_to(self.root):
+            raise ValueError("private artifacts must be outside visible inputs")
+        self.artifact_root_canonical=self.artifact_root.resolve(strict=True)
+        if self.artifact_root_canonical.is_relative_to(self.root):
+            raise ValueError("private artifact alias enters visible inputs")
         self.environment = env
         self.suffix = uuid.uuid4().hex[:10]
         self.namespace = "position-"+self.suffix
@@ -456,7 +580,7 @@ class Sandbox:
         self.host_ip,self.peer_ip = "10.239.254.1","10.239.254.2"
         self.work = self.root/"scratch"
         self.inputs = self.root/"inputs"
-        self.out = self.root/"artifacts"
+        self.out = self.artifact_root/"artifacts"
         self.active = set()
         self.relay = None
         self.relay_constructor_cleanup_refused = False
@@ -466,14 +590,26 @@ class Sandbox:
         self.retained = 0
         self.artifacts = {}
         self.cleanup_verified = False
+        self.capsule_cleanup_complete = False
         self.executions = []
         self.public_mounts = {}
 
     def start(self):
         for command in ("bwrap","setpriv","systemd-run","ip","iptables","ip6tables","mount","umount","prlimit"):
             if not shutil.which(command,path=SAFE["PATH"]): raise ValueError("missing enforced isolation tool: "+command)
-        for path in (self.work,self.inputs,self.out): path.mkdir(mode=0o700)
-        for path in (self.root,self.inputs):
+        private_fd=directory(self.artifact_root)
+        try:
+            private=os.fstat(private_fd)
+            if not stat.S_ISDIR(private.st_mode) or private.st_uid!=os.geteuid() or stat.S_IMODE(private.st_mode)!=0o700:
+                raise ValueError("private artifact root refused")
+        finally: os.close(private_fd)
+        self.out.mkdir(mode=0o700)
+        self.out_fd = directory(self.out)
+        self.receipts_fd = os.dup(self.out_fd)
+        try: self.capsule.allocate()
+        finally: self.retain("input-capsule.json",json.dumps(self.capsule.metadata(),sort_keys=True).encode())
+        for path in (self.work,self.inputs): path.mkdir(mode=0o700)
+        for path in (self.inputs,):
             fd=directory(path)
             try: owned_directory_mode(fd,0o711)
             finally: os.close(fd)
@@ -482,10 +618,8 @@ class Sandbox:
             fd=public_parents(input_fd,"public",mode=0o711)
             os.close(fd)
         finally: os.close(input_fd)
-        self.out_fd = directory(self.out)
         if stat.S_IMODE(os.fstat(self.out_fd).st_mode)!=0o700:
             raise ValueError("private artifact directory mode refused")
-        self.receipts_fd = os.dup(self.out_fd)
         host("mount","-t","tmpfs","-o","size=5G,nodev,nosuid,mode=0700,uid=65534,gid=65534","position-proof",str(self.work))
         self.mounted = True
         self.work_fd = directory(self.work)
@@ -573,14 +707,28 @@ class Sandbox:
     def net(self,*args):
         return host("ip","netns","exec",self.namespace,*args)
 
+    def approved_mount(self, source, destination):
+        candidate=Path(source)
+        if candidate.is_relative_to(self.artifact_root_canonical):
+            private_out=self.artifact_root_canonical/"artifacts"
+            allowed={(private_out/"oms-store","/fixture/oms-store"),
+                     (private_out/"position-reclaim","/fixture/position-reclaim"),
+                     (private_out/"seed.json","/receipt/seed.json"),
+                     (private_out/"negative-seed.json","/receipt/seed.json")}
+            if (candidate,destination) not in allowed:
+                raise ValueError("private artifact mount refused")
+
     def execute(self,args,*,seconds=540,cwd="/input/kanz",extra=None,mounts=(),output_limit=MAX_OUTPUT):
+        self.capsule.verify()
         unit = "position-"+uuid.uuid4().hex
         env = dict(self.environment)
         if extra: env.update(extra)
         private=os.fstat(self.out_fd)
         if not stat.S_ISDIR(private.st_mode) or private.st_uid!=os.geteuid() or stat.S_IMODE(private.st_mode)!=0o700:
             raise ValueError("private artifact directory mode refused")
-        access_specs=[["assigned-root",str(self.root),"directory",0o711,os.X_OK],
+        access_specs=[["filesystem-root","/","directory",0o755,os.X_OK],
+                      ["runtime-parent","/run","directory",0o755,os.X_OK],
+                      ["assigned-root",str(self.root),"directory",0o711,os.X_OK],
                       ["input-parent",str(self.inputs),"directory",0o711,os.X_OK],
                       ["public-parent",str(self.inputs/"public"),"directory",0o711,os.X_OK],
                       ["source",str(self.inputs/"source"),"directory",0o755,os.R_OK|os.X_OK],
@@ -603,6 +751,7 @@ class Sandbox:
                          ["readonly-mount","/etc/fonts","directory",None,os.R_OK|os.X_OK]]
         for source,dest in (*self.tools,*mounts):
             source=str(Path(source).resolve(strict=True))
+            self.approved_mount(source,dest)
             if source not in self.public_mounts:
                 target=self.inputs/"public"/str(len(self.public_mounts))
                 if Path(source).is_dir(): target.mkdir(mode=0o755)
@@ -703,7 +852,7 @@ os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
         except ValueError:
             self.retain("launch-permissions-"+unit+".json",json.dumps({"schema":1,"classification":"missing-or-invalid-frame","supervisor_exit":code,"combined_output_bytes":len(data)},sort_keys=True).encode())
             raise ValueError("launch permission preflight framing refused") from None
-        self.retain("launch-permissions-"+unit+".json",json.dumps({**access,"private_artifacts_mode700":True},sort_keys=True).encode())
+        self.retain("launch-permissions-"+unit+".json",json.dumps({**access,"private_artifacts_mode700":True,"visible_inputs":self.capsule.metadata()},sort_keys=True).encode())
         self.executions[-1]["launch_permissions"]=access
         if access["status"]!="passed": raise ValueError("launch permission preflight refused")
         return code,rest
@@ -831,6 +980,7 @@ except BaseException:
                 return None
         namespace_present=interface_present=mount_present=None
         public_remaining=[]
+        relay_stopped=self.relay is None and not self.relay_constructor_cleanup_refused
         try:
             for unit in tuple(self.active):
                 attempt(lambda unit=unit:host("systemctl","stop",unit))
@@ -842,7 +992,8 @@ except BaseException:
                 if self.inner.poll() is None:
                     attempt(self.inner.kill)
                     attempt(lambda:self.inner.wait(timeout=10))
-            if self.relay is not None: attempt(self.relay.close)
+            if self.relay is not None:
+                relay_stopped=attempt(lambda:(self.relay.close(),True)[1]) is True
             if self.veth_created: attempt(lambda:host("ip","link","del",self.interface))
             if self.net_created: attempt(lambda:host("ip","netns","del",self.namespace))
         finally:
@@ -863,13 +1014,20 @@ except BaseException:
             namespace_present=None if names is None else self.namespace in names.decode().split()
             status=attempt(lambda:subprocess.run(["ip","link","show",self.interface],env=SAFE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10).returncode)
             interface_present=None if status is None else status==0
-            status=attempt(lambda:subprocess.run(["mountpoint","-q",str(self.work)],env=SAFE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10).returncode)
-            mount_present=None if status is None else status==0
+            if self.capsule.created:
+                status=attempt(lambda:subprocess.run(["mountpoint","-q",str(self.work)],env=SAFE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10).returncode)
+                mount_present=None if status is None else status==0
+            else: mount_present=False # Never inspect/adopt an unallocated or colliding leaf.
             if any(value is not False for value in (namespace_present,interface_present,mount_present)) or self.active: failures.append("owned_resource_remains_or_unproven")
+            retired=self.inner is None or self.inner.poll() is not None
+            resources_absent=all(value is False for value in (namespace_present,interface_present,mount_present)) and not self.mounted and not self.active and not public_remaining and retired and relay_stopped and not self.relay_constructor_cleanup_refused
+            attempt(lambda:self.capsule.retire(resources_absent=resources_absent))
+            self.capsule_cleanup_complete=not self.capsule.created or self.capsule.absent is True
+            if not self.capsule_cleanup_complete: failures.append("visible_input_capsule_remains_or_unproven")
             if self.out_fd is not None:
                 try:
                     attempt(lambda:self.retain("executions.json",json.dumps(self.executions,sort_keys=True).encode()))
-                    attempt(lambda:self.retain("sandbox-cleanup.json",json.dumps({"errors":failures,"relay_constructor_cleanup_refused":self.relay_constructor_cleanup_refused,"namespace":self.namespace,"namespace_present":namespace_present,"interface_present":interface_present,"mount_present":mount_present,"public_input_mounts_remaining":public_remaining,"child_units_remaining":sorted(self.active)}).encode()))
+                    attempt(lambda:self.retain("sandbox-cleanup.json",json.dumps({"errors":failures,"relay_constructor_cleanup_refused":self.relay_constructor_cleanup_refused,"namespace":self.namespace,"namespace_present":namespace_present,"interface_present":interface_present,"mount_present":mount_present,"public_input_mounts_remaining":public_remaining,"child_units_remaining":sorted(self.active),"visible_inputs":self.capsule.metadata(),"capsule_cleanup_complete":self.capsule_cleanup_complete,"relay_stopped":relay_stopped}).encode()))
                 finally:
                     os.close(self.out_fd); self.out_fd=None
         if failures: raise ValueError("owned sandbox cleanup failed: "+",".join(failures))

@@ -17,6 +17,195 @@ import position_reclaim_sandbox as sandbox
 import required_ci
 
 
+def modeled_capsule(path):
+    """Old relay/publication controls model provisioning inside their scratch."""
+    capsule=object.__new__(sandbox.VisibleInputCapsule)
+    capsule.path=path;capsule.created=True;capsule.absent=None
+    capsule.allocate=lambda:path.chmod(0o711)
+    capsule.verify=lambda:None
+    def retire(*,resources_absent):
+        if resources_absent is not True: raise ValueError("modeled resource teardown unproven")
+        capsule.absent=True
+    capsule.retire=retire
+    capsule.metadata=lambda:{"schema":1,"created":True,"absence_observed":capsule.absent}
+    capsule.release=lambda:None
+    return capsule
+
+
+class CapsuleModel:
+    """Small syscall model: no /run allocation or host provisioning in units."""
+    def __init__(self):
+        self.nodes={"/":[0o755,0,0,1],"/run":[0o755,0,0,2]}
+        self.fds={};self.opened={};self.calls=[];self.next_fd=10
+
+    def path(self, path, dir_fd=None):
+        return str(Path(self.fds[dir_fd])/path) if dir_fd is not None else str(path)
+
+    def info(self, path):
+        return self.node_info(self.nodes[path])
+
+    def node_info(self, node):
+        mode,uid,gid,inode=node
+        return types.SimpleNamespace(st_mode=stat.S_IFDIR|mode,st_uid=uid,st_gid=gid,st_dev=1,st_ino=inode)
+
+    def open(self, path, flags, *, dir_fd=None):
+        self.calls.append(("open",str(path),flags))
+        if flags & (os.O_NOFOLLOW|os.O_DIRECTORY|os.O_CLOEXEC)!=(os.O_NOFOLLOW|os.O_DIRECTORY|os.O_CLOEXEC):
+            raise AssertionError("descriptor safety flags missing")
+        name=self.path(path,dir_fd)
+        if name not in self.nodes: raise FileNotFoundError()
+        if self.nodes[name][0]&stat.S_IFLNK: raise OSError(errno.ELOOP,"modeled symlink")
+        fd=self.next_fd;self.next_fd+=1;self.fds[fd]=name;self.opened[fd]=self.nodes[name]
+        return fd
+
+    def mkdir(self, name, *, mode, dir_fd):
+        path=self.path(name,dir_fd);self.calls.append(("mkdir",path))
+        if path in self.nodes: raise FileExistsError()
+        self.nodes[path]=[mode,0,0,len(self.nodes)+1]
+
+    def fchmod(self, fd, mode):
+        path=self.fds[fd];self.calls.append(("fchmod",path,mode))
+        self.opened[fd][0]=mode
+
+    def close(self, fd):
+        self.fds.pop(fd);self.opened.pop(fd)
+
+    def stat(self, path, *, dir_fd, follow_symlinks):
+        if follow_symlinks is not False: raise AssertionError("followed modeled entry")
+        name=self.path(path,dir_fd)
+        if name not in self.nodes: raise FileNotFoundError()
+        return self.info(name)
+
+    def children(self, fd):
+        parent=self.fds[fd]
+        return [Path(p).name for p in self.nodes if str(Path(p).parent)==parent and p!=parent]
+
+    def remove(self, name, *, dir_fd):
+        path=self.path(name,dir_fd);self.calls.append(("remove",path))
+        del self.nodes[path]
+
+    def rmdir(self, name, *, dir_fd):
+        path=self.path(name,dir_fd)
+        if any(str(Path(p).parent)==path and p!=path for p in self.nodes):
+            raise OSError(errno.ENOTEMPTY,"modeled nonempty directory")
+        self.remove(name,dir_fd=dir_fd)
+
+    def patches(self):
+        remove=lambda name,dir_fd:self.remove(name,dir_fd=dir_fd)
+        remove.avoids_symlink_attacks=True
+        return (mock.patch.multiple(sandbox.os,geteuid=lambda:0,open=self.open,
+                    fstat=lambda fd:self.node_info(self.opened[fd]),mkdir=self.mkdir,fchmod=self.fchmod,
+                    stat=self.stat,listdir=self.children,rmdir=self.rmdir,close=self.close),
+                mock.patch.object(sandbox.shutil,"rmtree",remove))
+
+
+class VisibleInputs(unittest.TestCase):
+    def test_declared_capsule_path_cannot_be_overridden_before_allocation(self):
+        for field,value in (("path",Path("/tmp/alternate")),("name","../alternate"),("nonce","invalid")):
+            fs=CapsuleModel();capsule=sandbox.VisibleInputCapsule();setattr(capsule,field,value)
+            os_patch,remove_patch=fs.patches()
+            with os_patch,remove_patch:
+                with self.assertRaises(ValueError): capsule.allocate()
+                self.assertEqual(fs.calls,[],"an alternate input path was touched")
+
+    def test_one_initial_capsule_has_fixed_ancestry_nonce_and_observed_retirement(self):
+        fs=CapsuleModel();capsule=sandbox.VisibleInputCapsule()
+        os_patch,remove_patch=fs.patches()
+        with os_patch,remove_patch:
+            capsule.allocate();capsule.verify()
+            self.assertEqual(capsule.path,Path("/run")/("position-reclaim-inputs-"+capsule.nonce))
+            self.assertEqual(len([c for c in fs.calls if c[0]=="mkdir"]),1)
+            fs.nodes[str(capsule.path/"inputs")]=(0o711,0,0,4)
+            fs.nodes[str(capsule.path/"scratch")]=(0o700,0,0,5)
+            metadata=capsule.metadata()
+            self.assertEqual([r["role"] for r in metadata["ancestors"]],["filesystem-root","runtime-parent"])
+            self.assertNotIn("/",json.dumps(metadata))
+            capsule.retire(resources_absent=True)
+            self.assertTrue(capsule.absent)
+            self.assertEqual(set(fs.nodes),{"/","/run"})
+            self.assertEqual(fs.fds,{})
+            self.assertTrue(all(c[1]==str(capsule.path) for c in fs.calls if c[0]=="fchmod"),"ancestor mode was changed")
+
+    def test_bad_ancestor_owner_mode_or_symlink_refuses_before_creation(self):
+        for path,value in (("/",(0o777,0,0,1)),("/run",(0o755,1000,0,2)),
+                           ("/run",(0o755,0,1000,2)),("/run",(stat.S_IFLNK|0o755,0,0,2))):
+            with self.subTest(path=path,value=value):
+                fs=CapsuleModel();fs.nodes[path]=value;capsule=sandbox.VisibleInputCapsule()
+                os_patch,remove_patch=fs.patches()
+                with os_patch,remove_patch:
+                    with self.assertRaises((ValueError,OSError)): capsule.allocate()
+                    self.assertFalse(capsule.created)
+                    self.assertFalse(any(c[0] in ("mkdir","fchmod") for c in fs.calls))
+                    capsule.release()
+
+    def test_existing_or_replaced_capsule_is_never_adopted_or_removed(self):
+        for collision in (True,False):
+            fs=CapsuleModel();capsule=sandbox.VisibleInputCapsule()
+            os_patch,remove_patch=fs.patches()
+            with os_patch,remove_patch:
+                if collision:
+                    fs.nodes[str(capsule.path)]=(0o711,1000,1000,99)
+                    with self.assertRaises(FileExistsError): capsule.allocate()
+                    capsule.retire(resources_absent=True)
+                else:
+                    capsule.allocate()
+                    fs.nodes[str(capsule.path)]=(0o711,0,0,99)
+                    with self.assertRaises(ValueError): capsule.retire(resources_absent=True)
+                    capsule.release()
+                self.assertIn(str(capsule.path),fs.nodes)
+                self.assertFalse(any(c[0]=="remove" for c in fs.calls))
+
+    def test_failed_initial_mode_setup_retires_only_owned_empty_capsule(self):
+        fs=CapsuleModel();capsule=sandbox.VisibleInputCapsule()
+        os_patch,remove_patch=fs.patches()
+        with os_patch,remove_patch:
+            with mock.patch.object(sandbox.os,"fchmod",side_effect=PermissionError(errno.EPERM,"modeled mode refusal")):
+                with self.assertRaises(PermissionError): capsule.allocate()
+            self.assertEqual(capsule.stage,"exclusive-allocation")
+            capsule.retire(resources_absent=True)
+            self.assertEqual(set(fs.nodes),{"/","/run"})
+            self.assertTrue(capsule.absent)
+            self.assertEqual(fs.fds,{})
+
+    def test_live_resources_or_private_child_refuse_retirement(self):
+        fs=CapsuleModel();capsule=sandbox.VisibleInputCapsule()
+        os_patch,remove_patch=fs.patches()
+        with os_patch,remove_patch:
+            capsule.allocate()
+            with self.assertRaises(ValueError): capsule.retire(resources_absent=False)
+            fs.nodes[str(capsule.path/"artifacts")]=(0o700,0,0,4)
+            with self.assertRaises(ValueError): capsule.retire(resources_absent=True)
+            self.assertFalse(any(c[0]=="remove" for c in fs.calls))
+            capsule.release()
+
+    def test_nonce_parent_and_leaf_custody_changes_refuse_before_removal(self):
+        for change in ("nonce","parent","owner","child-link"):
+            with self.subTest(change=change):
+                fs=CapsuleModel();capsule=sandbox.VisibleInputCapsule()
+                os_patch,remove_patch=fs.patches()
+                with os_patch,remove_patch:
+                    capsule.allocate()
+                    if change=="nonce": capsule.nonce="0"*32
+                    elif change=="parent": fs.nodes["/run"]=(0o755,0,0,99)
+                    elif change=="owner": fs.nodes[str(capsule.path)]=(0o711,1000,0,3)
+                    else: fs.nodes[str(capsule.path/"inputs")]=(stat.S_IFLNK|0o755,0,0,4)
+                    with self.assertRaises(ValueError): capsule.retire(resources_absent=True)
+                    self.assertFalse(any(c[0]=="remove" for c in fs.calls))
+                    capsule.release()
+
+    def test_private_artifact_tree_cannot_become_a_visible_input_or_mount(self):
+        capsule=sandbox.VisibleInputCapsule()
+        with mock.patch.object(sandbox.os,"geteuid",return_value=0):
+            with self.assertRaises(ValueError):
+                sandbox.Sandbox(Path("/repo"),capsule=capsule,artifact_root=capsule.path/"private",tools=[],env={})
+        box=object.__new__(sandbox.Sandbox);box.artifact_root=Path("/private");box.out=box.artifact_root/"artifacts"
+        box.artifact_root_canonical=box.artifact_root
+        for path in (box.artifact_root,box.out,box.out/"receipt.json"):
+            with self.assertRaises(ValueError): box.approved_mount(path,"/input")
+        box.approved_mount(box.out/"oms-store","/fixture/oms-store")
+        box.approved_mount(box.out/"seed.json","/receipt/seed.json")
+
+
 class ProtectedFiles(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
@@ -470,6 +659,7 @@ class FixedLoopbackRelay(unittest.TestCase):
         original_close=sandbox.FixedRelay.close
         with tempfile.TemporaryDirectory() as raw,socket.socket() as occupied,socket.socket() as available:
             root=Path(raw);boundary=root/"boundary";boundary.mkdir()
+            private=root/"private";private.mkdir(mode=0o700)
             repo=root/"empty-repo";repo.mkdir()
             occupied.bind(("127.0.0.1",0));occupied.listen(1)
             available.bind(("127.0.0.1",0))
@@ -478,7 +668,7 @@ class FixedLoopbackRelay(unittest.TestCase):
             # Model privileged setup without invoking any host provisioning.
             # The real relay still hits an owned loopback-port collision.
             with mock.patch.object(sandbox.os,"geteuid",return_value=0):
-                box=sandbox.Sandbox(repo,boundary,[],{})
+                box=sandbox.Sandbox(repo,capsule=modeled_capsule(boundary),artifact_root=private,tools=[],env={})
             box.host_ip="127.0.0.1"
             def host(*args,**kwargs):
                 if args[:2]==("git","init"):
@@ -502,6 +692,9 @@ class FixedLoopbackRelay(unittest.TestCase):
                 self.assertTrue(cleanup["relay_constructor_cleanup_refused"])
                 self.assertIn("fixed_relay_constructor_cleanup_refused",cleanup["errors"])
                 self.assertFalse(box.cleanup_verified)
+                self.assertFalse(cleanup["relay_stopped"])
+                self.assertFalse(cleanup["capsule_cleanup_complete"])
+                self.assertIsNone(box.capsule.absent,"capsule retired without proven relay teardown")
                 candidate=object.__new__(proof.Proof);candidate.box=box
                 with self.assertRaisesRegex(ValueError,"observed complete sandbox teardown"): candidate.publish(complete=False)
                 self.assertGreaterEqual(occupied.fileno(),0)
@@ -538,31 +731,31 @@ class PublishedReceipts(unittest.TestCase):
         retained=private/"artifacts";retained.mkdir(mode=0o700)
         publication=root/"position-reclaim-published-1-1";publication.mkdir(mode=0o700)
         candidate=object.__new__(proof.Proof)
+        candidate.input_capsule=sandbox.VisibleInputCapsule()
         candidate.source={"sha":"a"*40,"tree":"b"*40,"run":"1","attempt":"1"}
         candidate.publication=publication
         candidate.publication_fd=sandbox.directory(publication)
-        candidate.box=types.SimpleNamespace(cleanup_verified=True,receipts_fd=sandbox.directory(retained),artifacts={})
+        candidate.box=types.SimpleNamespace(cleanup_verified=True,capsule_cleanup_complete=True,receipts_fd=sandbox.directory(retained),artifacts={})
         for name,raw in (("passes-complete.json",b"two passes and controls"),("receipt.json",b"bounded receipt"),("oms-store",b"private executable")):
             sandbox.new_file(candidate.box.receipts_fd,name,raw)
             candidate.box.artifacts[name]={"size":len(raw),"sha256":proof.digest(raw)}
-        private.chmod(0o711)
         return candidate,private,retained
 
     def test_literal_sibling_is_listable_after_teardown_and_excludes_binaries(self):
         with tempfile.TemporaryDirectory() as raw:
             candidate,private,retained=self.candidate(Path(raw))
             try:
-                # The sandbox unit owns its fixtures. Model the upload runner's
-                # execute-only access to a root-owned 0711 private directory.
-                private.chmod(0o111)
+                # Model a path-denied operator tree. Publication is a sibling;
+                # it never needs to make the private artifact root traversable.
+                private.chmod(0o000)
                 with self.assertRaises(PermissionError): list(os.scandir(private))
-                private.chmod(0o711)
+                private.chmod(0o700)
                 previous=os.umask(0o777)
                 try: candidate.publish(complete=True)
                 finally: os.umask(previous)
                 with os.scandir(candidate.publication) as entries: names={p.name for p in entries}
                 self.assertEqual(names,{"receipt.json","passes-complete.json","complete.json"})
-                self.assertEqual(stat.S_IMODE(private.stat().st_mode),0o711)
+                self.assertEqual(stat.S_IMODE(private.stat().st_mode),0o700)
                 self.assertEqual(stat.S_IMODE(retained.stat().st_mode),0o700)
                 self.assertEqual(stat.S_IMODE(candidate.publication.stat().st_mode),0o755)
                 for name in names: self.assertEqual(stat.S_IMODE((candidate.publication/name).stat().st_mode),0o644)
@@ -596,6 +789,16 @@ class PublishedReceipts(unittest.TestCase):
                 self.assertTrue((candidate.publication/"receipt.json").is_file())
             finally: candidate.close_receipts()
 
+    def test_unretired_visible_inputs_refuse_even_otherwise_complete_publication(self):
+        with tempfile.TemporaryDirectory() as raw:
+            candidate,_,_=self.candidate(Path(raw))
+            candidate.box.capsule_cleanup_complete=False
+            try:
+                with self.assertRaisesRegex(ValueError,"observed complete sandbox teardown"):
+                    candidate.publish(complete=True)
+                self.assertEqual(list(candidate.publication.iterdir()),[])
+            finally: candidate.close_receipts()
+
 
 class CleanupRefusals(unittest.TestCase):
     def test_log_refusal_does_not_skip_descriptors_or_mount_cleanup(self):
@@ -604,6 +807,7 @@ class CleanupRefusals(unittest.TestCase):
             work=root/"scratch";work.mkdir()
             public=root/"public";public.mkdir()
             box=object.__new__(sandbox.Sandbox)
+            box.capsule=modeled_capsule(root/"capsule")
             box.active=set();box.inner=None;box.relay=None
             box.relay_constructor_cleanup_refused=False
             box.veth_created=False;box.net_created=False

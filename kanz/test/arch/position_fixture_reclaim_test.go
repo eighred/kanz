@@ -504,7 +504,9 @@ func positionForeignRecoveryHasNoPositionEdge(t *testing.T, root string) bool {
 		_, _ = h.Write([]byte(strings.ReplaceAll(string(raw), "\r\n", "\n")))
 		_, _ = h.Write([]byte{0})
 	}
-	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "5b6e77c274b410b6301df0422e2a79e9909b259d69c2ed1bf5643419f87245d7" {
+	// Independently reconstructed from canonical Git LF blobs: sorted path,
+	// NUL, normalized source bytes, NUL. The earlier recorded digest was wrong.
+	if len(paths) != 38 || fmt.Sprintf("%x", h.Sum(nil)) != "344e4d9d293650df8b300b5adda28ee5d93d94d11b870b040946a46cd1aa7d56" {
 		return false
 	}
 	workflow, err := os.ReadFile(filepath.Join(repo, ".github/workflows/kanz-ci.yml"))

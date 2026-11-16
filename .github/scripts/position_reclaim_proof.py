@@ -46,7 +46,7 @@ for _name,_expected in EVIDENCE_PINS.items():
 
 from go_shard_evidence import identity, inventory, validate_events, digest, MAX_EVENTS
 from go_test_evidence import check, events
-from position_reclaim_sandbox import Sandbox, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS
+from position_reclaim_sandbox import Sandbox, VisibleInputCapsule, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS
 
 PREFIX = "github.com/eighred/kanz/"
 STORE = PREFIX+"services/oms/tools/store_conformance"
@@ -215,6 +215,9 @@ class Proof:
             raise ValueError("private publication directory differs")
         self.started=time.monotonic()
         self.box=None
+        # Initial placement is declared before any worker exists. Only approved
+        # inputs/scratch use /run; operator state and artifacts stay private here.
+        self.input_capsule=VisibleInputCapsule()
         self.before=None
         self.negative_id=None
         self.network_id=None
@@ -288,7 +291,7 @@ class Proof:
         # only. Both names reach the same fixed namespace-local broker relay.
         env["TEST_NATS_URL"]="nats://127.0.0.1:4222"
         env.update(TEST_SESSION_BROWSER_SCRIPT="/input/web/e2e/sessions.cjs",TEST_MFA_BROWSER_SCRIPT="/input/web/e2e/mfa.cjs",TEST_MFA_PLAYWRIGHT="/input/web/node_modules/playwright",TEST_MFA_NODE="/tool/node/bin/node",TEST_MFA_BFF="/fixture/mfa-web-bff",TEST_MFA_STATIC_DIR="/input/web/dist",TEST_NATS_MTLS_CERT_DIR="/fixture/mtls")
-        self.box=Sandbox(self.repo,self.root,tools,env)
+        self.box=Sandbox(self.repo,capsule=self.input_capsule,artifact_root=self.root,tools=tools,env=env)
         self.box.start()
         self.box.probe()
         provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(Path("/usr/bin/cc").resolve().read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"loopback_ports":list(PORTS),"relay_translations":[{"outer":outer,"backend":backend,"inner":backend} for outer,backend in RELAY_PORTS]},"environment_names":sorted(env)}
@@ -594,7 +597,7 @@ class Proof:
 
     def publish(self, *, complete):
         """Copy only parent-declared bounded data after verified teardown."""
-        if not self.box or not self.box.cleanup_verified or self.box.receipts_fd is None:
+        if not self.box or not self.box.cleanup_verified or self.box.receipts_fd is None or not self.box.capsule_cleanup_complete:
             raise ValueError("publication requires observed complete sandbox teardown")
         before=os.fstat(self.publication_fd)
         if not stat.S_ISDIR(before.st_mode) or before.st_uid!=os.geteuid() or stat.S_IMODE(before.st_mode)!=0o700:
@@ -627,7 +630,8 @@ class Proof:
                 os.close(self.box.receipts_fd)
                 self.box.receipts_fd=None
         finally:
-            os.close(self.publication_fd)
+            try: self.input_capsule.release()
+            finally: os.close(self.publication_fd)
 
 
 def main():
