@@ -7,11 +7,27 @@ import transaction_fixture as fixture
 
 import proof
 import rollout_probe
-from test_network_evidence import complete_record
+from test_network_evidence import complete_record, diagnostic_record
 from transaction_fixture import CASES, validate_report, deployment_diagnostic, runtime_failure_category, synthetic_runtime_detail
 
 
 class TransactionEvidenceTests(unittest.TestCase):
+    def test_command_diagnostic_is_hash_bound_failure_not_transaction_acceptance(self):
+        record = diagnostic_record()
+        fixture.network_evidence.validate(record, "a" * 32)
+        receipt = {"record": record, "sha256": fixture.tx.fingerprint(record), "durableSequence": 28, "receiptCount": 35}
+        with self.assertRaises(ValueError):
+            fixture.validate_network_receipt(receipt)
+        # The normal durable serializer includes every numeric diagnostic field.
+        before = fixture.tx.fingerprint(record)
+        record["observations"][-1]["commandFailure"]["process"]["stderrBytes"] = 1
+        self.assertNotEqual(fixture.tx.fingerprint(record), before)
+        with self.assertRaises(ValueError):
+            fixture.validate_network_receipt(receipt)
+        record["phase"] = "network_verified"
+        with self.assertRaises(ValueError):
+            fixture.network_evidence.validate(record, "a" * 32)
+
     def test_durable_network_evidence_refuses_missing_tampered_or_unfinished(self):
         record = complete_record()
         good = {"record": record, "sha256": fixture.tx.fingerprint(record), "durableSequence": 25, "receiptCount": 32}
