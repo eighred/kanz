@@ -6,6 +6,8 @@ mounted in a worker. Only the parent can create/remove the named containers.
 """
 
 import argparse
+import base64
+import binascii
 import hashlib
 import importlib.util
 import json
@@ -30,6 +32,8 @@ PYTHON = "python:3.13.18-alpine3.24@sha256:7712cfd23e0501f5cb58faa5e6e0d515c9939
 PACKAGE = "github.com/eighred/kanz/internal/pg"
 ROLE_TEST = "TestRuntimePrivilegesWithSeparateRoles"
 VAULT_TEST = "TestRuntimeVaultIsolation"
+OUTPUT_BOUND_TEST = "TestRuntimeBootstrapOutputBoundedCopy"
+OUTPUT_BOUND_REQUIRED = {OUTPUT_BOUND_TEST, OUTPUT_BOUND_TEST + "/at-limit", OUTPUT_BOUND_TEST + "/over-limit"}
 REQUIRED = {ROLE_TEST, VAULT_TEST}
 REQUIRED.update(ROLE_TEST + "/" + name for name in (
     "UPDATE", "DELETE", "TRUNCATE", "ALTER", "direct-truncate", "public-truncate",
@@ -39,6 +43,16 @@ REQUIRED.update(ROLE_TEST + "/" + name for name in ("replication-parameter-set",
 REQUIRED.update(VAULT_TEST + "/" + name for name in ("prepare-marker-budget", "activation-marker-budget", "boundary-rerun"))
 MANIFEST_TESTS = {"test_base_separates_all_three_roles_and_preserves_callers", "test_tokyo_preserves_transformed_immutable_images_and_scopes_database_peer", "test_changed_contracts_fail_closed"}
 EVENT_ACTIONS = frozenset({"start", "run", "pause", "cont", "pass", "bench", "fail", "output", "skip"})
+KUBERNETES_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+BOOTSTRAP_MODES = frozenset({"base", "tv-sync", "runtime-isolation-prepare", "runtime-isolation-activate"})
+BOOTSTRAP_STAGES = frozenset({"unknown", "complete", "output", "process", "shell", "client", "token", "audit", "kubernetes-config", "vault"})
+BOOTSTRAP_CLASSES = frozenset({"unknown", "success", "output-limit", "context-ended", "launch-refused", "client-config", "vault-refusal", "local-ca-missing"})
+BOOTSTRAP_FRAME = re.compile(
+    r"[ \t]*runtime_vault_integration_test\.go:[1-9][0-9]{0,4}: runtime-bootstrap-observation "
+    r"mode=([a-z-]+) process=(not-started|exited|signaled) exit=(-1|0|[1-9][0-9]{0,2}) "
+    r"signal=(0|[1-9][0-9]?) context=(active|canceled|deadline) bytes=(0|[1-9][0-9]{0,4}) "
+    r"stage=([a-z-]+) class=([a-z-]+)"
+)
 PROBE_FAILURES = frozenset({
     "unexpected worker environment name", "Python locale coercion added LC_CTYPE",
     "scratch environment mismatch", "worker is root", "external network interface present",
@@ -152,11 +166,62 @@ def promote_elf(directory_fd, name, data):
     return {"sha256": hashlib.sha256(qualified).hexdigest(), "bytes": len(qualified), "mode": "0555"}
 
 
+def promote_public_ca(directory_fd, data):
+    limit = 16 << 10
+    if not 0 < len(data) <= limit:
+        raise ProofFailure("public fixture CA size refused")
+    match = re.fullmatch(rb"-----BEGIN CERTIFICATE-----\n((?:[A-Za-z0-9+/=]{1,64}\n)+)-----END CERTIFICATE-----\n", data)
+    if match is None:
+        raise ProofFailure("public fixture CA must be one certificate PEM with no trailing material")
+    encoded = match[1].replace(b"\n", b"")
+    try:
+        der = base64.b64decode(encoded, validate=True)
+    except binascii.Error:
+        raise ProofFailure("public fixture CA base64 refused") from None
+    if not der or base64.b64encode(der) != encoded:
+        raise ProofFailure("public fixture CA encoding is not canonical")
+    write_exclusive(directory_fd, "kubernetes-ca.crt", data, 0o444)
+    qualified = verify_regular(directory_fd, "kubernetes-ca.crt", limit, mode=0o444)
+    if qualified != data:
+        raise ProofFailure("public fixture CA changed during promotion")
+    return {"sha256": hashlib.sha256(qualified).hexdigest(), "bytes": len(qualified), "mode": "0444"}
+
+
+def observe_bootstrap_output(event, test, observation):
+    """Decode only the fixture's bounded fixed frame, never arbitrary log text."""
+    if not test.startswith(VAULT_TEST) or not isinstance(event.get("Output"), str):
+        return
+    for line in event["Output"].splitlines():
+        if "runtime-bootstrap-observation" not in line:
+            continue
+        match = BOOTSTRAP_FRAME.fullmatch(line)
+        if match is None:
+            observation["invalid_bootstrap_frames"] += 1
+            continue
+        mode, process, code, signal_number, context, size, stage, classification = match.groups()
+        code, signal_number, size = int(code), int(signal_number), int(size)
+        if (mode not in BOOTSTRAP_MODES or stage not in BOOTSTRAP_STAGES or classification not in BOOTSTRAP_CLASSES
+                or code > 255 or signal_number > 64 or size > 64 << 10):
+            observation["invalid_bootstrap_frames"] += 1
+            continue
+        if not ((process == "not-started" and code == -1 and signal_number == 0)
+                or (process == "exited" and code >= 0 and signal_number == 0)
+                or (process == "signaled" and code == -1 and signal_number > 0)):
+            observation["invalid_bootstrap_frames"] += 1
+            continue
+        if len(observation["bootstrap_observations"]) >= 64:
+            raise ProofFailure("bootstrap observation inventory exceeded its bound")
+        observation["bootstrap_observations"].append({"test": test, "mode": mode, "process": process,
+            "exit_code": code, "signal": signal_number, "context": context, "output_bytes": size,
+            "stage": stage, "classification": classification})
+
+
 def observe_fixture_events(events, observation):
     """Retain fixed protocol counters and required identities, never Output."""
     observation.update({"event_count": len(events), "event_classification": "present" if events else "empty",
                         "event_action_counts": {name: 0 for name in sorted(EVENT_ACTIONS)},
-                        "unknown_action_count": 0, "unknown_identity_count": 0})
+                        "unknown_action_count": 0, "unknown_identity_count": 0,
+                        "invalid_bootstrap_frames": 0, "bootstrap_observations": []})
     known = {}
     for event in events:
         if not isinstance(event, dict):
@@ -178,7 +243,11 @@ def observe_fixture_events(events, observation):
             continue
         counts = known.setdefault(test, {name: 0 for name in sorted(EVENT_ACTIONS)})
         counts[action] += 1
+        if action == "output":
+            observe_bootstrap_output(event, test, observation)
     observation["required_test_events"] = [{"test": name, "actions": known[name]} for name in sorted(known)]
+    if observation["invalid_bootstrap_frames"]:
+        raise ProofFailure("bootstrap observation frame refused")
 
 
 class Sandbox:
@@ -284,6 +353,8 @@ class Sandbox:
                 path, options = arguments[index + 1].split(":", 1)
                 expected_tmpfs[path] = options
         actual_mounts = {item["Destination"]: item for item in actual["Mounts"] if item["Type"] == "bind"}
+        if image == VAULT and expected_mounts != {KUBERNETES_CA_PATH: str(self.tools / "kubernetes-ca.crt")}:
+            raise ProofFailure("Vault worker requires only its qualified public Kubernetes CA mount")
         if set(actual_mounts) != set(expected_mounts) or any(item["Type"] not in ("bind", "tmpfs") for item in actual["Mounts"]):
             raise ProofFailure("unexpected writable/anonymous mount")
         if any(actual_mounts[path]["RW"] or actual_mounts[path]["Source"] != expected_mounts[path] for path in expected_mounts):
@@ -526,6 +597,16 @@ def main():
                     for field, value in promoted.items():
                         receipt[prefix + "_" + field] = value
                     del binary
+                receipt["stage"] = "networkless-public-ca"
+                public_ca = sandbox.mounts(sandbox.arguments("build-public-ca", GO, memory="3072m", scratch="3072m", cpus="2", pids="256", executable=True), modules=True)
+                public_ca += ["GOTOOLCHAIN=local", "GOPATH=/scratch/go", "GOMODCACHE=/modules", "GOCACHE=/scratch/cache",
+                              "GOTMPDIR=/scratch", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0",
+                              "go", "run", "/source/tools/runtime_credentials/fixture_ca.go"]
+                ca_code, ca_pem, _ = sandbox.run(public_ca, timeout=300, stdout_limit=16 << 10)
+                if ca_code:
+                    raise ProofFailure("isolated public fixture CA generation failed")
+                receipt["bootstrap_ca"] = promote_public_ca(tools_fd, ca_pem)
+                del ca_pem
                 receipt["stage"] = "manifest-oracles"
                 probe = sandbox.mounts(sandbox.arguments("sandbox-probe", PYTHON), modules=True, tools=True, python=True, work="/source/tools/runtime_credentials")
                 probe += ["PYTHONPATH=/python-deps", "PYTHONDONTWRITEBYTECODE=1", "python", "-B", "sandbox_probe.py"]
@@ -538,6 +619,36 @@ def main():
                     receipt["sandbox_probe_exit"] = probe_code
                     raise ProofFailure("kernel sandbox negative/positive probe failed")
                 receipt["sandbox_probe"] = "kernel limits, empty environment, loopback only, read-only inputs and scratch writes passed"
+                receipt["stage"] = "bootstrap-output-bound"
+                output_bound = sandbox.mounts(sandbox.arguments("output-bound", GO, memory="768m", scratch="128m", pids="96"), tools=True)
+                output_bound += ["/tools/test2json", "-t", "-p", PACKAGE, "/tools/runtime-pg.test",
+                                 "-test.v=test2json", "-test.timeout=30s", "-test.count=1", "-test.run=^" + OUTPUT_BOUND_TEST + "$"]
+                output_bound_execution = {"docker_start_exit": None, "stdout_bytes": None, "stderr_bytes": None,
+                                          "stderr_classification": "not-observed", "process": None}
+                receipt["bootstrap_output_bound"] = {"execution": output_bound_execution, "status": "not run"}
+                output_bound_code, output_bound_raw, _ = sandbox.run(output_bound, timeout=45, stdout_limit=64 << 10, observation=output_bound_execution)
+                try:
+                    output_bound_events = [json.loads(line) for line in output_bound_raw.splitlines()]
+                except (ValueError, UnicodeError):
+                    raise ProofFailure("bounded bootstrap output regression events refused") from None
+                if any(not isinstance(event, dict) or event.get("Package") != PACKAGE
+                       or event.get("Action") not in EVENT_ACTIONS
+                       or event.get("Test", "") not in OUTPUT_BOUND_REQUIRED | {""} for event in output_bound_events):
+                    raise ProofFailure("bounded bootstrap output regression identity refused")
+                if hashlib.sha256((source / verifier_path).read_bytes()).hexdigest() != binding["inputs"][verifier_path]:
+                    raise ProofFailure("canonical parent verifier changed before output-bound import")
+                output_bound_spec = importlib.util.spec_from_file_location("output_bound_evidence", source / verifier_path)
+                output_bound_verifier = importlib.util.module_from_spec(output_bound_spec)
+                output_bound_spec.loader.exec_module(output_bound_verifier)
+                try:
+                    output_bound_verifier.verify(output_bound_events, {"internal/pg": OUTPUT_BOUND_REQUIRED})
+                except (ValueError, KeyError):
+                    raise ProofFailure("bounded bootstrap output regression failed, skipped or incomplete") from None
+                if output_bound_code:
+                    raise ProofFailure("bounded bootstrap output regression process failed")
+                receipt["bootstrap_output_bound"].update({"status": "passed", "tests": sorted(OUTPUT_BOUND_REQUIRED), "skips": []})
+                del output_bound_raw, output_bound_events
+                receipt["stage"] = "manifest-oracles"
                 manifests = sandbox.mounts(sandbox.arguments("manifests", PYTHON), python=True, work="/source/tools/runtime_credentials")
                 manifests += ["PYTHONPATH=/python-deps", "PYTHONDONTWRITEBYTECODE=1", "python", "-B", "test_manifests.py"]
                 manifest_code, manifest_output, _ = sandbox.run(manifests, timeout=30)
@@ -559,6 +670,8 @@ def main():
                 postgres_id = sandbox.start(postgres)
                 namespace = "container:" + postgres_id
                 vault = sandbox.arguments("vault", VAULT, network=namespace, user="100:1000", scratch="64m")
+                position = vault.index("--entrypoint")
+                vault[position:position] = ["--mount", "type=bind,src=" + str(tools / "kubernetes-ca.crt") + ",dst=" + KUBERNETES_CA_PATH + ",readonly"]
                 vault += ["VAULT_DISABLE_MLOCK=true", "/bin/vault", "server", "-dev", "-dev-root-token-id=fixture-root-token",
                           "-dev-listen-address=127.0.0.1:8200", "-log-level=error"]
                 vault_id = sandbox.start(vault)

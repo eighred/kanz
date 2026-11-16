@@ -57,6 +57,13 @@ The pinned Go image builds the standard `cmd/test2json` converter offline in the
 executable build sandbox. The runtime worker executes parent-qualified read-only
 ELFs from `/tools`, keeping `/scratch` noexec. Failure diagnostics retain fixed
 process/event observations and required test identities; raw output is discarded.
+The same offline boundary generates one public dummy Kubernetes CA, with its
+signing key only in memory. The parent qualifies its bounded single-certificate
+PEM and mounts only that read-only file at Vault's standard in-pod CA path. It
+does not supply a service-account token or change the canonical bootstrap.
+The later owned TokenReview TLS CA, reviewer JWT and verification keys remain
+independent. Fixed bootstrap observations describe recognized error markers;
+an unclassified failure never becomes an invented cause or accepted proof.
 
 Render externally with the reviewed commit/tree and the approved PyYAML 6.0.3
 dependency. For base, omit `--input`. For Tokyo, supply the exact rendered Tokyo

@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -46,13 +48,51 @@ type runtimeVaultFixture struct {
 
 // Bound child output even before the outer sandbox's file/memory limits apply.
 // On failure only the test's generic classification is retained, not this text.
-type runtimeBootstrapOutput struct{ bytes.Buffer }
+// Keep the buffer named: embedding would promote ReadFrom and let io.Copy
+// bypass the bounded Write method.
+type runtimeBootstrapOutput struct {
+	buffer   bytes.Buffer
+	exceeded bool
+}
+
+func (output *runtimeBootstrapOutput) Len() int       { return output.buffer.Len() }
+func (output *runtimeBootstrapOutput) String() string { return output.buffer.String() }
 
 func (output *runtimeBootstrapOutput) Write(data []byte) (int, error) {
 	if output.Len()+len(data) > 64<<10 {
+		output.exceeded = true
 		return 0, io.ErrShortBuffer
 	}
-	return output.Buffer.Write(data)
+	return output.buffer.Write(data)
+}
+
+func TestRuntimeBootstrapOutputBoundedCopy(t *testing.T) {
+	for _, fixture := range []struct {
+		name      string
+		size      int
+		wantLimit bool
+	}{
+		{"at-limit", 64 << 10, false},
+		{"over-limit", (64 << 10) + 1, true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			// LimitReader has no WriterTo; this exercises io.Copy's destination
+			// dispatch, which used the embedded buffer's unbounded ReadFrom.
+			source := io.LimitReader(strings.NewReader(strings.Repeat("x", fixture.size)), int64(fixture.size))
+			var output runtimeBootstrapOutput
+			copied, err := io.Copy(&output, source)
+			if fixture.wantLimit {
+				if !errors.Is(err, io.ErrShortBuffer) {
+					t.Fatal("over-limit copy did not refuse output")
+				}
+			} else if err != nil || copied != int64(fixture.size) {
+				t.Fatal("at-limit copy failed its positive control")
+			}
+			if copied != int64(output.Len()) || output.Len() > 64<<10 || output.exceeded != fixture.wantLimit {
+				t.Fatal("bounded copy count or overflow classification mismatch")
+			}
+		})
+	}
 }
 
 func (v *runtimeVaultFixture) request(method, path, token string, payload any) (map[string]any, int) {
@@ -224,6 +264,7 @@ func (v *runtimeVaultFixture) bootstrap(mode, token, script string, approved boo
 	if strings.Contains(output.String(), token) {
 		v.t.Fatal("operator token entered bootstrap output")
 	}
+	v.observeBootstrap(mode, command, err, &output)
 	if err == nil {
 		if !strings.Contains(output.String(), "BOOTSTRAP_COMPLETE") {
 			v.t.Fatal("bootstrap returned success without completion")
@@ -235,6 +276,59 @@ func (v *runtimeVaultFixture) bootstrap(mode, token, script string, approved boo
 		v.t.Fatal("failed bootstrap retained a completion marker")
 	}
 	return err == nil
+}
+
+// Observations identify fixed public error markers, not an inferred first cause.
+// The parent retains only this bounded frame; raw output and errors stay local.
+func (v *runtimeVaultFixture) observeBootstrap(mode string, command *exec.Cmd, err error, output *runtimeBootstrapOutput) {
+	v.t.Helper()
+	switch mode {
+	case "base", "tv-sync", "runtime-isolation-prepare", "runtime-isolation-activate":
+	default:
+		v.t.Fatal("unknown fixture bootstrap mode")
+	}
+	process, code, signalNumber := "not-started", -1, 0
+	if command.ProcessState != nil {
+		process, code = "exited", command.ProcessState.ExitCode()
+		if status, ok := command.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			process, signalNumber = "signaled", int(status.Signal())
+		}
+	}
+	contextState := "active"
+	if errors.Is(v.ctx.Err(), context.DeadlineExceeded) {
+		contextState = "deadline"
+	} else if errors.Is(v.ctx.Err(), context.Canceled) {
+		contextState = "canceled"
+	}
+	stage, classification := "unknown", "unknown"
+	text := output.String()
+	switch {
+	case err == nil && strings.Contains(text, "BOOTSTRAP_COMPLETE"):
+		stage, classification = "complete", "success"
+	case err == nil:
+		// An unmarked zero exit remains unknown, even if text resembles an error.
+	case output.exceeded || errors.Is(err, io.ErrShortBuffer):
+		stage, classification = "output", "output-limit"
+	case contextState != "active":
+		stage, classification = "process", "context-ended"
+	case process == "not-started" || strings.Contains(text, "/tools/vault: not found") || strings.Contains(text, "/tools/vault: Permission denied"):
+		stage, classification = "shell", "launch-refused"
+	case strings.Contains(text, "failed to read environment:") || strings.Contains(text, "failed to setup TLS config:") || strings.Contains(text, "failed to create client:"):
+		stage, classification = "client", "client-config"
+	case strings.Contains(text, "Error looking up token:"):
+		stage, classification = "token", "vault-refusal"
+	case strings.Contains(text, "Error writing data to auth/kubernetes/config:"):
+		stage, classification = "kubernetes-config", "vault-refusal"
+		if strings.Contains(text, "open /var/run/secrets/kubernetes.io/serviceaccount/ca.crt: no such file or directory") {
+			classification = "local-ca-missing"
+		}
+	case strings.Contains(text, "Error listing audits:") || strings.Contains(text, "Error enabling audit device:"):
+		stage, classification = "audit", "vault-refusal"
+	case strings.Contains(text, "Error making API request."):
+		stage, classification = "vault", "vault-refusal"
+	}
+	v.t.Logf("runtime-bootstrap-observation mode=%s process=%s exit=%d signal=%d context=%s bytes=%d stage=%s class=%s",
+		mode, process, code, signalNumber, contextState, output.Len(), stage, classification)
 }
 
 func (v *runtimeVaultFixture) policyState() map[string]string {
