@@ -271,7 +271,10 @@ func (p *Postgres) applyRecoveredExecution(ctx context.Context, c RecoveryCase, 
 	if terminal {
 		working.Status = orderpb.OrderStatus_ORDER_STATUS_ROUTED
 	}
-	leaves, ok := dec.ToProtoScaled(new(big.Rat).Sub(dec.FromProto(st.GetOrderedQuantity()), dec.FromProto(st.GetFilledQuantity())))
+	if !dec.InDomain(st.GetOrderedQuantity()) || !dec.InDomain(st.GetFilledQuantity()) {
+		return nil, ErrPostedExecutionUnknown
+	}
+	leaves, ok := dec.ToProtoExact(new(big.Rat).Sub(dec.FromProto(st.GetOrderedQuantity()), dec.FromProto(st.GetFilledQuantity())))
 	if !ok {
 		return nil, ErrPostedExecutionUnknown
 	}
