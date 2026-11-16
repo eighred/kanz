@@ -400,7 +400,7 @@ pub async fn snapshot(
         portfolio: Some(PortfolioState {
             portfolio_id: portfolio.into(),
             base_currency: ccy.into(),
-            total_market_value: Some(math::money(nav, ccy)?),
+            total_market_value: Some(math::marked_money(nav, ccy)?),
             position_count: positions.len().try_into().map_err(|_| Error::Capacity)?,
             as_of: Some(at),
             ..Default::default()
