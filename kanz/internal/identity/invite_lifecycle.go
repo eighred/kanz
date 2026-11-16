@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/eighred/kanz/pkg/auth"
@@ -74,6 +75,9 @@ func (p *Postgres) RevokeInvite(ctx context.Context, actor Administration, id st
 	if i.RevokedAt != nil {
 		return i, tx.Commit(ctx)
 	}
+	if i.Revision == math.MaxInt64 {
+		return nil, ErrInviteConflict
+	}
 	before := i.Summary(now)
 	stamp := now.UTC()
 	i.RevokedAt = &stamp
@@ -107,6 +111,9 @@ func (p *Postgres) ReissueInvite(ctx context.Context, actor Administration, id s
 		return nil, err
 	}
 	if i.Revision != revision || i.RedeemedAt != nil || i.ReissuedAs != nil {
+		return nil, ErrInviteConflict
+	}
+	if i.Revision == math.MaxInt64 {
 		return nil, ErrInviteConflict
 	}
 	if err = policy.Check(i.Subject); err != nil {

@@ -21,7 +21,7 @@
 # Binance, OKX, both, or nothing. What it trades is a deployment decision, not a
 # compile-time one, and a MIC with no adapter is a hard error at the router rather
 # than a quiet simulation.
-FROM ghcr.io/eighred/base/golang:1.26.11@sha256:7af425da11f4fc1a9308eb704369e3f6d1c44e35bac0f874a59ade3f20fdc07e AS build
+FROM ghcr.io/eighred/base/golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

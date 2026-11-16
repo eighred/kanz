@@ -35,11 +35,12 @@ func TestGuardedFoldSerializesOutcomeAndRevokesOnPanic(t *testing.T) {
 	defer unblock()
 	done := make(chan error, 2)
 	var count atomic.Int32
+	failure := errors.New("first failed")
 	h := guardedFold(r, "a", func(context.Context, *envelopepb.Envelope, []byte) error {
 		if count.Add(1) == 1 {
 			close(entered)
 			<-release
-			return errors.New("first failed")
+			return failure
 		}
 		return nil
 	})
@@ -48,13 +49,24 @@ func TestGuardedFoldSerializesOutcomeAndRevokesOnPanic(t *testing.T) {
 	<-entered
 	go func() { done <- h(context.Background(), env, nil) }()
 	select {
-	case <-done:
-		t.Fatal("later handler overtook earlier outcome")
+	case err := <-done:
+		t.Fatalf("later handler overtook earlier outcome: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	unblock()
-	<-done
-	<-done
+	// Completion sends may race after the fold lock releases. Require exactly
+	// the injected failure and one successful retry, in either receive order.
+	failures := 0
+	for range 2 {
+		if err := <-done; errors.Is(err, failure) {
+			failures++
+		} else if err != nil {
+			t.Fatalf("unexpected fold outcome: %v", err)
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("failed folds = %d, want 1", failures)
+	}
 	if !r.Ready() {
 		t.Fatal("earlier failure overwrote later successful retry")
 	}

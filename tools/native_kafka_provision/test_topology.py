@@ -126,6 +126,9 @@ class TopologyTest(unittest.TestCase):
         raw='NATIVE_DIAGNOSTIC:'+json.dumps(value)
         self.assertEqual(qualify.probe_diagnostic(raw,'discover','a'*40),value)
         self.assertEqual(qualify.probe_diagnostic('SECRET','discover','a'*40),{'state':'UNKNOWN'})
+        for phase in ('partial-lost-ack', 'partial-ready', 'partial-produce', 'partial-reapply', 'partial-readback', 'partial-verify'):
+            partial = dict(value, mode='partial', phase=phase, category='kafka-6')
+            self.assertEqual(qualify.probe_diagnostic('NATIVE_DIAGNOSTIC:'+json.dumps(partial),'partial','a'*40),partial)
         for key,replacement in [('version','b'*40),('expected_identity',topology.IDENTITIES[1]),('phase','SECRET'),('category','SECRET')]:
             bad=dict(value);bad[key]=replacement
             with self.assertRaises(ValueError):qualify.probe_diagnostic('NATIVE_DIAGNOSTIC:'+json.dumps(bad),'discover','a'*40)
