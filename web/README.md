@@ -13,6 +13,29 @@ Rust WASM toolchain. `npm run dev` starts Vite after its renderer prebuild;
 configuration lives in `vite.config.ts`; the deployed same-origin boundary is
 owned by `kanz/services/web_bff/`.
 
+## Compiler compatibility boundary
+
+`npm run typecheck` requires both compiler checks. `typecheck:vue` retains the
+entire existing `tsconfig.json` graph, including Vue components, application TS,
+tests and Vite configuration, through `vue-tsc` and the official TypeScript 6
+JavaScript API compatibility package. `typecheck:native` uses the separately
+installed TypeScript 7.0.2 native compiler for the actual `vite.config.ts` and its
+imported declaration graph. Its additive `tsconfig.native.json` inherits the
+same compiler options and explicitly includes Node types. It does not replace
+or narrow the existing Vue check. `npm run build` requires both checks before
+Vite bundles the application.
+
+The aliases follow the [official dual-install scheme](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/).
+The retained `vue-tsc` version includes the [official TS6 shim-resolution fix](https://github.com/vuejs/language-tools/pull/6123).
+The native command names the reviewed native package directly; it does not rely
+on an ambiguous `tsc` binary link. No ambient Vue declaration, cast or new source
+exclusion supplies compatibility. This is a supported compatibility bridge,
+not native TypeScript checking of Vue templates or the full application. That
+remaining TypeScript 7 Vue migration is unsupported by this release and remains
+explicit under #1757. Dependency resolution and an installed compiler alone do
+not establish either check passed; use the tracked npm-generated lockfile and
+fresh CI typecheck, tests, bundle and browser evidence.
+
 ## Presentation behavior and qualification
 
 The Broker account view binds its four-read snapshot to the requested account
