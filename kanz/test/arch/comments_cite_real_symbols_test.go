@@ -123,14 +123,6 @@ func TestInfraCommentsCiteRealArchSymbols(t *testing.T) {
 // alternative is loosening the identifier pattern, which would make the guard
 // stop reporting the thing it exists for.
 var infraCitationAllowed = map[string]bool{
-	// THE DEAD SYMBOL ITSELF, quoted in network-policies.yaml as the historical
-	// record of what the block used to claim. It is the one name in this map that
-	// must NEVER exist: if a declaration by that name ever appears, the quotation
-	// stops being history and the entry should go. Naming it here rather than
-	// rewording the comment keeps the record readable — a reader who greps the
-	// old name finds the paragraph explaining why it is gone.
-	"tenantHeaderTrustingUndeployed": true,
-
 	"podSelector":        true,
 	"namespaceSelector":  true,
 	"matchLabels":        true,

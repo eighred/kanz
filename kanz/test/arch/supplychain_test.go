@@ -434,12 +434,10 @@ const canonicalImageOrg = "eighred"
 //
 //   - spiffe:   SPIRE server/agent, the CSI driver and spiffe-helper — upstream
 //     sigstore/spiffe images.
-//   - gitleaks: the secret-scanning image security.yml runs; not built here.
 //   - cloudnative-pg: the PostgreSQL operator and operand images pinned by the
 //     Tokyo testnet release lock and data-plane architecture guard.
 var thirdPartyImageOrgs = map[string]struct{}{
 	"spiffe":         {},
-	"gitleaks":       {},
 	"cloudnative-pg": {},
 }
 
@@ -556,12 +554,16 @@ func TestImageOrgIsCanonical(t *testing.T) {
 	// GitHub Actions OIDC signing identity ("who is trusted to sign"), not a
 	// container image reference, and a message that called it an image would
 	// misdirect whoever has to act on it.
+	usedThirdParty := map[string]bool{}
 	checkOrg := func(problems *[]string, relSlash, fieldDesc, org string, isSigningIdentity bool) {
 		if org == canonicalImageOrg {
 			return
 		}
-		if _, ok := thirdPartyImageOrgs[org]; ok {
-			return
+		if !isSigningIdentity {
+			if _, ok := thirdPartyImageOrgs[org]; ok {
+				usedThirdParty[org] = true
+				return
+			}
 		}
 		if strings.HasPrefix(org, "${{") {
 			if isSigningIdentity {
@@ -580,8 +582,8 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		}
 		if isSigningIdentity {
 			*problems = append(*problems, fmt.Sprintf(
-				"%s: %s: signing-identity org %q is neither the canonical %q nor a listed third "+
-					"party — this field is the GitHub Actions OIDC subject the ClusterImagePolicy trusts "+
+				"%s: %s: signing-identity org %q is not the canonical %q; third-party image allowances "+
+					"do not delegate signing authority. This is the GitHub Actions OIDC subject the ClusterImagePolicy trusts "+
 					"to sign, not a container image reference, so a mismatch here means a genuine "+
 					"signature from the real release workflow would fail verification",
 				relSlash, fieldDesc, org, canonicalImageOrg))
@@ -654,6 +656,11 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		}
 	}
 
+	for org := range thirdPartyImageOrgs {
+		if !usedThirdParty[org] {
+			problems = append(problems, "third-party image namespace "+org+" is unused in the parsed image fields; retire the exception")
+		}
+	}
 	if workflowImageRefsChecked < workflowImageRefFloor {
 		t.Fatalf("only %d ghcr.io image references matched across workflow files (build.yml's "+
 			"images:, preview.yml's tags:, release.yml's IMAGE:) — expected at least %d; a "+

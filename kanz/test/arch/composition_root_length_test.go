@@ -69,8 +69,10 @@ const (
 	budgetSlack = 60
 )
 
-// compositionRootBudget is the line count each over-cap root is allowed, and may
-// only be revised DOWNWARD. Every entry names the issue that retires it.
+// compositionRootBudget is the permanent source-shape ratchet retained after
+// #643's constructor extractions. Remaining subscription and goroutine wiring
+// has no promised extraction mandate. The guard rejects growth, unearned slack,
+// unknown functions and entries whose root has fallen below the ordinary cap.
 var compositionRootBudget = map[string]int{
 	// #643. Was 1,474 lines and 61 constructors with two bare nils. All four
 	// extractions the issue named have now landed — the pre-trade gate

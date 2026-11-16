@@ -61,9 +61,10 @@ import (
 // rlsExempt is a DEFAULT-DENY allow-list: every tenant-scoped table declared in
 // the migrations is checked unless it is named here with a reason.
 //
-// This guard checks that an exempt table still exists; it does not prove the
-// exception's safety premise. The named directory, authentication and audit
-// controls need their own tests. #1331 tracks that remaining premise audit.
+// Exceptions retire when RLS is introduced. Routing directories must remain
+// tenant-ID-only with FORCE-RLS payload and delivery tables. Authentication and
+// WORM/query authorization are also exercised by their owning runtime tests;
+// this source guard does not replace restricted-role database verification.
 var rlsExempt = map[string]string{
 	"identity_access_audit_tenants": "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
 	"bff_session_audit_tenants":     "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
@@ -83,10 +84,12 @@ var rlsExempt = map[string]string{
 	// auditor reads ACROSS tenants; tenant_id is a column for filtering/reporting,
 	// not an isolation boundary here" — the same call market-data and
 	// schema-registry make for universal data. Tenant-scoped read access is
-	// enforced at the query API, and the table is WORM at the database layer: a
-	// trigger makes UPDATE and DELETE raise, so it is insert-only even to a
-	// compromised app role.
-	"audit_log": "AUDIT-01a/b — a cross-tenant compliance record read by auditors; scoped at the query API, WORM in the database",
+	// enforced at the query API. This exception also REQUIRES database WORM
+	// protection against the runtime principal. The row trigger proves only
+	// UPDATE/DELETE refusal; #1747 owns the credential/TRUNCATE boundary, and
+	// #1748 owns retention/restore decisions. Passing source checks here do not
+	// certify those unresolved premises or authorize cross-tenant callers.
+	"audit_log": "AUDIT-01a/b decision: cross-tenant compliance record scoped at the query API; required WORM boundary unverified (#1747), retention/restore decision pending (#1748)",
 }
 
 var (
@@ -103,6 +106,8 @@ var (
 type tableDecl struct {
 	policies    map[string]bool
 	file        string
+	definition  string
+	altered     bool
 	tenantScope bool
 	enabled     bool
 	forced      bool
@@ -143,6 +148,9 @@ func TestEveryTenantScopedTableIsUnderForcedRLS(t *testing.T) {
 		}
 		if _, ok := rlsExempt[name]; ok {
 			seenExempt[name] = true
+			if problem := rlsExemptionProblem(name, d, decls); problem != "" {
+				problems = append(problems, name+": "+problem)
+			}
 			continue
 		}
 		switch {
@@ -178,6 +186,30 @@ func TestEveryTenantScopedTableIsUnderForcedRLS(t *testing.T) {
 				"was renamed, dropped, or its tenant_id column went away. Delete the entry.", name)
 		}
 	}
+}
+
+// The directory exceptions admit routing metadata, never subject names or audit
+// payloads. A new column, a later ALTER, or a companion losing tenant isolation
+// invalidates that permanent premise even while the directory still exists.
+func rlsExemptionProblem(name string, d *tableDecl, decls map[string]*tableDecl) string {
+	if d.enabled || d.forced || d.policy {
+		return "RLS exemption is stale: table now declares RLS or a policy; review and retire the exception"
+	}
+	if !strings.HasSuffix(name, "_audit_tenants") {
+		return ""
+	}
+	definition := strings.Join(strings.Fields(strings.ToLower(strings.Trim(d.definition, "() \t\r\n"))), " ")
+	if definition != "tenant_id text primary key" || d.altered {
+		return "routing directory exception requires exactly tenant_id TEXT PRIMARY KEY and no later ALTER"
+	}
+	payload := strings.TrimSuffix(name, "_tenants")
+	for _, table := range []string{payload, payload + "_pending"} {
+		companion := decls[table]
+		if companion == nil || !companion.enabled || !companion.forced || !companion.policy || !companion.guarded {
+			return "routing directory exception requires FORCE RLS and scoped policies on " + table
+		}
+	}
+	return ""
 }
 
 // scanMigrationsForTenantTables reads every service's migrations and returns what
@@ -237,9 +269,20 @@ func scanOneMigration(out map[string]*tableDecl, file, sql string) {
 		name := sql[m[2]:m[3]]
 		body := balancedParen(sql[m[1]-1:])
 		d := decl(out, name, file)
+		if d.definition != "" {
+			d.definition += " "
+		}
+		d.definition += body
 		if tenantColumn(body) {
 			d.tenantScope = true
 		}
+	}
+	// A later schema change can invalidate a directory's single-column premise
+	// without changing its original CREATE TABLE. Other ALTER forms stay outside
+	// this narrow premise; any ADD/DROP/ALTER/RENAME of its columns needs review.
+	columnChanges := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:"?[a-z_][a-z0-9_]*"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?\s*\*?\s+(?:ADD|DROP|ALTER|RENAME)\b`)
+	for _, m := range columnChanges.FindAllStringSubmatch(sql, -1) {
+		decl(out, strings.ToLower(m[1]), file).altered = true
 	}
 
 	// The direct form.
