@@ -542,17 +542,21 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"space is therefore the registry's published catalogue, and (schema_id, version) is " +
 			"immutable once published, so the entry never needs invalidating either.", ""},
 	"services/lineage/internal/graph: Memory.datasets": {boundedByConstruction,
-		"keyed by DatasetID{namespace, name}, built from the envelope's domain and schema ref — the " +
-			"estate's schema taxonomy, dozens of entries, not its event count. The type's own comment " +
-			"has said so since #244.", ""},
+		"CAPPED IN THE WRITE PATH: tenant plus canonical dataset keys are admitted only while the " +
+			"GLOBAL DatasetMax and retained-string budget allow the entire observation. Validated metadata " +
+			"is not assumed to be a closed taxonomy. TestGlobalAdmissionLimitsAreAtomic proves refusal " +
+			"without partial nodes, edges, counters or metadata; no cap is multiplied per owner.", ""},
 	"services/lineage/internal/graph: Memory.upstream": {boundedByConstruction,
-		"the edge set of the same dataset taxonomy as datasets: one entry per dataset, each holding " +
-			"the datasets it reads from. Bounded by the schema catalogue rather than by traffic.", ""},
+		"the outer keys are already admitted owned datasets, so they cannot exceed the GLOBAL " +
+			"DatasetMax. Observe resolves only same-owner retained parents and preflights the global " +
+			"EdgeMax before creating any outer/inner entry. TestGlobalAdmissionLimitsAreAtomic covers " +
+			"the simultaneous new-node/new-edge refusal; there is no silent topology eviction.", ""},
 	"services/lineage/internal/graph: Memory.ring": {boundedByConstruction,
-		"a fixed-capacity ring (DefaultEventIndexCapacity, or LINEAGE_EVENT_INDEX_MAX): once full, " +
-			"index() overwrites the oldest SLOT and deletes that slot's key from eventDS. It is the " +
-			"evictor for the event index rather than a thing needing one, and this guard cannot see " +
-			"that because the shrink is an indexed write paired with a delete on a SIBLING field.", ""},
+		"a fixed-capacity insertion ring bounded by Limits.EventIndexMax. Atomic Observe overwrites " +
+			"the oldest slot together with deleting that eventDS key and crediting its retained strings. " +
+			"The ring is the sibling index evictor, not another accumulating collection. The estate " +
+			"matcher does not attribute that sibling shrink to a ring slot; the million-observation " +
+			"bound and retained-duplicate/history-floor tests exercise the actual behavior.", ""},
 	"services/market_data/internal/feed: Gate.lastSeq": {boundedByConstruction,
 		"keyed by instrument_id, and the only wiring feeds this Gate the operator-configured " +
 			"MARKET_DATA_FEED_INSTRUMENTS list — no venue path routes arbitrary per-tick symbols " +
@@ -600,12 +604,10 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"outer key, one level down. The make(...) at a missing key is a lazy initialiser and the " +
 			"value arm deliberately refuses to read one as an evictor.", ""},
 	"services/lineage/internal/graph: Memory.upstream[]": {boundedByConstruction,
-		"the set of DIRECT UPSTREAM datasets of one dataset — an edge list over the same schema " +
-			"taxonomy that bounds the outer key, so it is bounded by the estate's dataset count rather " +
-			"than by its event count. Observe adds an edge only between two datasets already resolved " +
-			"from the envelope's domain and schema ref; an event cannot mint a dataset id of its own. " +
-			"The type's own comment has said datasets and upstream are not evicted, and why, since " +
-			"#244.", ""},
+		"CAPPED IN THE WRITE PATH: all nested edge sets share ONE GLOBAL EdgeMax counter, checked " +
+			"before any mutation. Both endpoint keys refer to cloned admitted dataset identities; the " +
+			"global string budget accounts their retained backing storage. An inner set cannot mint " +
+			"an owner or exceed the global admitted edge set. The owning atomic-bound tests cover it.", ""},
 	"services/tv_sync/internal/projection: Projection.accounts[]": {boundedByConstruction,
 		"one entry per ACCOUNT ID within a tenant, where the account id is the portfolio off an order " +
 			"FACT that already passed OMS entitlement — the provisioned account roster, which is what " +

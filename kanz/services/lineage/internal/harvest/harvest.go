@@ -1,62 +1,54 @@
-// Package harvest is the bus consumer that folds the event backbone into the
-// lineage graph and emits OpenLineage RunEvents (LIN-01a). It records EVERY
-// delivered event — a dropped event is a hole in the lineage graph — mapping
-// each to its dataset (domain + entity) and linking it to the dataset of the
-// event that caused it.
+// Package harvest folds validated live envelopes into the owned projection.
 package harvest
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
-
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/lineage/internal/graph"
 	"github.com/eighred/kanz/services/lineage/internal/openlineage"
 )
 
-// Harvester maps envelopes into the graph + an OpenLineage emitter.
 type Harvester struct {
 	graph   graph.Graph
 	emitter openlineage.Emitter
 }
 
-func New(g graph.Graph, e openlineage.Emitter) *Harvester {
-	return &Harvester{graph: g, emitter: e}
-}
+func New(g graph.Graph, e openlineage.Emitter) *Harvester { return &Harvester{graph: g, emitter: e} }
 
-// Handle matches bus.EventHandler. It is idempotent at the dataset level
-// (re-observing an event re-counts it but the edges are a set), so at-least-once
-// redelivery is safe. An emitter error is returned so the bus can retry/DLQ —
-// lineage completeness is durable-grade, not lossy.
+// Handle validates even direct calls. Owner is the exact envelope tenant, not a
+// principal, context fallback or LINEAGE_TENANT. Validation establishes envelope
+// invariants; it does not cryptographically bind an account to payload tenancy.
+// Observe returns the parent/output projection from its atomic admission. Emit
+// failures propagate to the existing one-attempt DLQ path; a retained retry
+// emits that same snapshot without recounting or resolving a later parent.
 func (h *Harvester) Handle(ctx context.Context, env *envelopepb.Envelope, _ []byte) error {
-	ds := datasetFor(env)
-	output := openlineage.Dataset{
-		Namespace: ds.Namespace,
-		Name:      ds.Name,
-		Facets:    schemaFacet(env.GetPayloadSchemaRef()),
+	if err := bus.Validate(env); err != nil {
+		return bus.Terminal(err)
 	}
-
-	// Resolve the input dataset(s) from the cause, if the graph still retains it.
-	// An unknown cause emits no input rather than a guessed one; the graph counts
-	// it (Coverage.UnlinkedCauses) so the missing edge is visible (#244).
-	var inputs []openlineage.Dataset
-	if cause := env.GetCausationId(); cause != "" {
-		if parentDS, look := h.graph.DatasetOf(cause); look == graph.LookupRetained && parentDS != ds {
-			inputs = append(inputs, openlineage.Dataset{Namespace: parentDS.Namespace, Name: parentDS.Name})
+	snapshot, err := h.graph.Observe(graph.Observation{
+		Owner: graph.Owner(env.GetTenantId()), EventID: env.GetEventId(),
+		Dataset: datasetFor(env), Domain: env.GetDomain(), SchemaRef: env.GetPayloadSchemaRef(),
+		At: env.GetEventTime().AsTime(), ParentEventID: env.GetCausationId(),
+		Source: env.GetSource(), CorrelationID: env.GetCorrelationId(),
+	})
+	if err != nil {
+		if errors.Is(err, graph.ErrConflict) {
+			return bus.Terminal(err)
 		}
+		return err // capacity and retained-history UNKNOWN stay TRANSIENT
 	}
-
-	h.graph.Observe(env.GetEventId(), ds, env.GetDomain(), env.GetPayloadSchemaRef(),
-		env.GetEventTime().AsTime(), env.GetCausationId())
-
-	return h.emitter.Emit(ctx, openlineage.FromEnvelope(env, output, inputs))
+	event, err := openlineage.FromSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+	return h.emitter.Emit(ctx, event)
 }
 
-// datasetFor derives an event's dataset: namespace "kanz.{domain}", name from the
-// schema ref's message type ("risk.v1.ExposureSet:3" → "ExposureSet"), falling
-// back to event_type. Mirrors the lake-sink entity derivation so the lineage
-// graph and the lakehouse tables key on the same dataset identity.
+// datasetFor preserves the canonical lake/catalog namespace and schema identity.
 func datasetFor(env *envelopepb.Envelope) graph.DatasetID {
 	domain := env.GetDomain()
 	if domain == "" {
@@ -64,7 +56,6 @@ func datasetFor(env *envelopepb.Envelope) graph.DatasetID {
 	}
 	return graph.DatasetID{Namespace: "kanz." + domain, Name: entityFrom(env.GetPayloadSchemaRef(), env.GetEventType())}
 }
-
 func entityFrom(ref, eventType string) string {
 	if ref != "" {
 		id := ref
@@ -80,17 +71,4 @@ func entityFrom(ref, eventType string) string {
 		return eventType
 	}
 	return "unknown"
-}
-
-func schemaFacet(ref string) map[string]any {
-	if ref == "" {
-		return nil
-	}
-	// A minimal custom facet carrying the EVT-16 schema ref — enough for the
-	// catalog (LIN-01b) to join the dataset to its registry schema.
-	return map[string]any{"kanzSchema": map[string]any{
-		"_producer":        openlineage.Producer,
-		"_schemaURL":       openlineage.SchemaURL,
-		"payloadSchemaRef": ref,
-	}}
 }

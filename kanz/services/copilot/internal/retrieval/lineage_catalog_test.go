@@ -47,7 +47,7 @@ func TestLineageCatalogResolvesDatasetNode(t *testing.T) {
 // A 403 (PII lineage denied) or 404 (unknown) resolves to ok=false so the
 // citation falls back to the raw event id — never breaking the answer.
 func TestLineageCatalogDeniedOrUnknownFallsBack(t *testing.T) {
-	for _, code := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+	for _, code := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusGone, http.StatusInternalServerError} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(code)
 			_, _ = w.Write([]byte(`{"error":"x"}`))

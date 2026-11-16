@@ -535,11 +535,12 @@ var retryCertifiedConsumers = map[string]string{
 		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
 
 	"services/lineage/cmd/lineage/main.go:runHarvest": "lineage: the sole handler is harvest.Harvester.Handle. " +
-		"graph.Memory.Observe (services/lineage/internal/graph/graph.go) always runs to " +
-		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
-		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +
-		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
-		"it never skips the observe that a first attempt already made.",
+		"Atomic Observe returns the original owned snapshot for a retained duplicate without recounting; " +
+		"an evicted old-time observation refuses as retained-history UNKNOWN instead of being admitted " +
+		"again. Emit follows admission and its error propagates, so a retry cannot skip a failed emission " +
+		"or acquire a later parent. Current production emission is the owned log sink; unscoped HTTP " +
+		"refuses. Capacity/history errors stay transient. Default attempts remain one, with no WithRetry " +
+		"added here; a future scoped external sink still needs its own idempotent delivery contract.",
 
 	"services/lake_sink/cmd/lake_sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +

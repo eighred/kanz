@@ -3,8 +3,8 @@
 // AUTH-01b authorizer (deny-by-default), logging every PII access decision into
 // the observation stream via the AUTH-01d recorder — so "who looked at whose PII
 // lineage" is itself auditable. The tenant scope is the MT-01d boundary: a
-// principal's tenant is bound onto the resource, so the authorizer's cross-tenant
-// guard runs on PII access too.
+// graph record's independently stored owner is checked before classification;
+// public and PII data both remain confined to that owner's tenant.
 package governance
 
 import (
@@ -30,8 +30,9 @@ const ResourceDataset = "dataset"
 type Sensitivity string
 
 const (
-	SensitivityPublic Sensitivity = "public"
-	SensitivityPII    Sensitivity = "pii"
+	SensitivityUnknown Sensitivity = "unknown"
+	SensitivityPublic  Sensitivity = "public"
+	SensitivityPII     Sensitivity = "pii"
 )
 
 // Config declares which datasets carry PII. A dataset is PII if its name or
@@ -110,35 +111,37 @@ func NewGovernor(classifier *Classifier, authz auth.Authorizer) *Governor {
 	return &Governor{classifier: classifier, authz: authz}
 }
 
-// CheckAccess decides whether principal p may read dataset ds. It returns the
-// dataset's sensitivity alongside the decision so callers can redact vs. expose.
-//
-// A NIL PRINCIPAL IS DENIED OUTRIGHT, PUBLIC DATASET OR NOT (#268). It used to be
-// denied only on PII — the non-PII branch short-circuited to "allow" before it
-// ever looked at p — and for two years nothing on the upstream side reconstructed
-// the gateway's principal headers, so EVERY proxied read arrived here with p ==
-// nil and was served the full provenance of every non-PII dataset in the graph,
-// unauthenticated and unscoped by tenant. "Public" classifies the DATA, not the
-// caller: it means this dataset carries no PII, not that anyone at all may read
-// the lineage of a fund's risk pipeline.
-//
-// auth.RequirePrincipal on the server's mux is the primary refusal and makes this
-// branch unreachable in the deployed shape. It is here anyway because the branch
-// above it is precisely where "nobody is asking" and "somebody with no grants is
-// asking" stopped being distinguishable, and a check that treats nobody as
-// allowed is worse than no check, because it looks like one.
-func (g *Governor) CheckAccess(ctx context.Context, p *auth.Principal, ds graph.DatasetID, schemaRef string) (auth.Decision, Sensitivity) {
-	sens := g.classifier.Classify(ds, schemaRef)
+// CheckOwner is the unconditional isolation gate. Public means non-PII within
+// an owned scope, never tenant-agnostic. A caller-constructed/zero Info has no
+// independently stored owner and fails closed even under a wildcard authorizer.
+func (g *Governor) CheckOwner(p *auth.Principal, info graph.Info) auth.Decision {
 	if p == nil {
-		return auth.Decision{Allow: false, Reason: "no authenticated principal"}, sens
+		return auth.Decision{Code: auth.DenyNoPrincipal, Reason: "no authenticated principal"}
 	}
+	if p.Tenant == "" {
+		return auth.Decision{Code: auth.DenyPrincipalNoTenant, Reason: "principal tenant unknown"}
+	}
+	if info.Owner() == "" {
+		return auth.Decision{Code: auth.DenyResourceTenantUnresolved, Reason: "stored dataset owner unknown"}
+	}
+	if string(info.Owner()) != p.Tenant {
+		return auth.Decision{Code: auth.DenyCrossTenant, Reason: "stored dataset owner differs from principal tenant"}
+	}
+	return auth.Decision{Allow: true, Reason: "stored owner matches"}
+}
+
+// CheckAccess checks ownership BEFORE classification, public allowance or RBAC.
+// The resource tenant comes only from the admitted record, not the principal.
+func (g *Governor) CheckAccess(ctx context.Context, p *auth.Principal, info graph.Info) (auth.Decision, Sensitivity) {
+	if d := g.CheckOwner(p, info); !d.Allow {
+		return d, SensitivityUnknown
+	}
+	sens := g.classifier.Classify(info.ID, info.SchemaRef)
 	if sens != SensitivityPII {
-		return auth.Decision{Allow: true, Reason: "public dataset"}, sens
+		return auth.Decision{Allow: true, Reason: "owned public dataset"}, sens
 	}
-	d := g.authz.Authorize(ctx, auth.Request{
-		Principal: p,
-		Action:    ActionPIIRead,
-		Resource:  auth.Resource{Type: ResourceDataset, ID: ds.String(), Tenant: p.Tenant},
-	})
-	return d, sens
+	return g.authz.Authorize(ctx, auth.Request{
+		Principal: p, Action: ActionPIIRead,
+		Resource: auth.Resource{Type: ResourceDataset, ID: info.ID.String(), Tenant: string(info.Owner())},
+	}), sens
 }

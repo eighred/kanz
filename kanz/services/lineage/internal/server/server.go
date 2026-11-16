@@ -23,7 +23,6 @@ type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
 	metrics   http.Handler
-	graph     graph.Graph
 	query     *query.Service
 	mux       *http.ServeMux
 	// handler is mux wrapped in auth.RequirePrincipal. It is built in New rather
@@ -41,8 +40,8 @@ func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h
 
 // WithLineage mounts the catalog + provenance API over the graph and governed
 // query service. Omitted ⇒ only the probes are served.
-func WithLineage(g graph.Graph, q *query.Service) Option {
-	return func(s *Server) { s.graph = g; s.query = q }
+func WithLineage(q *query.Service) Option {
+	return func(s *Server) { s.query = q }
 }
 
 func New(readiness *Readiness, logger *slog.Logger, opts ...Option) *Server {
@@ -63,7 +62,7 @@ func (s *Server) routes() {
 	if s.metrics != nil {
 		s.mux.Handle("GET /metrics", s.metrics)
 	}
-	if s.graph != nil {
+	if s.query != nil {
 		s.mux.HandleFunc("GET /v1/catalog/datasets", s.handleDatasets)
 	}
 	if s.query != nil {
@@ -84,16 +83,19 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleDatasets serves the catalog listing — dataset metadata (schema ref,
-// domain, last-seen). Topology metadata, not record contents, so it is not PII-
-// governed; the per-dataset PII gate applies on the provenance reads below.
-// The catalog carries coverage too: an empty or short catalog after a restart is
-// this pod's index, not the estate's data model, and the two must not read alike.
-func (s *Server) handleDatasets(w http.ResponseWriter, _ *http.Request) {
-	ds := s.graph.Datasets()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"count": len(ds), "datasets": ds, "coverage": s.graph.Coverage(),
-	})
+// handleDatasets returns only the caller's owned metadata and scoped coverage.
+// The raw graph is not mounted on this HTTP server.
+func (s *Server) handleDatasets(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+	catalog, err := s.query.Catalog(r.Context(), p)
+	if err != nil {
+		s.writeProvenance(w, r, nil, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, catalog)
 }
 
 func (s *Server) handleEventLineage(w http.ResponseWriter, r *http.Request) {
@@ -145,10 +147,18 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (*auth.Princi
 // would promise that it might). The body says what 410 does NOT assert.
 func (s *Server) writeProvenance(w http.ResponseWriter, r *http.Request, prov *query.Provenance, err error) {
 	switch {
-	case errors.Is(err, query.ErrNotRetained):
-		writeJSON(w, http.StatusGone, s.query.Explain(graph.LookupUnknown))
-	case errors.Is(err, query.ErrNotFound):
-		writeJSON(w, http.StatusNotFound, s.query.Explain(graph.LookupNotObserved))
+	case errors.Is(err, query.ErrNotRetained), errors.Is(err, query.ErrNotFound):
+		body, bound := s.query.Explain(err)
+		if !bound {
+			s.logger.ErrorContext(r.Context(), "lineage miss has no bound scoped coverage")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		code := http.StatusGone
+		if errors.Is(err, query.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, body)
 	case errors.Is(err, query.ErrForbidden):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access to PII lineage denied"})
 	case err != nil:
