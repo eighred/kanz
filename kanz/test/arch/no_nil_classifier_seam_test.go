@@ -22,7 +22,7 @@ import (
 //
 //	services/oms/cmd/oms            NewPreTradeGate(..., nil, ...)   pre-trade gate
 //	services/compliance/cmd/...     NewMonitor(..., nil, ...)        post-trade monitor
-//	services/risk-engine/cmd/...    engine.WithClassifier UNCALLED   every scenario
+//	services/risk_engine/cmd/...    engine.WithClassifier UNCALLED   every scenario
 //
 // None of the three failed. A mandate naming the SECTOR dimension bucketed every
 // holding under the empty key, so "no more than 10% in TECH" looked up a bucket
@@ -249,7 +249,7 @@ func TestNoClassifierSeamIsNilOrDarkAndUntracked(t *testing.T) {
 	//
 	// A seam called only from inside its own package used to resolve DARK, and
 	// that was wrong for factor.SectorExposure: its caller factor.ComputeExposure
-	// IS wired from services/risk-engine, so it runs on every served exposure
+	// IS wired from services/risk_engine, so it runs on every served exposure
 	// read while this guard reported it dark (#751).
 	//
 	// THE WIDENING IS ONE HOP AND CONDITIONAL, not "same-package callers count".

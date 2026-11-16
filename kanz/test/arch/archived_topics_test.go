@@ -212,7 +212,7 @@ var notArchivedByDesign = map[string]string{
 		"archiver subscribes no wealth.> subject, nothing is written to this topic, and nothing can " +
 		"be rebuilt from it. Accepted consequence: after a region failover that loses the NATS " +
 		"stream, nats-rebuild does NOT restore the catalogue and every household's drift reads " +
-		"outcome=\"no_model\" until an operator re-runs cmd/kanz-model — which is loud (the " +
+		"outcome=\"no_model\" until an operator re-runs cmd/kanz_model — which is loud (the " +
 		"kanz_wealth_models_registered gauge sits at 0) rather than silent, and is the same recovery " +
 		"the household valuations beside it already require. Revisit together with wealth.household " +
 		"if wealth ever gains an automated publisher.",

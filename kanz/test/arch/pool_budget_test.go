@@ -406,7 +406,7 @@ var pgPoolCallArg = regexp.MustCompile(`pg\.New(?:TenantPool|GlobalPool|Migratio
 // estate by construction (arm 2 above is what keeps that true), and scanning a
 // whole service tree would also match the constructor named in a comment.
 //
-// cmd/kanz-migrate is deliberately NOT scanned. Its initContainer runs to
+// cmd/kanz_migrate is deliberately NOT scanned. Its initContainer runs to
 // completion before its pod's app container starts, so its single connection
 // never coexists with the four already reserved for that same pod, and the surge
 // term already covers a rollout's worth of them.
@@ -422,9 +422,9 @@ func poolsPerService(t *testing.T, root string) map[string][]string {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
+		svc := deployedServiceName(e.Name())
 		var exprs []string
-		_ = filepath.WalkDir(filepath.Join(services, svc, "cmd"),
+		_ = filepath.WalkDir(filepath.Join(services, sourceDirectoryName(svc), "cmd"),
 			func(p string, d fs.DirEntry, werr error) error {
 				if werr != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 					return nil

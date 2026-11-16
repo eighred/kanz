@@ -34,6 +34,7 @@ Re-evaluate after locating callers and after the diff changes scope.
 |---|---|---|
 | Existing issue/PR, stale claim, overlap or closure | [issue-archaeology](../issue-archaeology/SKILL.md) | Current acceptance matched to code and evidence |
 | Unknown owner, new file, shared contract, deletion or cross-service effect | [stack-routing](../stack-routing/SKILL.md) | Owner, resolved consumers, boundary and affected guards |
+| Repository organization, directory moves or component README reconciliation | [repository-organization](../repository-organization/SKILL.md) | Ownership, complete path consumers, documentation and migration evidence |
 | Implementation or refactor | [engineering-standard](../engineering-standard/SKILL.md) | Smallest complete change in the existing owner |
 | Identity, authorization, tenant scope, input trust, secrets, CI/release, or agent tools | [security-audit](../security-audit/SKILL.md), guidance mode | Principal → input → control → resource, reachable failure and safe evidence |
 | Pricing, money, quantities, portfolio attribution or strategy claims | [financial-verification](../financial-verification/SKILL.md) | Dated inputs, units, independent numerical reference and limits |
@@ -159,8 +160,7 @@ an unknown edge or failure. Retain a compact working summary in the chat:
 acceptance, owning paths, decisions, tested revision and next unresolved gate.
 After context loss re-check mutable facts rather than trusting that summary.
 Stable rules belong in AGENTS.md, decisions and blockers in existing Issues,
-and implementation evidence in PRs and git. Optional receipts record runs;
-they are not a second project-memory system or current verification.
+and implementation evidence in PRs and git. Historical evidence does not replace current verification.
 
 Lead updates with the result or decision. Use short, complete sentences; omit
 repeated plans, raw inventories and narration of routine tools. Preserve exact

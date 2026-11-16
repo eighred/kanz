@@ -687,7 +687,7 @@ spec:
 #
 # ITS OWN POLICY, NOT A FOURTH ENTRY IN allow-gateway-to-read-upstreams. That
 # rule is the PROXIED upstream set, and test/arch/edge_test.go derives it from the
-# proxy.Service constants in services/api-gateway/internal/proxy/proxy.go —
+# proxy.Service constants in services/api_gateway/internal/proxy/proxy.go —
 # wealth, datamaster, copilot, tv-sync, optimization, accounting. identity is not
 # among them and must not appear to be: no route forwards a caller's request
 # there. This flow is the gateway's OWN dependency, made on its own behalf before

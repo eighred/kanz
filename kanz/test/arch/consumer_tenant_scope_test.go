@@ -40,7 +40,7 @@ var consumerTenantScopeExempt = map[string]string{
 		"cache is in-memory and keyed by currency, not by tenant, so there is no " +
 		"tenant-scoped store here to corrupt.",
 
-	"tv-sync/internal/projection/projection.go": "tv-sync predates the shared helper and implements the same rule inline: " +
+	"tv_sync/internal/projection/projection.go": "tv-sync predates the shared helper and implements the same rule inline: " +
 		"projection.Handle compares env tenant against p.tenant and skips a foreign one " +
 		"Its semantics differ " +
 		"deliberately — it SKIPS rather than refuses, because its subscription legitimately " +
@@ -98,7 +98,7 @@ func scanService(t *testing.T, dir string) (unguarded []string, hasPool, hasHand
 			// Mixed landing is allowed only while its exact file-only composition
 			// and tenant attribution remain independently verified. New handlers
 			// and the optional snapshot/PG owner still follow the default rule.
-			if filepath.Base(dir) == "lake-sink" && filepath.ToSlash(rel) == "internal/cdc/sink.go" {
+			if filepath.Base(dir) == "lake_sink" && filepath.ToSlash(rel) == "internal/cdc/sink.go" {
 				if err := verifyMixedLakeFileLanding(lakeLandingSources(t, dir)); err != nil {
 					t.Fatal(err)
 				}

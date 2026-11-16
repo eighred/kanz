@@ -9,11 +9,11 @@ import (
 
 func diagnosticBoundary(files map[string]string) bool {
 	required := map[string][]string{
-		"kanz-rs/crates/oms-store/Cargo.toml":                                  {"default = []", "qualification-diagnostics = []"},
-		"kanz-rs/crates/oms-recovery/Cargo.toml":                               {"default = []", "qualification-diagnostics = [\"kanz-oms-store/qualification-diagnostics\"]"},
-		"kanz-rs/crates/oms-store/src/diagnostics.rs":                          {"pub const STAGES: usize = 14;", "pub counts: [u64; STAGES]", "pub nanoseconds: [u64; STAGES]", "saturating_add(1)", "saturating_add(elapsed)", "#[cfg(feature = \"qualification-diagnostics\")]", "CURRENT", "Snapshot::default()"},
-		"kanz/services/oms/tools/recovery-conformance/worker_test.go":          {"const stageCount = 14", "profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true", "qualification diagnostics feature required", "w.profile.add(result.Diagnostics)", "TestWorkerProfileBoundedFailureOnly", `case "Observation", "Ack", "Parked", "FeeCorrection":`},
-		"kanz-rs/crates/oms-recovery/examples/recovery-coordinator-fixture.rs": {"cfg!(feature=\"qualification-diagnostics\")", "diagnostics::capture", "Stage::Total"},
+		"rust/crates/oms_store/Cargo.toml":                                  {"default = []", "qualification-diagnostics = []"},
+		"rust/crates/oms_recovery/Cargo.toml":                               {"default = []", "qualification-diagnostics = [\"kanz-oms-store/qualification-diagnostics\"]"},
+		"rust/crates/oms_store/src/diagnostics.rs":                          {"pub const STAGES: usize = 14;", "pub counts: [u64; STAGES]", "pub nanoseconds: [u64; STAGES]", "saturating_add(1)", "saturating_add(elapsed)", "#[cfg(feature = \"qualification-diagnostics\")]", "CURRENT", "Snapshot::default()"},
+		"kanz/services/oms/tools/recovery_conformance/worker_test.go":       {"const stageCount = 14", "profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true", "qualification diagnostics feature required", "w.profile.add(result.Diagnostics)", "TestWorkerProfileBoundedFailureOnly", `case "Observation", "Ack", "Parked", "FeeCorrection":`},
+		"rust/crates/oms_recovery/examples/recovery-coordinator-fixture.rs": {"cfg!(feature=\"qualification-diagnostics\")", "diagnostics::capture", "Stage::Total"},
 	}
 	for path, markers := range required {
 		for _, marker := range markers {
@@ -22,13 +22,13 @@ func diagnosticBoundary(files map[string]string) bool {
 			}
 		}
 	}
-	d := files["kanz-rs/crates/oms-store/src/diagnostics.rs"]
+	d := files["rust/crates/oms_store/src/diagnostics.rs"]
 	for _, forbidden := range []string{"println!", "eprintln!", "Vec<", "String", "std::fs", "std::env"} {
 		if strings.Contains(d, forbidden) {
 			return false
 		}
 	}
-	w := files["kanz/services/oms/tools/recovery-conformance/worker_test.go"]
+	w := files["kanz/services/oms/tools/recovery_conformance/worker_test.go"]
 	for _, line := range strings.Split(w, "\n") {
 		if strings.Contains(line, "diagnostic(request,") && !strings.Contains(line, "Fatalf(") && !strings.Contains(line, "diagnostic :=") && !strings.HasPrefix(line, "func ") {
 			return false
@@ -39,7 +39,7 @@ func diagnosticBoundary(files map[string]string) bool {
 
 func TestRustRecoveryDiagnosticBoundary(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
-	paths := []string{"kanz-rs/crates/oms-store/Cargo.toml", "kanz-rs/crates/oms-recovery/Cargo.toml", "kanz-rs/crates/oms-store/src/diagnostics.rs", "kanz/services/oms/tools/recovery-conformance/worker_test.go", "kanz-rs/crates/oms-recovery/examples/recovery-coordinator-fixture.rs"}
+	paths := []string{"rust/crates/oms_store/Cargo.toml", "rust/crates/oms_recovery/Cargo.toml", "rust/crates/oms_store/src/diagnostics.rs", "kanz/services/oms/tools/recovery_conformance/worker_test.go", "rust/crates/oms_recovery/examples/recovery-coordinator-fixture.rs"}
 	files := map[string]string{}
 	for _, path := range paths {
 		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))

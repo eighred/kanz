@@ -31,7 +31,7 @@ import (
 // "17 services each had their own secret() and 15 were wrong while 2 were right".
 //
 // The copies were not laziness. The canonical constants lived under
-// services/api-gateway/internal/, which Go's internal rule makes unimportable by
+// services/api_gateway/internal/, which Go's internal rule makes unimportable by
 // any other service, so there was nowhere shared to put them. pkg/auth is now
 // that home, and it carries the CONSTANT AND THE CHECK TOGETHER — a service that
 // can reach the name can reach the enforcement, so it cannot adopt one and

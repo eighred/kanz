@@ -25,7 +25,7 @@ import time
 import uuid
 
 
-GO = "ghcr.io/eighred/base/golang:1.26.10@sha256:eb36c1664dd974cde625f736e02c204383deebe03977365caaec5bf49f794348"
+GO = "ghcr.io/eighred/base/golang:1.26.11@sha256:7af425da11f4fc1a9308eb704369e3f6d1c44e35bac0f874a59ade3f20fdc07e"
 VAULT = "hashicorp/vault:1.21.4@sha256:6c77f568e6b6310d5bc68befb5711b9215c574de7da489e7c24332581176888b"
 POSTGRES = "postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9"
 PYTHON = "python:3.13.18-alpine3.24@sha256:7712cfd23e0501f5cb58faa5e6e0d515c9939bdbce866921799b31e696a1d13c"

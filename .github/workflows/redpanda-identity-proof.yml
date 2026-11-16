@@ -2,17 +2,17 @@ name: redpanda-identity-proof
 on:
   pull_request:
     paths:
-      - 'tools/native-kafka-provision/**'
-      - 'tools/tenant-quota/**'
-      - 'kanz/cmd/kanz-kafka-provision/**'
+      - 'tools/native_kafka_provision/**'
+      - 'tools/tenant_quota/**'
+      - 'kanz/cmd/kanz_kafka_provision/**'
       - 'kanz/infra/kafka/topics-job.yaml'
       - 'kanz/infra/kafka/kafka.yaml'
       - 'kanz/infra/tenancy/**'
       - 'kanz/infra/onboarding/provision-tenant.sh'
       - 'kanz/test/load/seed/**'
       - 'kanz/test/load/onboardingprobe/**'
-      - 'tools/redpanda-identity/**'
-      - 'tools/feed-identity/**'
+      - 'tools/redpanda_identity/**'
+      - 'tools/feed_identity/**'
       - 'kanz/tools/redpandaidentity/**'
       - 'kanz/tools/replay/**'
       - 'kanz/tools/natsrebuild/**'
@@ -24,17 +24,17 @@ on:
   push:
     branches: [main]
     paths:
-      - 'tools/native-kafka-provision/**'
-      - 'tools/tenant-quota/**'
-      - 'kanz/cmd/kanz-kafka-provision/**'
+      - 'tools/native_kafka_provision/**'
+      - 'tools/tenant_quota/**'
+      - 'kanz/cmd/kanz_kafka_provision/**'
       - 'kanz/infra/kafka/topics-job.yaml'
       - 'kanz/infra/kafka/kafka.yaml'
       - 'kanz/infra/tenancy/**'
       - 'kanz/infra/onboarding/provision-tenant.sh'
       - 'kanz/test/load/seed/**'
       - 'kanz/test/load/onboardingprobe/**'
-      - 'tools/redpanda-identity/**'
-      - 'tools/feed-identity/**'
+      - 'tools/redpanda_identity/**'
+      - 'tools/feed_identity/**'
       - 'kanz/tools/redpandaidentity/**'
       - 'kanz/tools/replay/**'
       - 'kanz/tools/natsrebuild/**'
@@ -66,7 +66,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: '1.69.0'
       - name: Generate existing canonical SDK
@@ -92,8 +92,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/redpanda-identity -p 'test_*.py'
-      - run: bash tools/feed-identity/install.sh
+      - run: python3 -B -m unittest discover -s tools/redpanda_identity -p 'test_*.py'
+      - run: bash tools/feed_identity/install.sh
       - name: Authenticate private mirrored builder reads
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -101,7 +101,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Qualify real SPIRE subjects and Redpanda ACLs
-        run: python3 -B tools/redpanda-identity/qualify.py
+        run: python3 -B tools/redpanda_identity/qualify.py
       - name: Remove disposable clusters after interruption
         if: always()
         run: |
@@ -135,7 +135,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: '1.69.0'
       - name: Generate existing canonical SDK
@@ -147,25 +147,25 @@ jobs:
       - name: Verify native owner boundaries
         working-directory: kanz
         run: |
-          go test -race -p 1 ./cmd/kanz-kafka-provision/... -count=1
-          go vet ./cmd/kanz-kafka-provision/...
+          go test -race -p 1 ./cmd/kanz_kafka_provision/... -count=1
+          go vet ./cmd/kanz_kafka_provision/...
       - name: Lint native owner with repository policy
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           install-mode: goinstall
           version: v2.12.2
           working-directory: kanz
-          args: --timeout=5m ./cmd/kanz-kafka-provision/...
+          args: --timeout=5m ./cmd/kanz_kafka_provision/...
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/native-kafka-provision -p 'test_*.py'
-      - run: bash tools/feed-identity/install.sh
+      - run: python3 -B -m unittest discover -s tools/native_kafka_provision -p 'test_*.py'
+      - run: bash tools/feed_identity/install.sh
       - name: Qualify quota concurrency against disposable Kubernetes
         run: |
           bash -n kanz/infra/tenancy/tenantctl.sh
-          python3 -B tools/tenant-quota/qualify.py
+          python3 -B tools/tenant_quota/qualify.py
       - name: Verify full architecture suite
         working-directory: kanz
         run: |
@@ -185,10 +185,10 @@ jobs:
           echo "$GOBIN" >> "$GITHUB_PATH"
           sh -n kanz/infra/onboarding/provision-tenant.sh
       - name: Qualify real three-broker native ownership
-        run: python3 -B tools/native-kafka-provision/qualify.py
+        run: python3 -B tools/native_kafka_provision/qualify.py
       - name: Reconcile exact owned native cluster after interruption
         if: always()
-        run: python3 -B tools/native-kafka-provision/owned_cleanup.py
+        run: python3 -B tools/native_kafka_provision/owned_cleanup.py
       - name: Remove registry authentication
         if: always()
         run: docker logout ghcr.io
@@ -212,7 +212,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: '1.69.0'
       - name: Generate existing canonical SDK
@@ -225,8 +225,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/native-kafka-provision -p 'test_*.py'
-      - run: bash tools/feed-identity/install.sh
+      - run: python3 -B -m unittest discover -s tools/native_kafka_provision -p 'test_*.py'
+      - run: bash tools/feed_identity/install.sh
       - name: Authenticate private mirrored builder reads
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -234,10 +234,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Qualify legacy JVM handoff and pinned fallback
-        run: python3 -B tools/native-kafka-provision/legacy_handoff.py
+        run: python3 -B tools/native_kafka_provision/legacy_handoff.py
       - name: Reconcile exact owned Kafka cluster after interruption
         if: always()
-        run: python3 -B tools/native-kafka-provision/owned_cleanup.py
+        run: python3 -B tools/native_kafka_provision/owned_cleanup.py
       - name: Remove registry authentication
         if: always()
         run: docker logout ghcr.io
@@ -261,7 +261,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: '1.69.0'
       - name: Generate existing canonical SDK
@@ -274,8 +274,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
-      - run: python3 -B -m unittest discover -s tools/native-kafka-provision -p 'test_*.py'
-      - run: bash tools/feed-identity/install.sh
+      - run: python3 -B -m unittest discover -s tools/native_kafka_provision -p 'test_*.py'
+      - run: bash tools/feed_identity/install.sh
       - name: Authenticate private mirrored builder reads
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -283,10 +283,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Diagnose only source-built inert image custody
-        run: python3 -B tools/native-kafka-provision/image_diagnostic.py
+        run: python3 -B tools/native_kafka_provision/image_diagnostic.py
       - name: Reconcile exact owned diagnostic cluster after interruption
         if: always()
-        run: python3 -B tools/native-kafka-provision/owned_cleanup.py
+        run: python3 -B tools/native_kafka_provision/owned_cleanup.py
       - name: Remove registry authentication
         if: always()
         run: docker logout ghcr.io

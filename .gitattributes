@@ -3,12 +3,12 @@
 # the SEC-02e self-test scripts. Force LF regardless of core.autocrlf.
 *.sh text eol=lf
 # Reviewed release metadata is byte-pinned before the operator parses JSON.
-kanz/infra/overlays/testnet-tokyo/tv-sync-release.json text eol=lf
+kanz/infra/overlays/testnet_tokyo/tv-sync-release.json text eol=lf
 kanz/.githooks/* text eol=lf
 
 # EC2 user data runs as Bash; CRLF breaks its shebang and makes Terraform plan
 # an incidental node update from a Windows checkout (#1106).
-kanz/infra/terraform-testnet/user_data.sh.tftpl text eol=lf
+kanz/infra/terraform_testnet/user_data.sh.tftpl text eol=lf
 
 # Go and proto sources MUST keep LF for the same class of reason: gofmt emits LF,
 # so a CRLF checkout (core.autocrlf=true on Windows) makes `gofmt -l` flag every
@@ -20,8 +20,8 @@ kanz/infra/terraform-testnet/user_data.sh.tftpl text eol=lf
 
 # Rust formatting and generated build inputs must be stable across Windows/Linux.
 *.rs text eol=lf
-/kanz-rs/*.toml text eol=lf
-/kanz-rs/Cargo.lock text eol=lf
+/rust/*.toml text eol=lf
+/rust/Cargo.lock text eol=lf
 
 # YAML must keep LF for the same reason, and it bit us. Generated manifests are
 # compared BYTE-FOR-BYTE against their generator's output:

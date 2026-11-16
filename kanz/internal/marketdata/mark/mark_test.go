@@ -70,7 +70,7 @@ func quoteEvent(t *testing.T, instrument string, bid, ask *commonpb.Decimal, at 
 // bytes enough to unmarshal them as a MarketDataEvent. Every call site below
 // names a real market.<assetClass>.trade or .quote variant, mirroring what
 // bussink.go actually stamps on the wire
-// (services/market-data/internal/feed/bussink.go) — an envelope with no
+// (services/market_data/internal/feed/bussink.go) — an envelope with no
 // EventType at all does not occur in production, so it is not a fixture worth
 // preserving now that Handle looks at it.
 func env(eventType string) *envelopepb.Envelope {

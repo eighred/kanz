@@ -79,7 +79,7 @@ func bodyIdentityRouteProblems(p *drainPkg, file *ast.File, rel string) []string
 				// The only methodless read handler is the SPA's file server. A
 				// methodless proxy or new registration can receive writes and must
 				// satisfy the same caller check as an explicit POST.
-				if !found && pattern == "/" && renderSelector(call.Args[1]) == "s.static" && strings.HasPrefix(rel, "web-bff/") {
+				if !found && pattern == "/" && renderSelector(call.Args[1]) == "s.static" && strings.HasPrefix(rel, "web_bff/") {
 					continue
 				}
 				routes++
@@ -194,7 +194,7 @@ func bodyIdentityPreAuthHandler(rel, pattern string) string {
 			return "resetCredential"
 		}
 	}
-	if strings.HasPrefix(rel, "web-bff/") {
+	if strings.HasPrefix(rel, "web_bff/") {
 		switch pattern {
 		// The browser tier delegates the same proofs to identity. Logout also
 		// works for an absent/expired cookie and grants no new authority.
@@ -241,6 +241,39 @@ func (s *Server) authenticated(w, r any) { s.provisioning.Verifier.Verify() }
 			p := newDrainPkg(fset, "", []*ast.File{file})
 			if got := len(bodyIdentityRouteProblems(p, file, rel)) > 0; got != tc.want {
 				t.Fatalf("route mutation rejected=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBodyIdentityBFFExceptionFollowsTheSourceLayout(t *testing.T) {
+	const rel = "web_bff/internal/server/server.go"
+	const source = `package server
+func (s *Server) Routes(mux any) {
+ mux.HandleFunc("POST /auth/login", s.handleCredentialLogin)
+ mux.Handle("/", s.static)
+}
+func (s *Server) handleCredentialLogin(w, r any) {}
+func (s *Server) static(w, r any) {}
+`
+	for _, tc := range []struct {
+		name, path, from, to string
+		want                 bool
+	}{
+		{"migrated-credential-and-static-routes", rel, "", "", false},
+		{"retired-source-path", "web-bff/internal/server/server.go", "", "", true},
+		{"new-methodless-route", rel, `"/"`, `"/changed"`, true},
+		{"new-mutation-using-credential-handler", rel, "POST /auth/login", "POST /auth/operate", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, tc.path, strings.Replace(source, tc.from, tc.to, 1), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := newDrainPkg(fset, "", []*ast.File{file})
+			if got := len(bodyIdentityRouteProblems(p, file, tc.path)) > 0; got != tc.want {
+				t.Fatalf("BFF route mutation rejected=%v, want %v", got, tc.want)
 			}
 		})
 	}

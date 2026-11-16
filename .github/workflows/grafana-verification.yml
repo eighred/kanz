@@ -3,16 +3,16 @@ on:
   pull_request:
     paths:
       - 'tools/grafana_proof/**'
-      - 'tools/feed-identity/install.sh'
-      - 'tools/feed-identity/proof.py'
+      - 'tools/feed_identity/install.sh'
+      - 'tools/feed_identity/proof.py'
       - 'kanz/infra/observability/**'
       - '.github/workflows/grafana-verification.yml'
   push:
     branches: [main]
     paths:
       - 'tools/grafana_proof/**'
-      - 'tools/feed-identity/install.sh'
-      - 'tools/feed-identity/proof.py'
+      - 'tools/feed_identity/install.sh'
+      - 'tools/feed_identity/proof.py'
       - 'kanz/infra/observability/**'
       - '.github/workflows/grafana-verification.yml'
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
       - name: Check complete evidence and refusal controls
         run: python3 -B -m unittest discover -s tools/grafana_proof -p 'test_*.py'
       - name: Install the existing checksum-pinned disposable cluster tools
-        run: bash tools/feed-identity/install.sh
+        run: bash tools/feed_identity/install.sh
       - name: Verify committed Grafana mounts, queries, refusals and policy
         run: python3 -B tools/grafana_proof/proof.py
       - name: Remove the owned disposable cluster after interruption

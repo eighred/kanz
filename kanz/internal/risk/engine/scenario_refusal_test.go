@@ -21,7 +21,7 @@ import (
 // A NAMED STRESS SCENARIO WITH NO CLASSIFIER MUST NOT RETURN THE UNSHOCKED BOOK
 // (#640).
 //
-// The engine is built by services/risk-engine with sharding.EngineOptions()
+// The engine is built by services/risk_engine with sharding.EngineOptions()
 // only, so engine.WithClassifier has never been called in production and the
 // classifier is nil on every deployed replica. Every scenario in the library —
 // GFC_2008, COVID_2020, and the credit, factor, liquidity and climate stresses —

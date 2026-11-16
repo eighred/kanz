@@ -84,7 +84,7 @@ func TestGatewayTenantUpstreamsMatchTheRenderedTenants(t *testing.T) {
 			"infra/deploy/tenants/: %v\n\n"+
 			"The gateway will dial <service>-<tenant> for them and every read 503s against a "+
 			"Service that was never generated. Either render their compute "+
-			"(go run ./cmd/kanz-tenantgen -tenant <t>) or remove them from the list.",
+			"(go run ./cmd/kanz_tenantgen -tenant <t>) or remove them from the list.",
 			len(extra), extra)
 	}
 }

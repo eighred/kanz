@@ -418,7 +418,7 @@ var drPosture = map[string]drClassification{
 		"spine. Worse, the rebuild's only sink is the bus (tools/natsrebuild/rebuild.go) — it " +
 		"restores the SPINE, and nothing anywhere re-drives this projection: the sole path that " +
 		"writes tv_facts is the running service, and its Rehydrate reads tv_facts itself " +
-		"(services/tv-sync/internal/projection/postgres.go), which is circular when the table is " +
+		"(services/tv_sync/internal/projection/postgres.go), which is circular when the table is " +
 		"empty. Per-tenant it is worse still — infra/dr/nats/rebuild-job.yaml drains only the " +
 		"un-prefixed __system__ topics and exits 0 having replayed nothing for any onboarded " +
 		"tenant. And no fill is persisted anywhere else, so what is lost is not a cache of " +
@@ -533,7 +533,7 @@ func migrationOwningServices(t *testing.T, root string) []string {
 		}
 		info, serr := os.Stat(filepath.Join(servicesDir, e.Name(), "migrations"))
 		if serr == nil && info.IsDir() {
-			out = append(out, e.Name())
+			out = append(out, deployedServiceName(e.Name()))
 		}
 	}
 	sort.Strings(out)

@@ -33,9 +33,9 @@ func checkRustOMSRelay(files map[string]string) error {
 	return nil
 }
 func TestRustOMSRelayBoundary(t *testing.T) {
-	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store")
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust", "crates", "oms_store")
 	files := map[string]string{}
-	for name, path := range map[string]string{"relay.rs": "src/relay.rs", "relay_wire.rs": "src/relay_wire.rs", "shared_wire": "../proto-wire/src/lib.rs", "fixture": "examples/relay_support/mod.rs"} {
+	for name, path := range map[string]string{"relay.rs": "src/relay.rs", "relay_wire.rs": "src/relay_wire.rs", "shared_wire": "../proto_wire/src/lib.rs", "fixture": "examples/relay_support/mod.rs"} {
 		raw, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if e != nil {
 			t.Fatal(e)
@@ -87,7 +87,7 @@ func TestRustOMSRelayActualEvidenceRequired(t *testing.T) {
 		t.Fatal(e)
 	}
 	check := func(w, c string) bool {
-		for _, m := range []string{"nats:2.12.6-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652", "TEST_NATS_URL: nats://127.0.0.1:4222", "set -o pipefail", "./services/oms/tools/store-conformance", "check_oms_fold_evidence.py", "docker rm -f oms-relay-nats"} {
+		for _, m := range []string{"nats:2.12.6-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652", "TEST_NATS_URL: nats://127.0.0.1:4222", "set -o pipefail", "./services/oms/tools/store_conformance", "check_oms_fold_evidence.py", "docker rm -f oms-relay-nats"} {
 			if !strings.Contains(w, m) {
 				return false
 			}

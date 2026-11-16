@@ -143,7 +143,7 @@ func lakeRawProofWorkflow(source string) error {
 			for _, command := range []string{
 				"set -euo pipefail",
 				"python3 -B -m unittest discover -s ../.github/scripts -p test_check_lake_raw_evidence.py",
-				"go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$' | tee \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
+				"go test -race -p 1 -json -count=1 ./services/lake_sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$' | tee \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
 				"python3 ../.github/scripts/check_lake_raw_evidence.py \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
 			} {
 				if !strings.Contains(step.Run, command) {
@@ -250,7 +250,7 @@ func lakeRawCrashPhases(source string) error {
 }
 
 func TestLakeRawCrashPhaseWiring(t *testing.T) {
-	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake-sink/internal/cdc/raw_integration_test.go")))
+	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake_sink/internal/cdc/raw_integration_test.go")))
 	if err := lakeRawCrashPhases(source); err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 // Bounded source guard for the staged #232/#1413 fixture, not a proof of CNI
 // semantics. The mandatory disposable workflow provides runtime enforcement.
 var messagingStagingMarkers = map[string][]string{
-	"tools/tokyo-messaging-proof/proof.py": {
+	"tools/tokyo_messaging_proof/proof.py": {
 		"feed.create_enforcing_cluster(name, scratch)",
 		"return feed.command(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name, *args]", "except TimeoutError:",
 		"refused = subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,",
@@ -26,7 +26,7 @@ var messagingStagingMarkers = map[string][]string{
 	},
 	".github/workflows/tokyo-messaging-proof.yml": {
 		"contents: read", "persist-credentials: false", "messaging-isolation:",
-		"python3 -B tools/tokyo-messaging-proof/proof.py", "if-no-files-found: error",
+		"python3 -B tools/tokyo_messaging_proof/proof.py", "if-no-files-found: error",
 	},
 }
 

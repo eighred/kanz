@@ -66,7 +66,7 @@ type EngineImpl struct {
 //
 // It is an interface here rather than a *shard.Assignment because the ring is a
 // risk-engine service concern and this package is shared; the service satisfies
-// it (services/risk-engine/internal/app.Sharding). A nil Ownership is the
+// it (services/risk_engine/internal/app.Sharding). A nil Ownership is the
 // unsharded posture — every portfolio is answerable, exactly as before.
 type Ownership interface {
 	// Owns reports whether this replica holds the portfolio's state.
@@ -95,7 +95,7 @@ func WithVolModel(vm compute.VolModel) EngineOption {
 // liquidity and climate stresses out of SectorCurve, which emits SectorShocks
 // exclusively — so with this unset the whole catalog first returned the
 // unshocked book, and then (once ErrScenarioUnresolvable landed) refused.
-// services/risk-engine now passes refdata.Cache.Factor when a security master
+// services/risk_engine now passes refdata.Cache.Factor when a security master
 // is configured.
 //
 // NIL REMAINS A LEGAL POSTURE and still means "this deployment has no

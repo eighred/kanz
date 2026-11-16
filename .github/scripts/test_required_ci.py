@@ -67,6 +67,18 @@ class GitScopeTests(unittest.TestCase):
                 self.assertEqual(selected, {"application": True, "forge": True})
                 self.git("reset", "--hard", self.base)
 
+    def test_component_guides_checker_and_discovery_config_select_forge(self):
+        for name in ("docs/deep/README.md", "kanz/services/owner/README.md",
+                     "rust/README.md", "docs/readme.md", "CONTRIBUTING.md",
+                     "tools/check_readmes.py", "tools/test_check_readmes.py",
+                     ".codex/config.toml"):
+            with self.subTest(name=name):
+                self.write(name, "reviewed documentation input")
+                head = self.save()
+                selected, _ = policy.scope(self.repo, "push", {"before": self.base, "after": head}, head)
+                self.assertTrue(selected["forge"], name)
+                self.git("reset", "--hard", self.base)
+
     def test_plugin_exemption_does_not_hide_unknown_or_deleted_runtime(self):
         for name in (".agents/new-runtime.py", "plugins/kanz-forge/commands.py", ".agents/plugins/kanz-forge_other/app.py"):
             with self.subTest(name=name):
@@ -111,9 +123,9 @@ class GitScopeTests(unittest.TestCase):
     def test_policy_and_build_helpers_cannot_skip(self):
         for name in (
             ".github/scripts/required_ci.py", ".github/scripts/release_source.py",
-            ".github/actions/setup-buf/action.yml", ".github/workflows/kanz-ci.yml",
-            "tools/Initialize-TestnetPortfolio.ps1", "kanz-schemas/packaging/go/go.mod",
-            "new-runtime/entrypoint", "kanz-web/README.md",
+            ".github/actions/setup_buf/action.yml", ".github/workflows/kanz-ci.yml",
+            "tools/Initialize-TestnetPortfolio.ps1", "schemas/packaging/go/go.mod",
+            "new-runtime/entrypoint", "web/README.md",
         ):
             with self.subTest(name=name):
                 self.write(name, "fixture")
@@ -290,6 +302,8 @@ class WorkflowContractTests(unittest.TestCase):
                          ("    runs-on: ubuntu-latest", "    runs-on: windows-latest"),
                          ("run: node --test", "run: true # node --test"),
                          ("scripts/provenance.py", "scripts/provenance.py || true"),
+                         ("tools/check_readmes.py --inventory", "tools/check_readmes.py --disabled"),
+                         ("test_check_readmes.py -v", "missing_test.py -v"),
                          ("    steps:", "    if: false\n    steps:"),
                          ("    steps:", "    continue-on-error: true\n    steps:")):
             with self.subTest(old=old), self.assertRaises(ValueError):

@@ -1,0 +1,206 @@
+// lake-sink consumes validated events from the derived Kafka archive, decoding
+// payloads against the EVT-16 schema registry into Hive-partitioned NDJSON.
+// Catalog/snapshot commits require their own implementation and qualification.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
+	"github.com/eighred/kanz/internal/version"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/lake_sink/internal/cdc"
+	"github.com/eighred/kanz/services/lake_sink/internal/config"
+	"github.com/eighred/kanz/services/lake_sink/internal/decode"
+	"github.com/eighred/kanz/services/lake_sink/internal/server"
+	"github.com/eighred/kanz/services/lake_sink/internal/sink"
+	"github.com/eighred/kanz/services/lake_sink/internal/snapshot"
+)
+
+func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Default().Error("config load failed", "err", err)
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
+
+	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
+	obs, err := observability.New(ctx, observability.Config{
+		ServiceName:    cfg.Source,
+		ServiceVersion: version.String(),
+		OTLPEndpoint:   cfg.OTLPEndpoint,
+		SampleRatio:    1,
+	}, base)
+	if err != nil {
+		slog.Default().Error("observability init failed", "err", err)
+		return 2
+	}
+	logger := obs.Logger
+	slog.SetDefault(logger)
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = obs.Shutdown(shutCtx)
+	}()
+
+	var fileOptions []sink.FileOption
+	if cfg.Snapshot != nil {
+		fileOptions = append(fileOptions, sink.EnableActiveRunCapture)
+	}
+	fileSink, err := sink.NewFileSink(cfg.OutputDir, "", fileOptions...)
+	if err != nil {
+		logger.Error("sink open failed", "err", err)
+		return 2
+	}
+
+	readiness := &server.Readiness{}
+	if cfg.Snapshot != nil {
+		readiness.RequireSnapshot()
+	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
+	go func() {
+		logger.Info("lake-sink listening", "addr", cfg.Listen)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("http server failed", "err", err)
+			fatal.Raise(err)
+		}
+	}()
+
+	runErr := runSink(ctx, cfg, fileSink, readiness, logger, obs)
+	if runErr != nil {
+		logger.Error("sink stopped with error", "err", runErr)
+	}
+
+	// Flush and close the sink before exit so buffered rows are durable.
+	if err := fileSink.Close(); err != nil {
+		logger.Error("sink close error", "err", err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("http shutdown error", "err", err)
+	}
+
+	// The run loop's own error and any fatal raised from a goroutine answer the
+	// same question — why is this process stopping — so they meet here, after
+	// every shutdown step above has run. Raise(nil) is a no-op mark.
+	fatal.Raise(runErr)
+	return fatal.Code()
+}
+
+// runSink dials Kafka, subscribes every configured topic on the one consumer
+// group, and folds each event into the sink. Durability has no lag to bound:
+// cdc.EventSink.Handle flushes (bufio.Flush + fsync) every row before acking,
+// so a row is durable by the time its offset commits (DATA-M5) — there is no
+// periodic flush here because there is nothing left for one to do. The first
+// non-cancellation subscription error cancels the siblings and is returned —
+// fail-fast, so a broken subscription brings the sink down rather than
+// silently losing the log.
+func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return fmt.Errorf("initialize workload identity: %w", err)
+	}
+	// All subscriptions and the Kafka client stop before the SVID source closes.
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	metrics := cdc.NewMetrics(obs.Registry)
+
+	var resolver decode.Resolver
+	if cfg.RegistryURL != "" {
+		resolver = decode.NewCachingResolver(decode.NewHTTPResolver(cfg.RegistryURL, nil))
+	} else {
+		logger.Warn("no LAKE_SINK_REGISTRY_URL — landing envelope-only (payloads undecoded)")
+	}
+	eventSink := cdc.NewEventSink(decode.NewDecoder(resolver), fileSink, time.Now, logger, metrics)
+
+	// Metrics on the CLIENT, not just the Consumer: kanz_bus_consume_halted_total
+	// is raised by KafkaClient.Subscribe, below bus.Consumer, and it is the only
+	// series that says this sink stopped rather than skip an event it could not
+	// dead-letter (#219). Without it the halt is a single log line on the way out.
+	client, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source, Metrics: busMetrics, TLSConfig: mesh.Client})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstErr error
+	)
+	if cfg.Snapshot != nil {
+		landing, ok := fileSink.(*sink.FileSink)
+		if !ok {
+			return errors.New("snapshot requires the owning active-run file sink")
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := snapshot.Run(ctx, *cfg.Snapshot, mesh.Source, landing, cfg.OutputDir, logger, busMetrics, readiness.SetSnapshot); err != nil && ctx.Err() == nil {
+				once.Do(func() { firstErr = err; cancel() })
+			}
+		}()
+	}
+	for _, topic := range cfg.Topics {
+		wg.Add(1)
+		go func(topic string) {
+			defer wg.Done()
+			logger.Info("lake-sink subscribing", "topic", topic, "group", cfg.ConsumerGroup)
+			var err error
+			if cfg.RetainRawFrame {
+				err = consumer.SubscribeDelivery(ctx, topic, cfg.ConsumerGroup, eventSink.HandleDelivery)
+			} else {
+				err = consumer.Subscribe(ctx, topic, cfg.ConsumerGroup, eventSink.Handle)
+			}
+			if err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}(topic)
+	}
+	readiness.Set(true)
+	wg.Wait()
+	readiness.Set(false)
+	return firstErr
+}

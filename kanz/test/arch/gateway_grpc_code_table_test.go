@@ -47,7 +47,7 @@ import (
 // this forces is that no code can be reached by the default arm unnoticed.
 
 // gatewayCodeTableFile is where the mapping lives, module-relative.
-const gatewayCodeTableFile = "services/api-gateway/internal/gateway/gateway.go"
+const gatewayCodeTableFile = "services/api_gateway/internal/gateway/gateway.go"
 
 // gatewayCodeTableFunc is the function that must name them.
 const gatewayCodeTableFunc = "httpStatus"
