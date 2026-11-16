@@ -186,11 +186,6 @@ func natsUserEntries(t *testing.T, body string) []natsUserEntry {
 			}
 			cur = &natsUserEntry{svid: m[1], account: account}
 			curDepth = depth
-			if strings.Contains(line, "}") && strings.Count(line, "}") >= strings.Count(line, "{") {
-				// `{ user: "x" }` on one line: no permissions, entry ends here.
-				out = append(out, *cur)
-				cur = nil
-			}
 		}
 		if cur != nil {
 			if strings.Contains(line, "permissions:") {
@@ -198,6 +193,12 @@ func natsUserEntries(t *testing.T, body string) []natsUserEntry {
 			}
 			if m := natsEmptyAllowRe.FindStringSubmatch(line); m != nil {
 				cur.emptyAllows = append(cur.emptyAllows, m[1])
+			}
+			if len(matches) == 1 && strings.Contains(line, "}") && strings.Count(line, "}") >= strings.Count(line, "{") {
+				// An inline entry can carry permissions too. Read them before
+				// closing it, or a broker exemption survives its own retirement.
+				out = append(out, *cur)
+				cur = nil
 			}
 		}
 
@@ -216,4 +217,22 @@ func natsUserEntries(t *testing.T, body string) []natsUserEntry {
 		out = append(out, *cur)
 	}
 	return out
+}
+
+func TestNATSInlineUserPermissionsAreNotDiscarded(t *testing.T) {
+	for _, tc := range []struct {
+		name, entry string
+		permission  bool
+	}{
+		{"broker without permissions", `{ user: "broker" }`, false},
+		{"inline permissions retire exception", `{ user: "broker", permissions: { publish: { allow: ["$SYS.>"] }, subscribe: { allow: ["$SYS.>"] } } }`, true},
+		{"multiline permissions", "{ user: \"broker\",\npermissions: { publish: { allow: [\"$SYS.>\"] } }\n}", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			users := natsUserEntries(t, "      SYS {\n        users: [\n"+tc.entry+"\n        ]\n      }")
+			if len(users) != 1 || users[0].account != "SYS" || users[0].hasPermissions != tc.permission {
+				t.Fatalf("parsed %v, want one SYS user with permissions=%v", users, tc.permission)
+			}
+		})
+	}
 }

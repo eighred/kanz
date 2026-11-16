@@ -11,10 +11,11 @@ Disaster recovery for the stateful databases:
 | compliance evidence (REG-02) | audit_chain_links — the filing hash chain | `kanz-compliance` |
 | platform identity (#364) | identity_users, identity_invites — the platform's own accounts and their Argon2id credentials | `kanz-identity` |
 
-(The market-data history and the audit log are append-only/WORM stores with
-their own retention; the *transactional* state that DR must restore is these.
-Read the `market-data` row in the posture table before extending that sentence
-to everything in that database — its bitemporal tables are not replayable.)
+The table declares DR primaries, rather than certifying the running estate.
+Read the `market-data` posture before claiming its bitemporal history is
+replayable. The audit log has no verified immutable-retention or restore
+exclusion: its PostgreSQL database is included in Tokyo's restore, and #1748
+owns the unresolved primary and evidence-retention decisions.
 
 **A cluster boundary here is a restore-timeline boundary.** PITR rewinds every
 database in a cluster together, so the grouping answers one question: *what must
@@ -52,7 +53,7 @@ what gets read, so it is not allowed to be the stale copy.
 | `datamaster` | covered | `kanz-books` (golden records + exception queue) |
 | `identity` | covered | `kanz-identity` — its **own** cluster (`identity_users`, `identity_invites`, #364). Credentials exist nowhere else: a failover onto an empty store locks **everyone** out, including whoever would run the recovery, so this is the one standby whose absence makes every other standby unreachable. Own cluster because PITR is per-cluster — co-locating with `kanz-books` would tie a password rotation to the ledger's restore timeline, silently re-enabling disabled accounts on any rewind. |
 | `market-data` | excluded | `price_observations` is append-only history with its own retention, re-ingestable from the feed. `contract_terms` (#345) and `ohlcv_bars` (#425) are **not**: a venue serves its *current* view of a specification or a candle, so a refeed restores today's values under today's `knowledge_time` and the original observation plus every restatement between are gone. What a restore loses is not the prices — it is the evidence of *what was knowable when*. `ingestion_coverage` (#591) is not replayable **at all** — nothing can reconstruct whether a feed was live last July — but losing it **fails safe**: an absent row reads as UNKNOWN and refuses a claim, where a refed candle supports a wrong one. The exclusion holds only while no sizing decision reaching real capital is derived from this store. |
-| `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
+| `audit` | NOT COVERED | #1748: PostgreSQL audit is included in Tokyo's restore; primary attribution and immutable-retention/restore semantics are unresolved. The row trigger is not object lock. #1747 separately owns the runtime credential/WORM boundary. |
 | `oms` | covered | `kanz-orders` (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |
 | `venue-binance` | covered | `kanz-orders` (`venue_orders`) — same cluster as the OMS *on purpose*: one restore timeline for the order path |
 | `venue-okx` | covered | `kanz-orders` (`venue_orders`) — same |
@@ -172,9 +173,9 @@ source of truth is the append-only journal.
 
 The general rule this settles: **covering something unnecessarily is cheap;
 excluding it on a rebuild story nobody has exercised is how #60 happened.** The
-two standing exclusions (`market-data`, `audit`) are not of that shape — each has
-an independently documented mechanism (the DR drill in `infra/dr/README.md` for
-market-data; object-lock/WORM for audit), not an inference.
+standing `market-data` exclusion has the bounded rationale stated in its row.
+Audit is unresolved under #1748; an append-only row trigger does not prove
+object-locked retention or justify excluding the database from recovery.
 
 Database naming across the deploy manifests, the DSN secrets and this document
 has been reported as inconsistent, so every mapping above should still be settled
@@ -282,4 +283,5 @@ DR overlay points that secret at the promoted cluster's service.
 1. Create the `kanz-dr-s3` secret (bucket creds) in `kanz-data` in both regions.
 2. Install the CloudNativePG operator once per cluster.
 3. Object-lock the backup bucket (WORM) so backups can't be deleted within
-   retention — the same tamper-resistance posture as the AUDIT-01b log.
+   retention. This is a backup requirement, not evidence that the audit log's
+   separate immutable-retention decision has been resolved.

@@ -139,12 +139,12 @@ var envHelperExempt = map[string]string{
 	// another KEY, not a default, and its first is a path this CLI takes from a
 	// flag. It applies no default and owns no convention this package could hold.
 	//
-	// It IS a near-copy of a different concept: pkg/secret.Read, the one
-	// implementation of file-or-env secret reading. The two are not
-	// interchangeable as written — Read derives the path from KEY_FILE while this
-	// reads a flag — so unifying them is a change to this tool's command line
-	// rather than a helper swap, and it is not smuggled into #692's repair.
-	"cmd/universe/main.go:secretFrom": "#692 — a (path, key) secret reader, not a key-and-default wrapper; unifying it with pkg/secret.Read is a CLI change",
+	// This is a standing API-shape decision from #692. pkg/secret.Read derives
+	// a file path from KEY_FILE; this CLI takes an explicit flag path. Its
+	// actual helper contract tests file precedence and read-error refusal.
+	// Convergence onto the shared reader removes the direct environment read
+	// and makes this entry stale; no CLI unification debt is implied here.
+	"cmd/universe/main.go:secretFrom": "#692 permanent decision: the CLI's explicit (path, key) reader has no key-and-default semantics; tested in cmd/universe/secret_test.go",
 }
 
 // readsEnvironment reports whether the body calls os.Getenv or os.LookupEnv.
