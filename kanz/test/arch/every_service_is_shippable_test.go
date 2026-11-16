@@ -58,8 +58,10 @@ import (
 // unshippableByDesign exempts a service from needing an image.
 //
 // An entry is a DECLARATION that the service is not meant to ship yet, not a
-// place to park work. Each names the issue that removes it again, and the
-// dead-entry arm below deletes the entry for you when the Dockerfile appears.
+// place to hide work. It names the unfinished-work owner or records an existing
+// standing deployment decision. Both remain subject to the Dockerfile/matrix
+// retirement and dead-entry checks below; neither authorizes implementation or
+// deployment by itself.
 var unshippableByDesign = map[string]string{
 	"autopilot": "Standing AUTO-01 deployment posture: this is the closed-loop OPERATIONS " +
 		"controller, not the alpha strategy layer. It remains parked until the system it would " +
