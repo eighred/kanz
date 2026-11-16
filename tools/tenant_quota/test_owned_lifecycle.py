@@ -120,6 +120,7 @@ class LifecycleModels(unittest.TestCase):
             report = json.loads((root / lifecycle.REPORT).read_bytes())
             self.assertTrue(report["passed"])
             self.assertEqual(report["cleanup"], "verified_absent")
+            self.assertEqual((report["cleanup_phase"], report["cleanup_category"]), ("completed", "none"))
             self.assertEqual(report["image"], dict(present=None, id=None, requested_digest_match=None))
             self.assertEqual([seconds for argv, seconds in commands.observed if argv[:3] == ["kind", "create", "cluster"]], [240])
             deletion = [seconds for argv, seconds in commands.observed if argv[:3] == ["kind", "delete", "cluster"]]
@@ -239,6 +240,7 @@ class LifecycleModels(unittest.TestCase):
             self.assertEqual(value["primary"], "timeout")
             self.assertTrue(value["cleanup_error"])
             self.assertEqual(value["cleanup"], "unknown")
+            self.assertEqual((value["cleanup_phase"], value["cleanup_category"]), ("delete", "command_nonzero"))
             self.assertFalse(value["passed"])
 
     def test_changed_source_refuses_retention(self):
@@ -259,6 +261,8 @@ class LifecycleModels(unittest.TestCase):
         with self.owner() as (owner, _, root):
             owner.prepare()
             owner.cleanup()
+            self.assertEqual(lifecycle.cleanup_diagnostic(owner, None),
+                dict(cleanup_phase="completed", cleanup_category="none"))
             with self.assertRaises(lifecycle.Refused):
                 owner.seal(11, "success")
             self.assertFalse((root / lifecycle.REPORT).exists())
@@ -444,6 +448,8 @@ class LifecycleModels(unittest.TestCase):
             self.assertTrue(report["cleanup_error"])
             self.assertEqual(cleanup["cleanup"], "unknown")
             self.assertTrue(cleanup["cleanup_error"])
+            for value in (report, cleanup):
+                self.assertEqual((value["cleanup_phase"], value["cleanup_category"]), ("delete", "command_nonzero"))
             self.assertNotIn("cluster", cleanup)
             self.assertNotIn("stderr", report)
 
@@ -459,6 +465,117 @@ class LifecycleModels(unittest.TestCase):
             with self.assertRaises(lifecycle.Refused):
                 owner.cleanup()
             self.assertEqual(sentinel.read_bytes(), b"foreign")
+
+    def test_cleanup_phase_causal_refusals_retained_in_lifecycle_report(self):
+        cases = (("journal", "launch_inventory"), ("allocation", "allocation_custody"),
+            ("capture", "container_identity"), ("inventory", "inventory_changed"),
+            ("delete", "command_nonzero"), ("container_absence", "owned_container_remains"),
+            ("network_absence", "owned_endpoint_remains"), ("work_retire", "work_custody"))
+        for phase, category in cases:
+            with self.subTest(phase=phase), self.owner() as (owner, commands, root):
+                self.create(owner)
+                if phase == "journal":
+                    (root / lifecycle.STATE / "launch-01.json").write_bytes(
+                        lifecycle.canonical({"claim": "0" * 64, "launch": 1}))
+                elif phase == "allocation":
+                    (root / lifecycle.STATE / "started.json").write_bytes(
+                        lifecycle.canonical({"claim": owner.claim_hash, "create_started": False}))
+                elif phase == "capture":
+                    commands.capture_unknown = True
+                elif phase == "inventory":
+                    (root / lifecycle.STATE / "inventory.json").write_bytes(lifecycle.canonical(
+                        {"claim": owner.claim_hash, "containers": [], "networks": []}))
+                elif phase == "delete":
+                    commands.delete_fails = True
+                elif phase == "container_absence":
+                    commands.keep_container = True
+                elif phase == "network_absence":
+                    commands.keep_endpoint = True
+                elif phase == "work_retire":
+                    os.chmod(owner.work, 0o750)
+                result = lifecycle.finish_owner(owner, 0, lifecycle.Refused("timeout"))
+                report = json.loads((root / lifecycle.REPORT).read_bytes())
+                self.assertEqual(result, dict(format="kanz-quota-outcome-v1", primary="timeout",
+                    cleanup="refused", retention="retained", cleanup_phase=phase, cleanup_category=category))
+                self.assertEqual((report["cleanup_phase"], report["cleanup_category"]), (phase, category))
+                self.assertEqual(report["primary"], "timeout")
+                self.assertTrue(report["cleanup_error"])
+                self.assertFalse(report["passed"])
+                self.assertFalse(owner.cleaned)
+
+    def test_cleanup_diagnostic_refuses_unlisted_and_nonexact_metadata(self):
+        class Label(str):
+            pass
+        class OtherRefusal(lifecycle.Refused):
+            pass
+        cases = (
+            ("network_absence", lifecycle.Refused("network_observation_unknown"), "network_absence", "network_observation_unknown"),
+            ("private diagnostic text", lifecycle.Refused("network_observation_unknown"), "unknown", "network_observation_unknown"),
+            (Label("delete"), lifecycle.Refused("command_nonzero"), "unknown", "command_nonzero"),
+            (False, lifecycle.Refused("timeout"), "unknown", "timeout"),
+            ([], lifecycle.Refused("timeout"), "unknown", "timeout"),
+            ("delete", lifecycle.Refused("private diagnostic text"), "delete", "unknown"),
+            ("delete", lifecycle.Refused(Label("command_nonzero")), "delete", "unknown"),
+            ("delete", lifecycle.Refused(["private diagnostic text"]), "delete", "unknown"),
+            ("delete", OtherRefusal("command_nonzero"), "delete", "unknown"),
+            ("work_retire", PermissionError("private diagnostic text"), "work_retire", "unknown"),
+            ("work_retire", None, "completed", "none"),
+            ("completed", None, "unknown", "none"))
+        for phase, error, expected_phase, expected_category in cases:
+            with self.subTest(phase=repr(phase), category=expected_category):
+                owner = unittest.mock.Mock(cleanup_phase=phase, cleaned=True)
+                value = lifecycle.cleanup_diagnostic(owner, error)
+                self.assertEqual(value, dict(cleanup_phase=expected_phase, cleanup_category=expected_category))
+                self.assertNotIn("private diagnostic text", json.dumps(value))
+        owner = unittest.mock.Mock(cleanup_phase="work_retire", cleaned=False)
+        self.assertEqual(lifecycle.cleanup_diagnostic(owner, None),
+            dict(cleanup_phase="work_retire", cleanup_category="none"))
+
+    def test_causal_cleanup_and_retention_errors_preserve_primary_diagnostic(self):
+        with self.owner() as (owner, commands, _):
+            self.create(owner)
+            commands.delete_fails = True
+            with patch.object(owner, "seal", side_effect=PermissionError("private retention text")) as seal:
+                result = lifecycle.finish_owner(owner, 0, lifecycle.Refused("timeout"))
+            self.assertEqual(result, dict(format="kanz-quota-outcome-v1", primary="timeout",
+                cleanup="refused", retention="refused", cleanup_phase="delete", cleanup_category="command_nonzero"))
+            self.assertEqual(seal.call_args.args[:2], (0, "timeout"))
+            self.assertIs(type(seal.call_args.args[2]), lifecycle.Refused)
+            self.assertEqual(seal.call_args.args[2].category, "command_nonzero")
+            self.assertIsNone(owner.fd)
+            self.assertIsNone(owner.parent)
+            self.assertNotIn("private retention text", json.dumps(result))
+
+    def test_work_retirement_unexpected_error_keeps_unknown_category(self):
+        with self.owner() as (owner, _, root):
+            self.create(owner)
+            with patch.object(owner, "retire_work", side_effect=PermissionError("private retirement text")):
+                result = lifecycle.finish_owner(owner, 11, None)
+            report = json.loads((root / lifecycle.REPORT).read_bytes())
+            self.assertEqual(result, dict(format="kanz-quota-outcome-v1", primary="success",
+                cleanup="refused", retention="retained", cleanup_phase="work_retire", cleanup_category="unknown"))
+            self.assertFalse(report["passed"])
+            self.assertTrue(report["cleanup_error"])
+            self.assertEqual((report["cleanup_phase"], report["cleanup_category"]), ("work_retire", "unknown"))
+            self.assertNotIn("private retirement text", json.dumps([result, report]))
+
+    def test_final_observation_accounting_error_is_not_completed(self):
+        with self.owner() as (owner, _, root):
+            self.create(owner)
+            original = owner.commands.reserve.finish
+            def finish(token):
+                original(token)
+                if owner.cleaned:
+                    raise lifecycle.Refused("receipt_write")
+            with patch.object(owner.commands.reserve, "finish", side_effect=finish):
+                result = lifecycle.finish_owner(owner, 11, None)
+            report = json.loads((root / lifecycle.REPORT).read_bytes())
+            self.assertTrue(owner.cleaned)  # Resource oracles completed; accounting still refused.
+            self.assertEqual(result, dict(format="kanz-quota-outcome-v1", primary="success",
+                cleanup="refused", retention="retained", cleanup_phase="work_retire", cleanup_category="receipt_write"))
+            self.assertTrue(report["cleanup_error"])
+            self.assertFalse(report["passed"])
+            self.assertNotEqual(report["cleanup_phase"], "completed")
 
 
 MODEL_TOOL = r'''import json,os,sys,time
@@ -492,7 +609,10 @@ elif role=="create":
             while True:time.sleep(1)
         while True:time.sleep(1)
 elif role=="delete":state.write_text(json.dumps({"exists":False}))
-elif role=="endpoints":pass
+elif role=="endpoints":
+    if mode=="network-error":
+        print("private model network response")
+        sys.exit(17)
 elif role=="wait":
     witness()
     while True:time.sleep(1)
@@ -644,10 +764,43 @@ class TransportLifecycleModels(unittest.TestCase):
         owner.seal.side_effect=PermissionError("fixed retention refusal")
         result=lifecycle.finish_owner(owner,0,lifecycle.Refused("timeout"))
         self.assertEqual(result,dict(format="kanz-quota-outcome-v1",primary="timeout",
-            cleanup="refused",retention="refused"))
+            cleanup="refused",retention="refused",
+            cleanup_phase="unknown",cleanup_category="unknown"))
         owner.seal.assert_called_once_with(0,"timeout",cleanup)
         owner.close.assert_called_once()
         self.assertNotIn("fixed retention",json.dumps(result))
+
+
+    def test_network_nonzero_diagnostic_retained_by_both_parent_reports(self):
+        with self.owned("network-error") as (owner, commands, root):
+            owner.prepare()
+            owner.create(owner.work / "kubeconfig")
+            result = lifecycle.finish_owner(owner, 11, None)
+            self.assertEqual(commands.last_exit, 17)
+            self.assertEqual(result, dict(format="kanz-quota-outcome-v1", primary="success",
+                cleanup="refused", retention="retained", cleanup_phase="network_absence",
+                cleanup_category="network_observation_unknown"))
+            second, other = self.second(root)
+            other.mode = "network-error"
+            with patch.object(lifecycle, "OwnedLifecycle", return_value=second), \
+                    patch.object(lifecycle.sys, "argv", ["owned_lifecycle.py", "cleanup"]):
+                with self.assertRaises(SystemExit) as error:
+                    lifecycle.main()
+            self.assertEqual(str(error.exception), "quota lifecycle: cleanup refused")
+            self.assertEqual(other.last_exit, 17)
+            report = json.loads((root / lifecycle.REPORT).read_bytes())
+            cleanup = json.loads((root / "quota-owned-cleanup.json").read_bytes())
+            for value in (report, cleanup):
+                self.assertEqual((value["cleanup_phase"], value["cleanup_category"]),
+                    ("network_absence", "network_observation_unknown"))
+                self.assertTrue(value["cleanup_error"])
+                self.assertNotIn("private model network response", json.dumps(value))
+            self.assertFalse(report["passed"])
+            self.assertEqual(sum(prefix == ("docker", "network", "inspect")
+                for prefix in commands.requested + other.requested), 2)
+            self.assertEqual(len(list((root / lifecycle.STATE).glob("launch-*.json"))), 20)
+            self.assertIsNone(second.fd)
+            self.assertIsNone(second.parent)
 
 
 if __name__ == "__main__":

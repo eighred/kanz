@@ -59,6 +59,38 @@ def primary_class(error):
     return value if value in PRIMARY_CATEGORIES else "unknown"
 
 
+# Fixed diagnostic labels only. They locate the active cleanup boundary, not
+# an inferred operating-system or Kind cause. Unexpected failures stay unknown.
+CLEANUP_PHASES = frozenset({"not_started", "journal", "allocation", "capture",
+    "inventory", "delete", "container_absence", "network_absence", "work_retire"})
+CLEANUP_CATEGORIES = frozenset({
+    "allocation_custody", "budget_custody", "budget_holder_live", "budget_inventory",
+    "budget_role", "claim_changed", "claim_custody", "cleanup_deadline", "clock_identity",
+    "command_nonzero", "container_count", "container_identity", "duplicate_json_key",
+    "holder_identity", "inventory_changed", "inventory_encoding", "inventory_shape",
+    "launch_inventory", "network_identity", "network_observation_unknown",
+    "observation_accounting_refused", "output_bound", "output_deadline",
+    "owned_container_remains", "owned_endpoint_remains", "process_claim",
+    "process_cleanup_unverified", "process_group_identity", "process_group_live_or_unknown",
+    "process_identity", "process_inventory_bound", "process_stat", "process_stat_bound",
+    "receipt_changed", "receipt_custody", "receipt_size", "receipt_write",
+    "state_entry", "state_entry_bound", "timeout", "unbound_command", "unowned_collision",
+    "work_cleanup_unverified", "work_custody"})
+
+
+def cleanup_diagnostic(owner, error):
+    phase = getattr(owner, "cleanup_phase", None)
+    phase = phase if type(phase) is str and phase in CLEANUP_PHASES else "unknown"
+    # Projection occurs after cleanup returned, including Reserve.__exit__.
+    # A late accounting error must not become a completed cleanup observation.
+    if phase == "work_retire" and getattr(owner, "cleaned", None) is True and error is None:
+        phase = "completed"
+    value = error.category if type(error) is Refused else None
+    category = ("none" if error is None else
+        value if type(value) is str and value in CLEANUP_CATEGORIES else "unknown")
+    return dict(cleanup_phase=phase, cleanup_category=category)
+
+
 def finish_owner(owner, cases, body_error):
     cleanup_error = retention_error = None
     try:
@@ -76,7 +108,8 @@ def finish_owner(owner, cases, body_error):
             retention_error = error
     return dict(format="kanz-quota-outcome-v1", primary=primary_class(body_error),
         cleanup="verified_absent" if owner.cleaned and cleanup_error is None else "refused",
-        retention="retained" if retention_error is None else "refused")
+        retention="retained" if retention_error is None else "refused",
+        **cleanup_diagnostic(owner, cleanup_error))
 
 
 def canonical(value):
@@ -504,6 +537,7 @@ class OwnedLifecycle:
         self.created = False
         self.create_verified = False
         self.cleaned = False
+        self.cleanup_phase = "not_started"
         self.containers = []
         self.networks = []
         self.primary = "unknown"
@@ -758,6 +792,7 @@ class OwnedLifecycle:
             raise
 
     def cleanup(self):
+        self.cleanup_phase = "journal"
         self.commands.groups_absent = False
         # One interval for the whole pre-delete observation phase. Nested
         # per-record/per-command checks consume this same running allowance.
@@ -766,11 +801,14 @@ class OwnedLifecycle:
             if self.commands.group_cleanup_refused or self.commands.reserve.refused:
                 raise Refused("process_cleanup_unverified")
             self.commands.groups_absent = True
+            self.cleanup_phase = "allocation"
             try:
                 started, _ = read_json(self.fd, "started.json")
             except FileNotFoundError:
+                self.cleanup_phase = "container_absence"
                 if self.name in self.kind_names(True) or self.listed_ids(True):
                     raise Refused("unowned_collision")
+                self.cleanup_phase = "work_retire"
                 self.retire_work()
                 self.cleaned = self.commands.groups_absent
                 return
@@ -783,7 +821,9 @@ class OwnedLifecycle:
                 raise Refused("process_claim")
             # This exact PID/starttime/UID was already checked in the journal.
             # Matching formatted metadata alone never substitutes for that check.
+            self.cleanup_phase = "capture"
             current, networks = self.capture(True)
+            self.cleanup_phase = "inventory"
             try:
                 saved, _ = read_json(self.fd, "inventory.json")
             except FileNotFoundError:
@@ -801,6 +841,7 @@ class OwnedLifecycle:
             delete_needed = bool(current) or self.name in self.kind_names(True)
         # Delete's existing 90s allowance is separate from observation time.
         if delete_needed:
+            self.cleanup_phase = "delete"
             token, remaining = self.begin_budget("delete")
             delete_error = None
             try:
@@ -815,12 +856,14 @@ class OwnedLifecycle:
                     self.commands.reserve.refused = True
                     if delete_error is None:
                         raise
+        self.cleanup_phase = "container_absence"
         with self.commands.reserve.observe():
             if self.name in self.kind_names(True) or self.listed_ids(True):
                 raise Refused("owned_container_remains")
             for cid in self.containers:
                 if self.listed_ids(True, exact_id=cid):
                     raise Refused("owned_container_remains")
+            self.cleanup_phase = "network_absence"
             for nid in self.networks:
                 code, raw = self.commands.run(["docker", "network", "inspect", "--format",
                     '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}', nid], 10,
@@ -829,6 +872,7 @@ class OwnedLifecycle:
                     raise Refused("network_observation_unknown")
                 if set(lines(raw, HEX64)).intersection(self.containers):
                     raise Refused("owned_endpoint_remains")
+            self.cleanup_phase = "work_retire"
             self.retire_work()
             self.cleaned = self.commands.groups_absent
 
@@ -852,7 +896,8 @@ class OwnedLifecycle:
             create_verified=self.create_verified,
             create_exit=self.create_exit, create_timed_out=self.create_timeout,
             cases_passed=cases, primary=primary, cleanup="verified_absent" if self.cleaned else "unknown",
-            cleanup_error=cleanup_error is not None, lifecycle_groups_absent=self.commands.groups_absent, quota_body_descendants="not_attested",
+            cleanup_error=cleanup_error is not None, **cleanup_diagnostic(self, cleanup_error),
+            lifecycle_groups_absent=self.commands.groups_absent, quota_body_descendants="not_attested",
             owned_container_count=len(self.containers), owned_network_count=len(self.networks),
             passed=primary == "success" and cases == 11 and self.cleaned and cleanup_error is None)
         # Exclusive retention: a foreign or already-published report is never
@@ -906,7 +951,7 @@ def main():
                     format="kanz-quota-owned-cleanup-v1", **owner.identity,
                     claim_sha256=owner.claim_hash,
                     cleanup="verified_absent" if owner.cleaned and cleanup_error is None else "unknown",
-                    cleanup_error=cleanup_error is not None,
+                    cleanup_error=cleanup_error is not None, **cleanup_diagnostic(owner, cleanup_error),
                     lifecycle_groups_absent=owner.commands.groups_absent, quota_body_descendants="not_attested",
                     owned_container_count=len(owner.containers), owned_network_count=len(owner.networks)))
             except BaseException as error:
