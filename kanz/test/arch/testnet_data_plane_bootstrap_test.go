@@ -45,6 +45,8 @@ case "$1 $2" in
     field=''; path=''
     for arg in "$@"; do case "$arg" in -field=*) field=${arg#-field=};; kv/*) path=$arg;; esac; done
 	case "$path:$field" in
+	  kv/kanz/accounting-runtime:credential_isolation_state|kv/kanz/audit-runtime:credential_isolation_state|kv/kanz/identity-runtime:credential_isolation_state)
+	    printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1 ;;
 	  kv/kanz/api-gateway:signing_secret) test -f "$FAKE_VAULT_STATE/gateway" || { printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; } ;;
 	  kv/kanz/identity:signing_key_pem) test -f "$FAKE_VAULT_STATE/identity" || { printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; } ;;
 	  kv/kanz/testnet/postgres:accounting_app) exit 0 ;;

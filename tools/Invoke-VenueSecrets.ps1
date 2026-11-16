@@ -8,11 +8,14 @@ param(
 
     [switch]$StageOnly,
 
-    [switch]$PrepareTVSync
+    [switch]$PrepareTVSync,
+
+    [switch]$PrepareRuntimeIsolation
 )
 
 $ErrorActionPreference = 'Stop'
 if ($PrepareTVSync -and ($Target -ne 'DataPlane' -or $Mode -ne 'Bootstrap')) { throw 'TV preparation requires DataPlane Bootstrap mode.' }
+if ($PrepareRuntimeIsolation -and ($Target -ne 'DataPlane' -or $Mode -ne 'Bootstrap' -or $PrepareTVSync)) { throw 'Runtime isolation preparation requires its own DataPlane Bootstrap invocation.' }
 $profileName = if ($env:KANZ_AWS_PROFILE) { $env:KANZ_AWS_PROFILE } else { 'kanz-platform' }
 $region = 'ap-northeast-1'
 $scriptRoot = $PSScriptRoot
@@ -21,7 +24,7 @@ $terraformRoot = Join-Path $repositoryRoot 'kanz\infra\terraform-testnet'
 $scriptName = if ($Target -eq 'DataPlane') { 'bootstrap-testnet-data-plane.sh' } elseif ($Target -eq 'WebEdge') { 'bootstrap-testnet-web-edge.sh' } else { 'bootstrap-testnet-venues.sh' }
 $bootstrapScript = Join-Path $scriptRoot $scriptName
 $remoteName = switch ($Target) {
-    'DataPlane' { if ($PrepareTVSync) { 'testnet-tv-sync-secrets' } else { 'testnet-data-plane-secrets' } }
+    'DataPlane' { if ($PrepareTVSync) { 'testnet-tv-sync-secrets' } elseif ($PrepareRuntimeIsolation) { 'testnet-runtime-isolation' } else { 'testnet-data-plane-secrets' } }
     'AccountProof' { 'testnet-venue-account-proof' }
     'WebEdge' { 'testnet-web-edge' }
     default { 'testnet-venue-secrets' }
@@ -52,7 +55,7 @@ if (-not (Get-Command session-manager-plugin.exe -ErrorAction SilentlyContinue))
     $env:Path = "$pluginDirectory;$env:Path"
 }
 
-if ($PrepareTVSync) {
+if ($PrepareTVSync -or $PrepareRuntimeIsolation) {
     & git -C $repositoryRoot fetch origin main --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Cannot verify merged bootstrap source.' }
     $main = (& git -C $repositoryRoot rev-parse origin/main).Trim()
@@ -75,7 +78,7 @@ elseif ($terraformPath) {
 else {
     throw 'Terraform is unavailable and KANZ_TESTNET_INSTANCE_ID is not set.'
 }
-if ($PrepareTVSync -and $instanceId -cne 'i-0ee1235614219f089') { throw 'TV bootstrap requires the reviewed Tokyo instance.' }
+if (($PrepareTVSync -or $PrepareRuntimeIsolation) -and $instanceId -cne 'i-0ee1235614219f089') { throw 'Scoped bootstrap preparation requires the reviewed Tokyo instance.' }
 if ($instanceId -notmatch '^i-[0-9a-f]+$') {
     throw 'Unable to resolve the testnet EC2 instance from Terraform state.'
 }
@@ -151,7 +154,7 @@ $remoteArgument = switch ($Target) {
     'Venue' { ' ' + $Mode.ToLowerInvariant() }
     'AccountProof' { ' account-proof' }
     'WebEdge' { '' }
-    default { if ($PrepareTVSync) { ' tv-sync' } else { '' } }
+    default { if ($PrepareTVSync) { ' tv-sync' } elseif ($PrepareRuntimeIsolation) { ' runtime-isolation-prepare' } else { '' } }
 }
 $interactiveCommand = "sudo k3s kubectl -n vault exec -it vault-0 -c vault -- /bin/sh $remoteScript$remoteArgument"
 Write-Host 'Sensitive values are entered only in the remote Vault process. Hidden input is expected.'

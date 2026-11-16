@@ -85,6 +85,10 @@ func run() int {
 		return 2
 	}
 	defer pool.Close()
+	if err := pg.CheckRuntimePrivileges(ctx, pool, "public"); err != nil {
+		logger.Error("runtime database authority refused", "err", err)
+		return 2
+	}
 	stopAudit, auditErr := auditdelivery.Start(ctx, pool, auditdelivery.Identity, cfg.AuditDelivery, obs.Registry, logger, fatal.Raise)
 	if auditErr != nil {
 		logger.Error("authority audit initialization failed", "err", auditErr)

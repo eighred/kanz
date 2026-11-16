@@ -421,6 +421,10 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (aud
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := pg.CheckRuntimePrivileges(ctx, pool, "public"); err != nil {
+		pool.Close()
+		return nil, nil, err
+	}
 	auditLogDurable.Set(1)
 	return audit.NewPostgres(pool), pool.Close, nil
 }
