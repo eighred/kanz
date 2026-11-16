@@ -24,6 +24,10 @@ import time
 import uuid
 
 PORTS = (4222, 4223, 4224, 4225, 5432, 6379, 9092)
+# The outer sockets must not reuse Docker's wildcard-published backend ports.
+# Child loopback endpoints remain canonical; only this fixed transit leg differs.
+RELAY_PORTS = ((24222,4222),(24223,4223),(24224,4224),(24225,4225),
+               (25432,5432),(26379,6379),(39092,9092))
 UID = 65534
 MAX_FILE = 32 * 1024 * 1024
 MAX_SOURCE = 1024 * 1024 * 1024
@@ -142,7 +146,7 @@ def new_file(root_fd, name, raw, mode=0o600):
 
 class FixedRelay:
     """Byte transport to one compile-time endpoint, bounded to 96 connections."""
-    def __init__(self, listen, upstream, ports=PORTS):
+    def __init__(self, listen, upstream, routes):
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.sockets = set()
@@ -150,16 +154,27 @@ class FixedRelay:
         self.workers = set()
         self.slots = threading.BoundedSemaphore(96)
         self.listeners = []
-        for port in ports:
-            listener = socket.socket()
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind((listen, port))
-            listener.listen(32)
-            listener.settimeout(.25)
-            self.listeners.append(listener)
-            thread = threading.Thread(target=self.accept, args=(listener,upstream,port))
-            thread.start()
-            self.threads.append(thread)
+        try:
+            # Prebind every owned socket before starting any worker. A later
+            # collision cannot leave a partially constructed relay running.
+            for port,_ in routes:
+                listener = socket.socket()
+                self.listeners.append(listener)
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                listener.bind((listen, port))
+                listener.listen(32)
+                listener.settimeout(.25)
+            for listener,(_,port) in zip(self.listeners,routes):
+                thread = threading.Thread(target=self.accept, args=(listener,upstream,port))
+                thread.start()
+                self.threads.append(thread)
+        except BaseException as primary:
+            try: self.close()
+            except BaseException as cleanup:
+                primary.position_relay_cleanup_refused = True
+                primary.add_note("fixed relay cleanup also refused: "+type(cleanup).__name__)
+                print("POSITION relay cleanup also refused:",type(cleanup).__name__,file=sys.stderr)
+            raise
 
     def accept(self, listener, upstream, port):
         while not self.stop.is_set():
@@ -220,13 +235,19 @@ class FixedRelay:
 
     def close(self):
         self.stop.set()
-        for s in self.listeners: s.close()
+        failures=[]
+        for s in self.listeners:
+            try: s.close()
+            except OSError as error: failures.append(type(error).__name__)
+        # Stop acceptors before taking the worker snapshot, so no new worker
+        # can escape the subsequent shutdown/join check.
+        for thread in self.threads: thread.join(6)
         with self.lock:
             for s in tuple(self.sockets):
                 with contextlib.suppress(OSError): s.shutdown(socket.SHUT_RDWR)
         with self.lock: workers=list(self.workers)
-        for thread in self.threads+workers: thread.join(6)
-        if any(t.is_alive() for t in self.threads+workers):
+        for thread in workers: thread.join(6)
+        if failures or any(t.is_alive() for t in self.threads+workers):
             raise ValueError("fixed relay did not stop/join")
 
 
@@ -240,17 +261,20 @@ class Sandbox:
         self.namespace = "position-"+self.suffix
         self.interface = "pr"+self.suffix
         # No route leaves this /30. Firewall also refuses host destinations
-        # other than the seven fixed proxy ports (4225 is our negative broker).
+        # other than the seven fixed transit ports (24225 reaches the negative broker).
         self.host_ip,self.peer_ip = "10.239.254.1","10.239.254.2"
         self.work = self.root/"scratch"
         self.inputs = self.root/"inputs"
         self.out = self.root/"artifacts"
         self.active = set()
         self.relay = None
+        self.relay_constructor_cleanup_refused = False
         self.inner = None
         self.mounted = self.net_created = self.veth_created = False
-        self.work_fd = self.out_fd = None
+        self.work_fd = self.out_fd = self.receipts_fd = None
         self.retained = 0
+        self.artifacts = {}
+        self.cleanup_verified = False
         self.executions = []
         self.public_mounts = {}
 
@@ -262,6 +286,7 @@ class Sandbox:
         self.inputs.chmod(0o711)
         (self.inputs/"public").mkdir(mode=0o711)
         self.out_fd = directory(self.out)
+        self.receipts_fd = os.dup(self.out_fd)
         host("mount","-t","tmpfs","-o","size=5G,nodev,nosuid,mode=0700,uid=65534,gid=65534","position-proof",str(self.work))
         self.mounted = True
         self.work_fd = directory(self.work)
@@ -316,10 +341,15 @@ class Sandbox:
         self.net("ip","link","set","lo","up")
         self.net("iptables","-P","OUTPUT","DROP")
         self.net("iptables","-A","OUTPUT","-o","lo","-j","ACCEPT")
-        self.net("iptables","-A","OUTPUT","-d",self.host_ip,"-p","tcp","-m","multiport","--dports",",".join(map(str,PORTS)),"-j","ACCEPT")
+        self.net("iptables","-A","OUTPUT","-d",self.host_ip,"-p","tcp","-m","multiport","--dports",",".join(str(outer) for outer,_ in RELAY_PORTS),"-j","ACCEPT")
         self.net("ip6tables","-P","OUTPUT","DROP")
         self.net("ip6tables","-A","OUTPUT","-o","lo","-j","ACCEPT")
-        self.relay = FixedRelay(self.host_ip,"127.0.0.1")
+        try:
+            self.relay = FixedRelay(self.host_ip,"127.0.0.1",RELAY_PORTS)
+        except BaseException as error:
+            if getattr(error,"position_relay_cleanup_refused",False) is True:
+                self.relay_constructor_cleanup_refused = True
+            raise
         self.inner = subprocess.Popen(["ip","netns","exec",self.namespace,sys.executable,str(Path(__file__).resolve()),"--fixed-relays"],env=SAFE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,start_new_session=True)
         time.sleep(.5)
         if self.inner.poll() is not None: raise ValueError("private loopback relays failed startup")
@@ -511,9 +541,12 @@ time.sleep(.5) # Only a bounded kernel-observation handshake, never financial qu
         if len(raw)>MAX_OUTPUT or self.retained+len(raw)>768*1024*1024: raise ValueError("artifact exceeds byte limit")
         new_file(self.out_fd,name,raw)
         self.retained+=len(raw)
+        self.artifacts[name] = {"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
 
     def close(self):
         failures = []
+        if self.relay_constructor_cleanup_refused:
+            failures.append("fixed_relay_constructor_cleanup_refused")
         def attempt(action):
             try: return action()
             except BaseException as error:
@@ -558,11 +591,12 @@ time.sleep(.5) # Only a bounded kernel-observation handshake, never financial qu
             if any(value is not False for value in (namespace_present,interface_present,mount_present)) or self.active: failures.append("owned_resource_remains_or_unproven")
             if self.out_fd is not None:
                 try:
-                    attempt(lambda:new_file(self.out_fd,"executions.json",json.dumps(self.executions,sort_keys=True).encode()))
-                    attempt(lambda:new_file(self.out_fd,"sandbox-cleanup.json",json.dumps({"errors":failures,"namespace":self.namespace,"namespace_present":namespace_present,"interface_present":interface_present,"mount_present":mount_present,"public_input_mounts_remaining":public_remaining,"child_units_remaining":sorted(self.active)}).encode()))
+                    attempt(lambda:self.retain("executions.json",json.dumps(self.executions,sort_keys=True).encode()))
+                    attempt(lambda:self.retain("sandbox-cleanup.json",json.dumps({"errors":failures,"relay_constructor_cleanup_refused":self.relay_constructor_cleanup_refused,"namespace":self.namespace,"namespace_present":namespace_present,"interface_present":interface_present,"mount_present":mount_present,"public_input_mounts_remaining":public_remaining,"child_units_remaining":sorted(self.active)}).encode()))
                 finally:
                     os.close(self.out_fd); self.out_fd=None
         if failures: raise ValueError("owned sandbox cleanup failed: "+",".join(failures))
+        self.cleanup_verified = True
 
 
 if __name__ == "__main__":
@@ -577,7 +611,7 @@ if __name__ == "__main__":
         os.execvpe(sys.argv[3],sys.argv[3:],SAFE)
     if sys.argv[1:] != ["--fixed-relays"]:
         raise SystemExit("parent-only fixed relay invocation required")
-    relay = FixedRelay("127.0.0.1","10.239.254.1")
+    relay = FixedRelay("127.0.0.1","10.239.254.1",tuple((backend,outer) for outer,backend in RELAY_PORTS))
     try:
         while True: time.sleep(1)
     finally:

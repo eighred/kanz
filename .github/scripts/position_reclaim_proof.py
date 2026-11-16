@@ -46,13 +46,25 @@ for _name,_expected in EVIDENCE_PINS.items():
 
 from go_shard_evidence import identity, inventory, validate_events, digest, MAX_EVENTS
 from go_test_evidence import check, events
-from position_reclaim_sandbox import Sandbox, directory, read_regular, new_file, host, SAFE
+from position_reclaim_sandbox import Sandbox, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS
 
 PREFIX = "github.com/eighred/kanz/"
 STORE = PREFIX+"services/oms/tools/store-conformance"
 CONTROL = PREFIX+"internal/bustest"
 HELPERS={CONTROL,CONTROL+"/positionfixture"}
 CONTROLLER = "./test/backing/position_reclaim"
+DISPATCH_PACKAGE = PREFIX+"pkg/bus"
+DISPATCH_TEST = "TestConsumerDispatchScopeOnOwnedBroker"
+DISPATCH_RECEIPT = re.compile(r"owned dispatch scope receipts: groups=2 deliveries=3,3 effects=2,2 repeated_frame_sha256=([0-9a-f]{64})")
+DISPATCH_REFUSAL = re.compile(r"[ \t]*consumer_dispatch_scope_integration_test\.go:[1-9][0-9]{0,4}: owned dispatch scope refusal witness: deliveries=1,1 effects=(1,0|0,1) marker_deliveries=0,0 marker_effects=0,0")
+DISPATCH_FAILURE = re.compile(r"[ \t]*consumer_dispatch_scope_integration_test\.go:[1-9][0-9]{0,4}: independent durable group dispatch missing")
+DISPATCH_UNIT_ROOTS = tuple("TestConsumerDispatchScope"+name for name in (
+    "SeparatesIndependentWork","CoordinatesOnlyMatchingReplicas","SeparatesInFlightGroups",
+    "DocumentsUnsupportedRawKeyOverlap","FollowsEveryClaimExit","PreservesDisabledAndRedisFailOpen"))
+DISPATCH_UNIT_TESTS = set(DISPATCH_UNIT_ROOTS)
+DISPATCH_UNIT_TESTS.update(DISPATCH_UNIT_ROOTS[0]+"/"+backend+"/"+field for backend in ("memory","shared-redis") for field in ("subject","group","tenant","command-key","framing"))
+DISPATCH_UNIT_TESTS.update(DISPATCH_UNIT_ROOTS[4]+"/"+name for name in ("success","handler-failure","retained-failure","parked","park-failure","backoff-canceled"))
+DISPATCH_UNIT_TESTS.update(DISPATCH_UNIT_ROOTS[5]+"/"+name for name in ("disabled","typed-nil","redis-failure","empty-key"))
 CAUSAL_CASES={
     (PREFIX+"services/webhook-ingest/internal/ingest",name) for name in (
         "TestIntegration_LoopOverNATS","TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres",
@@ -143,6 +155,43 @@ def parse_objects(raw):
         yield value
 
 
+def dispatch_unit_result(raw):
+    """The six roots and twenty subcases are separate from the broker control."""
+    validate_events(raw.decode(),[DISPATCH_PACKAGE])
+    rows=list(events(raw.decode().splitlines()))
+    if any(row.get("Test","") not in DISPATCH_UNIT_TESTS|{""} or row["Action"]=="skip" for row in rows):
+        raise ValueError("dispatch unit identity or skip differs")
+    ran=[row["Test"] for row in rows if row.get("Test") and row["Action"]=="run"]
+    passed=[row["Test"] for row in rows if row.get("Test") and row["Action"]=="pass"]
+    if len(ran)!=26 or set(ran)!=DISPATCH_UNIT_TESTS or len(passed)!=26 or set(passed)!=DISPATCH_UNIT_TESTS:
+        raise ValueError("dispatch unit root or subcase inventory incomplete")
+    return {"package":DISPATCH_PACKAGE,"tests":sorted(DISPATCH_UNIT_TESTS),"passed":26,"skipped":[]}
+
+
+def dispatch_control_result(raw, *, mutant=False):
+    """Require this exact no-skip broker control, not an unrelated package failure."""
+    rows=list(events(raw.decode().splitlines()))
+    if any(row.get("Package")!=DISPATCH_PACKAGE or row.get("Test","") not in ("",DISPATCH_TEST) or row["Action"]=="skip" for row in rows):
+        raise ValueError("owned dispatch control identity or skip differs")
+    tests=[row for row in rows if row.get("Test")==DISPATCH_TEST]
+    if sum(row["Action"]=="run" for row in tests)!=1:
+        raise ValueError("owned dispatch control did not run exactly once")
+    if mutant:
+        witness=[match[1] for row in tests if row["Action"]=="output" for line in row.get("Output","").splitlines() if (match:=DISPATCH_REFUSAL.fullmatch(line))]
+        reasons=[line for row in tests if row["Action"]=="output" for line in row.get("Output","").splitlines() if DISPATCH_FAILURE.fullmatch(line)]
+        if (sum(row["Action"]=="fail" for row in tests)!=1 or any(row["Action"]=="pass" for row in tests)
+                or sum(not row.get("Test") and row["Action"]=="fail" for row in rows)!=1
+                or len(witness)!=1 or len(reasons)!=1 or any(DISPATCH_RECEIPT.search(row.get("Output","")) for row in tests)):
+            raise ValueError("raw-key control did not fail its named dispatch boundary")
+        return {"test":DISPATCH_TEST,"status":"expected failure","reason":"independent durable group dispatch missing",
+                "witness":{"deliveries":[1,1],"effects":[int(value) for value in witness[0].split(",")],"marker_deliveries":[0,0],"marker_effects":[0,0]}}
+    validate_events(raw.decode(),[DISPATCH_PACKAGE])
+    markers=[match for row in tests if row["Action"]=="output" for match in DISPATCH_RECEIPT.findall(row.get("Output",""))]
+    if sum(row["Action"]=="pass" for row in tests)!=1 or len(markers)!=1:
+        raise ValueError("owned dispatch control completion receipt missing")
+    return {"test":DISPATCH_TEST,"status":"pass","groups":2,"deliveries":[3,3],"effects":[2,2],"repeated_frame_sha256":markers[0]}
+
+
 class Proof:
     def __init__(self, args):
         self.args=args
@@ -150,8 +199,20 @@ class Proof:
         # sudo changes ownership context, never broaden Git trust globally.
         os.environ.update(GIT_CONFIG_COUNT="1",GIT_CONFIG_KEY_0="safe.directory",GIT_CONFIG_VALUE_0=str(self.repo))
         self.source=identity()
-        self.root=Path(os.environ["RUNNER_TEMP"])/("position-reclaim-"+uuid.uuid4().hex)
+        runner_temp=Path(os.environ["RUNNER_TEMP"])
+        self.root=runner_temp/("position-reclaim-"+uuid.uuid4().hex)
         self.root.mkdir(mode=0o700)
+        self.publication=runner_temp/("position-reclaim-published-"+self.source["run"]+"-"+self.source["attempt"])
+        temp_fd=directory(runner_temp)
+        try:
+            os.mkdir(self.publication.name,mode=0o700,dir_fd=temp_fd)
+            self.publication_fd=os.open(self.publication.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=temp_fd)
+        finally: os.close(temp_fd)
+        os.fchmod(self.publication_fd,0o700)
+        published=os.fstat(self.publication_fd)
+        if not stat.S_ISDIR(published.st_mode) or published.st_uid!=os.geteuid() or stat.S_IMODE(published.st_mode)!=0o700:
+            os.close(self.publication_fd)
+            raise ValueError("private publication directory differs")
         self.started=time.monotonic()
         self.box=None
         self.before=None
@@ -230,9 +291,9 @@ class Proof:
         self.box=Sandbox(self.repo,self.root,tools,env)
         self.box.start()
         self.box.probe()
-        provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(Path("/usr/bin/cc").resolve().read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"relay_ports":[4222,4223,4224,4225,5432,6379,9092]},"environment_names":sorted(env)}
+        provenance={"source":self.source,"go":go_env,"go_sha256":digest(go.read_bytes()),"rust":rust_version,"rustc_sha256":digest((rust/"bin/rustc").read_bytes()),"cc_sha256":digest(Path("/usr/bin/cc").resolve().read_bytes()),"libc_sha256":digest(Path("/lib/x86_64-linux-gnu/libc.so.6").read_bytes()),"broker":self.before,"database_role":{"name":"kanzapp","superuser":False,"bypassrls":False},"sandbox":{"cpu_percent":200,"memory_bytes":6*1024**3,"tasks":512,"scratch_bytes":5*1024**3,"child_seconds":540,"parent_seconds":7800,"loopback_ports":list(PORTS),"relay_translations":[{"outer":outer,"backend":backend,"inner":backend} for outer,backend in RELAY_PORTS]},"environment_names":sorted(env)}
         provenance["evidence_consumer_pins"]=EVIDENCE_PINS
-        provenance["nats_endpoint_mapping"]={"host":"localhost:4222","sandbox":"127.0.0.1:4222","same_fixed_relay":4222}
+        provenance["nats_endpoint_mapping"]={"host":"localhost:4222","sandbox":"127.0.0.1:4222","outer_transit":24222,"same_fixed_backend":4222}
         source_fd=directory(self.box.inputs/"source")
         try:
             tested_sum=read_regular(source_fd,"kanz/go.sum",4*1024*1024)
@@ -381,8 +442,80 @@ class Proof:
             self.negative_receipts.append({"phase":"removed","container":self.negative_id,"remaining":[]})
             self.negative_id=None
 
+    def negative_fresh(self):
+        """Reset only the already-qualified owned fixture and its bounded tmpfs."""
+        before=docker_identity(self.negative_id)
+        self.negative_remove()
+        host("umount",str(self.data))
+        self.data_mounted=False
+        host("mount","-t","tmpfs","-o","size=128M,nodev,nosuid,noexec,mode=0700,uid=65534,gid=65534","position-negative",str(self.data))
+        self.data_mounted=True
+        fresh_fd=directory(self.data)
+        try:
+            if os.listdir(fresh_fd): raise ValueError("fresh owned broker storage is not empty")
+        finally: os.close(fresh_fd)
+        self.negative_create()
+        after=docker_identity(self.negative_id)
+        if before["container"]==after["container"] or before["image"]!=after["image"] or after["restart_count"]!=0:
+            raise ValueError("fresh owned broker identity differs")
+        reset={"before":before,"after":after,"fresh_storage_empty_before_start":True}
+        self.negative_receipts.append({"phase":"reset-on-fresh-storage",**reset})
+        return reset
+
+    def dispatch_inputs(self):
+        source_fd=directory(self.box.inputs/"source")
+        try:
+            return {name:read_regular(source_fd,"kanz/pkg/bus/"+name,256*1024) for name in (
+                "consumer.go","consumer_dispatch_scope_test.go","consumer_dispatch_scope_integration_test.go")}
+        finally: os.close(source_fd)
+
+    def dispatch_scope_units(self):
+        sources=self.dispatch_inputs()
+        pattern="^("+"|".join(DISPATCH_UNIT_ROOTS)+")$"
+        command=["go","test","-race","-p","1","./pkg/bus","-run",pattern,"-count=1","-timeout=1m","-json"]
+        code,raw=self.invoke(command,seconds=100,output_limit=256*1024)
+        self.box.retain("dispatch-unit-events.jsonl",raw)
+        if code: raise ValueError("isolated dispatch unit cases failed")
+        result=dispatch_unit_result(raw)
+        self.box.retain("dispatch-unit-control.json",json.dumps({"source":self.source,"inputs_sha256":{name:digest(data) for name,data in sources.items()},"events_sha256":digest(raw),"result":result},sort_keys=True).encode())
+
+    def dispatch_scope_control(self):
+        command=["go","test","-race","-p","1","./pkg/bus","-run","^"+DISPATCH_TEST+"$","-count=1","-timeout=1m","-json"]
+        extra={"TEST_NATS_URL":"nats://localhost:4225","TEST_POSITION_DEDUP_CONTROL":"1"}
+        sources=self.dispatch_inputs()
+        primary_before=docker_identity()
+        stable_broker(self.before,primary_before)
+        positive_broker=docker_identity(self.negative_id)
+        code,raw=self.invoke(command,seconds=100,extra=extra,output_limit=256*1024)
+        self.box.retain("dispatch-scoped-events.jsonl",raw)
+        if code: raise ValueError("owned dispatch positive control failed")
+        positive=dispatch_control_result(raw)
+        if positive_broker!=docker_identity(self.negative_id): raise ValueError("positive owned broker changed during control")
+        original=sources["consumer.go"].decode()
+        scoped="dedupKey := consumerDispatchKey(subject, group, env.TenantId, env.IdempotencyKey)"
+        if original.count(scoped)!=1: raise ValueError("dispatch mutation source shape differs")
+        mutant=original.replace(scoped,"dedupKey := env.IdempotencyKey",1).encode()
+        path=self.box.inputs/"dispatch-raw-key.go"
+        path.write_bytes(mutant)
+        # DeliverAll must not replay the positive fixture's different nonce into
+        # the mutant's groups. Retire only this owned broker and its storage.
+        reset=self.negative_fresh()
+        if reset["before"]!=positive_broker: raise ValueError("dispatch reset lost its positive broker binding")
+        negative_broker=reset["after"]
+        stable_broker(primary_before,docker_identity())
+        code,raw=self.invoke(command,seconds=100,extra=extra,output_limit=256*1024,mounts=[(path,"/input/kanz/pkg/bus/consumer.go")])
+        self.box.retain("dispatch-raw-key-events.jsonl",raw)
+        if code==0: raise ValueError("raw-key dispatch mutation survived")
+        negative=dispatch_control_result(raw,mutant=True)
+        if negative_broker!=docker_identity(self.negative_id): raise ValueError("negative owned broker changed during control")
+        primary_after=docker_identity()
+        stable_broker(primary_before,primary_after)
+        self.box.retain("dispatch-scope-control.json",json.dumps({"source":self.source,"owned_broker_port":4225,"explicit_owned_fixture":True,"inputs_sha256":{name:digest(data) for name,data in sources.items()},"mutated_consumer_sha256":digest(mutant),"positive":positive,"negative":negative,"positive_broker":positive_broker,"negative_broker":negative_broker,"owned_reset":reset,"primary_before":primary_before,"primary_after":primary_after},sort_keys=True).encode())
+
     def controls(self):
+        self.dispatch_scope_units()
         self.negative_start()
+        self.dispatch_scope_control()
         original=(self.repo/"kanz/internal/bustest/reclaim.go").read_text()
         for label,mutant,reason in (
             ("missing-cleanup",original.replace("t.Helper()","t.Helper(); return",1),"owned subject survived cleanup"),
@@ -396,14 +529,9 @@ class Proof:
             if code==0 or not any(e["Action"]=="fail" and e.get("Test")=="TestReclaimPreservesAnUnrelatedCanonicalPosition" for e in ev) or reason not in raw.decode(): raise ValueError("cleanup negative control failed to discriminate: "+label)
             self.box.retain(label+"-events.jsonl",raw)
             self.box.retain(label+"-source.json",json.dumps({"mutated_sha256":digest(mutant.encode()),"expected_failure":reason}).encode())
-            self.negative_remove()
             # Only this explicitly owned negative fixture is recreated; never
             # the primary broker used for either complete suite pass.
-            host("umount",str(self.data))
-            self.data_mounted=False
-            host("mount","-t","tmpfs","-o","size=128M,nodev,nosuid,noexec,mode=0700,uid=65534,gid=65534","position-negative",str(self.data))
-            self.data_mounted=True
-            self.negative_create()
+            self.negative_fresh()
         seeded=self.controller("seed","negative-seed",negative=True)
         old=docker_identity(self.negative_id)
         self.negative_remove()
@@ -426,7 +554,7 @@ class Proof:
         self.controller("cleanup","sentinel-cleanup")
         self.cleaned=True
         self.controls()
-        self.box.retain("passes-complete.json",json.dumps({"source":self.source,"complete_passes":2,"packages_per_pass":len(packages),"same_broker":docker_identity(),"negative_controls":["missing-cleanup","global-purge","recreation-with-retained-storage"]},sort_keys=True).encode())
+        self.box.retain("passes-complete.json",json.dumps({"source":self.source,"complete_passes":2,"packages_per_pass":len(packages),"same_broker":docker_identity(),"negative_controls":["dispatch-raw-key","missing-cleanup","global-purge","recreation-with-retained-storage"]},sort_keys=True).encode())
 
     def close(self):
         failures=[]
@@ -464,6 +592,43 @@ class Proof:
             except BaseException as error: failures.append(type(error).__name__)
         if failures: raise ValueError("proof cleanup failed: "+",".join(failures))
 
+    def publish(self, *, complete):
+        """Copy only parent-declared bounded data after verified teardown."""
+        if not self.box or not self.box.cleanup_verified or self.box.receipts_fd is None:
+            raise ValueError("publication requires observed complete sandbox teardown")
+        before=os.fstat(self.publication_fd)
+        if not stat.S_ISDIR(before.st_mode) or before.st_uid!=os.geteuid() or stat.S_IMODE(before.st_mode)!=0o700:
+            raise ValueError("publication directory is not private")
+        # This descriptor has been retained since before source execution. The
+        # directory is parent-only and never mounted into a target boundary.
+        if set(os.listdir(self.box.receipts_fd))!=set(self.box.artifacts):
+            raise ValueError("undeclared private artifact")
+        hashes={};total=0
+        for name,expected in sorted(self.box.artifacts.items()):
+            if name in ("oms-store","position-reclaim"): continue
+            raw=read_regular(self.box.receipts_fd,name,MAX_EVENTS)
+            total+=len(raw)
+            if total>768*1024*1024 or expected!={"size":len(raw),"sha256":digest(raw)}:
+                raise ValueError("publication artifact differs or exceeds bound")
+            new_file(self.publication_fd,name,raw,mode=0o644)
+            hashes[name]=digest(raw)
+        if complete:
+            if "passes-complete.json" not in hashes: raise ValueError("complete pass receipt missing")
+            new_file(self.publication_fd,"complete.json",json.dumps({"source":self.source,"artifacts_sha256":hashes,"cleanup":"observed-complete"},sort_keys=True).encode(),mode=0o644)
+        os.fsync(self.publication_fd)
+        os.fchmod(self.publication_fd,0o755)
+        after=os.fstat(self.publication_fd)
+        if (before.st_dev,before.st_ino)!=(after.st_dev,after.st_ino) or not stat.S_ISDIR(after.st_mode) or after.st_uid!=os.geteuid() or stat.S_IMODE(after.st_mode)!=0o755:
+            raise ValueError("published directory identity or mode differs")
+
+    def close_receipts(self):
+        try:
+            if self.box and self.box.receipts_fd is not None:
+                os.close(self.box.receipts_fd)
+                self.box.receipts_fd=None
+        finally:
+            os.close(self.publication_fd)
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -480,28 +645,21 @@ def main():
         except BaseException as cleanup:
             cleanup_error=cleanup
             print("POSITION cleanup also refused:",type(cleanup).__name__,file=sys.stderr)
-        # Root-only intermediates are excluded from upload. Give the runner
-        # read access only after all targets have terminated.
-        if proof.box and proof.box.out.exists():
-            proof.root.chmod(0o711)
-            proof.box.out.chmod(0o755)
-            for path in proof.box.out.iterdir():
-                if path.name in ("oms-store","position-reclaim"): path.unlink()
-                elif path.is_file() and not path.is_symlink(): path.chmod(0o644)
-            if primary is None and cleanup_error is None:
-                fd=directory(proof.box.out)
-                try:
-                    hashes={}
-                    total=0
-                    for path in sorted(proof.box.out.iterdir()):
-                        raw=read_regular(fd,path.name,MAX_EVENTS)
-                        total+=len(raw)
-                        if total>768*1024*1024: raise ValueError("final artifact set exceeds bound")
-                        hashes[path.name]=digest(raw)
-                    new_file(fd,"complete.json",json.dumps({"source":proof.source,"artifacts_sha256":hashes,"cleanup":"observed-complete"},sort_keys=True).encode(),mode=0o644)
-                finally: os.close(fd)
-        print("POSITION protected evidence:",str(proof.root/"artifacts"),flush=True)
+        publication_error=None
+        try:
+            if cleanup_error is None and proof.box and proof.box.receipts_fd is not None:
+                proof.publish(complete=primary is None)
+                print("POSITION published evidence:",str(proof.publication),flush=True)
+        except BaseException as publication:
+            publication_error=publication
+            print("POSITION publication also refused:",type(publication).__name__,file=sys.stderr)
+        finally:
+            try: proof.close_receipts()
+            except BaseException as receipt_close:
+                if publication_error is None: publication_error=receipt_close
+                print("POSITION receipt descriptors also refused:",type(receipt_close).__name__,file=sys.stderr)
         if cleanup_error is not None and primary is None: raise cleanup_error
+        if publication_error is not None and primary is None: raise publication_error
 
 
 if __name__=="__main__":
