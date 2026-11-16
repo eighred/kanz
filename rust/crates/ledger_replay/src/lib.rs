@@ -28,7 +28,7 @@ impl From<kanz_order_core::cost_basis::Error> for Error {
     }
 }
 
-/// UTC seconds plus nanoseconds, avoiding UnixNano overflow outside 1678â€“2262.
+/// UTC seconds plus nanoseconds, avoiding UnixNano overflow outside 1678–2262.
 /// The Go zero instant is an unbounded read cutoff, never a default to now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimePoint {

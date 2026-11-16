@@ -110,7 +110,7 @@ func evaluate(s specimen) specimen {
 		}
 		s.Refusal = &refusal{"price", []string{name}}
 	default:
-		prefix := fmt.Sprintf("accounting: NAV in %s REFUSED â€” the book holds value in ", s.Reporting)
+		prefix := fmt.Sprintf("accounting: NAV in %s REFUSED — the book holds value in ", s.Reporting)
 		rest, ok := strings.CutPrefix(message, prefix)
 		if !ok {
 			panic(err)

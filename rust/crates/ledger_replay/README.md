@@ -38,7 +38,7 @@ bits per rational numerator/denominator, including fold results. Rationals must
 be reduced with a positive denominator; noncanonical `BigRational::new_raw` values
 are refused before arithmetic. Capacity, invalid-rational or unsupported errors
 return no partial book. UTC timestamps use seconds and nanos
-over years 1â€“9999; they do not overflow through a Unix-nanosecond conversion.
+over years 1–9999; they do not overflow through a Unix-nanosecond conversion.
 This is a finite qualification domain, not an unbounded historical-store API.
 
 From the repository root, generate a fresh test-only capture from the Go owner:
