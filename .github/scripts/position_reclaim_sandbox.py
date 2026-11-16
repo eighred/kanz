@@ -15,6 +15,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import socket
@@ -35,6 +36,9 @@ MAX_FILE = 32 * 1024 * 1024
 MAX_SOURCE = 1024 * 1024 * 1024
 MAX_OUTPUT = 256 * 1024 * 1024
 MAX_GIT_METADATA_ENTRIES = 10000
+STORE_EXPORT_MAX_BYTES = 128 * 1024 * 1024
+STORE_EXPORT_MAX_ENTRIES = 16
+STORE_EXPORT_FIELDS = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
 SAFE = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"}
 PROBE_ENTRY = b"POSITION_PROBE_ENTRY v1"
 PROBE_STAGES = frozenset(("arguments","identity","uid-map","gid-map","environment","core-limit","file-limit",
@@ -256,6 +260,226 @@ def read_regular(root_fd, relative, limit):
             os.close(leaf)
     finally:
         os.close(fd)
+
+
+def store_export_snapshot(info):
+    return tuple(getattr(info, name) for name in STORE_EXPORT_FIELDS)
+
+
+def store_export_scan(fd):
+    """Inspect only Cargo's fixed example namespace; never follow an alias."""
+    result = {}
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if len(result) >= STORE_EXPORT_MAX_ENTRIES or not re.fullmatch(r"fixture(?:-[0-9a-f]{16})?(?:\.d)?", entry.name):
+                raise ValueError("Cargo example inventory refused")
+            info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != (UID, UID):
+                raise ValueError("Cargo example type or owner refused")
+            if entry.name.endswith(".d"):
+                if info.st_nlink != 1 or info.st_size > MAX_FILE or stat.S_IMODE(info.st_mode) & ~0o644:
+                    raise ValueError("Cargo dependency record refused")
+            result[entry.name] = store_export_snapshot(info)
+    return result
+
+
+def export_rust_store(root_fd):
+    """Data-only packaging after every Cargo process has stopped.
+
+    Two in-directory live aliases must exhaust the source's link count. The
+    export owns a fresh inode; neither source alias is removed or promoted.
+    This utility is not an ELF executor, Cargo hook or general copy interface.
+    """
+    descriptors = []
+    output_fd = copy_fd = None
+    owned_output = None
+    copied = False
+    failure = None
+    directory_chain = []
+    try:
+        current = os.dup(root_fd)
+        descriptors.append(current)
+        root = os.fstat(current)
+        if not stat.S_ISDIR(root.st_mode) or (root.st_uid, root.st_gid) != (UID, UID) or stat.S_IMODE(root.st_mode) != 0o700:
+            raise ValueError("assigned export scratch refused")
+        for component in ("rust-target", "debug", "examples"):
+            parent_fd = current
+            current = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+            descriptors.append(current)
+            info = os.fstat(current)
+            if (info.st_uid, info.st_gid) != (UID, UID) or stat.S_IMODE(info.st_mode) & 0o7022:
+                raise ValueError("Cargo example directory refused")
+            directory_chain.append((parent_fd, component, current, store_export_snapshot(info)))
+        examples_fd = current
+        directory_before = store_export_snapshot(os.fstat(examples_fd))
+        inventory = store_export_scan(examples_fd)
+        source_fd = os.open("fixture", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=examples_fd)
+        descriptors.append(source_fd)
+        source = os.fstat(source_fd)
+        if not stat.S_ISREG(source.st_mode) or (source.st_uid, source.st_gid) != (UID, UID) or source.st_nlink != 2 or not 0 < source.st_size <= STORE_EXPORT_MAX_BYTES or stat.S_IMODE(source.st_mode) not in (0o555, 0o755):
+            raise ValueError("Cargo fixture source refused")
+        source_before = store_export_snapshot(source)
+        aliases = [name for name, facts in inventory.items() if facts[:2] == source_before[:2]]
+        if len(aliases) != 2 or "fixture" not in aliases or not any(re.fullmatch(r"fixture-[0-9a-f]{16}", name) for name in aliases):
+            raise ValueError("Cargo fixture links are not wholly accounted")
+        if any(not name.endswith(".d") and name not in aliases for name in inventory):
+            raise ValueError("unrelated Cargo executable refused")
+        if any(inventory[name] != source_before for name in aliases):
+            raise ValueError("Cargo fixture alias changed")
+        os.mkdir("rust-store-export", mode=0o700, dir_fd=root_fd)
+        owned_output = os.stat("rust-store-export", dir_fd=root_fd, follow_symlinks=False)
+        output_fd = os.open("rust-store-export", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+        if (os.fstat(output_fd).st_dev, os.fstat(output_fd).st_ino) != (owned_output.st_dev, owned_output.st_ino) or not stat.S_ISDIR(owned_output.st_mode) or (owned_output.st_uid, owned_output.st_gid) != (UID, UID):
+            raise ValueError("exclusive export directory changed")
+        os.fchmod(output_fd, 0o700)
+        output_before = store_export_snapshot(os.fstat(output_fd))
+        copy_fd = os.open("fixture", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=output_fd)
+        copied = True
+        copy_initial = os.fstat(copy_fd)
+        if not stat.S_ISREG(copy_initial.st_mode) or copy_initial.st_nlink != 1 or (copy_initial.st_uid, copy_initial.st_gid) != (UID, UID) or (copy_initial.st_dev, copy_initial.st_ino) == (source.st_dev, source.st_ino):
+            raise ValueError("independent export inode refused")
+        os.fchmod(copy_fd, 0o600)
+        output_after_creation = store_export_snapshot(os.fstat(output_fd))
+        source_hash = hashlib.sha256()
+        count = 0
+        while chunk := os.read(source_fd, min(65536, STORE_EXPORT_MAX_BYTES + 1 - count)):
+            count += len(chunk)
+            if count > STORE_EXPORT_MAX_BYTES:
+                raise ValueError("Cargo fixture grew past bound")
+            source_hash.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(copy_fd, view)
+                if written <= 0:
+                    raise ValueError("export write refused")
+                view = view[written:]
+        if count != source.st_size or store_export_snapshot(os.fstat(source_fd)) != source_before:
+            raise ValueError("Cargo fixture changed during export")
+        os.fsync(copy_fd)
+        os.lseek(copy_fd, 0, os.SEEK_SET)
+        copy_hash = hashlib.sha256()
+        copy_count = 0
+        while chunk := os.read(copy_fd, min(65536, STORE_EXPORT_MAX_BYTES + 1 - copy_count)):
+            copy_count += len(chunk)
+            if copy_count > STORE_EXPORT_MAX_BYTES:
+                raise ValueError("export copy grew past bound")
+            copy_hash.update(chunk)
+        if copy_count != count or copy_hash.digest() != source_hash.digest():
+            raise ValueError("independent export digest differs")
+        os.fchmod(copy_fd, 0o555)
+        os.fsync(copy_fd)
+        os.fsync(output_fd)
+        copy_info = os.fstat(copy_fd)
+        if store_export_snapshot(os.stat("fixture", dir_fd=output_fd, follow_symlinks=False)) != store_export_snapshot(copy_info) or copy_info.st_nlink != 1 or copy_info.st_size != count or stat.S_IMODE(copy_info.st_mode) != 0o555:
+            raise ValueError("export inode custody changed")
+        if store_export_snapshot(os.fstat(source_fd)) != source_before or store_export_scan(examples_fd) != inventory or store_export_snapshot(os.fstat(examples_fd)) != directory_before or store_export_snapshot(os.fstat(output_fd)) != output_after_creation:
+            raise ValueError("export source or directory changed")
+        for parent_fd, component, descriptor, before in directory_chain:
+            if store_export_snapshot(os.fstat(descriptor)) != before or store_export_snapshot(os.stat(component, dir_fd=parent_fd, follow_symlinks=False)) != before:
+                raise ValueError("fixed Cargo directory ancestry changed")
+        if output_before[:6] != output_after_creation[:6] or stat.S_IMODE(os.fstat(output_fd).st_mode) != 0o700:
+            raise ValueError("private export directory changed")
+        named_output = os.stat("rust-store-export", dir_fd=root_fd, follow_symlinks=False)
+        if store_export_snapshot(named_output) != store_export_snapshot(os.fstat(output_fd)):
+            raise ValueError("export directory custody changed")
+        return {"schema": 1, "role": "rust-store-executable-export", "entry_count": len(inventory), "alias_count": 2,
+                "source": {"bytes": count, "uid": source.st_uid, "gid": source.st_gid, "mode": stat.S_IMODE(source.st_mode), "links": source.st_nlink, "sha256": source_hash.hexdigest()},
+                "copy": {"bytes": copy_count, "uid": copy_info.st_uid, "gid": copy_info.st_gid, "mode": stat.S_IMODE(copy_info.st_mode), "links": copy_info.st_nlink, "sha256": copy_hash.hexdigest()}, "distinct_inode": True}
+    except BaseException as error:
+        failure = error
+        # Remove only the still-owned inode/directory. Foreign collisions stay
+        # untouched; final Sandbox teardown remains mandatory after any refusal.
+        cleanup_refused = False
+        if copied:
+            try:
+                info = os.stat("fixture", dir_fd=output_fd, follow_symlinks=False)
+                own = os.fstat(copy_fd)
+                if (info.st_dev, info.st_ino) != (own.st_dev, own.st_ino):
+                    raise ValueError("export cleanup custody differs")
+                os.unlink("fixture", dir_fd=output_fd)
+            except BaseException:
+                cleanup_refused = True
+        if owned_output is not None:
+            try:
+                info = os.stat("rust-store-export", dir_fd=root_fd, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) != (owned_output.st_dev, owned_output.st_ino):
+                    raise ValueError("export directory cleanup custody differs")
+                os.rmdir("rust-store-export", dir_fd=root_fd)
+            except BaseException:
+                cleanup_refused = True
+        if cleanup_refused:
+            error.add_note("owned export cleanup refused; full sandbox teardown remains required")
+        raise
+    finally:
+        close_refused = False
+        for fd in (copy_fd, output_fd, *reversed(descriptors)):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    close_refused = True
+        if close_refused:
+            if failure is not None:
+                failure.add_note("export descriptor cleanup refused")
+            else:
+                raise ValueError("export descriptor cleanup refused")
+
+
+def rust_store_export_program():
+    """The only exporter command: fixed paths, no candidate imports or argv."""
+    utility = "import hashlib,json,os,re,stat\nfrom pathlib import Path\n"
+    for name, value in (("UID", UID), ("MAX_FILE", MAX_FILE), ("STORE_EXPORT_MAX_BYTES", STORE_EXPORT_MAX_BYTES), ("STORE_EXPORT_MAX_ENTRIES", STORE_EXPORT_MAX_ENTRIES), ("STORE_EXPORT_FIELDS", STORE_EXPORT_FIELDS)):
+        utility += name + "=" + repr(value) + "\n"
+    for function in (directory, store_export_snapshot, store_export_scan, export_rust_store):
+        utility += inspect.getsource(function) + "\n"
+    return utility + '''
+root_fd=None
+try:
+    root_fd=directory("/scratch")
+    receipt=export_rust_store(root_fd)
+    raw=json.dumps(receipt,sort_keys=True,separators=(",",":")).encode()
+    if len(raw)>16384: raise ValueError("export receipt exceeds bound")
+    os.write(1,raw+b"\\n")
+except BaseException:
+    os.write(1,b"POSITION_STORE_EXPORT_REFUSED v1\\n")
+    raise SystemExit(79) from None
+finally:
+    if root_fd is not None: os.close(root_fd)
+'''
+
+
+def validate_store_export(raw, binary, info):
+    """Parent compares typed data to its own bounded one-link file read."""
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate export field")
+            result[key] = value
+        return result
+    if type(raw) is not bytes or len(raw) > 16384 or type(binary) is not bytes or not 0 < len(binary) <= STORE_EXPORT_MAX_BYTES:
+        raise ValueError("export receipt or bytes exceed bound")
+    try:
+        row = json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ValueError("export receipt framing refused") from None
+    if type(row) is not dict or set(row) != {"schema", "role", "entry_count", "alias_count", "source", "copy", "distinct_inode"}:
+        raise ValueError("closed export receipt required")
+    if type(row["schema"]) is not int or row["schema"] != 1 or row["role"] != "rust-store-executable-export" or row["distinct_inode"] is not True:
+        raise ValueError("export identity refused")
+    if type(row["entry_count"]) is not int or not 2 <= row["entry_count"] <= STORE_EXPORT_MAX_ENTRIES or type(row["alias_count"]) is not int or row["alias_count"] != 2:
+        raise ValueError("export inventory refused")
+    for key, links, modes in (("source", 2, (0o555, 0o755)), ("copy", 1, (0o555,))):
+        facts = row[key]
+        if type(facts) is not dict or set(facts) != {"bytes", "uid", "gid", "mode", "links", "sha256"}:
+            raise ValueError("closed export file facts required")
+        if any(type(facts[name]) is not int for name in ("bytes", "uid", "gid", "mode", "links")) or facts["bytes"] != len(binary) or facts["uid"] != UID or facts["gid"] != UID or facts["mode"] not in modes or facts["links"] != links:
+            raise ValueError("export file facts differ")
+        if type(facts["sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", facts["sha256"]) or facts["sha256"] != hashlib.sha256(binary).hexdigest():
+            raise ValueError("export digest differs from actual bytes")
+    if not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid, info.st_nlink, info.st_size, stat.S_IMODE(info.st_mode)) != (UID, UID, 1, len(binary), 0o555):
+        raise ValueError("actual export file facts differ")
+    return row
 
 
 def new_file(root_fd, name, raw, mode=0o600):
@@ -921,6 +1145,57 @@ os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
         self.executions[-1]["launch_permissions"]=access
         if access["status"]!="passed": raise ValueError("launch permission preflight refused")
         return code,rest
+
+    def stopped_execution(self, command):
+        if self.active or not self.executions:
+            raise ValueError("export requires observed worker termination")
+        last = self.executions[-1]
+        if last.get("command") != command or type(last.get("supervisor_exit")) is not int or last["supervisor_exit"] != 0 or last.get("remaining_processes") is not False:
+            raise ValueError("export requires the successful stopped fixed worker")
+        effective = last.get("effective")
+        if type(effective) is not dict or effective.get("memory.max") != str(6*1024**3) or effective.get("memory.swap.max") != "0" or effective.get("pids.max") != "512":
+            raise ValueError("export worker effective bounds absent")
+        quota, period = map(int, effective.get("cpu.max", "").split())
+        if period <= 0 or quota != 2*period:
+            raise ValueError("export worker CPU bound differs")
+
+    def export_store(self):
+        self.stopped_execution(["cargo", "build", "--frozen", "-p", "kanz-oms-store", "--example", "fixture"])
+        program = rust_store_export_program()
+        command = ["python3", "-I", "-S", "-c", program]
+        code, raw = self.execute(command, cwd="/input/rust", seconds=30, output_limit=16384)
+        self.stopped_execution(command)
+        if code != 0:
+            raise ValueError("fixed Rust producer export refused")
+        # Validate actual bytes through the unchanged no-follow, bounded,
+        # one-link reader only after the exporter cgroup is empty as well.
+        output_fd = os.open("rust-store-export", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.work_fd)
+        try:
+            directory_before = store_export_snapshot(os.fstat(output_fd))
+            info = os.fstat(output_fd)
+            if (info.st_uid, info.st_gid) != (UID, UID) or stat.S_IMODE(info.st_mode) != 0o700:
+                raise ValueError("private Rust export directory differs")
+            leaf = os.open("fixture", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=output_fd)
+            try:
+                before = store_export_snapshot(os.fstat(leaf))
+                try:
+                    binary = read_regular(output_fd, "fixture", STORE_EXPORT_MAX_BYTES)
+                except EvidenceFileRefusal as error:
+                    self.retain("promotion-refusal.json", json.dumps({"schema": 1, "role": "rust-store-executable", **error.observation}, sort_keys=True).encode())
+                    raise
+                receipt = validate_store_export(raw, binary, os.fstat(leaf))
+                if before != store_export_snapshot(os.fstat(leaf)) or before != store_export_snapshot(os.stat("fixture", dir_fd=output_fd, follow_symlinks=False)) or directory_before != store_export_snapshot(os.fstat(output_fd)):
+                    raise ValueError("parent Rust export custody changed")
+                if directory_before != store_export_snapshot(os.stat("rust-store-export", dir_fd=self.work_fd, follow_symlinks=False)):
+                    raise ValueError("parent Rust export directory changed")
+            finally:
+                os.close(leaf)
+        finally:
+            os.close(output_fd)
+        self.retain("rust-store-export.json", json.dumps(receipt, sort_keys=True).encode())
+        self.retain("rust-store-export-utility.json", json.dumps({"schema": 1, "role": "fixed-data-only-exporter", "sha256": hashlib.sha256(program.encode()).hexdigest()}, sort_keys=True).encode())
+        self.retain("oms-store", binary)
+        return binary
 
     def promote(self,relative,name,limit):
         try:

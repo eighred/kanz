@@ -46,7 +46,7 @@ for _name,_expected in EVIDENCE_PINS.items():
 
 from go_shard_evidence import identity, inventory, validate_events, digest, MAX_EVENTS
 from go_test_evidence import check, events
-from position_reclaim_sandbox import Sandbox, VisibleInputCapsule, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS, effective_environment
+from position_reclaim_sandbox import Sandbox, VisibleInputCapsule, directory, read_regular, new_file, host, SAFE, PORTS, RELAY_PORTS, effective_environment, rust_store_export_program
 
 
 def require_go_toolchain(value):
@@ -329,6 +329,7 @@ class Proof:
         provenance["go_sum"]={"tested_sha256":digest(tested_sum),"tracked_sha256":digest(tracked_sum),"changed_by_provisioning":tested_sum!=tracked_sum}
         provenance["go_mod_sha256"]=digest(go_mod)
         provenance["cargo_lock_sha256"]=digest(cargo_lock)
+        provenance["rust_store_exporter_sha256"]=digest(rust_store_export_program().encode())
         sdk_fd=directory(self.repo/"schemas/gen/go")
         sdk={};total=0
         try:
@@ -348,7 +349,7 @@ class Proof:
         provenance["sysroot_packages_sha256"]=digest(packages)
         self.box.retain("provenance.json",json.dumps(provenance,sort_keys=True).encode())
         self.successful(["cargo","build","--frozen","-p","kanz-oms-store","--example","fixture"],cwd="/input/rust",seconds=540)
-        binary=self.box.promote("rust-target/debug/examples/fixture","oms-store",128*1024*1024)
+        binary=self.box.export_store()
         (self.box.out/"oms-store").chmod(0o555)
         # Build products are not dependency inputs for subsequent commands.
         self.successful(["rm","-rf","/scratch/rust-target"],seconds=30)
