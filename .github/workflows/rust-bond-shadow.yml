@@ -99,7 +99,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate canonical Go contracts
@@ -154,7 +154,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate canonical Go contracts
@@ -201,4 +201,74 @@ jobs:
         with:
           name: american-option-pricing-evidence
           path: ${{ runner.temp }}/american-option-pricing-evidence/
+          if-no-files-found: warn
+
+  term-structure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical Go contracts
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Capture actual Go term structure and affected consumers
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/term-structure-evidence"
+          go test -p 1 ./internal/risk/pricing/curve ./internal/risk/pricing ./internal/risk/compute ./services/risk_engine/tools/curve_reference -count=1
+          go run ./services/risk_engine/tools/curve_reference -source "$GITHUB_SHA" > "$RUNNER_TEMP/term-structure-evidence/go-reference.json"
+          go run ./services/risk_engine/tools/curve_reference -mixed -source "$GITHUB_SHA" > "$RUNNER_TEMP/term-structure-evidence/go-mixed-reference.json"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/term-structure-evidence/source.txt"
+          go version > "$RUNNER_TEMP/term-structure-evidence/go-version.txt"
+          sha256sum ../rust/Cargo.lock > "$RUNNER_TEMP/term-structure-evidence/lock.sha256"
+          sha256sum "$RUNNER_TEMP/term-structure-evidence/go-reference.json" > "$RUNNER_TEMP/term-structure-evidence/corpus.sha256"
+          sha256sum "$RUNNER_TEMP/term-structure-evidence/go-mixed-reference.json" > "$RUNNER_TEMP/term-structure-evidence/mixed-corpus.sha256"
+          go test -p 1 ./internal/risk/pricing/curve -run '^$' -bench '^BenchmarkBootstrap$' -benchtime=100ms -count=3 | tee "$RUNNER_TEMP/term-structure-evidence/current-benchmark.log"
+      - name: Verify independent equations and fresh Go compatibility
+        working-directory: rust
+        env:
+          KANZ_CURVE_CORPUS: ${{ runner.temp }}/term-structure-evidence/go-reference.json
+          KANZ_CURVE_SOURCE: ${{ github.sha }}
+          KANZ_MIXED_SOURCE: ${{ github.sha }}
+          KANZ_MIXED_CORPUS: ${{ runner.temp }}/term-structure-evidence/go-mixed-reference.json
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          rustc --version > "$RUNNER_TEMP/term-structure-evidence/rust-version.txt"
+          cargo fmt --all -- --check
+          cargo clippy --locked -p kanz-term-structure --all-targets -- -D warnings
+          python3 -B crates/term_structure/reference/reference.py --check 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/decimal-reference.log"
+          python3 -B crates/term_structure/reference/mixed_reference.py --check 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-decimal-reference.log"
+          python3 -B crates/term_structure/reference/interpolation_reference.py --check 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/rational-reference.log"
+          sha256sum crates/term_structure/reference/interpolation_reference.py crates/term_structure/tests/interpolation_reference.json > "$RUNNER_TEMP/term-structure-evidence/rational-reference.sha256"
+          sha256sum crates/term_structure/reference/mixed_reference.py crates/term_structure/tests/mixed_reference.json > "$RUNNER_TEMP/term-structure-evidence/mixed-reference.sha256"
+          sha256sum crates/term_structure/reference/reference.py crates/term_structure/tests/reference.json > "$RUNNER_TEMP/term-structure-evidence/reference.sha256"
+          cargo test --locked -p kanz-term-structure --test numerical 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/numerical.log"
+          cargo test --locked -p kanz-term-structure --test interpolation 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/interpolation.log"
+          cargo test --locked -p kanz-term-structure --lib 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-budget.log"
+          cargo test --locked -p kanz-term-structure --test calibration 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-numerical.log"
+          cargo test --locked -p kanz-term-structure --test calibration fresh_mixed_go_oracle_is_required -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/mixed-conformance.log"
+          cargo test --locked -p kanz-term-structure --test go_conformance missing_or_malformed_capture_refuses -- --exact 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/capture-refusal.log"
+          cargo test --locked -p kanz-term-structure --test go_conformance fresh_go_oracle_is_required -- --ignored --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/term-structure-evidence/conformance.log"
+      - name: Verify scalar ownership and required evidence
+        working-directory: kanz
+        run: |
+          go test -p 1 ./test/arch -run 'Test(RustTermStructure|RustBondShadow|RustMigration|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+      - name: Preserve source-bound term-structure evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: term-structure-evidence
+          path: ${{ runner.temp }}/term-structure-evidence/
           if-no-files-found: warn

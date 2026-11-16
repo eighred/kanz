@@ -113,6 +113,10 @@ func rustBoundaryFixtureFiles() []string {
 	for _, file := range rustLedgerSources {
 		out = append(out, rustLedgerPath+"/"+file)
 	}
+	out = append(out, rustTermPath+"/Cargo.toml")
+	for _, file := range append(append([]string{}, rustTermSources...), rustTermArtifacts...) {
+		out = append(out, rustTermPath+"/"+file)
+	}
 	for name, spec := range rustFeedPackages {
 		out = append(out, name+"/Cargo.toml")
 		for file := range spec.sources {
