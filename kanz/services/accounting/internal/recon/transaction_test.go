@@ -77,7 +77,7 @@ func custodianLines() []Transaction {
 func TestTransactionReconIsBlindAtTheNettedGrain(t *testing.T) {
 	book, executions, net, cash := twelveFills(t)
 
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		BusinessDate: day(1),
 		Positions:    map[string]*big.Rat{"AAPL": net},
@@ -106,7 +106,7 @@ func TestTransactionReconIsBlindAtTheNettedGrain(t *testing.T) {
 func TestTransactionReconNamesTheExecutionTheCustodianNeverSaw(t *testing.T) {
 	book, executions, net, cash := twelveFills(t)
 
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		BusinessDate: day(1),
 		Positions:    map[string]*big.Rat{"AAPL": net},
@@ -183,7 +183,7 @@ func TestTransactionReconEmptyIsNotNone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stmt := base
 			stmt.Grain = tc.grain
-			breaks, leg := Reconcile(book, executions, stmt, nil)
+			breaks, leg := reconcileForTest(t, book, executions, stmt, nil)
 			if leg != tc.wantLeg {
 				t.Errorf("leg = %s, want %s", leg, tc.wantLeg)
 			}
@@ -212,7 +212,7 @@ func TestTransactionReconWindowsTheBookByBusinessDate(t *testing.T) {
 		TradeDate: day(0), SettlementBasis: ledger.SettlementSettled, SettlementDate: day(0),
 	})
 
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		BusinessDate: day(1),
 		Positions:    map[string]*big.Rat{"AAPL": net},
@@ -239,7 +239,7 @@ func TestTransactionReconWindowsTheBookByBusinessDate(t *testing.T) {
 // not run rather than compare a whole journal against it.
 func TestTransactionReconRefusesAWindowlessStatement(t *testing.T) {
 	book, executions, net, cash := twelveFills(t)
-	breaks, leg := Reconcile(book, executions, Statement{
+	breaks, leg := reconcileForTest(t, book, executions, Statement{
 		PortfolioID:  "PF",
 		Positions:    map[string]*big.Rat{"AAPL": net},
 		Cash:         map[string]*big.Rat{"USD": cash},
@@ -270,7 +270,7 @@ func TestTransactionReconUsesTheTradeDateWhenNoSettlementDateIsAsserted(t *testi
 			"would silently drop it out of every transaction comparison",
 			got.Format("2006-01-02"), day(1).Format("2006-01-02"))
 	}
-	breaks, leg := Reconcile(ledger.NewBook("PF"), []ledger.Execution{unstated}, Statement{
+	breaks, leg := reconcileForTest(t, ledger.NewBook("PF"), []ledger.Execution{unstated}, Statement{
 		PortfolioID: "PF", BusinessDate: day(1), Grain: GrainTransactions,
 	}, nil)
 	if !leg.Ran() || len(breaks) != 1 || breaks[0].Key != "fill-unstated" {

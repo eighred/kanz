@@ -84,7 +84,7 @@ func TestPostgresMaterializeForAccountsScopesTheBookToOneCustodian(t *testing.T)
 		{"CUST-B", custB, "MSFT", 250, -250, "AAPL", "bin-main"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			basis, err := MaterializeForAccounts(ctx, st, "PORT-CUST", tc.scope, claimed)
+			basis, err := MaterializeForAccounts(ctx, st, "PORT-CUST", tc.scope, claimed, at.Add(24*time.Hour))
 			if err != nil {
 				t.Fatalf("MaterializeForAccounts: %v", err)
 			}
@@ -159,7 +159,7 @@ func TestPostgresMaterializeForAccountsReportsAnUnclaimedAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	basis, err := MaterializeForAccounts(ctx, st, "PORT-CUST", claimed, claimed)
+	basis, err := MaterializeForAccounts(ctx, st, "PORT-CUST", claimed, claimed, at.Add(24*time.Hour))
 	if err != nil {
 		t.Fatalf("MaterializeForAccounts: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestPostgresMaterializeAttributedDerivesTheScopeFromTheJournal(t *testing.T
 		}
 	}
 
-	basis, err := MaterializeAttributed(ctx, st, "PORT-CUST")
+	basis, err := MaterializeAttributed(ctx, st, "PORT-CUST", at.Add(24*time.Hour))
 	if err != nil {
 		t.Fatalf("MaterializeAttributed: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestPostgresMaterializeAttributedReportsAnEmptyDerivedScope(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	basis, err := MaterializeAttributed(ctx, st, "PORT-CUST")
+	basis, err := MaterializeAttributed(ctx, st, "PORT-CUST", at.Add(24*time.Hour))
 	if err != nil {
 		t.Fatalf("MaterializeAttributed: %v", err)
 	}

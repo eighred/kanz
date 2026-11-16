@@ -193,8 +193,8 @@ func WithOnUncovered(fn func(venue, account string, excluded uint32)) Option {
 	return func(v *View) { v.onUncovered = fn }
 }
 
-// WithOnUndated is called when an observation arrives with no observation time
-// and is therefore discarded.
+// WithOnUndated is called when an observation arrives without a usable
+// observation time and is therefore discarded.
 func WithOnUndated(fn func(venue, account string)) Option {
 	return func(v *View) { v.onUndated = fn }
 }
@@ -239,17 +239,20 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 		// partial answer under one fresh observation timestamp.
 		return nil
 	}
-	observedAt := msg.GetObservedAt().AsTime().UTC()
-	if observedAt.IsZero() || msg.GetObservedAt() == nil {
+	stamp := msg.GetObservedAt()
+	if stamp == nil || stamp.CheckValid() != nil || stamp.AsTime().IsZero() {
 		// AN UNDATED MARGIN FIGURE IS NOT A MARGIN FIGURE. Folding it would put a
 		// number of unknown age behind a freshness bound that could never judge it
 		// — the exact substitution the bound exists to prevent — so it is dropped
 		// and the account keeps whatever it had, which will itself age out.
+		// Validate before AsTime: it normalizes invalid nanos into another instant,
+		// which could make malformed venue state appear fresh to every margin control.
 		if v.onUndated != nil {
 			v.onUndated(key.venue, key.account)
 		}
 		return nil
 	}
+	observedAt := stamp.AsTime().UTC()
 
 	snap := snapshot{
 		observedAt:  observedAt,

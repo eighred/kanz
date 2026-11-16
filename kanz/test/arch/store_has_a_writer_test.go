@@ -18,7 +18,7 @@ import (
 // internal/marketdata/terms is the contract-terms store. It has a production
 // READER: termsource.Provider (internal/risk/termsource/provider.go — its
 // TermsAsOf and Curve call store.LatestAsOf), constructed at
-// services/risk-engine/cmd/risk-engine/main.go and handed straight to
+// services/risk_engine/cmd/risk_engine/main.go and handed straight to
 // compute.RegisterFIRisk on the next line.
 // DV01, Duration, Convexity and SpreadDuration are registered off it.
 //
@@ -155,7 +155,7 @@ var storeWithoutAWriterExempt = map[string]string{
 		"internal/risk/termsource/provider_test.go); the only non-test construction of a " +
 		"reference.v1.ContractTerms in the module is postgres.go, which is the unmarshal " +
 		"target on the way OUT. Nothing has ever produced a term. The reader is live and reaches " +
-		"production: termsource.Provider is built at services/risk-engine/cmd/risk-engine/" +
+		"production: termsource.Provider is built at services/risk_engine/cmd/risk_engine/" +
 		"main.go and handed to compute.RegisterFIRisk on the next line, so DV01, Duration, " +
 		"Convexity and SpreadDuration are registered over an empty table today. Missing " +
 		"terms produce excluded InputCoverage and OMS refuses those measures for admission " +

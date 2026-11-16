@@ -7,21 +7,21 @@ cache-mode: read
 on:
   pull_request:
     paths:
-      - 'kanz-rs/**'
-      - 'kanz-web/.nvmrc'
-      - 'kanz-schemas/proto/**'
+      - 'rust/**'
+      - 'web/.nvmrc'
+      - 'schemas/proto/**'
       - 'kanz/internal/dec/**'
-      - 'kanz/tools/decimal-conformance/**'
-      - 'kanz/tools/depth-conformance/**'
+      - 'kanz/tools/decimal_conformance/**'
+      - 'kanz/tools/depth_conformance/**'
       - 'kanz/pkg/alpha/**'
-      - 'kanz/services/market-ingest/**'
+      - 'kanz/services/market_ingest/**'
       - 'kanz/dev/**'
       - 'kanz/pkg/bus/**'
       - 'kanz/services/archiver/**'
-      - 'kanz/services/lake-sink/**'
-      - 'kanz/services/api-gateway/**'
-      - 'kanz/cmd/kanz-lake-snapshot/**'
-      - 'kanz/cmd/kanz-tenantgen/**'
+      - 'kanz/services/lake_sink/**'
+      - 'kanz/services/api_gateway/**'
+      - 'kanz/cmd/kanz_lake_snapshot/**'
+      - 'kanz/cmd/kanz_tenantgen/**'
       - 'kanz/infra/nats/**'
       - 'kanz/internal/lake/**'
       - 'kanz/internal/testidentity/**'
@@ -40,7 +40,7 @@ on:
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/*feed_handoff_evidence.py'
       - '.github/scripts/*rust*audit*'
-      - 'tools/rust-audit-tools/**'
+      - 'tools/rust_audit_tools/**'
       - '.github/scripts/*rust_release_evidence.py'
       - '.github/workflows/release.yml'
       - '.github/workflows/build.yml'
@@ -48,21 +48,21 @@ on:
   push:
     branches: [main]
     paths:
-      - 'kanz-rs/**'
-      - 'kanz-web/.nvmrc'
-      - 'kanz-schemas/proto/**'
+      - 'rust/**'
+      - 'web/.nvmrc'
+      - 'schemas/proto/**'
       - 'kanz/internal/dec/**'
-      - 'kanz/tools/decimal-conformance/**'
-      - 'kanz/tools/depth-conformance/**'
+      - 'kanz/tools/decimal_conformance/**'
+      - 'kanz/tools/depth_conformance/**'
       - 'kanz/pkg/alpha/**'
-      - 'kanz/services/market-ingest/**'
+      - 'kanz/services/market_ingest/**'
       - 'kanz/dev/**'
       - 'kanz/pkg/bus/**'
       - 'kanz/services/archiver/**'
-      - 'kanz/services/lake-sink/**'
-      - 'kanz/services/api-gateway/**'
-      - 'kanz/cmd/kanz-lake-snapshot/**'
-      - 'kanz/cmd/kanz-tenantgen/**'
+      - 'kanz/services/lake_sink/**'
+      - 'kanz/services/api_gateway/**'
+      - 'kanz/cmd/kanz_lake_snapshot/**'
+      - 'kanz/cmd/kanz_tenantgen/**'
       - 'kanz/infra/nats/**'
       - 'kanz/internal/lake/**'
       - 'kanz/internal/testidentity/**'
@@ -81,7 +81,7 @@ on:
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/*feed_handoff_evidence.py'
       - '.github/scripts/*rust*audit*'
-      - 'tools/rust-audit-tools/**'
+      - 'tools/rust_audit_tools/**'
       - '.github/scripts/*rust_release_evidence.py'
       - '.github/workflows/release.yml'
       - '.github/workflows/build.yml'
@@ -111,20 +111,20 @@ jobs:
           printf '%s\n%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > snapshot-proof/run.txt
           rustc +1.90.0 --version > snapshot-proof/toolchain.txt
       - name: Build overflow-checked worker and separate kernel probe
-        working-directory: kanz-rs
+        working-directory: rust
         run: |
           cargo +1.90.0 fmt --all -- --check
           cargo +1.90.0 build --release --locked -p kanz-lake-snapshot --bin kanz-lake-snapshot --example sandbox-probe
       - name: Execute actual finite queries and process confinement
-        working-directory: kanz-rs
+        working-directory: rust
         run: |
           set -euo pipefail
           cargo +1.90.0 test --release --locked -p kanz-lake-snapshot --all-targets -- --test-threads=1 2>&1 | tee ../snapshot-proof/tests.txt
           cargo +1.90.0 clippy --release --locked -p kanz-lake-snapshot --all-targets -- -D warnings
       - name: Bind tested binaries and dependency inventory
         run: |
-          sha256sum kanz-rs/target/release/kanz-lake-snapshot kanz-rs/target/release/examples/sandbox-probe kanz-rs/Cargo.lock > snapshot-proof/sha256.txt
-          cargo +1.90.0 tree --manifest-path kanz-rs/Cargo.toml --locked -p kanz-lake-snapshot -e normal > snapshot-proof/dependencies.txt
+          sha256sum rust/target/release/kanz-lake-snapshot rust/target/release/examples/sandbox-probe rust/Cargo.lock > snapshot-proof/sha256.txt
+          cargo +1.90.0 tree --manifest-path rust/Cargo.toml --locked -p kanz-lake-snapshot -e normal > snapshot-proof/dependencies.txt
       - name: Retain actual snapshot qualification
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -142,7 +142,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate canonical snapshot SDK
@@ -159,16 +159,16 @@ jobs:
           git rev-parse HEAD 'HEAD^{tree}' > snapshot-owner-proof/source.txt
           printf '%s\n%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > snapshot-owner-proof/run.txt
           rustup toolchain install 1.90.0 --profile minimal
-          KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo +1.90.0 build --release --locked --manifest-path kanz-rs/Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot
-          sudo install -o root -g root -m 0555 kanz-rs/target/release/kanz-lake-snapshot "$RUNNER_TEMP/lake-bin/worker"
-          sudo install -o root -g root -m 0555 kanz-rs/target/release/kanz-lake-snapshot "$RUNNER_TEMP/lake-bin/worker-swap"
+          KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo +1.90.0 build --release --locked --manifest-path rust/Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot
+          sudo install -o root -g root -m 0555 rust/target/release/kanz-lake-snapshot "$RUNNER_TEMP/lake-bin/worker"
+          sudo install -o root -g root -m 0555 rust/target/release/kanz-lake-snapshot "$RUNNER_TEMP/lake-bin/worker-swap"
           cd kanz
           stamp="-X github.com/eighred/kanz/internal/version.stamped=$(git rev-parse HEAD)"
-          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/owner.test" ./services/lake-sink/internal/snapshot
-          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/gateway.test" ./services/api-gateway/cmd/api-gateway
+          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/owner.test" ./services/lake_sink/internal/snapshot
+          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/gateway.test" ./services/api_gateway/cmd/api_gateway
           go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/archiver.test" ./services/archiver/internal/archive
-          go build -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/kanz-lake-snapshot" ./cmd/kanz-lake-snapshot
-          go vet ./services/lake-sink/... ./services/api-gateway/... ./services/archiver/... ./cmd/kanz-lake-snapshot ./infra/nats
+          go build -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/kanz-lake-snapshot" ./cmd/kanz_lake_snapshot
+          go vet ./services/lake_sink/... ./services/api_gateway/... ./services/archiver/... ./cmd/kanz_lake_snapshot ./infra/nats
       - name: Authenticate existing private image mirrors
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -193,7 +193,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: kanz/services/lake-sink/Dockerfile
+          file: kanz/services/lake_sink/Dockerfile
           build-args: VERSION=${{ github.sha }}
           builder: ${{ steps.lake-builder.outputs.name }}
           tags: kanz-lake-sink:verification
@@ -298,7 +298,7 @@ jobs:
           result=0
           for version in 2.12.6 2.14.5; do
             export TEST_LAKE_NATS_VERSION="$version" TEST_LAKE_NATS_SERVER="$RUNNER_TEMP/lake-bin/nats-$version"
-            (cd kanz/services/lake-sink/internal/snapshot && go tool test2json -t -p github.com/eighred/kanz/services/lake-sink/internal/snapshot "$RUNNER_TEMP/lake-bin/owner.test" -test.v=test2json -test.count=1 -test.timeout=20m -test.run "$selection") | tee "snapshot-owner-proof/$version.jsonl" || result=1
+            (cd kanz/services/lake_sink/internal/snapshot && go tool test2json -t -p github.com/eighred/kanz/services/lake_sink/internal/snapshot "$RUNNER_TEMP/lake-bin/owner.test" -test.v=test2json -test.count=1 -test.timeout=20m -test.run "$selection") | tee "snapshot-owner-proof/$version.jsonl" || result=1
           done
           exit "$result"
       - name: Stop owned snapshot fixture dependencies and prove absence
@@ -391,7 +391,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate existing canonical Go SDK
@@ -401,7 +401,7 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
           make -C kanz generate
       - name: Install pinned Rust toolchain
-        working-directory: kanz-rs
+        working-directory: rust
         run: |
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
           rustup show active-toolchain
@@ -409,7 +409,7 @@ jobs:
         working-directory: kanz
         run: go test -p 1 ./test/arch -run 'Test(Rust|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
       - name: Rust format, compile and unit tests
-        working-directory: kanz-rs
+        working-directory: rust
         run: |
           cargo fmt --all -- --check
           KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo check --locked --workspace --all-targets
@@ -419,40 +419,40 @@ jobs:
       - name: Select pinned Node for actual WASM qualification
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
       - name: Qualify actual browser rendering WASM
-        working-directory: kanz-rs
+        working-directory: rust
         run: |
           set -euo pipefail
           cargo +1.90.0 test --locked --release -p kanz-browser-render
           rustup target add wasm32-unknown-unknown --toolchain 1.90.0
-          bash crates/browser-render/tests/build-wasm.sh | tee "$RUNNER_TEMP/browser-render.json"
+          bash crates/browser_render/tests/build-wasm.sh | tee "$RUNNER_TEMP/browser-render.json"
       - name: Preserve actual Node WASM evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-render-wasm
           path: |
             ${{ runner.temp }}/browser-render.json
-            kanz-rs/target/wasm32-unknown-unknown/release/kanz_browser_render.wasm
+            rust/target/wasm32-unknown-unknown/release/kanz_browser_render.wasm
           if-no-files-found: error
           retention-days: 7
       - name: Differential proof against current Go authority
         env:
           DECIMAL_CONFORMANCE_FIXTURE: ${{ runner.temp }}/kanz-decimal-conformance.json
         run: |
-          (cd kanz && go test -p 1 ./internal/dec ./tools/decimal-conformance -count=1)
-          (cd kanz && go run ./tools/decimal-conformance) > "$DECIMAL_CONFORMANCE_FIXTURE"
-          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml --test go_conformance -- --ignored
+          (cd kanz && go test -p 1 ./internal/dec ./tools/decimal_conformance -count=1)
+          (cd kanz && go run ./tools/decimal_conformance) > "$DECIMAL_CONFORMANCE_FIXTURE"
+          cargo +1.90.0 test --locked --manifest-path rust/Cargo.toml --test go_conformance -- --ignored
       - name: Differential depth proof and ownership handoff tests
         env:
           KANZ_DEPTH_CORPUS: ${{ runner.temp }}/kanz-depth-conformance.json
           KANZ_OKX_DEPTH_CORPUS: ${{ runner.temp }}/kanz-okx-depth-conformance.json
         run: |
-          (cd kanz && go test -p 1 ./tools/depth-conformance ./internal/marketedge/depth ./internal/marketedge/book ./pkg/alpha ./services/market-ingest/... -count=1)
-          (cd kanz && go run ./tools/depth-conformance) > "$KANZ_DEPTH_CORPUS"
-          (cd kanz && go run ./tools/depth-conformance --okx) > "$KANZ_OKX_DEPTH_CORPUS"
-          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-binance-depth --test go_conformance
-          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-market-feed --test go_okx_conformance
+          (cd kanz && go test -p 1 ./tools/depth_conformance ./internal/marketedge/depth ./internal/marketedge/book ./pkg/alpha ./services/market_ingest/... -count=1)
+          (cd kanz && go run ./tools/depth_conformance) > "$KANZ_DEPTH_CORPUS"
+          (cd kanz && go run ./tools/depth_conformance --okx) > "$KANZ_OKX_DEPTH_CORPUS"
+          cargo +1.90.0 test --locked --manifest-path rust/Cargo.toml -p kanz-binance-depth --test go_conformance
+          cargo +1.90.0 test --locked --manifest-path rust/Cargo.toml -p kanz-market-feed --test go_okx_conformance
       - name: Start the actual local Redpanda and NATS configuration
         run: docker compose -f kanz/dev/docker-compose.yml up -d --wait --wait-timeout 120 kafka nats
       - name: Real protocol, archive, drain and replay compatibility
@@ -460,11 +460,11 @@ jobs:
         env:
           TEST_KAFKA_BROKERS: 127.0.0.1:9092
           TEST_NATS_URL: nats://127.0.0.1:4222
-          KANZ_BINANCE_DEPTH_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-binance-depth
-          KANZ_OKX_DEPTH_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-okx-depth
+          KANZ_BINANCE_DEPTH_BIN: ${{ github.workspace }}/rust/target/debug/kanz-binance-depth
+          KANZ_OKX_DEPTH_BIN: ${{ github.workspace }}/rust/target/debug/kanz-okx-depth
         run: |
           set -o pipefail
-          go test -race -p 1 ./pkg/bus ./services/archiver/internal/archive ./tools/replay ./services/lake-sink/internal/cdc ./tools/depth-conformance \
+          go test -race -p 1 ./pkg/bus ./services/archiver/internal/archive ./tools/replay ./services/lake_sink/internal/cdc ./tools/depth_conformance \
             -run '^(TestKafkaPublishSubscribe|TestBacklogPollerReportsKafkaLag|TestKafkaBacklogRefusesToReportZeroForAnUnreachableBroker|TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable|TestArchiver_|TestDrain_|TestReaderRange|TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted|TestRustDepthProcessThroughJetStream|TestRustOKXDepthProcessThroughJetStream)' \
             -count=1 -json | tee "$RUNNER_TEMP/redpanda-tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
@@ -474,9 +474,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/feed-handoff-bin" "$RUNNER_TEMP/feed-handoff-proof"
           source=$(git rev-parse HEAD)
-          (cd kanz && go build -trimpath -ldflags "-X github.com/eighred/kanz/internal/version.stamped=$source" -o "$RUNNER_TEMP/feed-handoff-bin/market-ingest" ./services/market-ingest/cmd/market-ingest)
-          (cd kanz && go test -race -p 1 -c -o "$RUNNER_TEMP/feed-handoff-bin/handoff.test" ./tools/depth-conformance)
-          KANZ_BUILD_VERSION="$source" CARGO_TARGET_DIR="$RUNNER_TEMP/feed-handoff-target" cargo +1.90.0 build --locked --manifest-path kanz-rs/Cargo.toml -p kanz-binance-depth -p kanz-okx-depth
+          (cd kanz && go build -trimpath -ldflags "-X github.com/eighred/kanz/internal/version.stamped=$source" -o "$RUNNER_TEMP/feed-handoff-bin/market-ingest" ./services/market_ingest/cmd/market_ingest)
+          (cd kanz && go test -race -p 1 -c -o "$RUNNER_TEMP/feed-handoff-bin/handoff.test" ./tools/depth_conformance)
+          KANZ_BUILD_VERSION="$source" CARGO_TARGET_DIR="$RUNNER_TEMP/feed-handoff-target" cargo +1.90.0 build --locked --manifest-path rust/Cargo.toml -p kanz-binance-depth -p kanz-okx-depth
           cp "$RUNNER_TEMP/feed-handoff-target/debug/kanz-binance-depth" "$RUNNER_TEMP/feed-handoff-bin/kanz-binance-depth"
           cp "$RUNNER_TEMP/feed-handoff-target/debug/kanz-okx-depth" "$RUNNER_TEMP/feed-handoff-bin/kanz-okx-depth"
           python3 .github/scripts/check_feed_handoff_evidence.py --prepare --root . --proof "$RUNNER_TEMP/feed-handoff-proof" --binaries "$RUNNER_TEMP/feed-handoff-bin" --sha "$source" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
@@ -489,7 +489,7 @@ jobs:
           KANZ_FEED_HANDOFF_VERSION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          go tool test2json -t -p github.com/eighred/kanz/tools/depth-conformance "$RUNNER_TEMP/feed-handoff-bin/handoff.test" -test.v=test2json -test.count=1 -test.timeout=8m -test.run '^TestFeed(RuntimeControlledHandoff|HandoffExactRepeatControl)$' | tee "$RUNNER_TEMP/feed-handoff-proof/tests.jsonl"
+          go tool test2json -t -p github.com/eighred/kanz/tools/depth_conformance "$RUNNER_TEMP/feed-handoff-bin/handoff.test" -test.v=test2json -test.count=1 -test.timeout=8m -test.run '^TestFeed(RuntimeControlledHandoff|HandoffExactRepeatControl)$' | tee "$RUNNER_TEMP/feed-handoff-proof/tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_feed_handoff_evidence.py
           python3 ../.github/scripts/check_feed_handoff_evidence.py --root .. --proof "$RUNNER_TEMP/feed-handoff-proof" --binaries "$RUNNER_TEMP/feed-handoff-bin" --sha "$(git rev-parse HEAD)" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
       - name: Retain exact-source controlled feed rehearsal evidence
@@ -518,7 +518,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: kanz-rs/services/binance-depth/Dockerfile
+          file: rust/services/binance_depth/Dockerfile
           build-args: VERSION=${{ github.sha }}
           tags: kanz-binance-depth:verification
           push: false
@@ -530,7 +530,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: kanz-rs/services/okx-depth/Dockerfile
+          file: rust/services/okx_depth/Dockerfile
           build-args: VERSION=${{ github.sha }}
           tags: kanz-okx-depth:verification
           push: false
@@ -561,7 +561,7 @@ jobs:
           upload-artifact: false
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Verify signed tool consumer boundaries
-        run: python3 -B -m unittest discover -s tools/rust-audit-tools -p test_consume.py
+        run: python3 -B -m unittest discover -s tools/rust_audit_tools -p test_consume.py
       - name: Install pinned Rust evidence tools
         run: bash .github/scripts/install-rust-audit.sh
       - name: Exercise actual-image Rust release gates without publishing

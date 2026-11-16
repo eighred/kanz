@@ -155,7 +155,7 @@ func TestDeterministicIDIsPure(t *testing.T) {
 func TestTheReplayIDChainIsDerived(t *testing.T) {
 	// 1. signal_id comes from (strategy, nonce) — the two things a replayed alert
 	//    repeats verbatim. This is the hop the corrected comments describe.
-	fset, f := backstopFile(t, "services/webhook-ingest/internal/ingest/pipeline.go")
+	fset, f := backstopFile(t, "services/webhook_ingest/internal/ingest/pipeline.go")
 	if !fieldDerivedFrom(f, "SignalID", "StrategyID", "Nonce") {
 		t.Errorf("%s: pipeline.go does not derive SignalID from (StrategyID, Nonce).\n\n"+
 			"A signal id minted from anything else — a clock, a UUID, the delivery — makes every "+

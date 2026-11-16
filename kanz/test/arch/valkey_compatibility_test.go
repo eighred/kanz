@@ -11,7 +11,7 @@ import (
 )
 
 const valkeyProofImage = "valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b"
-const valkeyProofCommand = `go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook-ingest/internal/ingest ./services/api-gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"`
+const valkeyProofCommand = `go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook_ingest/internal/ingest ./services/api_gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"`
 const valkeyProofCheck = `python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"`
 
 func checkValkeyCompatibilityCI(data []byte) error {
@@ -73,7 +73,7 @@ func TestValkeyCompatibilityUsesRealPinnedServer(t *testing.T) {
 		"wrong version":         {"TEST_VALKEY_VERSION: 9.1.3", "TEST_VALKEY_VERSION: 9.1.2"},
 		"missing URL":           {"TEST_REDIS_URL: redis://localhost:6379/0", "TEST_REDIS_URL: ''"},
 		"no identity execution": {"check_valkey_evidence.py --pattern)", "check_valkey_evidence.py --unused)"},
-		"missing package":       {"./pkg/redisadapter ./services/webhook-ingest", "./services/webhook-ingest"},
+		"missing package":       {"./pkg/redisadapter ./services/webhook_ingest", "./services/webhook_ingest"},
 		"no race":               {"-race -json", "-json"},
 		"missing pipefail":      {"          set -o pipefail\n          python -m unittest", "          python -m unittest"},
 		"missing checker tests": {"python -m unittest discover -s ../.github/scripts -p test_check_valkey_evidence.py", "echo no-checker-tests"},

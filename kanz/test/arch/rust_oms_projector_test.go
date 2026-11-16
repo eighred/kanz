@@ -8,7 +8,7 @@ import (
 )
 
 func TestRustOMSPositionProjectorBoundary(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "src", "position_projector.rs"))
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "rust", "crates", "oms_store", "src", "position_projector.rs"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,7 +3,7 @@ package auth
 // The scope a DEV HS256 token is bound to (#242).
 //
 // ONLY THE NAMES LIVE HERE, NOT THE VALIDATOR. The bundled HS256 stand-in is
-// still the gateway's alone (services/api-gateway/internal/middleware) and
+// still the gateway's alone (services/api_gateway/internal/middleware) and
 // nothing in this package will ever accept an HMAC-signed token — see
 // asymmetricAlgs. What sits here are the two strings the MINTER
 // (internal/devtoken) writes and the VALIDATOR requires, in the one place both

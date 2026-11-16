@@ -74,7 +74,7 @@ var submitFieldsExempt = map[string]string{
 }
 
 func TestEverySubmitOrderFieldReachesOrderState(t *testing.T) {
-	protoRoot := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-schemas", "proto")
+	protoRoot := filepath.Join(filepath.Dir(moduleRoot(t)), "schemas", "proto")
 	cmdFields := protoFieldNames(t, filepath.Join(protoRoot, filepath.FromSlash(submitFieldsCommandProto)), submitFieldsCommandMsg)
 	stateFields := protoFieldNames(t, filepath.Join(protoRoot, filepath.FromSlash(submitFieldsStateProto)), submitFieldsStateMsg)
 

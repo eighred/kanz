@@ -7,8 +7,12 @@
 # freshly built test binaries in %TEMP%, so the Makefile points GOTMPDIR here.
 .gotmp/
 
-# Rust migration build output; canonical schemas remain tracked in kanz-schemas.
-/kanz-rs/target/
+# Python interpreter caches are generated on every host, including CI.
+__pycache__/
+*.py[cod]
+
+# Rust migration build output; canonical schemas remain tracked in schemas.
+/rust/target/
 
 # Stripped release binaries (`make release`).
 bin/
@@ -18,10 +22,10 @@ bin/
 # command rather than as a blanket rule: `kanz` and `operator` are also directory
 # names in this repo, and a pattern broad enough to catch the binaries would
 # silently ignore the source trees beside them.
-/kanz/universe
-/kanz/universe.exe
 /kanz/kanz-provisioner
 /kanz/kanz-provisioner.exe
+/kanz/kanz_provisioner
+/kanz/kanz_provisioner.exe
 
 # Compiled binaries. `go build ./cmd/<x>` from the module root drops the binary
 # beside the source, and one reached a commit that way (#410's branch). Untracked

@@ -51,7 +51,7 @@ import (
 // principalCanonicalDecl and principalEdgeDecl are where the two types live.
 const (
 	principalCanonicalDecl = "pkg/auth/principal.go"
-	principalEdgeDecl      = "services/api-gateway/internal/middleware/auth.go"
+	principalEdgeDecl      = "services/api_gateway/internal/middleware/auth.go"
 )
 
 // edgeOmits are canonical fields the EDGE type deliberately does not carry.
@@ -202,7 +202,7 @@ func TestEveryCanonicalPrincipalLiteralIsComplete(t *testing.T) {
 	// means the walk or the matcher broke, and every check below would pass.
 	if len(sites) == 0 {
 		t.Fatal("found no keyed auth.Principal literals outside pkg/auth — the two reverse " +
-			"conversions in services/api-gateway are known to exist, so this guard is broken " +
+			"conversions in services/api_gateway are known to exist, so this guard is broken " +
 			"rather than satisfied")
 	}
 

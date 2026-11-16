@@ -379,7 +379,11 @@ func TestTheSweepPublishesUnderTheBooksTenant(t *testing.T) {
 	l2 := leveredBook(t, 15, -1, 100, -50_000)
 	l2.hold(t, 100_000)
 	l2.bus.events = nil
-	l2.mon.resetStatus(bookKey{tenant: "t1", portfolio: "p1"})
+	// This fixture starts an unobserved verdict; production failure rollback is
+	// now restricted to the reservation that owns the failed publication.
+	l2.mon.mu.Lock()
+	l2.mon.books[bookKey{tenant: "t1", portfolio: "p1"}].lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+	l2.mon.mu.Unlock()
 
 	if err := l2.mon.ReevaluateAll(context.Background()); err != nil {
 		t.Fatalf("the sweep could not publish what it found: %v. The fakeBus rejects an empty "+

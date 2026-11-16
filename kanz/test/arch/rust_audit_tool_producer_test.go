@@ -119,7 +119,7 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 		count := 0
 		for _, s := range owner.j.Steps {
 			if strings.Contains(s.Run, "qualify.py "+owner.mode) {
-				if s.Run != `python3 -B tools/rust-audit-tools/qualify.py `+owner.mode+` "$RUNNER_TEMP/rust-audit-tools"` || s.Continue || s.If != "" {
+				if s.Run != `python3 -B tools/rust_audit_tools/qualify.py `+owner.mode+` "$RUNNER_TEMP/rust-audit-tools"` || s.Continue || s.If != "" {
 					return fmt.Errorf("tool qualification cannot be skipped")
 				}
 				count++
@@ -134,7 +134,7 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 
 func TestRustAuditToolProducerBoundary(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
-	paths := []string{"tools/rust-audit-tools/Dockerfile", "tools/rust-audit-tools/qualify.py", ".github/workflows/base-image-mirror.yml"}
+	paths := []string{"tools/rust_audit_tools/Dockerfile", "tools/rust_audit_tools/qualify.py", ".github/workflows/base-image-mirror.yml"}
 	var text [3]string
 	for i, p := range paths {
 		b, err := os.ReadFile(filepath.Join(root, p))

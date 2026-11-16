@@ -72,7 +72,7 @@ func newPool(t *testing.T) *pgxpool.Pool {
 		}
 	})
 
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market-data", "migrations",
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market_data", "migrations",
 		"0002_contract_terms.sql"))
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
@@ -325,5 +325,26 @@ func TestPutRefusesARecordWithNoTerms(t *testing.T) {
 	if err == nil {
 		t.Fatal("a record with a nil ContractTerms was stored — it would decode into an empty terms " +
 			"message, which reads as a derivative whose specification is absent rather than as an error")
+	}
+}
+
+func TestPutRefusesInconsistentTermsBeforeDatabaseAccess(t *testing.T) {
+	for name, corrupt := range map[string]func(*Record){
+		"kind differs from variant": func(r *Record) { r.Kind = KindBond },
+		"missing variant":           func(r *Record) { r.Terms.Terms = nil },
+		"typed nil variant":         func(r *Record) { r.Terms.Terms = (*referencepb.ContractTerms_Option)(nil) },
+		"empty variant":             func(r *Record) { r.Terms.Terms = &referencepb.ContractTerms_Option{} },
+		"different instrument":      func(r *Record) { r.Terms.InstrumentId = "OTHER" },
+		"missing effective time":    func(r *Record) { r.Terms.AsOf = nil },
+		"different effective time":  func(r *Record) { r.Terms.AsOf = timestamppb.New(t0.Add(time.Hour)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := optionRec("BTC-60000-C", "BTC", 60000, t0, 1)
+			corrupt(&record)
+			// A nil pool makes any attempt to start the transaction fail the test.
+			if err := NewPostgres(nil).Put(context.Background(), []Record{record}); err == nil {
+				t.Fatal("inconsistent contract terms were accepted")
+			}
+		})
 	}
 }

@@ -163,7 +163,7 @@ func TestEveryFactPublisherProvesOneEnvelope(t *testing.T) {
 // they were fixed in the change that added it.
 //
 // Two entries turned out to be wrong about the module rather than about the
-// code. cmd/kanz-halt was already proven end-to-end and the entry was describing
+// code. cmd/kanz_halt was already proven end-to-end and the entry was describing
 // this scan's blind spot (see provenByRealBrokerTest). internal/marketedge/ingest
 // said its double "accepts any Event" when that double had already been hardened
 // to enforce the tenant rule. Both are worth remembering the next time an
@@ -204,7 +204,7 @@ func testFilesIn(t *testing.T, root, dir string) []string {
 // The scan reads "has a real producer" as a literal bus.NewProducer call in the
 // package's own _test.go. A package whose test drives its OWN ENTRYPOINT against
 // a live broker therefore reads as unproven — the NewProducer call is in main.go,
-// one frame down, where a name match cannot see it. cmd/kanz-halt was listed
+// one frame down, where a name match cannot see it. cmd/kanz_halt was listed
 // below as having "no broker-shaped test at all" while
 // TestIntegration_ToolFlipsTheRealGate was publishing its FACT over a real
 // JetStream spine and asserting the real gate flipped, in CI, on every run.
@@ -222,7 +222,7 @@ func testFilesIn(t *testing.T, root, dir string) []string {
 // worse than the false negative it would fix. Each entry names the test, and the
 // dead-entry check above fails if that test stops existing.
 var provenByRealBrokerTest = map[string]integrationProof{
-	"cmd/kanz-halt": {
+	"cmd/kanz_halt": {
 		test: "TestIntegration_ToolFlipsTheRealGate",
 		why: "publishes the halt FACT through run(), the tool's real entrypoint, over a live " +
 			"JetStream spine, then asserts the real halt.Gate folded it and flipped. Gated on " +

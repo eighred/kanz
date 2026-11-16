@@ -362,10 +362,10 @@ func serviceMains(t *testing.T, root string) []string {
 // # A budget reached THROUGH a main is still spent by the pod (#264)
 //
 // This used to read the mains and nothing else, and risk-engine does not spell
-// its drain in one: cmd/risk-engine/main.go calls app.App.Run, and the whole
+// its drain in one: cmd/risk_engine/main.go calls app.App.Run, and the whole
 // ordered drain — await consumers, flush debounced recomputes, checkpoint
 // durable state, close transports — runs under DefaultShutdownTimeout in
-// services/risk-engine/internal/app/lifecycle.go. The guard derived 20s for
+// services/risk_engine/internal/app/lifecycle.go. The guard derived 20s for
 // risk-engine while the process could spend 40, and raising that const to 120s
 // moved the derived budget by exactly zero seconds. A grace period derived from
 // a number that cannot move is not derived from anything.
@@ -437,14 +437,14 @@ type shutdownSite struct {
 // and on any entry here the walk can no longer find — so neither a new budget
 // nor a deleted one can go unnoticed.
 var serviceShutdownExtras = map[string][]shutdownSite{
-	"services/lake-sink/cmd/lake-sink/main.go": {
-		{file: "services/lake-sink/internal/snapshot/lease.go", name: "ctx",
+	"services/lake_sink/cmd/lake_sink/main.go": {
+		{file: "services/lake_sink/internal/snapshot/lease.go", name: "ctx",
 			why: "Optional snapshot lease connection close has an independent five-second cleanup context after cancellation. Count it conservatively even though the feature is disabled in current deployments; it does not prove an OS-level child join bound."},
-		{file: "services/lake-sink/internal/snapshot/store.go", name: "cleanup",
+		{file: "services/lake_sink/internal/snapshot/store.go", name: "cleanup",
 			why: "Optional snapshot Create rollback has an independent five-second cleanup context and can overlap shutdown. Count it additively rather than assuming overlap; existing manifest grace is not evidence that the optional image/resources or worker lifecycle are qualified."},
 	},
-	"services/risk-engine/cmd/risk-engine/main.go": {{
-		file:         "services/risk-engine/internal/app/lifecycle.go",
+	"services/risk_engine/cmd/risk_engine/main.go": {{
+		file:         "services/risk_engine/internal/app/lifecycle.go",
 		name:         "DefaultShutdownTimeout",
 		absentInMain: "ShutdownTimeout:",
 		why: "App.Run puts the ENTIRE ordered drain under this watchdog — await consumers, flush " +
@@ -545,7 +545,7 @@ var notAShutdownBudget = map[string]string{
 	"services/operator/internal/nodeops/nodeops.go:drainRetryInterval": "the interval between retries " +
 		"of a KUBERNETES node drain the operator performs on OTHER pods. It bounds nothing about the " +
 		"operator's own termination — the operator pod's shutdown is the 5s OTLP flush in its main.",
-	"services/market-data/internal/feed/conform.go:ctx": "a running-path fetch of the vendor's " +
+	"services/market_data/internal/feed/conform.go:ctx": "a running-path fetch of the vendor's " +
 		"instrument conformance data. It is off context.Background() because it must outlive the " +
 		"request that triggered it, not because it runs after SIGTERM.",
 	"services/datamaster/internal/store/lock.go:ctx": "a running-path advisory-lock release, bounded " +

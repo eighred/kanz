@@ -40,7 +40,7 @@ func TestExactMandateBookNeverRoundsToCents(t *testing.T) {
 			}
 			return nil
 		})
-		m := &compliancepb.Mandate{PortfolioId: "PF", Rules: []*compliancepb.Rule{{Type: compliancepb.RuleType_RULE_TYPE_CONCENTRATION}}}
+		m := &compliancepb.Mandate{PortfolioId: "PF", Rules: []*compliancepb.Rule{{Type: compliancepb.RuleType_RULE_TYPE_CONCENTRATION, Params: &compliancepb.Rule_Concentration{Concentration: &compliancepb.ConcentrationLimit{}}}}}
 		status, _, err := CheckMandateExact(context.Background(), map[string]dec.Exact{"A": "1"}, nav, "USD", nil, compliance.NewEngine(reg), m, time.Now())
 		if err != nil || !called || status != MandateFeasible {
 			t.Fatalf("%s: %v %v %v", nav, status, called, err)

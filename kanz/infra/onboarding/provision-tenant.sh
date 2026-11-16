@@ -47,7 +47,7 @@
 #
 # Source of both, in production: Eighred SSO (OIDC) — kanz mints no
 # production identity. In dev/staging against the HS256 validator, mint both
-# with cmd/kanz-devtoken (a standalone CLI in no service image).
+# with cmd/kanz_devtoken (a standalone CLI in no service image).
 #
 # Both are sent as `Authorization: Bearer <token>`. Neither probe request
 # sets an `X-Kanz-Tenant` header: the gateway never reads that header, it
@@ -104,7 +104,7 @@ MSG_NS="${MSG_NS:-kanz-messaging}"
 # false "MT-01d not deployed" alarm on a healthy cluster this step exists to
 # prevent. So: no fallback. The operator supplies both names, read off the
 # real DSN each service's deployment mounts — RISK_ENGINE_DATABASE_URL_FILE
-# (services/risk-engine, cluster kanz-risk) and ACCOUNTING_DATABASE_URL_FILE
+# (services/risk_engine, cluster kanz-risk) and ACCOUNTING_DATABASE_URL_FILE
 # (services/accounting, cluster kanz-books), both at
 # /run/secrets/db/database-url in their respective Deployments. Step 1
 # refuses (exit 2) before any kubectl runs if either is unset.
@@ -121,7 +121,7 @@ step() { [ "$STEP" = "all" ] || [ "$STEP" = "$1" ]; }
 # still refuses correctly when run in isolation.
 verify_preflight() {
   missing=""
-  [ -n "${VERIFY_TOKEN:-}" ] || missing="$missing  - VERIFY_TOKEN (bearer token for tenant '$TENANT' itself — Eighred SSO in production, cmd/kanz-devtoken in dev)
+  [ -n "${VERIFY_TOKEN:-}" ] || missing="$missing  - VERIFY_TOKEN (bearer token for tenant '$TENANT' itself — Eighred SSO in production, cmd/kanz_devtoken in dev)
 "
   [ -n "${VERIFY_TOKEN_OTHER:-}" ] || missing="$missing  - VERIFY_TOKEN_OTHER (bearer token for any OTHER existing tenant — same source)
 "
@@ -246,7 +246,7 @@ if step storage; then
 
   for c in kanz-risk kanz-books; do
     # The expected FORCE-RLS table set per cluster, read off the migrations
-    # that declare it (services/risk-engine/migrations/0002_tenant_rls.sql;
+    # that declare it (services/risk_engine/migrations/0002_tenant_rls.sql;
     # services/accounting/migrations/0001_ledger.sql — note the SQL there is
     # `FORCE  ROW LEVEL SECURITY` with TWO SPACES, in a `FOREACH t IN ARRAY
     # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
@@ -357,7 +357,7 @@ if step compute; then
   # FACTs into an account nothing else is a member of: orders in, nothing out,
   # every service Ready throughout (#637). The tool prints each manifest's NATS
   # and Kafka prerequisites as it writes it; do not skip them.
-  ( cd ../.. && go run ./cmd/kanz-tenantgen -tenant "$TENANT" )
+  ( cd ../.. && go run ./cmd/kanz_tenantgen -tenant "$TENANT" )
 
   # NATS user (SEC-M3): a compute pod's SPIFFE ID is derived from its
   # ServiceAccount, not from tenantctl.sh's per-tenant-namespace TENANT_SAS
@@ -465,7 +465,7 @@ if step seed; then
   echo "     GET  /v1/mandates/pending-changes                 (the approver queue)"
   echo "     POST /v1/portfolios/${FIRST_PORTFOLIO:-PF1}/mandate/approve  (a DIFFERENT signatory)"
   echo ""
-  echo "   BREAK-GLASS - an estate with no gateway route yet (cmd/kanz-mandate):"
+  echo "   BREAK-GLASS - an estate with no gateway route yet (cmd/kanz_mandate):"
   echo "     kanz-mandate propose --tenant $TENANT --file mandate.json \\"
   echo "                          --by operator:<a> --reason <why> --out proposal.json"
   echo "     kanz-mandate approve --tenant $TENANT --file mandate.json \\"

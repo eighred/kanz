@@ -248,11 +248,12 @@ func TestAFlattenedPortfolioIsNotReportedAsUnverifiableLeverage(t *testing.T) {
 func TestRecordStatusTreatsAForgottenBookAsANewBreach(t *testing.T) {
 	m := NewMonitor(comp.NewEngine(nil), comp.NewMandateRegistry(), nil, nil, nil, nil)
 	forgotten := bookKey{tenant: "t1", portfolio: "gone"}
-	if !m.recordStatus(forgotten, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH) {
+	captured := &evaluationSnapshot{key: forgotten}
+	if entered, _ := m.recordStatus(captured, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH); !entered {
 		t.Error("a breach on a book the sweep has dropped was reported as no transition, so it " +
 			"would be swallowed; the safe direction is a duplicate FACT, never a lost one")
 	}
-	if m.recordStatus(forgotten, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS) {
+	if entered, _ := m.recordStatus(captured, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS); entered {
 		t.Error("a PASS was reported as an entry into breach")
 	}
 }

@@ -5,8 +5,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $python = (Get-Command python.exe -ErrorAction Stop).Source
-$verifierPath = Join-Path $PSScriptRoot 'cni-proof/proof.py'
-$networkPath = Join-Path $PSScriptRoot 'gateway-policy-proof/network_observation.py'
+$verifierPath = Join-Path $PSScriptRoot 'cni_proof/proof.py'
+$networkPath = Join-Path $PSScriptRoot 'gateway_policy_proof/network_observation.py'
 $Region = 'ap-northeast-1'
 $InstanceId = 'i-0ee1235614219f089'
 $AccountId = '012619468098'
@@ -18,9 +18,9 @@ $headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($headCommit -ne $releaseCommit) {
     throw 'CNI proof is refused: HEAD is not exact origin/main.'
 }
-& git -C $repoRoot ls-files --error-unmatch tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py tools/gateway-policy-proof/network_observation.py *> $null
+& git -C $repoRoot ls-files --error-unmatch tools/Test-TestnetCNI.ps1 tools/cni_proof/proof.py tools/gateway_policy_proof/network_observation.py *> $null
 if ($LASTEXITCODE -ne 0) { throw 'CNI verifier inputs must be tracked.' }
-& git -C $repoRoot diff --quiet $releaseCommit -- tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py tools/gateway-policy-proof/network_observation.py
+& git -C $repoRoot diff --quiet $releaseCommit -- tools/Test-TestnetCNI.ps1 tools/cni_proof/proof.py tools/gateway_policy_proof/network_observation.py
 if ($LASTEXITCODE -ne 0) { throw 'CNI verifier inputs differ from merged origin/main.' }
 
 # No SSM command is issued before source and fixed estate identity checks.

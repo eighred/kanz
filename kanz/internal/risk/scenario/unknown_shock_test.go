@@ -15,9 +15,9 @@ import (
 
 type forbiddenRevaluer struct{ t *testing.T }
 
-func (r forbiddenRevaluer) RevalueOption(context.Context, string, time.Time, *commonpb.Money, compute.RevalShocks) (*commonpb.Money, bool) {
+func (r forbiddenRevaluer) RevalueOption(context.Context, string, time.Time, *commonpb.Money, compute.RevalShocks) compute.RevalResult {
 	r.t.Fatal("invalid batch reached the revaluer")
-	return nil, false
+	return compute.RevalResult{}
 }
 
 type untrustedShock struct{}

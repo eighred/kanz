@@ -126,7 +126,7 @@ func TestConnectionBudgetIsDerivedAndFunded(t *testing.T) {
 			"result means nothing — did the package move, or did the walk stop early?")
 	}
 
-	// --- ARM 3: the arithmetic, for EVERY POSTGRES THIS ESTATE RUNS -----------
+	// --- ARM 3: the arithmetic, for the dev rig and declared DR primaries -----
 	//
 	// The first version of this guard compared the whole estate's demand against
 	// infra/deploy/postgres-dev.yaml, whose own first line says "DEV-ONLY Postgres
@@ -233,19 +233,19 @@ func TestConnectionBudgetIsDerivedAndFunded(t *testing.T) {
 
 	// --- ARM 5: A POOL THAT REACHES AN UNDECLARED SERVER MUST SAY SO ----------
 	//
-	// market-data and audit are drExcluded — deliberately, and for good reasons
-	// recorded there — so no CNPG cluster holds them. They still open pools in
-	// production, against a Postgres no file in this repository declares. Dropping
-	// them from the sum silently is how the partition would quietly stop adding up
-	// to the whole; naming them is what keeps the gap visible while it is genuine.
+	// market-data and audit have no primary assignment in the DR inventory this
+	// arithmetic reads. Tokyo separately declares its shared testnet server; that
+	// existence neither assigns a production/DR primary nor funds these base
+	// workload ceilings. #1748 owns the missing attribution decision. Dropping
+	// these pools from the sum would hide that unresolved term.
 	for _, key := range sortedKeys(unattributed) {
 		reason, ok := undeclaredServerPools[key]
 		if !ok {
-			t.Errorf("%s opens a Postgres pool (%d connections at its declared ceiling) against a "+
-				"server no manifest in this repository declares.\n\n"+
-				"It is in no CNPG cluster in infra/dr/postgres/cluster.yaml and its DSN comes from "+
-				"Vault, so its demand is counted against nothing and no max_connections anywhere is "+
-				"checked against it. Either place it in a cluster, or record the exposure in "+
+			t.Errorf("%s opens a Postgres pool (%d connections at its declared ceiling) without a "+
+				"primary assignment in the inspected DR inventory.\n\n"+
+				"No target in infra/dr/postgres/cluster.yaml is charged this pool's demand. "+
+				"A separate testnet server declaration is not an attribution in this inventory. "+
+				"Represent an approved primary assignment, or record the exposure in "+
 				"undeclaredServerPools with the issue that closes it.", key, unattributed[key])
 			continue
 		}
@@ -349,34 +349,30 @@ func barePoolConstructions(t *testing.T, root string) map[string]bool {
 // which pool reaches which server
 // ---------------------------------------------------------------------------
 
-// undeclaredServerPools is the default-deny record of pools whose Postgres this
-// repository does not declare. Keyed "service/<dsn expression>"; the value states
-// the exposure and the issue that closes it. A dead entry fails the guard.
-//
-// These are NOT oversights, which is the point of writing them down rather than
-// dropping them from the sum. market-data and audit are classified drExcluded in
-// dr_postgres_coverage_test.go with reasons — a re-ingestable price history and a
-// WORM audit store that is deliberately not restorable-to-an-instant — so neither
-// belongs in a PITR cluster, and consequently neither has a server declared here
-// to size. Their DSNs come from Vault (#59), like every production DSN.
+// undeclaredServerPools records pools unassigned to a primary in the declared
+// infra/dr/postgres inventory. It does not deny Tokyo's separately declared
+// shared testnet server or certify its runtime capacity. A temporary entry
+// retires when this pool is assigned to an actual primary in the inspected
+// inventory, or its construction disappears; pgTargets derives that condition.
+// #59/#60 are historical DSN/DR provenance, not the open attribution owner.
 var undeclaredServerPools = map[string]string{
 	"web-bff/cfg.SessionDSN": "#1288: optional shared-session authority reserves four connections per BFF; production database placement and scaling budget remain unverified. Existing memory singleton deployment opens no session pool.",
-	"audit/cfg.DatabaseURL": "audit is drExcluded (AUDIT-01b WORM store with its own tamper-resistant " +
-		"retention), so no CNPG cluster holds it and no manifest here declares the server it reaches. " +
-		"Its demand is small — one pool at a ceiling of 2 — but it is UNSIZED, not zero. Closing this " +
-		"needs the WORM store's server declared somewhere this guard can read; the DSN binding is #59.",
+	"audit/cfg.DatabaseURL": "#1748 temporary: the audit pool has no primary assignment in the " +
+		"declared DR inventory. Tokyo's shared testnet database is a separate declaration; this " +
+		"guard cannot infer the production target or its funded connection budget from it. Retire " +
+		"after approved primary attribution is represented in the inspected inventory, or the pool disappears. " +
+		"#1747 separately owns the WORM/credential boundary; no immutability or capacity proof is asserted here.",
 
-	"market-data/cfg.DatabaseURL": "market-data is drExcluded (append-only price history, re-ingestable " +
-		"from the upstream feed), so no CNPG cluster holds it. This is the LARGEST unsized demand on the " +
-		"estate: KEDA scales market-data to 16, so its pool alone wants 64 connections, and the risk " +
-		"engine's price pool below lands on the same server. Whatever serves price_observations in " +
-		"production is sized by nobody. DSN binding is #59.",
+	"market-data/cfg.DatabaseURL": "#1748 temporary: no market-data primary is assigned in the " +
+		"declared DR inventory, so the base workload's derived pool ceiling is unattributed. " +
+		"A replayability exclusion does not fund connections. Retire when approved primary attribution " +
+		"is represented in this inventory, or the pool disappears; historical DSN binding is #59.",
 
-	"risk-engine/cfg.MarketDataURL": "risk-engine's SECOND pool, and it CROSSES A CLUSTER BOUNDARY: it " +
+	"risk-engine/cfg.MarketDataURL": "#1748 temporary: risk-engine's SECOND pool CROSSES A CLUSTER BOUNDARY: it " +
 		"reads market-data's price_observations, not risk state, so it does NOT land on kanz-risk. " +
 		"Charging it to kanz-risk would over-size that cluster and hide this gap at the same time. It " +
-		"lands wherever market-data's store lives, which is the undeclared server above — at a ceiling " +
-		"of 12, another 48 connections onto it.",
+		"lands wherever market-data's store lives. Retire with that store's approved primary assignment " +
+		"in the inspected inventory, or when this pool disappears; the demand is never zero.",
 }
 
 // foreignPoolReaches names, for every pool opened with a DSN that is NOT the
@@ -410,7 +406,7 @@ var pgPoolCallArg = regexp.MustCompile(`pg\.New(?:TenantPool|GlobalPool|Migratio
 // estate by construction (arm 2 above is what keeps that true), and scanning a
 // whole service tree would also match the constructor named in a comment.
 //
-// cmd/kanz-migrate is deliberately NOT scanned. Its initContainer runs to
+// cmd/kanz_migrate is deliberately NOT scanned. Its initContainer runs to
 // completion before its pod's app container starts, so its single connection
 // never coexists with the four already reserved for that same pod, and the surge
 // term already covers a rollout's worth of them.
@@ -426,9 +422,9 @@ func poolsPerService(t *testing.T, root string) map[string][]string {
 		if !e.IsDir() {
 			continue
 		}
-		svc := e.Name()
+		svc := deployedServiceName(e.Name())
 		var exprs []string
-		_ = filepath.WalkDir(filepath.Join(services, svc, "cmd"),
+		_ = filepath.WalkDir(filepath.Join(services, sourceDirectoryName(svc), "cmd"),
 			func(p string, d fs.DirEntry, werr error) error {
 				if werr != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 					return nil

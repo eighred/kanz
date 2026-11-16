@@ -37,10 +37,11 @@ verification, and permission to trade as separate claims. Leave an issue open
 when its acceptance needs evidence that does not exist; state the missing input
 precisely. Never place credentials in test files, logs, reports, or agent context.
 
-For a Forge capability or `/doctor`, separate four claims: **implemented** (the
+For a Forge capability or `/doctor`, distinguish **implemented** (the
 entrypoint and supporting files exist), **configured** (this host exposes its
 tools and dependencies), **operational** (a representative operation succeeded
-with observed evidence), and **incomplete** (the missing step). Report each with
+with observed evidence), **incomplete** (observed failure or missing setup), and
+**unverified** (no suitable probe evidence). Report each with
 its scope and evidence; a manifest check proves implementation structure, not
 Chat routing, native delegation, live access or completion of an audit. Inspect
 tools before attempting a probe and avoid mutations for a status check.

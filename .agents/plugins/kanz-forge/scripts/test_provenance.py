@@ -85,5 +85,49 @@ class ProvenanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "missing mapped skill"):
                     validate.command_files()
 
+    def test_duplicate_import_and_missing_or_changed_license_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin"
+            shutil.copytree(provenance.PLUGIN, root, ignore=shutil.ignore_patterns("__pycache__"))
+            original = json.loads((root / "upstreams.json").read_text())
+            for mutation in ("duplicate", "missing_license", "changed_license", "omitted_license"):
+                rows = json.loads(json.dumps(original))
+                row = rows[0]
+                if mutation == "duplicate":
+                    row["imports"].append(row["imports"][0])
+                elif mutation == "missing_license":
+                    row["license_sources"] = []
+                elif mutation == "changed_license":
+                    row["license_sources"][0]["blob"] = "0" * 40
+                else:
+                    row["imports"] = [item for item in row["imports"] if item["source"] != "LICENSE"]
+                (root / "upstreams.json").write_text(json.dumps(rows))
+                with self.subTest(mutation=mutation), patch.object(provenance, "PLUGIN", root):
+                    with self.assertRaises(ValueError):
+                        provenance.registry()
+
+    def test_missing_help_and_malformed_routes_fail_cleanly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin"
+            shutil.copytree(provenance.PLUGIN, root, ignore=shutil.ignore_patterns("__pycache__"))
+            catalog_path = root / "skills/commands/commands.json"
+            original = json.loads(catalog_path.read_text())
+            for mutation in ("help", "entry", "workflow", "skills", "mode"):
+                catalog = json.loads(json.dumps(original))
+                if mutation == "help":
+                    del catalog["/help"]
+                elif mutation == "entry":
+                    catalog["/work"] = []
+                elif mutation == "workflow":
+                    catalog["/work"]["workflow"] = 1
+                elif mutation == "skills":
+                    catalog["/work"]["skills"] = [{}]
+                else:
+                    catalog["/work"]["mode"] = ""
+                catalog_path.write_text(json.dumps(catalog))
+                with self.subTest(mutation=mutation), patch.object(validate, "PLUGIN", root):
+                    with self.assertRaises(ValueError):
+                        validate.command_files()
+
 if __name__ == "__main__":
     unittest.main()

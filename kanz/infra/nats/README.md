@@ -17,7 +17,7 @@ short-retention live tier for low-latency fan-out.
 ## Streams
 
 One stream per domain, binding `{domain}.>` per
-`kanz-schemas/README.md` § Subject / Topic Taxonomy §4. File storage, 3 replicas, `limits`
+`schemas/README.md` § Subject / Topic Taxonomy §4. File storage, 3 replicas, `limits`
 retention, `old`-discard, 2m duplicate window (broker-side idempotency keyed on
 the envelope `idempotency_key`).
 
@@ -62,7 +62,7 @@ account's subjects are physically invisible to another. `tls.verify_and_map`
 maps the client's SVID URI SAN to a per-tenant user → account, so isolation is
 enforced by *which account a connection lands in*, not by the subject string —
 the bus keeps publishing the unchanged 3-segment logical subject
-(`kanz-schemas/README.md` § Subject / Topic Taxonomy §6). `tenancy.yaml` ships the `SYS`, `__system__`
+(`schemas/README.md` § Subject / Topic Taxonomy §6). `tenancy.yaml` ships the `SYS`, `__system__`
 (platform + pre-tenancy events), and an example `acme` tenant account; each
 tenant account carries its own JetStream quota (noisy-neighbor bound, tightened
 in MT-01e).

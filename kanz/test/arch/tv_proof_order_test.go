@@ -16,7 +16,7 @@ var tvEarlyProofs = []string{
 
 var tvProofPrerequisites = []string{
 	"Provision non-superuser DB role (so RLS is enforced, not bypassed)",
-	"Generate kanz-schemas Go SDK",
+	"Generate schemas Go SDK",
 	"Download reviewed Go dependencies with bounded transport retries",
 	"Start NATS (JetStream)",
 	"Bootstrap the NATS topology (the script production applies)",

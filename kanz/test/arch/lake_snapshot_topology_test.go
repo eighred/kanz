@@ -22,8 +22,8 @@ func optionalSnapshotTopology(files map[string]string, profile jetstream.StreamC
 	}
 	markers := map[string][]string{
 		"internal/lake/snapshotprofile/profile.go":                 {"[]string{SubjectRequested, SubjectCapturing, SubjectPublished, SubjectFailed}"},
-		"services/lake-sink/internal/snapshot/store.go":            {"const SubjectRequested = snapshotprofile.SubjectRequested", "subject = snapshotprofile.SubjectCapturing", "subject = snapshotprofile.SubjectPublished", "subject = snapshotprofile.SubjectFailed"},
-		"services/lake-sink/internal/snapshot/runtime.go":          {"client.RequireAccountIdentity(startup, cfg.NATSAccount, svid.ID.String())", "client.RequireDurableRetention(startup, snapshotprofile.Stream())", `client.RequireRegisteredDefaultDurable(startup, snapshotprofile.Name, "lake.snapshot.>", "archiver")`, "client.RequireCanonicalParking(startup, SubjectRequested, int64(snapshotprofile.Stream().MaxMsgSize))"},
+		"services/lake_sink/internal/snapshot/store.go":            {"const SubjectRequested = snapshotprofile.SubjectRequested", "subject = snapshotprofile.SubjectCapturing", "subject = snapshotprofile.SubjectPublished", "subject = snapshotprofile.SubjectFailed"},
+		"services/lake_sink/internal/snapshot/runtime.go":          {"client.RequireAccountIdentity(startup, cfg.NATSAccount, svid.ID.String())", "client.RequireDurableRetention(startup, snapshotprofile.Stream())", `client.RequireRegisteredDefaultDurable(startup, snapshotprofile.Name, "lake.snapshot.>", "archiver")`, "client.RequireCanonicalParking(startup, SubjectRequested, int64(snapshotprofile.Stream().MaxMsgSize))"},
 		"infra/nats/snapshot_candidate.go":                         {"snapshotprofile.Stream()", "hex.EncodeToString(sum[:]) != baselineSHA256", "uniqueUsers(accounts)"},
 		"../.github/scripts/check_lake_snapshot_owner_evidence.py": {`VERSIONS = ("2.12.6", "2.14.5")`, `verify(events, {PACKAGE: NAMES})`, `TestSnapshotActualCanonicalArchiverFourFactsRestartAndTenantRefusal`, `TestSnapshotActualOwnerKillReplaysPersistedCut`, `TestSnapshotActualParkingAndRegisteredArchiverPreflight`, `TestSnapshotActualBrokerAccountProfileAndRestartRefusal`, `TestSnapshotActualRuntimeDurablePublicationQueryAndEstablishedChannelFailure`, `check_source_inventory(args.root)`, `check_manifest(proof,args.sha,args.tree,args.run,args.attempt,hashes)`},
 		"../.github/scripts/release_ci.py":                         {`"architecture-migration.yml": {"compatibility", "finite-snapshot", "finite-snapshot-owner"}`},
@@ -57,10 +57,10 @@ func optionalSnapshotTopology(files map[string]string, profile jetstream.StreamC
 		return fmt.Errorf("mandatory snapshot owner job unavailable")
 	}
 	required := map[string][]string{
-		"Build source-bound owner worker gateway archiver and CLI once": {"cargo +1.90.0 build --release --locked", "sudo install -o root -g root -m 0555", "./services/lake-sink/internal/snapshot", "./services/api-gateway/cmd/api-gateway", "./services/archiver/internal/archive", "./cmd/kanz-lake-snapshot"},
+		"Build source-bound owner worker gateway archiver and CLI once": {"cargo +1.90.0 build --release --locked", "sudo install -o root -g root -m 0555", "./services/lake_sink/internal/snapshot", "./services/api_gateway/cmd/api_gateway", "./services/archiver/internal/archive", "./cmd/kanz_lake_snapshot"},
 		"Install two checksum-pinned native brokers":                    {"for version in 2.12.6 2.14.5", "77fe7dd69ff5144126026b78355900be0ab0bb4339dc61a7621dcc9b9e9d07a6", "5e3b603d47c447bda1f77f9ac16dbf91c90aac4ff3681f8fbbc7201e4ed99355", "sha256sum --check --status", "--binary-inventory"},
 		"Provision disposable scoped PostgreSQL and canonical Redpanda": {"NOSUPERUSER NOBYPASSRLS", "psql -X -w -h 127.0.0.1", "SELECT 1", "--wait-timeout 120 kafka", "snapshot-owner-proof/owned.json"},
-		"Actual finite owner on both broker versions without skips":     {"for version in 2.12.6 2.14.5", "--regex --root .", "go tool test2json -t -p github.com/eighred/kanz/services/lake-sink/internal/snapshot", "-test.count=1", "-test.run \"$selection\"", "|| result=1", "exit \"$result\""},
+		"Actual finite owner on both broker versions without skips":     {"for version in 2.12.6 2.14.5", "--regex --root .", "go tool test2json -t -p github.com/eighred/kanz/services/lake_sink/internal/snapshot", "-test.count=1", "-test.run \"$selection\"", "|| result=1", "exit \"$result\""},
 		"Stop owned snapshot fixture dependencies and prove absence":    {"snapshot-owner-proof/owned.json", "down --volumes", "snapshot-owner-proof/cleanup.json", "$pg_after$compose_after$volumes_after$networks_after"},
 		"Verify complete source-bound owner evidence":                   {"test_check_lake_snapshot_owner_evidence.py", "--seal --root .", "--binaries", "--sha", "--tree", "--run", "--attempt"},
 	}
@@ -103,7 +103,7 @@ func optionalSnapshotTopology(files map[string]string, profile jetstream.StreamC
 func optionalSnapshotFiles(t *testing.T, root string) map[string]string {
 	t.Helper()
 	files := map[string]string{}
-	for _, path := range []string{"internal/lake/snapshotprofile/profile.go", "services/lake-sink/internal/snapshot/store.go", "services/lake-sink/internal/snapshot/runtime.go", "infra/nats/snapshot_candidate.go", "../.github/scripts/check_lake_snapshot_owner_evidence.py", "../.github/scripts/release_ci.py", "../.github/workflows/architecture-migration.yml"} {
+	for _, path := range []string{"internal/lake/snapshotprofile/profile.go", "services/lake_sink/internal/snapshot/store.go", "services/lake_sink/internal/snapshot/runtime.go", "infra/nats/snapshot_candidate.go", "../.github/scripts/check_lake_snapshot_owner_evidence.py", "../.github/scripts/release_ci.py", "../.github/workflows/architecture-migration.yml"} {
 		files[path] = read(t, filepath.Join(root, path))
 	}
 	return files
@@ -125,10 +125,10 @@ func TestLakeSnapshotOptionalTopologyRequiresSeparateActualProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, mutation := range []struct{ path, old, replacement string }{
-		{"services/lake-sink/internal/snapshot/runtime.go", "client.RequireAccountIdentity", "client.OmittedIdentity"},
-		{"services/lake-sink/internal/snapshot/runtime.go", "client.RequireRegisteredDefaultDurable", "client.OmittedArchive"},
-		{"services/lake-sink/internal/snapshot/runtime.go", "client.RequireCanonicalParking", "client.OmittedParking"},
-		{"services/lake-sink/internal/snapshot/store.go", "subject = snapshotprofile.SubjectFailed", "subject = SubjectRequested"},
+		{"services/lake_sink/internal/snapshot/runtime.go", "client.RequireAccountIdentity", "client.OmittedIdentity"},
+		{"services/lake_sink/internal/snapshot/runtime.go", "client.RequireRegisteredDefaultDurable", "client.OmittedArchive"},
+		{"services/lake_sink/internal/snapshot/runtime.go", "client.RequireCanonicalParking", "client.OmittedParking"},
+		{"services/lake_sink/internal/snapshot/store.go", "subject = snapshotprofile.SubjectFailed", "subject = SubjectRequested"},
 		{"infra/nats/snapshot_candidate.go", "snapshotprofile.Stream()", "otherProfile()"},
 		{"../.github/workflows/architecture-migration.yml", "  finite-snapshot-owner:", "  removed-owner:"},
 		{"../.github/workflows/architecture-migration.yml", "  finite-snapshot-owner:", "  finite-snapshot-owner:\n    continue-on-error: true"},

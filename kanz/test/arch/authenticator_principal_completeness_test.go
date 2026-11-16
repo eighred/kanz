@@ -47,12 +47,12 @@ import (
 const principalCompletenessType = "Principal"
 
 // principalCompletenessDecl is where that struct is declared, module-relative.
-const principalCompletenessDecl = "services/api-gateway/internal/middleware/auth.go"
+const principalCompletenessDecl = "services/api_gateway/internal/middleware/auth.go"
 
 // principalCompletenessScope is the tree searched for literals of it. The type
 // is gateway-internal (Go's internal rule makes it unimportable elsewhere), so
 // this is the whole reachable set by construction.
-const principalCompletenessScope = "services/api-gateway"
+const principalCompletenessScope = "services/api_gateway"
 
 // principalCompletenessExempt maps a module-relative file path to the reason a
 // literal in it may be partial, and the issue that retires the entry.
@@ -129,7 +129,7 @@ func TestEveryAuthenticatorPopulatesTheWholePrincipal(t *testing.T) {
 	// guard now watches nothing.
 	if len(seen) < 2 {
 		t.Fatalf("found middleware.Principal literals in %d files (%v) — expected at least 2 "+
-			"(the OIDC bridge in cmd/api-gateway and the dev HS256 arm in internal/middleware). "+
+			"(the OIDC bridge in cmd/api_gateway and the dev HS256 arm in internal/middleware). "+
 			"The construction shape moved and this guard is asserting nothing", len(seen), keysOf(seen))
 	}
 

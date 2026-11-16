@@ -1,11 +1,11 @@
 # EVT-21b — cross-language serialization fixtures
 
-This directory holds the generator output consumed by all three EVT-21b
+This directory holds ignored, reproducible generator output consumed by all three EVT-21b
 parity test suites:
 
 - Go:    `kanz/test/contract/serialization/parity_test.go`
-- Python: `kanz-py/tests/test_serialization_parity.py`
-- TS:    `kanz/ts/kanz-bus/test/serialization-parity.test.ts`
+- Python: `python/tests/test_serialization_parity.py`
+- TS:    `kanz/ts/kanz_bus/test/serialization-parity.test.ts`
 
 ## Layout
 
@@ -20,13 +20,15 @@ encoding parity.
 
 ## Regenerate
 
+From `kanz/` after schema SDK generation:
+
 ```
 go run ./test/contract/serialization/cmd/genfixtures \
     -out ./test/contract/serialization/fixtures
 ```
 
 CI runs this before invoking any of the three language test suites. The
-Go parity test fails loudly with this exact command if committed
+Go parity test fails loudly with this exact command if generated
 fixtures drift from `BuildAll()`.
 
 ## Why Go is the canonical generator

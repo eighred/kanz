@@ -146,7 +146,7 @@ func postV1(method, path string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, path, body)
 	req.Header.Set(auth.HeaderPrincipalTenant, testTenant)
 	req.Header.Set(auth.HeaderPrincipalSubject, "alice@kanz")
-	if err := auth.SetPrincipalPortfolios(req.Header, []string{"PF1"}); err != nil {
+	if err := auth.SetPrincipalPortfolios(req.Header, []string{strings.SplitN(req.URL.Path, "/", 5)[3]}); err != nil {
 		panic(err)
 	}
 	return req

@@ -222,12 +222,12 @@ class VerdictTests(unittest.TestCase):
             return (setup.count("if: matrix.language == 'go'") == 3
                     and "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" in setup
                     and "go-version-file: kanz/go.mod" in setup
-                    and "uses: ./.github/actions/setup-buf" in setup
+                    and "uses: ./.github/actions/setup_buf" in setup
                     and "version: 1.69.0" in setup
                     and "protoc-gen-go@v1.36.11" in setup
                     and "protoc-gen-go-grpc@v1.5.1" in setup
                     and 'export PATH="$(go env GOPATH)/bin:$PATH"' in setup
-                    and "working-directory: kanz-schemas" in setup
+                    and "working-directory: schemas" in setup
                     and "buf generate" in setup
                     and "bash bootstrap-go-sdk.sh" in setup
                     and 'echo "CODEQL_OVERLAY_DATABASE_MODE=none" >> "$GITHUB_ENV"' in setup
@@ -253,7 +253,7 @@ class VerdictTests(unittest.TestCase):
 
     - name: Perform CodeQL Analysis
       id: analyze
-      uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+      uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066
       with:
         category: "/language:${{matrix.language}}"
         skip-queries: false

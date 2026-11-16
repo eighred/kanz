@@ -14,7 +14,7 @@ import (
 //
 // Every guard that checks a service has a broker account keys on
 // servicesWithEntrypoints — Go packages under kanz/services. The inference
-// service is Python, lives in kanz-py/, and was therefore invisible to all of
+// service is Python, lives in python/, and was therefore invisible to all of
 // them: it had no entry in tenancy.yaml at all, and nothing said so.
 //
 // That is not a cosmetic gap. infra/nats/nats.yaml sets `verify: true` +
@@ -34,7 +34,7 @@ import (
 //     each line is individually plausible.
 const inferenceSVID = "spiffe://kanz.internal/ns/kanz-services/sa/inference"
 
-// pythonDialsNATS reports whether kanz-py still opens a broker connection. If it
+// pythonDialsNATS reports whether python still opens a broker connection. If it
 // ever stops, this guard should be deleted rather than left passing vacuously.
 func pythonDialsNATS(t *testing.T, pyRoot string) bool {
 	t.Helper()
@@ -47,10 +47,10 @@ func pythonDialsNATS(t *testing.T, pyRoot string) bool {
 
 func TestThePythonServiceHasABrokerAccount(t *testing.T) {
 	root := moduleRoot(t)
-	pyRoot := filepath.Join(filepath.Dir(root), "kanz-py")
+	pyRoot := filepath.Join(filepath.Dir(root), "python")
 
 	if !pythonDialsNATS(t, pyRoot) {
-		t.Skip("kanz-py no longer dials NATS — delete this guard rather than leaving it green")
+		t.Skip("python no longer dials NATS — delete this guard rather than leaving it green")
 	}
 
 	pub := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
@@ -59,7 +59,7 @@ func TestThePythonServiceHasABrokerAccount(t *testing.T) {
 	perm, ok := pub[inferenceSVID]
 	if !ok {
 		t.Fatalf("tenancy.yaml has no permissions block for %s.\n\n"+
-			"kanz-py dials the broker, and nats.yaml sets verify: true + verify_and_map — so with "+
+			"python dials the broker, and nats.yaml sets verify: true + verify_and_map — so with "+
 			"no admitted SVID this service is refused at the TLS handshake and scores nothing. "+
 			"risk-engine really does publish inference.feature.computed; the streaming path is wired.",
 			inferenceSVID)
@@ -79,7 +79,7 @@ func TestThePythonServiceHasABrokerAccount(t *testing.T) {
 			allow = sub[inferenceSVID]
 		}
 		if permDenies(subject, allow) || !covered(subject, allow.allow) {
-			t.Errorf("kanz-py %ss %q (%s in %s) but tenancy.yaml's permissions.%s for %s does not "+
+			t.Errorf("python %ss %q (%s in %s) but tenancy.yaml's permissions.%s for %s does not "+
 				"allow it — the service authenticates fine and is then DENIED on that subject, "+
 				"which reads as a broken feature rather than a missing grant",
 				c.direction, subject, c.constName, filepath.Base(c.file), c.direction, inferenceSVID)

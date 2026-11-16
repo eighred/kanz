@@ -9,8 +9,8 @@ equivalent to repository CI. `make help` lists the available targets.
 ## Prerequisites
 
 - Go (see `go.mod` for the version), Docker, and [buf](https://buf.build/docs/installation).
-- The repo expects `kanz/` and `kanz-schemas/` as **sibling** directories — the
-  Go module `replace`s the schema SDK to `../kanz-schemas/gen/go` (EVT-15a).
+- The repo expects `kanz/` and `schemas/` as **sibling** directories — the
+  Go module `replace`s the schema SDK to `../schemas/gen/go` (EVT-15a).
 - **On Windows, read AGENTS.md's "Windows environment" section first.** A
   `GOTMPDIR` outside `%TEMP%`, `GOFLAGS`, build tags and the LF line-ending rule
   are required there, and skipping them makes `go test` fail at random while the
@@ -60,7 +60,7 @@ when claiming a complete suite, not only the example groups above.
 ### Why generation precedes builds
 
 Generated code is never committed (EVT-15a). The kanz module `replace`s
-`kanz-schemas-go` to `../kanz-schemas/gen/go`, so that tree must exist before
+`kanz-schemas-go` to `../schemas/gen/go`, so that tree must exist before
 anything builds. `buf generate` needs `protoc-gen-go-grpc` on `PATH` — it emits
 the inference + query gRPC stubs that `protoc-gen-go` alone omits — and `make
 bootstrap` installs it. `GOFLAGS=-mod=mod` permits dependency resolution; it
@@ -145,7 +145,7 @@ ranges and lake-sink durability. A YAML/config validation pass is not runtime
 evidence; record actual suite results and dependency skips separately.
 
 - Build context is the repo root: the service Dockerfiles COPY the generated
-  `kanz-schemas/gen/go` SDK. `make up`, build, vet and test run generation first.
+  `schemas/gen/go` SDK. `make up`, build, vet and test run generation first.
 - Auth/signing/quotas are disabled — this is a dev loop, not a security posture.
 - Seeding reuses `test/load/seed` (`SEED_NATS_URL` / `SEED_TENANT`).
 
@@ -153,14 +153,16 @@ evidence; record actual suite results and dependency skips separately.
 
 ```sh
 make scaffold NAME=my-service     # EVT-16a layout, on-convention from line 1
-go build ./services/my-service/...
+go build ./services/my_service/...
 ```
 
-The scaffold (DEVX-01b, `tools/scaffold`) emits `cmd/<name>/main.go` +
-`internal/{config,server}` wired with observability + probes. Fill in the real
+The scaffold (`kanz/tools/scaffold`) emits snake_case source paths
+(`services/my_service/cmd/my_service/main.go`) from the deployed service name
+`my-service`, preserving that binary/service identity. It also emits
+`internal/{config,server}` wired with observability and probes. Fill in the real
 work; copy the bus-consumer pattern from `services/audit` or `services/lineage`.
-The Backstage "New Kanz service" template (DEVX-01c) runs the same generator from
-the portal.
+The Backstage template references the same generator; portal registration and
+its runner action must be configured independently.
 
 ## Everyday targets
 
@@ -169,7 +171,7 @@ the portal.
 | `make generate` | regenerate the schema SDKs (after a `.proto` change) |
 | `make build` | build binaries into `bin/` |
 | `make test` / `make test-race` | serialized bounded package groups without / with race detection |
-| `make lint` | go vet, tracked gofmt check and golangci-lint |
+| `make lint` | go vet, tracked/untracked nonignored gofmt check and golangci-lint |
 | `make up` / `make down` | local dev stack |
 | `make scaffold NAME=x` | new service skeleton |
 | `make ci` | local convenience chain; actual CI is `.github/workflows/kanz-ci.yml` |
@@ -178,7 +180,7 @@ the portal.
 
 - Services: `services/<name>/` (entrypoint `cmd/<name>`, packages `internal/`).
 - Shared libs: `pkg/` (cross-service) and `internal/` (cross-service, unexported).
-- Schemas: the sibling `kanz-schemas/` module — proto + buf, and the five
+- Schemas: the sibling `schemas/` module — proto + buf, and the five
   normative wire specifications in its `README.md`. SDKs generate into `gen/`.
 - Infra: `infra/` (k8s, GitOps, security, observability, lakehouse, catalog,
   backstage). Portal: `infra/backstage`.
@@ -187,3 +189,9 @@ the portal.
   `infra/nats/` for broker incidents, `infra/deploy/` for replica loss,
   `infra/observability/slo/` for error-budget burn, `infra/tenancy/` for tenant
   onboarding, `services/autopilot/` and `services/audit/` for their own.
+
+Directory placement, naming at every depth and README requirements follow
+[the shared Eighred standard](../../.agents/plugins/kanz-forge/skills/repository-organization/references/eighred-standard.md).
+From the repository root, `python -B tools/check_readmes.py --inventory` checks
+all effective-source READMEs and contributor links. This does not execute their
+operator commands or qualify their external dependencies.

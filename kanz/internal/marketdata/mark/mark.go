@@ -6,8 +6,8 @@
 // something right now — tv-sync's unrealized P&L, and the OMS pre-trade gate
 // valuing a MARKET order at admission.
 //
-// Lifted from services/tv-sync/internal/markfeed, which could not be shared:
-// Go's internal rule makes a package under services/tv-sync/internal reachable
+// Lifted from services/tv_sync/internal/markfeed, which could not be shared:
+// Go's internal rule makes a package under services/tv_sync/internal reachable
 // only from tv-sync, so the OMS could not have reused it where it sat.
 //
 // STALENESS IS THE PART THAT IS NEW, and it is why this is not just a move. A
@@ -285,24 +285,22 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 		}
 		price = p
 	case ev.GetQuote() != nil && ev.GetQuote().GetBidPrice() != nil && ev.GetQuote().GetAskPrice() != nil:
-		bid, ok := decutil.FromProtoChecked(ev.GetQuote().GetBidPrice())
+		prices, ok := QualifyLiveQuote(ev.GetQuote().GetBidPrice(), ev.GetQuote().GetAskPrice())
 		if !ok {
 			return nil
 		}
-		ask, ok := decutil.FromProtoChecked(ev.GetQuote().GetAskPrice())
-		if !ok {
-			return nil
-		}
-		qBid, qAsk = bid, ask
-		mid := new(big.Rat).Add(bid, ask)
-		price = mid.Quo(mid, big.NewRat(2, 1))
+		qBid, qAsk, price = prices.Bid, prices.Ask, prices.Mid
 	default:
 		return nil
 	}
 	if price == nil || price.Sign() <= 0 {
 		return nil
 	}
-	asOf := s.clampSkew(eventTime(env, &ev))
+	at, ok := eventTime(env, &ev)
+	if !ok {
+		return nil // malformed present time: acknowledge without changing price or touch
+	}
+	asOf := s.clampSkew(at)
 	s.mu.Lock()
 	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: asOf}
 	// THE WIDTH IS WRITTEN ONLY BY THE QUOTE ARM. recordTouchLocked drops a nil,
@@ -355,7 +353,7 @@ func (s *Source) sweepLocked() {
 //
 // WHICH VARIANT AN event_type ANNOUNCES IS NOT THIS FOLD'S QUESTION, and it is
 // no longer answered here: eventtype.Of owns the taxonomy
-// services/market-data/internal/feed/bussink.go stamps, and its own test
+// services/market_data/internal/feed/bussink.go stamps, and its own test
 // derives the variant tokens from the MarketDataEvent oneof descriptor rather
 // than restating them. What IS this fold's question is which of those variants
 // a MARK can be taken from, and that is the switch below — a Trade and a Quote,
@@ -409,9 +407,15 @@ func (s *Source) clampSkew(asOf time.Time) time.Time {
 // eventTime prefers the MarketDataEvent's own event_time — it is the venue
 // timestamp for THIS event and stays correct inside a batch, where one envelope
 // carries many events with different times. The envelope is the fallback.
-func eventTime(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) time.Time {
-	if ts := ev.GetEventTime(); ts != nil {
-		return ts.AsTime()
+func eventTime(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (time.Time, bool) {
+	ts := ev.GetEventTime()
+	if ts == nil {
+		ts = env.GetEventTime()
 	}
-	return env.GetEventTime().AsTime()
+	// Only absence selects the envelope. AsTime would normalize a malformed
+	// present field into a different, potentially fresh and usable instant.
+	if ts != nil && ts.CheckValid() != nil {
+		return time.Time{}, false
+	}
+	return ts.AsTime(), true
 }

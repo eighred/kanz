@@ -129,7 +129,7 @@ func checkNativeKafkaOwner(files map[string]string) bool {
 func TestNativeKafkaSourceBoundaryAndMutations(t *testing.T) {
 	root := moduleRoot(t)
 	files := map[string]string{}
-	for key, path := range map[string]string{"main": "cmd/kanz-kafka-provision/main.go", "engine": "cmd/kanz-kafka-provision/internal/provision/engine.go", "shell": "infra/tenancy/tenantctl.sh"} {
+	for key, path := range map[string]string{"main": "cmd/kanz_kafka_provision/main.go", "engine": "cmd/kanz_kafka_provision/internal/provision/engine.go", "shell": "infra/tenancy/tenantctl.sh"} {
 		b, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil {
 			t.Fatal(err)
@@ -211,7 +211,7 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 	}
 	diagnosticRuns := 0
 	for _, step := range diagnostic.Steps {
-		if step.Run == "python3 -B tools/native-kafka-provision/image_diagnostic.py" {
+		if step.Run == "python3 -B tools/native_kafka_provision/image_diagnostic.py" {
 			if step.If != nil || step.Continue != nil {
 				return false
 			}
@@ -223,19 +223,19 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 	}
 	seen, cleanup, quota := 0, 0, 0
 	for _, step := range job.Steps {
-		if strings.TrimSpace(step.Run) == "bash -n kanz/infra/tenancy/tenantctl.sh\npython3 -B tools/tenant-quota/qualify.py" {
+		if strings.TrimSpace(step.Run) == "bash -n kanz/infra/tenancy/tenantctl.sh\npython3 -B tools/tenant_quota/qualify.py" {
 			if step.If != nil || step.Continue != nil {
 				return false
 			}
 			quota++
 		}
-		if step.Run == "python3 -B tools/native-kafka-provision/qualify.py" {
+		if step.Run == "python3 -B tools/native_kafka_provision/qualify.py" {
 			if step.If != nil || step.Continue != nil {
 				return false
 			}
 			seen++
 		}
-		if step.Run == "python3 -B tools/native-kafka-provision/owned_cleanup.py" {
+		if step.Run == "python3 -B tools/native_kafka_provision/owned_cleanup.py" {
 			if step.If != "always()" || step.Continue != nil {
 				return false
 			}
@@ -260,12 +260,12 @@ func TestNativeKafkaQualificationCannotBeOptional(t *testing.T) {
 		{"default: full", "default: image-diagnostics"},
 		{"github.event_name == 'workflow_dispatch'", "github.event_name == 'pull_request'"},
 		{"github.ref != 'refs/heads/main'", "true"},
-		{"run: python3 -B tools/native-kafka-provision/image_diagnostic.py", "run: echo skipped"},
+		{"run: python3 -B tools/native_kafka_provision/image_diagnostic.py", "run: echo skipped"},
 		{"  native-topic-provisioning:\n", "  native-topic-provisioning:\n    continue-on-error: true\n"},
-		{"run: python3 -B tools/native-kafka-provision/qualify.py", "if: false\n        run: python3 -B tools/native-kafka-provision/qualify.py"},
-		{"run: python3 -B tools/native-kafka-provision/qualify.py", "run: echo skipped"},
-		{"run: python3 -B tools/native-kafka-provision/owned_cleanup.py", "run: echo skipped"},
-		{"python3 -B tools/tenant-quota/qualify.py", "echo skipped quota proof"},
+		{"run: python3 -B tools/native_kafka_provision/qualify.py", "if: false\n        run: python3 -B tools/native_kafka_provision/qualify.py"},
+		{"run: python3 -B tools/native_kafka_provision/qualify.py", "run: echo skipped"},
+		{"run: python3 -B tools/native_kafka_provision/owned_cleanup.py", "run: echo skipped"},
+		{"python3 -B tools/tenant_quota/qualify.py", "echo skipped quota proof"},
 	} {
 		if !strings.Contains(source, mutation.old) {
 			t.Fatal("mutation anchor missing")
