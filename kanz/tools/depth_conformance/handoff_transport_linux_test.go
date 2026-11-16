@@ -132,17 +132,41 @@ func startHandoffBroker(t *testing.T, rustID string, denyRustPublish bool) *hand
 
 func (b *handoffBroker) connections(id string) []uint64 {
 	b.t.Helper()
-	state, err := b.server.Connz(&ns.ConnzOptions{Username: true, Limit: 32})
-	if err != nil || state.Total > 32 {
-		b.t.Fatal("bounded broker principal inventory unavailable")
-	}
-	var ids []uint64
-	for _, c := range state.Conns {
-		if c.AuthorizedUser == id {
-			ids = append(ids, c.Cid)
+	// Connz in the pinned NATS server reads opts.Username while TLSMap writes
+	// it without the client lock. Read the verified TLS state through the
+	// exported, locked accessor instead; client-supplied names are not identity.
+	// This disposable broker has one fixed stream and at most 16 connections.
+	// A scan that misses a registered client must refuse, including CID growth
+	// beyond this finite range; it must never report an incomplete empty set.
+	for attempt := 0; attempt < 50; attempt++ {
+		before := b.server.NumClients()
+		if before > 32 {
+			b.t.Fatal("bounded broker principal inventory exceeded")
 		}
+		var ids []uint64
+		observed := 0
+		for cid := uint64(1); cid <= 4096; cid++ {
+			client := b.server.GetClient(cid)
+			if client == nil {
+				continue
+			}
+			observed++
+			state := client.GetTLSConnectionState()
+			if state == nil || !state.HandshakeComplete || state.Version != tls.VersionTLS13 || len(state.PeerCertificates) != 1 {
+				continue
+			}
+			uris := state.PeerCertificates[0].URIs
+			if len(uris) == 1 && uris[0].String() == id {
+				ids = append(ids, cid)
+			}
+		}
+		if observed == before && observed == b.server.NumClients() {
+			return ids
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return ids
+	b.t.Fatal("complete broker principal inventory unavailable")
+	return nil
 }
 
 func handoffWait(t *testing.T, limit time.Duration, label string, predicate func() bool) {
