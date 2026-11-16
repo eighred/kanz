@@ -39,7 +39,7 @@ var gatewayResourceAuthzExempt = map[string]string{}
 
 func TestEveryResourceScopedGatewayRouteGatesOnOwnership(t *testing.T) {
 	path := filepath.Join(moduleRoot(t), filepath.FromSlash(
-		"services/api-gateway/internal/gateway/gateway.go"))
+		"services/api_gateway/internal/gateway/gateway.go"))
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)

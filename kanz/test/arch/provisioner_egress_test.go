@@ -23,7 +23,7 @@ func findNodeProvisionerEgressPolicy(docs []networkPolicyDoc) (networkPolicyDoc,
 // operator-supplied node IP that has no fixed CIDR), and nothing else. The
 // provisioner Job pod itself never dials :6443 or :443 — the k3s join curl
 // runs on the target node over the SSH session, not in the pod (see
-// cmd/kanz-provisioner/join.go) — so those ports must not appear here. Unlike
+// cmd/kanz_provisioner/join.go) — so those ports must not appear here. Unlike
 // operator-egress, this guard's "no empty to:" rule is per-rule rather than
 // global: the SSH rule's open `to:` is the one intentional exception, but its
 // port set is still pinned so it cannot silently widen.

@@ -25,15 +25,85 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_session_acceptance_is_bound_through_adapter_to_actual_main_gate(self):
+        from test_work_session import fixture, receipt
+        data = snapshot()
+        data['work_session'] = fixture()
+        proof = receipt('original')
+        proof['merge_sha'] = MAIN
+        data['work_session']['main_acceptance'] = [proof]
+        data['validation_graph'] = dict(main_revision=MAIN, nodes=[dict(
+            id='actual-main', kind='gate', subject='main', revision=MAIN,
+            validation=dict(data['main'], inventory_evidence='reviewed complete source inventory',
+                            observed=[dict(data['main']['observed'][0], evidence='official main run/job')]))], edges=[])
+        self.assertTrue(assess(data)['work_session']['complete'])
+        data['validation_graph']['nodes'][0]['validation']['observed'][0]['status'] = 'IN_PROGRESS'
+        result = assess(data)['work_session']
+        self.assertFalse(result['complete'])
+        self.assertIn('original', result['unverified_receipts'])
+
+        data['validation_graph']['nodes'][0]['validation']['observed'][0]['status'] = 'SUCCESS'
+        data['main']['sha'] = HEAD
+        data['main']['observed'][0]['sha'] = HEAD
+        result = assess(data)['work_session']
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['initial_verified_on_main'], [])
+        self.assertIn('original', result['unverified_receipts'])
+
+        data['main']['sha'] = MAIN
+        data['main']['observed'][0]['sha'] = MAIN
+        data['main']['observed'][0]['status'] = 'FAILURE'
+        result = assess(data)['work_session']
+        self.assertFalse(result['complete'])
+        self.assertIn('original', result['unverified_receipts'])
+
+    def test_session_progress_stays_separate_from_new_finding_completion(self):
+        from test_work_session import fixture, finding, receipt
+        data = snapshot()
+        data['work_session'] = fixture()
+        data['work_session']['findings'] = [finding()]
+        data['work_session']['main_acceptance'] = [receipt('repair')]
+        result = assess(data)['work_session']
+        self.assertEqual(result['initial_verified_on_main'], [])
+        self.assertIn('repair', result['blocked_repairs'])
+        self.assertFalse(result['complete'])
+
+    def test_continuation_ranking_survives_delivery_ownership_filter(self):
+        from test_validation_graph import task as graph_task
+        data = snapshot()
+        data['tasks'] = [task('new', 'new'), task('branch', 'branch'), task('pr', 'pr')]
+        data['validation_graph'] = dict(nodes=[
+            graph_task('new', priority=1),
+            graph_task('branch', priority=1, continuation=dict(kind='branch', evidence='reviewed branch @ head')),
+            graph_task('pr', priority=1, continuation=dict(kind='pr', evidence='reviewed PR @ head'))], edges=[])
+        self.assertEqual(assess(data)['plan']['next_actionable'], 'pr')
+        data['active_tasks'] = [task('other-owner', 'pr')]
+        self.assertEqual(assess(data)['plan']['next_actionable'], 'branch')
+
+    def test_validation_selection_preserves_active_file_ownership(self):
+        from test_validation_graph import fixture
+        data = snapshot()
+        data['validation_graph'] = fixture()
+        data['tasks'] = [task('feature', 'feature', priority=0), task('repair', 'runtime', priority=2),
+                         task('independent', 'docs', priority=1)]
+        self.assertEqual(assess(data)['plan']['next_actionable'], 'repair')
+        data['active_tasks'] = [task('active', 'runtime')]
+        report = assess(data)
+        self.assertEqual(report['plan']['next_actionable'], 'independent')
+        self.assertIn('overlap', report['plan']['deferred']['repair'][0])
+        self.assertIn('feature', report['plan']['deferred'])
+
     def test_selects_highest_priority_feasible_task_and_rechecks_holds(self):
         data = snapshot()
         high = task("high", "risk", blockers=["signed upstream input"], priority=0)
         medium = task("medium", "observability", priority=1)
         low = task("low", "docs", priority=2)
         data["tasks"] = [low, medium, high]
-        self.assertEqual(assess(data)["plan"]["next_actionable"], "medium")
+        self.assertEqual(assess(data)["plan"]["ownership_candidate"], "medium")
+        self.assertIsNone(assess(data)["plan"]["next_actionable"])
+        self.assertFalse(assess(data)["plan"]["validation_aware"])
         high["blockers"] = []
-        self.assertEqual(assess(data)["plan"]["next_actionable"], "high")
+        self.assertEqual(assess(data)["plan"]["ownership_candidate"], "high")
         for item in data["tasks"]:
             item["blockers"] = ["required check pending"]
         self.assertIsNone(assess(data)["plan"]["next_actionable"])
@@ -122,7 +192,7 @@ class DeliveryEvidenceTests(unittest.TestCase):
                          task("guard2", "kanz/test/arch/guard_test.go"),
                          task("forge", ".agents")]
         plan = assess(data)["plan"]
-        self.assertEqual(plan["next_actionable"], "guard")
+        self.assertEqual(plan["ownership_candidate"], "guard")
         self.assertEqual(plan["independent"], ["guard", "forge"])
         self.assertEqual(plan["deferred"]["deployment"], [{"overlap": ["worker"]}])
         self.assertEqual(plan["deferred"]["broker"], [{"overlap": ["worker"]}])

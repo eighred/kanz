@@ -138,7 +138,9 @@ func DecodeModelProto(payload []byte) (wealth.ModelPortfolio, error) {
 	}
 	profile, ok := domainProfile(m.GetRiskProfile())
 	if !ok {
-		return wealth.ModelPortfolio{}, fmt.Errorf(
+		// Keep only decoded identity for the folder's attribution check. This
+		// partial result is not an admissible policy and must never be Put.
+		return wealth.ModelPortfolio{ModelID: m.GetModelId()}, fmt.Errorf(
 			"consume: model %s carries risk_profile %v, which this build does not know; refusing rather "+
 				"than admitting a model no household can be matched to",
 			m.GetModelId(), m.GetRiskProfile())

@@ -35,7 +35,7 @@ import (
 //
 // # What this checks
 //
-// Every capability named by a route registration under services/api-gateway/
+// Every capability named by a route registration under services/api_gateway/
 // appears in the Grants policy the api-gateway composition root builds.
 //
 // It is a comparison of two sets in one file, and it would have failed the day
@@ -102,7 +102,7 @@ import (
 // registering the route.
 var gatewayGrantExempt = map[string]string{}
 
-const gatewayAuthzPkg = "services/api-gateway/internal/authz"
+const gatewayAuthzPkg = "services/api_gateway/internal/authz"
 
 func TestEveryCapabilityARouteDemandsIsGrantedToSomeRole(t *testing.T) {
 	root := moduleRoot(t)
@@ -122,7 +122,7 @@ func TestEveryCapabilityARouteDemandsIsGrantedToSomeRole(t *testing.T) {
 	// gateway declares a capability by construction, so finding a handful means
 	// the registration shape moved and a new dead capability would sail past.
 	if len(required) == 0 {
-		t.Fatal("no route registration named a capability anywhere under services/api-gateway — " +
+		t.Fatal("no route registration named a capability anywhere under services/api_gateway — " +
 			"the Handle(cap, pattern, h) shape moved and this guard is comparing an empty set")
 	}
 	routes := 0
@@ -170,7 +170,7 @@ func TestEveryCapabilityARouteDemandsIsGrantedToSomeRole(t *testing.T) {
 			"is registered, documented and capability-gated looks exactly like one that works. "+
 			"authz.Fund sat in that state from #415 to #535 while POST /v1/portfolios/{id}/"+
 			"cash-movements was unreachable by anybody.\n\n"+
-			"Grant it to a role in services/api-gateway/cmd/api-gateway/main.go — with a config "+
+			"Grant it to a role in services/api_gateway/cmd/api_gateway/main.go — with a config "+
 			"field, an env var and a validateAuth collision check, the way the trade and operator "+
 			"roles have — or stop registering the route, so the deployment answers 404 (\"there is "+
 			"no such surface here\") instead of 403 (\"you may not\"). Do NOT add an entry to "+
@@ -192,9 +192,9 @@ func TestEveryCapabilityARouteDemandsIsGrantedToSomeRole(t *testing.T) {
 // gatewayDeclaredCapabilities returns the exported constants of type Capability
 // declared in the authz package.
 //
-// Read from SOURCE rather than imported, and not by choice: services/api-gateway/
+// Read from SOURCE rather than imported, and not by choice: services/api_gateway/
 // internal/authz is under an internal/ tree rooted at the service, so no package
-// outside services/api-gateway may import it. test/arch never can.
+// outside services/api_gateway may import it. test/arch never can.
 func gatewayDeclaredCapabilities(t *testing.T, root string, fset *token.FileSet) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
@@ -227,7 +227,7 @@ func gatewayDeclaredCapabilities(t *testing.T, root string, fset *token.FileSet)
 // gatewayRequiredCapabilities maps each capability to the route patterns that
 // demand it, over every handler package the gateway registers routes from.
 //
-// The scan covers all of services/api-gateway rather than a list of handler
+// The scan covers all of services/api_gateway rather than a list of handler
 // packages: a list is a thing to forget to extend, and forgetting it here would
 // mean the newest route — the one most likely to demand a capability nobody has
 // granted yet — is the one route not checked.
@@ -236,7 +236,7 @@ func gatewayRequiredCapabilities(
 ) map[string][]string {
 	t.Helper()
 	out := map[string][]string{}
-	walkGoFiles(t, root, "services/api-gateway", fset, func(rel string, f *ast.File) {
+	walkGoFiles(t, root, "services/api_gateway", fset, func(rel string, f *ast.File) {
 		local, ok := gatewayAuthzImportName(f)
 		if !ok {
 			return
@@ -281,7 +281,7 @@ func gatewayGrantedCapabilities(
 ) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
-	walkGoFiles(t, root, "services/api-gateway/cmd/api-gateway", fset, func(_ string, f *ast.File) {
+	walkGoFiles(t, root, "services/api_gateway/cmd/api_gateway", fset, func(_ string, f *ast.File) {
 		local, ok := gatewayAuthzImportName(f)
 		if !ok {
 			return

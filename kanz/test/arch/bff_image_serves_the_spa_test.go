@@ -15,7 +15,7 @@ import (
 // #371's five slices were complete — 12 test files, 110 passing frontend tests,
 // every screen wired through /api/*. The web-bff image built cleanly. And the
 // image contained NO SPA: its Dockerfile compiled the Go binary and copied
-// nothing else, because kanz-web/dist is gitignored (it is a build artifact) and
+// nothing else, because web/dist is gitignored (it is a build artifact) and
 // nothing in the build pipeline produced it into the docker context.
 //
 // The result would have started, passed every probe, served /api and /auth
@@ -47,7 +47,7 @@ import (
 func TestBFFImageServesTheSPAItsManifestPointsAt(t *testing.T) {
 	root := moduleRoot(t)
 
-	dockerfile := filepath.Join(root, "services", "web-bff", "Dockerfile")
+	dockerfile := filepath.Join(root, "services", "web_bff", "Dockerfile")
 	df, err := os.ReadFile(dockerfile)
 	if err != nil {
 		t.Fatalf("read the web-bff Dockerfile: %v", err)
@@ -57,16 +57,16 @@ func TestBFFImageServesTheSPAItsManifestPointsAt(t *testing.T) {
 	// NON-VACUITY: the Dockerfile must be the one we think it is. A renamed or
 	// emptied file would otherwise make every assertion below pass on nothing.
 	if !strings.Contains(dfText, "/out/web-bff") {
-		t.Fatalf("services/web-bff/Dockerfile does not build the web-bff binary — this guard is " +
+		t.Fatalf("services/web_bff/Dockerfile does not build the web-bff binary — this guard is " +
 			"reading the wrong file, or the build has moved")
 	}
 
 	// Where the image puts the SPA: the destination of a COPY whose source is the
 	// built frontend. Parsed rather than hardcoded so moving it is one edit.
-	copySPA := regexp.MustCompile(`(?m)^COPY\s+kanz-web/dist/?\s+(\S+)\s*$`)
+	copySPA := regexp.MustCompile(`(?m)^COPY\s+web/dist/?\s+(\S+)\s*$`)
 	m := copySPA.FindStringSubmatch(dfText)
 	if m == nil {
-		t.Fatalf("services/web-bff/Dockerfile never copies kanz-web/dist into the image.\n\n" +
+		t.Fatalf("services/web_bff/Dockerfile never copies web/dist into the image.\n\n" +
 			"The image would start, pass every probe, serve /api and /auth correctly and return " +
 			"NOTHING at / — an application that is finished, green and blank in a browser. The SPA " +
 			"must ship in THIS image because the BFF serves it on its own origin; a separate static " +
@@ -75,7 +75,7 @@ func TestBFFImageServesTheSPAItsManifestPointsAt(t *testing.T) {
 	}
 	imageDir := strings.TrimSuffix(m[1], "/")
 
-	// AND THE WORKFLOW MUST PRODUCE dist BEFORE THE BUILD READS IT. kanz-web/dist
+	// AND THE WORKFLOW MUST PRODUCE dist BEFORE THE BUILD READS IT. web/dist
 	// is gitignored, so a COPY of it fails unless something put it in the context
 	// — and it must be BOTH workflows: a release that ships an image without the
 	// SPA is the same outage, arriving on the artifact anyone actually deploys.
@@ -86,7 +86,7 @@ func TestBFFImageServesTheSPAItsManifestPointsAt(t *testing.T) {
 			t.Fatalf("read %s: %v", wf, err)
 		}
 		if !strings.Contains(string(b), "npm run build") {
-			t.Errorf(".github/workflows/%s never runs `npm run build`, so kanz-web/dist does not exist "+
+			t.Errorf(".github/workflows/%s never runs `npm run build`, so web/dist does not exist "+
 				"in the docker context and the web-bff image ships without the SPA (or fails to build "+
 				"at the COPY, depending on buildkit's mood about a missing path)", wf)
 		}

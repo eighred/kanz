@@ -5,8 +5,8 @@ import sys
 from check_migration_evidence import verify
 
 REQUIRED = {
-    "services/risk-engine/tools/bond-risk-conformance": {"TestRustBondRiskProcessConformance", "TestBondCorpusIndependentAnalytics"},
-    "services/risk-engine/internal/bondshadow": {"TestRustBondShadowActualProcess"},
+    "services/risk_engine/tools/bond_risk_conformance": {"TestRustBondRiskProcessConformance", "TestBondCorpusIndependentAnalytics"},
+    "services/risk_engine/internal/bondshadow": {"TestRustBondShadowActualProcess"},
     "internal/shadowprocess": set(),
 }
 

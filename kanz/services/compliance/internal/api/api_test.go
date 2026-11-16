@@ -123,7 +123,7 @@ func mandateJSON(t *testing.T, version int64, rules int) string {
 	if rules > 0 {
 		limits := make([]any, 0, rules)
 		for i := 0; i < rules; i++ {
-			limits = append(limits, map[string]any{"rule_id": "R" + string(rune('1'+i))})
+			limits = append(limits, map[string]any{"rule_id": "R" + string(rune('1'+i)), "type": "RULE_TYPE_BUYING_POWER", "buying_power": map[string]any{}})
 		}
 		m["rules"] = limits
 	}
@@ -619,7 +619,8 @@ func TestPropose_TheAdvertisedDigestIsTheOneTheApprovalCovers(t *testing.T) {
 		MandateId: "M-2026Q3", TenantId: tenantA, PortfolioId: portfolio, Version: 13,
 		EffectiveAt: timestamppb.New(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)),
 		Rules: []*compliancepb.Rule{
-			{RuleId: "R1"}, {RuleId: "R2"},
+			{RuleId: "R1", Type: compliancepb.RuleType_RULE_TYPE_BUYING_POWER, Params: &compliancepb.Rule_BuyingPower{BuyingPower: &compliancepb.BuyingPowerLimit{}}},
+			{RuleId: "R2", Type: compliancepb.RuleType_RULE_TYPE_BUYING_POWER, Params: &compliancepb.Rule_BuyingPower{BuyingPower: &compliancepb.BuyingPowerLimit{}}},
 		},
 	}, reason)
 	if err != nil {

@@ -51,6 +51,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	riskv1 "github.com/eighred/kanz/internal/risk/api/v1"
 )
 
 // Status is whether a value may be stated. It is deliberately two-valued and
@@ -93,6 +94,23 @@ type Coverage struct {
 	ExclusionReasons []string `json:"exclusion_reasons,omitempty"`
 }
 
+// ModelStatus distinguishes what the producer declared, independently of whether
+// coverage permits stating its value. A declared model is not a model approval.
+type ModelStatus string
+
+const (
+	ModelUndeclared  ModelStatus = "UNDECLARED"
+	ModelPlaceholder ModelStatus = "PLACEHOLDER"
+	ModelDeclared    ModelStatus = "DECLARED_MODEL"
+)
+
+// Provenance keeps the model label an advisory reader needs. Parameters, input
+// identities and private model metadata are not part of this projection.
+type Provenance struct {
+	Status ModelStatus          `json:"status"`
+	Method riskv1.MeasureMethod `json:"method,omitempty"`
+}
+
 // Measure is one governed value and whether it may be stated.
 type Measure struct {
 	Name   string `json:"name"`
@@ -108,6 +126,9 @@ type Measure struct {
 	// Reason is why the value is withheld. Empty when Status is MEASURED.
 	Reason   string   `json:"reason,omitempty"`
 	Coverage Coverage `json:"coverage"`
+	// Risk measures always report a model state, including UNDECLARED. Exposure
+	// records carry no model provenance on the wire and omit this field.
+	Provenance *Provenance `json:"provenance,omitempty"`
 }
 
 // Set is a projected governed read.
@@ -184,7 +205,7 @@ func ProjectExposure(resp *querypb.ExposureResponse) Set {
 }
 
 func projectMeasure(m *domainpb.RiskMeasure, withholdAll bool, flagReason string) Measure {
-	out := Measure{Name: m.GetName(), Coverage: coverageOf(m.GetCoverage())}
+	out := Measure{Name: m.GetName(), Coverage: coverageOf(m.GetCoverage()), Provenance: provenanceOf(m.GetProvenance())}
 	out = stateValue(out, m.GetValue(), m.GetCoverage(), withholdAll, flagReason)
 	if out.Status == StatusMeasured {
 		if u, ok := dec.Float64(m.GetUncertaintyAbs()); ok {
@@ -192,6 +213,18 @@ func projectMeasure(m *domainpb.RiskMeasure, withholdAll bool, flagReason string
 		}
 	}
 	return out
+}
+
+func provenanceOf(p *domainpb.MeasureProvenance) *Provenance {
+	method := riskv1.MeasureMethod(p.GetMethod())
+	status := ModelUndeclared
+	if method != "" {
+		status = ModelDeclared
+		if method.IsPlaceholder() {
+			status = ModelPlaceholder
+		}
+	}
+	return &Provenance{Status: status, Method: method}
 }
 
 // stateValue is the whole decision, and the ORDER OF THE CHECKS IS THE
@@ -227,15 +260,15 @@ func withhold(out Measure, reason string) Measure {
 
 // readFlags names every flag and decides whether the response withholds wholesale.
 //
-// TWO FLAGS WITHHOLD AND TWO DO NOT, and which is which is the argument:
+// Only known advisory flags may preserve a value:
 //
 //   - CURRENCY_EXCLUDED withholds. The response was computed over a SUBSET of the
 //     book because the engine has no FX layer (RISK-06), and QUALITY_FLAG_CURRENCY_EXCLUDED
 //     says a caller that must not under-report has to refuse rather than treat it
 //     as a number. No direction claim is available to make instead.
-//   - UNSPECIFIED withholds. grpcsrv emits it for a flag it could not map and says
-//     a caller must not read it as "fine". An unnamed trust signal is an unknown,
-//     and a critical unknown fails closed.
+//   - UNSPECIFIED and unknown enum values withhold. A newer producer can send a
+//     numeric enum this build cannot interpret. Naming it without refusing its
+//     values would treat an unknown trust signal as an all-clear.
 //   - DEGRADED and STALE do NOT withhold. The values are real, just cached or
 //     older than the request's budget; the named flag and as_of say exactly that.
 //     Emptying the plane here would empty it during precisely the incident an
@@ -250,15 +283,19 @@ func readFlags(flags []querypb.QualityFlag) (names []string, withholdAll bool, r
 	for _, f := range flags {
 		names = append(names, strings.TrimPrefix(f.String(), "QUALITY_FLAG_"))
 		switch f {
+		case querypb.QualityFlag_QUALITY_FLAG_DEGRADED,
+			querypb.QualityFlag_QUALITY_FLAG_STALE,
+			querypb.QualityFlag_QUALITY_FLAG_INPUTS_UNRESOLVED:
+			// These advisory signals retain their existing per-measure policy.
 		case querypb.QualityFlag_QUALITY_FLAG_CURRENCY_EXCLUDED:
 			withholdAll = true
 			reason = "the response was computed over a currency subset of the book " +
 				"(CURRENCY_EXCLUDED); every base-currency value on it may move in either direction"
-		case querypb.QualityFlag_QUALITY_FLAG_UNSPECIFIED:
+		default:
 			if !withholdAll {
 				withholdAll = true
 				reason = "the engine attached a trust flag this platform cannot name " +
-					"(QUALITY_FLAG_UNSPECIFIED); an unnamed signal is an unknown, not an all-clear"
+					"(" + f.String() + "); an unnamed signal is an unknown, not an all-clear"
 			}
 		}
 	}

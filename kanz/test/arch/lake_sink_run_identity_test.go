@@ -22,7 +22,7 @@ func lakeSinkRunIdentity(source string) error {
 		if err != nil {
 			return err
 		}
-		if path == "github.com/eighred/kanz/services/lake-sink/internal/sink" {
+		if path == "github.com/eighred/kanz/services/lake_sink/internal/sink" {
 			alias = "sink"
 			if imported.Name != nil {
 				alias = imported.Name.Name
@@ -82,7 +82,7 @@ func lakeSinkRunIdentity(source string) error {
 }
 
 func TestLakeSinkRequestsRunIdentityForPartFiles(t *testing.T) {
-	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake-sink/cmd/lake-sink/main.go")))
+	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake_sink/cmd/lake_sink/main.go")))
 	if err := lakeSinkRunIdentity(source); err != nil {
 		t.Fatal(err)
 	}

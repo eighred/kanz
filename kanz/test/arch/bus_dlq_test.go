@@ -191,47 +191,7 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 	return ok && id.Name == pkg
 }
 
-// dlqExemptBroadcastOnlyConsumers is the default-deny allow-list of
-// bus.NewConsumer call sites certified safe to omit bus.WithDLQ because every
-// subscription they make is SubscribeBroadcast/SubscribeBroadcastReady, never
-// the grouped Subscribe.
-//
-// pkg/bus/consumer.go (SubscribeBroadcastReady's shared dispatch path)
-// documents that the broadcast path does NOT route to the DLQ at all — an
-// unreadable or failed broadcast message "is returned as an error, the message
-// is nacked", full stop. c.dlq is never consulted anywhere in that path
-// (consumer.go). That makes bus.WithDLQ structurally INERT on a
-// consumer used only for broadcast: there is no code path left that would
-// ever read c.dlq, so its absence loses nothing.
-//
-// A listed entry must also be a consumer that CANNOT hold a DLQ publisher: a
-// read-only observer whose tenancy grant denies all business publish (see
-// test/arch/nats_identity_test.go's readOnlyObserverSVIDs) has no dlq.*
-// publish grant to construct bus.WithDLQ from in the first place. Certifying
-// the exemption on inertness alone, without also requiring read-only, would
-// let a capital-path consumer skip the DLQ merely by *also* subscribing to a
-// broadcast subject elsewhere — this list is for consumers with NOTHING but
-// broadcast subscriptions, and specifically ones that could never wire a DLQ
-// even if asked to.
-//
-// This is default-deny like retryCertifiedConsumers below: a NEW
-// bus.NewConsumer call site that lacks WithDLQ still fails
-// TestEveryBusConsumerWiresADLQ until an entry here names it explicitly, with
-// its own justification. Listing cannot silently widen — only enumerating a
-// specific file:line can, and that requires a reviewed edit to this file.
 var dlqExemptBroadcastOnlyConsumers = map[string]string{
-	"cmd/kanz-monitor/busreader.go:runBusReader": "kanz-monitor: this Consumer is used " +
-		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go and " +
-		"risk.position.changed.> at busreader.go) — there is no Subscribe call anywhere " +
-		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
-		"(consumer.go, Consumer.Subscribe) is unreachable from this call site; per " +
-		"SubscribeBroadcastReady's shared dispatch in consumer.go the broadcast path never " +
-		"consults c.dlq regardless, so " +
-		"WithDLQ would be inert here. The monitor is also a read-only observer " +
-		"(test/arch/nats_identity_test.go's readOnlyObserverSVIDs; its tenancy grant " +
-		"denies all business publish) and physically cannot hold the dlq.* " +
-		"publisher WithDLQ requires — there is no producer anywhere in this file, " +
-		"see busreader.go's own READ-ONLY doc comment.",
 	"test/load/orderflow/facts.go:watchFacts": "orderflow (#865): this Consumer makes " +
 		"TWO SubscribeReplay calls (order.order.accepted and order.order.rejected) and " +
 		"nothing else — there is no Subscribe call anywhere in test/load/orderflow, so the " +
@@ -239,7 +199,7 @@ var dlqExemptBroadcastOnlyConsumers = map[string]string{
 		"site. SubscribeReplay shares subscribeEphemeral with SubscribeBroadcast in " +
 		"pkg/bus/nats.go — one function, one enum apart — so the same fact holds: the " +
 		"ephemeral path never consults c.dlq and WithDLQ is structurally inert here.\n" +
-		"It also CANNOT hold a DLQ publisher, for a stronger reason than the monitor's: " +
+		"It also CANNOT hold a DLQ publisher, because " +
 		"this whole package must not publish AT ALL. It is the write-path load harness, and " +
 		"test/arch/load_harness_front_door_test.go enforces that it submits orders through " +
 		"the api-gateway's POST /v1/orders rather than putting anything on the bus itself. " +
@@ -329,7 +289,7 @@ func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 // and quietly false a year later, when the tool is renamed, moved under a build
 // tag, or deleted as unused because nothing imports it. So it is a guard: the
 // module must contain a non-test subscription to a subject in the `dlq.`
-// namespace. Deleting cmd/kanz-redrive fails this test.
+// namespace. Deleting cmd/kanz_redrive fails this test.
 //
 // It checks TWO things, because either alone is satisfiable by something an
 // operator cannot actually use:
@@ -353,7 +313,7 @@ func TestTheDLQNamespaceHasAReader(t *testing.T) {
 		"holds its 202, no ORDER_REJECTED FACT is emitted, kanz-replay refuses dlq. subjects by " +
 		"design (it republishes into the isolated replay namespace, which is the wrong " +
 		"destination), and recovery needs a human to hand-write a republisher.\n\n" +
-		"pkg/bus.Redriver is the engine and cmd/kanz-redrive is the entry point (#220). If one " +
+		"pkg/bus.Redriver is the engine and cmd/kanz_redrive is the entry point (#220). If one " +
 		"was removed, restore it or replace it with something that reads the namespace."
 
 	if len(engines) == 0 {
@@ -453,7 +413,7 @@ func dlqDrainSites(t *testing.T, root string) (engines, entryPoints []string) {
 }
 
 // dlqNamespace is the reserved DLQ subject prefix (bus.dlqSubjectPrefix, and
-// kanz-schemas/README.md § Subject Taxonomy §6). Spelled here rather than
+// schemas/README.md § Subject Taxonomy §6). Spelled here rather than
 // imported because test/arch is deliberately dependency-free over the module it
 // scans.
 const dlqNamespace = "dlq."
@@ -505,16 +465,16 @@ func usesRedriver(f *ast.File) bool {
 // either), so a call site whose every subscription runs through one of those
 // two has nothing here to certify — WithRetry there would be inert, not
 // dangerous, and is deliberately left OFF this list rather than certified for
-// a decision that cannot arise (services/compliance, services/webhook-ingest).
+// a decision that cannot arise (services/compliance, services/webhook_ingest).
 //
 // Keyed on "file:line" — busConsumerCall.where(), the same identity the guard
 // already reports failures against. An edit that moves the call site
 // un-certifies it until this entry is updated to match; that fails CLOSED,
 // which is the safe direction for a capital-path guard.
 var retryCertifiedConsumers = map[string]string{
-	"services/tv-sync/cmd/tv-sync/main.go:run": "tv-sync: the sole handler is " +
+	"services/tv_sync/cmd/tv_sync/main.go:run": "tv-sync: the sole handler is " +
 		"projection.Projection.Handle. Its only error return before the fold is " +
-		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go), " +
+		"PostgresLog.Append itself failing (services/tv_sync/internal/projection/postgres.go), " +
 		"which means nothing committed. fold() never returns an error and Handle " +
 		"unconditionally returns nil once it runs, so there is no error path between a " +
 		"successful Append and the fold that a retry could trigger — a retry can only " +
@@ -540,7 +500,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:runEngine": "risk-engine (state ingest): dispatches " +
+	"services/risk_engine/cmd/risk_engine/main.go:runEngine": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
 		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
@@ -551,7 +511,7 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
+	"services/risk_engine/cmd/risk_engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go) " +
 		"— a last-value cache write, same shape as accounting's live FX feed. Nothing to skip. " +
 		"Since #894 the write is admitted only for an instrument in the calibration strip parsed at " +
@@ -560,7 +520,7 @@ var retryCertifiedConsumers = map[string]string{
 		"branch as the first. The dropped branch returns nil for an event this subscriber never had " +
 		"work for, not for work an earlier attempt left unfinished.",
 
-	"services/market-data/cmd/market-data/main.go:runIngest": "market-data: the sole handler is " +
+	"services/market_data/cmd/market_data/main.go:runIngest": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
@@ -581,10 +541,10 @@ var retryCertifiedConsumers = map[string]string{
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
 		"it never skips the observe that a first attempt already made.",
 
-	"services/lake-sink/cmd/lake-sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+	"services/lake_sink/cmd/lake_sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
-		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go). A retry " +
+		"resolved by downstream compaction (services/lake_sink/internal/cdc/sink.go). A retry " +
 		"redoes the row; it cannot skip it.",
 
 	"services/alternatives/cmd/alternatives/main.go:runConsumer": "alternatives: the sole handler is " +

@@ -13,6 +13,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/agentgate"
@@ -52,6 +54,7 @@ type gateServer struct {
 	exposureHits int
 	measureHits  int
 	scenarioHits int
+	measures     []*domainpb.RiskMeasure
 }
 
 func (s *gateServer) Exposure(_ context.Context, _ *querypb.ExposureRequest) (*querypb.ExposureResponse, error) {
@@ -68,7 +71,7 @@ func (s *gateServer) Measures(_ context.Context, _ *querypb.MeasuresRequest) (*q
 	s.mu.Lock()
 	s.measureHits++
 	s.mu.Unlock()
-	return &querypb.MeasuresResponse{PortfolioId: "PF-T1", OwnerTenant: s.ownerTenant}, nil
+	return &querypb.MeasuresResponse{PortfolioId: "PF-T1", OwnerTenant: s.ownerTenant, Set: &domainpb.RiskMeasureSet{Measures: s.measures}}, nil
 }
 
 func (s *gateServer) EvaluateScenario(_ context.Context, _ *querypb.EvaluateScenarioRequest) (*querypb.EvaluateScenarioResponse, error) {
@@ -243,5 +246,47 @@ func TestGRPCGate_EntitledCallerIsServed(t *testing.T) {
 	}
 	if data != 1 {
 		t.Fatalf("engine saw %d data read(s), want exactly 1", data)
+	}
+}
+
+func TestGRPCGate_ProvenanceLabelsReachAgentContext(t *testing.T) {
+	value := func(n int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: n} }
+	srv := &gateServer{ownerTenant: "t1", measures: []*domainpb.RiskMeasure{
+		{Name: "VaR99", Value: value(125), Provenance: &domainpb.MeasureProvenance{Method: "placeholder_1pct_gross", Params: map[string]string{"private-param": "private-value"}}},
+		{Name: "FactorVaR99", Value: value(250), Provenance: &domainpb.MeasureProvenance{Method: "factor_model", ModelId: "private-model-id", InputDigest: "private-input-digest"}},
+		{Name: "Legacy", Value: value(10)},
+		{Name: "DV01", Value: value(0), Coverage: &domainpb.InputCoverage{ExcludedCount: 1}, Provenance: &domainpb.MeasureProvenance{Method: "historical_simulation"}},
+	}}
+	reg, _ := serveGate(t, srv)
+	call := llm.ToolCall{Name: "get_risk_measures", Input: map[string]any{"portfolio_id": "PF-T1"}}
+	out := reg.Invoke(context.Background(), t1Analyst(), call)
+	if out.IsError {
+		t.Fatalf("entitled read refused: %s", out.Content)
+	}
+	for _, line := range []string{
+		`VaR99 = 125 [model: PLACEHOLDER; method: "placeholder_1pct_gross"]`,
+		`FactorVaR99 = 250 [model: DECLARED_MODEL; method: "factor_model"]`,
+		`Legacy = 10 [model: UNDECLARED]`,
+	} {
+		if !strings.Contains(out.Content, line) {
+			t.Errorf("agent context lost %q:\n%s", line, out.Content)
+		}
+	}
+	if !strings.Contains(out.Content, "DV01: UNAVAILABLE") || strings.Contains(out.Content, "DV01 =") || strings.Contains(out.Content, "private-") {
+		t.Errorf("label leaked private metadata or restored a withheld value:\n%s", out.Content)
+	}
+	if len(out.Values) != 3 || out.Measured != 3 || out.Unavailable != 1 {
+		t.Fatalf("labelling changed grounding/coverage: %+v", out)
+	}
+	for _, v := range out.Values {
+		if v == 0 {
+			t.Fatal("withheld zero became citable")
+		}
+	}
+	_, before := srv.reads()
+	denied := reg.Invoke(context.Background(), t2Intruder(), call)
+	_, after := srv.reads()
+	if !denied.IsError || before != after || strings.Contains(denied.Content, "PLACEHOLDER") || strings.Contains(denied.Content, "factor_model") {
+		t.Fatalf("another tenant reached model provenance: %+v, reads %d -> %d", denied, before, after)
 	}
 }

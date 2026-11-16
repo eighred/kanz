@@ -12,7 +12,7 @@ REQUIRED = {
         "TestValkeyAdapterCommitExtendsTTL",
         "TestValkeyAdapterReleaseAllowsRetry",
     },
-    "services/webhook-ingest/internal/ingest": {
+    "services/webhook_ingest/internal/ingest": {
         "TestARealRedisAdmitsAnAlertExactlyOnce",
         "TestARealRedisHoldsTheClaimForTheWholeWindow",
         "TestARealRedisFreesAClaimNothingActedOn",
@@ -20,7 +20,7 @@ REQUIRED = {
         "TestTwoPodsOverARealRedisFanOutAnAlertOnce",
         "TestTwoPodsWithPerPodCachesDOUBLE_TRADE",
     },
-    "services/api-gateway/internal/middleware": {
+    "services/api_gateway/internal/middleware": {
         "TestIdempotencyIsSharedAcrossPodsOverRealRedis",
         "TestCrossTenantKeysStayDistinctInRealRedis",
     },

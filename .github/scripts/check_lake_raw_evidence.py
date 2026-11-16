@@ -3,7 +3,7 @@ import json
 import sys
 from check_migration_evidence import verify
 
-REQUIRED = {"services/lake-sink/internal/cdc": {
+REQUIRED = {"services/lake_sink/internal/cdc": {
     "TestRawCrashRecoveryPhaseHandoff",
     "TestRawRestartReadPhaseHandoff",
     "TestRawKafkaCustodyAndOffsets",

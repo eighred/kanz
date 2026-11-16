@@ -34,7 +34,7 @@ func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 		t.Fatalf("new folder: %v", err)
 	}
 	ctx := context.Background()
-	env := &envelopepb.Envelope{EventType: "wealth.household.updated"}
+	env := &envelopepb.Envelope{EventType: wealth.EventTypeHouseholdValued, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, PartitionKey: "HH-1"}
 
 	h := wealth.Household{
 		HouseholdID: "HH-1", CurrencyCode: "USD", AsOf: time.Unix(1700000000, 0), RecordedBy: "test:advisor", Reason: "test valuation",
@@ -74,7 +74,7 @@ func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 func TestFolderRejectsMissingHouseholdID(t *testing.T) {
 	st := book.NewMemoryStore()
 	f, _ := NewFolder(testTenant, st, nil)
-	env := &envelopepb.Envelope{EventType: "wealth.household.updated"}
+	env := &envelopepb.Envelope{EventType: wealth.EventTypeHouseholdValued, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT}
 	if err := f.Handle(context.Background(), env, payload(t, wealth.Household{})); err == nil {
 		t.Fatal("missing household_id should surface an error")
 	}

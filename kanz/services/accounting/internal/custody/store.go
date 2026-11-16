@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
@@ -22,6 +23,14 @@ import (
 // OutcomeNoStatement, and this error is what routes to it.
 var ErrNoStatement = errors.New("custody: no statement for subject")
 
+// ErrAmbiguousStatement refuses a comparison when distinct statement identities
+// share the newest receipt time. Arrival order cannot establish precedence.
+var ErrAmbiguousStatement = errors.New("custody: ambiguous newest statement")
+
+// ErrStatementIdentityConflict refuses reuse of a tenant-wide source identity
+// for a different comparison subject. A redelivery cannot relocate evidence.
+var ErrStatementIdentityConflict = errors.New("custody: statement ID belongs to another subject")
+
 // Store is the durable home of statements, runs and the break lifecycle.
 //
 // THE BREAK STATE IS THE PART THAT MUST BE DURABLE. Statements and runs could in
@@ -29,14 +38,19 @@ var ErrNoStatement = errors.New("custody: no statement for subject")
 // exist nowhere else, and losing them resets every break to OPEN — which
 // regenerates the exact "list nobody reads" this control was built to prevent.
 type Store interface {
+	// CommitRun commits the run, its verifying break transitions and completion
+	// FACT together. Failed/no-statement runs leave existing breaks unchanged.
+	CommitRun(context.Context, Run) (Run, error)
+	Outbox() outbox.Queue
 	// SaveStatement records a custodian statement, idempotent on StatementID. A
 	// restatement for a subject already reconciled REPLACES the latest statement;
 	// it does not mutate the runs that reconciled the earlier one, because the
 	// history must reconstruct what was known and when.
+	// Reusing an ID for a different subject returns ErrStatementIdentityConflict.
 	SaveStatement(ctx context.Context, s Statement) error
 
-	// LatestStatement returns the newest statement for a subject by ReceivedAt,
-	// or ErrNoStatement.
+	// LatestStatement returns the unique newest statement for a subject by
+	// ReceivedAt, ErrNoStatement, or ErrAmbiguousStatement when precedence is unknown.
 	LatestStatement(ctx context.Context, subject Subject) (Statement, error)
 
 	// SaveRun records a completed run. Idempotent on RunID.
@@ -107,8 +121,18 @@ type MemoryStore struct {
 	mu         sync.Mutex
 	statements map[string][]Statement // subject key -> statements, append order
 	runs       map[string][]Run       // portfolio|custodian -> runs, append order
-	runIDs     map[string]struct{}
+	runIDs     map[string]runReference
 	breaks     map[string]Break // break id -> break
+	outbox     *outbox.Memory
+}
+
+// runReference locates the one canonical run in append-only history. Capture
+// provenance survives published-row eviction without retaining a second payload;
+// a legacy SaveRun entry must never acquire a fabricated completion on retry.
+type runReference struct {
+	pair               string
+	index              int
+	completionCaptured bool
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -116,8 +140,9 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		statements: map[string][]Statement{},
 		runs:       map[string][]Run{},
-		runIDs:     map[string]struct{}{},
+		runIDs:     map[string]runReference{},
 		breaks:     map[string]Break{},
+		outbox:     outbox.NewMemory(),
 	}
 }
 
@@ -131,10 +156,15 @@ func (m *MemoryStore) SaveStatement(_ context.Context, s Statement) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := s.Subject().Key()
-	for i, existing := range m.statements[key] {
-		if existing.StatementID == s.StatementID {
-			m.statements[key][i] = cloneStatement(s)
-			return nil
+	for storedKey, statements := range m.statements {
+		for i, existing := range statements {
+			if existing.StatementID == s.StatementID {
+				if storedKey != key {
+					return ErrStatementIdentityConflict
+				}
+				m.statements[key][i] = cloneStatement(s)
+				return nil
+			}
 		}
 	}
 	m.statements[key] = append(m.statements[key], cloneStatement(s))
@@ -150,10 +180,17 @@ func (m *MemoryStore) LatestStatement(_ context.Context, subject Subject) (State
 		return Statement{}, ErrNoStatement
 	}
 	best := list[0]
+	newest := 1
 	for _, s := range list[1:] {
 		if s.ReceivedAt.After(best.ReceivedAt) {
 			best = s
+			newest = 1
+		} else if s.ReceivedAt.Equal(best.ReceivedAt) {
+			newest++
 		}
+	}
+	if newest > 1 {
+		return Statement{}, ErrAmbiguousStatement
 	}
 	return cloneStatement(best), nil
 }
@@ -165,10 +202,16 @@ func (m *MemoryStore) SaveRun(_ context.Context, r Run) error {
 	if _, dup := m.runIDs[r.RunID]; dup {
 		return nil
 	}
-	m.runIDs[r.RunID] = struct{}{}
-	key := pairKey(r.Subject.PortfolioID, r.Subject.CustodianID)
-	m.runs[key] = append(m.runs[key], r)
+	m.appendRunLocked(r, false)
 	return nil
+}
+
+// appendRunLocked is called under m.mu. Both write paths keep the identity
+// index and its immutable history entry together, with no caller-owned rats.
+func (m *MemoryStore) appendRunLocked(run Run, completionCaptured bool) {
+	key := pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)
+	m.runIDs[run.RunID] = runReference{pair: key, index: len(m.runs[key]), completionCaptured: completionCaptured}
+	m.runs[key] = append(m.runs[key], cloneRun(run))
 }
 
 // LatestRun implements Store.
@@ -185,7 +228,7 @@ func (m *MemoryStore) LatestRun(_ context.Context, portfolioID, custodianID stri
 			best = r
 		}
 	}
-	return best, nil
+	return cloneRun(best), nil
 }
 
 // UpsertBreaks implements Store.
@@ -195,6 +238,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 
 	seen := make(map[string]struct{}, len(detected))
 	for _, d := range detected {
+		d.PortfolioID, d.CustodianID = subject.PortfolioID, subject.CustodianID
 		seen[d.BreakID] = struct{}{}
 		if prior, ok := m.breaks[d.BreakID]; ok && prior.Status != BreakResolved {
 			// KNOWN AND STILL OUTSTANDING: the figures and LastSeenAt advance;
@@ -218,6 +262,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 		fresh.Revision = 1
 		if prior, ok := m.breaks[d.BreakID]; ok {
 			fresh.Revision = prior.Revision + 1
+			fresh.PortfolioID, fresh.CustodianID = prior.PortfolioID, prior.CustodianID
 		}
 		fresh.Assignee, fresh.Explanation = "", ""
 		m.breaks[d.BreakID] = fresh
@@ -245,11 +290,9 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 	return m.outstandingLocked(), nil
 }
 
-// sameSubject reports whether a stored break belongs to subject. The break id
-// carries the pair, which is why it can be answered without a second field.
+// sameSubject uses stored ownership, including when a working-item ID is opaque.
 func sameSubject(b Break, subject Subject) bool {
-	prefix := subject.PortfolioID + "|" + subject.CustodianID + "|"
-	return len(b.BreakID) >= len(prefix) && b.BreakID[:len(prefix)] == prefix
+	return b.PortfolioID == subject.PortfolioID && b.CustodianID == subject.CustodianID
 }
 
 // OutstandingBreaks implements Store.

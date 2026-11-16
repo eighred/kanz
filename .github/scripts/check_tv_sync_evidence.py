@@ -6,7 +6,7 @@ from check_migration_evidence import verify
 
 ROOT = "TestTokyoTVSyncSeparateRolesAndRecovery"
 REQUIRED = {
-    "services/tv-sync/internal/projection": {
+    "services/tv_sync/internal/projection": {
         ROOT,
         ROOT + "/RuntimeCannotDDL",
         ROOT + "/FutureTableGrant",

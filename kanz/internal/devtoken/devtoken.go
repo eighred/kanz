@@ -51,7 +51,7 @@ type Claims struct {
 	TTL        time.Duration
 }
 
-// claims mirrors the gateway's wire shape (services/api-gateway/internal/
+// claims mirrors the gateway's wire shape (services/api_gateway/internal/
 // middleware.jwtClaims), which is unexported and unimportable from here. The
 // contract is pinned by TestDevTokenAcceptedByGateway, which drives the real
 // validator rather than a copy of it.

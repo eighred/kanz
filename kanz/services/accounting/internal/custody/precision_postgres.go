@@ -6,7 +6,13 @@ import (
 )
 
 func (p *Postgres) exactTransaction(ctx context.Context) (pgx.Tx, error) {
-	tx, err := p.pool.Begin(ctx)
+	var tx pgx.Tx
+	var err error
+	if p.tx != nil {
+		tx, err = p.tx.Begin(ctx)
+	} else {
+		tx, err = p.pool.Begin(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}

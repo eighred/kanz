@@ -47,7 +47,7 @@ const httpServerHome = "internal/platform/httpserver"
 //
 // A new entry is a claim that some server needs bounds the estate default cannot
 // express. Say which bound and why, and file the issue — Timeouts is four fields
-// and overriding one (as cmd/api-gateway does for Write and Idle) does not need an
+// and overriding one (as cmd/api_gateway does for Write and Idle) does not need an
 // exemption.
 var bareHTTPServerExemptions = map[string]string{}
 
@@ -115,7 +115,7 @@ func TestOnlyThePlatformConstructorBuildsAnHTTPServer(t *testing.T) {
 			"all. That exact literal shipped in twenty-six composition roots (#235).\n\n"+
 			"Use %s.New(addr, handler, %s.Standard()), which refuses to build a server with "+
 			"any of the four unset. To change one bound for this server, override that field "+
-			"of Standard() — cmd/api-gateway does it for Write and Idle — rather than "+
+			"of Standard() — cmd/api_gateway does it for Write and Idle — rather than "+
 			"reaching for the raw struct.",
 			rel, filepath.Base(httpServerHome), filepath.Base(httpServerHome))
 	}
@@ -232,9 +232,9 @@ func TestNoPackageRunsOnTheSharedDefaultClient(t *testing.T) {
 // into a response and a severed connection that names nothing, which is the same
 // inversion the entries above exist to prevent, one layer further in.
 var standardWriteMustExceed = []deadlineLayer{
-	{name: "copilotForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+	{name: "copilotForwardTimeout", file: "services/api_gateway/internal/proxy/proxy.go",
 		label: "the gateway's wait on a proxied POST /v1/ask"},
-	{name: "readForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+	{name: "readForwardTimeout", file: "services/api_gateway/internal/proxy/proxy.go",
 		label: "the gateway's wait on a proxied wealth/datamaster/tv-sync read"},
 	{name: "serviceStatementTimeout", file: "internal/pg/pool.go",
 		label: "how long a service query may hold a Postgres backend inside a handler",
@@ -304,10 +304,10 @@ func TestStandardTimeoutsClearTheBudgetsBeneathThem(t *testing.T) {
 	// connection to these services; standardIdleTimeout is when THEY retire it.
 	// The gateway must be the one that gives it up.
 	pool := durationConst(t,
-		at("services/api-gateway/cmd/api-gateway/main.go"), "proxyIdleConnTimeout")
+		at("services/api_gateway/cmd/api_gateway/main.go"), "proxyIdleConnTimeout")
 	if idle <= pool {
 		t.Errorf("standardIdleTimeout (%s) does not exceed proxyIdleConnTimeout (%s, "+
-			"services/api-gateway/cmd/api-gateway/main.go).\n\n"+
+			"services/api_gateway/cmd/api_gateway/main.go).\n\n"+
 			"The upstream then closes idle connections the gateway's pool still believes it "+
 			"may reuse. net/http retries an idempotent request over a fresh connection, so "+
 			"this does not usually surface as an error — it surfaces as latency nobody can "+

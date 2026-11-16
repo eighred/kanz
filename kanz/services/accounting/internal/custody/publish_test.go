@@ -14,13 +14,10 @@ package custody_test
 // the TRANSPORT level and receives wire bytes, so stamping, Validate and framing
 // all really run and only the socket is mocked.
 //
-// WHAT IT WOULD HAVE CAUGHT HERE SPECIFICALLY. A ReconciliationRun is published
-// from a TICKER, not from an inbound delivery, so there is no ctx tenant for the
-// producer to inherit — the ProducerConfig.Tenant fallback is the only source of
-// one, and without it bus.Validate refuses every publish with "tenant_id
-// required". That is the failure that crash-looped the OMS and silently stopped
-// accounting's cash movements reaching NAV; a scheduled reconciliation would hit
-// it on its first tick, in production, having passed every unit test.
+// Scheduled runs have no inbound delivery, so the composition root supplies its
+// configured tenant before the store captures the completion in the outbox.
+// These checks exercise that captured tenant through real producer framing and
+// validation. A producer fallback cannot repair a missing durable record tenant.
 
 import (
 	"context"
@@ -138,7 +135,7 @@ func TestReconciliationRunEnvelopeValidates(t *testing.T) {
 	r, store, cc := newRealProducerReconciler(t, productionProducerConfig())
 	seedStatement(t, store, map[string]*big.Rat{"AAPL": big.NewRat(100, 1)})
 
-	if _, err := r.Reconcile(context.Background(), reconcileSubject()); err != nil {
+	if _, err := r.Reconcile(bus.WithTenantID(context.Background(), "acme"), reconcileSubject()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	env, payload := decodeOne(t, cc)
@@ -201,7 +198,7 @@ func TestAProducerWithNoTenantFallbackIsRefusedByValidate(t *testing.T) {
 func TestNoStatementRunEnvelopeValidates(t *testing.T) {
 	r, _, cc := newRealProducerReconciler(t, productionProducerConfig())
 
-	run, err := r.Reconcile(context.Background(), reconcileSubject())
+	run, err := r.Reconcile(bus.WithTenantID(context.Background(), "acme"), reconcileSubject())
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -230,7 +227,7 @@ func TestNoStatementRunEnvelopeValidates(t *testing.T) {
 func TestRunPartitionKeyIsThePortfolioCustodianPair(t *testing.T) {
 	r, store, cc := newRealProducerReconciler(t, productionProducerConfig())
 	seedStatement(t, store, map[string]*big.Rat{"AAPL": big.NewRat(100, 1)})
-	if _, err := r.Reconcile(context.Background(), reconcileSubject()); err != nil {
+	if _, err := r.Reconcile(bus.WithTenantID(context.Background(), "acme"), reconcileSubject()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	env, _ := decodeOne(t, cc)

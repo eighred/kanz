@@ -19,10 +19,10 @@ REQUIRED = {
         "TestDrain_DryRunPublishesNothingToTheRealTopic",
     },
     "tools/replay": {"TestReaderRange"},
-    "services/lake-sink/internal/cdc": {
+    "services/lake_sink/internal/cdc": {
         "TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted",
     },
-    "tools/depth-conformance": {"TestRustDepthProcessThroughJetStream", "TestRustOKXDepthProcessThroughJetStream"},
+    "tools/depth_conformance": {"TestRustDepthProcessThroughJetStream", "TestRustOKXDepthProcessThroughJetStream"},
 }
 
 

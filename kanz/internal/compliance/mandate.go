@@ -128,7 +128,7 @@ func NewMandateRegistry(opts ...MandateRegistryOption) *MandateRegistry {
 }
 
 // Arm marks the initial mandate replay complete — mirrors PositionCache.Arm
-// (services/webhook-ingest/internal/ingest/positions.go), the pattern this
+// (services/webhook_ingest/internal/ingest/positions.go), the pattern this
 // copies rather than invents.
 //
 // Both the OMS's pre-trade gate and compliance's post-trade monitor used to call

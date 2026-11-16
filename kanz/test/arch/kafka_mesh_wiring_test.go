@@ -50,8 +50,8 @@ func TestServiceKafkaClientsCarryWorkloadIdentity(t *testing.T) {
 	}
 	for _, path := range []string{
 		"services/archiver/cmd/archiver/main.go",
-		"services/archiver/cmd/archiver-drain/main.go",
-		"services/lake-sink/cmd/lake-sink/main.go",
+		"services/archiver/cmd/archiver_drain/main.go",
+		"services/lake_sink/cmd/lake_sink/main.go",
 	} {
 		if seen[path] != 1 {
 			t.Errorf("expected one protected Kafka dial in %s, found %d; review a moved or removed caller", path, seen[path])

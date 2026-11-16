@@ -25,10 +25,10 @@ import (
 
 // Revaluer reprices an option position under shocks. compute.Revaluer satisfies
 // it; the interface lives here so scenario does not force a particular
-// implementation. ok=false ⇒ not an option / inputs unavailable (the position
-// is shocked linearly instead).
+// implementation. The typed disposition separates a known linear instrument
+// from an unassessed position whose approximation must carry an exclusion.
 type Revaluer interface {
-	RevalueOption(ctx context.Context, instrumentID string, asOf time.Time, baseMV *commonpb.Money, shocks compute.RevalShocks) (*commonpb.Money, bool)
+	RevalueOption(ctx context.Context, instrumentID string, asOf time.Time, baseMV *commonpb.Money, shocks compute.RevalShocks) compute.RevalResult
 }
 
 // EvaluateReval applies shocks to a deep clone of p — repricing option positions
@@ -95,18 +95,40 @@ func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revalu
 	for _, pos := range cp.Positions() {
 		priceFrac := parallelFrac + instrumentPriceFrac(shocks, pos.InstrumentID) + sectorFrac(ctx, cfg.classifier, pos, asOf, shocks, cov)
 		rs := compute.RevalShocks{PriceFrac: priceFrac, GlobalVolBump: globalVol, VolByUnderlying: volByUnderlying}
-		if mv, ok := reval.RevalueOption(ctx, string(pos.InstrumentID), asOf, pos.MarketValue, rs); ok {
-			pos.MarketValue = mv
+		result := reval.RevalueOption(ctx, string(pos.InstrumentID), asOf, pos.MarketValue, rs)
+		if result.Status == compute.RevalPriced && result.Value != nil {
+			pos.MarketValue = result.Value
 			cp.SetPosition(pos)
 			continue
 		}
-		// Linear fallback for non-option positions.
+		if result.Status != compute.RevalKnownLinear {
+			reason := result.Reason
+			if reason == "" {
+				reason = compute.SkipInvalidPricing
+			}
+			cov.revaluationUnassessed(pos.InstrumentID, reason)
+		}
+		// Keep every holding in the approximation. Coverage prevents an
+		// unassessed option/classification from looking like a complete stress.
 		if priceFrac != 0 && pos.MarketValue != nil {
 			pos.MarketValue = compute.ShockMoney(pos.MarketValue, fracDecimal(priceFrac))
 			cp.SetPosition(pos)
 		}
 	}
 	return cp
+}
+
+func (s *shockCoverage) revaluationUnassessed(id domain.InstrumentID, reason string) {
+	if excluded, seen := s.seen[id]; seen {
+		if excluded {
+			return
+		}
+		// A resolved sector does not certify option valuation. One position
+		// remains one exclusion, rather than a contribution plus an exclusion.
+		s.cov.Contributed--
+	}
+	s.seen[id] = true
+	s.cov.Exclude(id, reason)
 }
 
 // collectGlobalShocks sums the book-wide price fraction (ParallelShift) and vol

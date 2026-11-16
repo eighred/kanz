@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$overlay = Join-Path $repoRoot 'kanz\infra\overlays\testnet-tokyo-observability'
+$overlay = Join-Path $repoRoot 'kanz\infra\overlays\testnet_tokyo_observability'
 
 function Invoke-SsmCommands {
     param(
@@ -60,7 +60,7 @@ if ($headCommit -ne $releaseCommit) {
 $provenancePaths = @(
     'tools/Resolve-EcrReleaseDigest.ps1',
     'tools/Install-TestnetObservability.ps1',
-    'kanz/infra/overlays/testnet-tokyo-observability',
+    'kanz/infra/overlays/testnet_tokyo_observability',
     'kanz/infra/observability/node-exporter.yaml',
     'kanz/infra/observability/prometheus.yaml',
     'kanz/infra/observability/rules-configmap.yaml'

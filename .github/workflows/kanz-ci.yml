@@ -1,13 +1,13 @@
 # kanz monorepo CI — the Go safety net for the `kanz` module (CICD-01a).
 #
-# The module depends on the kanz-schemas Go SDK via a local `replace` directive
-# (kanz/go.mod → ../kanz-schemas/gen/go). That SDK is generated, never
+# The module depends on the schemas Go SDK via a local `replace` directive
+# (kanz/go.mod → ../schemas/gen/go). That SDK is generated, never
 # committed (EVT-15a), so every job must `buf generate` it first — including
 # protoc-gen-go-grpc, which emits the inference.v1 gRPC stubs (PRED-06) that
 # protoc-gen-go alone does not. GOFLAGS=-mod=mod lets the toolchain resolve and
 # checksum the freshly generated local module.
 #
-# CICD-01b adds the Python (kanz-py, pytest) + TypeScript (kanz/ts, node:test
+# CICD-01b adds the Python (python, pytest) + TypeScript (kanz/ts, node:test
 # via tsx — the runner the package actually uses; "vitest" in the task is loose
 # shorthand) jobs plus a `buf lint`+`buf breaking` schema gate.
 name: kanz-ci
@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       application: ${{ steps.scope.outputs.application }}
+      forge: ${{ steps.scope.outputs.forge }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,6 +44,11 @@ jobs:
       - name: Select application scope from checked Git history
         id: scope
         run: python3 .github/scripts/required_ci.py scope
+
+  forge:
+    needs: scope
+    if: needs.scope.outputs.forge == 'true'
+    uses: ./.github/workflows/kanz-forge.yml
 
   release-custody:
     needs: scope
@@ -138,7 +144,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
 
       # Complete native browser installation before restoring any Go outputs.
       # The compiler cache binds the resulting full package fingerprint.
@@ -150,7 +156,7 @@ jobs:
 
       - name: Prepare complete MFA browser dependencies before compiler cache
         run: |
-          cd kanz-web
+          cd web
           npm ci --no-audit --no-fund
           npx --no-install playwright install --with-deps chromium
 
@@ -169,6 +175,12 @@ jobs:
           # read-only cache consumers. Every test still uses -count=1.
           cache: false
 
+      - name: Verify local Go formatting inventory
+        if: matrix.kind == 'quality'
+        run: |
+          python3 -B -m unittest discover -s .github/scripts -p test_local_format_gate.py
+          make -C kanz fmt
+
       - name: Identify isolated Go compiler cache
         id: compiler_cache_meta
         working-directory: kanz
@@ -182,7 +194,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.compiler_cache_meta.outputs.paths }}
-          key: kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}
+          key: kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'schemas/buf.gen.yaml', 'schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}
           # An absent shard cache may reuse another shard's compiler inputs.
           # Host/native/toolchain identity and race/quality remain exact;
           # fresh -count=1 tests and complete shard evidence are unchanged.
@@ -190,7 +202,7 @@ jobs:
             kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-
             kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-
 
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
 
@@ -200,7 +212,7 @@ jobs:
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Generate kanz-schemas Go SDK
+      - name: Generate schemas Go SDK
         run: make -C kanz generate
 
       - name: Download reviewed Go dependencies with bounded transport retries
@@ -343,7 +355,7 @@ jobs:
           KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
           OMS_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
         run: |
-          go run ./cmd/kanz-migrate --dir services/oms/migrations
+          go run ./cmd/kanz_migrate --dir services/oms/migrations
           go build -o /tmp/oms ./services/oms/cmd/oms
           OMS_NATS_URL=nats://localhost:4222 \
           OMS_TENANT=__system__ \
@@ -370,7 +382,7 @@ jobs:
             sleep 1
           done
           test "$armed" = true
-          go run ./cmd/kanz-halt --nats nats://localhost:4222 \
+          go run ./cmd/kanz_halt --nats nats://localhost:4222 \
             --resume --by operator:ci-fixture \
             --reason 'disposable CI simulated OMS fixture' --tenant __system__
 
@@ -437,7 +449,7 @@ jobs:
       # model card; this proves transport/scoring, not production model approval.
       - name: Start Python inference on the real bus
         env:
-          PYTHONPATH: ${{ github.workspace }}/kanz-schemas/gen/python:${{ github.workspace }}/kanz-py
+          PYTHONPATH: ${{ github.workspace }}/schemas/gen/python:${{ github.workspace }}/python
           KANZ_INFERENCE_MODELS: ${{ runner.temp }}/inference-ci-model.json
           KANZ_INFERENCE_NATS_URL: nats://localhost:4222
           KANZ_INFERENCE_ALLOW_INSECURE_GRPC: "true"
@@ -445,11 +457,11 @@ jobs:
           KANZ_INFERENCE_METRICS_BIND: 127.0.0.1:8099
         run: |
           python -m venv "$RUNNER_TEMP/inference-ci"
-          "$RUNNER_TEMP/inference-ci/bin/pip" install --require-hashes -r kanz-py/requirements.txt -r kanz-py/requirements-codegen.txt
-          mkdir -p kanz-schemas/gen/python
+          "$RUNNER_TEMP/inference-ci/bin/pip" install --require-hashes -r python/requirements.txt -r python/requirements-codegen.txt
+          mkdir -p schemas/gen/python
           "$RUNNER_TEMP/inference-ci/bin/python" -m grpc_tools.protoc \
-            -I kanz-schemas/proto --python_out=kanz-schemas/gen/python \
-            --grpc_python_out=kanz-schemas/gen/python $(find kanz-schemas/proto -name '*.proto')
+            -I schemas/proto --python_out=schemas/gen/python \
+            --grpc_python_out=schemas/gen/python $(find schemas/proto -name '*.proto')
           python - <<'PY'
           import json, os
           from datetime import datetime, timedelta, timezone
@@ -479,7 +491,7 @@ jobs:
         env:
           TEST_NATS_URL: nats://localhost:4222
           TEST_INFERENCE_ON_BUS: "1"
-        run: go test -race -p 1 ./services/risk-engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
+        run: go test -race -p 1 ./services/risk_engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
 
       - name: Verify durable Kafka fixtures across repeated tenant rebuilds
         if: matrix.shard == 0 || matrix.kind == 'quality'
@@ -497,7 +509,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_lake_raw_evidence.py
-          go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$' | tee "$RUNNER_TEMP/lake-raw-proof.jsonl"
+          go test -race -p 1 -json -count=1 ./services/lake_sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$' | tee "$RUNNER_TEMP/lake-raw-proof.jsonl"
           python3 ../.github/scripts/check_lake_raw_evidence.py "$RUNNER_TEMP/lake-raw-proof.jsonl"
 
       - name: Preserve raw Kafka custody evidence
@@ -514,22 +526,22 @@ jobs:
 
       - name: Build the real MFA browser boundary
         run: |
-          cd kanz-web
+          cd web
           npm run build
           cd ../kanz
-          go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
+          go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web_bff/cmd/web_bff
 
       - name: Qualify WASM rendering through real BFF and Chromium
         if: matrix.kind == 'quality'
         working-directory: kanz
         env:
-          TEST_RENDER_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/browser-renderer.cjs
-          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/kanz-web/dist
-          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
+          TEST_RENDER_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/browser-renderer.cjs
+          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/web/dist
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           TEST_MFA_NODE: node
         run: |
           set -o pipefail
-          go test -p 1 ./services/web-bff/internal/server -run '^TestBrowserRendererProductionBundle$' -count=1 -json | tee "$RUNNER_TEMP/browser-renderer-proof.jsonl"
+          go test -p 1 ./services/web_bff/internal/server -run '^TestBrowserRendererProductionBundle$' -count=1 -json | tee "$RUNNER_TEMP/browser-renderer-proof.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_browser_renderer_evidence.py
           python3 ../.github/scripts/check_browser_renderer_evidence.py "$RUNNER_TEMP/browser-renderer-proof.jsonl" "$RUNNER_TEMP/browser-renderer-proof.json"
 
@@ -541,8 +553,8 @@ jobs:
           path: |
             ${{ runner.temp }}/browser-renderer-proof.jsonl
             ${{ runner.temp }}/browser-renderer-proof.json
-            kanz-web/src/generated/browser-render.ts
-            kanz-web/dist/assets/*.wasm
+            web/src/generated/browser-render.ts
+            web/dist/assets/*.wasm
           if-no-files-found: error
           retention-days: 7
 
@@ -553,7 +565,7 @@ jobs:
           TV_SYNC_TEST_ADMIN_URL: postgres://kanz:kanz@localhost:5432/kanz?sslmode=disable
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/tv-sync/internal/projection -run '^TestTokyoTVSyncSeparateRolesAndRecovery$' -count=1 -json | tee "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
+          go test -race -p 1 ./services/tv_sync/internal/projection -run '^TestTokyoTVSyncSeparateRolesAndRecovery$' -count=1 -json | tee "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p 'test_check_tv_sync_evidence.py'
           python3 ../.github/scripts/check_tv_sync_evidence.py "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
 
@@ -567,7 +579,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_tv_readiness_evidence.py
-          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)" ./pkg/bus ./services/tv-sync/cmd/tv-sync ./services/tv-sync/internal/server ./services/tv-sync/internal/brokerapi | tee "$RUNNER_TEMP/tv-readiness-proof.jsonl"
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)" ./pkg/bus ./services/tv_sync/cmd/tv_sync ./services/tv_sync/internal/server ./services/tv_sync/internal/brokerapi | tee "$RUNNER_TEMP/tv-readiness-proof.jsonl"
           python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"
 
       - name: Qualify restored tv-sync snapshot without writes
@@ -578,7 +590,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py
-          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv_sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"
           python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"
 
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
@@ -592,12 +604,12 @@ jobs:
           TEST_OMS_ON_BUS: "1"
           TEST_INFERENCE_ON_BUS: "1"
           TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
-          TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/sessions.cjs
-          TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
-          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
+          TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/sessions.cjs
+          TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/mfa.cjs
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           TEST_MFA_NODE: node
           TEST_MFA_BFF: ${{ runner.temp }}/mfa-web-bff
-          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/kanz-web/dist
+          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/web/dist
           # Both are required by the mTLS suite; a test that gated on one alone
           # would FAIL rather than skip when the other went missing.
           TEST_NATS_MTLS_URL: nats://localhost:4223
@@ -696,16 +708,21 @@ jobs:
       #
       #   `go test` joined because the openrouter adapter HAS tests behind its tag and
       #   build+vet would never run them. They are fully mocked — httptest fixtures, no
-      #   key, no network — so unlike the redis step below this needs no service, and
-      #   there is no reason not to run them. The anthropic tag has no tests of its own;
-      #   including it here costs nothing and means adding one later is enough.
+      #   provider key or model network access. The shared copilot recording tests
+      #   also use the canonical broker started above, including in tagged builds.
       - name: Build + vet + test the `anthropic,openrouter` tags
         if: matrix.kind == 'quality'
         working-directory: kanz
+        env:
+          TEST_NATS_URL: nats://localhost:4222
         run: |
+          set -o pipefail
           go build -tags anthropic,openrouter ./...
           go vet -tags anthropic,openrouter ./services/copilot/...
           go test -tags anthropic,openrouter -p 1 -count=1 ./services/copilot/...
+          # Keep the complete tagged suite above; record each grounding acceptance
+          # outcome separately so missing or skipped provider-build proof is visible.
+          go test -tags anthropic,openrouter -p 1 -count=1 -json -run '^TestGrounding(WholeNumericClaims|RefusesUnsupportedNumericClaims|FiniteMatchingPreservesPolicy|NumbersReachHTTPAndObservation|NumbersReachCanonicalObservationReplay)$' ./services/copilot/internal/retrieval ./services/copilot/cmd/copilot
 
       # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
       # is only exercised under this tag: idempotency_realredis_test.go stands two
@@ -736,8 +753,8 @@ jobs:
           python -m unittest discover -s ../.github/scripts -p test_check_valkey_evidence.py
           go build -tags redis ./...
           go vet -tags redis ./...
-          go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
-          go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook-ingest/internal/ingest ./services/api-gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"
+          go test -tags redis -p 1 -race -count=1 ./services/webhook_ingest/... ./services/api_gateway/... ./pkg/redisadapter/... ./pkg/bus/...
+          go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook_ingest/internal/ingest ./services/api_gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"
           python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"
 
       - name: Preserve source-bound race evidence
@@ -849,7 +866,7 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
       - name: Generate canonical SDK for independent package inventory
@@ -882,7 +899,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      # The kanz-py tests import the generated Python schema SDK, which is not
+      # The python tests import the generated Python schema SDK, which is not
       # committed (EVT-15a) and not yet published to an index (DEBT-01b). Rather
       # than buf + the remote python plugins (which would also drag in the Go
       # plugins to satisfy the full buf.gen.yaml), grpc_tools.protoc generates
@@ -892,10 +909,10 @@ jobs:
       # pipeline so the *published* SDK ships it stays a follow-up.
       # prometheus-client is a RUNTIME dependency, not a test one: kanz_inference's
       # servicer and streaming worker import kanz_inference.observability.metrics
-      # at module scope (#241), so without it every kanz-py test that touches the
+      # at module scope (#241), so without it every python test that touches the
       # inference package fails at collection. It is unpinned here for the same
       # reason the rest of this line is — these are the TEST toolchain, and what
-      # the image installs is kanz-py/requirements.txt, hash-pinned.
+      # the image installs is python/requirements.txt, hash-pinned.
       # cryptography is TEST-ONLY and deliberately not in requirements.txt: it mints
       # the throwaway SVID-shaped certificates tests/test_bus_mtls.py completes real
       # TLS handshakes against (#241). Those handshakes are the only way to tell a
@@ -906,21 +923,21 @@ jobs:
 
       - name: Generate Python schema SDK
         run: |
-          mkdir -p kanz-schemas/gen/python
+          mkdir -p schemas/gen/python
           python -m grpc_tools.protoc \
-            -I kanz-schemas/proto \
-            --python_out=kanz-schemas/gen/python \
-            --pyi_out=kanz-schemas/gen/python \
-            --grpc_python_out=kanz-schemas/gen/python \
-            $(find kanz-schemas/proto -name '*.proto')
+            -I schemas/proto \
+            --python_out=schemas/gen/python \
+            --pyi_out=schemas/gen/python \
+            --grpc_python_out=schemas/gen/python \
+            $(find schemas/proto -name '*.proto')
 
       # pb2 modules are PEP-420 namespace packages (no __init__.py), so both the
       # SDK root and the package root go on PYTHONPATH. Integration tests
       # (test_*_integration.py) skip without live NATS/Kafka.
       - name: Test
         env:
-          PYTHONPATH: ${{ github.workspace }}/kanz-schemas/gen/python:${{ github.workspace }}/kanz-py
-        run: pytest kanz-py/tests -q
+          PYTHONPATH: ${{ github.workspace }}/schemas/gen/python:${{ github.workspace }}/python
+        run: pytest python/tests -q
 
       # THE PAIR THAT ACTUALLY SHIPS, WHICH NOTHING ELSE HERE EXERCISES.
       #
@@ -943,14 +960,14 @@ jobs:
           set -euo pipefail
           python -m venv /tmp/codegen
           /tmp/codegen/bin/pip install --quiet --no-cache-dir --require-hashes \
-            --only-binary=:all: -r kanz-py/requirements-codegen.txt
+            --only-binary=:all: -r python/requirements-codegen.txt
           mkdir -p /tmp/gen
-          /tmp/codegen/bin/python -m grpc_tools.protoc -I kanz-schemas/proto \
+          /tmp/codegen/bin/python -m grpc_tools.protoc -I schemas/proto \
             --python_out=/tmp/gen --pyi_out=/tmp/gen --grpc_python_out=/tmp/gen \
-            $(find kanz-schemas/proto -name '*.proto')
+            $(find schemas/proto -name '*.proto')
           python -m venv /tmp/runtime
           /tmp/runtime/bin/pip install --quiet --no-cache-dir --require-hashes \
-            --only-binary=:all: -r kanz-py/requirements.txt
+            --only-binary=:all: -r python/requirements.txt
           echo "gencode: $(grep -m1 -h 'Protobuf Python Version' /tmp/gen/common/v1/money_pb2.py)"
           /tmp/runtime/bin/python -c "import google.protobuf; print('runtime:', google.protobuf.__version__)"
           PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"
@@ -975,9 +992,9 @@ jobs:
           # checks them (tsx strips types), so a types major ahead of the runtime
           # lets tsc accept an API that does not exist in production. That is why
           # dependabot.yml ignores @types/node majors.
-          node-version-file: kanz/ts/kanz-bus/.nvmrc
+          node-version-file: kanz/ts/kanz_bus/.nvmrc
 
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
 
@@ -985,7 +1002,7 @@ jobs:
       # plugins the full buf.gen.yaml lists. Mirrors the bufbuild/es version
       # pinned there; keep them in sync.
       - name: Generate TypeScript schema SDK
-        working-directory: kanz-schemas
+        working-directory: schemas
         run: |
           cat > /tmp/buf.gen.ts.yaml <<'EOF'
           version: v2
@@ -1004,7 +1021,7 @@ jobs:
       # gen/ts/package.json declares @bufbuild/protobuf, and the consumer installs the
       # package with `file:` — which npm links as a SYMLINK. Node's ESM resolver then
       # resolves the REAL path, so it looks for node_modules starting at
-      # kanz-schemas/gen/ts/… and walks UP — never reaching kanz/ts/kanz-bus/node_modules
+      # schemas/gen/ts/… and walks UP — never reaching kanz/ts/kanz_bus/node_modules
       # where npm hoisted the dependency. Every import of the SDK died with
       # ERR_MODULE_NOT_FOUND: Cannot find package '@bufbuild/protobuf'.
       #
@@ -1013,16 +1030,16 @@ jobs:
       # PARITY-07 publishes it for real, it installs as a normal copied package and the
       # hoist works. Until then, it is a symlink, and symlinks resolve differently.)
       - name: Install the generated SDK's dependencies
-        working-directory: kanz-schemas/gen/ts
+        working-directory: schemas/gen/ts
         run: npm install --omit=dev --no-audit --no-fund
 
       # The @eighred/kanz-schemas dep isn't published (DEBT-01b); repoint it at
       # the freshly generated local package so npm resolves it from disk, not the
       # registry. The package.json edit is ephemeral (CI only).
       - name: Install
-        working-directory: kanz/ts/kanz-bus
+        working-directory: kanz/ts/kanz_bus
         run: |
-          npm pkg set dependencies.@eighred/kanz-schemas="file:../../../kanz-schemas/gen/ts"
+          npm pkg set dependencies.@eighred/kanz-schemas="file:../../../schemas/gen/ts"
           npm install
 
       # Typecheck, and it must run BEFORE the tests rather than instead of them.
@@ -1032,20 +1049,20 @@ jobs:
       # .d.ts public surface other code consumes, kept every check green.
       # `tsc` is the only thing that reads tsconfig's strict/noUncheckedIndexedAccess.
       - name: Typecheck
-        working-directory: kanz/ts/kanz-bus
+        working-directory: kanz/ts/kanz_bus
         run: npm run build
 
       - name: Test
-        working-directory: kanz/ts/kanz-bus
+        working-directory: kanz/ts/kanz_bus
         run: npm test
 
-  # THE OPERATOR SURFACE (#371). Nothing guarded kanz-web until this job: it was
+  # THE OPERATOR SURFACE (#371). Nothing guarded web until this job: it was
   # absent from every workflow, and the paths filter above did not even list it,
   # so a pull request touching only the SPA ran NO checks whatsoever — a type
   # error or a broken build reached main unremarked.
   #
   # There is no linter step because the repository has no JS/TS linter anywhere;
-  # the compiler is the quality gate, exactly as it is for kanz/ts/kanz-bus.
+  # the compiler is the quality gate, exactly as it is for kanz/ts/kanz_bus.
   web:
     needs: scope
     if: needs.scope.outputs.application == 'true'
@@ -1058,35 +1075,35 @@ jobs:
           # Its OWN .nvmrc, not kanz-bus's: two independently versioned
           # workspaces sharing one pin means bumping either one silently moves
           # the other's runtime.
-          node-version-file: kanz-web/.nvmrc
+          node-version-file: web/.nvmrc
 
       # npm ci, not npm install: the lockfile is tracked, and ci fails on a
       # lockfile that disagrees with package.json rather than quietly resolving
       # something the developer never ran.
       - name: Install
-        working-directory: kanz-web
+        working-directory: web
         run: npm ci --no-audit --no-fund
 
       - name: Install pinned Rust WASM target for browser rendering
         run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
 
       - name: Prepare checked browser rendering asset
-        working-directory: kanz-web
+        working-directory: web
         run: npm run prebuild
 
       - name: Typecheck
-        working-directory: kanz-web
+        working-directory: web
         run: npm run typecheck
 
       - name: Test
-        working-directory: kanz-web
+        working-directory: web
         run: npm test
 
       # Build separately before browser qualification, so a failure here is distinguishable from a
       # type error above — the BFF serves this output, and a bundle that does
       # not build is a blank operator surface.
       - name: Build
-        working-directory: kanz-web
+        working-directory: web
         run: npm run build
 
       # Avoid the observed Azure mirror font-download stalls without changing
@@ -1098,7 +1115,7 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py --verify
 
       - name: Qualify broker history rendering in Chromium
-        working-directory: kanz-web
+        working-directory: web
         run: |
           set -euo pipefail
           npx --no-install playwright install --with-deps chromium
@@ -1109,7 +1126,7 @@ jobs:
   # generated file fails CI. Second check is DORMANT until the published SDK
   # exists (PARITY-07b/c): setting the repo variable KANZ_SDK_PUBLISHED=true
   # (done in PARITY-07d, when the `replace` directives are deleted) arms it, and
-  # from then on any surviving local kanz-schemas replace fails CI so the module
+  # from then on any surviving local schemas replace fails CI so the module
   # stays pinned to published releases.
   sdk-guard:
     needs: scope
@@ -1120,7 +1137,7 @@ jobs:
       - name: No committed generated SDK files
         run: |
           set -euo pipefail
-          tracked=$(git ls-files -- 'kanz-schemas/gen' '*.pb.go' '*_pb2.py' '*_pb2_grpc.py' '*_pb2.pyi' '*_pb.js' '*_pb.d.ts')
+          tracked=$(git ls-files -- 'schemas/gen' '*.pb.go' '*_pb2.py' '*_pb2_grpc.py' '*_pb2.pyi' '*_pb.js' '*_pb.d.ts')
           if [ -n "$tracked" ]; then
             printf '::error::generated SDK files are committed (EVT-15a: generated code is published, never committed):\n%s\n' "$tracked"
             exit 1
@@ -1130,15 +1147,15 @@ jobs:
         run: |
           set -euo pipefail
           # Catches single-line and block-form replace directives.
-          if grep -En '=>.*kanz-schemas' kanz/go.mod; then
-            echo '::error file=kanz/go.mod::local kanz-schemas replace survives after SDK publication — pin the published kanz-schemas-go (DEBT-01c)'
+          if grep -En '=>.*schemas' kanz/go.mod; then
+            echo '::error file=kanz/go.mod::local schemas replace survives after SDK publication — pin the published kanz-schemas-go (DEBT-01c)'
             exit 1
           fi
 
   # THE COMMITTED MODULE GRAPH MUST STAND ON ITS OWN (#946).
   #
   # This workflow sets GOFLAGS=-mod=mod globally, and it has to: the kanz module
-  # `replace`s the kanz-schemas Go SDK to a generated directory, and a freshly
+  # `replace`s the schemas Go SDK to a generated directory, and a freshly
   # generated local module must be allowed to settle into the graph rather than
   # failing readonly. That is a deliberate convenience and this job does not
   # remove it.
@@ -1191,7 +1208,7 @@ jobs:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
 
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
 
@@ -1205,8 +1222,8 @@ jobs:
       # because the graph has to be complete for the module as it is ACTUALLY
       # built — with the local replace resolved — and not for a hypothetical one
       # without it.
-      - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
+      - name: Generate schemas Go SDK
+        working-directory: schemas
         run: |
           buf generate
           bash bootstrap-go-sdk.sh
@@ -1426,13 +1443,15 @@ jobs:
         with:
           # Full history so buf can resolve the main baseline for `breaking`.
           fetch-depth: 0
-      - uses: ./.github/actions/setup-buf
+      - uses: ./.github/actions/setup_buf
         with:
           version: 1.69.0
+      - name: Verify baseline selection and incompatible-change refusal
+        run: python3 -B -m unittest discover -s .github/scripts -p test_schema_baseline.py
       - name: Lint
-        working-directory: kanz-schemas
+        working-directory: schemas
         run: buf lint
-      # Compares kanz-schemas/proto against its state on main. A no-op (passes)
+      # Compares schemas/proto against its state on main. A no-op (passes)
       # when a PR touches no proto; on a proto PR it fails any wire-incompatible
       # change, enforcing the additive-only envelope discipline (EVT-21c).
       #
@@ -1443,14 +1462,14 @@ jobs:
       # on push-to-main (where checkout does create the local branch). That split
       # is why this guard was inert on exactly the changes it exists to gate.
       - name: Breaking-change check
-        working-directory: kanz-schemas
-        run: buf breaking --against '../.git#ref=origin/main,subdir=kanz-schemas'
+        working-directory: schemas
+        run: bash check-breaking.sh
 
   # The only application context required by the main ruleset. Missing results,
   # cancellation, and accidental skips must never masquerade as successful CI.
   kanz-ci-required:
     if: ${{ always() }}
-    needs: [scope, release-custody, go, go-race, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
+    needs: [scope, forge, release-custody, go, go-race, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

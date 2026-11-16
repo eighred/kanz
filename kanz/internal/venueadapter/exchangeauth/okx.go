@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/execution"
+	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
 
 // OKXTradingMode selects which OKX order book a signed request reaches (#147).
@@ -119,7 +120,7 @@ func okxAccount(ctx context.Context, cred Credential, opt Options) (AccountInfo,
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opt.BaseURL+requestPath, nil)
 	if err != nil {
-		return AccountInfo{}, err
+		return AccountInfo{}, fmt.Errorf("exchangeauth: create OKX REST request: %w", transporterr.Redact(err))
 	}
 	// THE MODE MATTERS ON A READ, TOO. Demo and live are separate OKX accounts
 	// with separate keys, so asking live "which account is this?" with a demo key

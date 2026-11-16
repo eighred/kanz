@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	decutil "github.com/eighred/kanz/internal/dec"
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 )
 
@@ -265,13 +266,25 @@ func BuyingPowerRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violat
 	if bp == nil {
 		return paramsMismatch("buying_power")
 	}
-	if c.Book.Cash == nil {
+	if c.Book.Cash == nil || c.Book.Cash.GetAmount() == nil {
 		return &compliancepb.Violation{
 			Message:  "buying power cannot be verified: cash balance unavailable",
 			Evidence: map[string]string{"cash": "unavailable"},
 		}
 	}
-	after := ratFromDecimal(c.Book.Cash.GetAmount())
+	if c.Book.BaseCurrency == "" || c.Book.Cash.GetCurrencyCode() != c.Book.BaseCurrency {
+		return &compliancepb.Violation{
+			Message:  "buying power cannot be verified: cash is not in the portfolio base currency",
+			Evidence: map[string]string{"currency": c.Book.Cash.GetCurrencyCode(), "base_currency": c.Book.BaseCurrency},
+		}
+	}
+	after, ok := decutil.FromProtoChecked(c.Book.Cash.GetAmount())
+	if !ok || !decimalInDomain(bp.GetMinCashAfter()) {
+		return &compliancepb.Violation{
+			Message:  "buying power cannot be verified: cash or floor is outside the decimal domain",
+			Evidence: map[string]string{"cash": "unreadable"},
+		}
+	}
 	floor := ratFromDecimal(bp.GetMinCashAfter())
 	if after.Cmp(floor) >= 0 {
 		return nil
