@@ -207,11 +207,11 @@ class NetworkFramingTests(unittest.TestCase):
                 with self.subTest(command=command, change=change), self.assertRaises(ValueError): check(bad)
 
     def test_closed_actual_wrapper_recipes(self):
-        self.assertEqual(codec.SOURCE_BUNDLES, {'normal': {'files': ['policy_state.py', 'transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_scope.py', 'rollout_engine.py', 'network_observation.py'], 'fixed': ['source_loader.py', 'bounded_process.py']}, 'plan': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}, 'restore': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'recovery_restore.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}})
+        self.assertEqual(codec.SOURCE_BUNDLES, {'normal': {'files': ['policy_state.py', 'transaction.py', 'policy_client.py', 'bounded_process.py', 'rollout_scope.py', 'rollout_engine.py', 'network_observation.py'], 'fixed': ['source_loader.py', 'rollout_probe.py']}, 'plan': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}, 'restore': {'files': ['policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'recovery_restore.py', 'bounded_process.py'], 'fixed': ['source_loader.py']}})
         builders = []
         for mode, name in WRAPPERS.items():
             wrapper = (ROOT / "tools" / name).read_text(encoding="utf-8")
-            expected = {"source_loader.py"} | ({"bounded_process.py"} if mode == "normal" else set())
+            expected = {"source_loader.py"} | ({"rollout_probe.py"} if mode == "normal" else set())
             self.assertTrue(valid_framing(wrapper, expected))
             canonical_root = "$proofRoot = Join-Path $PSScriptRoot 'gateway_policy_proof'"
             legacy_root = "$proofRoot = Join-Path $PSScriptRoot 'gateway-policy-proof'"
@@ -286,14 +286,20 @@ class NetworkFramingTests(unittest.TestCase):
             text = "x" * 65537
             bad["files"][name] = {"text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
             run(encoded=packed(json.dumps(bad).encode()))
-        for mode in ("missing", "extra", "duplicate", "oversize", "combined"):
+        for mode in ("missing", "extra", "duplicate", "oversize", "combined", "main_missing", "main_extra", "stale_partition"):
             value = copy.deepcopy(bundle); fixed_value = copy.deepcopy(frame)
-            if mode == "missing": del fixed_value["files"]["bounded_process.py"]
+            if mode == "missing": del fixed_value["files"]["rollout_probe.py"]
             elif mode == "extra": fixed_value["files"]["evil.py"] = {"text": "", "sha256": hashlib.sha256(b"").hexdigest()}
             elif mode == "duplicate": value["files"]["source_loader.py"] = "substitute"
             elif mode == "oversize": value["files"]["rollout_engine.py"] = "x" * 65537
+            elif mode == "main_missing": del value["files"]["bounded_process.py"]
+            elif mode == "main_extra": value["files"]["rollout_probe.py"] = "substitute"
+            elif mode == "stale_partition":
+                value["files"]["rollout_probe.py"] = value["files"].pop("bounded_process.py")
+                fixed_value["files"]["bounded_process.py"] = fixed_value["files"].pop("rollout_probe.py")
             else: value["payload"]["pad"] = "x" * (524000 - len(json.dumps(value)))
-            run(value, encoded=packed(json.dumps(fixed_value).encode()))
+            with self.subTest(partition=mode):
+                run(value, encoded=packed(json.dumps(fixed_value).encode()))
         unicode_sources = {name: data + "# UTF8 λ ' \\\r\n".encode() for name, data in original.items()}
         unicode_frame = declaration(wrapper, unicode_sources)
         run(encoded=unicode_frame["encoded"], expected=unicode_sources, good=True)

@@ -296,7 +296,10 @@ those operations were not run. The item remains UNKNOWN with no new batch.
 Six completed nonconverged batches retain their existing outcome. This source
 repair does not identify which deadline caused an earlier uninstrumented failure.
 The normal operator transports seven modules in its main XZ frame and the exact
-`source_loader.py`/`bounded_process.py` pair in a separately encoded fixed frame.
+`source_loader.py`/`rollout_probe.py` pair in a separately encoded fixed frame.
+`bounded_process.py` remains one of the seven main-frame modules. This lossless
+placement changes neither the nine runtime source files nor the closed loader's
+execution order; the former two-file fixed partition is refused.
 Planner and restore partitions retain their existing module inventory. Both use
 the same bounded CRC64 XZ codec; the fixed frame requires exact names, field types,
 UTF8 source and SHA256 before any source write. The remote prefix contains only

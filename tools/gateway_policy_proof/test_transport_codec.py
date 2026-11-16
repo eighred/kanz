@@ -120,6 +120,29 @@ class TransportCodecTests(unittest.TestCase):
             with self.subTest(decode_mode=mode), self.assertRaises(ValueError):
                 codec.decode_fixed(codec.encode(b'{"files":{}}'), mode)
 
+    def test_normal_fixed_partition_refuses_stale_placement(self):
+        import hashlib
+        canonical = {"source_loader.py": b"# loader\n", "rollout_probe.py": b"# probe\n"}
+        self.assertEqual(set(codec.SOURCE_BUNDLES["normal"]["fixed"]), set(canonical))
+        self.assertEqual(len(codec.SOURCE_BUNDLES["normal"]["files"]), 7)
+        self.assertEqual(len(codec.SOURCE_BUNDLES["normal"]["fixed"]), 2)
+        controls = {
+            "missing_loader": {"rollout_probe.py": canonical["rollout_probe.py"]},
+            "missing_probe": {"source_loader.py": canonical["source_loader.py"]},
+            "former_fixed_extra": {**canonical, "bounded_process.py": b"# former fixed\n"},
+            "stale_two_file_partition": {"source_loader.py": canonical["source_loader.py"], "bounded_process.py": b"# former fixed\n"},
+            "third_fixed_module": {**canonical, "network_observation.py": b"# extra\n"},
+        }
+        for control, values in controls.items():
+            with self.subTest(control=control):
+                with self.assertRaisesRegex(ValueError, "^fixed source inventory$"):
+                    codec.encode_fixed(values, "normal")
+                frame = {"files": {name: {"text": data.decode("utf-8"), "sha256": hashlib.sha256(data).hexdigest()}
+                                   for name, data in values.items()}}
+                encoded = codec.encode(json.dumps(frame).encode("utf-8"))
+                with self.assertRaisesRegex(ValueError, "^fixed source inventory$"):
+                    codec.decode_fixed(encoded, "normal")
+
     def test_remote_decoder_source_exact_segments_and_modes(self):
         import ast
         source = (Path(__file__).parent / "transport_codec.py").read_text(encoding="utf-8")
@@ -182,7 +205,7 @@ class TransportCodecTests(unittest.TestCase):
             source + "\nimport base64\n", source + "\nside_effect()\n",
             source.replace('hashlib.sha256(data).hexdigest() != value["sha256"]', "False"),
             source.replace('object_pairs_hook=_unique_fixed', 'object_pairs_hook=dict'),
-            source.replace('"bounded_process.py"]}', '"unreviewed.py"]}'),
+            source.replace('"rollout_probe.py"]}', '"unreviewed.py"]}', 1),
         ]
         self.assertTrue(all(value != source for value in mutations))
         for index, changed in enumerate(mutations):

@@ -14,7 +14,7 @@ MEMORY_LIMIT = 16777216
 
 # One literal partition for the checked Python and PowerShell source collectors.
 # Transport placement never changes the closed loader's module execution order.
-SOURCE_BUNDLES = {"normal":{"files":["policy_state.py","transaction.py","policy_client.py","rollout_probe.py","rollout_scope.py","rollout_engine.py","network_observation.py"],"fixed":["source_loader.py","bounded_process.py"]},"plan":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","bounded_process.py"],"fixed":["source_loader.py"]},"restore":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","recovery_restore.py","bounded_process.py"],"fixed":["source_loader.py"]}}
+SOURCE_BUNDLES = {"normal":{"files":["policy_state.py","transaction.py","policy_client.py","bounded_process.py","rollout_scope.py","rollout_engine.py","network_observation.py"],"fixed":["source_loader.py","rollout_probe.py"]},"plan":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","bounded_process.py"],"fixed":["source_loader.py"]},"restore":{"files":["policy_state.py","policy_client.py","rollout_scope.py","recovery_receipts.py","recovery_plan.py","recovery_restore.py","bounded_process.py"],"fixed":["source_loader.py"]}}
 
 
 def encode(raw):
