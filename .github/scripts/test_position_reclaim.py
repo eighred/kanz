@@ -264,6 +264,246 @@ class ProtectedFiles(unittest.TestCase):
         with self.assertRaises(OSError): sandbox.directory(self.root/"directory-link")
 
 
+class RustStoreExport(unittest.TestCase):
+    def model(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        root.chmod(0o700)
+        examples = root/"rust-target/debug/examples"
+        examples.mkdir(parents=True, mode=0o700)
+        fixture = examples/"fixture"
+        fixture.write_bytes(b"source-free dummy fixture bytes")
+        fixture.chmod(0o755)
+        os.link(fixture, examples/"fixture-0123456789abcdef")
+        for name in ("fixture.d", "fixture-0123456789abcdef.d"):
+            (examples/name).write_bytes(b"fixed dummy dependency record")
+            (examples/name).chmod(0o644)
+        fd = sandbox.directory(root)
+        self.addCleanup(os.close, fd)
+        return root, fd, examples
+
+    def test_two_live_aliases_export_independent_one_link_bytes(self):
+        root, fd, examples = self.model()
+        original = (examples/"fixture").read_bytes()
+        previous = os.umask(0o077)
+        try: receipt = sandbox.export_rust_store(fd)
+        finally: os.umask(previous)
+        exported = root/"rust-store-export/fixture"
+        self.assertEqual(receipt["entry_count"], 4)
+        self.assertEqual(receipt["alias_count"], 2)
+        self.assertEqual(receipt["source"]["links"], 2)
+        self.assertEqual(exported.stat().st_nlink, 1)
+        self.assertNotEqual(exported.stat().st_ino, (examples/"fixture").stat().st_ino)
+        self.assertEqual(exported.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(exported.stat().st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(exported.parent.stat().st_mode), 0o700)
+        self.assertEqual(sandbox.validate_store_export(json.dumps(receipt).encode(), original, exported.stat()), receipt)
+        (examples/"fixture-0123456789abcdef").write_bytes(b"old alias changes after export")
+        self.assertNotEqual((examples/"fixture").read_bytes(), original)
+        self.assertEqual(exported.read_bytes(), original)
+        self.assertEqual(exported.stat().st_nlink, 1)
+        self.assertNotIn(str(root), json.dumps(receipt))
+
+    def test_outside_second_link_and_third_link_refuse_without_source_unlink(self):
+        for problem in ("outside", "third"):
+            with self.subTest(problem=problem):
+                root, fd, examples = self.model()
+                if problem == "outside":
+                    (examples/"fixture-0123456789abcdef").unlink()
+                    os.link(examples/"fixture", root/"outside")
+                else:
+                    os.link(examples/"fixture", examples/"fixture-fedcba9876543210")
+                before = (examples/"fixture").stat()
+                with self.assertRaises(ValueError): sandbox.export_rust_store(fd)
+                self.assertEqual((examples/"fixture").stat().st_nlink, before.st_nlink)
+                self.assertFalse((root/"rust-store-export").exists())
+
+    def test_unknown_name_symlink_fifo_and_unrelated_executable_refuse(self):
+        for problem in ("name", "symlink", "fifo", "unrelated", "linked-dependency", "inventory"):
+            with self.subTest(problem=problem):
+                root, fd, examples = self.model()
+                if problem == "name": (examples/"fixture-INVALID").write_bytes(b"unknown")
+                elif problem == "symlink":
+                    (examples/"fixture").unlink()
+                    os.symlink("fixture-0123456789abcdef", examples/"fixture")
+                elif problem == "fifo": os.mkfifo(examples/"fixture-fedcba9876543210.d")
+                elif problem == "unrelated": (examples/"fixture-fedcba9876543210").write_bytes(b"other inode")
+                elif problem == "linked-dependency": os.link(examples/"fixture.d", root/"dependency-alias")
+                else:
+                    for i in range(17): (examples/(("fixture-%016x.d") % (i+1))).write_bytes(b"record")
+                with self.assertRaises((OSError, ValueError)): sandbox.export_rust_store(fd)
+                self.assertFalse((root/"rust-store-export").exists())
+
+    def test_missing_alias_empty_oversized_owner_mode_and_linked_parent_refuse(self):
+        for problem in ("single", "empty", "oversized", "owner", "mode", "parent"):
+            with self.subTest(problem=problem):
+                root, fd, examples = self.model()
+                if problem == "single": (examples/"fixture-0123456789abcdef").unlink()
+                elif problem == "empty": (examples/"fixture").write_bytes(b"")
+                elif problem == "oversized": (examples/"fixture").write_bytes(b"x"*65)
+                elif problem == "mode": (examples/"fixture").chmod(0o777)
+                elif problem == "parent":
+                    (root/"rust-target").rename(root/"linked-target")
+                    os.symlink("linked-target", root/"rust-target")
+                with mock.patch.object(sandbox, "STORE_EXPORT_MAX_BYTES", 64), mock.patch.object(sandbox, "UID", 65533 if problem == "owner" else 65534):
+                    with self.assertRaises((OSError, ValueError)): sandbox.export_rust_store(fd)
+                self.assertFalse((root/"rust-store-export").exists())
+
+    def test_foreign_existing_output_directory_or_symlink_is_preserved(self):
+        for problem in ("directory", "symlink"):
+            with self.subTest(problem=problem):
+                root, fd, _ = self.model()
+                foreign = root/"foreign"; foreign.mkdir()
+                (foreign/"fixture").write_bytes(b"foreign existing bytes")
+                if problem == "symlink": os.symlink("foreign", root/"rust-store-export")
+                else:
+                    (root/"rust-store-export").mkdir()
+                    (root/"rust-store-export/fixture").write_bytes(b"foreign existing bytes")
+                with self.assertRaises((OSError, ValueError)): sandbox.export_rust_store(fd)
+                self.assertEqual((root/"rust-store-export/fixture").read_bytes(), b"foreign existing bytes")
+                self.assertEqual((foreign/"fixture").read_bytes(), b"foreign existing bytes")
+
+    def test_exclusive_copy_collision_preserves_foreign_file_or_symlink(self):
+        for problem in ("file", "symlink"):
+            with self.subTest(problem=problem):
+                root, fd, _ = self.model()
+                original_open = os.open
+                def collision(name, flags, mode=0o777, *, dir_fd=None):
+                    if name == "fixture" and flags & os.O_CREAT:
+                        if problem == "symlink": os.symlink("../foreign", name, dir_fd=dir_fd)
+                        else:
+                            foreign = original_open(name, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600, dir_fd=dir_fd)
+                            os.write(foreign, b"foreign collision"); os.close(foreign)
+                    return original_open(name, flags, mode, dir_fd=dir_fd)
+                (root/"foreign").write_bytes(b"foreign collision")
+                with mock.patch.object(sandbox.os, "open", side_effect=collision):
+                    with self.assertRaises((OSError, ValueError)): sandbox.export_rust_store(fd)
+                destination = root/"rust-store-export/fixture"
+                if problem == "symlink": self.assertTrue(destination.is_symlink())
+                else: self.assertEqual(destination.read_bytes(), b"foreign collision")
+                self.assertEqual((root/"foreign").read_bytes(), b"foreign collision")
+
+    def test_source_metadata_or_link_change_refuses_and_cleans_only_owned_copy(self):
+        for problem in ("time", "links", "directory"):
+            with self.subTest(problem=problem):
+                root, fd, examples = self.model()
+                original_read = os.read
+                changed = False
+                def mutate(descriptor, count):
+                    nonlocal changed
+                    result = original_read(descriptor, count)
+                    if not changed and result:
+                        changed = True
+                        if problem == "links": os.link(examples/"fixture", root/"late-link")
+                        elif problem == "directory":
+                            examples.rename(examples.parent/"replaced-examples")
+                            examples.mkdir()
+                        else:
+                            info = (examples/"fixture").stat()
+                            os.utime(examples/"fixture", ns=(info.st_atime_ns, info.st_mtime_ns+1))
+                    return result
+                with mock.patch.object(sandbox.os, "read", side_effect=mutate):
+                    with self.assertRaises(ValueError): sandbox.export_rust_store(fd)
+                self.assertTrue(changed)
+                surviving = examples.parent/"replaced-examples/fixture" if problem == "directory" else examples/"fixture"
+                self.assertTrue(surviving.is_file())
+                self.assertFalse((root/"rust-store-export").exists())
+
+    def test_copy_hash_is_independently_read_and_partial_write_failure_cleans(self):
+        for problem in ("hash", "write"):
+            with self.subTest(problem=problem):
+                root, fd, _ = self.model()
+                original_read = os.read
+                reads = 0
+                def corrupt_copy(descriptor, count):
+                    nonlocal reads
+                    result = original_read(descriptor, count)
+                    reads += 1
+                    return b"X" + result[1:] if reads == 3 and result else result
+                with mock.patch.object(sandbox.os, "read", side_effect=corrupt_copy if problem == "hash" else original_read), mock.patch.object(sandbox.os, "write", side_effect=OSError(errno.ENOSPC, "dummy full scratch") if problem == "write" else os.write):
+                    with self.assertRaises((OSError, ValueError)): sandbox.export_rust_store(fd)
+                self.assertFalse((root/"rust-store-export").exists())
+
+    def test_typed_receipt_refuses_forged_counts_hashes_owner_or_unknown_fields(self):
+        root, fd, _ = self.model()
+        row = sandbox.export_rust_store(fd)
+        target = root/"rust-store-export/fixture"
+        binary = target.read_bytes()
+        mutations = [("schema", True), ("role", "other"), ("entry_count", 17), ("entry_count", True), ("alias_count", 1), ("alias_count", 3), ("distinct_inode", False), ("unknown", 1)]
+        for key, value in mutations:
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(row); changed[key] = value
+                with self.assertRaises(ValueError): sandbox.validate_store_export(json.dumps(changed).encode(), binary, target.stat())
+        for section in ("source", "copy"):
+            for key, value in (("bytes", True), ("uid", 0), ("gid", True), ("mode", 0o777), ("links", 4), ("sha256", "0"*64), ("extra", 0)):
+                with self.subTest(section=section, key=key):
+                    changed = copy.deepcopy(row); changed[section][key] = value
+                    with self.assertRaises(ValueError): sandbox.validate_store_export(json.dumps(changed).encode(), binary, target.stat())
+        for raw in (b"", b"null", b"{}", b"{"+b" "*16384+b"}", json.dumps(row).encode().replace(b'"schema": 1', b'"schema": 1, "schema": 1')):
+            with self.assertRaises(ValueError): sandbox.validate_store_export(raw, binary, target.stat())
+        with self.assertRaises(ValueError): sandbox.validate_store_export(json.dumps(row).encode(), b"forged same role", target.stat())
+        os.link(target, root/"export-alias")
+        with self.assertRaises(ValueError): sandbox.validate_store_export(json.dumps(row).encode(), binary, target.stat())
+
+    def test_fixed_program_and_successful_cgroup_absence_are_mandatory(self):
+        import ast
+        program = sandbox.rust_store_export_program()
+        ast.parse(program)
+        self.assertIn('root_fd=directory("/scratch")', program)
+        self.assertIn('os.write(1,b"POSITION_STORE_EXPORT_REFUSED v1\\n")', program)
+        self.assertNotIn("sys.argv", program)
+        command = ["cargo", "build", "--frozen", "-p", "kanz-oms-store", "--example", "fixture"]
+        facts = {"command": command, "supervisor_exit": 0, "remaining_processes": False,
+                 "effective": {"memory.max": str(6*1024**3), "memory.swap.max": "0", "pids.max": "512", "cpu.max": "200000 100000"}}
+        box = object.__new__(sandbox.Sandbox); box.active = set(); box.executions = [facts]
+        box.stopped_execution(command)
+        for key, value in (("remaining_processes", True), ("remaining_processes", None), ("supervisor_exit", 1), ("supervisor_exit", False), ("command", ["cargo", "other"]), ("effective", None)):
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(facts); changed[key] = value; box.executions = [changed]
+                with self.assertRaises(ValueError): box.stopped_execution(command)
+        box.executions = [facts]; box.active = {"live-worker"}
+        with self.assertRaises(ValueError): box.stopped_execution(command)
+
+    def test_parent_join_rechecks_actual_bytes_and_exporter_termination(self):
+        for problem in (None, "bytes", "receipt", "linked", "live", "exit"):
+            with self.subTest(problem=problem):
+                root, fd, _ = self.model()
+                receipt = sandbox.export_rust_store(fd)
+                target = root/"rust-store-export/fixture"
+                original = target.read_bytes()
+                if problem == "bytes":
+                    target.chmod(0o600); target.write_bytes(b"different exported bytes"); target.chmod(0o555)
+                elif problem == "receipt": receipt["alias_count"] = 1
+                elif problem == "linked": os.link(target, root/"unaccounted-export-alias")
+                cargo = ["cargo", "build", "--frozen", "-p", "kanz-oms-store", "--example", "fixture"]
+                effective = {"memory.max": str(6*1024**3), "memory.swap.max": "0", "pids.max": "512", "cpu.max": "200000 100000"}
+                box = object.__new__(sandbox.Sandbox)
+                box.active = set(); box.work_fd = fd
+                box.executions = [{"command": cargo, "supervisor_exit": 0, "remaining_processes": False, "effective": effective}]
+                retained = {}
+                box.retain = lambda name, raw: retained.update({name: raw})
+                def execute(command, **kwargs):
+                    self.assertEqual(command, ["python3", "-I", "-S", "-c", sandbox.rust_store_export_program()])
+                    self.assertEqual(kwargs, {"cwd": "/input/rust", "seconds": 30, "output_limit": 16384})
+                    box.executions.append({"command": command, "supervisor_exit": 1 if problem == "exit" else 0,
+                                           "remaining_processes": problem == "live", "effective": effective})
+                    if problem == "live": box.active.add("still-live-exporter")
+                    return box.executions[-1]["supervisor_exit"], json.dumps(receipt).encode()
+                box.execute = execute
+                if problem is None:
+                    self.assertEqual(box.export_store(), original)
+                    self.assertEqual(set(retained), {"oms-store", "rust-store-export.json", "rust-store-export-utility.json"})
+                    self.assertEqual(retained["oms-store"], original)
+                    self.assertEqual(json.loads(retained["rust-store-export.json"]), receipt)
+                else:
+                    with self.assertRaises((OSError, ValueError)): box.export_store()
+                    self.assertNotIn("oms-store", retained)
+                    if problem == "linked":
+                        refusal = json.loads(retained["promotion-refusal.json"])
+                        self.assertEqual((refusal["reason"], refusal["link_count"]), ("multiple-links", 2))
+
+
 class KernelBoundary(unittest.TestCase):
     def test_synthetic_root_and_device_directories_are_readonly(self):
         # Refuse before attempting any write if called outside the owned lane.
@@ -282,6 +522,56 @@ class KernelBoundary(unittest.TestCase):
                     os.close(fd);os.unlink(path)
                     self.fail("write escaped owned scratch")
         with open("/dev/null","wb") as sink: self.assertEqual(sink.write(b"required device"),15)
+
+
+class ObservedProcessStatus(unittest.TestCase):
+    def test_actual_own_pid_receipt_uses_known_host_identity(self):
+        # This is a file-reader positive control, including ordinary CI. Only
+        # the separate strict wrapper/kernel controls establish isolation.
+        pid = os.getpid()
+        with mock.patch.object(sandbox, "UID", os.getuid()):
+            row = sandbox.observed_process_status(str(pid))
+        self.assertEqual(row["host_pid"], pid)
+        self.assertEqual(row["namespace_pid"], pid)
+        self.assertEqual(row["host_uids"], [os.getuid()])
+        self.assertGreaterEqual(int(row["cap_eff"], 16), 0)
+
+    def test_only_enoent_and_esrch_mean_the_enumerated_sample_vanished(self):
+        for error in (FileNotFoundError(errno.ENOENT, "dummy vanished PID"),
+                      ProcessLookupError(errno.ESRCH, "dummy vanished PID")):
+            with self.subTest(errno=error.errno), mock.patch.object(sandbox.Path, "read_text", autospec=True, side_effect=error) as read:
+                self.assertIsNone(sandbox.observed_process_status("1234"))
+                read.assert_called_once_with(Path("/proc/1234/status"))
+
+    def test_permission_other_os_errors_and_contradictory_errno_stay_fatal(self):
+        for error in (PermissionError(errno.EACCES, "dummy permission refusal"),
+                      OSError(errno.EIO, "dummy read failure"),
+                      FileNotFoundError(errno.EIO, "wrong disappearance errno"),
+                      ProcessLookupError(errno.EPERM, "wrong disappearance errno")):
+            with self.subTest(kind=type(error).__name__, errno=error.errno), mock.patch.object(sandbox.Path, "read_text", autospec=True, side_effect=error):
+                with self.assertRaises(type(error)) as caught:
+                    sandbox.observed_process_status("1234")
+                self.assertIs(caught.exception, error)
+
+    def test_status_receipt_and_malformed_or_privileged_identity_discriminate(self):
+        good = "Uid:\t65534\t65534\t65534\t65534\nNSpid:\t1234\t2\nCapEff:\t0000000000000000\n"
+        with mock.patch.object(sandbox.Path, "read_text", autospec=True, return_value=good) as read:
+            self.assertEqual(sandbox.observed_process_status("1234"),
+                             {"host_pid": 1234, "namespace_pid": 2, "host_uids": [65534], "cap_eff": "0000000000000000"})
+            read.assert_called_once_with(Path("/proc/1234/status"))
+        for changed in (good.replace("65534", "0"), good.replace("65534", "invalid"),
+                        good.replace("Uid:", "MissingUid:"), good.replace("NSpid:\t1234\t2", "NSpid:"),
+                        good.replace("NSpid:\t1234\t2", "NSpid:\t0"), good.replace("CapEff:", "MissingCaps:"),
+                        good.replace("0000000000000000", "malformed"), good + "x"*16385):
+            with self.subTest(status=changed[:24]), mock.patch.object(sandbox.Path, "read_text", autospec=True, return_value=changed):
+                with self.assertRaises((ValueError, KeyError, IndexError)):
+                    sandbox.observed_process_status("1234")
+
+    def test_invalid_pid_cannot_select_any_other_proc_path(self):
+        for pid in (None, True, 1, "", "0", "-1", "01", "self", "../1", "1/status", " 1", "1\n", "2147483648", "1"*100):
+            with self.subTest(pid=pid), mock.patch.object(sandbox.Path, "read_text", autospec=True) as read:
+                with self.assertRaises(ValueError): sandbox.observed_process_status(pid)
+                read.assert_not_called()
 
 
 class LaunchPermissions(unittest.TestCase):
