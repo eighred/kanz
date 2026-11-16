@@ -32,6 +32,32 @@ type PositionReceipts struct {
 	keys                  map[string]bool
 }
 
+type receiptReader interface {
+	Stop()
+	Closed() <-chan struct{}
+}
+
+// close releases the finite test's receipts only after its callback has joined.
+// A failed join retains the collections rather than clearing a live reader's state.
+func (r *PositionReceipts) close(reader receiptReader) error {
+	if reader != nil {
+		reader.Stop()
+		select {
+		case <-reader.Closed():
+		case <-time.After(5 * time.Second):
+			return errors.New("POSITION receipt reader did not stop/join")
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for input := range r.seen {
+		clear(r.seen[input])
+		delete(r.seen, input)
+	}
+	clear(r.keys)
+	return nil
+}
+
 // ReclaimOMSPositions registers the exact system-fixture output keys and starts
 // their receipt reader before commands/fills can reach the shared disposable OMS.
 // AwaitFills must join the actual owned inputs before this fixture returns.
@@ -46,30 +72,19 @@ func ReclaimOMSPositions(t testing.TB, js jetstream.JetStream, portfolio, instru
 	for _, key := range keys {
 		r.keys[key] = true
 	}
-	if os.Getenv("TEST_OMS_ON_BUS") != "1" {
-		return r
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	c, err := js.CreateConsumer(ctx, "POSITION", jetstream.ConsumerConfig{FilterSubjects: keys, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy, MaxAckPending: 512, InactiveThreshold: 30 * time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
+	var c jetstream.Consumer
 	var cc jetstream.ConsumeContext
 	t.Cleanup(func() {
-		if cc != nil {
-			cc.Stop()
-			select {
-			case <-cc.Closed():
-			case <-time.After(5 * time.Second):
-				t.Error("POSITION receipt reader did not stop/join")
-				return
-			}
-		}
-		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		if err := js.DeleteConsumer(cleanup, "POSITION", c.CachedInfo().Name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+		if err := r.close(cc); err != nil {
 			t.Error(err)
+			return
+		}
+		if c != nil {
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := js.DeleteConsumer(cleanup, "POSITION", c.CachedInfo().Name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+				t.Error(err)
+			}
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -77,6 +92,18 @@ func ReclaimOMSPositions(t testing.TB, js jetstream.JetStream, portfolio, instru
 			t.Error(r.err)
 		}
 	})
+	if os.Getenv("TEST_OMS_ON_BUS") != "1" {
+		return r
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Preserve the former server-default 30s acknowledgment window and unlimited
+	// redelivery explicitly. This finite observer must not exhaust an input before
+	// its causal join; stop/join/delete and the 30s inactivity limit own its lifetime.
+	c, err := js.CreateConsumer(ctx, "POSITION", jetstream.ConsumerConfig{FilterSubjects: keys, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second, MaxDeliver: -1, MaxAckPending: 512, InactiveThreshold: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
 	cc, err = c.Consume(func(message jetstream.Msg) {
 		env, payload, err := bus.Unframe(message.Data())
 		var state domainpb.PositionState

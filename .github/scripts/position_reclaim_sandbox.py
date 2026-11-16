@@ -33,6 +33,74 @@ MAX_FILE = 32 * 1024 * 1024
 MAX_SOURCE = 1024 * 1024 * 1024
 MAX_OUTPUT = 256 * 1024 * 1024
 SAFE = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "GIT_CONFIG_NOSYSTEM":"1", "GIT_CONFIG_GLOBAL":"/dev/null"}
+PROBE_ENTRY = b"POSITION_PROBE_ENTRY v1"
+PROBE_STAGES = frozenset(("arguments","identity","uid-map","gid-map","environment","core-limit","file-limit",
+                         "capabilities","hidden-paths","input-readonly","write-boundary","root-readonly","device",
+                         "scratch-write","private-loopback","fixed-backends","egress-refusal","proc-isolation",
+                         "success-record","sampling-handshake"))
+PROBE_REFUSALS = frozenset(("assertion","os-operation","unexpected"))
+# Exact English marker observations only, not an inferred first cause. Verified
+# against bubblewrap v0.9.0 bubblewrap.c and util-linux v2.39.3 prlimit.c/c.h.
+# Other versions/messages remain unknown; these markers grant no recovery action.
+LAUNCHER_REFUSALS = {
+    b"bwrap: Creating new namespace failed: Operation not permitted":"bwrap-namespace-refused",
+    b"bwrap: No permissions to creating new namespace, likely because the kernel does not allow non-privileged user namespaces. On e.g. debian this can be enabled with 'sysctl kernel.unprivileged_userns_clone=1'.":"bwrap-namespace-refused",
+    b"prlimit: failed to execute python3: Permission denied":"prlimit-exec-refused",
+    b"prlimit: failed to execute python3: Operation not permitted":"prlimit-exec-refused",
+}
+
+
+def launch_observation(supervisor_exit, raw):
+    """Never retain an unknown launcher error, environment value or its hash."""
+    if type(supervisor_exit) is not int or not -255<=supervisor_exit<=255 or type(raw) is not bytes:
+        raise ValueError("launcher observation process metadata refused")
+    window=raw[:4096]
+    if len(raw)>4096 and not window.endswith(b"\n"):
+        window=window.rsplit(b"\n",1)[0] if b"\n" in window else b""
+    markers={LAUNCHER_REFUSALS[line] for line in window.splitlines() if line in LAUNCHER_REFUSALS} if supervisor_exit else set()
+    return {"schema":1,"supervisor_exit":supervisor_exit,"combined_output_bytes":len(raw),
+            "launcher_refusal":next(iter(markers)) if len(markers)==1 else "unknown"}
+
+
+def probe_output(supervisor_exit, raw, combined_output_bytes):
+    """Project a bounded fixed child protocol; return no unknown diagnostic text."""
+    observation={"schema":1,"supervisor_exit":supervisor_exit,"combined_output_bytes":combined_output_bytes,
+                 "inner_entry":False,"framing":"unrecognized","stage":"unknown","refusal":"unknown",
+                 "launcher_refusal":"unknown"}
+    if (type(supervisor_exit) is not int or not -255<=supervisor_exit<=255 or type(raw) is not bytes
+            or type(combined_output_bytes) is not int or not len(raw)<=combined_output_bytes<=MAX_OUTPUT+65536):
+        raise ValueError("probe observation process metadata refused")
+    if len(raw)>65536 or combined_output_bytes>65536:
+        observation["framing"]="oversize"
+        return observation,None
+    lines=raw.splitlines()
+    if not lines or lines[0]!=PROBE_ENTRY:
+        observation["framing"]="missing-entry"
+        observation["launcher_refusal"]=launch_observation(supervisor_exit,raw)["launcher_refusal"]
+        return observation,None
+    observation["inner_entry"]=True
+    if len(lines)!=2 or lines.count(PROBE_ENTRY)!=1:
+        observation["framing"]="unexpected-output"
+        return observation,None
+    if supervisor_exit:
+        parts=lines[1].split(b" ")
+        if len(parts)==5 and parts[:2]==[b"POSITION_PROBE_REFUSAL",b"v1"]:
+            try: stage,refusal=parts[3].decode("ascii"),parts[4].decode("ascii")
+            except UnicodeDecodeError: pass
+            else:
+                if parts[2]==b"stage" and stage in PROBE_STAGES and refusal in PROBE_REFUSALS:
+                    observation.update(framing="refusal",stage=stage,refusal=refusal)
+                    return observation,None
+        observation["framing"]="invalid-refusal"
+        return observation,None
+    try: candidate=json.loads(lines[1])
+    except (ValueError,UnicodeError): candidate=None
+    if not isinstance(candidate,dict):
+        observation["framing"]="invalid-record"
+        return observation,None
+    observation["framing"]="candidate-record"
+    # The caller still performs every original independent JSON/kernel check.
+    return observation,lines[1]
 
 
 def host(*args, timeout=30, input=None):
@@ -453,12 +521,12 @@ os.execvpe(sys.argv[1],sys.argv[1:],os.environ)
                 process.wait(timeout=10)
                 remaining=bool(group and (Path("/sys/fs/cgroup")/group.lstrip("/")/"cgroup.procs").exists() and (Path("/sys/fs/cgroup")/group.lstrip("/")/"cgroup.procs").read_text().strip())
                 if not remaining: self.active.discard(unit)
-                self.executions.append({"unit":unit,"command":args,"seconds":seconds,"effective":locals().get("effective"),"observed_host_uids":sorted(observed_host_uids),"observed_processes":list(observed_processes.values()),"host_sampling_limit":"fast commands may terminate before parent sampling","remaining_processes":remaining})
+                self.executions.append({"unit":unit,"command":args,"seconds":seconds,"effective":locals().get("effective"),"supervisor_exit":locals().get("code"),"combined_output_bytes":len(data),"observed_host_uids":sorted(observed_host_uids),"observed_processes":list(observed_processes.values()),"host_sampling_limit":"fast commands may terminate before parent sampling","remaining_processes":remaining})
                 with contextlib.suppress(FileNotFoundError): gate.unlink()
                 subprocess.run(["systemctl","reset-failed",unit],env=SAFE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
         first,separator,rest=bytes(data).partition(b"\n")
         if not separator or not first.startswith(b"POSITION_OUTER_IDENTITY "):
-            self.retain("outer-identity-refusal-"+unit+".log",bytes(data))
+            self.retain("outer-identity-refusal-"+unit+".json",json.dumps(launch_observation(code,bytes(data)),sort_keys=True).encode())
             raise ValueError("trusted pre-bwrap non-root outer identity receipt absent")
         outer=json.loads(first.removeprefix(b"POSITION_OUTER_IDENTITY "))
         if outer["uid"]!=65534 or outer["gid"]!=65534 or outer["groups"] or int(outer["cap_eff"],16)!=0 or outer["no_new_privileges"]!=1: raise ValueError("outer identity differs")
@@ -479,51 +547,85 @@ os.execvpe(sys.argv[1],sys.argv[1:],os.environ)
         denied.settimeout(.2)
         script=r'''
 import errno,json,os,resource,socket,sys,time
-expected=json.loads(sys.argv[1]); host=sys.argv[2]; denied=int(sys.argv[3])
-assert os.getuid()==65534 and os.getgid()==65534
-assert open("/proc/self/uid_map").read().split()[::2]==["65534","1"]
-assert open("/proc/self/gid_map").read().split()[::2]==["65534","1"]
-assert set(os.environ)==set(expected), "ambient environment escaped"
-assert resource.getrlimit(resource.RLIMIT_CORE)==(0,0)
-assert resource.getrlimit(resource.RLIMIT_FSIZE)==(268435456,268435456)
-status=dict(line.split(":",1) for line in open("/proc/self/status") if ":" in line)
-assert int(status["CapEff"].strip(),16)==0
-for hidden in ("/home","/root","/var/run/docker.sock","/run/docker.sock"):
-    assert not os.path.exists(hidden), "host path exposed"
-for path in ("/input/AGENTS.md","/tool/go/bin/go"):
-    try:
-        fd=os.open(path,os.O_WRONLY); os.close(fd)
-    except OSError as e:
-        assert e.errno in (errno.EROFS,errno.EACCES)
-    else: raise AssertionError("source/toolchain writable")
-for path in ("/probe","/etc/probe","/dev/probe","/dev/shm/probe","/fixture/probe","/receipt/probe","/input/probe"):
-    try:
-        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd)
-    except OSError as e:
-        assert e.errno in (errno.EROFS,errno.EACCES)
-    else: raise AssertionError("write escaped bounded scratch")
-assert os.statvfs("/").f_flag & os.ST_RDONLY
-with open("/dev/null","wb") as null: null.write(b"required character device")
-with open("/scratch/probe","xb") as f:f.write(b"owned scratch")
-with socket.socket() as listener:
-    listener.bind(("127.0.0.1",0)); listener.listen(1)
-    with socket.create_connection(listener.getsockname(),timeout=1) as client:
-        accepted,_=listener.accept()
-        with accepted: client.sendall(b"loopback"); assert accepted.recv(8)==b"loopback"
-for port in (4222,4223,4224,5432,6379,9092):
-    with socket.create_connection(("127.0.0.1",port),timeout=3): pass
-for address in ((host,denied),("203.0.113.1",443)):
-    try: socket.create_connection(address,timeout=.3).close()
-    except OSError: pass
-    else: raise AssertionError("unapproved egress succeeded")
-assert not os.path.exists("/proc/999999/status")
-print(json.dumps({"uid":os.getuid(),"uid_map":open("/proc/self/uid_map").read().split(),"gid_map":open("/proc/self/gid_map").read().split(),"cap_eff":status["CapEff"].strip(),"network_namespace":os.stat("/proc/self/ns/net").st_ino,"pid":os.getpid(),"scratch_total":os.statvfs("/scratch").f_blocks*os.statvfs("/scratch").f_frsize,"environment_names":sorted(os.environ),"private_loopback":"passed","fixed_backends":"connected","unapproved_egress":"refused","source_and_toolchain":"readonly","cores":0},sort_keys=True))
-sys.stdout.flush()
-time.sleep(.5) # Only a bounded kernel-observation handshake, never financial quiescence.
+stage="arguments"
+print("POSITION_PROBE_ENTRY v1",flush=True)
+try:
+    expected=json.loads(sys.argv[1]); host=sys.argv[2]; denied=int(sys.argv[3])
+    stage="identity"
+    assert os.getuid()==65534 and os.getgid()==65534
+    stage="uid-map"
+    assert open("/proc/self/uid_map").read().split()[::2]==["65534","1"]
+    stage="gid-map"
+    assert open("/proc/self/gid_map").read().split()[::2]==["65534","1"]
+    stage="environment"
+    assert set(os.environ)==set(expected), "ambient environment escaped"
+    stage="core-limit"
+    assert resource.getrlimit(resource.RLIMIT_CORE)==(0,0)
+    stage="file-limit"
+    assert resource.getrlimit(resource.RLIMIT_FSIZE)==(268435456,268435456)
+    stage="capabilities"
+    status=dict(line.split(":",1) for line in open("/proc/self/status") if ":" in line)
+    assert int(status["CapEff"].strip(),16)==0
+    stage="hidden-paths"
+    for hidden in ("/home","/root","/var/run/docker.sock","/run/docker.sock"):
+        assert not os.path.exists(hidden), "host path exposed"
+    stage="input-readonly"
+    for path in ("/input/AGENTS.md","/tool/go/bin/go"):
+        try:
+            fd=os.open(path,os.O_WRONLY); os.close(fd)
+        except OSError as e:
+            assert e.errno in (errno.EROFS,errno.EACCES)
+        else: raise AssertionError("source/toolchain writable")
+    stage="write-boundary"
+    for path in ("/probe","/etc/probe","/dev/probe","/dev/shm/probe","/fixture/probe","/receipt/probe","/input/probe"):
+        try:
+            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd)
+        except OSError as e:
+            assert e.errno in (errno.EROFS,errno.EACCES)
+        else: raise AssertionError("write escaped bounded scratch")
+    stage="root-readonly"
+    assert os.statvfs("/").f_flag & os.ST_RDONLY
+    stage="device"
+    with open("/dev/null","wb") as null: null.write(b"required character device")
+    stage="scratch-write"
+    with open("/scratch/probe","xb") as f:f.write(b"owned scratch")
+    stage="private-loopback"
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1",0)); listener.listen(1)
+        with socket.create_connection(listener.getsockname(),timeout=1) as client:
+            accepted,_=listener.accept()
+            with accepted: client.sendall(b"loopback"); assert accepted.recv(8)==b"loopback"
+    stage="fixed-backends"
+    for port in (4222,4223,4224,5432,6379,9092):
+        with socket.create_connection(("127.0.0.1",port),timeout=3): pass
+    stage="egress-refusal"
+    for address in ((host,denied),("203.0.113.1",443)):
+        try: socket.create_connection(address,timeout=.3).close()
+        except OSError: pass
+        else: raise AssertionError("unapproved egress succeeded")
+    stage="proc-isolation"
+    assert not os.path.exists("/proc/999999/status")
+    stage="success-record"
+    print(json.dumps({"uid":os.getuid(),"uid_map":open("/proc/self/uid_map").read().split(),"gid_map":open("/proc/self/gid_map").read().split(),"cap_eff":status["CapEff"].strip(),"network_namespace":os.stat("/proc/self/ns/net").st_ino,"pid":os.getpid(),"scratch_total":os.statvfs("/scratch").f_blocks*os.statvfs("/scratch").f_frsize,"environment_names":sorted(os.environ),"private_loopback":"passed","fixed_backends":"connected","unapproved_egress":"refused","source_and_toolchain":"readonly","cores":0},sort_keys=True))
+    stage="sampling-handshake"
+    sys.stdout.flush()
+    time.sleep(.5) # Only a bounded kernel-observation handshake, never financial quiescence.
+except AssertionError:
+    print("POSITION_PROBE_REFUSAL v1 stage "+stage+" assertion",flush=True)
+    raise SystemExit(1) from None
+except OSError:
+    print("POSITION_PROBE_REFUSAL v1 stage "+stage+" os-operation",flush=True)
+    raise SystemExit(1) from None
+except BaseException:
+    print("POSITION_PROBE_REFUSAL v1 stage "+stage+" unexpected",flush=True)
+    raise SystemExit(1) from None
 '''
         try:
             code,raw=self.execute(["python3","-I","-c",script,json.dumps(sorted(self.environment)),self.host_ip,str(denied.getsockname()[1])],seconds=30,output_limit=65536)
+            observation,raw=probe_output(code,raw,self.executions[-1]["combined_output_bytes"])
+            self.retain("sandbox-probe-observation.json",json.dumps(observation,sort_keys=True).encode())
             if code: raise ValueError("kernel/mount/environment/network probes failed")
+            if raw is None: raise ValueError("kernel probe diagnostic framing refused")
             try: conn,_=denied.accept()
             except socket.timeout: pass
             else:

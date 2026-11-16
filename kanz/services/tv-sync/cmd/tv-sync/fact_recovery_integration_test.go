@@ -42,6 +42,17 @@ type responseFaultLog struct {
 	fresh, duplicate, appendError, held, injected atomic.Uint64
 }
 
+func (l *responseFaultLog) attemptContext(ctx context.Context, databaseTimeout bool) (context.Context, context.CancelFunc) {
+	if databaseTimeout || l.fail.Load() {
+		return context.WithTimeout(ctx, 200*time.Millisecond)
+	}
+	// Confirming the real commit is a fault precondition, not a 200ms latency
+	// assertion. It retains the inbound delivery deadline and cancellation,
+	// bounded by both the case and transport, without an extra 200ms cap. Once
+	// injection is armed, held retries use the original short failure budget.
+	return context.WithCancel(ctx)
+}
+
 func (l *responseFaultLog) Append(ctx context.Context, f projection.Fact) (bool, int64, error) {
 	if l.fail.Load() {
 		l.held.Add(1)
@@ -199,7 +210,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 					if e.TenantId != tenant {
 						return nil
 					}
-					attempt, end := context.WithTimeout(c, 200*time.Millisecond)
+					attempt, end := fault.attemptContext(c, mode == "database-timeout")
 					defer end()
 					err := p.Handle(attempt, e, b)
 					if id, ok := targetID.Load().(string); ok && e.EventId == id {
@@ -486,11 +497,15 @@ func TestTargetDLQObservationIsIdentityScoped(t *testing.T) {
 // Neither case implies DLQ parking.
 type diagnosticAppendLog struct {
 	projection.Log
-	fresh bool
-	err   error
+	fresh    bool
+	err      error
+	deadline time.Time
+	calls    int
 }
 
-func (l *diagnosticAppendLog) Append(context.Context, projection.Fact) (bool, int64, error) {
+func (l *diagnosticAppendLog) Append(ctx context.Context, _ projection.Fact) (bool, int64, error) {
+	l.deadline, _ = ctx.Deadline()
+	l.calls++
 	return l.fresh, 1, l.err
 }
 
@@ -545,5 +560,73 @@ func TestAmbiguousResponseRequiresConfirmedDuplicateBeforeFault(t *testing.T) {
 	close(fault.release)
 	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err != nil || fault.injected.Load() != 1 {
 		t.Fatal("release reinjected or refused")
+	}
+}
+
+func TestResponseFaultAttemptDeadlineFollowsPhase(t *testing.T) {
+	for _, mode := range []string{"committed-response", "ambiguous-committed-response", "restart-unacked", "database-timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			caseDeadline, _ := ctx.Deadline()
+			base := &diagnosticAppendLog{fresh: true}
+			fault := &responseFaultLog{Log: base, release: make(chan struct{}), simulateAmbiguous: mode == "ambiguous-committed-response"}
+			attempt, end := fault.attemptContext(ctx, mode == "database-timeout")
+			defer end()
+			if mode == "database-timeout" {
+				_, _, _ = base.Append(attempt, projection.Fact{})
+				if !base.deadline.Before(caseDeadline) || time.Until(base.deadline) > 200*time.Millisecond {
+					t.Fatal("deliberate database timeout lost its short attempt deadline")
+				}
+				return
+			}
+			if _, _, err := fault.Append(attempt, projection.Fact{}); err == nil || !base.deadline.Equal(caseDeadline) {
+				t.Fatal("confirmed-commit preparation did not retain the case deadline")
+			}
+			if fault.simulateAmbiguous {
+				if !fault.ambiguous.Load() || fault.fail.Load() || fault.fresh.Load() != 1 {
+					t.Fatal("fresh ambiguous response armed the outage before confirmed duplicate")
+				}
+				base.fresh = false
+				duplicate, stopDuplicate := fault.attemptContext(ctx, false)
+				defer stopDuplicate()
+				if _, _, err := fault.Append(duplicate, projection.Fact{}); err == nil || !base.deadline.Equal(caseDeadline) || fault.duplicate.Load() != 1 {
+					t.Fatal("confirmed duplicate did not complete preparation within the case deadline")
+				}
+			}
+			if !fault.fail.Load() || fault.injected.Load() != 1 {
+				t.Fatal("confirmed append did not arm the response fault")
+			}
+			held, stopHeld := fault.attemptContext(ctx, false)
+			heldDeadline, ok := held.Deadline()
+			if !ok || !heldDeadline.Before(caseDeadline) || time.Until(heldDeadline) > 200*time.Millisecond {
+				stopHeld()
+				t.Fatal("post-injection retry lost its short attempt deadline")
+			}
+			stopHeld()
+			calls := base.calls
+			if _, _, err := fault.Append(held, projection.Fact{}); !errors.Is(err, context.Canceled) || fault.held.Load() != 1 || base.calls != calls {
+				t.Fatal("canceled held retry reached the database or escaped its fault")
+			}
+			cancel()
+			if !errors.Is(attempt.Err(), context.Canceled) {
+				t.Fatal("preparation outlived case cancellation")
+			}
+		})
+	}
+}
+
+func TestActualAppendErrorCannotSatisfyAmbiguousPreparation(t *testing.T) {
+	base := &diagnosticAppendLog{err: context.DeadlineExceeded}
+	fault := &responseFaultLog{Log: base, release: make(chan struct{}), simulateAmbiguous: true}
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("actual append error was replaced by synthetic response loss")
+	}
+	base.err = nil
+	if fresh, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || fresh {
+		t.Fatal("confirmed duplicate did not arm response loss")
+	}
+	if fault.ambiguous.Load() || fault.fresh.Load() != 0 || fault.duplicate.Load() != 1 || fault.appendError.Load() != 1 || fault.injected.Load() != 1 {
+		t.Fatal("actual error followed by duplicate falsely satisfied confirmed fresh ambiguity")
 	}
 }

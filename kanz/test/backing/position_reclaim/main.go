@@ -146,6 +146,15 @@ func expectedSubject(nonce string) string {
 	return subject.PositionFor("position-proof-"+nonce, "unrelated", "sentinel")
 }
 
+func sentinelProducerConfig(source, nonce string) bus.ProducerConfig {
+	return bus.ProducerConfig{Source: producerSource, ProducerVersion: source, Tenant: "position-proof-" + nonce}
+}
+
+func sentinelEvent(nonce string, now time.Time) bus.Event {
+	key := expectedSubject(nonce)
+	return bus.Event{Subject: key, EventType: subject.PositionChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "risk", EventTime: now, PartitionKey: key, PayloadSchemaRef: "domain.v1.PositionState:1", Payload: &domainpb.PositionState{PortfolioId: "unrelated", InstrumentId: "sentinel", Quantity: &commonpb.Decimal{Coefficient: 7}, AsOf: timestamppb.New(now)}}
+}
+
 func identity(value receipt) error {
 	if value.Schema != 1 || !fullSHA.MatchString(value.Source) || !positiveID.MatchString(value.Run) || !positiveID.MatchString(value.Attempt) || value.Source != os.Getenv("GITHUB_SHA") || value.Run != os.Getenv("GITHUB_RUN_ID") || value.Attempt != os.Getenv("GITHUB_RUN_ATTEMPT") {
 		return errors.New("source/run receipt identity differs")
@@ -212,12 +221,12 @@ func run(phase, seed, output string) error {
 			return errors.New("fixture producer transport unavailable")
 		}
 		defer func() { _ = client.Close() }()
-		producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: producerSource, ProducerVersion: value.Source, Tenant: "position-proof-" + value.Nonce})
+		producer, err := bus.NewProducer(client, sentinelProducerConfig(value.Source, value.Nonce))
 		if err != nil {
 			return errors.New("canonical producer unavailable")
 		}
 		now := time.Now().UTC()
-		err = producer.Publish(ctx, bus.Event{Subject: value.SentinelSubject, EventType: subject.PositionChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "risk", EventTime: now, PartitionKey: value.SentinelSubject, PayloadSchemaRef: "domain.v1.PositionState:1", Payload: &domainpb.PositionState{PortfolioId: "unrelated", InstrumentId: "sentinel", Quantity: &commonpb.Decimal{Coefficient: 7}, AsOf: timestamppb.New(now)}})
+		err = producer.Publish(ctx, sentinelEvent(value.Nonce, now))
 		if err != nil {
 			return errors.New("canonical sentinel publication refused")
 		}

@@ -59,6 +59,11 @@ class KernelBoundary(unittest.TestCase):
     def test_synthetic_root_and_device_directories_are_readonly(self):
         # Refuse before attempting any write if called outside the owned lane.
         self.assertEqual(os.getuid(),65534)
+        self.assertEqual(os.getgid(),65534)
+        self.assertEqual(os.getgroups(),[])
+        status=dict(line.split(":",1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
+        self.assertEqual(int(status["CapEff"].strip(),16),0)
+        self.assertEqual(status["NoNewPrivs"].strip(),"1")
         self.assertTrue(os.statvfs("/").f_flag & os.ST_RDONLY)
         for path in ("/position-unit-probe","/etc/position-unit-probe","/dev/position-unit-probe","/dev/shm/position-unit-probe","/fixture/position-unit-probe","/receipt/position-unit-probe"):
             with self.subTest(path=path):
@@ -68,6 +73,62 @@ class KernelBoundary(unittest.TestCase):
                     os.close(fd);os.unlink(path)
                     self.fail("write escaped owned scratch")
         with open("/dev/null","wb") as sink: self.assertEqual(sink.write(b"required device"),15)
+
+
+class ProbeObservations(unittest.TestCase):
+    def test_fixed_refusal_stages_and_candidate_record_are_not_kernel_success(self):
+        for stage in sorted(sandbox.PROBE_STAGES):
+            for refusal in sorted(sandbox.PROBE_REFUSALS):
+                raw=sandbox.PROBE_ENTRY+b"\nPOSITION_PROBE_REFUSAL v1 stage "+stage.encode()+b" "+refusal.encode()+b"\n"
+                observation,payload=sandbox.probe_output(1,raw,len(raw)+100)
+                self.assertIsNone(payload)
+                self.assertEqual(observation,{"schema":1,"supervisor_exit":1,"combined_output_bytes":len(raw)+100,
+                    "inner_entry":True,"framing":"refusal","stage":stage,"refusal":refusal,"launcher_refusal":"unknown"})
+        raw=sandbox.PROBE_ENTRY+b'\n{"pid": 1}\n'
+        observation,payload=sandbox.probe_output(0,raw,len(raw)+100)
+        self.assertEqual(payload,b'{"pid": 1}')
+        self.assertEqual(observation["framing"],"candidate-record")
+        self.assertEqual(observation["stage"],"unknown")
+        self.assertNotIn("passed",json.dumps(observation))
+
+    def test_malformed_unknown_oversized_or_contradictory_probe_output_refuses(self):
+        entry=sandbox.PROBE_ENTRY+b"\n"
+        frame=b"POSITION_PROBE_REFUSAL v1 stage environment assertion\n"
+        secret=b"dummy-unknown-environment-value"
+        for code,raw in ((1,b""),(1,secret),(1,frame),(1,entry+frame.replace(b"environment",secret)),
+                         (1,entry+frame.replace(b"assertion",b"arbitrary")),(1,entry+frame+frame),
+                         (1,entry+entry+frame),(1,entry+frame+secret),(1,entry+b'{}\n'),
+                         (0,entry+frame),(0,entry+b'[]\n'),(0,entry+secret),(0,entry+b'{}\n'+secret),
+                         (1,entry+frame.replace(b"assertion",b"\xff")),(1,b"x"*65537)):
+            with self.subTest(code=code,bytes=len(raw)):
+                observation,payload=sandbox.probe_output(code,raw,len(raw))
+                self.assertIsNone(payload)
+                self.assertNotIn(secret.decode(),json.dumps(observation))
+                self.assertEqual(observation["stage"],"unknown")
+        for code,raw,count in ((True,b"",0),(256,b"",0),(1,b"value",0),(1,b"",sandbox.MAX_OUTPUT+65537)):
+            with self.assertRaises(ValueError): sandbox.probe_output(code,raw,count)
+
+    def test_only_verified_literal_launcher_markers_are_projected(self):
+        secret=b"dummy-private-error-text"
+        for marker,expected in sandbox.LAUNCHER_REFUSALS.items():
+            raw=marker+b"\n"+secret
+            observed=sandbox.launch_observation(1,raw)
+            self.assertEqual(observed,{"schema":1,"supervisor_exit":1,"combined_output_bytes":len(raw),"launcher_refusal":expected})
+            self.assertNotIn(secret.decode(),json.dumps(observed))
+            self.assertNotIn(marker.decode(),json.dumps(observed))
+            for modified in (b"prefix "+marker,marker+b" suffix",b"x"*4096+b"\n"+marker,
+                             b"\n"*(4096-len(marker))+marker+b" hidden suffix"):
+                self.assertEqual(sandbox.launch_observation(1,modified)["launcher_refusal"],"unknown")
+            self.assertEqual(sandbox.launch_observation(0,marker)["launcher_refusal"],"unknown")
+        mixed=b"\n".join(sandbox.LAUNCHER_REFUSALS)
+        self.assertEqual(sandbox.launch_observation(1,mixed)["launcher_refusal"],"unknown")
+        self.assertEqual(sandbox.launch_observation(1,secret)["launcher_refusal"],"unknown")
+        for code in (None,True,256):
+            with self.assertRaises(ValueError): sandbox.launch_observation(code,secret)
+        observation,payload=sandbox.probe_output(1,b"prlimit: failed to execute python3: Permission denied\n",100)
+        self.assertIsNone(payload)
+        self.assertFalse(observation["inner_entry"])
+        self.assertEqual(observation["launcher_refusal"],"prlimit-exec-refused")
 
 
 class EvidenceRefusals(unittest.TestCase):
