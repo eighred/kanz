@@ -63,31 +63,56 @@ func TestRustOMSPositionBoundary(t *testing.T) {
 }
 
 func TestRustOMSPositionMathBoundary(t *testing.T) {
-	b, e := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), "rust", "crates", "oms_store", "src", "position_math.rs"))
-	if e != nil {
-		t.Fatal(e)
-	}
-	check := func(raw string) bool {
-		code, e := rustMigrationWithoutComments(raw)
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
+	read := func(path string) string {
+		b, e := os.ReadFile(filepath.Join(root, path))
 		if e != nil {
-			return false
+			t.Fatal(e)
 		}
-		code = rustMigrationCompact(code)
-		for _, m := range []string{`kanz_order_core::{decimal,exact_decimal,has_terminating_decimal,`, `rational,`, `v.numer().bits()>16384||v.denom().bits()>16384`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&out.qty)?`, `bound(&out.realized)?`, `bound(&weight)?`, `bound(&v)?`, `ifhas_terminating_decimal(&v){exact_decimal(v)}else{decimal(v)}.ok_or(Error::Capacity)?`, `quantity:Some(exact_decimal(l.qty.clone()).ok_or(Error::Capacity)?)`, `average_price:Some(decimal(l.avg.clone()).ok_or(Error::Capacity)?)`, `market_value:Some(marked_money(price*&l.qty,ccy)?)`, `ifnonzero&&result.amount.as_ref().is_none_or(|d|d.coefficient==0)`} {
-			if !strings.Contains(code, m) {
+		return string(b)
+	}
+	wrapper := read("crates/oms_store/src/position_math.rs")
+	shared := read("crates/order_core/src/cost_basis.rs")
+	check := func(raw, common string) bool {
+		for source, markers := range map[string][]string{
+			raw:    {`kanz_order_core::{decimal,exact_decimal,has_terminating_decimal,`, `rational,`, `kanz_order_core::cost_basis::bound(v)`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&v)?`, `ifhas_terminating_decimal(&v){exact_decimal(v)}else{decimal(v)}.ok_or(Error::Capacity)?`, `quantity:Some(exact_decimal(l.qty.clone()).ok_or(Error::Capacity)?)`, `average_price:Some(decimal(l.avg.clone()).ok_or(Error::Capacity)?)`, `market_value:Some(marked_money(price*&l.qty,ccy)?)`, `ifnonzero&&result.amount.as_ref().is_none_or(|d|d.coefficient==0)`, `self.0.fold(&q,&p)`, `kanz_order_core::cost_basis::aggregate(lots.iter().map(|l|&l.0))`},
+			common: {`value.numer().bits()>16384||value.denom().bits()>16384`, `!value.denom().is_positive()`, `letreduced=value.reduced()`, `forvaluein[&out.qty,&out.realized,&weight,&cost]`, `bound(value)?`, `letmutnext=self.clone()`, `*self=next;`, `closed*(price-&self.avg)*self.qty.signum()`},
+		} {
+			code, e := rustMigrationWithoutComments(source)
+			if e != nil {
 				return false
 			}
+			code = rustMigrationCompact(code)
+			for _, m := range markers {
+				if !strings.Contains(code, m) {
+					return false
+				}
+			}
 		}
+		code, _ := rustMigrationWithoutComments(raw)
+		code = rustMigrationCompact(code)
 		return !strings.Contains(code, "fnrational(") && !strings.Contains(code, "fndecimal(")
 	}
-	s := string(b)
-	if !check(s) {
-		t.Fatal("math ownership/bounds missing")
+	if !check(wrapper, shared) {
+		t.Fatal("shared math ownership/bounds missing")
 	}
-	for _, m := range []string{"v.numer().bits() > 16384", "s.len() > 4096", "bound(&weight)?", "bound(&v)?", "has_terminating_decimal(&v)", "exact_decimal(v)", "exact_decimal(l.qty.clone())", "nonzero &&"} {
-		t.Run(m, func(t *testing.T) {
-			changed := strings.ReplaceAll(s, m, "false")
-			if changed == s || check(changed) {
+	for _, m := range []struct {
+		shared bool
+		from   string
+	}{
+		{false, "has_terminating_decimal(&v)"}, {false, "exact_decimal(v)"}, {false, "exact_decimal(l.qty.clone())"}, {false, "nonzero &&"},
+		{false, "s.len() > 4096"}, {false, "bound(&v)?"}, {false, "self.0.fold(&q, &p)"},
+		{true, "value.numer().bits() > 16384"}, {true, "&weight, &cost"}, {true, "bound(value)?"}, {true, "*self = next;"},
+		{true, "!value.denom().is_positive()"}, {true, "let reduced = value.reduced()"},
+	} {
+		t.Run(m.from, func(t *testing.T) {
+			a, b := wrapper, shared
+			if m.shared {
+				b = strings.ReplaceAll(b, m.from, "removed")
+			} else {
+				a = strings.ReplaceAll(a, m.from, "removed")
+			}
+			if (a == wrapper && b == shared) || check(a, b) {
 				t.Fatal("mutation missed/accepted")
 			}
 		})

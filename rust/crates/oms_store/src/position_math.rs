@@ -7,28 +7,23 @@ use kanz_order_core::{
 };
 use num_bigint::BigInt;
 use num_rational::BigRational as Rat;
-use num_traits::{Signed, Zero};
+use num_traits::Zero;
 use std::str::FromStr;
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Lot {
-    pub qty: Rat,
-    pub avg: Rat,
-    pub realized: Rat,
-}
-impl Default for Lot {
-    fn default() -> Self {
-        Self {
-            qty: Rat::zero(),
-            avg: Rat::zero(),
-            realized: Rat::zero(),
-        }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Lot(kanz_order_core::cost_basis::Lot);
+impl std::ops::Deref for Lot {
+    type Target = kanz_order_core::cost_basis::Lot;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 pub(crate) fn bound(v: &Rat) -> Result<(), Error> {
-    if v.numer().bits() > 16384 || v.denom().bits() > 16384 {
-        Err(Error::Capacity)
-    } else {
-        Ok(())
+    kanz_order_core::cost_basis::bound(v).map_err(math_error)
+}
+fn math_error(value: kanz_order_core::cost_basis::Error) -> Error {
+    match value {
+        kanz_order_core::cost_basis::Error::Capacity => Error::Capacity,
+        kanz_order_core::cost_basis::Error::InvalidRational => Error::InvalidInput,
     }
 }
 pub(crate) fn parse(s: &str) -> Result<Rat, Error> {
@@ -62,11 +57,11 @@ pub(crate) fn text(v: &Rat) -> String {
 }
 impl Lot {
     pub fn from_text(q: &str, a: &str, r: &str) -> Result<Self, Error> {
-        Ok(Self {
+        Ok(Self(kanz_order_core::cost_basis::Lot {
             qty: parse(q)?,
             avg: parse(a)?,
             realized: parse(r)?,
-        })
+        }))
     }
     pub fn fold(&mut self, fill: &Fill) -> Result<(), Error> {
         let mut q = rational(fill.quantity.as_ref()).ok_or(Error::InvalidInput)?;
@@ -74,49 +69,13 @@ impl Lot {
             q = -q;
         }
         let p = rational(fill.price.as_ref()).ok_or(Error::InvalidInput)?;
-        let next = &self.qty + &q;
-        if self.qty.is_zero() || self.qty.signum() == q.signum() {
-            self.avg = if next.is_zero() {
-                Rat::zero()
-            } else {
-                (self.qty.abs() * &self.avg + q.abs() * &p) / next.abs()
-            };
-        } else {
-            let closed = self.qty.abs().min(q.abs());
-            self.realized += closed * (&p - &self.avg) * self.qty.signum();
-            if next.is_zero() {
-                self.avg = Rat::zero()
-            } else if next.signum() != self.qty.signum() {
-                self.avg = p;
-            }
-        }
-        self.qty = next;
-        bound(&self.qty)?;
-        bound(&self.avg)?;
-        bound(&self.realized)
+        self.0.fold(&q, &p).map_err(math_error)
     }
 }
 pub(crate) fn aggregate(lots: &[Lot]) -> Result<Lot, Error> {
-    let mut out = Lot::default();
-    let mut weight = Rat::zero();
-    let mut cost = Rat::zero();
-    for l in lots {
-        out.qty += &l.qty;
-        out.realized += &l.realized;
-        weight += l.qty.abs();
-        cost += l.qty.abs() * &l.avg;
-        bound(&cost)?;
-        bound(&out.qty)?;
-        bound(&out.realized)?;
-        bound(&weight)?;
-    }
-    if !weight.is_zero() {
-        out.avg = cost / weight;
-    }
-    bound(&out.qty)?;
-    bound(&out.avg)?;
-    bound(&out.realized)?;
-    Ok(out)
+    kanz_order_core::cost_basis::aggregate(lots.iter().map(|l| &l.0))
+        .map(Lot)
+        .map_err(math_error)
 }
 pub(crate) fn money(v: Rat, ccy: &str) -> Result<Money, Error> {
     bound(&v)?;
