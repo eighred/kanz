@@ -224,4 +224,50 @@ mod tests {
         );
         assert!(marked_money(repeating, "USD").is_err());
     }
+    #[test]
+    fn finite_money_outside_exact_capacity_never_uses_rounded_zero() {
+        for value in [
+            Rat::new(1.into(), BigInt::from(1) << 129_usize),
+            Rat::new(1.into(), BigInt::from(1) << 513_usize),
+        ] {
+            assert!(bound(&value).is_ok());
+            assert!(has_terminating_decimal(&value));
+            assert!(exact_decimal(value.clone()).is_none());
+            let rounded = decimal(value.clone()).unwrap();
+            assert_eq!((rounded.coefficient, rounded.exponent), (0, -8));
+            assert!(matches!(money(value.clone(), "USD"), Err(Error::Capacity)));
+            assert!(matches!(marked_money(value, "USD"), Err(Error::Capacity)));
+        }
+        let finite = Rat::from_integer(BigInt::from(i64::MAX) + BigInt::from(1));
+        assert!(bound(&finite).is_ok());
+        assert!(has_terminating_decimal(&finite));
+        assert!(matches!(money(finite.clone(), "USD"), Err(Error::Capacity)));
+        assert!(matches!(marked_money(finite, "USD"), Err(Error::Capacity)));
+
+        let repeating = Rat::new(1.into(), 3.into());
+        assert!(!has_terminating_decimal(&repeating));
+        let amount = money(repeating.clone(), "USD").unwrap().amount.unwrap();
+        assert_eq!((amount.coefficient, amount.exponent), (33_333_333, -8));
+        let marked = marked_money(repeating, "USD").unwrap().amount.unwrap();
+        assert_eq!((marked.coefficient, marked.exponent), (33_333_333, -8));
+    }
+
+    #[test]
+    fn raw_money_inputs_refuse_before_termination_classification() {
+        for (n, d) in [
+            (1_i64, 0_i64),
+            (0, 0),
+            (0, -1),
+            (1, -2),
+            (-1, -2),
+            (2, 4),
+            (3, 6),
+            (0, 2),
+        ] {
+            let value = Rat::new_raw(n.into(), d.into());
+            assert!(matches!(bound(&value), Err(Error::InvalidInput)));
+            assert!(matches!(money(value.clone(), "USD"), Err(Error::InvalidInput)));
+            assert!(matches!(marked_money(value, "USD"), Err(Error::InvalidInput)));
+        }
+    }
 }
