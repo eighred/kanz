@@ -93,7 +93,10 @@ func TestPostgresJetStreamStatementPresenceThroughCompletion(t *testing.T) {
 		stopInput()
 		if !joined {
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("statement consumer shutdown: %v", err)
+				}
 			case <-time.After(10 * time.Second):
 				t.Error("statement consumer did not join")
 			}

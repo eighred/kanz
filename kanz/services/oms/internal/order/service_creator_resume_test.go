@@ -55,7 +55,10 @@ func TestService_CreatorReloadsAfterAnotherDeliveryWorksTheOrder(t *testing.T) {
 		store.unblock.Do(func() { close(store.proceed) })
 		if !joined {
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("creator shutdown: %v", err)
+				}
 			case <-time.After(5 * time.Second):
 				t.Error("creator did not join after releasing its barrier")
 			}

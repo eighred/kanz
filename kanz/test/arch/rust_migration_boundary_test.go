@@ -35,8 +35,8 @@ var rustMigrationCargo = map[string]map[string]string{
 		"name": `"kanz-decimal-compat"`, "version": `"0.1.0"`, "edition": `"2021"`,
 		"rust-version": `"1.90"`, "publish": `false`,
 	},
-	"dependencies":       {"prost": `"=0.14.1"`},
-	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.2.0"`},
+	"dependencies":       {"prost": `"=0.14.6"`},
+	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.3.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
 	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render"]`, "resolver": `"2"`},
@@ -136,33 +136,6 @@ func rustMigrationWithoutComments(source string) (string, error) {
 }
 
 func checkRustMigrationBoundary(root string) error {
-	if err := checkBrowserRender(root); err != nil {
-		return err
-	}
-	if err := checkRustLakeSnapshot(root); err != nil {
-		return err
-	}
-	if err := checkRustRecoveryCoordinator(root); err != nil {
-		return err
-	}
-	if err := checkRustOrderCore(root); err != nil {
-		return err
-	}
-	if err := checkRustVenueBoundary(root); err != nil {
-		return err
-	}
-	if err := checkRustOMSStoreBoundary(root); err != nil {
-		return err
-	}
-	if err := checkRustOMSFillShadow(root); err != nil {
-		return err
-	}
-	if err := checkRustBondShadowBoundary(root); err != nil {
-		return err
-	}
-	if err := checkRustDepthBoundary(root); err != nil {
-		return err
-	}
 	raw, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
 	if err != nil {
 		return fmt.Errorf("Rust compatibility manifest missing: %w", err)
@@ -201,6 +174,34 @@ func checkRustMigrationBoundary(root string) error {
 	build, err := os.ReadFile(filepath.Join(root, "build.rs"))
 	if err != nil || rustMigrationCompact(string(build)) != rustMigrationCompact(rustMigrationBuild) {
 		return fmt.Errorf("Rust build must generate only canonical common/v1 Decimal and Money via the reviewed build recipe")
+	}
+
+	if err := checkBrowserRender(root); err != nil {
+		return err
+	}
+	if err := checkRustLakeSnapshot(root); err != nil {
+		return err
+	}
+	if err := checkRustRecoveryCoordinator(root); err != nil {
+		return err
+	}
+	if err := checkRustOrderCore(root); err != nil {
+		return err
+	}
+	if err := checkRustVenueBoundary(root); err != nil {
+		return err
+	}
+	if err := checkRustOMSStoreBoundary(root); err != nil {
+		return err
+	}
+	if err := checkRustOMSFillShadow(root); err != nil {
+		return err
+	}
+	if err := checkRustBondShadowBoundary(root); err != nil {
+		return err
+	}
+	if err := checkRustDepthBoundary(root); err != nil {
+		return err
 	}
 
 	// Conservative token checks ignore comments but retain strings. They may ask
@@ -281,6 +282,39 @@ func checkRustMigrationBoundary(root string) error {
 		}
 	}
 	return nil
+}
+
+// An invalid root must report its own refusal before inspecting child packages.
+// The fixture has no children: accepting a valid root must still reach the
+// browser boundary, so early root checks cannot become an early success.
+func TestRustMigrationChecksRootBeforeNestedBoundaries(t *testing.T) {
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
+	manifest, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := os.ReadFile(filepath.Join(root, "build.rs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, manifest, build, want string }{
+		{"unreviewed_root", string(manifest) + "\n[unreviewed]\n", string(build), "unreviewed or duplicate Cargo table"},
+		{"unreviewed_build", string(manifest), string(build) + "\nfn unexpected() {}\n", "Rust build must generate only canonical common/v1 Decimal and Money"},
+		{"valid_root_still_checks_child", string(manifest), string(build), "browser renderer manifest/dependencies changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dst, "Cargo.toml"), []byte(tc.manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dst, "build.rs"), []byte(tc.build), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkRustMigrationBoundary(dst); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("root validation order: want %q, got %v", tc.want, err)
+			}
+		})
+	}
 }
 
 // Mutations run against disposable copies, never the shared checkout. This
