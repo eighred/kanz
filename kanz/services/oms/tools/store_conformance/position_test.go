@@ -486,6 +486,63 @@ func TestRustPositionStoreTransactions(t *testing.T) {
 		}
 	})
 
+	t.Run("total-nav-near-cancellation", func(t *testing.T) {
+		// Both individual cost marks remain representable. The total alone
+		// distinguishes a known zero, exact tiny value and repeating rounded zero.
+		for _, tc := range []struct {
+			name            string
+			secondCost      string
+			refuse          bool
+			wantCoefficient int64
+			wantExponent    int32
+		}{
+			{name: "positive-tiny-repeating", secondCost: "299999999/300000000", refuse: true},
+			{name: "negative-tiny-repeating", secondCost: "300000001/300000000", refuse: true},
+			{name: "known-zero", secondCost: "1"},
+			{name: "exact-tiny-positive", secondCost: "9999999999/10000000000", wantCoefficient: 1, wantExponent: -10},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newFixture(t)
+				const portfolio = "portfolio"
+				if _, err := f.pool.Exec(f.ctx, `INSERT INTO positions (portfolio_id,venue,instrument_id,quantity,average_price,realized_pnl) VALUES ($1,'VENUE','NAV_A','1','1','0'),($1,'VENUE','NAV_B','-1',$2,'0')`, portfolio, tc.secondCost); err != nil {
+					t.Fatal(err)
+				}
+				before := positionDurable(t, f)
+				goSnapshot, goErr := position.NewPostgres(f.open(f.tenant), "USD").Snapshot(f.ctx, portfolio, at)
+				if tc.refuse {
+					if goErr == nil || goSnapshot != nil {
+						t.Fatal("Go served a rounded-zero total NAV")
+					}
+				} else if goErr != nil || goSnapshot == nil {
+					t.Fatal("Go refused known zero or an exact tiny total NAV", goErr)
+				}
+				result := runResult(t, map[string]any{"mode": "position-snapshot", "schema": f.schema, "tenant": f.tenant, "portfolio_id": portfolio, "at": clock(at), "base_currency": "USD"})
+				if tc.refuse {
+					expect(t, result.Status, "Capacity")
+					if len(result.State) != 0 {
+						t.Fatal("tiny repeating total exposed a rounded snapshot")
+					}
+				} else {
+					expect(t, result.Status, "snapshot")
+					var snap domainpb.PortfolioSnapshot
+					if proto.Unmarshal(result.State, &snap) != nil || snap.Portfolio == nil || len(snap.Positions) != 2 || snap.Portfolio.PositionCount != 2 || snap.LogPosition != nil {
+						t.Fatal("positive total NAV control lost complete snapshot shape")
+					}
+					total := snap.Portfolio.TotalMarketValue
+					if total == nil || total.CurrencyCode != "USD" || total.Amount == nil || total.Amount.Coefficient != tc.wantCoefficient || total.Amount.Exponent != tc.wantExponent {
+						t.Fatal("total NAV differs from literal independent rational oracle")
+					}
+					if !proto.Equal(goSnapshot, &snap) {
+						t.Fatal("Go/Rust complete total-NAV snapshots differ")
+					}
+				}
+				if !reflect.DeepEqual(before, positionDurable(t, f)) {
+					t.Fatal("read-only total NAV observation changed durable owners")
+				}
+			})
+		}
+	})
+
 	t.Run("large-and-fractional-canonical-output", func(t *testing.T) {
 		for _, quantity := range []*commonpb.Decimal{{Coefficient: 200000000000}, {Coefficient: 1, Exponent: -10}, {Coefficient: 123456789, Exponent: -9}} {
 			f := newFixture(t)

@@ -2040,6 +2040,7 @@ name = "kanz-bond-risk-shadow"
 version = "0.1.0"
 dependencies = [
  "kanz-decimal-compat",
+ "kanz-term-structure",
  "num-bigint 0.4.6",
  "num-rational",
  "num-traits",
@@ -2080,6 +2081,18 @@ dependencies = [
  "protoc-bin-vendored",
  "sha2 0.10.9",
  "tokio",
+]
+
+[[package]]
+name = "kanz-ledger-replay"
+version = "0.1.0"
+dependencies = [
+ "kanz-order-core",
+ "num-bigint 0.4.6",
+ "num-rational",
+ "num-traits",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2213,6 +2226,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanz-option-pricing"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kanz-order-core"
 version = "0.1.0"
 dependencies = [
@@ -2238,6 +2260,15 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-reflect",
+]
+
+[[package]]
+name = "kanz-term-structure"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

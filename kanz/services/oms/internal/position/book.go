@@ -298,7 +298,7 @@ func (b *Book) aggregate(portfolioID, instrument string) *lot {
 // aggregate: it belongs to no single exchange.
 func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
 	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.AvgCost), l.Qty)
-	qty, ok := dec.ToProtoScaled(l.Qty)
+	qty, ok := dec.ToProtoExact(l.Qty)
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
 	}
@@ -306,7 +306,7 @@ func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
 	}
-	marketValue, err := b.money(new(big.Rat).Mul(price, l.Qty))
+	marketValue, err := projectionMark(new(big.Rat).Mul(price, l.Qty), b.baseCcy)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
 	}
@@ -331,27 +331,10 @@ func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big
 	}, nil
 }
 
-// money wraps an exact amount as Money, refusing rather than fabricating one.
-// dec.ToProtoScaled preserves magnitude by rescaling, so a $100bn position value
-// is represented at a coarser exponent rather than wrapped into a small number.
-//
-// THE !ok BRANCH IS EFFECTIVELY UNREACHABLE, AND IS KEPT ON PURPOSE. Refusal
-// requires a value ToProtoScaled cannot represent at ANY exponent it will
-// reach — around two billion decimal digits, which no position value approaches
-// and no test can construct in finite time. It stays because the contract
-// returns `ok` and discarding it is how the wrapping bug got in: the compiler is
-// the only thing that keeps a future edit from ignoring it. Do not "simplify" it
-// away on the grounds that it never fires.
-//
-// Returning a zero Money instead of an error would be worse than returning
-// nothing: heldPositions treats a zero-valued position as flat and drops it, so
-// the compliance rules would stop seeing the holding entirely (COMP-M1).
+// money preserves finite amounts and retains the established rounding of
+// nonterminating weighted-cost P&L and cost-marked snapshot values.
 func (b *Book) money(r *big.Rat) (*commonpb.Money, error) {
-	amt, ok := dec.ToProtoScaled(r)
-	if !ok {
-		return nil, fmt.Errorf("amount is not representable as a Decimal")
-	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: b.baseCcy}, nil
+	return projectionMoney(r, b.baseCcy)
 }
 
 // Snapshot returns a portfolio's current holdings as a PortfolioSnapshot — the
@@ -378,7 +361,7 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 		l := b.aggregate(portfolioID, k.instrument)
 		mv := new(big.Rat).Mul(l.AvgCost, l.Qty)
 		nav.Add(nav, mv)
-		marketValue, err := b.money(mv)
+		marketValue, err := projectionMark(mv, b.baseCcy)
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s: %w", portfolioID, k.instrument, err)
 		}
@@ -386,7 +369,7 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s realized pnl: %w", portfolioID, k.instrument, err)
 		}
-		qty, ok := dec.ToProtoScaled(l.Qty)
+		qty, ok := dec.ToProtoExact(l.Qty)
 		if !ok {
 			return nil, fmt.Errorf("portfolio %s position %s: quantity is not representable", portfolioID, k.instrument)
 		}
@@ -404,7 +387,7 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 			AsOf:         ts,
 		})
 	}
-	navMoney, err := b.money(nav)
+	navMoney, err := projectionMark(nav, b.baseCcy)
 	if err != nil {
 		return nil, fmt.Errorf("portfolio %s NAV: %w", portfolioID, err)
 	}
