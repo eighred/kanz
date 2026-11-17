@@ -35,15 +35,24 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Only a fixed pinned-server permission-violation count is retained. No raw
+// Only fixed pinned-server diagnostic-template counters are retained. No raw
 // server diagnostic, credential, client address or subject argument is printed.
-type filingDenials struct{ publish atomic.Uint64 }
+type filingDenials struct {
+	publish             atomic.Uint64
+	startupFatal        atomic.Uint64
+	jetStreamStartFatal atomic.Uint64
+}
 
 func (*filingDenials) Noticef(string, ...any) {}
 func (*filingDenials) Warnf(string, ...any)   {}
-func (*filingDenials) Fatalf(string, ...any)  {}
 func (*filingDenials) Debugf(string, ...any)  {}
 func (*filingDenials) Tracef(string, ...any)  {}
+func (d *filingDenials) Fatalf(format string, _ ...any) {
+	d.startupFatal.Add(1)
+	if format == "Can't start JetStream: %v" {
+		d.jetStreamStartFatal.Add(1)
+	}
+}
 func (d *filingDenials) Errorf(format string, _ ...any) {
 	if strings.HasSuffix(format, "Publish Violation - Subject %q") {
 		d.publish.Add(1)
@@ -79,8 +88,11 @@ func TestFilingPublishersUseActualAccountPermissionsAndReturnBridge(t *testing.T
 	options.StoreDir = t.TempDir()
 	options.MaxPayload = 1 << 20
 	options.MaxConn = 12
-	options.JetStreamMaxMemory = 16 << 20
-	options.JetStreamMaxStore = 16 << 20
+	// Account reservations must fit the server even though the streams below
+	// only use bounded memory storage. Preserve the canonical acme 64MB/2GB
+	// quota; this disposable server declaration does not alter account policy.
+	options.JetStreamMaxMemory = 128 << 20
+	options.JetStreamMaxStore = (2 << 30) + (16 << 20)
 	domain := spiffeid.RequireTrustDomainFromString("kanz.internal")
 	authority, err := testidentity.NewAuthority(domain)
 	if err != nil {
@@ -108,7 +120,7 @@ func TestFilingPublishersUseActualAccountPermissionsAndReturnBridge(t *testing.T
 	server.Start()
 	t.Cleanup(func() { server.Shutdown(); server.WaitForShutdown() })
 	if !server.ReadyForConnections(3 * time.Second) {
-		t.Fatal("owned account broker did not become ready")
+		t.Fatalf("owned account broker did not become ready: startup_fatal_count=%d jetstream_start_fatal_count=%d", denials.startupFatal.Load(), denials.jetStreamStartFatal.Load())
 	}
 	url := "tls://" + server.Addr().String()
 	tlsFor := func(id string) *tls.Config { return transport.ClientTLSConfig(issue(id), transport.AuthorizeMesh()) }
