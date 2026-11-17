@@ -14,7 +14,9 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	risk "github.com/eighred/kanz/internal/risk"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/engine"
 	"github.com/eighred/kanz/internal/risk/state"
@@ -27,7 +29,9 @@ func observedPositions(t *testing.T, n int) (*engine.EngineImpl, *state.Store, t
 	p := domain.NewPortfolio("P", "USD")
 	p.SetAggregate(domain.AggregateUpdate{AsOf: stamp})
 	for i := range n {
-		p.SetPosition(domain.Position{InstrumentID: v1.InstrumentID(fmt.Sprintf("I%04d", i)), Quantity: &commonpb.Decimal{Coefficient: 9007199254740993 + int64(i), Exponent: -11}, AsOf: stamp})
+		quantity := &commonpb.Decimal{Coefficient: 9007199254740993 + int64(i), Exponent: -11}
+		quantity.ProtoReflect().SetUnknown([]byte{0x1a, 0x01, 'x'})
+		p.SetPosition(domain.Position{InstrumentID: v1.InstrumentID(fmt.Sprintf("I%04d", i)), Quantity: quantity, AsOf: stamp})
 	}
 	if err := s.Restore(p, nil); err != nil {
 		t.Fatal(err)
@@ -46,6 +50,9 @@ func TestPositionsPreserveExactObservedQuantityAndBoundedPages(t *testing.T) {
 	}
 	if got := first.Positions[0].Quantity; got.GetCoefficient() != 9007199254740993 || got.GetExponent() != -11 {
 		t.Fatalf("quantity lost precision: %v", got)
+	}
+	if len(first.Positions[0].Quantity.ProtoReflect().GetUnknown()) != 0 {
+		t.Fatal("unselected opaque decimal metadata crossed the read projection")
 	}
 	last, err := e.Positions(context.Background(), v1.PositionsRequest{PortfolioID: "P", PageSize: 2, PageToken: first.NextPageToken})
 	if err != nil {
@@ -116,5 +123,41 @@ func TestPositionsPreserveMissingQuantityAsUnknown(t *testing.T) {
 		if pos.Quantity != nil {
 			t.Fatalf("unknown quantity became a number: %+v", pos)
 		}
+	}
+}
+
+func TestPositionsRefuseFreshToStalePaginationWithoutBindingWallClock(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	observed := now.Add(-time.Second)
+	store := state.NewStore()
+	p := domain.NewPortfolio("P", "USD")
+	p.SetAggregate(domain.AggregateUpdate{AsOf: observed})
+	for _, id := range []v1.InstrumentID{"I-A", "I-B", "I-C"} {
+		p.SetPosition(domain.Position{InstrumentID: id, Quantity: &commonpb.Decimal{Coefficient: 9007199254740993, Exponent: -11}, AsOf: observed})
+	}
+	if err := store.Restore(p, nil); err != nil {
+		t.Fatal(err)
+	}
+	e := engine.New(store, compute.DefaultRegistry(), risk.NewCache(), risk.NewDetectorWithClock(func() time.Time { return now }))
+	first, err := e.Positions(context.Background(), v1.PositionsRequest{PortfolioID: "P", PageSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.QualityFlags) != 0 || first.Positions[0].Quantity.GetCoefficient() != 9007199254740993 {
+		t.Fatalf("fresh exact observation: %+v", first)
+	}
+	now = now.Add(10 * time.Second)
+	continued, err := e.Positions(context.Background(), v1.PositionsRequest{PortfolioID: "P", PageSize: 1, PageToken: first.NextPageToken})
+	if err != nil || continued.SnapshotID != first.SnapshotID {
+		t.Fatalf("wall clock itself invalidated unchanged fresh knowledge: %+v %v", continued, err)
+	}
+	now = now.Add(time.Minute)
+	_, err = e.Positions(context.Background(), v1.PositionsRequest{PortfolioID: "P", PageSize: 1, PageToken: first.NextPageToken})
+	if !errors.Is(err, v1.ErrPositionSnapshotChanged) {
+		t.Fatalf("fresh-to-stale continuation mixed trust states: %v", err)
+	}
+	stale, err := e.Positions(context.Background(), v1.PositionsRequest{PortfolioID: "P", PageSize: 1})
+	if err != nil || len(stale.QualityFlags) != 1 || stale.QualityFlags[0] != v1.QualityFlagStale || stale.SnapshotID == first.SnapshotID {
+		t.Fatalf("new stale snapshot identity: %+v %v", stale, err)
 	}
 }

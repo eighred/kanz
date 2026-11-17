@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	"github.com/eighred/kanz/services/oms/internal/order"
 )
@@ -61,6 +62,9 @@ func TestStateReadPostgresPreservesTenantIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := pg.Service.Configure(cfg); err != nil {
+			t.Fatal(err)
+		}
 		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 			if _, err := conn.Exec(ctx, "SET search_path TO "+quoted); err != nil {
 				return err
@@ -100,7 +104,7 @@ func TestStateReadPostgresPreservesTenantIsolation(t *testing.T) {
 	seed(a, "t1", "O", 9007199254740993)
 	seed(b, "t2", "O", -9007199254740991)
 	seed(b, "t2", "foreign", 123)
-	read := grpcsrv.NewStateRead(order.NewPostgres(a), "t1", nil)
+	read := grpcsrv.NewStateRead(ctx, order.NewPostgres(a), "t1", nil)
 	resp, err := read.OrderStateRead(ctx, &querypb.OrderStateReadRequest{PortfolioId: "P", OrderId: "O"})
 	if err != nil || resp.GetOrderedQuantity().GetValue().GetCoefficient() != 9007199254740993 {
 		t.Fatalf("tenant-scoped exact read: %v %v", resp, err)
@@ -110,4 +114,55 @@ func TestStateReadPostgresPreservesTenantIsolation(t *testing.T) {
 	if status.Code(hidden) != codes.NotFound || status.Code(absent) != codes.NotFound || status.Convert(hidden).Message() != status.Convert(absent).Message() {
 		t.Fatalf("foreign row discovery: %v / %v", hidden, absent)
 	}
+	t.Run("server-deadline-bounds-shared-pool-acquisition", func(t *testing.T) {
+		if a.Config().MaxConns != 4 {
+			t.Fatal("fixture is not using the unchanged canonical four-connection service profile")
+		}
+		held := make([]*pgxpool.Conn, 0, 4)
+		release := func() {
+			for _, conn := range held {
+				conn.Release()
+			}
+			held = nil
+		}
+		defer release()
+		for range 4 {
+			conn, err := a.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			held = append(held, conn)
+		}
+		read := grpcsrv.NewStateRead(ctx, order.NewPostgres(a), "t1", nil)
+		defer func() {
+			read.CancelReads()
+			release()
+			joinCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := read.JoinReads(joinCtx); err != nil {
+				t.Error(err)
+			}
+		}()
+		done := make(chan error, 1)
+		go func() {
+			_, err := read.OrderStateRead(context.Background(), &querypb.OrderStateReadRequest{PortfolioId: "P", OrderId: "O"})
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if status.Code(err) != codes.DeadlineExceeded {
+				t.Fatalf("pool acquisition escaped the server deadline: %v", err)
+			}
+		case <-time.After(6 * time.Second):
+			t.Fatal("read waited indefinitely for an execution-store connection")
+		}
+		if a.Stat().AcquiredConns() != 4 {
+			t.Fatal("timed-out read changed ownership of the fixture's execution connections")
+		}
+		release()
+		fresh, err := read.OrderStateRead(ctx, &querypb.OrderStateReadRequest{PortfolioId: "P", OrderId: "O"})
+		if err != nil || fresh.GetOrderedQuantity().GetValue().GetCoefficient() != 9007199254740993 {
+			t.Fatalf("pool did not recover after bounded read refusal: %v %v", fresh, err)
+		}
+	})
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/auth"
+	readbudget "github.com/eighred/kanz/services/mcp/internal/read_budget"
 )
 
 type Decimal struct {
@@ -87,7 +88,12 @@ func (c *Client) Positions(ctx context.Context, portfolio string, size uint32, t
 	if size > 100 || len(token) > 128 {
 		return PositionPage{}, errors.New("invalid bounded position page")
 	}
+	ctx, cancel := readbudget.Context(ctx)
+	defer cancel()
 	resp, err := c.positions.Positions(ctx, &querypb.PositionsRequest{PortfolioId: portfolio, PageSize: size, PageToken: token})
+	if ctx.Err() != nil {
+		return PositionPage{}, status.FromContextError(ctx.Err()).Err()
+	}
 	if err != nil {
 		return PositionPage{}, readError(err)
 	}
@@ -127,7 +133,12 @@ func (c *Client) OrderState(ctx context.Context, portfolio, orderID string) (Ord
 	if !c.allowed(ctx, portfolio) {
 		return OrderState{}, agentgate.ErrResourceNotVisible
 	}
+	ctx, cancel := readbudget.Context(ctx)
+	defer cancel()
 	resp, err := c.orders.OrderStateRead(ctx, &querypb.OrderStateReadRequest{PortfolioId: portfolio, OrderId: orderID})
+	if ctx.Err() != nil {
+		return OrderState{}, status.FromContextError(ctx.Err()).Err()
+	}
 	if err != nil {
 		return OrderState{}, readError(err)
 	}

@@ -46,7 +46,7 @@ func TestBothBooksShareOneOutboxInTheInMemoryDeployment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openStores: %v", err)
 	}
-	t.Cleanup(closeStores)
+	t.Cleanup(closeStores.Close)
 
 	if orders.Outbox() == nil || positions.Outbox() == nil {
 		t.Fatal("a store has no outbox queue — nothing would carry its FACTs at all")
@@ -73,7 +73,7 @@ func TestOpenStoresReturnsBothBooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openStores: %v", err)
 	}
-	t.Cleanup(closeStores)
+	t.Cleanup(closeStores.Close)
 
 	if orders == nil || positions == nil {
 		t.Fatalf("openStores returned orders=%v positions=%v — a nil store is an OMS that cannot "+

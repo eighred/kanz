@@ -77,10 +77,20 @@ type Detector struct {
 // Callers tighten/loosen via the public fields or via the
 // constants for engine-wide overrides.
 func NewDetector() *Detector {
+	return NewDetectorWithClock(time.Now)
+}
+
+// NewDetectorWithClock provides an explicit clock for deterministic composition
+// checks. The clock is trusted construction input, never an RPC argument; nil
+// panics rather than silently substituting a different time authority.
+func NewDetectorWithClock(clock func() time.Time) *Detector {
+	if clock == nil {
+		panic("risk: detector clock is required")
+	}
 	return &Detector{
 		FreshnessBudget:   DefaultFreshnessBudget,
 		DegradedThreshold: DefaultDegradedThreshold,
-		now:               time.Now,
+		now:               clock,
 	}
 }
 

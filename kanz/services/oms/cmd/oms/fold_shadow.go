@@ -12,7 +12,7 @@ import (
 	"log/slog"
 )
 
-func persistentStoresWithShadow(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, reg prometheus.Registerer) (order.Store, position.Store, func(), error) {
+func persistentStoresWithShadow(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, reg prometheus.Registerer) (order.Store, position.Store, *storesCleanup, error) {
 	results := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "kanz_oms_rust_fill_shadow_results_total", Help: "Diagnostic Rust aggregate fold comparisons (fill/cancel/expire); no execution authority."}, []string{"status"})
 	for _, status := range []string{"queue_full", "invalid_input", "invalid_result", "worker_rejected", "matched", "disagreement", "output_limit", "timeout", "worker_failure"} {
 		results.WithLabelValues(status)
@@ -33,7 +33,7 @@ func persistentStoresWithShadow(ctx context.Context, cfg config.Config, pool *pg
 		store.SetFillFoldObserver(worker.Submit)
 		store.SetTerminalFoldObserver(worker.SubmitTerminal)
 	}
-	return store, position.NewPostgres(pool, cfg.BaseCurrency), func() { worker.Close(); pool.Close() }, nil
+	return store, position.NewPostgres(pool, cfg.BaseCurrency), &storesCleanup{closeWorker: func() { worker.Close() }, closePool: pool.Close}, nil
 }
 
 func terminalFoldObserver(store order.Store) func(order.TerminalFoldCapture) {

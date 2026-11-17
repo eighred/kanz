@@ -15,6 +15,12 @@ existing gateway-only MCP ingress and authenticated principal projection remain
 required. No bearer, cookie, or caller-selected tenant is forwarded to a domain
 service.
 
+Every selected domain RPC has a fixed three-second client budget, including
+ownership and scalar-measure reads in this mode. An earlier caller deadline
+clips that budget, and caller cancellation propagates to the domain. Agent
+arguments cannot extend it. Dependency errors retain the existing sanitized
+refusal and authorization-decision recording.
+
 `get_positions` uses `risk.read`. It reports **observed risk state**, not an
 accounting book or proof that all holdings have arrived. Each row carries its
 state time and an exact signed quantity. Missing/malformed quantities, missing
@@ -24,7 +30,9 @@ JavaScript's exact range. An empty observed set is not a claim of a flat book.
 The complete observed snapshot is bounded at 1,024 rows, with pages of at most
 100 (default 50). A content-bound cursor refuses a changed snapshot; restart
 pagination rather than combine versions. Oversized snapshots refuse without
-serving a prefix. Historical `as_of` arguments are unsupported and refused.
+serving a prefix. The content identity also binds quality flags, so aging from
+fresh to stale invalidates continuation without binding unrelated wall-clock
+ticks. Historical `as_of` arguments are unsupported and refused.
 
 `get_order_state` requires `portfolio_id`, `order_id`, and `order.read`. No role
 grant is added by this change. It reports one **recorded OMS state**, including
@@ -44,6 +52,15 @@ the neighboring history, pending-approval or instrument-catalogue services.
 The MCP client authenticates the declared risk-engine and OMS SVIDs explicitly.
 Other identity/topology selections require their own reviewed configuration;
 there is no automatic mesh-wide or plaintext fallback for this mode.
+
+The OMS read server imposes a five-second deadline, including pool acquisition
+and network work. It admits at most one read at a time against the existing
+four-connection execution store; additional reads fail immediately. OMS lifecycle
+cancellation cancels accepted reads. Listener shutdown has one five-second budget
+for transport, Serve and accepted-Load joins. A noncooperative reader produces an
+explicit cleanup refusal: the OMS retains that shared store until fatal process
+exit rather than blocking in pool close or claiming joined cleanup. No replacement
+store is constructed on that path.
 
 Qualification includes the actual risk Engine and generated protobuf transport,
 production MCP authorization/projection, a synthetic SPIFFE mTLS OMS listener,

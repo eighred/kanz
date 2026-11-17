@@ -7,20 +7,15 @@ package risk
 // the *composition* the future orchestrator will perform:
 // state.Store → compute → Cache → Detector → response flags.
 //
-// Lives in `package risk` (internal test) so it can drive
-// Detector.now for time-mocking without expanding the public
-// surface with a NewDetectorWithClock constructor.
+// Lives in `package risk` (internal test) so these historical composition
+// checks can drive Detector.now directly. The actual Engine's pagination
+// checks use NewDetectorWithClock to bind freshness transitions deterministically.
 //
 // # Scope vs the orchestrator
 //
-// The orchestrator (which doesn't exist yet — separate task)
-// owns the actual EngineImpl that satisfies v1.Engine. These tests
-// inline the composition logic to (a) show the integration works,
-// (b) double as documentation of the pattern the orchestrator
-// should implement. When the orchestrator lands, these tests
-// should be rewritten against EngineImpl.Exposure / .Measures /
-// .Health directly — the composition shifts from test code to
-// production code.
+// EngineImpl now owns the production v1.Engine composition. These older tests
+// inline the primitive composition; they do not substitute for the owning
+// engine and query-service tests or establish a served capability by themselves.
 
 import (
 	"context"

@@ -20,6 +20,15 @@ func detectorAt(now time.Time) *Detector {
 
 var t0 = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
+func TestDetectorWithClockRejectsNil(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != "risk: detector clock is required" {
+			t.Fatalf("nil clock did not refuse construction explicitly: %v", recovered)
+		}
+	}()
+	NewDetectorWithClock(nil)
+}
+
 func TestAssess_FreshStateIsModeNormalNoFlags(t *testing.T) {
 	d := detectorAt(t0)
 	mode, flags := d.Assess(t0.Add(-10 * time.Second)) // 10s old

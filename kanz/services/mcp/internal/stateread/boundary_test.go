@@ -18,6 +18,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -38,18 +39,52 @@ type stateDomain struct {
 	exposures, positions, orders atomic.Int32
 	page                         *querypb.PositionsResponse
 	row                          *querypb.OrderStateReadResponse
+	holdMethod                   string
+	captures                     chan capturedDomainRead
 }
 
-func (s *stateDomain) Exposure(_ context.Context, req *querypb.ExposureRequest) (*querypb.ExposureResponse, error) {
+type capturedDomainRead struct {
+	method   string
+	deadline time.Time
+	bounded  bool
+	done     <-chan struct{}
+}
+
+func (s *stateDomain) hold(ctx context.Context, method string) error {
+	if s.holdMethod != method {
+		return nil
+	}
+	deadline, bounded := ctx.Deadline()
+	s.captures <- capturedDomainRead{method: method, deadline: deadline, bounded: bounded, done: ctx.Done()}
+	<-ctx.Done()
+	return status.FromContextError(ctx.Err()).Err()
+}
+
+func (s *stateDomain) Exposure(ctx context.Context, req *querypb.ExposureRequest) (*querypb.ExposureResponse, error) {
 	s.exposures.Add(1)
+	if err := s.hold(ctx, "Exposure"); err != nil {
+		return nil, err
+	}
 	return &querypb.ExposureResponse{PortfolioId: req.GetPortfolioId(), OwnerTenant: "t1"}, nil
 }
-func (s *stateDomain) Positions(context.Context, *querypb.PositionsRequest) (*querypb.PositionsResponse, error) {
+func (s *stateDomain) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*querypb.MeasuresResponse, error) {
+	if err := s.hold(ctx, "Measures"); err != nil {
+		return nil, err
+	}
+	return &querypb.MeasuresResponse{PortfolioId: req.GetPortfolioId(), OwnerTenant: "t1"}, nil
+}
+func (s *stateDomain) Positions(ctx context.Context, _ *querypb.PositionsRequest) (*querypb.PositionsResponse, error) {
 	s.positions.Add(1)
+	if err := s.hold(ctx, "Positions"); err != nil {
+		return nil, err
+	}
 	return proto.Clone(s.page).(*querypb.PositionsResponse), nil
 }
-func (s *stateDomain) OrderStateRead(context.Context, *querypb.OrderStateReadRequest) (*querypb.OrderStateReadResponse, error) {
+func (s *stateDomain) OrderStateRead(ctx context.Context, _ *querypb.OrderStateReadRequest) (*querypb.OrderStateReadResponse, error) {
 	s.orders.Add(1)
+	if err := s.hold(ctx, "OrderStateRead"); err != nil {
+		return nil, err
+	}
 	return proto.Clone(s.row).(*querypb.OrderStateReadResponse), nil
 }
 
@@ -216,5 +251,70 @@ func TestStateToolsRefuseUndeclaredArgumentsAndOversizedPages(t *testing.T) {
 	}
 	if domain.exposures.Load() != 0 || domain.positions.Load() != 0 || domain.orders.Load() != 0 {
 		t.Fatal("invalid arguments reached a domain backend")
+	}
+}
+
+func TestSelectedReadRPCsImposeDeadlinesAndPropagateCallerCancellation(t *testing.T) {
+	measureCall := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_risk_measures","arguments":{"portfolio_id":"P"}}}`
+	for _, target := range []struct{ method, body string }{{"Exposure", positionCall}, {"Measures", measureCall}, {"Positions", positionCall}, {"OrderStateRead", orderStateCall}} {
+		for _, earlier := range []bool{false, true} {
+			name := target.method + "/no-caller-deadline"
+			if earlier {
+				name = target.method + "/earlier-caller-deadline"
+			}
+			t.Run(name, func(t *testing.T) {
+				handler, domain, _, _ := stateBoundary(t)
+				domain.holdMethod = target.method
+				domain.captures = make(chan capturedDomainRead, 1)
+				var ctx context.Context
+				var cancel context.CancelFunc
+				if earlier {
+					ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+				} else {
+					ctx, cancel = context.WithCancel(context.Background())
+				}
+				defer cancel()
+				callerDeadline, callerBounded := ctx.Deadline()
+				if !earlier && callerBounded {
+					t.Fatal("fixture accidentally supplied a deadline")
+				}
+				req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(target.body)).WithContext(ctx)
+				auth.SetPrincipalHeaders(req.Header, "dummy-reader", "t1", []string{"reader"})
+				if err := auth.SetPrincipalPortfolios(req.Header, []string{"P"}); err != nil {
+					t.Fatal(err)
+				}
+				recorder := httptest.NewRecorder()
+				rpcDone := make(chan struct{})
+				go func() { defer close(rpcDone); handler.ServeHTTP(recorder, req) }()
+				var captured capturedDomainRead
+				select {
+				case captured = <-domain.captures:
+				case <-time.After(2 * time.Second):
+					t.Fatal("selected generated RPC did not reach the domain fixture")
+				}
+				if !captured.bounded || captured.method != target.method || time.Until(captured.deadline) <= 0 || time.Until(captured.deadline) > 3*time.Second+time.Millisecond {
+					t.Fatal("selected RPC did not impose its trusted three-second budget")
+				}
+				if earlier && captured.deadline.After(callerDeadline.Add(time.Millisecond)) {
+					t.Fatal("selected RPC extended the caller deadline")
+				}
+				// Observing the generated-transport deadline is sufficient; cancel
+				// now rather than burning the three-second budget in every case.
+				cancel()
+				select {
+				case <-captured.done:
+				case <-time.After(time.Second):
+					t.Fatal("caller cancellation did not reach the domain RPC")
+				}
+				select {
+				case <-rpcDone:
+				case <-time.After(time.Second):
+					t.Fatal("canceled domain call kept the MCP handler alive")
+				}
+				if text := recorder.Body.String(); strings.Contains(text, "rpc error") || strings.Contains(text, "context canceled") || strings.Contains(text, "dummy-reader") {
+					t.Fatalf("dependency context escaped sanitized refusal: %s", text)
+				}
+			})
+		}
 	}
 }

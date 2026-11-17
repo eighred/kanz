@@ -40,6 +40,7 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
 	"github.com/eighred/kanz/services/oms/internal/costwatch"
+	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	"github.com/eighred/kanz/services/oms/internal/order"
 	"github.com/eighred/kanz/services/oms/internal/position"
 	"github.com/eighred/kanz/services/oms/internal/riskview"
@@ -161,7 +162,9 @@ func run() int {
 // wiring — a dial, a store, a bad OMS_VENUE_ACCOUNTS — and the caller maps
 // !started to exit 2; started (a failure surfacing after the group is
 // running, i.e. firstErr below) maps to exit 1 (#266).
-func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) (bool, error) {
+// An unjoined optional read also forces the first result false and preserves
+// its cleanup error: the caller must exit rather than open replacement stores.
+func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) (started bool, resultErr error) {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
@@ -243,7 +246,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	if err != nil {
 		return false, err
 	}
-	defer closeStores()
+	defer closeStores.Close()
 
 	// OMS-01e: fill→position projector over the shared book.
 	projector, err := position.NewProjector(book, producer, cfg.Tenant)
@@ -615,11 +618,23 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		defer stopGRPC()
 	}
 	if cfg.StateQueryListen != "" {
-		stopStateRead, err := serveStateRead(cfg, mesh, store, logger)
+		stopStateRead, err := serveStateRead(ctx, cfg, mesh, store, logger)
 		if err != nil {
 			return false, err
 		}
-		defer stopStateRead()
+		defer func() {
+			if err := stopStateRead(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+				if errors.Is(err, grpcsrv.ErrStateReadNotJoined) {
+					// Pool.Close could wait forever beneath this accepted Load.
+					// Fail the process instead; no new store is opened here and
+					// process exit, not joined cleanup, releases the old pool.
+					closeStores.RetainPoolUntilExit()
+					started = false
+					logger.Error("OMS state read did not join; shared store retained until fatal process exit")
+				}
+			}
+		}()
 	}
 
 	// WHERE AN UNTARGETED ORDER GOES (#437). The four-way decision, its one fatal
@@ -843,7 +858,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	)
 
 	// THE OUTBOX RELAY (#292). It is JOINED INTO wg, and that is not tidiness:
-	// closeStores() — deferred above, so it runs AFTER wg.Wait() returns — closes
+	// closeStores.Close() — deferred above, so it runs AFTER wg.Wait() returns — closes
 	// the pool this relay reads and writes, and main() is os.Exit(run()), so a
 	// frame returning DESTROYS whatever it did not join. This relay is the worst
 	// thing to destroy mid-pass: it publishes a FACT and only then marks the
@@ -1574,7 +1589,7 @@ func executionAttributionCounter(obs *observability.Provider) *prometheus.Counte
 	return c
 }
 
-func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger, reg prometheus.Registerer) (order.Store, position.Store, func(), error) {
+func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger, reg prometheus.Registerer) (order.Store, position.Store, *storesCleanup, error) {
 	if cfg.DatabaseURL == "" {
 		logger.Warn("NO OMS_DATABASE_URL — the order store, the position book AND the outbox are IN-PROCESS. This deployment "+
 			"MUST run exactly ONE replica: two pods would each admit the same order (double trade) and each publish "+
@@ -1583,7 +1598,7 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger, reg
 			"fix", "set OMS_DATABASE_URL; the shipped manifest runs replicas: 2")
 		q := outbox.NewMemory() // ONE queue, so the relay this root runs drains both books (#795)
 		return order.NewMemoryStore(order.WithSharedOutbox(q)),
-			position.NewBook(cfg.BaseCurrency, position.WithSharedOutbox(q)), func() {}, nil
+			position.NewBook(cfg.BaseCurrency, position.WithSharedOutbox(q)), &storesCleanup{}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it (the

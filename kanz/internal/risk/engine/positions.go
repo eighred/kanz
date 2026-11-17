@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -51,7 +50,7 @@ func (e *EngineImpl) Positions(ctx context.Context, req v1.PositionsRequest) (v1
 		}
 		var quantity *commonpb.Decimal
 		if pos.Quantity != nil && dec.InDomain(pos.Quantity) {
-			quantity = proto.Clone(pos.Quantity).(*commonpb.Decimal)
+			quantity = &commonpb.Decimal{Coefficient: pos.Quantity.GetCoefficient(), Exponent: pos.Quantity.GetExponent()}
 		}
 		rows = append(rows, v1.ObservedPosition{InstrumentID: pos.InstrumentID, Quantity: quantity, AsOf: pos.AsOf.UTC()})
 	}
@@ -62,7 +61,8 @@ func (e *EngineImpl) Positions(ctx context.Context, req v1.PositionsRequest) (v1
 		Portfolio v1.PortfolioID
 		AsOf      string
 		Rows      []v1.ObservedPosition
-	}{req.PortfolioID, p.AsOf().UTC().Format("2006-01-02T15:04:05.999999999Z07:00"), rows})
+		Quality   []v1.QualityFlag
+	}{req.PortfolioID, p.AsOf().UTC().Format("2006-01-02T15:04:05.999999999Z07:00"), rows, flags})
 	if err != nil {
 		return v1.PositionsResponse{}, err
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/internal/measureread"
 	"github.com/eighred/kanz/pkg/auth"
+	readbudget "github.com/eighred/kanz/services/mcp/internal/read_budget"
 )
 
 // Client reads risk state over query.v1.
@@ -65,8 +66,14 @@ func (c *Client) OwnerTenant(ctx context.Context, portfolioID string) (string, e
 			// occurs for an anonymous, foreign-tenant or out-of-scope caller.
 			return "", agentgate.ErrResourceNotVisible
 		}
+		var cancel context.CancelFunc
+		ctx, cancel = readbudget.Context(ctx)
+		defer cancel()
 	}
 	resp, err := c.query.Exposure(ctx, &querypb.ExposureRequest{PortfolioId: portfolioID})
+	if c.scoped && ctx.Err() != nil {
+		return "", status.FromContextError(ctx.Err()).Err()
+	}
 	if err != nil {
 		return "", mapErr(err)
 	}
@@ -98,8 +105,14 @@ func (c *Client) Measures(ctx context.Context, portfolioID string) (measureread.
 		if !ok || p.Subject == "" || c.expectedTenant == "" || p.Tenant != c.expectedTenant || !auth.PortfolioInScope(p.Portfolios, portfolioID) {
 			return measureread.Set{}, agentgate.ErrResourceNotVisible
 		}
+		var cancel context.CancelFunc
+		ctx, cancel = readbudget.Context(ctx)
+		defer cancel()
 	}
 	resp, err := c.query.Measures(ctx, &querypb.MeasuresRequest{PortfolioId: portfolioID})
+	if c.scoped && ctx.Err() != nil {
+		return measureread.Set{}, status.FromContextError(ctx.Err()).Err()
+	}
 	if err != nil {
 		return measureread.Set{}, mapErr(err)
 	}
