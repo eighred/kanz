@@ -1,5 +1,6 @@
 import copy
 import io
+import json
 import os
 from pathlib import Path
 import struct
@@ -36,6 +37,45 @@ def library(soname='libcrypto.so.3', extra_tag=None):
     struct.pack_into('<HHIQQQIHHHHHH', output, 16, 3, 62, 1, 0, 0,
                      section_offset, 0, 64, 0, 0, 64, 6, 1)
     return bytes(output)
+
+
+class SourceIdentityTests(unittest.TestCase):
+    def test_commit_tree_and_epoch_must_match(self):
+        commit = {'sha': p.PINS['source'], 'tree': {'sha': p.PINS['tree']},
+                  'committer': {'date': '2026-11-17T16:11:53Z'}}
+        raw = json.dumps(commit).encode()
+        with patch.object(p, 'fetch', return_value=raw):
+            self.assertEqual(p.upstream_commit()['sha256'], p.digest(raw))
+        for key, value in [('sha', '0' * 40), ('tree', {'sha': '0' * 40}),
+                           ('committer', {'date': '2026-11-17T16:11:52Z'})]:
+            with self.subTest(key=key), patch.object(p, 'fetch', return_value=json.dumps(
+                    {**commit, key: value}).encode()), self.assertRaisesRegex(ValueError, 'upstream commit'):
+                p.upstream_commit()
+
+    def test_only_the_published_maintenance_patch_can_establish_ancestry(self):
+        ident, fix = 'CVE-2026-124709', p.PINS['fixes']['CVE-2026-124709']
+        compare = {'status': 'ahead', 'base_commit': {'sha': fix}, 'merge_base_commit': {'sha': fix}}
+        ref = {'name': '3.5.10 git commit', 'tags': ['patch'],
+               'url': 'https://github.com/openssl/openssl/commit/' + fix}
+        with patch.dict(p.PINS, {'fixes': {ident: fix}}):
+            for label, refs, state, ancestor in [
+                ('valid', [ref], 'PUBLISHED', compare),
+                ('different branch', [{**ref, 'name': '4.0.4 git commit'}], 'PUBLISHED', compare),
+                ('not a patch', [{**ref, 'tags': ['related']}], 'PUBLISHED', compare),
+                ('ambiguous', [ref, ref], 'PUBLISHED', compare),
+                ('unpublished', [ref], 'RESERVED', compare),
+                ('not an ancestor', [ref], 'PUBLISHED', {**compare, 'status': 'behind'}),
+            ]:
+                record = {'cveMetadata': {'cveId': ident, 'state': state},
+                          'containers': {'cna': {'providerMetadata': {'shortName': 'openssl'},
+                                                 'references': refs}}}
+                with self.subTest(label=label), patch.object(p, 'fetch', side_effect=[
+                        json.dumps(ancestor).encode(), json.dumps(record).encode()]):
+                    if label == 'valid':
+                        self.assertEqual(p.provenance()[ident]['fix'], fix)
+                    else:
+                        with self.assertRaises(ValueError):
+                            p.provenance()
 
 
 class ELFTests(unittest.TestCase):

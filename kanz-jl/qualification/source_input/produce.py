@@ -1,5 +1,6 @@
 """Prepare a reproducible native input. This never installs a Julia consumer."""
 import argparse
+import datetime as dt
 import hashlib
 import io
 import json
@@ -77,23 +78,41 @@ def source_archive(data):
         raise ValueError('incomplete source archive')
 
 
+def upstream_commit():
+    url = 'https://api.github.com/repos/openssl/openssl/git/commits/' + PINS['source']
+    raw = fetch(url, 256 << 10)
+    commit = json.loads(raw)
+    expected_date = dt.datetime.fromtimestamp(PINS['epoch'], dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    if (commit.get('sha') != PINS['source'] or commit.get('tree', {}).get('sha') != PINS['tree']
+            or commit.get('committer', {}).get('date') != expected_date):
+        raise ValueError('upstream commit, tree or timestamp differs')
+    return {'url': url, 'sha256': digest(raw)}
+
+
 def provenance():
     observations = {}
     for ident, fix in PINS['fixes'].items():
-        url = 'https://api.github.com/repos/openssl/openssl/compare/' + fix + '...' + PINS['source']
+        # The second page omits the unrelated file diffs while retaining the merge base.
+        url = ('https://api.github.com/repos/openssl/openssl/compare/' + fix + '...' + PINS['source']
+               + '?per_page=1&page=2')
         raw = fetch(url, 8 << 20)
         value = json.loads(raw)
         if (value.get('status') not in ('ahead', 'identical')
+                or value.get('base_commit', {}).get('sha') != fix
                 or value.get('merge_base_commit', {}).get('sha') != fix):
             raise ValueError('vendor fix is not an ancestor: ' + ident)
         cna_url = 'https://openssl-library.org/news/secjson/' + ident.lower() + '.json'
         cna_raw = fetch(cna_url, 64 << 10)
         cna = json.loads(cna_raw)
         container = cna.get('containers', {}).get('cna', {})
-        refs = {item.get('url') for item in container.get('references', [])}
+        # This is the CNA's label for the 3.5 maintenance patch. The source
+        # under test still identifies itself as 3.5.10-dev.
+        refs = [item.get('url') for item in container.get('references', [])
+                if item.get('name') == '3.5.10 git commit' and 'patch' in item.get('tags', [])]
         if (cna.get('cveMetadata', {}).get('cveId') != ident
+                or cna.get('cveMetadata', {}).get('state') != 'PUBLISHED'
                 or container.get('providerMetadata', {}).get('shortName') != 'openssl'
-                or 'https://github.com/openssl/openssl/commit/' + fix not in refs):
+                or refs != ['https://github.com/openssl/openssl/commit/' + fix]):
             raise ValueError('vendor CNA fix reference differs: ' + ident)
         observations[ident] = {'fix': fix, 'compareURL': url, 'compareSHA256': digest(raw),
                                'cnaURL': cna_url, 'cnaSHA256': digest(cna_raw)}
@@ -477,6 +496,7 @@ def main():
         raise ValueError('immutable builder identity differs')
     raw = read_path(args.archive, 64 << 20) if args.archive else fetch(PINS['url'], 64 << 20)
     source_archive(raw)
+    commit = upstream_commit()
     fixes = provenance()
     output = args.output.absolute()
     output_fd = new_directory(output)
@@ -495,7 +515,7 @@ def main():
                 raise ValueError('independent builds differ: ' + name)
         report = {'schema': 1, 'purpose': 'unaccepted-native-source-input', 'consumerAccepted': False,
                   'sourceSHA': source_sha, 'sourceTree': source_tree, 'runID': args.run_id,
-                  'runAttempt': args.attempt, 'pins': PINS, 'vendorFixes': fixes,
+                  'runAttempt': args.attempt, 'pins': PINS, 'upstreamCommit': commit, 'vendorFixes': fixes,
                   'builder': {'reference': PINS['builder'], 'imageID': image['Id'], 'rootFS': image['RootFS']},
                   'recipeSHA256': digest((HERE / 'build.sh').read_bytes()),
                   'independentBuildsEqual': True,

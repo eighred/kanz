@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 022
 exec > /work/result/build.log 2>&1
-[[ $(id -u) == 65532 && $HOME == /work/home && $SOURCE_DATE_EPOCH == 1794780043 ]]
+[[ $(id -u) == 65532 && $HOME == /work/home && $SOURCE_DATE_EPOCH == 1794931913 ]]
 mkdir /work/home /work/tmp /work/source /work/stage
 for tool in gcc make perl readelf sha256sum tar gzip dpkg-query; do
   command -v "$tool"

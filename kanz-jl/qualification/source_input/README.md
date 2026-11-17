@@ -10,9 +10,14 @@ the adoption boundary.
 hash. The source's actual identity is **3.5.10-dev**; `VERSION.dat` is checked
 byte-for-byte and never rewritten. The commit is unsigned. Its hash and HTTPS
 provenance are reviewed input identities, not a signed upstream release claim.
-The producer rechecks that all five vendor CNA-linked fixes are ancestors of the
-selected source. Unknown/missing responses fail; source provenance does not
-establish artifact or consumer safety.
+The producer checks the source commit, tree and committer timestamp against
+the upstream Git metadata. For each pinned CVE it verifies the exact commit
+labelled as the 3.5 maintenance patch in the published OpenSSL CNA record and
+its ancestry in the selected source. The November 18, 2026 catalog review found
+eight advisories for 3.5.9 across 305 published records. Three additions to the
+previous inventory were CVE-2026-107493, CVE-2026-124709 and CVE-2026-35190.
+The latter two patches postdate the previous source candidate. The consumer
+qualification still requires a fresh full catalog and its affected control.
 
 The compiler is the existing digest-pinned Rust/bookworm image used by the Julia
 builder and `base-image-mirror.yml`. Two separate containers start with separate
