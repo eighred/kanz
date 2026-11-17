@@ -268,10 +268,45 @@ func mcpReadDeclarations(f *ast.File, owner bool) (functions, tools int, offende
 		}
 		return false
 	}
+	// Server.tool returns a zero value with false when lookup finds no offered
+	// capability. Exclude only that negative lookup result, never a registration
+	// or an empty value returned as a successful lookup.
+	lookupMisses := map[*ast.CompositeLit]bool{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !owner || fn.Name.Name != "tool" || fn.Recv == nil || len(fn.Recv.List) != 1 ||
+			fn.Type.Results == nil || len(fn.Type.Results.List) != 2 || !isTool(fn.Type.Results.List[0].Type) {
+			continue
+		}
+		receiver, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+		if !ok {
+			continue
+		}
+		server, ok := receiver.X.(*ast.Ident)
+		result, boolean := fn.Type.Results.List[1].Type.(*ast.Ident)
+		if !ok || server.Name != "Server" || !boolean || result.Name != "bool" || result.Obj != nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if _, nested := n.(*ast.FuncLit); nested {
+				return false
+			}
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok || len(ret.Results) != 2 {
+				return true
+			}
+			lit, literal := ret.Results[0].(*ast.CompositeLit)
+			found, constant := ret.Results[1].(*ast.Ident)
+			if literal && isTool(lit.Type) && len(lit.Elts) == 0 && constant && found.Name == "false" && found.Obj == nil {
+				lookupMisses[lit] = true
+			}
+			return true
+		})
+	}
 	seen := map[*ast.CompositeLit]bool{}
 	var inspectLiteral func(*ast.CompositeLit, ast.Expr)
 	inspectLiteral = func(lit *ast.CompositeLit, typ ast.Expr) {
-		if seen[lit] {
+		if seen[lit] || lookupMisses[lit] {
 			return
 		}
 		seen[lit] = true

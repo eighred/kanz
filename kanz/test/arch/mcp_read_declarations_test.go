@@ -32,6 +32,20 @@ var implicit = []reads.Tool{{Name: "get_positions"}}
 `,
 			tools: 2,
 		},
+		{
+			name: "actual tool lookup miss",
+			source: `package server
+type Tool struct { Name string }
+type Server struct { tools []Tool }
+func (s *Server) tool(name string) (Tool, bool) {
+    for _, t := range s.tools {
+        if t.Name == name { return t, true }
+    }
+    return Tool{}, false
+}
+`,
+			owner: true,
+		},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			_, tools, offenders := scanMCPDeclarationFixture(t, fixture.source, fixture.owner)
@@ -74,6 +88,21 @@ func TestMCPToolDeclarationsRejectUnverifiableNames(t *testing.T) {
 			_, tools, offenders := scanMCPDeclarationFixture(t, source, true)
 			if tools != 1 || len(offenders) != 1 || !strings.Contains(offenders[0], "explicit non-empty string literal") {
 				t.Fatalf("tools = %d, offenders = %v; want unverifiable declaration refused", tools, offenders)
+			}
+		})
+	}
+	for _, fixture := range []struct {
+		name string
+		body string
+	}{
+		{"empty append registration", `func register(s *Server) { s.tools = append(s.tools, Tool{}) }`},
+		{"empty successful lookup", `func (s *Server) tool(name string) (Tool, bool) { return Tool{}, true }`},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			source := "package server\ntype Tool struct { Name string }\ntype Server struct { tools []Tool }\n" + fixture.body
+			_, tools, offenders := scanMCPDeclarationFixture(t, source, true)
+			if tools != 1 || len(offenders) != 1 || !strings.Contains(offenders[0], "explicit non-empty string literal") {
+				t.Fatalf("tools = %d, offenders = %v; want empty offered tool refused", tools, offenders)
 			}
 		})
 	}
