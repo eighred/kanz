@@ -59,8 +59,8 @@ four-connection execution store; additional reads fail immediately. OMS lifecycl
 cancellation cancels accepted reads. Listener shutdown has one five-second budget
 for transport, Serve and accepted-Load joins. A noncooperative reader produces an
 explicit cleanup refusal: the OMS retains that shared store until fatal process
-exit rather than blocking in pool close or claiming joined cleanup. No replacement
-store is constructed on that path.
+exit rather than blocking in pool close or claiming joined cleanup. The cleanup
+error preserves the original startup/runtime failure classification.
 
 Qualification includes the actual risk Engine and generated protobuf transport,
 production MCP authorization/projection, a synthetic SPIFFE mTLS OMS listener,

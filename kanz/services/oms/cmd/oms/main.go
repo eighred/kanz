@@ -162,8 +162,8 @@ func run() int {
 // wiring — a dial, a store, a bad OMS_VENUE_ACCOUNTS — and the caller maps
 // !started to exit 2; started (a failure surfacing after the group is
 // running, i.e. firstErr below) maps to exit 1 (#266).
-// An unjoined optional read also forces the first result false and preserves
-// its cleanup error: the caller must exit rather than open replacement stores.
+// An unjoined optional read appends its cleanup error while preserving the
+// original startup/runtime classification for the caller's fatal exit.
 func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) (started bool, resultErr error) {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
@@ -627,10 +627,9 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 				resultErr = errors.Join(resultErr, err)
 				if errors.Is(err, grpcsrv.ErrStateReadNotJoined) {
 					// Pool.Close could wait forever beneath this accepted Load.
-					// Fail the process instead; no new store is opened here and
-					// process exit, not joined cleanup, releases the old pool.
+					// Fatal process exit releases the retained pool; the cleanup
+					// refusal remains an error without changing started.
 					closeStores.RetainPoolUntilExit()
-					started = false
 					logger.Error("OMS state read did not join; shared store retained until fatal process exit")
 				}
 			}
