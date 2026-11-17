@@ -85,11 +85,15 @@ func analyticImports(f *ast.File) map[string]string {
 
 func darkAnalyticProblems(files map[string]*ast.File, exemptions map[string]string) []string {
 	declared := map[string]bool{}
+	methodNames := map[string]bool{}
 	for path, pkg := range analyticFamilies {
 		if f := files[path]; f != nil {
 			for _, d := range f.Decls {
 				if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.IsExported() {
 					declared[analyticDecl(pkg, fn)] = true
+					if fn.Recv != nil {
+						methodNames[fn.Name.Name] = true
+					}
 				}
 			}
 		}
@@ -160,12 +164,20 @@ func darkAnalyticProblems(files map[string]*ast.File, exemptions map[string]stri
 				case *ast.Ident:
 					target = pkg + "." + callee.Name
 				case *ast.SelectorExpr:
+					resolvedReceiver := false
 					if receiver, ok := callee.X.(*ast.Ident); ok {
 						if modelParams[receiver.Name] {
 							target = "internal/risk/factormodel.Model." + callee.Sel.Name
+							resolvedReceiver = true
 						} else if p := imports[receiver.Name]; p != "" {
 							target = p + "." + callee.Sel.Name
+							resolvedReceiver = true
 						}
+					}
+					if !resolvedReceiver && methodNames[callee.Sel.Name] {
+						// Inferred locals/fields/call results are candidates, not
+						// proof of their receiver type or a qualified live root.
+						problems = append(problems, "unresolved analytic caller "+path+":"+fn.Name.Name+" ."+callee.Sel.Name+" needs qualified root")
 					}
 				}
 				if declared[target] {
@@ -320,6 +332,51 @@ func cloneAnalyticFiles(in map[string]*ast.File) map[string]*ast.File {
 		out[path] = file
 	}
 	return out
+}
+
+func TestDarkAnalyticGuardRefusesUnresolvedCandidateReceivers(t *testing.T) {
+	base := analyticSourceFiles(t)
+	for _, tc := range []struct{ name, source string }{
+		{"provider-inferred", `package fixture
+import (
+ "context"
+ "time"
+ "github.com/eighred/kanz/internal/risk/compute"
+)
+func candidate(ctx context.Context, provider compute.ModelProvider) float64 {
+ m, ok := provider.Model(ctx, time.Time{})
+ if !ok { return 0 }
+ return m.TrackingError(nil, nil)
+}`},
+		{"unrelated-same-name", `package fixture
+type unrelated struct{}
+func (unrelated) TrackingError(map[string]float64, map[string]float64) float64 { return 1 }
+func candidate(m unrelated) float64 { return m.TrackingError(nil, nil) }
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const path = "services/risk_engine/internal/future/candidate.go"
+			files := cloneAnalyticFiles(base)
+			var err error
+			files[path], err = parser.ParseFile(token.NewFileSet(), path, tc.source, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatal(err)
+			}
+			problems := strings.Join(darkAnalyticProblems(files, darkAnalyticExempt), "\n")
+			if !strings.Contains(problems, "unresolved analytic caller "+path+":candidate .TrackingError needs qualified root") || strings.Contains(problems, "stale/unowned analytic exemption: internal/risk/factormodel.Model.TrackingError") || strings.Contains(problems, "unreviewed analytic caller ") {
+				t.Fatalf("unknown receiver was ignored or misrepresented as resolved/live: %s", problems)
+			}
+			exempt := map[string]string{}
+			for key, reason := range darkAnalyticExempt {
+				if key != "internal/risk/factormodel.Model.TrackingError" {
+					exempt[key] = reason
+				}
+			}
+			if !strings.Contains(strings.Join(darkAnalyticProblems(files, exempt), "\n"), "dark analytic without owner: internal/risk/factormodel.Model.TrackingError") {
+				t.Fatal("unknown receiver retired the independent benchmark owner")
+			}
+		})
+	}
 }
 
 // This recipe checks actual CallExpr/assignment nodes, not comments or a helper
