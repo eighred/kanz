@@ -180,6 +180,31 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(result["assessment"]["next_actionable"], "repair")
         self.assertEqual(result["observations"]["main"]["sha"], MAIN)
 
+    def test_both_scope_jobs_are_required_on_the_reviewed_revision(self):
+        runs = [dict(name="scope", id=i, head_sha=SHA, status="completed",
+                     conclusion="success", html_url=f"job/{i}") for i in (21, 22)]
+
+        def api(path):
+            if f"/commits/{SHA}/check-runs?" in path:
+                return [dict(total_count=len(runs), check_runs=runs)]
+            return self.api(path)
+
+        contract = self.contract()
+        contract["nodes"][0]["validation"]["expected"] = [
+            dict(id="scope", check_id=21), dict(id="scope", check_id=22)]
+
+        def assessment():
+            return collect("eighred/kanz", api, contract)["assessment"]["nodes"]["julia"]
+
+        self.assertEqual(assessment()["state"], "DELIVERABLE")
+        runs[0]["conclusion"] = "failure"
+        self.assertEqual(assessment()["state"], "VALIDATION_FAILED")
+        runs[0]["conclusion"] = "success"
+        runs[0]["id"] = 23  # A rerun requires a fresh review of the new job.
+        self.assertEqual(assessment()["state"], "BLOCKED")
+        runs.pop(0)
+        self.assertEqual(assessment()["state"], "BLOCKED")
+
     def test_unavailable_checks_do_not_become_green(self):
         def api(path):
             if '/check-runs?' in path: raise ValueError("access denied")

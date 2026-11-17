@@ -32,6 +32,12 @@ The classifier distinguishes observed DNS failure, source-bound advisory
 evidence, dependent aggregates and unknown errors; a generic exit code or a
 test named `fail` does not establish an application regression.
 
+When two workflows report the same job name, review both workflow runs and
+include one expected entry per job with its name in `id` and GitHub's numeric
+check-run ID in `check_id`. For example, `kanz-ci` and `kanz-build` both
+publish a `scope` job. Bind each ID to its workflow and revision in the inventory
+evidence. Refresh these IDs after a rerun. Unique names can still use `id` alone.
+
 For checked nodes, `revision` is a full SHA. `validation` contains matching
 `sha`, `expected` check IDs, `observed` check records (`id`, `sha`, `status`,
 `evidence`), `inventory_complete: true`, and `inventory_evidence` identifying
