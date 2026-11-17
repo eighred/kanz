@@ -83,9 +83,9 @@ def broker_objects():
         broker['resources']['requests']['memory']='2Gi'
         broker['resources']['limits']['memory']='3Gi'
         next(v for v in spec['volumes'] if v['name'] == 'config')['configMap']['name'] = name
-        # The full table creates 693 replicas per broker across three tenants.
-        # Reserve memory for them and use small allocation steps for the sparse
-        # functional fixture; retain the finite volume and all durability gates.
+        # Tenant plus system inventories must fit these fixed resources before
+        # creation. Use small allocation steps for the sparse functional fixture;
+        # retain the finite volume and all durability gates.
         svc = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name, 'namespace': 'kanz-messaging'},
                'spec': {'selector': {'native-broker': name}, 'publishNotReadyAddresses': True,
                         'ports': [{'name': 'kafka', 'port': 9094}, {'name': 'rpc', 'port': 33145}]}}

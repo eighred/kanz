@@ -12,9 +12,28 @@ from test_lifecycle import evidence as lifecycle_evidence
 class TopologyTest(unittest.TestCase):
     def test_full_inventory_fits_finite_fixture(self):
         raw=(topology.ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
+        # Each filing family adds its three-partition history topic AND a
+        # three-partition DLQ. Keep the independently reviewed old inventory
+        # fixed, so unrelated table growth cannot silently redefine this bound.
+        lines=raw.splitlines(keepends=True)
+        filing_rows=[]
+        for family in (b'compliance.filing',b'risk.sustainability'):
+            matches=[line for line in lines if line.split()[:1]==[family]]
+            self.assertEqual(len(matches),1)
+            self.assertEqual(matches[0].split(),[family,b'3',b'delete',b'2592000000',b'yes'])
+            filing_rows.extend(matches)
+        baseline=b''.join(line for line in lines if line not in filing_rows)
+        _,baseline_count,baseline_partitions=qualify.canonical_inventory(baseline)
+        self.assertEqual((baseline_count,baseline_partitions),(60,231))
         _,count,partitions=qualify.canonical_inventory(raw)
-        self.assertEqual((count,partitions),(60,231))
-        self.assertEqual(qualify.fixture_capacity(partitions)['replicasPerBroker'],693)
+        self.assertEqual((count,partitions),(baseline_count+4,baseline_partitions+12))
+        # The actual qualifier also creates the system inventory, which has
+        # the existing three-partition, system-only dlq.archiver in addition.
+        _,system_count,system_partitions=qualify.canonical_inventory(raw,system=True)
+        self.assertEqual((system_count,system_partitions),(count+1,partitions+3))
+        self.assertEqual(qualify.fixture_capacity(partitions,system_partitions)['replicasPerBroker'],975)
+        with self.assertRaises(ValueError):
+            qualify.fixture_capacity(260,system_partitions)
         for bad in (True,0,1000):
             with self.assertRaises(ValueError):qualify.fixture_capacity(bad)
 
