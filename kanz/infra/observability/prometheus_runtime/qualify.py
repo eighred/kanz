@@ -6,13 +6,18 @@ are writable by target processes. The receipt contains no TLS private material.
 """
 
 import argparse
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import ssl
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -22,13 +27,80 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 SHELLS = {"busybox", "ash", "awk", "sh"}
+OUTPUT_LIMIT = 1 << 20
+COMMAND_ENV = contextvars.ContextVar("prometheus_command_env", default=None)
+
+
+@contextlib.contextmanager
+def command_scope(scratch):
+    paths = {name: Path(scratch) / name for name in ("home", "tmp", "cache", "docker_config")}
+    for path in paths.values():
+        path.mkdir(mode=0o700)
+    environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C.UTF-8",
+                   "HOME": str(paths["home"]), "TMPDIR": str(paths["tmp"]),
+                   "XDG_CACHE_HOME": str(paths["cache"]),
+                   "DOCKER_CONFIG": str(paths["docker_config"]), "GIT_CONFIG_NOSYSTEM": "1"}
+    token = COMMAND_ENV.set(environment)
+    try:
+        yield
+    finally:
+        COMMAND_ENV.reset(token)
 
 
 def command(*args, timeout=60, check=True):
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            timeout=timeout, check=False)
+    environment = COMMAND_ENV.get()
+    if (environment is None or sys.platform != "linux" or not hasattr(os, "waitid")
+            or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL):
+        raise RuntimeError("qualification command scope and Linux child reaping are required")
+    if not 0 < timeout <= 60:
+        raise ValueError("qualification command deadline is outside its bound")
+    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=environment, close_fds=True,
+                               start_new_session=True, bufsize=0)
+    selector = selectors.DefaultSelector()
+    buffers = {process.stdout: bytearray(), process.stderr: bytearray()}
+    deadline = time.monotonic() + timeout
+    exited, total = False, 0
+    try:
+        for stream in buffers:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map() or not exited:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            for key, _ in selector.select(min(remaining, .1)):
+                raw = os.read(key.fileobj.fileno(), 65536)
+                if not raw:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(raw)
+                if total > OUTPUT_LIMIT:
+                    raise ValueError("qualification command output exceeds its shared byte limit")
+                buffers[key.fileobj].extend(raw)
+            if not exited and os.waitid(os.P_PID, process.pid,
+                                        os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                exited = True
+                # Keep the exited leader unreaped until its owned process group
+                # is killed: its PID cannot be reused for an unrelated group.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        finally:
+            selector.close()
+            for stream in buffers:
+                stream.close()
+    result = subprocess.CompletedProcess(args, process.returncode,
+                                         bytes(buffers[process.stdout]), bytes(buffers[process.stderr]))
     if check and result.returncode:
-        raise RuntimeError(f"{args[0]} {args[1]} failed: {result.stderr.decode()[-2000:]}")
+        raise RuntimeError(f"qualification command failed with exit {result.returncode}")
     return result
 
 
@@ -93,6 +165,27 @@ def wait_for(check):
     raise TimeoutError("isolated Prometheus probe did not converge")
 
 
+def watch_status(api):
+    raw = command("docker", "exec", api, "python", "/fixture/kube_fixture.py", "status").stdout
+
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate watch status field")
+            result[key] = value
+        return result
+
+    if not 0 < len(raw) <= 4096:
+        raise ValueError("watch status is absent or exceeds its bound")
+    status = json.loads(raw, object_pairs_hook=unique_fields)
+    if (not isinstance(status, dict)
+            or set(status) != {"initial_events_requested", "initial_bookmark_sent"}
+            or any(value is not True for value in status.values())):
+        raise ValueError("streaming initial events and completed bookmark write are required")
+    return status
+
+
 def runtime(image, helper, scratch, suffix):
     name, api, volume, holder = ("prometheus-" + suffix + tail
                                  for tail in ("", "-api", "-data", "-holder"))
@@ -140,8 +233,7 @@ scrape_configs:
                 "--config.file=/fixture/prometheus.yml", "--storage.tsdb.path=/prometheus",
                 "--web.listen-address=127.0.0.1:9090")
         start_api()
-        wait_for(lambda: json.loads(command("docker", "exec", api, "python",
-                                            "/fixture/kube_fixture.py", "status").stdout))
+        discovery_status = wait_for(lambda: watch_status(api))
         wait_for(lambda: "Ready" in probe(api, "/-/ready"))
         value = query(api, "vector(1)")
         if len(value) != 1 or value[0]["value"][1] != "1":
@@ -160,18 +252,18 @@ scrape_configs:
         if len(observed) != 1 or observed[0]["value"][1] != "1":
             raise ValueError("TLS pod discovery did not scrape its target")
         at = observed[0]["value"][0]
-        discovery_status = json.loads(command("docker", "exec", api, "python",
-                                              "/fixture/kube_fixture.py", "status").stdout)
         command("docker", "rm", "-f", api)
         command("docker", "stop", "--time=15", name)
         command("docker", "start", name)
         start_api()
+        restarted_status = wait_for(lambda: watch_status(api))
         wait_for(lambda: "Ready" in probe(api, "/-/ready"))
         retained = query(api, 'up{job="kubernetes-pods"}', at)
         if len(retained) != 1 or retained[0]["value"][1] != "1":
             raise ValueError("pre-restart observation was lost from the owned volume")
         return {"readiness": True, "constant_query": True,
                 "tls_pod_discovery": True, "watch_protocol": discovery_status,
+                "watch_protocol_after_restart": restarted_status,
                 "retained_history_after_restart": True}
     finally:
         survivors = []
@@ -205,7 +297,8 @@ def main():
     if "@sha256:" not in upstream:
         raise ValueError("upstream must be pinned")
     suffix = uuid.uuid4().hex[:12]
-    with tempfile.TemporaryDirectory(prefix="prometheus-qualification-") as directory:
+    with tempfile.TemporaryDirectory(prefix="prometheus-qualification-") as directory, \
+            command_scope(Path(directory)):
         scratch = Path(directory)
         baseline = image_inventory(upstream, scratch, suffix + "-upstream")
         candidate = image_inventory(args.candidate, scratch, suffix + "-candidate")
