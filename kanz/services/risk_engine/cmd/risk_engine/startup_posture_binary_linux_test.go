@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -26,15 +27,18 @@ import (
 	"github.com/eighred/kanz/services/risk_engine/internal/app"
 )
 
+var riskEngineBinary = flag.String("kanz-risk-engine-bin", "", "qualified public risk-engine executable")
+var riskEngineBinarySHA256 = flag.String("kanz-risk-engine-bin-sha256", "", "SHA-256 of the qualified public risk-engine executable")
+
 // The parent must build/promote this exact-source binary, bind it read-only and
-// provide an isolated canonical broker. Ordinary package tests omit this input;
+// provide it through explicit public-artifact flags with an isolated canonical
+// broker. Ordinary package tests omit these inputs;
 // they do not establish #1064's actual-binary acceptance or OS confinement.
 func TestRiskStartupPostureActualBinary(t *testing.T) {
-	binary := os.Getenv("KANZ_RISK_ENGINE_BIN")
-	if binary == "" {
+	binary, wantHash := *riskEngineBinary, *riskEngineBinarySHA256
+	if binary == "" && wantHash == "" {
 		t.Skip("#1064 actual binary requires the qualified isolated fixture")
 	}
-	wantHash := os.Getenv("KANZ_RISK_ENGINE_BIN_SHA256")
 	if !filepath.IsAbs(binary) || len(wantHash) != 64 {
 		t.Fatal("qualified binary identity missing")
 	}
