@@ -23,8 +23,10 @@ a duplicate hit. `kanz_risk_shared_dedup_configured` reports selection, while th
 closed `operation` labels on `kanz_risk_shared_dedup_errors_total` report failures.
 Selection is not backend readiness, and endpoint/error text is not logged.
 Endpoint URLs select address, authentication and database only; query/fragment
-options refuse startup. Dial/read/write/pool waits each have a fixed one-second
-budget and SDK retries are disabled. These socket budgets do not establish an
+options refuse startup. A hostname is mandatory; bracketed IPv6 is supported.
+An omitted port means 6379; an explicit port must be in 1..65535.
+Dial/read/write/pool waits each have a fixed one-second budget and SDK retries
+are disabled. These socket budgets do not establish an
 absolute operating-system wall-clock bound for a complete dispatch.
 
 The [unselected component](../../infra/overlays/risk_shared_dedup/README.md)

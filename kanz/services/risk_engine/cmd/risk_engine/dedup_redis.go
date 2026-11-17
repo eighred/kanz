@@ -6,6 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +32,28 @@ func loadDedupConfig(cfg config.Config) (dedupConfig, error) {
 	}
 	if strings.ContainsAny(cfg.RedisURL, "?#") {
 		return dedupConfig{}, errors.New("invalid RISK_ENGINE_REDIS_URL: query and fragment options are unsupported; coordination budgets are fixed")
+	}
+	// The SDK supplies localhost when authority is absent and does not bound
+	// numeric ports. Those conveniences would conceal malformed explicit input.
+	endpoint, err := url.Parse(cfg.RedisURL)
+	const invalidEndpoint = "invalid RISK_ENGINE_REDIS_URL: require a redis:// or rediss:// hostname and port 1..65535 when specified"
+	if err != nil || (endpoint.Scheme != "redis" && endpoint.Scheme != "rediss") || endpoint.Hostname() == "" {
+		return dedupConfig{}, errors.New(invalidEndpoint)
+	}
+	bracketed := strings.HasPrefix(endpoint.Host, "[")
+	if bracketed || strings.Contains(endpoint.Hostname(), ":") {
+		ip, err := netip.ParseAddr(endpoint.Hostname())
+		if !bracketed || err != nil || !ip.Is6() {
+			return dedupConfig{}, errors.New(invalidEndpoint)
+		}
+	}
+	if port := endpoint.Port(); port != "" {
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || number == 0 {
+			return dedupConfig{}, errors.New(invalidEndpoint)
+		}
+	} else if strings.HasSuffix(endpoint.Host, ":") {
+		return dedupConfig{}, errors.New(invalidEndpoint) // explicit empty port is not omission
 	}
 	opts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil || opts.Network == "unix" {
