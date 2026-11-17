@@ -1,8 +1,10 @@
 import hashlib
+import json
 import copy
 import re
 from pathlib import Path
 import unittest
+from unittest.mock import Mock
 import yaml
 import qualify
 
@@ -122,6 +124,54 @@ class QualificationTests(unittest.TestCase):
                         value.replace('C=US', 'C=GB'), value.replace('client-a-abcde', 'a,OU=x'),
                         value.replace('client-a-abcde', 'a' * 254)):
                 self.assertIsNone(re.fullmatch(pattern, bad))
+
+    def test_records_are_verified_on_both_sides_of_one_broker_restart(self):
+        self.assertEqual(qualify.CASES[-2:], (
+            ('verify', 'proof-bootstrap', 'verify'),
+            ('verify-after-restart', 'proof-bootstrap', 'verify')))
+        uid = '00000000-0000-0000-0000-000000000001'
+        old, new = ('containerd://' + v * 64 for v in ('a', 'b'))
+        meta = {'uid': uid, 'name': 'redpanda-aaa-bbb'}
+        first = {'name': 'redpanda', 'containerID': old, 'restartCount': 0,
+                 'ready': True, 'state': {'running': {}}}
+        second = dict(first, containerID=new, restartCount=1,
+                      lastState={'terminated': {'containerID': old, 'exitCode': 0}})
+
+        def pod(meta, state):
+            return {'metadata': meta, 'status': {'containerStatuses': [state]},
+                    'spec': {'serviceAccountName': 'redpanda', 'containers': [{'name': 'redpanda',
+                              'image': qualify.REDPANDA, 'command': ['/opt/redpanda/bin/redpanda']}]}}
+
+        def fixture(metadata, state):
+            return Mock(side_effect=[json.dumps({'items': [pod(meta, first)]}), '', '', '',
+                                     json.dumps(pod(metadata, state))])
+
+        k = fixture(meta, second)
+        result = qualify.restart_broker(k)
+        self.assertEqual(result['after']['previousContainerID'], result['before']['containerID'])
+        self.assertEqual([call.args[2] for call in k.call_args_list], ['get', 'exec', 'wait', 'wait', 'get'])
+        self.assertIn('pod/redpanda-aaa-bbb', k.call_args_list[1].args)
+        self.assertIn('redpanda', k.call_args_list[1].args)
+        for label, metadata, state in (
+                ('replacement pod', dict(meta, uid=uid[:-1]+'2'), second),
+                ('old container', meta, dict(second, containerID=old)),
+                ('not ready', meta, dict(second, ready=False)),
+                ('second restart', meta, dict(second, restartCount=2)),
+                ('unrelated exit', meta, dict(second, lastState={'terminated': {'containerID': new, 'exitCode': 0}})),
+                ('failed exit', meta, dict(second, lastState={'terminated': {'containerID': old, 'exitCode': 137}}))):
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                qualify.restart_broker(fixture(metadata, state))
+        preexisting = Mock(return_value=json.dumps({'items': [pod(meta, second)]}))
+        with self.assertRaises(ValueError):
+            qualify.restart_broker(preexisting)
+        preexisting.assert_called_once()
+        for field in ('hostPID', 'shareProcessNamespace'):
+            wrong = pod(meta, first)
+            wrong['spec'][field] = True
+            client = Mock(return_value=json.dumps({'items': [wrong]}))
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                qualify.restart_broker(client)
+            client.assert_called_once()
 
     def test_exact_subjects_are_distinct_and_bounded(self):
         values=[qualify.subject(sa) for sa in qualify.SAS]
