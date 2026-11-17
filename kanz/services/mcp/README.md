@@ -64,11 +64,29 @@ explicit cleanup refusal: the OMS retains that shared store until fatal process
 exit rather than blocking in pool close or claiming joined cleanup. The cleanup
 error preserves the original startup/runtime failure classification.
 
-Qualification includes the actual risk Engine and generated protobuf transport,
-production MCP authorization/projection, a synthetic SPIFFE mTLS OMS listener,
-and restricted-role PostgreSQL read isolation. Run affected packages serially
-on Linux, with the real database prerequisite and the architecture import/write
-mutation controls. These component checks do not establish gateway identity
-configuration, deployed NetworkPolicy, production data completeness or operational
-acceptance. Deployment/network selection and complete-chain verification remain
-separate from constructing the source capability.
+The Linux `state_read_integration` test exercises both tools through the gateway
+and MCP executables. An ephemeral OIDC issuer grants read access to one fixture
+portfolio. The real risk Engine and OMS read listener serve their projections
+over SPIFFE mTLS. OMS reads a seeded record through its tenant-bound PostgreSQL
+pool. The test also reads each gateway allow decision back from JetStream. The
+MCP tool authorizer records its own decisions through structured logging.
+
+Run the following from `kanz/` in an isolated loopback fixture with the generated
+Go SDK. Supply `TEST_NATS_URL` from a fresh canonical JetStream fixture on port
+4222 and `TEST_POSTGRES_URL` from an empty fixture database named `kanzapp` on
+port 55432. The database fixture uses the passwordless local `kanzapp` role with
+`NOSUPERUSER NOBYPASSRLS`. Use an absolute scratch directory for `fixture_bin`.
+
+```sh
+go build -race -o "$fixture_bin/gateway" ./services/api_gateway/cmd/api_gateway
+go build -race -o "$fixture_bin/mcp" ./services/mcp/cmd/mcp
+go test -race -c -tags state_read_integration -o "$fixture_bin/oms_read" ./services/oms/cmd/oms
+TEST_GATEWAY_BINARY="$fixture_bin/gateway" TEST_MCP_BINARY="$fixture_bin/mcp" \
+  TEST_OMS_STATE_FIXTURE_BINARY="$fixture_bin/oms_read" \
+  go test -race -p 1 -count=1 -tags state_read_integration ./services/risk_engine/internal/grpcsrv \
+    -run '^TestAuthorizedGatewayStateReadsAndBrokerDecisions$'
+```
+
+Deployed NetworkPolicy, image identity and operational portfolio coverage require
+verification in the selected estate. Run the owning architecture and projection
+tests separately for capability restrictions, bounded reads and refusal behavior.
