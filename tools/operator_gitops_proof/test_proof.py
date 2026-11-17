@@ -1,10 +1,12 @@
 """Source inclusion and actual API readback must establish different boundaries."""
 import copy
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 import yaml
 
@@ -158,6 +160,22 @@ class OperatorOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "operation refused"):
             proof.check_operation(app, "a" * 40)
 
+    def test_same_revision_previous_success_cannot_prove_new_request(self):
+        token = [{"name": "operator-gitops-request", "value": "b" * 32}]
+        self.assertFalse(proof.check_operation(self.application(), "a" * 40, token))
+
+    def test_exact_request_token_and_completion_pass(self):
+        token = [{"name": "operator-gitops-request", "value": "b" * 32}]
+        app = self.application()
+        app["status"]["operationState"]["operation"] = {"info": token}
+        self.assertTrue(proof.check_operation(app, "a" * 40, token))
+
+    def test_other_completed_request_cannot_prove_new_request(self):
+        token = [{"name": "operator-gitops-request", "value": "b" * 32}]
+        app = self.application()
+        app["status"]["operationState"]["operation"] = {"info": [{"name": "operator-gitops-request", "value": "c" * 32}]}
+        self.assertFalse(proof.check_operation(app, "a" * 40, token))
+
     def observed_fixture(self, seconds_per_call):
         _, resources, _, _ = proof.operator_source()
         accounts = [copy.deepcopy(item) for key, item in resources.items() if key[0] == "ServiceAccount"]
@@ -195,6 +213,193 @@ class OperatorOperationTests(unittest.TestCase):
         with mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]):
             with self.assertRaisesRegex(TimeoutError, "late operator reconciliation success refused"):
                 fixture.observe(resources, "a" * 40, None)
+
+    def test_requested_sync_waits_for_its_token_before_readback(self):
+        fixture, resources, clock = self.observed_fixture(5)
+        original = fixture.k
+        requested = []
+
+        def k(*args, timeout=30):
+            if "patch" in args:
+                requested.append(json.loads(args[-1])["operation"]["info"])
+                return "{}"
+            value = json.loads(original(*args, timeout=timeout))
+            if "application" in args:
+                value["status"]["operationState"]["operation"] = {"info": requested[-1]}
+            return json.dumps(value)
+
+        fixture.k = k
+        with mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]):
+            fixture.observe(resources, "a" * 40, None, request_sync=True)
+            fixture.observe(resources, "a" * 40, None, request_sync=True)
+        self.assertEqual(len(requested), 2)
+        self.assertNotEqual(requested[0], requested[1])
+
+    def test_requested_same_revision_stale_success_times_out_without_inventory(self):
+        fixture, resources, clock = self.observed_fixture(5)
+        inventory = []
+
+        def k(*args, timeout=30):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 10)
+            if "patch" in args:
+                return "{}"
+            clock[0] += 40
+            if "application" not in args:
+                inventory.append(args)
+                raise AssertionError("stale operation reached inventory readback")
+            return json.dumps(self.application())
+
+        fixture.k = k
+        with mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(proof.time, "sleep"):
+            with self.assertRaisesRegex(TimeoutError, "reconciliation deadline expired"):
+                fixture.observe(resources, "a" * 40, None, request_sync=True)
+        self.assertEqual(inventory, [])
+
+
+class OperatorCreationOwnershipTests(unittest.TestCase):
+    source = "a" * 40
+    name = "messaging-proof-bbbbbbbbbbbb"
+
+    def fixture(self, scratch):
+        process = SimpleNamespace(command_failure=lambda error: None)
+        with mock.patch.object(proof, "load_module", return_value=process):
+            fixture = proof.Fixture(scratch, self.name)
+        return fixture
+
+    def environment(self, directory):
+        return mock.patch.dict(proof.os.environ, {"PATH": "/fixture/bin", "RUNNER_TEMP": directory,
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": self.source, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"})
+
+    def test_preexisting_cluster_main_writes_no_owner_and_never_deletes(self):
+        with tempfile.TemporaryDirectory() as directory, self.environment(directory):
+            commands = []
+            feed = SimpleNamespace(create_enforcing_cluster=mock.Mock())
+            process = SimpleNamespace(command_failure=lambda error: None)
+
+            def command(fixture, args, data=None, timeout=60):
+                commands.append(args)
+                if args[:2] == ["git", "rev-parse"]:
+                    return self.source
+                if args == ["kind", "get", "clusters"]:
+                    return self.name
+                raise AssertionError("preflight refusal reached an effect")
+
+            def load(name, path):
+                return feed if path == "tools/feed_identity/proof.py" else process
+
+            with mock.patch.object(proof.uuid, "uuid4", return_value=SimpleNamespace(hex="b" * 32)), \
+                    mock.patch.object(proof, "load_module", side_effect=load), \
+                    mock.patch.object(proof.Fixture, "command", command), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as result:
+                    proof.main()
+            self.assertEqual(result.exception.code, 1)
+            self.assertFalse((Path(directory) / "operator-gitops-owner.json").exists())
+            self.assertFalse(any(args[:3] == ["kind", "delete", "cluster"] for args in commands))
+            feed.create_enforcing_cluster.assert_not_called()
+
+    def test_preflight_without_create_command_issues_no_cleanup_authorization(self):
+        with tempfile.TemporaryDirectory() as directory, self.environment(directory):
+            fixture = self.fixture(Path(directory))
+            fixture.command = mock.Mock(return_value="")
+            feed = SimpleNamespace(create_enforcing_cluster=mock.Mock(side_effect=RuntimeError("before create")))
+            with mock.patch.object(proof, "load_module", return_value=feed):
+                with self.assertRaisesRegex(RuntimeError, "before create"):
+                    fixture.install({}, {}, {}, self.source)
+            self.assertFalse(fixture.owner.exists())
+            self.assertFalse(fixture.cleanup())
+            self.assertFalse(any(call.args[0][:3] == ["kind", "delete", "cluster"] for call in fixture.command.call_args_list))
+
+    def test_ambiguous_create_keeps_matching_cleanup_authorization(self):
+        with tempfile.TemporaryDirectory() as directory, self.environment(directory):
+            fixture = self.fixture(Path(directory))
+            commands = []
+
+            def command(args, data=None, timeout=60):
+                commands.append(args)
+                if args[:3] == ["kind", "create", "cluster"]:
+                    raise RuntimeError("lost create response")
+                return ""
+
+            fixture.command = command
+            feed = SimpleNamespace()
+
+            def create(name, scratch):
+                feed.command(["kind", "create", "cluster", "--name", name,
+                              "--kubeconfig", str(scratch / "kubeconfig")])
+
+            feed.create_enforcing_cluster = create
+            with mock.patch.object(proof, "load_module", return_value=feed):
+                with self.assertRaisesRegex(RuntimeError, "lost create response"):
+                    fixture.install({}, {}, {}, self.source)
+            recorded = json.loads(fixture.owner.read_text())
+            proof.validate_creation_authorization(recorded, self.source, "123", "1")
+            self.assertEqual(recorded, fixture.creation_authorization)
+            self.assertTrue(fixture.cleanup())
+            self.assertFalse(fixture.owner.exists())
+            self.assertEqual(sum(args[:3] == ["kind", "delete", "cluster"] for args in commands), 1)
+
+    def test_tampered_creation_authorization_cannot_delete(self):
+        with tempfile.TemporaryDirectory() as directory, self.environment(directory):
+            fixture = self.fixture(Path(directory))
+            fixture.command = mock.Mock(return_value="")
+            fixture.authorize_creation(self.source)
+            identity = json.loads(fixture.owner.read_text())
+            identity["source"] = "c" * 40
+            fixture.owner.write_text(json.dumps(identity))
+            with self.assertRaisesRegex(ValueError, "creation authorization refused"):
+                fixture.cleanup()
+            self.assertFalse(any(call.args[0][:3] == ["kind", "delete", "cluster"] for call in fixture.command.call_args_list))
+
+    def test_cleanup_without_creation_authorization_never_deletes(self):
+        with tempfile.TemporaryDirectory() as directory, self.environment(directory):
+            fixture = self.fixture(Path(directory))
+            fixture.command = mock.Mock()
+            self.assertFalse(fixture.cleanup())
+            fixture.command.assert_not_called()
+
+    def test_create_edge_refuses_collision_or_wrong_target_without_cleanup_rights(self):
+        for conflict in ("collision", "foreign-name"):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as directory, self.environment(directory):
+                fixture = self.fixture(Path(directory))
+                commands = []
+                inspections = [0]
+
+                def command(args, data=None, timeout=60):
+                    commands.append(args)
+                    if args == ["kind", "get", "clusters"]:
+                        inspections[0] += 1
+                        return self.name if conflict == "collision" and inspections[0] == 2 else ""
+                    raise AssertionError("refused create reached an effect")
+
+                fixture.command = command
+                feed = SimpleNamespace()
+
+                def create(name, scratch):
+                    target = "messaging-proof-cccccccccccc" if conflict == "foreign-name" else name
+                    feed.command(["kind", "create", "cluster", "--name", target,
+                                  "--kubeconfig", str(scratch / "kubeconfig")])
+
+                feed.create_enforcing_cluster = create
+                with mock.patch.object(proof, "load_module", return_value=feed):
+                    with self.assertRaises(ValueError):
+                        fixture.install({}, {}, {}, self.source)
+                self.assertFalse(fixture.owner.exists())
+                self.assertFalse(fixture.cleanup())
+                self.assertFalse(any(args[:3] in (["kind", "create", "cluster"], ["kind", "delete", "cluster"]) for args in commands))
+
+    def test_authorization_rejects_wrong_job_or_cluster_binding(self):
+        identity = {"schema": 1, "cluster": self.name, "source": self.source, "runID": "123",
+                    "runAttempt": "1", "creationID": "b" * 32, "creationAuthorized": True}
+        proof.validate_creation_authorization(identity, self.source, "123", "1")
+        for field, value in (("schema", True), ("cluster", "messaging-proof-cccccccccccc"),
+                             ("source", "c" * 40), ("runID", "124"), ("runAttempt", "2"),
+                             ("creationID", "c" * 32), ("creationAuthorized", False)):
+            with self.subTest(field=field):
+                changed = dict(identity, **{field: value})
+                with self.assertRaisesRegex(ValueError, "creation authorization refused"):
+                    proof.validate_creation_authorization(changed, self.source, "123", "1")
 
 
 if __name__ == "__main__":

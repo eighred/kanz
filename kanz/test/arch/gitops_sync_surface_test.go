@@ -179,13 +179,13 @@ func TestNoGitOpsExclusionOutlivesItsFile(t *testing.T) {
 // questions about the same two fields, and a second parser is a second answer
 // that drifts.
 type gitOpsSyncSource struct {
-	manifest   string   // repo-relative path of the file declaring it, for error messages
-	name       string   // metadata.name
-	paths      []string // repo-root-relative sync paths, e.g. "kanz/infra/deploy"
-	excludeRaw string   // directory.exclude verbatim, so a failure can quote the list
-	includeRaw string   // a nonempty include can silently omit ordinary manifests
-	recurse    bool
-	templatePath string
+	manifest             string   // repo-relative path of the file declaring it, for error messages
+	name                 string   // metadata.name
+	paths                []string // repo-root-relative sync paths, e.g. "kanz/infra/deploy"
+	excludeRaw           string   // directory.exclude verbatim, so a failure can quote the list
+	includeRaw           string   // a nonempty include can silently omit ordinary manifests
+	recurse              bool
+	templatePath         string
 	destinationNamespace string
 	// excluded holds slash-separated paths RELATIVE TO THE SYNC PATH. Argo CD's
 	// own documentation for directory.exclude gives `{config.yaml,env-use2/*}` as
@@ -234,15 +234,15 @@ func gitOpsSyncSources(t *testing.T, root string) []gitOpsSyncSource {
 				continue
 			}
 			sources = append(sources, gitOpsSyncSource{
-				manifest:   rel,
-				name:       doc.Metadata.Name,
-				paths:      doc.syncPaths(),
-				excludeRaw: doc.Spec.Template.Spec.Source.Directory.Exclude,
-				includeRaw: doc.Spec.Template.Spec.Source.Directory.Include,
-				recurse:    doc.Spec.Template.Spec.Source.Directory.Recurse,
-				templatePath: doc.Spec.Template.Spec.Source.Path,
+				manifest:             rel,
+				name:                 doc.Metadata.Name,
+				paths:                doc.syncPaths(),
+				excludeRaw:           doc.Spec.Template.Spec.Source.Directory.Exclude,
+				includeRaw:           doc.Spec.Template.Spec.Source.Directory.Include,
+				recurse:              doc.Spec.Template.Spec.Source.Directory.Recurse,
+				templatePath:         doc.Spec.Template.Spec.Source.Path,
 				destinationNamespace: doc.Spec.Template.Spec.Destination.Namespace,
-				excluded:   parseExcludeList(t, rel, doc.Spec.Template.Spec.Source.Directory.Exclude),
+				excluded:             parseExcludeList(t, rel, doc.Spec.Template.Spec.Source.Directory.Exclude),
 			})
 		}
 	}

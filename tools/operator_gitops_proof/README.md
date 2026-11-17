@@ -20,7 +20,9 @@ The required observations are initial sync, deletion/self-heal of one actual
 ServiceAccount, same-revision resync, revision change and rollback. Every phase
 requires the six real ServiceAccounts, six exact egress policies, SPIRE namespace
 label and complete Argo resource inventory, with zero Jobs. Rollback must remove
-the second revision's annotation. Every observation has one 120-second success
+the second revision's annotation. Explicit resync and rollback operations carry
+a fresh `operation.info` request token; a previous successful operation at the
+same revision cannot satisfy either observation. Every observation has one 120-second success
 deadline; a command that returns after it cannot establish success. Subprocess
 diagnostics are byte bounded and are not emitted.
 
@@ -34,9 +36,17 @@ python3 -B tools/operator_gitops_proof/proof.py
 
 The actual proof refuses execution outside its Linux GitHub Actions job. It
 prints a closed exact-source/case/cleanup result to stdout. The separate
-`RUNNER_TEMP/operator-gitops-owner.json` records only the generated cluster and
-source/run identity so the workflow can clean up an interrupted run. Cleanup
-must validate all four fields before deleting that single cluster. No broker
+`RUNNER_TEMP/operator-gitops-owner.json` is issued only at the actual owned Kind
+create-command edge, after the cluster name is confirmed absent. A pre-existing
+name is refused without an owner file or delete. The schema-1 record contains
+`cluster`, `source`, `runID`, `runAttempt`, a 32-hex `creationID` whose first twelve
+characters form the cluster suffix, and `creationAuthorized: true`. Both normal
+and interrupted-run cleanup must call `validate_creation_authorization` with
+the current workflow source/run/attempt before deleting that single cluster.
+Normal cleanup additionally requires the exact in-memory creation record and
+consumes the file after confirmed deletion. An ambiguous create failure retains
+the same authorization for cleanup; an absent-name preflight alone issues none.
+No broker
 execution-result receipt or raw command output is written.
 
 Passing this disposable proof does not show that a deployed Argo instance has

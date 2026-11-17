@@ -112,16 +112,34 @@ def operator_source():
     return files, resources, application, project
 
 
-def check_operation(application, revision):
+def check_operation(application, revision, token=None):
     state = application.get("status", {}).get("operationState", {})
     result = state.get("syncResult", {})
     sync = application.get("status", {}).get("sync", {})
+    if token is not None and state.get("operation", {}).get("info") != token:
+        return False
     if (application.get("operation") or not state.get("finishedAt") or
             result.get("revision") != revision or sync.get("revision") != revision):
         return False
     if state.get("phase") != "Succeeded":
         raise ValueError("exact-revision Argo operation refused")
     return sync.get("status") == "Synced"
+
+
+def validate_creation_authorization(value, source, run_id, run_attempt):
+    """A preflight collision must never manufacture a cleanup entitlement."""
+    if (type(value) is not dict or set(value) != {
+            "schema", "cluster", "source", "runID", "runAttempt", "creationID", "creationAuthorized"}
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or value["creationAuthorized"] is not True
+            or not re.fullmatch(r"[0-9a-f]{40}", source)
+            or not re.fullmatch(r"[1-9][0-9]*", run_id)
+            or not re.fullmatch(r"[1-9][0-9]*", run_attempt)
+            or value["source"] != source or value["runID"] != run_id or value["runAttempt"] != run_attempt
+            or type(value["creationID"]) is not str or not re.fullmatch(r"[0-9a-f]{32}", value["creationID"])
+            or value["cluster"] != "messaging-proof-" + value["creationID"][:12]):
+        raise ValueError("operator creation authorization refused")
+    return value
 
 
 def check_inventory(resources, accounts, policies, jobs, namespace, marker):
@@ -169,6 +187,9 @@ class Fixture:
         self.environment["KUBECONFIG"] = str(self.config)
         self.process = load_module("operator_bounded_process", "tools/gateway_policy_proof/bounded_process.py")
         self.stage = "initialization"
+        self.creation_id = name.removeprefix("messaging-proof-") + uuid.uuid4().hex[12:]
+        self.creation_authorization = None
+        self.owner = Path(os.environ["RUNNER_TEMP"]) / "operator-gitops-owner.json"
 
     def command(self, args, data=None, timeout=60):
         return self.process.run(args, cwd=ROOT, env=self.environment, data=data,
@@ -221,12 +242,39 @@ class Fixture:
             raise ValueError("operator fixture Git source exceeds bound")
         return revisions, data, items
 
-    def install(self, files, application, project):
-        self.stage = "create-disposable-cluster"
-        feed = load_module("operator_feed_cluster", "tools/feed_identity/proof.py")
-        feed.command = self.command
+    def authorize_creation(self, source):
+        if self.creation_authorization is not None:
+            raise ValueError("operator creation already authorized")
         if self.name in self.command(["kind", "get", "clusters"]).splitlines():
             raise ValueError("operator fixture refuses cluster adoption")
+        identity = {"schema": 1, "cluster": self.name, "source": source,
+                    "runID": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "creationID": self.creation_id, "creationAuthorized": True}
+        validate_creation_authorization(identity, source, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"])
+        # This intent record is issued only at the actual create-command edge.
+        # It survives a lost create response so only this job can clean up its
+        # ambiguous partial creation; an absent-name preflight alone issues none.
+        with self.owner.open("x", encoding="utf-8") as output:
+            json.dump(identity, output)
+            output.flush()
+            os.fsync(output.fileno())
+        self.creation_authorization = identity
+
+    def install(self, files, application, project, source):
+        self.stage = "create-disposable-cluster"
+        feed = load_module("operator_feed_cluster", "tools/feed_identity/proof.py")
+        if self.name in self.command(["kind", "get", "clusters"]).splitlines():
+            raise ValueError("operator fixture refuses cluster adoption")
+
+        def creation_command(args, data=None, timeout=60):
+            if args[:3] == ["kind", "create", "cluster"]:
+                if (args.count("--name") != 1 or args[args.index("--name") + 1] != self.name
+                        or args.count("--kubeconfig") != 1 or args[args.index("--kubeconfig") + 1] != str(self.config)):
+                    raise ValueError("operator create command ownership differs")
+                self.authorize_creation(source)
+            return self.command(args, data=data, timeout=timeout)
+
+        feed.command = creation_command
         feed.create_enforcing_cluster(self.name, self.scratch)
         # Reuse the reviewed Argo version, manifest digest and immutable images;
         # no broker, hook or execution-result receipt code is invoked.
@@ -278,10 +326,12 @@ class Fixture:
         return revisions
 
     def observe(self, resources, revision, marker, *, request_sync=False):
-        if request_sync:
-            self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
-                "operation": {"sync": {"revision": revision, "prune": True}}}))
         deadline = time.monotonic() + 120
+        token = None
+        if request_sync:
+            token = [{"name": "operator-gitops-request", "value": uuid.uuid4().hex}]
+            self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
+                "operation": {"info": token, "sync": {"revision": revision, "prune": True}}}), timeout=10)
 
         def observed(*args):
             remaining = deadline - time.monotonic()
@@ -291,7 +341,7 @@ class Fixture:
 
         while time.monotonic() < deadline:
             app = observed("-n", "argocd", "get", "application", APP, "-o", "json")
-            if check_operation(app, revision):
+            if check_operation(app, revision, token):
                 accounts = observed("-n", NAMESPACE, "get", "serviceaccounts", "-o", "json")["items"]
                 policies = observed("-n", NAMESPACE, "get", "networkpolicies", "-o", "json")["items"]
                 jobs = observed("-n", NAMESPACE, "get", "jobs", "-o", "json")["items"]
@@ -320,9 +370,19 @@ class Fixture:
             "spec": {"source": {"targetRevision": revision}}}))
 
     def cleanup(self):
+        if self.creation_authorization is None:
+            return False
+        identity = self.creation_authorization
+        recorded = json.loads(self.owner.read_text(encoding="utf-8"))
+        validate_creation_authorization(recorded, identity["source"], identity["runID"], identity["runAttempt"])
+        if recorded != identity or recorded["cluster"] != self.name:
+            raise ValueError("operator cleanup authorization differs from creation")
         self.command(["kind", "delete", "cluster", "--name", self.name, "--kubeconfig", str(self.config)], timeout=180)
         if self.name in self.command(["kind", "get", "clusters"]).splitlines():
             raise ValueError("owned operator cluster remains")
+        self.owner.unlink()
+        self.creation_authorization = None
+        return True
 
 
 def main():
@@ -335,14 +395,9 @@ def main():
         if not re.fullmatch(r"[0-9a-f]{40}", source) or source != os.environ["GITHUB_SHA"]:
             raise ValueError("operator source identity differs")
         report.update(source=source, tree=fixture.command(["git", "rev-parse", "HEAD^{tree}"]), cluster=fixture.name)
-        identity = {"cluster": fixture.name, "source": source, "runID": os.environ["GITHUB_RUN_ID"],
-                    "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"]}
-        owner = Path(os.environ["RUNNER_TEMP"]) / "operator-gitops-owner.json"
-        with owner.open("x", encoding="utf-8") as output:
-            json.dump(identity, output)
         try:
             files, resources, application, project = operator_source()
-            revisions = fixture.install(files, application, project)
+            revisions = fixture.install(files, application, project, source)
             for case in CASES:
                 fixture.stage = case
                 marker = "revised" if case == "revision-change" else None
@@ -363,8 +418,7 @@ def main():
                 report["command"] = command
         finally:
             try:
-                fixture.cleanup()
-                report["cleanup"] = True
+                report["cleanup"] = fixture.cleanup()
             finally:
                 print(json.dumps(report, sort_keys=True))
     if not report["passed"] or not report["cleanup"]:
