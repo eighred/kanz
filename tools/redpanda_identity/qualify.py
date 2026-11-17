@@ -21,7 +21,7 @@ REDPANDA = 'docker.redpanda.com/redpandadata/redpanda:v26.2.6@sha256:8b1076e0d61
 SAS = ('proof-bootstrap', 'proof-a', 'proof-b', 'proof-ungranted')
 CASES = (('bootstrap','proof-bootstrap','bootstrap'), ('client-a','proof-a','publish'),
          ('client-b','proof-b','publish'), ('ungranted','proof-ungranted','ungranted'),
-         ('verify','proof-bootstrap','verify'))
+         ('verify','proof-bootstrap','verify'), ('verify-after-restart','proof-bootstrap','verify'))
 
 
 # Export only these fixed strings. Build output itself can contain repository
@@ -292,11 +292,66 @@ def validate_observation(result, sa, mode, sha):
         raise ValueError('missing exact positive identity evidence')
 
 
+def broker_restart_evidence(before, after):
+    # A replacement pod would have a new emptyDir. Require the same pod and the
+    # exact previous container as Kubernetes' clean termination observation.
+    keys = {'podUID', 'containerID', 'restartCount'}
+    if (not isinstance(before, dict) or set(before) != keys
+            or not isinstance(after, dict) or set(after) != keys | {'previousContainerID', 'previousExitCode'}
+            or before.get('podUID') != after.get('podUID')
+            or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', str(before.get('podUID')))
+            or not all(re.fullmatch(r'containerd://[0-9a-f]{64}', str(row.get('containerID'))) for row in (before, after))
+            or before['containerID'] == after['containerID']
+            or type(before.get('restartCount')) is not int or before['restartCount'] != 0
+            or type(after.get('restartCount')) is not int or after['restartCount'] != 1
+            or type(after.get('previousExitCode')) is not int or after['previousExitCode'] != 0
+            or after.get('previousContainerID') != before['containerID']):
+        raise ValueError('expected one clean broker restart on the original storage')
+
+
+def restart_broker(k):
+    namespace = ('-n', 'kanz-messaging')
+    pods = json.loads(k(*namespace, 'get', 'pods', '-l', 'app=redpanda', '-o', 'json'))['items']
+    if len(pods) != 1:
+        raise ValueError('expected exactly one disposable broker pod')
+    pod = pods[0]
+    name = pod['metadata']['name']
+    if not re.fullmatch(r'redpanda-[a-z0-9]+-[a-z0-9]+', name):
+        raise ValueError('unexpected broker pod identity')
+
+    def observation(pod):
+        if pod['metadata'].get('deletionTimestamp'):
+            raise ValueError('broker pod is being replaced')
+        status, = (item for item in pod['status']['containerStatuses'] if item['name'] == 'redpanda')
+        if status.get('ready') is not True or 'running' not in status.get('state', {}):
+            raise ValueError('broker container is not ready')
+        return {'podUID': pod['metadata']['uid'], 'containerID': status['containerID'],
+                'restartCount': status['restartCount']}, status.get('lastState', {}).get('terminated', {})
+
+    before, _ = observation(pod)
+    if before['restartCount'] != 0:
+        raise ValueError('fresh broker already restarted')
+    ref = 'pod/' + name
+    k(*namespace, 'exec', ref, '-c', 'redpanda', '--', 'sh', '-ec',
+      'test "$(cat /proc/1/comm)" = redpanda && kill -TERM 1')
+    k(*namespace, 'wait', '--for=jsonpath={.status.containerStatuses[?(@.name=="redpanda")].restartCount}=1',
+      ref, '--timeout=90s')
+    k(*namespace, 'wait', '--for=condition=Ready', ref, '--timeout=90s')
+    after, terminated = observation(json.loads(k(*namespace, 'get', ref, '-o', 'json')))
+    after.update(previousContainerID=terminated.get('containerID'), previousExitCode=terminated.get('exitCode'))
+    broker_restart_evidence(before, after)
+    return {'before': before, 'after': after}
+
+
 def validate_report(evidence, sha):
     if (not re.fullmatch(r'[0-9a-f]{40}', sha) or evidence.get('sourceSHA') != sha
             or evidence.get('passed') is not True or evidence.get('cleanupPassed') is not True
             or evidence.get('developmentOnly') is not True or evidence.get('brokerImage') != REDPANDA):
         raise ValueError('missing source-bound complete qualification')
+    restart = evidence.get('brokerRestart')
+    if not isinstance(restart, dict) or set(restart) != {'before', 'after'}:
+        raise ValueError('missing broker restart evidence')
+    broker_restart_evidence(restart['before'], restart['after'])
     observations = evidence.get('observations')
     storage = evidence.get('storageObservations')
     if not isinstance(observations, list) or len(observations) != len(CASES) or not isinstance(storage, list) or len(storage) != len(CASES):
@@ -354,6 +409,9 @@ def main():
             k('-n','kanz-messaging','rollout','status','deployment/redpanda','--timeout=240s')
             for sa in SAS: apply([{'apiVersion':'v1','kind':'ServiceAccount','metadata':{'name':sa,'namespace':'kanz-services'}}])
             for case,sa,mode in CASES:
+                if case == 'verify-after-restart':
+                    evidence['stage'] = 'restart disposable broker'
+                    evidence['brokerRestart'] = restart_broker(k)
                 evidence['stage']='storage preflight '+case
                 storage = preflight_storage(k, evidence, case)
                 evidence['storageObservations'].append(dict(storage, case=case))
