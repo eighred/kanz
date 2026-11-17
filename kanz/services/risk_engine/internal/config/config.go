@@ -196,9 +196,9 @@ type Config struct {
 	// replicas, the consumer switches from the per-instance in-memory dedup
 	// window to a Redis-backed bus.Deduper so a redelivery landing on a
 	// different replica than the original is still recognized. Empty ⇒
-	// per-instance dedup (the pre-05c default). Only honored in the `redis`
-	// build; the default build ignores it (the concrete go-redis client is
-	// behind the build tag, the PARITY-04a/04h stance).
+	// per-instance dedup (the pre-05c default). Explicit selection on a binary
+	// without the redis build tag refuses startup; malformed explicit endpoints
+	// also refuse. Runtime coordination errors fail open and are observable.
 	RedisURL string
 
 	// Calibration (WIRE-01c): the in-process curve-calibration scheduler. The

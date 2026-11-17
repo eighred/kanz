@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-risk-engine-to-dedup
+  namespace: kanz-services
+spec:
+  podSelector:
+    matchLabels:
+      app: risk-engine
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: valkey-risk-dedup
+      ports:
+        - { protocol: TCP, port: 6379 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dedup-from-risk-engine
+  namespace: kanz-messaging
+spec:
+  podSelector:
+    matchLabels:
+      app: valkey-risk-dedup
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-services
+          podSelector:
+            matchLabels:
+              app: risk-engine
+      ports:
+        - { protocol: TCP, port: 6379 }

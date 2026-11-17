@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Unselected: no canonical or Tokyo kustomization imports this component.
+# Its caller must bind the qualified shared-dedup image digest separately.
+resources:
+  - secret-provider-class.yaml
+  - network-policies.yaml
+
+patches:
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: risk-engine
+      namespace: kanz-services
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: RISK_ENGINE_REDIS_URL_FILE
+          value: /run/secrets/risk-dedup/url
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: risk-dedup
+          mountPath: /run/secrets/risk-dedup
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: risk-dedup
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: risk-engine-dedup

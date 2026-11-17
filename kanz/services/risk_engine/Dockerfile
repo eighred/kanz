@@ -7,7 +7,7 @@
 # generated-not-committed (EVT-15a). The build workflow runs `buf generate`
 # first, so both trees sit side by side in the context. Build with:
 #   docker build -f kanz/services/risk_engine/Dockerfile .
-FROM ghcr.io/eighred/base/golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS build
+FROM ghcr.io/eighred/base/golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS source
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -25,6 +25,8 @@ RUN sh /usr/local/bin/go-mod-download.sh
 
 COPY schemas/gen/go/ /src/schemas/gen/go/
 COPY kanz/ ./
+
+FROM source AS build
 # CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
 # is pure Go), which is what distroless/static requires. -trimpath strips local
 # paths; -s -w drop the symbol/debug tables.
@@ -34,11 +36,24 @@ ARG VERSION=
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
       -o /out/risk-engine ./services/risk_engine/cmd/risk_engine
 
+# Selected explicitly with --target shared-dedup. A default build does not
+# compile or link go-redis. Runtime endpoint selection remains separately required.
+FROM source AS build-shared
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -tags redis -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
+      -o /out/risk-engine ./services/risk_engine/cmd/risk_engine
+
 # Distroless static: no shell, no libc, no package manager — minimal attack
 # surface. :nonroot runs as uid 65532. (Pinning by digest is a CICD-01d
 # supply-chain hardening follow-up.)
-FROM ghcr.io/eighred/base/distroless-static:nonroot
-COPY --from=build /out/risk-engine /risk-engine
+FROM ghcr.io/eighred/base/distroless-static:nonroot AS runtime
 USER nonroot:nonroot
 EXPOSE 8081
 ENTRYPOINT ["/risk-engine"]
+
+FROM runtime AS shared-dedup
+COPY --from=build-shared /out/risk-engine /risk-engine
+
+# Last stage is deliberately the redis-free image used by existing builds.
+FROM runtime AS default
+COPY --from=build /out/risk-engine /risk-engine

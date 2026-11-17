@@ -78,6 +78,11 @@ func run() int {
 		slog.Default().Error("config load failed", "err", err)
 		return 2
 	}
+	dedupCfg, err := loadDedupConfig(cfg)
+	if err != nil {
+		slog.Default().Error("dedup config rejected", "err", err)
+		return 2
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -107,6 +112,10 @@ func run() int {
 		defer cancel()
 		_ = obs.Shutdown(shutCtx)
 	}()
+	deduper, dedupCloser := newDeduper(dedupCfg, logger, obs.Registry)
+	if dedupCloser != nil {
+		defer func() { _ = dedupCloser.Close() }()
+	}
 
 	readiness := &server.Readiness{}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
@@ -149,7 +158,7 @@ func run() int {
 
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics, greekModels); err != nil {
+		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics, greekModels, deduper); err != nil {
 			logger.Error("engine stopped with error", "err", err)
 			runErr = err
 		}
@@ -192,7 +201,7 @@ func hostOrigin() string {
 // runEngine builds the ingestion→recompute→publish pipeline over the live
 // NATS spine and runs it under the graceful-shutdown lifecycle. Returns
 // when ctx is canceled (signal) or ingestion fails.
-func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics, greekModels *app.GreekModelPosture) error {
+func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics, greekModels *app.GreekModelPosture, deduper bus.Deduper) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	bondShadow, err := newBondShadow(ctx, cfg, obs.Registry)
 	if err != nil {
@@ -655,13 +664,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		a.Checkpoint = snap.Checkpoint
 	}
 
-	// PARITY-05c: under N replicas, switch cross-pod dedup to the shared Redis
-	// store when configured (redis build + RISK_ENGINE_REDIS_URL); otherwise the
-	// per-instance in-memory window stands. nil Deduper is ignored by WithDeduper.
-	deduper, dedupCloser := newDeduper(cfg, logger)
-	if dedupCloser != nil {
-		a.Closers = append(a.Closers, dedupCloser)
-	}
+	// The process owns the optional shared client through shutdown. nil retains
+	// the per-instance window. Both modes still require idempotent handlers.
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDeduper(deduper), bus.WithDLQ(client))
 	if err != nil {
 		return err
