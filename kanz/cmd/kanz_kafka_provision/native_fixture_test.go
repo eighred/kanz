@@ -487,7 +487,15 @@ func nativeBrokerView(brokers []kafka.Broker, mode string) (bool, error) {
 	}
 }
 
-func nativeProduce(ctx context.Context, c *kafka.Client, topic, value string) error {
+type nativeProducer interface {
+	Produce(context.Context, *kafka.ProduceRequest) (*kafka.ProduceResponse, error)
+}
+
+type nativeFetchReader interface {
+	Fetch(context.Context, *kafka.FetchRequest) (*kafka.FetchResponse, error)
+}
+
+func nativeProduce(ctx context.Context, c nativeProducer, topic, value string) error {
 	r, e := c.Produce(ctx, &kafka.ProduceRequest{Topic: topic, Partition: 0, RequiredAcks: kafka.RequireAll, Records: kafka.NewRecordReader(kafka.Record{Value: kafka.NewBytes([]byte(value))})})
 	if e != nil {
 		return e
@@ -497,7 +505,7 @@ func nativeProduce(ctx context.Context, c *kafka.Client, topic, value string) er
 	}
 	return r.Error
 }
-func nativeReadContains(ctx context.Context, c *kafka.Client, topic, value string) error {
+func nativeReadContains(ctx context.Context, c nativeFetchReader, topic, value string) error {
 	r, e := c.Fetch(ctx, &kafka.FetchRequest{Topic: topic, Partition: 0, Offset: 0, MinBytes: 1, MaxBytes: 8192, MaxWait: time.Second})
 	if e != nil {
 		return e
@@ -532,6 +540,94 @@ func nativeReadContains(ctx context.Context, c *kafka.Client, topic, value strin
 		return provision.ErrMissing
 	}
 	return nil
+}
+
+// Cached metadata can name a leader before that broker accepts partition
+// traffic. Only read-only leader transitions may be retried here. An empty
+// successful fetch proves readiness, never that the later sentinel was stored.
+func nativePartialFetchReady(ctx context.Context, c nativeFetchReader, topic string) error {
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := func() (err error) {
+			r, err := c.Fetch(ctx, &kafka.FetchRequest{Topic: topic, Partition: 0, Offset: 0, MinBytes: 1, MaxBytes: 8192, MaxWait: time.Second})
+			if r != nil {
+				if closer, ok := r.Records.(io.Closer); ok {
+					defer func() {
+						if closeErr := closer.Close(); closeErr != nil {
+							err = errors.Join(err, provision.ErrBroker, closeErr)
+						}
+					}()
+				}
+				if r.Topic != topic || r.Partition != 0 {
+					return provision.ErrConflict
+				}
+			}
+			if err != nil {
+				return err
+			}
+			if r == nil {
+				return provision.ErrBroker
+			}
+			if r.Error != nil {
+				return r.Error
+			}
+			if r.Records == nil {
+				return provision.ErrBroker
+			}
+			record, readErr := r.Records.ReadRecord()
+			if record != nil {
+				for _, field := range []kafka.Bytes{record.Key, record.Value} {
+					if field != nil {
+						defer func() {
+							if closeErr := field.Close(); closeErr != nil {
+								err = errors.Join(err, provision.ErrBroker, closeErr)
+							}
+						}()
+					}
+				}
+				return provision.ErrConflict // this newly-created topic must be empty
+			}
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			if readErr == nil {
+				return provision.ErrBroker
+			}
+			return readErr
+		}()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			return nil
+		}
+		var code kafka.Error
+		if errors.Is(err, provision.ErrBroker) || !errors.As(err, &code) || (code != kafka.NotLeaderForPartition && code != kafka.LeaderNotAvailable) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+type nativePartialTraffic interface {
+	nativeFetchReader
+	nativeProducer
+}
+
+func nativePartialProduce(ctx context.Context, c nativePartialTraffic, topic string, diagnostic *nativeDiagnostic) error {
+	if err := nativePartialFetchReady(ctx, c, topic); err != nil {
+		return err
+	}
+	diagnostic.Phase = "partial-produce"
+	return nativeProduce(ctx, c, topic, "preserved-partial-history")
 }
 func nativeDeniedTopic(ctx context.Context, config *tls.Config, topic string) error {
 	for _, write := range []bool{true, false} {
@@ -702,8 +798,7 @@ func nativePartial(ctx context.Context, c *kafka.Client, cluster string, diagnos
 		case <-ticker.C:
 		}
 	}
-	diagnostic.Phase = "partial-produce"
-	if e = nativeProduce(ctx, c, p.Topics[0].Name, "preserved-partial-history"); e != nil {
+	if e = nativePartialProduce(ctx, c, p.Topics[0].Name, diagnostic); e != nil {
 		return e
 	}
 	diagnostic.Phase = "partial-reapply"
