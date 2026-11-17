@@ -95,6 +95,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	// and the caller must keep it that way.
 	reg.MustRegister(m.recomputeTotal, m.recomputeDuration, m.emitSkipped, m.awaitingEmit,
 		m.recomputeInflight, m.recomputeQueueDepth)
+	// These are the complete status values emitted by observeRecompute. A
+	// registered CounterVec alone exposes neither zero before the first event.
+	for _, status := range []string{"ok", "error"} {
+		m.recomputeTotal.WithLabelValues(status)
+	}
 	return m
 }
 

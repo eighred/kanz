@@ -13,6 +13,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/risk_engine/internal/app"
 )
 
 // THE COMPOSITION ROOT'S OWN WIRING, ASSERTED (#1037).
@@ -44,7 +45,8 @@ func TestNewMeasurePublisher_TheAnnouncedModelReachesTheGauge(t *testing.T) {
 		t.Fatalf("NewProducer: %v", err)
 	}
 
-	publisher, methods, err := newMeasurePublisher(producer, reg)
+	methods := app.NewMeasureMethodPosture(reg)
+	publisher, err := newMeasurePublisher(producer, methods)
 	if err != nil {
 		t.Fatalf("newMeasurePublisher: %v", err)
 	}

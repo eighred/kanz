@@ -107,6 +107,12 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	// Registration precedes both HTTP serving and the broker branch. Startup
+	// configuration, a wired registry and measured capability are separate facts.
+	riskMetrics := engine.NewMetrics(obs.Registry)
+	greekModels := app.NewGreekModelPosture(obs.Registry)
+	postures := newStartupPostures(obs.Registry, cfg.Source, cfg.NATSURL != "")
+
 	readiness := &server.Readiness{}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
@@ -117,38 +123,9 @@ func run() int {
 		}
 	}()
 
-	// THE RISK COLLECTORS ARE REGISTERED BEFORE THE BROKER BRANCH, AND THAT IS THE
-	// POINT (#1050). They used to be built inside runEngine, which only runs when
-	// RISK_ENGINE_NATS_URL is set — so a broker-less deployment exported NO
-	// kanz_risk_recompute_* series at all, and every rule written over them was
-	// silent on the one deployment that consumes nothing and computes nothing
-	// while its probes stay green. That is the `if producer != nil` shape that has
-	// already silenced two alerting layers on this estate (#973, #963).
-	//
-	// Registered here, ABSENCE means a registration defect or a scrape that is not
-	// reaching these pods, and ZERO means deployed-and-idle — two different
-	// readings that an absent series collapses into one. The broker-less case
-	// still announces itself, loudly, in the WARN below.
-	riskMetrics := engine.NewMetrics(obs.Registry)
-
-	// AND SO IS THE GREEK POSTURE, FOR THE SAME REASON AND ONE STEP FURTHER
-	// (#1055). Delta is registered in compute.DefaultRegistry and answers with the
-	// portfolio's net exposure on EVERY deployment — compute.RegisterGreeks, the
-	// only thing that overwrites it, has no production caller anywhere — so since
-	// #1037 the OMS gate refuses to fold it and a mandate naming Delta refuses
-	// every order. That is a live change in admission behaviour and nothing
-	// announced it.
-	//
-	// Registered HERE rather than beside MeasurePosture, which is inside runEngine
-	// and therefore behind cfg.NATSURL: the broker-less pod exports no
-	// kanz_risk_measure_live and no kanz_risk_measure_method at all, so an alert
-	// over either is silent on it. This series exists on every pod that starts.
-	// State fills it in with the final registry once there is one.
-	greekModels := app.NewGreekModelPosture(obs.Registry)
-
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics, greekModels); err != nil {
+		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics, greekModels, postures); err != nil {
 			logger.Error("engine stopped with error", "err", err)
 			runErr = err
 		}
@@ -191,8 +168,8 @@ func hostOrigin() string {
 // runEngine builds the ingestion→recompute→publish pipeline over the live
 // NATS spine and runs it under the graceful-shutdown lifecycle. Returns
 // when ctx is canceled (signal) or ingestion fails.
-func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics, greekModels *app.GreekModelPosture) error {
-	busMetrics := bus.NewBusMetrics(obs.Registry)
+func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics, greekModels *app.GreekModelPosture, postures *startupPostures) error {
+	busMetrics := postures.bus
 	bondShadow, err := newBondShadow(ctx, cfg, obs.Registry)
 	if err != nil {
 		return err
@@ -250,8 +227,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	if err != nil {
 		return err
 	}
-	// Publisher + the which-model-did-it-announce gauge; measurepublish.go (#1037).
-	publisher, measureMethods, err := newMeasurePublisher(producer, obs.Registry)
+	// Attach the observer already visible in startup metrics (#1037, #1064).
+	publisher, err := newMeasurePublisher(producer, postures.methods)
 	if err != nil {
 		return err
 	}
@@ -544,12 +521,9 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	// WHAT THIS ENGINE SERVES, WHAT SERVES IT, AND WHETHER ANY OF IT IS A MODEL —
-	// three postures over the SAME final registry, stated the instant it is final.
-	// They live in measureposture.go beside this file: the ratchet on this function
-	// refused the third one (#1055), the way it refused #713's and #1007's wiring
-	// on the OMS side, so the wiring moved rather than the budget going up.
-	stateMeasurePostures(obs.Registry, logger, registry, measureMethods, greekModels)
+	// State the final registry shared by queries and recomputes. Registration
+	// happened before startup could take the broker-less branch (#1064).
+	stateMeasurePostures(logger, registry, postures, greekModels)
 	// THE AI LAYER GETS ITS INPUT (AI-M1).
 	//
 	// internal/prediction shipped a feature publisher, a resilient inference client and a

@@ -30,7 +30,8 @@ type BusMetrics struct {
 	// connection, 0 while it does not (#636). Until it existed, losing NATS was
 	// SILENT in twenty of twenty-one services — MaxReconnects defaults to -1, so
 	// the client buffers and heals forever and nothing upstream ever learns.
-	connected *prometheus.GaugeVec // client
+	connected  *prometheus.GaugeVec // client
+	configured *prometheus.GaugeVec // client — configuration, not connectivity
 	// connectionEvents counts the transitions, and it is NOT redundant with the
 	// gauge. scrape_interval is 30s: a spine that drops and recovers inside one
 	// interval leaves the gauge reading 1 at every scrape, so flapping — the
@@ -177,6 +178,10 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 			Name: "kanz_bus_connected",
 			Help: "1 while this client holds a live NATS connection, 0 while it does not.",
 		}, []string{"client"}),
+		configured: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kanz_bus_configured",
+			Help: "1 when this client has a broker configured, 0 when no broker was configured. Does not assert connectivity or backlog health.",
+		}, []string{"client"}),
 		connectionEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kanz_bus_connection_events_total",
 			Help: "NATS connection transitions, by client and event (disconnected|reconnected|closed).",
@@ -192,9 +197,27 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 		m.dlqParked, m.dlqRedrive,
 		m.consumerLag, m.pending,
 		m.backlogPollFailures, m.backlogPollSuccess,
-		m.connected, m.connectionEvents, m.consumeErrors,
+		m.connected, m.configured, m.connectionEvents, m.consumeErrors,
 	)
 	return m
+}
+
+// ConfigureClient declares startup configuration before a dial is attempted.
+// Touching the finite transition labels does not invent a connection event.
+// Backlog gauges remain absent until a poll obtains an actual broker answer.
+func (m *BusMetrics) ConfigureClient(client string, configured bool) {
+	if m == nil {
+		return
+	}
+	value := 0.0
+	if configured {
+		value = 1
+	}
+	m.configured.WithLabelValues(client).Set(value)
+	m.connected.WithLabelValues(client)
+	for _, event := range []string{"disconnected", "reconnected", "closed"} {
+		m.connectionEvents.WithLabelValues(client, event)
+	}
 }
 
 // setConnected records the connection state and the transition that produced it.
