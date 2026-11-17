@@ -225,7 +225,7 @@ func (p *Postgres) Record(ctx context.Context, plan Plan) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	scope := filing.PublicationScope{Tenant: plan.Tenant, Portfolio: plan.Portfolio, ReportID: id.String(), InputDigest: plan.InputDigest, AsOf: plan.AsOf, RecordedAt: time.Now().UTC()}
+	scope := filing.PublicationScope{Tenant: plan.Tenant, Portfolio: plan.Portfolio, ReportID: id.String(), InputDigest: plan.InputDigest, AsOf: plan.AsOf, RecordedAt: recordingTime(time.Now())}
 	signing := &transactionSigner{ctx: ctx, tx: tx, links: p.links, kind: p.signatureKind}
 	body, output, err := plan.Build(scope, signing)
 	if err != nil {
@@ -309,6 +309,11 @@ func (p *Postgres) Record(ctx context.Context, plan Plan) ([]byte, error) {
 	}
 	return p.flush(ctx, plan, response)
 }
+
+// recordingTime fixes the single sampled observation to the durable outbox's
+// PostgreSQL microsecond precision before signing or storing any representation.
+// Effective AsOf is supplied independently and is never normalized here.
+func recordingTime(sample time.Time) time.Time { return sample.UTC().Truncate(time.Microsecond) }
 
 func validateRetained(artifact []byte, hash, previous string, witness []byte) (*regulatorypb.FilingRecorded, error) {
 	retained := new(regulatorypb.FilingRecorded)

@@ -244,8 +244,16 @@ func FromWire(report *regulatorypb.RegReport) (filing.Report, error) {
 		if !valid || line.Value == nil {
 			return filing.Report{}, errors.New("regulatory publication: invalid filed decimal")
 		}
+		item := filing.LineItem{Code: line.Code, Label: line.Label, Value: value}
+		// The wire must carry the value actually filed, not extra precision
+		// hidden by Canonical's rendering. Compare rationals, not encodings.
+		projected, err := filing.FiledDecimal(item)
+		filed, exact := dec.FromProtoChecked(projected)
+		if err != nil || !exact || value.Cmp(filed) != 0 {
+			return filing.Report{}, errors.New("regulatory publication: wire value differs from the filed decimal")
+		}
 		seen[line.Code] = true
-		out.LineItems = append(out.LineItems, filing.LineItem{Code: line.Code, Label: line.Label, Value: value})
+		out.LineItems = append(out.LineItems, item)
 	}
 	expected, err := Report(out, report.ReportId, nil)
 	if err != nil || !proto.Equal(expected.GetCapitalCharge(), report.CapitalCharge) {

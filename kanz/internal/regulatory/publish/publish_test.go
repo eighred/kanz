@@ -18,6 +18,7 @@ import (
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/regulatory"
 	riskv1 "github.com/eighred/kanz/internal/risk/api/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	regulatorypb "github.com/eighred/kanz/kanz-schemas-go/regulatory/v1"
 	sustainabilitypb "github.com/eighred/kanz/kanz-schemas-go/sustainability/v1"
@@ -188,17 +189,52 @@ func TestPublishRegulatorySignedArtifactReachesTheBroker(t *testing.T) {
 		if mismatch {
 			wantTotal = "15.00000001"
 		}
-		want, ok := dec.ParseProtoExact(wantTotal)
-		if !ok || len(observed.Body.Report.LineItems) != 6 || charge == nil || !proto.Equal(charge.Total, want) || (!mismatch && len(charge.Components) != 5) || (mismatch && len(charge.Components) != 0) {
+		// Literal economic/filed oracles: do not obtain expected values from
+		// Report or FromWire, which are both part of the producer under test.
+		wantRows := map[string]string{"FRTB_DELTA": "1", "FRTB_VEGA": "2", "FRTB_CURVATURE": "3", "FRTB_DRC": "4", "FRTB_RRAO": "5", "FRTB_TOTAL": wantTotal}
+		want, valid := new(big.Rat).SetString(wantTotal)
+		if !valid || len(observed.Body.Report.LineItems) != len(wantRows) || charge == nil || charge.Framework != regulatorypb.Framework_FRAMEWORK_FRTB || (!mismatch && len(charge.Components) != 5) || (mismatch && len(charge.Components) != 0) {
 			t.Fatal("FRTB capital projection invented a residual or lost filed rows")
 		}
+		actualTotal, valid := dec.FromProtoChecked(charge.Total)
+		if !valid || charge.Total == nil || actualTotal.Cmp(want) != 0 {
+			t.Fatal("FRTB capital total differs from its literal filed value")
+		}
+		seenRows := make(map[string]bool)
 		for _, line := range observed.Body.Report.LineItems {
-			if line.Code != "FRTB_TOTAL" {
-				value, ok := dec.FromProtoChecked(line.Value)
-				if !ok || !value.IsInt() {
-					t.Fatal("FRTB independently rounded row changed")
-				}
+			if line == nil {
+				t.Fatal("FRTB literal row missing")
 			}
+			text, present := wantRows[line.Code]
+			expected, ok := new(big.Rat).SetString(text)
+			value, valid := dec.FromProtoChecked(line.Value)
+			if !present || seenRows[line.Code] || !ok || !valid || line.Value == nil || value.Cmp(expected) != 0 {
+				t.Fatal("FRTB code-to-filed-value mapping differs from literal oracle")
+			}
+			seenRows[line.Code] = true
+		}
+		seenComponents := make(map[string]bool)
+		componentSum := new(big.Rat)
+		for _, component := range charge.Components {
+			if component == nil || component.Name == "FRTB_TOTAL" {
+				t.Fatal("FRTB capital component name invalid")
+			}
+			text, present := wantRows[component.Name]
+			expected, ok := new(big.Rat).SetString(text)
+			amount, valid := dec.FromProtoChecked(component.Amount)
+			if !present || seenComponents[component.Name] || !ok || !valid || component.Amount == nil || amount.Cmp(expected) != 0 {
+				t.Fatal("FRTB component-name-to-amount mapping differs from literal oracle")
+			}
+			seenComponents[component.Name] = true
+			componentSum.Add(componentSum, amount)
+		}
+		if !mismatch && componentSum.Cmp(big.NewRat(15, 1)) != 0 {
+			t.Fatal("FRTB literal component sum changed")
+		}
+		canonical := []byte("FRTB\n2026-06-30T00:00:00Z\nFRTB_CURVATURE=3\nFRTB_DELTA=1\nFRTB_DRC=4\nFRTB_RRAO=5\nFRTB_TOTAL=" + wantTotal + "\nFRTB_VEGA=2\n")
+		signature := sha256.Sum256(canonical)
+		if !bytes.Equal(observed.Body.FilingCanonical, canonical) || observed.Body.Report.Signature != hex.EncodeToString(signature[:]) {
+			t.Fatal("FRTB signed canonical artifact differs from literal filed rows")
 		}
 	}
 }
@@ -299,4 +335,75 @@ func TestPublishRegulatoryRejectsAlteredContextAndSignature(t *testing.T) {
 			}
 		})
 	}
+	t.Run("surplus-sub-filing-scale-digits", func(t *testing.T) {
+		record := syntheticRecord(t)
+		original, err := FromWire(record.Body.Report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := 0
+		for i, line := range record.Body.Report.LineItems {
+			if line.Code == "FORM_PF_GROSS_NAV" {
+				line.Value = &commonpb.Decimal{Coefficient: 1000000000001, Exponent: -9}
+				original.LineItems[i].Value = big.NewRat(1000000000001, 1000000000)
+				changed++
+			}
+		}
+		if changed != 1 || !bytes.Equal(original.Canonical(), record.Body.FilingCanonical) {
+			t.Fatal("surplus-digit control did not preserve the original rendered canonical artifact")
+		}
+		if _, err := FromWire(record.Body.Report); err == nil {
+			t.Fatal("wire retained digits that the original filed signature does not describe")
+		}
+		// Build a mathematically consistent witness independently of the typed
+		// validator. Refusal must come from the filed-value invariant, not merely
+		// from leaving an obsolete context hash on an otherwise changed body.
+		full, err := (proto.MarshalOptions{Deterministic: true}).Marshal(record.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(full)
+		witness := make([]byte, len(bindingDomain)+8+sha256.Size)
+		copy(witness, bindingDomain)
+		binary.BigEndian.PutUint64(witness[len(bindingDomain):], uint64(len(full)))
+		copy(witness[len(bindingDomain)+8:], digest[:])
+		link := signer.Link{Prev: chain.Genesis, Cur: chain.Next(chain.Genesis, witness), Body: witness}
+		if _, err := Recorded(record.Body, link); err == nil {
+			t.Fatal("consistent context witness admitted surplus unfiled digits")
+		}
+		record.BindingPrevHash, record.BindingHash = link.Prev, link.Cur
+		if _, err := Event(record); err == nil {
+			t.Fatal("event admitted surplus unfiled digits despite a consistent witness")
+		}
+	})
+	t.Run("equivalent-decimal-encoding", func(t *testing.T) {
+		record := syntheticRecord(t)
+		originalSignature := record.Body.Report.Signature
+		changed := 0
+		for _, line := range record.Body.Report.LineItems {
+			if line.Code == "FORM_PF_GROSS_NAV" {
+				equivalent := &commonpb.Decimal{Coefficient: 10000, Exponent: -1}
+				if proto.Equal(line.Value, equivalent) {
+					t.Fatal("equivalent-encoding control did not change coefficient/exponent representation")
+				}
+				line.Value = equivalent
+				changed++
+			}
+		}
+		decoded, err := FromWire(record.Body.Report)
+		if changed != 1 || err != nil || !bytes.Equal(decoded.Canonical(), record.Body.FilingCanonical) {
+			t.Fatal("equivalent exact filed value was refused or changed its canonical rendering")
+		}
+		witness, err := BindingCanonical(record.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound, err := Recorded(record.Body, signer.Link{Prev: chain.Genesis, Cur: chain.Next(chain.Genesis, witness), Body: witness})
+		if err != nil || bound.Body.Report.Signature != originalSignature {
+			t.Fatal("equivalent encoding changed the original signature or could not be recorded")
+		}
+		if _, err := Event(bound); err != nil {
+			t.Fatal("equivalent exact encoding could not be published")
+		}
+	})
 }

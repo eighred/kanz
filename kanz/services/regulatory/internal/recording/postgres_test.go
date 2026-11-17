@@ -274,6 +274,7 @@ func TestPublishRegulatoryAtomicRestartAndBrokerDedup(t *testing.T) {
 	p := f.recorder(t, "acme", "chain", fault)
 	var calls atomic.Int32
 	plan := formPlan(t, "acme", &calls)
+	plan.AsOf = plan.AsOf.Add(123 * time.Nanosecond)
 	if _, err := p.Record(f.ctx, plan); !errors.Is(err, recording.ErrUnpublished) {
 		t.Fatalf("expected committed/pending response: %v", err)
 	}
@@ -322,6 +323,22 @@ func TestPublishRegulatoryAtomicRestartAndBrokerDedup(t *testing.T) {
 	}
 	if observed.Body.SignatureKind != regulatorypb.FilingSignatureKind_FILING_SIGNATURE_KIND_AUDIT_CHAIN || chain.Next(observed.Body.FilingPrevHash, observed.Body.FilingCanonical) != observed.Body.Report.Signature || observed.BindingPrevHash != observed.Body.Report.Signature || envelope.EventId != observed.Body.Report.ReportId || envelope.TenantId != "acme" {
 		t.Fatal("original/context chain or published identity changed")
+	}
+	var storedTime time.Time
+	var storedArtifact []byte
+	if err := f.pool.QueryRow(f.ctx, `SELECT o.event_time,a.artifact FROM outbox o JOIN regulatory_filing_artifacts a ON a.tenant_id=o.tenant_id AND a.report_id::text=o.correlation_id WHERE a.report_id=$1 AND o.event_type=$2`, observed.Body.Report.ReportId, regulatorypublish.RecordedSubject).Scan(&storedTime, &storedArtifact); err != nil {
+		t.Fatal("recording timestamp custody query failed")
+	}
+	var retained regulatorypb.FilingRecorded
+	var served struct {
+		RecordedAt time.Time `json:"recorded_at"`
+	}
+	if proto.Unmarshal(storedArtifact, &retained) != nil || !proto.Equal(&retained, &observed) || json.Unmarshal(response, &served) != nil {
+		t.Fatal("recording timestamp representations could not be joined")
+	}
+	recordedAt := observed.Body.RecordedAt.AsTime()
+	if recordedAt.Nanosecond()%1000 != 0 || !storedTime.Equal(recordedAt) || !envelope.EventTime.AsTime().Equal(recordedAt) || !served.RecordedAt.Equal(recordedAt) || !observed.Body.Report.AsOf.AsTime().Equal(plan.AsOf) {
+		t.Fatal("artifact, actual outbox, response and envelope recording times diverged or effective time changed")
 	}
 	previousBinding := observed.BindingHash
 	plan.AsOf = plan.AsOf.Add(24 * time.Hour)
