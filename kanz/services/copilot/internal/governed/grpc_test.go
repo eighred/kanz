@@ -44,6 +44,11 @@ func (f fakeQuery) Health(context.Context, *querypb.HealthRequest, ...grpc.CallO
 	return &querypb.HealthResponse{}, nil
 }
 
+// No copilot tool acquires this additive RPC through interface conformance.
+func (f fakeQuery) DecomposeRisk(context.Context, *querypb.DecomposeRiskRequest, ...grpc.CallOption) (*querypb.DecomposeRiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "decomposition is not part of this copilot fixture")
+}
+
 func dec(coeff int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}
 }

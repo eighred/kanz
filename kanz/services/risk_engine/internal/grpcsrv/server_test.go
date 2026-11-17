@@ -22,11 +22,19 @@ import (
 // fakeEngine is a hand-rolled v1.Engine returning the concrete domain types
 // the real engine produces, so the adapter's type-asserts + converters run.
 type fakeEngine struct {
-	exposure func(v1.ExposureRequest) (v1.ExposureResponse, error)
-	measures func(v1.MeasuresRequest) (v1.MeasuresResponse, error)
-	scenario func(v1.ScenarioRequest) (v1.ScenarioResponse, error)
-	health   func() (v1.Health, error)
-	list     func() ([]v1.PortfolioSummary, error)
+	decompose func(v1.DecomposeRiskRequest) (v1.DecomposeRiskResponse, error)
+	exposure  func(v1.ExposureRequest) (v1.ExposureResponse, error)
+	measures  func(v1.MeasuresRequest) (v1.MeasuresResponse, error)
+	scenario  func(v1.ScenarioRequest) (v1.ScenarioResponse, error)
+	health    func() (v1.Health, error)
+	list      func() ([]v1.PortfolioSummary, error)
+}
+
+func (f fakeEngine) DecomposeRisk(_ context.Context, r v1.DecomposeRiskRequest) (v1.DecomposeRiskResponse, error) {
+	if f.decompose == nil {
+		return v1.DecomposeRiskResponse{}, v1.ErrDecompositionUnavailable
+	}
+	return f.decompose(r)
 }
 
 func (f fakeEngine) Exposure(_ context.Context, r v1.ExposureRequest) (v1.ExposureResponse, error) {

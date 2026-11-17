@@ -51,14 +51,15 @@ import (
 // Store, Cache, and Detector are each concurrency-safe, and the
 // Registry is immutable after construction.
 type EngineImpl struct {
-	store      *state.Store
-	registry   *compute.Registry
-	cache      *risk.Cache
-	detector   *risk.Detector
-	volModel   compute.VolModel
-	classifier factor.Classifier
-	ownership  Ownership
-	evaluator  Evaluator
+	store       *state.Store
+	registry    *compute.Registry
+	cache       *risk.Cache
+	detector    *risk.Detector
+	volModel    compute.VolModel
+	classifier  factor.Classifier
+	ownership   Ownership
+	evaluator   Evaluator
+	factorModel compute.ModelProvider
 }
 
 // Ownership is the query side of the shard ring (#110): which portfolios may

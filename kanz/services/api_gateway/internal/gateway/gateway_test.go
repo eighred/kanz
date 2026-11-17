@@ -101,6 +101,11 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 	return f.healthResp, f.err
 }
 
+// Existing gateway routes do not expose the additive decomposition RPC.
+func (f *fakeClient) DecomposeRisk(context.Context, *querypb.DecomposeRiskRequest, ...grpc.CallOption) (*querypb.DecomposeRiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "decomposition is not part of this gateway fixture")
+}
+
 // serve mounts the risk routes on the real capability router (SEC-M2) and authenticates in
 // front of it, as middleware.Auth does in production — the router runs INSIDE the auth
 // middleware, so a principal is always on ctx by the time a route is reached. These tests are

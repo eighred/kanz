@@ -39,7 +39,6 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/engine"
-	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/liquiditysource"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/pricing/livequote"
@@ -280,6 +279,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// used by queries and recomputes; it creates no domain state or FACT.
 	registerPortfolioInventory(obs.Registry, store)
 	registry := compute.DefaultRegistry()
+	var factorModel compute.ModelProvider
 	// RISK-12: with a market-data price store configured, override the RISK-07
 	// 1%×gross VaR99 placeholder with the real historical-simulation model, read
 	// point-in-time-correct off the shared price history (MODEL-01b) the
@@ -428,25 +428,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		if err != nil {
 			return err
 		}
-		modelProvider := compute.NewLiveModelProvider(
-			// STATISTICAL, EXPLICITLY, and the explicitness is the point: the zero
-			// value of factormodel.ModelType is FUNDAMENTAL, which needs a
-			// CharacteristicProvider this deployment does not have — so an
-			// omitted Type would select the one model that cannot fit, and every
-			// factor measure would report zero for a reason nothing states.
-			//
-			// PCA over the return covariance needs only returns, which is why it
-			// is the model that can be wired today. Fundamental and Blend become
-			// reachable through compute.NewStoreCharacteristicProvider (it derives
-			// momentum and volatility from this same returns provider); its
-			// industry factor additionally needs a sector classifier, whose
-			// production source is not built.
-			factormodel.Config{Type: factormodel.Statistical},
-			universe,
-			factormodel.Providers{Returns: provider},
-			// Fit daily, and record each instance; modelrecord.go (#1039).
-			artifacts.FitOptions()...,
-		)
+		modelProvider := newFactorModelProvider(universe, provider, artifacts)
+		factorModel = modelProvider
 		compute.RegisterFactorRisk(context.Background(), registry, compute.FactorProviders{
 			Model: replay.Models{Source: modelProvider},
 			// COUNTED BY REASON, NOT BY INSTRUMENT — one series per instrument
@@ -853,6 +836,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		}
 		cfg.RefData.LogPosture(logger, "risk-engine")
 		engineOpts := sharding.EngineOptions()
+		engineOpts = append(engineOpts, engine.WithFactorModel(replay.Models{Source: factorModel}))
 		if refCache != nil {
 			engineOpts = append(engineOpts, engine.WithClassifier(app.NewFactorClassifier(refCache)))
 			// The refresh cycle. It exits on ctx.Done like the calibration
