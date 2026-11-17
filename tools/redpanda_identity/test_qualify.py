@@ -138,7 +138,9 @@ class QualificationTests(unittest.TestCase):
                       lastState={'terminated': {'containerID': old, 'exitCode': 0}})
 
         def pod(meta, state):
-            return {'metadata': meta, 'status': {'containerStatuses': [state]}}
+            return {'metadata': meta, 'status': {'containerStatuses': [state]},
+                    'spec': {'serviceAccountName': 'redpanda', 'containers': [{'name': 'redpanda',
+                              'image': qualify.REDPANDA, 'command': ['/opt/redpanda/bin/redpanda']}]}}
 
         def fixture(metadata, state):
             return Mock(side_effect=[json.dumps({'items': [pod(meta, first)]}), '', '', '',
@@ -163,6 +165,13 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qualify.restart_broker(preexisting)
         preexisting.assert_called_once()
+        for field in ('hostPID', 'shareProcessNamespace'):
+            wrong = pod(meta, first)
+            wrong['spec'][field] = True
+            client = Mock(return_value=json.dumps({'items': [wrong]}))
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                qualify.restart_broker(client)
+            client.assert_called_once()
 
     def test_exact_subjects_are_distinct_and_bounded(self):
         values=[qualify.subject(sa) for sa in qualify.SAS]

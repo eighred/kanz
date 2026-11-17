@@ -328,12 +328,18 @@ def restart_broker(k):
         return {'podUID': pod['metadata']['uid'], 'containerID': status['containerID'],
                 'restartCount': status['restartCount']}, status.get('lastState', {}).get('terminated', {})
 
+    spec = pod['spec']
+    container, = (item for item in spec['containers'] if item['name'] == 'redpanda')
+    if (spec.get('hostPID', False) is not False or spec.get('shareProcessNamespace', False) is not False
+            or spec.get('serviceAccountName') != 'redpanda' or container['image'] != REDPANDA
+            or container['command'] != ['/opt/redpanda/bin/redpanda']):
+        raise ValueError('unexpected broker process namespace or executable')
     before, _ = observation(pod)
     if before['restartCount'] != 0:
         raise ValueError('fresh broker already restarted')
     ref = 'pod/' + name
     k(*namespace, 'exec', ref, '-c', 'redpanda', '--', 'sh', '-ec',
-      'test "$(cat /proc/1/comm)" = redpanda && kill -TERM 1')
+      'kill -TERM 1')
     k(*namespace, 'wait', '--for=jsonpath={.status.containerStatuses[?(@.name=="redpanda")].restartCount}=1',
       ref, '--timeout=90s')
     k(*namespace, 'wait', '--for=condition=Ready', ref, '--timeout=90s')
