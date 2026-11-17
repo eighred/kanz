@@ -264,6 +264,7 @@ func (c *Consumer) subscribeDelivery(ctx context.Context, subject, group string,
 		// or Release it, or the event is stranded until the lease expires.
 		key := dispatchDedupKey(subject, group, env.TenantId, env.IdempotencyKey)
 		if !c.dedup.Claim(key) {
+			c.metrics.observeDedupSuppression(subject, group)
 			return nil // duplicate within window — ack and skip (not a dispatch)
 		}
 		attemptHandler := h

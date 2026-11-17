@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -75,8 +77,10 @@ func TestConsumerDedupSharesOnlyTheSameReplicaDispatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	shared := bus.NewRedisDedup(newFakeRedis(), time.Minute)
+	reg := prometheus.NewRegistry()
+	metrics := bus.NewBusMetrics(reg)
 	newConsumer := func() *bus.Consumer {
-		c, err := bus.NewConsumer(&oneShotSub{msg: frameKey(t, "concurrent-fact")}, bus.WithDeduper(shared))
+		c, err := bus.NewConsumer(&oneShotSub{msg: frameKey(t, "concurrent-fact")}, bus.WithDeduper(shared), bus.WithBusMetrics(metrics))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,6 +128,13 @@ func TestConsumerDedupSharesOnlyTheSameReplicaDispatch(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatal("completed same-group dispatch was not shared across replicas")
+	}
+	const counter = "kanz_bus_dedup_suppressed_total"
+	if got, _ := counterByLabels(t, reg, counter, map[string]string{"subject": "execution.fill", "group": "position"}); got != 2 {
+		t.Errorf("in-flight and completed duplicate counter = %v, want 2", got)
+	}
+	if got, _ := counterByLabels(t, reg, counter, map[string]string{"group": "tca"}); got != 0 {
+		t.Errorf("independent group duplicate counter = %v, want 0", got)
 	}
 }
 
