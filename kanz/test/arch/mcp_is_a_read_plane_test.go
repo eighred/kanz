@@ -174,15 +174,8 @@ func TestTheMCPPlaneDeclaresNoWriteSideCapability(t *testing.T) {
 		t.Skipf("%s does not exist yet", mcpTree)
 	}
 
-	// Verbs that name a capital action. Matched on the DECLARED tool names and
-	// exported functions, not on comments — a guard that greps prose matches its
-	// own explanation, which is how three guards in this tree once passed with
-	// the checked thing deleted.
-	verbs := []string{"submitorder", "placeorder", "cancelorder", "amendorder",
-		"executeorder", "sendorder", "routeorder"}
-
 	var offenders []string
-	decls := 0
+	functions, tools := 0, 0
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -190,37 +183,147 @@ func TestTheMCPPlaneDeclaresNoWriteSideCapability(t *testing.T) {
 		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		f, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		f, perr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if perr != nil {
 			t.Fatalf("parse %s: %v", path, perr)
 		}
 		rel, _ := filepath.Rel(root, path)
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			decls++
-			lower := strings.ToLower(fn.Name.Name)
-			for _, v := range verbs {
-				if strings.Contains(lower, v) {
-					offenders = append(offenders, filepath.ToSlash(rel)+": "+fn.Name.Name)
-				}
-			}
+		slash := filepath.ToSlash(rel)
+		fnCount, toolCount, found := mcpReadDeclarations(f, filepath.ToSlash(filepath.Dir(rel)) == mcpTree+"/internal/server")
+		functions += fnCount
+		tools += toolCount
+		for _, offender := range found {
+			offenders = append(offenders, slash+": "+offender)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
-	if decls < 5 {
-		t.Fatalf("found %d function declaration(s) under %s — the scan is broken", decls, mcpTree)
+	if functions < 5 || tools == 0 {
+		t.Fatalf("found %d function declaration(s) and %d Tool declaration(s) under %s — the scan is broken", functions, tools, mcpTree)
 	}
 	if len(offenders) > 0 {
 		sort.Strings(offenders)
-		t.Errorf("%d function(s) on the MCP plane name a capital action: %v.\n"+
-			"This plane is read-only (#743). A function that claims to place, cancel or amend an "+
-			"order does not belong here whatever it currently does — the name is what the next "+
-			"person builds on.", len(offenders), offenders)
+		t.Errorf("%d declaration(s) on the MCP plane claim a capital action or lack a verifiable tool name: %v.\n"+
+			"This plane is read-only (#743). Functions and declared tools must not claim to place, "+
+			"cancel or amend an order. Tool names must be explicit non-empty string literals so "+
+			"this guard can verify the offered capability.", len(offenders), offenders)
 	}
+}
+
+// mcpReadDeclarations checks all function names and actual server.Tool literals,
+// including implicit literals nested in []Tool. Comments and unrelated Name
+// fields are not declarations of an MCP capability. The owner flag identifies
+// the package where Tool is defined; other packages must import that exact type.
+func mcpReadDeclarations(f *ast.File, owner bool) (functions, tools int, offenders []string) {
+	imports := map[string]bool{}
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != modulePath+"/"+mcpTree+"/internal/server" {
+			continue
+		}
+		alias := "server"
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		}
+		imports[alias] = true
+	}
+	packageTypes := map[*ast.Object]bool{}
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			functions++
+			if mcpCapitalName(fn.Name.Name) {
+				offenders = append(offenders, "function "+fn.Name.Name)
+			}
+		}
+		if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.TYPE {
+			for _, spec := range gen.Specs {
+				if typ, ok := spec.(*ast.TypeSpec); ok {
+					packageTypes[typ.Name.Obj] = true
+				}
+			}
+		}
+	}
+	isTool := func(expr ast.Expr) bool {
+		for {
+			switch typ := expr.(type) {
+			case *ast.ParenExpr:
+				expr = typ.X
+			case *ast.StarExpr:
+				expr = typ.X
+			default:
+				goto resolved
+			}
+		}
+	resolved:
+		switch typ := expr.(type) {
+		case *ast.Ident:
+			return typ.Name == "Tool" && (owner || imports["."]) &&
+				(typ.Obj == nil || owner && packageTypes[typ.Obj])
+		case *ast.SelectorExpr:
+			pkg, ok := typ.X.(*ast.Ident)
+			return ok && typ.Sel.Name == "Tool" && imports[pkg.Name] &&
+				(pkg.Obj == nil || pkg.Obj.Kind == ast.Pkg)
+		}
+		return false
+	}
+	seen := map[*ast.CompositeLit]bool{}
+	var inspectLiteral func(*ast.CompositeLit, ast.Expr)
+	inspectLiteral = func(lit *ast.CompositeLit, typ ast.Expr) {
+		if seen[lit] {
+			return
+		}
+		seen[lit] = true
+		if lit.Type != nil {
+			typ = lit.Type
+		}
+		if isTool(typ) {
+			tools++
+			name, ok := fieldValue(lit, "Name").(*ast.BasicLit)
+			if !ok || name.Kind != token.STRING {
+				offenders = append(offenders, "Tool.Name must be an explicit non-empty string literal")
+				return
+			}
+			value, err := strconv.Unquote(name.Value)
+			if err != nil || strings.TrimSpace(value) == "" {
+				offenders = append(offenders, "Tool.Name must be an explicit non-empty string literal")
+			} else if mcpCapitalName(value) {
+				offenders = append(offenders, "tool "+value)
+			}
+		}
+		var element ast.Expr
+		switch container := typ.(type) {
+		case *ast.ArrayType:
+			element = container.Elt
+		case *ast.MapType:
+			element = container.Value
+		}
+		for _, el := range lit.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				el = kv.Value
+			}
+			if child, ok := el.(*ast.CompositeLit); ok {
+				inspectLiteral(child, element)
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.CompositeLit); ok {
+			inspectLiteral(lit, nil)
+		}
+		return true
+	})
+	return functions, tools, offenders
+}
+
+func mcpCapitalName(name string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(name))
+	for _, verb := range []string{"submitorder", "placeorder", "cancelorder", "amendorder",
+		"executeorder", "sendorder", "routeorder"} {
+		if strings.Contains(normalized, verb) {
+			return true
+		}
+	}
+	return false
 }
