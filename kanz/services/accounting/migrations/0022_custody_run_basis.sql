@@ -1,5 +1,9 @@
 -- NULL preserves the unknown basis of historical runs, skipped comparisons and older writers.
 ALTER TABLE custody_runs ADD COLUMN book_basis JSONB;
+COMMENT ON COLUMN custody_runs.book_basis IS
+    'Observed scope mode and sorted account IDs by custodian for this portfolio. '
+    'journal_position bounds the WORM portfolio prefix before canonical revision selection and UTC business-day close. '
+    'Pre-index entries belong to the immutable legacy prefix. NULL denotes unavailable evidence.';
 ALTER TABLE custody_breaks ADD COLUMN comparison_scope JSONB;
 
 -- Only a detection writes the financial figures. An operator assignment or a

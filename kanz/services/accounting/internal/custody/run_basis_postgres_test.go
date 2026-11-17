@@ -26,7 +26,7 @@ func TestRunRecordsItsBasis(t *testing.T) {
 	}
 	reconcile := func(scope *BookScope, when time.Time) Run {
 		t.Helper()
-		r, err := NewReconciler(st, LedgerBookLoader(journal, scope, testLogger()), nil, nil, nil, testLogger(), func() time.Time { return when })
+		r, err := NewReconciler(st, LedgerBookLoader(journal, scope, testLogger()), &capturePublisher{}, nil, nil, testLogger(), func() time.Time { return when })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -68,14 +68,43 @@ func TestRunRecordsItsBasis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Refuse completion after the scope change has touched break rows.
+	// Both the run basis and the changed break age must roll back together.
+	if _, err := pool.Exec(ctx, `ALTER TABLE outbox ADD CONSTRAINT custody_basis_refuse_completion CHECK (event_type <> 'accounting.custody.reconciled') NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	rejected, err := NewReconciler(st, LedgerBookLoader(journal, swapped, testLogger()), &capturePublisher{}, nil, nil, testLogger(), func() time.Time { return now.Add(90 * time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rejected.Reconcile(ctx, subject()); err == nil || errors.Is(err, ErrPublicationPending) {
+		t.Fatalf("refused completion appeared committed: %v", err)
+	}
+	prior, err := fresh.LatestRun(ctx, "PF1", "CUST-A")
+	if err != nil || prior.RunID != unchanged.RunID {
+		t.Fatalf("partial basis commit: %+v, %v", prior, err)
+	}
+	b, err := fresh.LoadBreak(ctx, first.Breaks[0].BreakID)
+	if err != nil || !b.FirstSeenAt.Equal(now) || !b.LastSeenAt.Equal(unchanged.CompletedAt) {
+		t.Fatalf("partial break scope commit: %+v, %v", b, err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE outbox DROP CONSTRAINT custody_basis_refuse_completion`); err != nil {
+		t.Fatal(err)
+	}
 	changed := reconcile(swapped, now.Add(2*time.Hour))
-	if len(changed.Breaks) == 0 {
+	if len(changed.Breaks) != len(first.Breaks) {
 		t.Fatal("missing redetected breaks")
 	}
 	for _, b := range changed.Breaks {
 		if !b.FirstSeenAt.Equal(changed.CompletedAt) || b.Status != BreakOpen {
 			t.Fatalf("changed scope inherited prior break: %+v", b)
 		}
+	}
+	derived := reconcile(nil, now.Add(150*time.Minute))
+	storedDerived, err := fresh.LatestRun(ctx, "PF1", "CUST-A")
+	wantDerived := &RunBasis{Mode: BasisDerived, Accounts: map[string][]string{"CUST-A": {"bin-main", "okx-sub-1"}}, JournalPosition: 3}
+	if err != nil || storedDerived.RunID != derived.RunID || !reflect.DeepEqual(storedDerived.Basis, wantDerived) {
+		t.Fatalf("derived journal evidence not retained: %+v, %v", storedDerived.Basis, err)
 	}
 	retry, err := fresh.CommitRun(ctx, first)
 	if err != nil || !reflect.DeepEqual(retry.Basis, want) {
