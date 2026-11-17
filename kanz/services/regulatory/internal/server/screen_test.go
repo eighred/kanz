@@ -10,7 +10,6 @@ import (
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 
-	"github.com/eighred/kanz/internal/audit/signer"
 	"github.com/eighred/kanz/internal/compliance"
 )
 
@@ -44,7 +43,7 @@ func screenServer(t *testing.T, cl compliance.Classifier) *Server {
 	if cl != nil {
 		opts = append(opts, WithClassifier(cl))
 	}
-	return New(r, nil, signer.New(""), opts...)
+	return New(r, nil, opts...)
 }
 
 func decodeResult(t *testing.T, body string) *compliancepb.ComplianceResult {

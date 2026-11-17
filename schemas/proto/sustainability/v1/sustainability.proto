@@ -16,6 +16,7 @@ syntax = "proto3";
 package sustainability.v1;
 
 import "common/v1/decimal.proto";
+import "google/protobuf/timestamp.proto";
 
 // ESGScore is an instrument's (issuer's) environmental/social/governance rating —
 // the overall score plus its three pillars. Higher is better; the scale is the
@@ -113,4 +114,76 @@ message TemperatureAlignment {
   // aligned is true when the trajectory is on a sub-target pathway (≤ the target
   // degrees, default 1.5°C).
   bool aligned = 2;
+}
+
+// These observations record the inputs and computations of a filing request.
+// They are not a vendor reference-data feed or approval to use the inputs for
+// admission. Unknown reference-data authority must not become an approved SCD.
+enum ObservationOrigin {
+  OBSERVATION_ORIGIN_UNSPECIFIED = 0;
+  OBSERVATION_ORIGIN_FILING_REQUEST_UNVERIFIED = 1;
+}
+
+// InstrumentObservation is one issuer datum used by one retained filing.
+// ESG and carbon observations have separate, persisted UUIDv7 identities.
+message InstrumentObservation {
+  string observation_id = 1;
+  string report_id = 2;
+  string tenant_id = 3;
+  string portfolio_id = 4;
+  google.protobuf.Timestamp as_of = 5;
+  ObservationOrigin origin = 6;
+  string input_manifest_digest = 7;
+  google.protobuf.Timestamp recorded_at = 8;
+  oneof datum {
+    ESGScore esg = 10;
+    CarbonMetrics carbon = 11;
+  }
+}
+
+// ESGAggregate has portfolio grain; it must not masquerade as an issuer score.
+message ESGAggregate {
+  double overall = 1;
+  double environmental = 2;
+  double social = 3;
+  double governance = 4;
+}
+
+// CarbonCoverage is the existing metric's reported coverage, not a new estimate.
+// The exact input money is retained in the filing input manifest.
+message CarbonCoverage {
+  string datum = 1;
+  double fraction = 2;
+  uint32 uncovered_count = 3;
+  repeated string uncovered_sample = 4;
+}
+
+message PortfolioObservation {
+  string observation_id = 1;
+  string report_id = 2;
+  string tenant_id = 3;
+  string portfolio_id = 4;
+  google.protobuf.Timestamp as_of = 5;
+  ObservationOrigin origin = 6;
+  string input_manifest_digest = 7;
+  ESGAggregate esg = 8;
+  double weighted_average_carbon_intensity = 9;
+  double financed_emissions = 10;
+  CarbonCoverage intensity_coverage = 11;
+  CarbonCoverage attribution_coverage = 12;
+  uint32 total_holdings = 13;
+  uint32 esg_observed_holdings = 14;
+  google.protobuf.Timestamp recorded_at = 15;
+}
+
+// The binding hash refers to the separate context record in the filing chain.
+// It does not assert that the original filing signature covered these fields.
+message InstrumentObserved {
+  InstrumentObservation observation = 1;
+  string context_binding_hash = 2;
+}
+
+message PortfolioAggregated {
+  PortfolioObservation observation = 1;
+  string context_binding_hash = 2;
 }

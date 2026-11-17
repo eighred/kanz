@@ -104,7 +104,7 @@ data:
     # explicit rather than clever: test/arch's TestEverySubjectIsCarriedByAStream walks the
     # AST for every subject the code names and fails the build if any of them is not carried
     # here, so narrowing this is guarded rather than a gamble.
-    ensure_stream RISK          "risk.portfolio.>,risk.exposure.>,risk.signal.>,risk.command.>,risk.curve.>,risk.factor.>" 24h
+    ensure_stream RISK          "risk.portfolio.>,risk.exposure.>,risk.signal.>,risk.command.>,risk.curve.>,risk.factor.>,risk.sustainability.>" 24h
     # EXECUTION also carries strategy.> and order.> — the signal→order path.
     # bus.Publish is a JETSTREAM publish, so a subject with no stream bound to it
     # is not "fire and forget", it is a hard publish failure. Both subjects were
@@ -211,7 +211,7 @@ data:
     # consumer down over a long weekend must not come back to find its inputs aged
     # out of the stream — that is a silently short ledger, and it looks like nothing.
     ensure_stream ACCOUNTING    "accounting.>"    168h
-    ensure_stream COMPLIANCE    "compliance.breach.>" 168h
+    ensure_stream COMPLIANCE    "compliance.breach.>,compliance.filing.>" 168h
     ensure_stream SETTLEMENT    "settlement.>"    168h
     ensure_stream ALTERNATIVES  "alternatives.>"  168h
 

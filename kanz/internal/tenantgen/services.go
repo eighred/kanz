@@ -260,9 +260,18 @@ var Services = []Service{
 	},
 }
 
-// ServiceByName returns the declared service with the given name.
+// OptionalServices are explicit source candidates, never part of a default
+// tenant render. Rendering one does not provision its DB/Vault role or gateway
+// routing; those prerequisites must be reviewed before committing that output to
+// active GitOps. The same renderer owns its ServiceAccount/SPIFFE identity.
+var OptionalServices = []Service{{
+	Name: "regulatory", Base: "infra/deploy/regulatory-deploy.yaml", Container: "regulatory", TenantEnv: "REGULATORY_TENANT",
+	Why: "explicitly selected tenant-pinned filing producer (#1069/#1070); its broker identity is admitted, but tenant database/Vault and API routing activation are separate operator prerequisites",
+}}
+
+// ServiceByName returns a declared default or explicitly selected service.
 func ServiceByName(name string) (Service, bool) {
-	for _, s := range Services {
+	for _, s := range append(append([]Service(nil), Services...), OptionalServices...) {
 		if s.Name == name {
 			return s, true
 		}

@@ -113,6 +113,9 @@ data:
     accounting.collateral      6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
+    # Filing/request observations are history, never latest-per-key state.
+    compliance.filing          3   delete   2592000000  yes
+    risk.sustainability        3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
     # THE MODEL ARTIFACTS A RISK NUMBER WAS COMPUTED FROM (#1039). Beside
     # risk.portfolio and on the SAME retention, deliberately: these are the inputs

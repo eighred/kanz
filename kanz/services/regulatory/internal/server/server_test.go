@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/audit/signer"
 	"github.com/eighred/kanz/internal/filing"
 	"github.com/eighred/kanz/internal/regulatory"
 	"github.com/eighred/kanz/internal/regulatory/frtb"
@@ -21,7 +21,7 @@ func newServer(t *testing.T) *Server {
 	t.Helper()
 	r := &Readiness{}
 	r.Set(true)
-	return New(r, nil, signer.New(""))
+	return New(r, nil, filingModelOptions()...)
 }
 
 // post marshals body to JSON, POSTs it, and returns the recorder.
@@ -31,8 +31,38 @@ func post(t *testing.T, s *Server, path string, body any) *httptest.ResponseReco
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
+	if strings.HasPrefix(path, "/v1/filings/") {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(b, &object); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(object["as_of"], []byte("null")) || len(object["as_of"]) == 0 {
+			object["as_of"] = json.RawMessage(`"2026-06-30T00:00:00Z"`)
+		}
+		if bytes.Equal(object["portfolio_id"], []byte(`""`)) || len(object["portfolio_id"]) == 0 {
+			object["portfolio_id"] = json.RawMessage(`"pf1"`)
+		}
+		// Existing typed fixtures use nil optional fields. Omit those inputs
+		// explicitly; the new boundary refuses JSON null rather than silently
+		// replacing a supplied unknown with a healthy-looking numeric default.
+		for key, value := range object {
+			if bytes.Equal(value, []byte("null")) {
+				delete(object, key)
+			}
+		}
+		if _, present := object["Holdings"]; !present && (path == "/v1/filings/tcfd" || path == "/v1/filings/sfdr") {
+			object["Holdings"] = json.RawMessage(`[]`)
+		}
+		b, err = json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b = omitNullModelFields(t, b)
+	}
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b)))
+	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	filingPrincipal(request, "__system__")
+	s.ServeHTTP(rec, request)
 	return rec
 }
 
@@ -198,9 +228,9 @@ func TestClimateDisclosures(t *testing.T) {
 	}
 }
 
-// Successive filings chain: each signature is a distinct position in the audit
-// hash chain the ChainSigner advances.
-func TestSignaturesAdvanceChain(t *testing.T) {
+// Repeated semantic requests reuse the committed signature instead of advancing
+// a second chain position. Actual two-link/restart continuity is PG evidence.
+func TestRepeatedFilingReusesItsRecordedSignature(t *testing.T) {
 	s := newServer(t)
 	sig := func() string {
 		rec := post(t, s, "/v1/filings/aifmd", map[string]any{
@@ -212,8 +242,8 @@ func TestSignaturesAdvanceChain(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 		return out.Signature
 	}
-	if a, b := sig(), sig(); a == b {
-		t.Fatal("identical inputs produced the same signature — the chain did not advance")
+	if a, b := sig(), sig(); a == "" || a != b {
+		t.Fatal("identical requests lost their recorded signature")
 	}
 }
 
@@ -254,7 +284,7 @@ var plainDecimal = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
 func TestClimateFilingServesTheDecimalItSigned(t *testing.T) {
 	ready := &Readiness{}
 	ready.Set(true)
-	s := New(ready, nil, filing.HashSigner{})
+	s := New(ready, nil, filingModelOptions()...)
 
 	at := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
 	in := sustainability.DisclosureInputs{
@@ -267,7 +297,7 @@ func TestClimateFilingServesTheDecimalItSigned(t *testing.T) {
 		}},
 		GlidePath:       sustainability.GlidePath{BaseYear: 2020, TargetYear: 2050, BaseEmissions: 1000},
 		Year:            2035,
-		Scenario:        sustainability.ClimateScenario{CarbonPrice: 0.5, PhysicalSeverity: 0.125},
+		Scenario:        sustainability.ClimateScenario{Name: "synthetic-request", CarbonPrice: 0.5, PhysicalSeverity: 0.125},
 		TempSensitivity: 3,
 		FossilFuel:      map[string]bool{"ISS-1": true},
 	}

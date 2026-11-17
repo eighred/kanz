@@ -121,7 +121,7 @@ func run(args []string) error {
 
 func declaredNames() []string {
 	var out []string
-	for _, s := range tenantgen.Services {
+	for _, s := range append(append([]tenantgen.Service(nil), tenantgen.Services...), tenantgen.OptionalServices...) {
 		out = append(out, s.Name)
 	}
 	return out

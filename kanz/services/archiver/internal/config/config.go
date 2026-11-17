@@ -30,6 +30,7 @@ var DefaultSubjects = []string{
 	"accounting.>",
 	"settlement.>",
 	"compliance.breach.>",
+	"compliance.filing.>",
 	"compliance.mandate.>",
 	"risk.portfolio.>",
 	"risk.exposure.>",
@@ -44,6 +45,7 @@ var DefaultSubjects = []string{
 	// Leaving these out would archive the answer and discard the working.
 	"risk.curve.>",
 	"risk.factor.>",
+	"risk.sustainability.>",
 	"inference.>",
 	"platform.>",
 	"data.>",

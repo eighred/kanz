@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 // THIS SERVICE HOLDS ITS OWN BOUND (#769).
@@ -30,7 +28,7 @@ func bodyLimitServer(t *testing.T) *Server {
 	t.Helper()
 	r := &Readiness{}
 	r.Set(true)
-	return New(r, nil, signer.New(""))
+	return New(r, nil, filingModelOptions()...)
 }
 
 // AN OVERSIZED BODY IS 413, and it is refused on EVERY /v1 route rather than
@@ -51,7 +49,9 @@ func TestBodyLimit_AnOversizedBodyIsRefusedOnEveryRoute(t *testing.T) {
 		"/v2/screening/esg",
 	} {
 		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(huge)))
+		request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(huge))
+		filingPrincipal(request, "__system__")
+		s.ServeHTTP(rec, request)
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Errorf("%s answered %d for a %d-byte body, want 413", path, rec.Code, len(huge))
 		}

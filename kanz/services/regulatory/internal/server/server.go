@@ -1,13 +1,11 @@
 // Package server is the regulatory filing service's HTTP surface (WIRE-01e): it
 // assembles the delivered PARITY-06 filings — FRTB market-risk capital, Form PF,
 // AIFMD leverage, and the TCFD/SFDR climate disclosures — from request-supplied
-// inputs, signs them through the injected Signer, and serves them point-in-time.
+// inputs, records their original signature and separate context witness with
+// durable FACTs, and serves them point-in-time.
 //
-// It owns no analytics: each endpoint decodes the delivered *Inputs struct
-// directly (no DTO duplication), calls the delivered File* assembler (which is
-// completeness-gated and validates its inputs — an incomplete or invalid filing
-// is never signed), and renders the signed Report as JSON. This is the
-// NAV-endpoint request→compute→sign→JSON pattern applied to regulatory filings.
+// It owns no analytics: the existing File* assembler runs with the recorder's
+// transaction-bound signer. Existing Report.Body owns rendered decimal values.
 package server
 
 import (
@@ -21,25 +19,22 @@ import (
 
 	"github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/filing"
 	"github.com/eighred/kanz/internal/regulatory"
+	regulatorypublish "github.com/eighred/kanz/internal/regulatory/publish"
 	"github.com/eighred/kanz/internal/sustainability"
+	sustainabilitypublish "github.com/eighred/kanz/internal/sustainability/publish"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	regulatorypb "github.com/eighred/kanz/kanz-schemas-go/regulatory/v1"
+	sustainabilitypb "github.com/eighred/kanz/kanz-schemas-go/sustainability/v1"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/regulatory/internal/recording"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Signer signs a filing's canonical bytes. It is internal/filing's one-method
-// seam — which regulatory.Signer and sustainability.Signer now alias — so a
-// single value (the AUDIT-01 signer.ChainSigner, or a bare content-hash signer)
-// drives every framework's filing. The composition root injects the concrete
-// signer.
-type Signer interface {
-	// Sign returns the report's signature — its position in the durable audit
-	// chain. An error means the chain link did NOT land, and the report must not be
-	// issued: a filing carrying a chain position that exists in no chain is worse
-	// than no filing.
-	Sign(canonical []byte) (string, error)
-}
-
-// Readiness gates traffic; the endpoints are pure over the request, so the
-// service is ready as soon as it is up (the flag exists for graceful shutdown).
+// Readiness gates traffic after the composition root has opened durable storage
+// and its authenticated broker transport, and during graceful shutdown.
 type Readiness struct{ ready atomic.Bool }
 
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
@@ -47,11 +42,12 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
 // Server is the HTTP handler.
 type Server struct {
-	logger    *slog.Logger
-	readiness *Readiness
-	signer    Signer
-	metrics   http.Handler
-	mux       *http.ServeMux
+	logger                  *slog.Logger
+	readiness               *Readiness
+	recorder                recording.Recorder
+	tenant, producerVersion string
+	metrics                 http.Handler
+	mux                     *http.ServeMux
 	// classifier resolves SECTOR and ISSUER for the ESG screen (#751).
 	//
 	// NIL IS A POSTURE, NOT A BUG. Without it those dimensions are UNRESOLVABLE,
@@ -85,16 +81,23 @@ func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h
 // the engine refuses rather than passes.
 func WithClassifier(c compliance.Classifier) Option { return func(s *Server) { s.classifier = c } }
 
+// WithRecorder binds one trusted tenant to one storage/broker account. There is
+// no request-controlled credential/account selection and no signing-only fallback.
+func WithRecorder(tenant, version string, recorder recording.Recorder) Option {
+	return func(s *Server) { s.tenant, s.producerVersion, s.recorder = tenant, version, recorder }
+}
+
 // MetricsHandler returns the handler WithMetrics supplied, or nil. The
 // composition root serves it on the metrics listener; nothing serves it here.
 func (s *Server) MetricsHandler() http.Handler { return s.metrics }
 
-// New builds the server over an injected filing signer.
-func New(readiness *Readiness, logger *slog.Logger, signer Signer, opts ...Option) *Server {
+// New builds the server. Filing routes refuse unless WithRecorder is supplied;
+// metrics and the read-only ESG screen remain independently available.
+func New(readiness *Readiness, logger *slog.Logger, opts ...Option) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{logger: logger, readiness: readiness, signer: signer, mux: http.NewServeMux()}
+	s := &Server{logger: logger, readiness: readiness, mux: http.NewServeMux()}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -135,102 +138,179 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 
 // --- filings -----------------------------------------------------------------
 
-// asOfEnvelope carries the optional point-in-time as-of alongside the embedded
-// filing inputs. The delivered *Inputs struct embeds into it, so its exported
-// fields promote to top-level JSON keys — the request body is the delivered
-// input set plus an `as_of`, with no duplicated DTO.
+// Filing requests require an explicit effective as_of and portfolio. Existing
+// input structs remain the computation contract; the boundary additionally
+// retains exact source-money tokens before the float climate analytic edge.
 type frtbRequest struct {
-	AsOf *time.Time `json:"as_of"`
+	AsOf      *time.Time `json:"as_of"`
+	Portfolio string     `json:"portfolio_id"`
 	regulatory.FRTBInputs
 }
 type formPFRequest struct {
-	AsOf *time.Time `json:"as_of"`
+	AsOf      *time.Time `json:"as_of"`
+	Portfolio string     `json:"portfolio_id"`
 	regulatory.FormPFInputs
 }
 type aifmdRequest struct {
-	AsOf *time.Time `json:"as_of"`
+	AsOf      *time.Time `json:"as_of"`
+	Portfolio string     `json:"portfolio_id"`
 	regulatory.AIFMDInputs
 }
 type disclosureRequest struct {
-	AsOf *time.Time `json:"as_of"`
+	AsOf      *time.Time `json:"as_of"`
+	Portfolio string     `json:"portfolio_id"`
 	sustainability.DisclosureInputs
 }
 
 func (s *Server) handleFRTB(w http.ResponseWriter, r *http.Request) {
+	if !s.filingCaller(w, r) {
+		return
+	}
 	var req frtbRequest
-	if !decode(w, r, &req) {
+	input, ok := readFilingInput(w, r, &req, nil, nil)
+	if !ok {
 		return
 	}
-	rep, breakdown, err := regulatory.FileFRTB(req.FRTBInputs, asOf(req.AsOf), s.signer)
-	if err != nil {
-		badRequest(w, err)
-		return
-	}
-	out := rep.Body()
-	out["breakdown"] = map[string]float64{
-		"delta": breakdown.Delta, "vega": breakdown.Vega, "curvature": breakdown.Curvature,
-		"drc": breakdown.DRC, "rrao": breakdown.RRAO, "total": breakdown.Total,
-	}
-	writeJSON(w, http.StatusOK, out)
+	s.recordFiling(w, r, "FRTB", req.Portfolio, req.AsOf, input, nil, func(signer filing.Signer) (filing.Report, map[string]any, error) {
+		rep, breakdown, err := regulatory.FileFRTB(req.FRTBInputs, *req.AsOf, signer)
+		if err != nil {
+			return rep, nil, err
+		}
+		out := rep.Body()
+		out["breakdown"] = map[string]float64{"delta": breakdown.Delta, "vega": breakdown.Vega, "curvature": breakdown.Curvature, "drc": breakdown.DRC, "rrao": breakdown.RRAO, "total": breakdown.Total}
+		return rep, out, nil
+	})
 }
 
 func (s *Server) handleFormPF(w http.ResponseWriter, r *http.Request) {
+	if !s.filingCaller(w, r) {
+		return
+	}
 	var req formPFRequest
-	if !decode(w, r, &req) {
+	input, ok := readFilingInput(w, r, &req, []string{"GrossAssetValue", "NetAssetValue", "VaR", "GrossExposure"}, nil)
+	if !ok {
 		return
 	}
-	rep, err := regulatory.FileFormPF(req.FormPFInputs, asOf(req.AsOf), s.signer)
-	if err != nil {
-		badRequest(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, rep.Body())
+	s.recordFiling(w, r, "FORM_PF", req.Portfolio, req.AsOf, input, nil, func(signer filing.Signer) (filing.Report, map[string]any, error) {
+		rep, err := regulatory.FileFormPF(req.FormPFInputs, *req.AsOf, signer)
+		return rep, rep.Body(), err
+	})
 }
 
 func (s *Server) handleAIFMD(w http.ResponseWriter, r *http.Request) {
+	if !s.filingCaller(w, r) {
+		return
+	}
 	var req aifmdRequest
-	if !decode(w, r, &req) {
+	input, ok := readFilingInput(w, r, &req, []string{"NAV", "GrossExposure", "CommitmentExposure"}, nil)
+	if !ok {
 		return
 	}
-	rep, breakdown, err := regulatory.FileAIFMD(req.AIFMDInputs, asOf(req.AsOf), s.signer)
-	if err != nil {
-		badRequest(w, err)
-		return
-	}
-	out := rep.Body()
-	// Exact decimal strings, like the line items. The leverage ratios are a
-	// compliance threshold — they must not round on the way out.
-	out["breakdown"] = map[string]string{
-		"aum": dec.Str(breakdown.AUM), "gross_leverage": dec.Str(breakdown.GrossLeverage),
-		"commitment_leverage": dec.Str(breakdown.CommitmentLeverage),
-	}
-	writeJSON(w, http.StatusOK, out)
+	s.recordFiling(w, r, "AIFMD", req.Portfolio, req.AsOf, input, nil, func(signer filing.Signer) (filing.Report, map[string]any, error) {
+		rep, breakdown, err := regulatory.FileAIFMD(req.AIFMDInputs, *req.AsOf, signer)
+		if err != nil {
+			return rep, nil, err
+		}
+		out := rep.Body()
+		out["breakdown"] = map[string]string{"aum": dec.Str(breakdown.AUM), "gross_leverage": dec.Str(breakdown.GrossLeverage), "commitment_leverage": dec.Str(breakdown.CommitmentLeverage)}
+		return rep, out, nil
+	})
 }
 
 func (s *Server) handleTCFD(w http.ResponseWriter, r *http.Request) {
+	if !s.filingCaller(w, r) {
+		return
+	}
 	var req disclosureRequest
-	if !decode(w, r, &req) {
+	input, ok := readFilingInput(w, r, &req, nil, &req)
+	if !ok {
 		return
 	}
-	rep, err := sustainability.FileTCFD(req.DisclosureInputs, asOf(req.AsOf), s.signer)
-	if err != nil {
-		badRequest(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, rep.Body())
+	s.recordFiling(w, r, "TCFD", req.Portfolio, req.AsOf, input, &req, func(signer filing.Signer) (filing.Report, map[string]any, error) {
+		rep, err := sustainability.FileTCFD(req.DisclosureInputs, *req.AsOf, signer)
+		return rep, rep.Body(), err
+	})
 }
 
 func (s *Server) handleSFDR(w http.ResponseWriter, r *http.Request) {
+	if !s.filingCaller(w, r) {
+		return
+	}
 	var req disclosureRequest
-	if !decode(w, r, &req) {
+	input, ok := readFilingInput(w, r, &req, nil, &req)
+	if !ok {
 		return
 	}
-	rep, err := sustainability.FileSFDR(req.DisclosureInputs, asOf(req.AsOf), s.signer)
+	s.recordFiling(w, r, "SFDR", req.Portfolio, req.AsOf, input, &req, func(signer filing.Signer) (filing.Report, map[string]any, error) {
+		rep, err := sustainability.FileSFDR(req.DisclosureInputs, *req.AsOf, signer)
+		return rep, rep.Body(), err
+	})
+}
+
+func (s *Server) filingCaller(w http.ResponseWriter, r *http.Request) bool {
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing authenticated filing principal"})
+		return false
+	}
+	if !filing.BoundedIdentifier(s.tenant) || principal.Tenant != s.tenant {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "filing unavailable"})
+		return false
+	}
+	if s.recorder == nil || s.producerVersion == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "filing recorder is not configured"})
+		return false
+	}
+	return true
+}
+
+func (s *Server) recordFiling(w http.ResponseWriter, r *http.Request, framework, portfolio string, at *time.Time, input filingInput, climate *disclosureRequest, assemble func(filing.Signer) (filing.Report, map[string]any, error)) {
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok || !filing.BoundedIdentifier(portfolio) || at == nil || at.IsZero() || !auth.PortfolioInScope(principal.Portfolios, portfolio) {
+		badRequest(w, errors.New("explicit permitted portfolio and as_of required"))
+		return
+	}
+	method := regulatorypublish.FilingMethod(framework)
+	provenance := &domainpb.MeasureProvenance{Method: string(method), InputManifestDigest: input.digest, Params: map[string]string{"input_origin": "filing-request/unverified", "producer_version": s.producerVersion}}
+	plan := recording.Plan{Tenant: s.tenant, Portfolio: portfolio, Framework: framework, AsOf: at.UTC(), InputDigest: input.digest}
+	plan.Build = func(scope filing.PublicationScope, signer filing.Signer) (*regulatorypb.FilingRecordBody, map[string]any, error) {
+		rep, out, err := assemble(signer)
+		if err != nil {
+			return nil, nil, err
+		}
+		wire, err := regulatorypublish.Report(rep, scope.ReportID, provenance)
+		if err != nil {
+			return nil, nil, err
+		}
+		body := &regulatorypb.FilingRecordBody{Report: wire, TenantId: scope.Tenant, PortfolioId: scope.Portfolio, InputOrigin: sustainabilitypb.ObservationOrigin_OBSERVATION_ORIGIN_FILING_REQUEST_UNVERIFIED, InputManifest: append([]byte(nil), input.manifest...), InputManifestDigest: input.digest, ProducerVersion: s.producerVersion, FilingCanonical: rep.Canonical()}
+		body.RecordedAt = timestamppb.New(scope.RecordedAt)
+		if climate != nil {
+			body.InstrumentObservations, body.PortfolioObservation, err = sustainabilitypublish.Build(scope, input.holdings, func() (string, error) { id, err := uuid.NewV7(); return id.String(), err })
+			if err != nil {
+				return nil, nil, err
+			}
+			// The current climate model has both channels, with no separate kind
+			// discriminator. Preserve that absence rather than invent a channel.
+			if climate.Scenario.Name != "" || climate.Scenario.CarbonPrice != 0 || climate.Scenario.PhysicalSeverity != 0 {
+				body.ClimateScenario = &sustainabilitypb.ClimateScenario{Name: climate.Scenario.Name, CarbonPrice: climate.Scenario.CarbonPrice, PhysicalSeverity: climate.Scenario.PhysicalSeverity}
+			}
+		}
+		return body, out, nil
+	}
+	response, err := s.recorder.Record(r.Context(), plan)
 	if err != nil {
-		badRequest(w, err)
+		if errors.Is(err, recording.ErrUnpublished) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": recording.ErrUnpublished.Error()})
+		} else if errors.Is(err, recording.ErrInvalidInput) {
+			badRequest(w, err)
+		} else {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "filing recording failed"})
+		}
 		return
 	}
-	writeJSON(w, http.StatusOK, rep.Body())
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(response)
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -250,15 +330,6 @@ func (s *Server) handleSFDR(w http.ResponseWriter, r *http.Request) {
 // and AIFMD handlers above do.
 
 // --- helpers -----------------------------------------------------------------
-
-// asOf resolves the request as-of: the supplied time, or now (UTC) when absent —
-// so a filing is always stamped point-in-time.
-func asOf(t *time.Time) time.Time {
-	if t != nil && !t.IsZero() {
-		return t.UTC()
-	}
-	return time.Now().UTC()
-}
 
 // maxRequestBytes bounds a /v1 request body (#769).
 //

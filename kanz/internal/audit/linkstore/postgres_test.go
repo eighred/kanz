@@ -14,6 +14,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/audit/signer"
@@ -27,7 +28,12 @@ func newPool(t *testing.T) *pgxpool.Pool {
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run linkstore Postgres integration tests")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal("invalid test database configuration")
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = pgx.Identifier{"regulatory_linkstore_test"}.Sanitize()
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -39,7 +45,7 @@ func newPool(t *testing.T) *pgxpool.Pool {
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS audit_chain_links CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP SCHEMA IF EXISTS regulatory_linkstore_test CASCADE; CREATE SCHEMA regulatory_linkstore_test`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
