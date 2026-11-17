@@ -4,6 +4,7 @@ No network, persistence, dispatch, merge or production authority. Edges describe
 actual validation dependencies; an unrelated red check is never a global lock.
 """
 import re
+from collections import Counter, defaultdict
 
 STATES = {"READY", "IN_PROGRESS", "BLOCKED", "VALIDATION_FAILED",
           "VALIDATION_PENDING", "DELIVERABLE"}
@@ -24,13 +25,26 @@ def validation(node):
     if not SHA.fullmatch(revision) or data.get("sha") != revision:
         return "BLOCKED", ["validation revision is missing or stale"], []
     expected, observed = data.get("expected", []), data.get("observed", [])
-    names = [item["id"] for item in expected]
-    if not names or len(set(names)) != len(names):
+    counts = Counter(item["id"] for item in expected)
+    pins = [item["check_id"] for item in expected if "check_id" in item]
+    if (not counts or any(type(pin) is not int or pin <= 0 for pin in pins)
+            or len(set(pins)) != len(pins)
+            or any(counts[item["id"]] > 1 and "check_id" not in item for item in expected)):
         return "BLOCKED", ["expected check inventory is missing or ambiguous"], []
+    by_name = defaultdict(list)
+    for row in observed:
+        if row.get("sha") == revision:
+            by_name[row.get("id")].append(row)
     rows = []
     for item in expected:
-        matches = [row for row in observed if row.get("id") == item["id"]
-                   and row.get("sha") == revision]
+        name = item["id"]
+        matches = by_name[name]
+        # A pin cannot select one green job out of an unreviewed collision.
+        if len(matches) != counts[name]:
+            matches = []
+        elif "check_id" in item:
+            matches = [row for row in matches if type(row.get("check_id")) is int
+                       and row["check_id"] == item["check_id"]]
         row = matches[0] if len(matches) == 1 else {}
         status = row.get("status")
         evidence = row.get("evidence")
@@ -44,7 +58,10 @@ def validation(node):
             state = "pending"
         else:
             state = "failed"
-        rows.append({"id": item["id"], "state": state, "evidence": evidence})
+        result = {"id": name, "state": state, "evidence": evidence}
+        if "check_id" in item:
+            result["check_id"] = item["check_id"]
+        rows.append(result)
     if any(row["state"] == "failed" for row in rows):
         return "VALIDATION_FAILED", ["required validation failed"], rows
     if any(row["state"] == "unavailable" for row in rows):
