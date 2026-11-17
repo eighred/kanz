@@ -148,13 +148,30 @@ func TestDecomposePortfolioRefusesUnknownFutureAndNonfiniteModels(t *testing.T) 
 }
 
 func TestDecomposePortfolioKeepsSubEightDecimalObservation(t *testing.T) {
-	p := domain.NewPortfolio("PF", "USD")
-	p.SetPosition(domain.Position{InstrumentID: "A", MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1, Exponent: -9}}, AsOf: decompositionAt})
-	m := decompositionModel(t)
-	m.FactorCov[0][0], m.SpecificVar["A"] = 1, 0
-	d, err := DecomposePortfolio(context.Background(), p, staticModel{m})
-	if err != nil || !proto.Equal(d.Total, &commonpb.Decimal{Coefficient: 1, Exponent: -9}) {
-		t.Fatalf("lost shortest-roundtrip observation: %v %v", d.Total, err)
+	for _, tc := range []struct {
+		name        string
+		coefficient int64
+		exponent    int32
+	}{
+		{"negative-exponent", 1, -9},
+		{"positive-exponent", 1, 20},
+		{"short-negative-exponent", -1, -9},
+		{"short-positive-exponent", -1, 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := domain.NewPortfolio("PF", "USD")
+			input := &commonpb.Decimal{Coefficient: tc.coefficient, Exponent: tc.exponent}
+			p.SetPosition(domain.Position{InstrumentID: "A", MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: input}, AsOf: decompositionAt})
+			m := decompositionModel(t)
+			m.FactorCov[0][0], m.SpecificVar["A"] = 1, 0
+			d, err := DecomposePortfolio(context.Background(), p, staticModel{m})
+			// One unit loading, unit variance and no specific risk give
+			// sigma=|v| while factor exposure retains the position's sign.
+			wantRisk := &commonpb.Decimal{Coefficient: 1, Exponent: tc.exponent}
+			if err != nil || !proto.Equal(d.Total, wantRisk) || len(d.ByFactor) != 1 || !proto.Equal(d.ByFactor[0].Exposure, input) {
+				t.Fatalf("lost shortest-roundtrip observation: %+v %v", d, err)
+			}
+		})
 	}
 }
 

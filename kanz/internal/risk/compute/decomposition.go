@@ -104,7 +104,9 @@ func decomposeModel(model *factormodel.Model, values map[string]float64) (v1.Ris
 			err = v1.ErrDecompositionUnavailable
 			return nil
 		}
-		valueDecimal, ok := dec.ParseProtoExact(strconv.FormatFloat(value, 'g', -1, 64))
+		// Exact's decimal grammar has no exponent form. 'f', -1 keeps the
+		// shortest roundtrip observation without adding a fixed rounding scale.
+		valueDecimal, ok := dec.ParseProtoExact(strconv.FormatFloat(value, 'f', -1, 64))
 		if !ok || !dec.InDomain(valueDecimal) {
 			err = v1.ErrDecompositionUnavailable
 			return nil
