@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/migrate"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/oms/internal/config"
@@ -43,16 +45,17 @@ func TestServeRecordedStateForGatewayRead(t *testing.T) {
 	if err := pool.QueryRow(root, "SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user").Scan(&restricted); err != nil || !restricted {
 		t.Fatal("the fixture must use a restricted role")
 	}
-	// The parent supplies a fresh disposable database. The first migration
-	// refuses an existing orders table so a reused fixture cannot pass.
-	for _, name := range []string{"0001_orders.sql", "0005_orders_version.sql"} {
-		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(root, string(migration)); err != nil {
-			t.Fatal(err)
-		}
+	prepareRecordedStateSchema(t, root, db)
+	const policy = `SELECT c.relrowsecurity AND c.relforcerowsecurity AND row_security_active(c.oid)
+		AND app_current_tenant() = $1
+		AND (SELECT count(*) FROM pg_policy WHERE polrelid = c.oid) = 1
+		AND EXISTS (SELECT 1 FROM pg_policy AS p WHERE p.polrelid = c.oid AND p.polname = 'tenant_isolation'
+			AND pg_get_expr(p.polqual, p.polrelid) = '(tenant_id = app_current_tenant())'
+			AND pg_get_expr(p.polwithcheck, p.polrelid) = '(tenant_id = app_current_tenant())')
+		FROM pg_class AS c WHERE c.oid = 'orders'::regclass`
+	var active bool
+	if err := pool.QueryRow(root, policy, "tenant_a").Scan(&active); err != nil || !active {
+		t.Fatal("the tenant-scoped orders policy must be active on the OMS connection")
 	}
 	row := &orderpb.OrderState{
 		OrderId: "recorded-order", PortfolioId: "PF_A", InstrumentId: "FIXTURE",
@@ -64,7 +67,7 @@ func TestServeRecordedStateForGatewayRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(root, "INSERT INTO orders (order_id, status, state) VALUES ($1,$2,$3)", row.GetOrderId(), int32(row.GetStatus()), data); err != nil {
+	if _, err := pool.Exec(root, "INSERT INTO orders (order_id, portfolio_id, status, state) VALUES ($1,$2,$3,$4)", row.GetOrderId(), row.GetPortfolioId(), int32(row.GetStatus()), data); err != nil {
 		t.Fatal(err)
 	}
 	mesh, err := transport.NewMesh(root, os.Getenv("TEST_OMS_READ_SOCKET"))
@@ -94,5 +97,24 @@ func TestServeRecordedStateForGatewayRead(t *testing.T) {
 	case <-root.Done():
 	case <-time.After(45 * time.Second):
 		t.Fatal("parent did not release the recorded state service")
+	}
+}
+
+func prepareRecordedStateSchema(t *testing.T, root context.Context, db string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(root, 12*time.Second)
+	defer cancel()
+	migrations, err := migrate.Load(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pg.NewMigrationPool(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	applied, err := migrate.New(pool).Up(ctx, migrations)
+	if err != nil || len(applied) != len(migrations) {
+		t.Fatalf("fresh OMS schema requires every owned migration: applied %d of %d, error %v", len(applied), len(migrations), err)
 	}
 }

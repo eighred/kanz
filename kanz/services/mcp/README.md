@@ -67,8 +67,9 @@ error preserves the original startup/runtime failure classification.
 The Linux `state_read_integration` test exercises both tools through the gateway
 and MCP executables. An ephemeral OIDC issuer grants read access to one fixture
 portfolio. The real risk Engine and OMS read listener serve their projections
-over SPIFFE mTLS. OMS reads a seeded record through its tenant-bound PostgreSQL
-pool. The test also reads each gateway allow decision back from JetStream. The
+over SPIFFE mTLS. The fixture applies every OMS migration through the canonical
+migration runner, verifies the active forced tenant policy, then reads a seeded
+record through the tenant-bound PostgreSQL pool. The test also reads each gateway allow decision back from JetStream. The
 MCP tool authorizer records its own decisions through structured logging.
 
 Run the following from `kanz/` in an isolated loopback fixture with the generated
