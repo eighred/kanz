@@ -194,15 +194,6 @@ var syncSurfaceExempt = map[string]string{
 		"cache would put the replay defence on a store with no persistence and no failover, which is " +
 		"worse than the pinned single replica it replaces. RETIRED BY #106 (live Redis).",
 
-	"operator": "HOLDS A ONE-SHOT JOB THAT MUST NOT BE RE-CREATED. halt-job.yaml is kanz-halt's " +
-		"manifest end to end, and the Job in it is the break-glass invocation itself — under " +
-		"recurse+prune+selfHeal Argo would re-apply it, i.e. re-halt the platform, and re-apply it " +
-		"again when anyone deleted it. The tree's OTHER manifest (cli-identities.yaml: ServiceAccount " +
-		"and NetworkPolicy for the three shell-run CLIs) is ordinary and syncable, so this exemption " +
-		"is about the Job, not the tree. RETIRING IT means naming halt-job.yaml in directory.exclude " +
-		"and adding the tree (#1342) — deliberately left out of #625 so the kill switch's delivery is changed " +
-		"on its own, and not as a side effect of an observability fix.",
-
 	"overlays": "EXPLICIT TESTNET PROMOTION BOUNDARIES, NOT A PRODUCTION APPLICATIONSET COMPONENT. " +
 		"infra/overlays/testnet_tokyo binds one reviewed release to the cost-bounded Tokyo cluster and " +
 		"is applied only after external dependency and DR gates pass. #1098 owns its server-side " +

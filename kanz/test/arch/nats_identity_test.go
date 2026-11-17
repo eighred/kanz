@@ -109,7 +109,7 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 // permissions, is what makes the split mean something: kanz-mandate can no
 // longer halt the platform, and kanz-halt can no longer forge a mandate.
 //
-// Operator ServiceAccounts are now declared in halt-job.yaml and
+// Operator ServiceAccounts are now declared in halt-identity.yaml and
 // cli-identities.yaml. TestOperatorCLIsHaveServiceAccounts checks those bindings
 // rather than retaining the old claim that every tool runs as kanz-halt. These
 // declarations do not prove live SPIRE issuance or a runtime operator session.
@@ -138,14 +138,10 @@ var operatorSVIDs = map[string]string{
 // immutability: the broad API wildcard permits administrative operations.
 // #1749 owns that least-privilege boundary and real broker qualification.
 
-// operatorServiceAccountFiles are every manifest that may declare a
-// ServiceAccount in the kanz-operator namespace. kanz-halt's lives in
-// halt-job.yaml (it owns that tool's whole manifest, Job included); the
-// other three live in cli-identities.yaml (SEC-M3d — see that file's header
-// for why they are a sibling, not an extension of halt-job.yaml). A new
-// operator identity manifest must be added to this list or the guard below
-// cannot see it and will falsely report the SVID as un-issuable.
-var operatorServiceAccountFiles = []string{"halt-job.yaml", "cli-identities.yaml"}
+// operatorServiceAccountFiles contains the continuously reconciled identity manifests.
+// halt-job.yaml is a separately excluded human invocation, so it may not own
+// the Namespace, ServiceAccount or NetworkPolicy needed by that invocation.
+var operatorServiceAccountFiles = []string{"halt-identity.yaml", "cli-identities.yaml"}
 
 var (
 	k8sKindLine      = regexp.MustCompile(`^kind:\s*(\S+)\s*$`)

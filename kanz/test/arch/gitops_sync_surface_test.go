@@ -183,6 +183,10 @@ type gitOpsSyncSource struct {
 	name       string   // metadata.name
 	paths      []string // repo-root-relative sync paths, e.g. "kanz/infra/deploy"
 	excludeRaw string   // directory.exclude verbatim, so a failure can quote the list
+	includeRaw string   // a nonempty include can silently omit ordinary manifests
+	recurse    bool
+	templatePath string
+	destinationNamespace string
 	// excluded holds slash-separated paths RELATIVE TO THE SYNC PATH. Argo CD's
 	// own documentation for directory.exclude gives `{config.yaml,env-use2/*}` as
 	// an example, which only means anything if the pattern is matched against the
@@ -234,6 +238,10 @@ func gitOpsSyncSources(t *testing.T, root string) []gitOpsSyncSource {
 				name:       doc.Metadata.Name,
 				paths:      doc.syncPaths(),
 				excludeRaw: doc.Spec.Template.Spec.Source.Directory.Exclude,
+				includeRaw: doc.Spec.Template.Spec.Source.Directory.Include,
+				recurse:    doc.Spec.Template.Spec.Source.Directory.Recurse,
+				templatePath: doc.Spec.Template.Spec.Source.Path,
+				destinationNamespace: doc.Spec.Template.Spec.Destination.Namespace,
 				excluded:   parseExcludeList(t, rel, doc.Spec.Template.Spec.Source.Directory.Exclude),
 			})
 		}
@@ -261,11 +269,15 @@ type applicationSetDoc struct {
 		} `yaml:"generators"`
 		Template struct {
 			Spec struct {
+				Destination struct {
+					Namespace string `yaml:"namespace"`
+				} `yaml:"destination"`
 				Source struct {
 					Path      string `yaml:"path"`
 					Directory struct {
 						Recurse bool   `yaml:"recurse"`
 						Exclude string `yaml:"exclude"`
+						Include string `yaml:"include"`
 					} `yaml:"directory"`
 				} `yaml:"source"`
 			} `yaml:"spec"`
