@@ -222,7 +222,9 @@ def grafana_frames(body, keys=None):
     return found
 
 
-def request(port, path, password=None, body=None):
+def request(port, path, password=None, body=None, *, timeout=10):
+    require(type(timeout) in (int, float) and math.isfinite(timeout) and 0 < timeout <= 10,
+            "http_timeout_out_of_range")
     headers = {}
     if password:
         headers["Authorization"] = "Basic " + base64.b64encode(("admin:" + password).encode()).decode()
@@ -235,7 +237,7 @@ def request(port, path, password=None, body=None):
         def redirect_request(self, *_args, **_kwargs):
             return None
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    with opener.open(req, timeout=10) as response:
+    with opener.open(req, timeout=timeout) as response:
         raw = response.read(2 * 1024 * 1024 + 1)
         require(len(raw) <= 2 * 1024 * 1024, "http_output_exceeded_bound")
         return json.loads(raw)
@@ -250,6 +252,36 @@ def eventually(operation, timeout=120):
             if time.monotonic() >= end:
                 raise ProofError("bounded_observation_timeout") from None
             time.sleep(3)
+
+
+def wait_panel_readiness(port, targets):
+    deadline = time.monotonic() + 240
+    def remaining():
+        seconds = deadline - time.monotonic()
+        require(seconds > 0, "bounded_observation_timeout")
+        return seconds
+    while True:
+        remaining()
+        observed_ns = time.time_ns()
+        require(type(observed_ns) is int and 300_000_000_000 <= observed_ns <= (1 << 63) - 1,
+                "query_timestamp_out_of_range")
+        timestamp_ms = observed_ns // 1_000_000
+        timestamp = timestamp_ms / 1000
+        # Every recording group must be ready at this same instant. One burn
+        # rate does not establish that the separately recorded TSDB coverage exists.
+        try:
+            for _, _, expr in targets:
+                keys = {(None, None)} if expr == "slo:budget_window_coverage:ratio" else set(BURNS)
+                params = urllib.parse.urlencode({"query": expr, "time": str(timestamp)})
+                response = request(port, "/api/v1/query?" + params, timeout=min(10, remaining()))
+                remaining()
+                values = vector(response, keys)
+                oracle(expr, values)
+                remaining()
+            remaining()
+            return timestamp_ms
+        except (ProofError, urllib.error.URLError, TimeoutError):
+            time.sleep(min(3, remaining()))
 
 
 HTTP_PROBE = r'''printf 'KANZ_GRAFANA_PROBE_V1:%s:START\n' "$2"
@@ -532,11 +564,8 @@ def main():
                 require(loaded["meta"]["provisioned"] and panel_targets(loaded["dashboard"]) == targets,
                         "dashboard_not_committed_provisioning")
                 passed("provisioned_datasource_and_dashboard")
-                def ready_rates():
-                    value = vector(request(pp, "/api/v1/query?" + urllib.parse.urlencode({"query": targets[0][2]})))
-                    oracle(targets[0][2], value)
-                eventually(ready_rates, timeout=240)
-                timestamp = int(time.time())
+                timestamp_ms = wait_panel_readiness(pp, targets)
+                timestamp = timestamp_ms / 1000
                 report["queryTime"] = timestamp
                 report["panels"] = []
                 for panel, ref, expr in targets:
@@ -548,7 +577,7 @@ def main():
                     queried = grafana_frames(request(gp, "/api/ds/query", password, {"queries": [{"refId": "A",
                         "datasource": {"type": "prometheus", "uid": "kanz-prometheus"}, "expr": expr,
                         "instant": True, "range": False, "format": "time_series", "intervalMs": 30000,
-                        "maxDataPoints": 1000}], "from": str((timestamp - 300) * 1000), "to": str(timestamp * 1000)}), keys)
+                        "maxDataPoints": 1000}], "from": str(timestamp_ms - 300_000), "to": str(timestamp_ms)}), keys)
                     same_values(direct, queried)
                     outcome = oracle(expr, direct)
                     report["panels"].append({"panel": panel, "ref": ref, "expressionSHA256": hashlib.sha256(expr.encode()).hexdigest(),

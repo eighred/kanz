@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 import proof
@@ -119,6 +120,193 @@ class QueryControls(unittest.TestCase):
         return {"status": "success", "data": {"resultType": "vector", "result": [
             {"metric": {"service": key[0], "slo": key[1]}, "value": [10, str(value)]}
             for key, value in values.items()]}}
+
+    def readiness_targets(self):
+        dashboard = json.loads((proof.OBS / "dashboards/slo-burn-rate.json").read_text(encoding="utf-8"))
+        return proof.panel_targets(dashboard)
+
+    def readiness_response(self, expr):
+        if expr == "slo:budget_window_coverage:ratio":
+            values = {(None, None): 0.0001}
+        elif expr == "slo:error_budget:ratio":
+            values = proof.BUDGETS
+        elif "consumed" in expr:
+            values = {key: -1 for key in proof.BURNS}
+        else:
+            values = proof.BURNS
+        return self.response(values)
+
+    def test_readiness_waits_for_delayed_coverage_after_the_first_ten_targets_are_ready(self):
+        targets = self.readiness_targets()
+        queries = []
+        clock = {"now": 100}
+        def sleep(seconds):
+            clock["now"] += seconds
+        def request(port, path, *, timeout):
+            self.assertEqual(port, 12345)
+            self.assertEqual(timeout, 10)
+            params = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            expr, timestamp = params["query"][0], params["time"][0]
+            queries.append((expr, timestamp))
+            if expr == "slo:budget_window_coverage:ratio" and len(queries) == 11:
+                return self.response({})
+            return self.readiness_response(expr)
+        with mock.patch.object(proof, "request", side_effect=request), \
+                mock.patch.object(proof.time, "time_ns", side_effect=[1794925939123456789, 1794925939456789123]), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(proof.time, "sleep", side_effect=sleep) as sleeping:
+            timestamp_ms = proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(timestamp_ms, 1794925939456)
+        self.assertEqual([expr for expr, _ in queries], [expr for _, _, expr in targets] * 2)
+        self.assertEqual([value for _, value in queries[:11]], ["1794925939.123"] * 11)
+        self.assertEqual([value for _, value in queries[11:]], ["1794925939.456"] * 11)
+        sleeping.assert_called_once_with(3)
+
+    def test_permanently_missing_coverage_exhausts_the_existing_240_second_budget(self):
+        targets = self.readiness_targets()
+        queries = []
+        clock = {"now": 100}
+        def sleep(seconds):
+            clock["now"] += seconds
+        def request(_port, path, *, timeout):
+            expr = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["query"][0]
+            queries.append(expr)
+            if expr == "slo:budget_window_coverage:ratio":
+                clock["now"] = 337
+                return self.response({})
+            return self.readiness_response(expr)
+        with mock.patch.object(proof, "request", side_effect=request), \
+                mock.patch.object(proof.time, "time_ns", return_value=1794925939123456789), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(proof.time, "sleep", side_effect=sleep) as sleeping:
+            with self.assertRaisesRegex(proof.ProofError, "^bounded_observation_timeout$"):
+                proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(queries, [expr for _, _, expr in targets])
+        sleeping.assert_called_once_with(3)
+        self.assertEqual(clock["now"], 340)
+
+    def test_readiness_uses_one_fractional_millisecond_timestamp_and_refuses_invalid_time(self):
+        targets = self.readiness_targets()
+        queries = []
+        def request(_port, path, *, timeout):
+            params = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            queries.append(params["time"][0])
+            return self.readiness_response(params["query"][0])
+        with mock.patch.object(proof, "request", side_effect=request), \
+                mock.patch.object(proof.time, "time_ns", return_value=1794925939999999999), \
+                mock.patch.object(proof.time, "monotonic", return_value=100), \
+                mock.patch.object(proof.time, "sleep") as sleep:
+            timestamp_ms = proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(timestamp_ms, 1794925939999)
+        self.assertEqual(queries, ["1794925939.999"] * 11)
+        self.assertNotEqual(timestamp_ms / 1000, int(timestamp_ms / 1000))
+        self.assertEqual(str(timestamp_ms - 300_000), "1794925639999")
+        self.assertEqual(str(timestamp_ms), "1794925939999")
+        sleep.assert_not_called()
+        for invalid in (0, -1, True, 1 << 63):
+            with self.subTest(time_ns=invalid), \
+                    mock.patch.object(proof, "request") as request, \
+                    mock.patch.object(proof.time, "time_ns", return_value=invalid), \
+                    mock.patch.object(proof.time, "monotonic", return_value=100), \
+                    mock.patch.object(proof.time, "sleep") as sleep:
+                with self.assertRaisesRegex(proof.ProofError, "^query_timestamp_out_of_range$"):
+                    proof.wait_panel_readiness(12345, targets)
+                request.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_complete_readiness_identities_do_not_replace_the_independent_oracle(self):
+        targets = self.readiness_targets()
+        clock = {"now": 100}
+        def request(_port, path, *, timeout):
+            expr = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["query"][0]
+            if expr == "slo:budget_window_coverage:ratio":
+                return self.response({(None, None): 1})
+            return self.readiness_response(expr)
+        def sleep(seconds):
+            self.assertEqual(seconds, 3)
+            clock["now"] = 340
+        with mock.patch.object(proof, "request", side_effect=request) as request, \
+                mock.patch.object(proof.time, "time_ns", return_value=1794925939123456789), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(proof.time, "sleep", side_effect=sleep) as sleeping:
+            with self.assertRaisesRegex(proof.ProofError, "^bounded_observation_timeout$"):
+                proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(request.call_count, 11)
+        sleeping.assert_called_once_with(3)
+
+    def test_readiness_refuses_successful_last_reply_after_the_joint_deadline(self):
+        targets = self.readiness_targets()
+        clock = {"now": 100}
+        queries = []
+        def request(_port, path, *, timeout):
+            expr = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["query"][0]
+            queries.append(expr)
+            if len(queries) == len(targets):
+                clock["now"] = 340.001
+            return self.readiness_response(expr)
+        with mock.patch.object(proof, "request", side_effect=request), \
+                mock.patch.object(proof.time, "time_ns", return_value=1794925939123456789), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(proof.time, "sleep") as sleep:
+            with self.assertRaisesRegex(proof.ProofError, "^bounded_observation_timeout$"):
+                proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(queries, [expr for _, _, expr in targets])
+        sleep.assert_not_called()
+
+    def test_readiness_never_launches_the_next_query_after_oracle_consumes_the_budget(self):
+        targets = self.readiness_targets()
+        clock = {"now": 100}
+        actual_oracle = proof.oracle
+        def request(_port, path, *, timeout):
+            expr = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["query"][0]
+            return self.readiness_response(expr)
+        def oracle(expr, values):
+            result = actual_oracle(expr, values)
+            clock["now"] = 340
+            return result
+        with mock.patch.object(proof, "request", side_effect=request) as requesting, \
+                mock.patch.object(proof, "oracle", side_effect=oracle) as observing, \
+                mock.patch.object(proof.time, "time_ns", return_value=1794925939123456789), \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(proof.time, "sleep") as sleep:
+            with self.assertRaisesRegex(proof.ProofError, "^bounded_observation_timeout$"):
+                proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(requesting.call_count, 1)
+        self.assertEqual(observing.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_readiness_clips_transport_timeout_and_sleep_without_resetting_the_deadline(self):
+        targets = self.readiness_targets()
+        clock = {"now": 100}
+        timeouts = []
+        def timestamp():
+            clock["now"] = 338.5
+            return 1794925939123456789
+        def request(_port, path, *, timeout):
+            timeouts.append(timeout)
+            expr = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["query"][0]
+            return self.response({}) if expr == "slo:budget_window_coverage:ratio" else self.readiness_response(expr)
+        def sleep(seconds):
+            clock["now"] += seconds
+        with mock.patch.object(proof, "request", side_effect=request), \
+                mock.patch.object(proof.time, "time_ns", side_effect=timestamp) as sampling, \
+                mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(proof.time, "sleep", side_effect=sleep) as sleeping:
+            with self.assertRaisesRegex(proof.ProofError, "^bounded_observation_timeout$"):
+                proof.wait_panel_readiness(12345, targets)
+        self.assertEqual(timeouts, [1.5] * len(targets))
+        sampling.assert_called_once_with()
+        sleeping.assert_called_once_with(1.5)
+        self.assertEqual(clock["now"], 340)
+        # The real HTTP helper must forward the clipped timeout, while unrelated
+        # callers retain their existing ten-second default. No socket is opened.
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value.read.return_value = b"{}"
+        with mock.patch.object(proof.urllib.request, "build_opener", return_value=opener):
+            proof.request(12345, "/api/v1/query?query=vector(1)", timeout=1.5)
+            self.assertEqual(opener.open.call_args.kwargs["timeout"], 1.5)
+            proof.request(12345, "/api/v1/query?query=vector(1)")
+            self.assertEqual(opener.open.call_args.kwargs["timeout"], 10)
 
     def test_all_five_real_ratios_are_required(self):
         golden = {("api-gateway", "availability"): 100, ("api-gateway", "query-latency"): 5,
