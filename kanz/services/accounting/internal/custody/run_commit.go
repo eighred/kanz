@@ -40,6 +40,7 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 
 func cloneRun(run Run) Run {
 	run.Tolerance = cloneRat(run.Tolerance)
+	run.Basis = run.Basis.clone()
 	run.Breaks = append([]Break(nil), run.Breaks...)
 	for i := range run.Breaks {
 		b := &run.Breaks[i]
@@ -84,6 +85,9 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		staged.breaks[id] = b
 	}
 	if verifying(run) {
+		for i := range run.Breaks {
+			run.Breaks[i].comparison = run.Basis
+		}
 		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
 		if err != nil {
 			return Run{}, err
@@ -151,12 +155,22 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		if prior.RunID != run.RunID || prior.Subject.Key() != run.Subject.Key() {
 			return Run{}, ErrRunIdentityConflict
 		}
+		if err := tx.QueryRow(ctx, `SELECT book_basis FROM custody_runs WHERE run_id=$1`, prior.RunID).Scan(&prior.Basis); err != nil {
+			return Run{}, err
+		}
 		return prior, tx.Commit(ctx)
 	}
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
 	if verifying(run) {
+		if run.Basis != nil {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_break_scope',
+				jsonb_build_object('mode',$1::text,'accounts',$2::text[])::text,true)`,
+				run.Basis.Mode, run.Basis.Accounts[run.Subject.CustodianID]); err != nil {
+				return Run{}, err
+			}
+		}
 		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
 		if err != nil {
 			return Run{}, err

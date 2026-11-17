@@ -240,7 +240,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 	for _, d := range detected {
 		d.PortfolioID, d.CustodianID = subject.PortfolioID, subject.CustodianID
 		seen[d.BreakID] = struct{}{}
-		if prior, ok := m.breaks[d.BreakID]; ok && prior.Status != BreakResolved {
+		if prior, ok := m.breaks[d.BreakID]; ok && prior.Status != BreakResolved && prior.comparison.sameScope(d.comparison, subject.CustodianID) {
 			// KNOWN AND STILL OUTSTANDING: the figures and LastSeenAt advance;
 			// the operator's work does not. Overwriting status here is the bug
 			// that resets an assignment on every daily run.

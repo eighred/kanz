@@ -386,6 +386,7 @@ type Run struct {
 	Subject       Subject
 	Outcome       Outcome
 	StatementID   string
+	Basis         *RunBasis
 	Breaks        []Break
 	Tolerance     *big.Rat
 	CompletedAt   time.Time
@@ -397,7 +398,8 @@ type Break struct {
 	// BreakID is stable ACROSS RUNS, derived from (portfolio, custodian, kind,
 	// key) — see BreakID. The age depends on it: a break given a fresh id every
 	// day would be permanently one day old.
-	BreakID string
+	BreakID    string
+	comparison *RunBasis // volatile store redetection scope
 	// Ownership comes from the reconciliation subject or stored columns, never
 	// from parsing the opaque working-item ID.
 	PortfolioID string `json:"-"`

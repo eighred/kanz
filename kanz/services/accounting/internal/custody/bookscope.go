@@ -2,6 +2,7 @@ package custody
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -51,6 +52,49 @@ type BookScope struct {
 	// claimed is portfolio -> every account any of its custodians claims, which
 	// is what makes an unclaimed account detectable rather than merely absent.
 	claimed map[string]ledger.AccountScope
+}
+
+// RunBasis records the account assignment observed when the book was folded.
+// It describes the comparison, without certifying that a declared account exists.
+// The run's subject supplies the portfolio and inclusive UTC business-day close.
+type RunBasis struct {
+	Mode            string              `json:"mode"`
+	Accounts        map[string][]string `json:"accounts"`
+	JournalPosition int64               `json:"journal_position"`
+}
+
+func (s *BookScope) runBasis(subject Subject, mode string, fold ledger.CustodyBasis) *RunBasis {
+	ids := slices.Sorted(maps.Keys(fold.Accounts))
+	if ids == nil {
+		ids = []string{} // The journal was read and contained no attributed accounts.
+	}
+	accounts := map[string][]string{subject.CustodianID: ids}
+	if mode == BasisDeclared {
+		for custodian, scope := range s.accounts[subject.PortfolioID] {
+			accounts[custodian] = slices.Sorted(maps.Keys(scope))
+		}
+	}
+	return &RunBasis{Mode: mode, Accounts: accounts, JournalPosition: fold.JournalPosition}
+}
+
+func (b *RunBasis) clone() *RunBasis {
+	if b == nil {
+		return nil
+	}
+	out := *b
+	out.Accounts = make(map[string][]string, len(b.Accounts))
+	for custodian, accounts := range b.Accounts {
+		out.Accounts[custodian] = slices.Clone(accounts)
+	}
+	return &out
+}
+
+// New journal entries advance the prefix without changing which accounts a break compares.
+func (b *RunBasis) sameScope(other *RunBasis, custodian string) bool {
+	if b == nil || other == nil {
+		return b == other
+	}
+	return b.Mode == other.Mode && slices.Equal(b.Accounts[custodian], other.Accounts[custodian])
 }
 
 // CashAccountAllowed requires an explicit, unambiguous portfolio assignment.

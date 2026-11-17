@@ -125,8 +125,10 @@ func MaterializeForAccounts(
 	if err != nil {
 		return CustodyBasis{}, err
 	}
+	position := int64(len(events))
 	events = sortedFor(events, effectiveAsOf, time.Time{}, true)
 	basis := foldForAccounts(portfolioID, events, scope, claimed)
+	basis.JournalPosition = position
 	basis.Accounts = scope
 	return basis, nil
 }
@@ -166,9 +168,11 @@ func MaterializeAttributed(ctx context.Context, st Store, portfolioID string, ef
 	if err != nil {
 		return CustodyBasis{}, err
 	}
+	position := int64(len(events))
 	events = sortedFor(events, effectiveAsOf, time.Time{}, true)
 	scope := AttributedAccounts(events)
 	basis := foldForAccounts(portfolioID, events, scope, scope)
+	basis.JournalPosition = position
 	basis.Accounts = scope
 	if len(basis.Unmapped) > 0 {
 		// UNREACHABLE, AND LOUD RATHER THAN IGNORED. scope and claimed are both
