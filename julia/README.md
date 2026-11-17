@@ -30,6 +30,31 @@ it is not an OS or network sandbox. Operational network/resource isolation is
 still required before deployment. Package loading reads the installed runtime
 and generated source files.
 
+## Offline source-package input
+
+`qualification/offline_depot.py` verifies the three external source packages in
+`qualification/offline_packages.json` against the canonical LF bytes of the locked
+Manifest. The trusted parent supplies a read-only input directory containing
+`Manifest.toml`, `offline_packages.json` and one `<Package>.tar.gz` per declared
+package. It separately creates and retains a private empty scratch depot.
+The preparer takes these directories as `--input` and `--depot`; invoke it only
+inside the reviewed Linux sandbox with no network, an empty allowlisted
+environment, read-only inputs/tools and explicit resource/deadline limits.
+
+Preparation performs no downloads, package installation, Julia execution or
+precompilation. It checks compressed SHA256/size, the complete archive census,
+upstream Git tree and Project UUID/version before descriptor-relative exclusive
+writes. Links, special files, ambiguous paths, build scripts, artifact manifests,
+alternative source entries and unexpected inputs refuse. All package validation
+precedes output creation. Output files are read-only and `consumerAccepted` is
+always false.
+
+This helper closes the source-input format only. Its adoption into offline
+runtime preparation, actual Julia slug/load compatibility, native candidate
+identity, final-image numerical/Go-consumer tests and complete advisory
+qualification remain under #1536. The existing image/workflow has not switched
+to this helper or to the development OpenSSL candidate.
+
 ## Source-only OCI qualification
 
 `Dockerfile` packages this same worker and its generated contracts using the
