@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	"github.com/eighred/kanz/internal/dec"
+	decutil "github.com/eighred/kanz/internal/dec"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/factormodel"
@@ -64,7 +64,7 @@ func DecomposePortfolio(ctx context.Context, p *domain.Portfolio, provider Model
 			coverage.Exclude(pos.InstrumentID, "currency_unresolved")
 			continue
 		}
-		value, valid := dec.Float64(pos.MarketValue.GetAmount())
+		value, valid := decutil.Float64(pos.MarketValue.GetAmount())
 		if !valid {
 			coverage.Exclude(pos.InstrumentID, "market_value_unresolved")
 			continue
@@ -106,8 +106,8 @@ func decomposeModel(model *factormodel.Model, values map[string]float64) (v1.Ris
 		}
 		// Exact's decimal grammar has no exponent form. 'f', -1 keeps the
 		// shortest roundtrip observation without adding a fixed rounding scale.
-		valueDecimal, ok := dec.ParseProtoExact(strconv.FormatFloat(value, 'f', -1, 64))
-		if !ok || !dec.InDomain(valueDecimal) {
+		valueDecimal, ok := decutil.ParseProtoExact(strconv.FormatFloat(value, 'f', -1, 64))
+		if !ok || !decutil.InDomain(valueDecimal) {
 			err = v1.ErrDecompositionUnavailable
 			return nil
 		}

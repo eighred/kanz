@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/dec"
+	decutil "github.com/eighred/kanz/internal/dec"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/factormodel"
@@ -49,7 +49,7 @@ func decompositionBook() *domain.Portfolio {
 
 func decompositionValue(t *testing.T, d *commonpb.Decimal) float64 {
 	t.Helper()
-	v, ok := dec.Float64(d)
+	v, ok := decutil.Float64(d)
 	if !ok {
 		t.Fatalf("absent/unrepresentable Decimal: %v", d)
 	}
