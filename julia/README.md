@@ -49,11 +49,21 @@ alternative source entries and unexpected inputs refuse. All package validation
 precedes output creation. Output files are read-only and `consumerAccepted` is
 always false.
 
-This helper closes the source-input format only. Its adoption into offline
-runtime preparation, actual Julia slug/load compatibility, native candidate
-identity, final-image numerical/Go-consumer tests and complete advisory
-qualification remain under #1536. The existing image/workflow has not switched
-to this helper or to the development OpenSSL candidate.
+After preparation, run the consumer check against the private depot in the same
+isolated Linux environment. Use the selected Julia 1.13.3 executable. Keep the
+depot writable for this step so the package loader can create its caches.
+
+```sh
+JULIA_DEPOT_PATH="$depot" JULIA_LOAD_PATH='@:@stdlib' JULIA_PKG_OFFLINE=true \
+  julia --startup-file=no --history-file=no --project=julia julia/test/offline_depot.jl
+```
+
+The check uses Julia's package slug algorithm and the locked manifest to locate
+each external package. It verifies the source path and version actually loaded
+by the worker's ProtoBuf import and the presence of its compiled package caches.
+For numerical and wire behavior, run the canonical generation and test commands
+above with the same prepared depot. Image adoption, native advisory qualification
+and deployment acceptance remain tracked in #1536.
 
 ## Source-only OCI qualification
 
