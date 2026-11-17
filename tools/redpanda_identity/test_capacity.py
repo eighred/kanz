@@ -60,6 +60,11 @@ class CapacityTests(unittest.TestCase):
         evidence = {'sourceSHA': sha, 'passed': True, 'cleanupPassed': True,
                     'developmentOnly': True, 'brokerImage': qualify.REDPANDA,
                     'observations': [], 'storageObservations': []}
+        before = {'podUID': '00000000-0000-0000-0000-000000000001',
+                  'containerID': 'containerd://' + 'a' * 64, 'restartCount': 0}
+        after = dict(before, containerID='containerd://' + 'b' * 64, restartCount=1,
+                     previousContainerID=before['containerID'], previousExitCode=0)
+        evidence['brokerRestart'] = {'before': before, 'after': after}
         for case, sa, mode in qualify.CASES:
             evidence['observations'].append({'case': case, 'passed': True, 'mode': mode,
                 'identity': qualify.identity(sa), 'subjectDN': 'CN=fixture,O=SPIRE,C=US,' + qualify.subject(sa),
@@ -73,7 +78,7 @@ class CapacityTests(unittest.TestCase):
                              ('requiredHeadroomBytes', 0), ('usedBytes', 40 << 30)]:
             bad = copy.deepcopy(evidence); bad['storageObservations'][2][field] = value
             with self.assertRaises(ValueError): qualify.validate_report(bad, sha)
-        for index in range(5):
+        for index in range(len(qualify.CASES)):
             bad = copy.deepcopy(evidence); del bad['storageObservations'][index]
             with self.assertRaises(ValueError): qualify.validate_report(bad, sha)
         bad = copy.deepcopy(evidence); bad['storageObservations'].append(bad['storageObservations'][0])

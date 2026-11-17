@@ -33,8 +33,12 @@ TTL is 60 seconds only in this fixture. An ungranted SVID must receive explicit
 topic authorization errors. The `proof-ungranted` identity has no grant in
 the topic ACL inventory; it has a valid SPIRE registration and a distinct DN
 mapping. This case does not prove refusal of an unmapped certificate subject.
-Final bootstrap reads require exactly two expected
-records per topic, so rejected writes cannot silently have succeeded.
+Bootstrap reads require exactly two expected records per topic. The fixture then
+requests a graceful shutdown of the broker process. It checks that Kubernetes
+restarted the container exactly once on the original pod and data volume,
+observes the old container's successful exit, and repeats the read with a fresh
+client. This covers retained fixture records across a broker process restart.
+Consumer-group checkpoint recovery and restore into new storage remain open.
 
 `redpanda-identity-proof.yml` runs the mandatory fixture on Linux with no optional
 skip. Local unit checks:
