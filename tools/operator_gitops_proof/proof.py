@@ -126,6 +126,45 @@ def check_operation(application, revision, token=None):
     return sync.get("status") == "Synced"
 
 
+def operation_observation(application, revision, token, resources):
+    """Closed scalar diagnostics; never retain raw Application or resource data."""
+    status = application.get("status", {})
+    state = status.get("operationState", {})
+    result = state.get("syncResult", {})
+    sync = status.get("sync", {})
+    phase = state.get("phase")
+    sync_status = sync.get("status")
+    found = status.get("resources", [])
+    bounded = type(found) is list and len(found) <= 64
+    actual = set()
+    if bounded:
+        for item in found:
+            if type(item) is not dict:
+                bounded = False
+                break
+            key = item.get("kind"), item.get("namespace", ""), item.get("name")
+            if any(type(value) is not str or len(value) > 128 for value in key):
+                bounded = False
+                break
+            actual.add(key)
+    return {
+        "applicationObserved": True,
+        "sync": sync_status if sync_status in ("Synced", "OutOfSync") else "UNKNOWN",
+        "phase": phase if phase in ("Running", "Terminating", "Succeeded", "Failed", "Error") else "UNKNOWN",
+        "targetRevisionMatches": application.get("spec", {}).get("source", {}).get("targetRevision") == revision,
+        "operationRevisionMatches": result.get("revision") == revision,
+        "comparisonRevisionMatches": sync.get("revision") == revision,
+        "manualRequest": token is not None,
+        "requestInfoMatches": token is not None and state.get("operation", {}).get("info") == token,
+        "operationPending": bool(application.get("operation")),
+        "operationFinished": bool(state.get("finishedAt")),
+        "resourceInventoryBounded": bounded,
+        "missingResourceCount": len(set(resources) - actual) if bounded else None,
+        "unexpectedResourceCount": len(actual - set(resources)) if bounded else None,
+        "readbackMatches": None,
+    }
+
+
 def validate_creation_authorization(value, source, run_id, run_attempt):
     """A preflight collision must never manufacture a cleanup entitlement."""
     if (type(value) is not dict or set(value) != {
@@ -327,10 +366,16 @@ class Fixture:
 
     def observe(self, resources, revision, marker, *, request_sync=False):
         deadline = time.monotonic() + 120
+        self.last_observation = {"applicationObserved": False}
         token = None
         if request_sync:
             token = [{"name": "operator-gitops-request", "value": uuid.uuid4().hex}]
+            # Changing the target first lets automated sync race the separately
+            # queued manual operation. Keep its target and request identity in
+            # one atomic Application update, including a return to an old SHA.
             self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
+                "metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}},
+                "spec": {"source": {"targetRevision": revision}},
                 "operation": {"info": token, "sync": {"revision": revision, "prune": True}}}), timeout=10)
 
         def observed(*args):
@@ -341,6 +386,7 @@ class Fixture:
 
         while time.monotonic() < deadline:
             app = observed("-n", "argocd", "get", "application", APP, "-o", "json")
+            self.last_observation = operation_observation(app, revision, token, resources)
             if check_operation(app, revision, token):
                 accounts = observed("-n", NAMESPACE, "get", "serviceaccounts", "-o", "json")["items"]
                 policies = observed("-n", NAMESPACE, "get", "networkpolicies", "-o", "json")["items"]
@@ -349,11 +395,13 @@ class Fixture:
                 try:
                     check_inventory(resources, accounts, policies, jobs, namespace, marker)
                 except ValueError:
+                    self.last_observation["readbackMatches"] = False
                     # A self-heal may be in flight after a resource deletion.
                     # Never admit the dangerous Job, even transiently.
                     if jobs:
                         raise
                 else:
+                    self.last_observation["readbackMatches"] = True
                     actual = {(item["kind"], item.get("namespace", ""), item["name"])
                               for item in app["status"].get("resources", [])}
                     if actual != set(resources):
@@ -404,7 +452,7 @@ def main():
                 revision = revisions[1] if case == "revision-change" else revisions[0]
                 if case == "identity-self-heal":
                     fixture.k("-n", NAMESPACE, "delete", "serviceaccount", "kanz-model", "--wait=true")
-                if case in ("revision-change", "rollback"):
+                if case == "revision-change":
                     fixture.target(revision)
                 fixture.observe(resources, revision, marker, request_sync=case in ("same-revision-sync", "rollback"))
                 report["cases"].append(case)
@@ -413,6 +461,8 @@ def main():
             report["failedStage"] = fixture.stage
             report["failure"] = ("deadline" if isinstance(error, TimeoutError) else
                                  "boundary-refused" if isinstance(error, ValueError) else "command-or-source-refused")
+            if isinstance(error, TimeoutError) and getattr(fixture, "last_observation", None) is not None:
+                report["operationObservation"] = fixture.last_observation
             command = fixture.process.command_failure(error)
             if command is not None:
                 report["command"] = command

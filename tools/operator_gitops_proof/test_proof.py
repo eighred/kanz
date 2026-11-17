@@ -221,7 +221,12 @@ class OperatorOperationTests(unittest.TestCase):
 
         def k(*args, timeout=30):
             if "patch" in args:
-                requested.append(json.loads(args[-1])["operation"]["info"])
+                payload = json.loads(args[-1])
+                # Changing the desired revision separately lets automatic sync
+                # finish before this particular manual operation is recorded.
+                self.assertEqual(payload["spec"]["source"]["targetRevision"], "a" * 40)
+                self.assertEqual(payload["operation"]["sync"]["revision"], "a" * 40)
+                requested.append(payload["operation"]["info"])
                 return "{}"
             value = json.loads(original(*args, timeout=timeout))
             if "application" in args:
@@ -255,6 +260,9 @@ class OperatorOperationTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "reconciliation deadline expired"):
                 fixture.observe(resources, "a" * 40, None, request_sync=True)
         self.assertEqual(inventory, [])
+        self.assertTrue(fixture.last_observation["operationRevisionMatches"])
+        self.assertFalse(fixture.last_observation["requestInfoMatches"])
+        self.assertIsNone(fixture.last_observation["readbackMatches"])
 
 
 class OperatorCreationOwnershipTests(unittest.TestCase):
