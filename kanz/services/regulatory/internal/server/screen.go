@@ -160,7 +160,7 @@ func (s *Server) handleESGScreen(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	result := sustainability.Screen(r.Context(), book, s.classifier, req.policy(), asOf(req.AsOf))
+	result := sustainability.Screen(r.Context(), book, s.classifier, req.policy(), screenAsOf(req.AsOf))
 	if versioned {
 		// A separate route refuses old deployments. Proto JSON preserves int64
 		// fields as strings and timestamps as RFC3339 for browser consumers.
@@ -175,4 +175,13 @@ func (s *Server) handleESGScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// The legacy screen permits an omitted observation date. The versioned route
+// validates its required date before reaching this shared screen calculation.
+func screenAsOf(t *time.Time) time.Time {
+	if t != nil && !t.IsZero() {
+		return t.UTC()
+	}
+	return time.Now().UTC()
 }
