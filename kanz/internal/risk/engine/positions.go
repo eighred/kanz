@@ -32,17 +32,17 @@ func (e *EngineImpl) Positions(ctx context.Context, req v1.PositionsRequest) (v1
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.PositionsResponse{}, err
 	}
-	p, err := e.store.SnapshotOwned(req.PortfolioID)
+	p, err := e.store.SnapshotOwnedBounded(req.PortfolioID, maxObservedPositions)
 	if errors.Is(err, state.ErrNotOwned) {
 		return v1.PositionsResponse{}, v1.ErrPortfolioNotOwned
+	}
+	if errors.Is(err, state.ErrSnapshotPositionLimit) {
+		return v1.PositionsResponse{}, v1.ErrPositionSnapshotBound
 	}
 	if err != nil {
 		return v1.PositionsResponse{}, err
 	}
 	positions := p.Positions()
-	if len(positions) > maxObservedPositions {
-		return v1.PositionsResponse{}, v1.ErrPositionSnapshotBound
-	}
 	rows := make([]v1.ObservedPosition, 0, len(positions))
 	for _, pos := range positions {
 		if pos.InstrumentID == "" || len(pos.InstrumentID) > 256 {

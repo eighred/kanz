@@ -103,7 +103,7 @@ import (
 
 // Store is the risk engine's state-of-the-world. Implements
 // ingest.Applier (writer side) and exposes Snapshot / SnapshotWithKeys /
-// SnapshotOwned (reader side). Compute layers (RISK-06/07/08) and the
+// SnapshotOwned / SnapshotOwnedBounded (reader side). Compute layers (RISK-06/07/08) and the
 // api/v1 surface read portfolios through those, and every one of them
 // returns a clone — see the package doc's "Reads leave by clone" (#821).
 type Store struct {

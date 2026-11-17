@@ -20,7 +20,7 @@ import (
 
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
-	"github.com/eighred/kanz/services/oms/internal/order"
+	orderstore "github.com/eighred/kanz/services/oms/internal/order"
 )
 
 // Exercise the actual tenant-scoped Postgres.Load with the owned order/read
@@ -104,7 +104,7 @@ func TestStateReadPostgresPreservesTenantIsolation(t *testing.T) {
 	seed(a, "t1", "O", 9007199254740993)
 	seed(b, "t2", "O", -9007199254740991)
 	seed(b, "t2", "foreign", 123)
-	read := grpcsrv.NewStateRead(ctx, order.NewPostgres(a), "t1", nil)
+	read := grpcsrv.NewStateRead(ctx, orderstore.NewPostgres(a), "t1", nil)
 	resp, err := read.OrderStateRead(ctx, &querypb.OrderStateReadRequest{PortfolioId: "P", OrderId: "O"})
 	if err != nil || resp.GetOrderedQuantity().GetValue().GetCoefficient() != 9007199254740993 {
 		t.Fatalf("tenant-scoped exact read: %v %v", resp, err)
@@ -133,7 +133,7 @@ func TestStateReadPostgresPreservesTenantIsolation(t *testing.T) {
 			}
 			held = append(held, conn)
 		}
-		read := grpcsrv.NewStateRead(ctx, order.NewPostgres(a), "t1", nil)
+		read := grpcsrv.NewStateRead(ctx, orderstore.NewPostgres(a), "t1", nil)
 		defer func() {
 			read.CancelReads()
 			release()

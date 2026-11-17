@@ -15,12 +15,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
-	"github.com/eighred/kanz/services/oms/internal/order"
+	orderstore "github.com/eighred/kanz/services/oms/internal/order"
 )
 
-func stateReadFixture(t *testing.T) (*order.MemoryStore, *orderpb.OrderState) {
+func stateReadFixture(t *testing.T) (*orderstore.MemoryStore, *orderpb.OrderState) {
 	t.Helper()
-	store := order.NewMemoryStore()
+	store := orderstore.NewMemoryStore()
 	row := &orderpb.OrderState{OrderId: "O", PortfolioId: "P", InstrumentId: "I", Status: orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED,
 		OrderedQuantity: &commonpb.Decimal{Coefficient: 9007199254740993, Exponent: -11}, FilledQuantity: &commonpb.Decimal{Coefficient: 2, Exponent: -11},
 		LeavesQuantity: &commonpb.Decimal{Coefficient: 9007199254740991, Exponent: -11}, AsOf: timestamppb.New(time.Now().UTC()),
@@ -72,7 +72,7 @@ func TestStateReadQuarantineAndUnknownStatusWithholdValues(t *testing.T) {
 		} else {
 			row.Status = orderpb.OrderStatus(999)
 		}
-		if err := store.Save(context.Background(), row, 0, nil); err != nil {
+		if err := store.Save(context.Background(), row, 0, nil, ""); err != nil {
 			t.Fatal(err)
 		}
 		resp, err := grpcsrv.NewStateRead(context.Background(), store, "t1", nil).OrderStateRead(context.Background(), &querypb.OrderStateReadRequest{PortfolioId: "P", OrderId: "O"})

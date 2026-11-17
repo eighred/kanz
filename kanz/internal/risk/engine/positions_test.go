@@ -104,6 +104,35 @@ func TestPositionsRefuseMalformedAndOversizedSnapshots(t *testing.T) {
 	}
 }
 
+func TestPositionsRefuseOversizedRetainedMapBeforeCloneOrMaterialization(t *testing.T) {
+	e, store := newEngine()
+	p := domain.NewPortfolio("P", "USD")
+	for i := range 1025 {
+		p.SetPosition(domain.Position{InstrumentID: v1.InstrumentID(fmt.Sprintf("I%04d", i)), Quantity: &commonpb.Decimal{}})
+	}
+	if p.PositionCount() != 0 || p.ObservedPositionCount() != 1025 {
+		t.Fatal("fixture must retain 1,025 flat rows while reporting zero non-flat positions")
+	}
+	if err := store.Restore(p, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var refusal error
+	measured := testing.Benchmark(func(b *testing.B) {
+		for range b.N {
+			_, refusal = e.Positions(ctx, v1.PositionsRequest{PortfolioID: "P"})
+		}
+	})
+	if !errors.Is(refusal, v1.ErrPositionSnapshotBound) {
+		t.Fatalf("oversized observed map was not refused: %v", refusal)
+	}
+	// Permit small error wrapping/representation changes. Cloning a 1,025-row
+	// map or constructing its position slice exceeds this byte bound by itself.
+	if measured.AllocsPerOp() > 32 || measured.AllocedBytesPerOp() > 4096 {
+		t.Fatalf("oversized refusal allocated %d objects / %d bytes per call; clone/materialization occurred before the cardinality gate", measured.AllocsPerOp(), measured.AllocedBytesPerOp())
+	}
+}
+
 func TestPositionsPreserveMissingQuantityAsUnknown(t *testing.T) {
 	e, s := newEngine()
 	p := domain.NewPortfolio("P", "USD")

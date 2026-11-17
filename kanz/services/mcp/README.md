@@ -27,8 +27,10 @@ state time and an exact signed quantity. Missing/malformed quantities, missing
 times, stale/degraded responses and unknown trust signals withhold numerical
 values as `UNKNOWN`. Coefficients are JSON strings, preserving integers beyond
 JavaScript's exact range. An empty observed set is not a claim of a flat book.
-The complete observed snapshot is bounded at 1,024 rows, with pages of at most
-100 (default 50). A content-bound cursor refuses a changed snapshot; restart
+The complete observed snapshot is bounded at 1,024 rows. Actual stored cardinality,
+including retained flat rows, is checked under the owning aggregate lock before
+cloning or sorting. Pages contain at most 100 rows (default 50). A content-bound
+cursor refuses a changed snapshot; restart
 pagination rather than combine versions. Oversized snapshots refuse without
 serving a prefix. The content identity also binds quality flags, so aging from
 fresh to stale invalidates continuation without binding unrelated wall-clock

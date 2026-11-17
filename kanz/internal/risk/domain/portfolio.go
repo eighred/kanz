@@ -163,6 +163,11 @@ func (p *Portfolio) TotalMarketValue() *commonpb.Money { return p.totalMarketVal
 // by the most recent PortfolioState event.
 func (p *Portfolio) PositionCount() uint32 { return p.positionCount }
 
+// ObservedPositionCount is the actual stored-map cardinality, including retained
+// flat positions. It neither builds the sorted view nor clones rows. A live
+// aggregate may call it only under its owning state-store lock.
+func (p *Portfolio) ObservedPositionCount() int { return len(p.positions) }
+
 // AsOf returns the timestamp of the most recent state event applied
 // to this portfolio. Zero before any state event has been applied.
 func (p *Portfolio) AsOf() time.Time { return p.asOf }
@@ -214,8 +219,8 @@ func (p *Portfolio) Position(id InstrumentID) (Position, bool) {
 //
 // NOT A PURE READ. The first call after a mutation WRITES p.sortedCache,
 // so the receiver must be exclusively owned by the calling goroutine — a
-// Clone (state.Store.Snapshot / SnapshotWithKeys / SnapshotOwned, the only
-// reads that exist), or the live copy inside internal/risk/state under its
+// Clone (state.Store.Snapshot, SnapshotWithKeys, SnapshotOwned or
+// SnapshotOwnedBounded), or the live copy inside internal/risk/state under its
 // per-aggregate lock. That is a property of the caller, not of this
 // method, and it holds today because there is no exported way to obtain a
 // shared *Portfolio (#821) — not because the write is somehow benign.

@@ -170,6 +170,9 @@ var (
 	ErrOwnershipUnmanaged = errors.New("state: store was not built with runtime ownership")
 	// ErrEmptyPortfolioID: an ownership call with no aggregate id.
 	ErrEmptyPortfolioID = errors.New("state: empty portfolio id")
+
+	ErrInvalidSnapshotLimit  = errors.New("state: snapshot position limit must be positive")
+	ErrSnapshotPositionLimit = errors.New("state: observed position snapshot exceeds its limit")
 )
 
 // OwnershipManaged reports whether this Store gates on ownership at all —
@@ -380,6 +383,18 @@ func (s *Store) Release(id v1.PortfolioID) (rec persist.PortfolioRecord, release
 // The returned portfolio is a deep clone taken under the per-aggregate lock,
 // same as Snapshot.
 func (s *Store) SnapshotOwned(id v1.PortfolioID) (*domain.Portfolio, error) {
+	// A Go map's length fits in int. The native ceiling preserves this legacy
+	// method's unbounded behavior while sharing the ownership/clone path.
+	return s.SnapshotOwnedBounded(id, int(^uint(0)>>1))
+}
+
+// SnapshotOwnedBounded retains SnapshotOwned's ownership and clone semantics,
+// but refuses an oversized observed map before cloning or materializing rows.
+// The source-reported non-flat PositionCount is not this cardinality.
+func (s *Store) SnapshotOwnedBounded(id v1.PortfolioID, maxPositions int) (*domain.Portfolio, error) {
+	if maxPositions <= 0 {
+		return nil, ErrInvalidSnapshotLimit
+	}
 	s.mu.Lock()
 	owns := s.ownsLocked(id)
 	lock := s.locks[id]
@@ -394,6 +409,9 @@ func (s *Store) SnapshotOwned(id v1.PortfolioID) (*domain.Portfolio, error) {
 	if lock != nil {
 		lock.Lock()
 		defer lock.Unlock()
+	}
+	if port.ObservedPositionCount() > maxPositions {
+		return nil, ErrSnapshotPositionLimit
 	}
 	return port.Clone(), nil
 }
