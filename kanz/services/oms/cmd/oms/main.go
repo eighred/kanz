@@ -614,6 +614,13 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		}
 		defer stopGRPC()
 	}
+	if cfg.StateQueryListen != "" {
+		stopStateRead, err := serveStateRead(cfg, mesh, store, logger)
+		if err != nil {
+			return false, err
+		}
+		defer stopStateRead()
+	}
 
 	// WHERE AN UNTARGETED ORDER GOES (#437). The four-way decision, its one fatal
 	// case and the cost ranker it prefers with are in router.go, where

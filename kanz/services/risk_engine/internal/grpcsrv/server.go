@@ -72,6 +72,8 @@ func New(engine v1.Engine, ownerTenant string) *Server {
 // the service wires up).
 func (s *Server) Register(r grpc.ServiceRegistrar) {
 	querypb.RegisterRiskQueryServiceServer(r, s)
+	positions, _ := s.engine.(v1.PositionReader)
+	querypb.RegisterPositionQueryServiceServer(r, &positionServer{engine: positions, ownerTenant: s.ownerTenant})
 }
 
 // requireDecimalDomain refuses a request carrying an out-of-domain Decimal

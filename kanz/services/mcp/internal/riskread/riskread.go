@@ -25,16 +25,25 @@ import (
 
 	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/internal/measureread"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // Client reads risk state over query.v1.
 type Client struct {
-	query querypb.RiskQueryServiceClient
+	query          querypb.RiskQueryServiceClient
+	expectedTenant string
+	scoped         bool
 }
 
 // New builds the client over a generated query.v1 client, constructed from the
 // mTLS ClientConn at the composition root.
 func New(q querypb.RiskQueryServiceClient) *Client { return &Client{query: q} }
+
+// NewScoped binds selected state reads to one configured upstream tenant.
+// The caller cannot select that identity through tool arguments or headers.
+func NewScoped(q querypb.RiskQueryServiceClient, tenant string) *Client {
+	return &Client{query: q, expectedTenant: tenant, scoped: true}
+}
 
 // OwnerTenant resolves the portfolio's owning tenant for the authorization gate,
 // and returns NOTHING ELSE about it.
@@ -49,9 +58,20 @@ func New(q querypb.RiskQueryServiceClient) *Client { return &Client{query: q} }
 // else" with ONE answer, because a caller able to tell them apart can enumerate
 // another tenant's portfolios by id.
 func (c *Client) OwnerTenant(ctx context.Context, portfolioID string) (string, error) {
+	if c.scoped {
+		p, ok := auth.PrincipalFromContext(ctx)
+		if !ok || p.Subject == "" || c.expectedTenant == "" || p.Tenant != c.expectedTenant || !auth.PortfolioInScope(p.Portfolios, portfolioID) {
+			// Gate.Authorize still records the policy denial. No resource lookup
+			// occurs for an anonymous, foreign-tenant or out-of-scope caller.
+			return "", agentgate.ErrResourceNotVisible
+		}
+	}
 	resp, err := c.query.Exposure(ctx, &querypb.ExposureRequest{PortfolioId: portfolioID})
 	if err != nil {
 		return "", mapErr(err)
+	}
+	if c.scoped && (resp.GetOwnerTenant() != c.expectedTenant || resp.GetPortfolioId() != portfolioID) {
+		return "", agentgate.ErrResourceNotVisible
 	}
 	return resp.GetOwnerTenant(), nil
 }
@@ -73,9 +93,18 @@ func (c *Client) OwnerTenant(ctx context.Context, portfolioID string) (string, e
 // plane becomes a data tap. What changed is that the integrity record is not one
 // of them — it is the difference between a number and a claim.
 func (c *Client) Measures(ctx context.Context, portfolioID string) (measureread.Set, error) {
+	if c.scoped {
+		p, ok := auth.PrincipalFromContext(ctx)
+		if !ok || p.Subject == "" || c.expectedTenant == "" || p.Tenant != c.expectedTenant || !auth.PortfolioInScope(p.Portfolios, portfolioID) {
+			return measureread.Set{}, agentgate.ErrResourceNotVisible
+		}
+	}
 	resp, err := c.query.Measures(ctx, &querypb.MeasuresRequest{PortfolioId: portfolioID})
 	if err != nil {
 		return measureread.Set{}, mapErr(err)
+	}
+	if c.scoped && (resp.GetOwnerTenant() != c.expectedTenant || resp.GetPortfolioId() != portfolioID) {
+		return measureread.Set{}, agentgate.ErrResourceNotVisible
 	}
 	return measureread.ProjectMeasures(resp), nil
 }

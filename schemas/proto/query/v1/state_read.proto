@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package query.v1;
+
+import "common/v1/decimal.proto";
+import "google/protobuf/timestamp.proto";
+import "query/v1/risk_query.proto";
+
+// StateReadKnowledge distinguishes an absent observation from an observed zero.
+enum StateReadKnowledge {
+  STATE_READ_KNOWLEDGE_UNSPECIFIED = 0;
+  STATE_READ_KNOWLEDGE_SUPPORTED = 1;
+  STATE_READ_KNOWLEDGE_UNSUPPORTED = 2;
+  STATE_READ_KNOWLEDGE_UNKNOWN = 3;
+}
+
+// ObservedQuantity preserves the canonical Decimal without inferring missing data.
+message ObservedQuantity {
+  StateReadKnowledge knowledge = 1;
+  // Present only with SUPPORTED knowledge.
+  common.v1.Decimal value = 2;
+}
+
+// PositionQueryService reads the positions observed by the risk engine. It is
+// neither an accounting book nor evidence that all positions have arrived.
+service PositionQueryService {
+  rpc Positions(PositionsRequest) returns (PositionsResponse);
+}
+
+message PositionsRequest {
+  string portfolio_id = 1;
+  // Zero selects 50. Values above 100 are refused, never silently clamped.
+  uint32 page_size = 2;
+  // Bound to the entire observed snapshot and portfolio. A changed snapshot
+  // refuses continuation; callers restart rather than combine state versions.
+  string page_token = 3;
+}
+
+message PositionsResponse {
+  string portfolio_id = 1;
+  string owner_tenant = 2;
+  google.protobuf.Timestamp as_of = 3;
+  repeated ObservedPosition positions = 4;
+  uint32 total_observed = 5;
+  string next_page_token = 6;
+  // Content identity for pagination, not an authority or complete-history claim.
+  string snapshot_id = 7;
+  repeated QualityFlag quality_flags = 8;
+}
+
+message ObservedPosition {
+  string instrument_id = 1;
+  ObservedQuantity quantity = 2;
+  google.protobuf.Timestamp as_of = 3;
+}
+
+// OrderStateReadService serves one narrowly projected recorded OMS state.
+// It has no commands, venue operations, approvals, credentials or history API.
+service OrderStateReadService {
+  rpc OrderStateRead(OrderStateReadRequest) returns (OrderStateReadResponse);
+}
+
+message OrderStateReadRequest {
+  string portfolio_id = 1;
+  string order_id = 2;
+}
+
+message OrderStateReadResponse {
+  string portfolio_id = 1;
+  string owner_tenant = 2;
+  string order_id = 3;
+  string instrument_id = 4;
+  // The canonical OMS lifecycle label, or UNKNOWN for an unrecognized value.
+  // This records the OMS observation; it does not assert current venue state.
+  string recorded_status = 5;
+  StateReadKnowledge status_knowledge = 6;
+  ObservedQuantity ordered_quantity = 7;
+  ObservedQuantity filled_quantity = 8;
+  ObservedQuantity leaves_quantity = 9;
+  google.protobuf.Timestamp as_of = 10;
+  google.protobuf.Timestamp read_at = 11;
+  int64 version = 12;
+  // Quarantine withholds usable quantities and lifecycle claims. No underlying
+  // venue response, fee, account, actor or investigation detail is exposed.
+  bool quarantined = 13;
+}

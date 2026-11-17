@@ -8,7 +8,8 @@
 //
 // WHAT THIS BINARY CANNOT DO, BY CONSTRUCTION. It places no orders, cancels
 // nothing, amends nothing, holds no venue credential and dials no exchange. It
-// speaks to exactly ONE upstream — the risk-engine's query.v1 read API — and
+// reads the risk-engine's query.v1 API. Explicitly selected state reads add a
+// dedicated, read-only OMS query.v1 endpoint; they do not use order commands.
 // test/arch/mcp_is_a_read_plane_test.go asserts on the import graph that none of
 // the capital or venue surface is even reachable from here, because a tool that
 // could do those things arrives as an import before it arrives as a handler.
@@ -27,8 +28,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
-
 	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -37,7 +36,6 @@ import (
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/mcp/internal/config"
-	"github.com/eighred/kanz/services/mcp/internal/riskread"
 	"github.com/eighred/kanz/services/mcp/internal/server"
 )
 
@@ -87,16 +85,14 @@ func run() int {
 		logger.Error("mcp: policy bundle refused", "err", err, "file", cfg.PolicyFile)
 		return 2
 	}
+	authorizer = auth.NewAuditedAuthorizer(authorizer, auth.NewSlogRecorder(logger), cfg.Source, logger)
 
-	// The ONE upstream this plane reads.
-	conn, err := dialRiskQuery(ctx, cfg, logger)
+	reader, stateReader, closeReaders, err := buildReaders(ctx, cfg, logger)
 	if err != nil {
-		logger.Error("risk query dial failed", "err", err, "addr", cfg.RiskQueryAddr)
+		logger.Error("governed query configuration failed", "err", err)
 		return 2
 	}
-	defer func() { _ = conn.Close() }()
-
-	reader := riskread.New(querypb.NewRiskQueryServiceClient(conn))
+	defer closeReaders()
 	// The gate takes the SAME client as its OwnerResolver: "who owns this" and
 	// "what does it say" must come from one source, or the plane can authorize
 	// against one view of ownership and read from another.
@@ -125,7 +121,11 @@ func run() int {
 		_ = metricsSrv.Shutdown(shutCtx)
 	}()
 
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, gate, reader, logger), httpserver.Standard())
+	var serverOptions []server.Option
+	if stateReader != nil {
+		serverOptions = append(serverOptions, server.WithStateReads(stateReader))
+	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, gate, reader, logger, serverOptions...), httpserver.Standard())
 	go func() {
 		logger.Info("mcp read plane listening", "addr", cfg.Listen, "upstream", cfg.RiskQueryAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

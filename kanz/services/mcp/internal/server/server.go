@@ -67,11 +67,16 @@ type Tool struct {
 	Description string
 	Action      auth.Action
 	// invoke runs the read. It is called ONLY after the gate has allowed it.
-	invoke func(ctx context.Context, r Reader, portfolioID string) (any, error)
+	invoke     func(ctx context.Context, r Reader, arguments Arguments) (any, error)
+	properties map[string]any
+	required   []string
+	valid      func(Arguments) bool
 }
 
+type Option func(*Server)
+
 // New builds the server and registers routes.
-func New(readiness *Readiness, gate *agentgate.Gate, reader Reader, logger *slog.Logger) *Server {
+func New(readiness *Readiness, gate *agentgate.Gate, reader Reader, logger *slog.Logger, opts ...Option) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -80,10 +85,14 @@ func New(readiness *Readiness, gate *agentgate.Gate, reader Reader, logger *slog
 		Name:        "get_risk_measures",
 		Description: "Read the latest governed risk measures for a portfolio the caller is entitled to.",
 		Action:      auth.ActionRiskRead,
-		invoke: func(ctx context.Context, r Reader, portfolioID string) (any, error) {
-			return r.Measures(ctx, portfolioID)
+		invoke: func(ctx context.Context, r Reader, arguments Arguments) (any, error) {
+			return r.Measures(ctx, arguments.PortfolioID)
 		},
+		valid: func(a Arguments) bool { return a.OrderID == "" && a.PageSize == 0 && a.PageToken == "" },
 	}}
+	for _, opt := range opts {
+		opt(s)
+	}
 	sort.Slice(s.tools, func(i, j int) bool { return s.tools[i].Name < s.tools[j].Name })
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)

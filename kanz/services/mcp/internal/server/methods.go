@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/eighred/kanz/pkg/auth"
 )
@@ -77,18 +80,22 @@ type toolsListResult struct {
 func (s *Server) listTools() toolsListResult {
 	out := make([]toolDescriptor, 0, len(s.tools))
 	for _, t := range s.tools {
+		properties := map[string]any{"portfolio_id": map[string]any{
+			"type": "string", "maxLength": 256,
+			"description": "The portfolio to read. Scoped to the caller's tenant.",
+		}}
+		for key, value := range t.properties {
+			properties[key] = value
+		}
+		required := append([]string{"portfolio_id"}, t.required...)
 		out = append(out, toolDescriptor{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"portfolio_id": map[string]any{
-						"type":        "string",
-						"description": "The portfolio to read. Scoped to the caller's tenant.",
-					},
-				},
-				"required": []string{"portfolio_id"},
+				"type":                 "object",
+				"properties":           properties,
+				"required":             required,
+				"additionalProperties": false,
 			},
 		})
 	}
@@ -96,10 +103,15 @@ func (s *Server) listTools() toolsListResult {
 }
 
 type callParams struct {
-	Name      string `json:"name"`
-	Arguments struct {
-		PortfolioID string `json:"portfolio_id"`
-	} `json:"arguments"`
+	Name      string    `json:"name"`
+	Arguments Arguments `json:"arguments"`
+}
+
+type Arguments struct {
+	PortfolioID string `json:"portfolio_id"`
+	OrderID     string `json:"order_id,omitempty"`
+	PageSize    uint32 `json:"page_size,omitempty"`
+	PageToken   string `json:"page_token,omitempty"`
 }
 
 // callToolResult is the MCP tool result shape. IsError carries a refusal the
@@ -127,10 +139,15 @@ func textResult(s string, isErr bool) callToolResult {
 // unresolved resource tenant used to skip the cross-tenant boundary entirely.
 func (s *Server) callTool(ctx context.Context, p *auth.Principal, req request) response {
 	var params callParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(req.Params))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&params); err != nil {
 		return fail(req.ID, codeInvalidParams, "invalid params")
 	}
-	if params.Arguments.PortfolioID == "" {
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return fail(req.ID, codeInvalidParams, "invalid params")
+	}
+	if params.Arguments.PortfolioID == "" || len(params.Arguments.PortfolioID) > 256 || strings.TrimSpace(params.Arguments.PortfolioID) != params.Arguments.PortfolioID {
 		return fail(req.ID, codeInvalidParams, "portfolio_id is required")
 	}
 	tool, found := s.tool(params.Name)
@@ -139,7 +156,11 @@ func (s *Server) callTool(ctx context.Context, p *auth.Principal, req request) r
 		// state, and tools/list already says so.
 		return fail(req.ID, codeMethodNotFound, "unknown tool: "+params.Name)
 	}
+	if tool.valid != nil && !tool.valid(params.Arguments) {
+		return fail(req.ID, codeInvalidParams, "invalid tool arguments")
+	}
 
+	ctx = auth.WithPrincipal(ctx, p)
 	v := s.gate.Authorize(ctx, p, tool.Action, auth.ResourcePortfolio, params.Arguments.PortfolioID)
 	if !v.Allowed {
 		// The gate's message is already the closed-set rendering. The
@@ -148,7 +169,7 @@ func (s *Server) callTool(ctx context.Context, p *auth.Principal, req request) r
 		return fail(req.ID, codeUnauthorized, v.Message)
 	}
 
-	out, err := tool.invoke(ctx, s.reader, params.Arguments.PortfolioID)
+	out, err := tool.invoke(ctx, s.reader, params.Arguments)
 	if err != nil {
 		// The dependency's own words are logged, not rendered: a read surface's
 		// error text is not this plane's to publish to an agent.

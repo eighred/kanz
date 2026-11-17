@@ -27,8 +27,11 @@ type Config struct {
 	// disables it, which is the shape a deployment that fronts no web app runs
 	// in — an unserved port is better than a read surface nobody asked for.
 	GRPCListen string
-	LogLevel   slog.Level
-	Source     string
+	// StateQueryListen is an opt-in, separately authenticated read projection.
+	// It never registers the broader order-history/approval/catalogue services.
+	StateQueryListen string
+	LogLevel         slog.Level
+	Source           string
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
 	// NATSURL is the spine. Empty ⇒ the service runs HTTP/probes only (no
@@ -462,6 +465,7 @@ func Load() (Config, error) {
 		// pointed at it either way, so naming it is one line of config and the
 		// difference between "serving" and "configured to serve".
 		GRPCListen:              os.Getenv("OMS_GRPC_LISTEN"),
+		StateQueryListen:        os.Getenv("OMS_STATE_QUERY_LISTEN"),
 		LogLevel:                env.ParseLevelOr(env.Or("OMS_LOG_LEVEL", "info"), slog.LevelInfo),
 		Source:                  env.Or("OMS_SOURCE", "oms"),
 		OTLPEndpoint:            os.Getenv("OMS_OTLP_ENDPOINT"),
@@ -695,6 +699,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("OMS_VENUE_ACCOUNTS is not safe to trade on: %w", err)
 	}
 
+	if cfg.StateQueryListen != "" && (cfg.SPIFFESocket == "" || cfg.Tenant == "" || cfg.NATSURL == "" || cfg.DatabaseURL == "" || cfg.StateQueryListen == cfg.GRPCListen || cfg.StateQueryListen == cfg.Listen) {
+		return Config{}, fmt.Errorf("OMS_STATE_QUERY_LISTEN requires a separate listener, an owning tenant, durable database, active spine and SPIFFE_ENDPOINT_SOCKET")
+	}
 	return cfg, nil
 }
 
