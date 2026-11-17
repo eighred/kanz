@@ -129,6 +129,19 @@ class GraphTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.assertNotEqual(assess_graph(data)["nodes"]["julia"]["state"], "DELIVERABLE")
 
+    def test_duplicate_names_require_a_complete_unambiguous_set_of_run_ids(self):
+        node = gate(status="SUCCESS")
+        data = node["validation"]
+        data["observed"] = [dict(data["observed"][0], check_id=i) for i in (1, 2)]
+        for expected in ([{}], [{"check_id": 1}], [{"check_id": 1}, {}],
+                         [{"check_id": 1}, {"check_id": 1}],
+                         [{"check_id": True}, {"check_id": 2}],
+                         [{"check_id": None}, {"check_id": 2}]):
+            with self.subTest(expected=expected):
+                data["expected"] = [dict(id="test", **entry) for entry in expected]
+                result = assess_graph(dict(nodes=[node], edges=[]))
+                self.assertEqual(result["nodes"]["julia"]["state"], "BLOCKED")
+
     def test_pending_unavailable_and_in_progress_are_distinct(self):
         data = fixture()
         data["nodes"][0]["validation"]["observed"][0]["status"] = "IN_PROGRESS"
