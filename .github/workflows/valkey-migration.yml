@@ -10,10 +10,60 @@ on:
       - 'tools/valkey_migration/**'
       - '.github/workflows/valkey-migration.yml'
   workflow_dispatch:
+    inputs:
+      qualification:
+        description: Valkey fixture to run
+        type: choice
+        options: [retained-state, shared-risk]
+        default: retained-state
+      expected_sha:
+        description: Full reviewed commit SHA for shared-risk
+        type: string
 permissions:
   contents: read
 jobs:
+  shared-risk:
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'shared-risk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      packages: read
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Bind the dispatch to the reviewed source
+        run: '[[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" == "$EXPECTED_SHA" ]]'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.dockerignore
+            /kanz/
+            /schemas/
+            /tools/risk_shared_dedup_proof/
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-flags: --oci-worker-gc=true
+          driver-opts: |
+            image=ghcr.io/eighred/base/buildkit:buildx-stable-1
+            memory=3500m
+            memory-swap=3500m
+            cpu-period=100000
+            cpu-quota=200000
+      - name: Build the canonical default and selected service images and fixture driver
+        run: python3 -I -B tools/risk_shared_dedup_proof/fixture.py build
+      - name: Verify shared dispatch, persisted state, outage and recovery
+        timeout-minutes: 6
+        run: python3 -I -B tools/risk_shared_dedup_proof/fixture.py run
   retained-state:
+    if: github.event_name != 'workflow_dispatch' || inputs.qualification != 'shared-risk'
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
