@@ -9,12 +9,14 @@ import (
 	"testing"
 )
 
-// #1413: freeze the previously deployed bytes while publishing source support.
+// #1413: freeze the reviewed source baseline before identity promotion.
 // This deliberately strict transition guard prevents a partial pod-template or
 // image promotion. Remove it AND the named exception together when a verified
 // image and socket configuration are promoted; normal SPIFFE wiring checks must
 // cover that final state. These hashes prove staging only, not deployability.
-const lakeSinkBeforeIdentitySHA = "be1afd1dd77fb22b79297360e9b6ed58473b83f12d217b489d03ba31e5b971fc"
+// #1069/#1070 extend only LAKE_SINK_TOPICS with the two filing history families.
+// This reviewed source pin retains the same image and identity staging posture.
+const lakeSinkBeforeIdentitySHA = "4a12ac19b6fe7d1ea0f488a8ce9f2e7d13fa3a6aa5822ebfeb632f3c61e02303"
 const lakeSinkIdentityPatchSHA = "1700a25214a603a2db4e4c4b1d702cd9765cf84250162882d594e7eeaf703c7d"
 
 func checkLakeSinkStagingBytes(active, patch []byte) error {

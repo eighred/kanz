@@ -437,6 +437,10 @@ type shutdownSite struct {
 // and on any entry here the walk can no longer find — so neither a new budget
 // nor a deleted one can go unnoticed.
 var serviceShutdownExtras = map[string][]shutdownSite{
+	"services/regulatory/cmd/regulatory/main.go": {{
+		file: "services/regulatory/internal/recording/postgres.go", name: "cleanup",
+		why: "A filing transaction's deferred rollback uses an independent five-second cleanup context after cancellation. Count it additively rather than assuming it completes inside the HTTP drain."},
+	},
 	"services/lake_sink/cmd/lake_sink/main.go": {
 		{file: "services/lake_sink/internal/snapshot/lease.go", name: "ctx",
 			why: "Optional snapshot lease connection close has an independent five-second cleanup context after cancellation. Count it conservatively even though the feature is disabled in current deployments; it does not prove an OS-level child join bound."},

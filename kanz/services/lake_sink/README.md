@@ -90,7 +90,12 @@ those remain production migration acceptance requirements under #1413.
 
 ### Coordinated image promotion
 
-The active deployment remains unchanged for this source-first change.
+The reviewed deployment source adds `compliance.filing` and
+`risk.sustainability` to `LAKE_SINK_TOPICS` for #1069/#1070. Its pinned image,
+socket configuration, mounts and identity staging posture remain unchanged.
+This topic-only amendment changes the desired pod configuration; applying it
+can restart the singleton. It does not prove old-image compatibility, an
+observed rollout or authenticated consumption of the new topics.
 `broker-identity-patch.yaml` is a staged strategic merge patch outside the GitOps
 resource directories; do not apply it alone. The existing pinned image does not
 consume the new socket configuration, and changing its pod template would

@@ -57,8 +57,9 @@ func TestEveryServiceIsWiredToTheSpiffeSocketItReads(t *testing.T) {
 		want := reads[svc]
 		if svc == "lake-sink" {
 			// #1413 source-first release: this old image does not consume the new
-			// socket. Its entire active manifest stays frozen; the staged patch is
-			// checked below. Retire this exception in the matching digest+config
+			// socket. The reviewed baseline includes the #1069/#1070 topic-only
+			// amendment; its image and identity wiring remain unchanged. The staged
+			// patch is checked below. Retire this exception in the matching digest+config
 			// promotion so the ordinary wiring assertion takes over atomically.
 			continue
 		}

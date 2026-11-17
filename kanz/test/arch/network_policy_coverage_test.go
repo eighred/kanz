@@ -1038,6 +1038,10 @@ var tenantHeaderTrustingSplitListeners = map[string]int{
 	// regulatory in allow-observability-scrape's list, so moving audit's /metrics
 	// off it would have widened the rule for no gain. The API left instead.
 	"audit": 8102,
+	// Filing recording now reads the gateway principal before any lookup/signing
+	// (#1069/#1070). The existing gateway-only API remains on :8103; :8083 is
+	// metrics only. The header trust depends on that NetworkPolicy separation.
+	"regulatory": 8103,
 }
 
 // tenantHeaderRead matches a READ of the tenant principal header — the act that
