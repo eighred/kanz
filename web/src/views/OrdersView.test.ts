@@ -131,3 +131,13 @@ it('reloads a reused portfolio route and ignores a late order response', async (
   expect(wrapper.text()).toContain('current-order')
   expect(wrapper.text()).not.toContain('previous-order')
 })
+
+it('discloses the bounded history independently of unindexed orders', async () => {
+  const orders = Array.from({ length: 200 }, (_, i) => ({ order_id: String(i) }))
+  const wrapper = await open({ orders, unindexed: '3' })
+  expect(api.risk.orders).toHaveBeenCalledWith('PF1', 200)
+  expect(wrapper.find('[role=status]').text()).toContain('Earlier indexed orders may exist')
+  expect(wrapper.find('[role=alert]').text()).toContain('3 order(s)')
+  const shorter = await open({ orders: orders.slice(1), unindexed: '0' })
+  expect(shorter.find('[role=status]').exists()).toBe(false)
+})
