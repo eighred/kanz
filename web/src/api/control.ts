@@ -98,7 +98,21 @@ export function settled(p: Provision): boolean {
 export const control = {
   nodes: () => api.get<{ nodes?: Node[] }>('/api/v1/control/nodes').then((r) => r.nodes ?? []),
   clusters: () => api.get<{ clusters?: Cluster[] }>('/api/v1/control/clusters').then((r) => r.clusters ?? []),
-  venues: () => api.get<{ venues?: VenueKeyStatus[] }>('/api/v1/control/venues').then((r) => r.venues ?? []),
+  async venues(): Promise<VenueKeyStatus[]> {
+    const body = await api.get<unknown>('/api/v1/control/venues')
+    const invalid = 'The control plane returned invalid venue credential status.'
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(invalid)
+    if (!('venues' in body)) return [] // ProtoJSON omits an empty repeated field.
+    if (!Array.isArray(body.venues)) throw new Error(invalid)
+    const seen = new Set<string>()
+    return body.venues.map(row => {
+      if (!row || typeof row !== 'object' || typeof row.venue !== 'string' ||
+          !row.venue || row.venue !== row.venue.trim() || row.venue === '.' || row.venue === '..' || seen.has(row.venue) ||
+          ('configured' in row && typeof row.configured !== 'boolean')) throw new Error(invalid)
+      seen.add(row.venue)
+      return { venue: row.venue, configured: row.configured === true }
+    })
+  },
   provisions: () =>
     api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions').then((r) => r.provisions ?? []),
 
