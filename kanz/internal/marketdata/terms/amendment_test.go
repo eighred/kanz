@@ -1,6 +1,7 @@
 package terms
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -8,6 +9,57 @@ import (
 
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 )
+
+func TestImmutableRevisionCollisionRollsBackBatch(t *testing.T) {
+	st := NewPostgres(termsTimePool(t))
+	ctx := t.Context()
+	original := optionRec("contract", "underlying", 100, t0, 1)
+	if err := st.Put(ctx, []Record{original, original}); err != nil {
+		t.Fatalf("exact retry: %v", err)
+	}
+	pending := optionRec("pending", "underlying", 101, t0, 1)
+	conflict := optionRec("contract", "underlying", 101, t0, 1)
+	if err := st.Put(ctx, []Record{pending, conflict}); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("different strike at the same revision: %v", err)
+	}
+	if _, err := st.LatestAsOf(ctx, pending.InstrumentID, t0); !errors.Is(err, ErrNoTerms) {
+		t.Fatalf("partial write: %v", err)
+	}
+	got, err := st.LatestAsOf(ctx, original.InstrumentID, t0)
+	if err != nil || !proto.Equal(got.Terms, original.Terms) {
+		t.Fatalf("original revision changed: %v", err)
+	}
+}
+
+func TestConcurrentRevisionWritersAgreeOnOneWinner(t *testing.T) {
+	st := NewPostgres(termsTimePool(t))
+	ctx := t.Context()
+	start := make(chan struct{})
+	type result struct {
+		rec Record
+		err error
+	}
+	out := make(chan result, 2)
+	for _, strike := range []int64{100, 101} {
+		rec := optionRec("contract", "underlying", strike, t0, 1)
+		go func() {
+			<-start
+			out <- result{rec, st.Put(ctx, []Record{rec})}
+		}()
+	}
+	close(start)
+	one, two := <-out, <-out
+	if one.err != nil {
+		one, two = two, one
+	}
+	if one.err != nil || !errors.Is(two.err, ErrRevisionConflict) {
+		t.Fatalf("want one winner and one conflict, got %v, %v", one.err, two.err)
+	}
+	got, err := st.LatestAsOf(ctx, "contract", t0)
+	if err != nil || !proto.Equal(got.Terms, one.rec.Terms) {
+		t.Fatalf("winner differs from retained revision: %v", err)
+	}
+}
 
 func TestChainMembershipFollowsLatestContractAmendment(t *testing.T) {
 	st := NewPostgres(termsTimePool(t))
