@@ -6,13 +6,30 @@ const credential = ref('')
 const busy = ref(false)
 const error = ref('')
 const done = ref(false)
-const status = ref<{ verified_address: string; pending_address: string; verification_delivery: string } | null>(null)
+type MailboxStatus = { verified_address: string; pending_address: string; verification_delivery: string }
+const status = ref<MailboxStatus | null>(null)
+const statusError = ref('')
+const loading = ref(true)
+let latestRead = 0
 async function reload() {
-  try { status.value = await api.get('/auth/mailbox') }
-  catch { status.value = null; error.value = 'Mailbox status could not be loaded. Recovery may not be configured.' }
+  const read = ++latestRead
+  loading.value = true
+  status.value = null
+  statusError.value = ''
+  try {
+    const result = await api.get<MailboxStatus>('/auth/mailbox')
+    if (read === latestRead) status.value = result
+  } catch {
+    if (read === latestRead) statusError.value = 'Mailbox status could not be loaded. Recovery may not be configured.'
+  } finally {
+    if (read === latestRead) loading.value = false
+  }
 }
 onMounted(reload)
-onBeforeUnmount(() => { credential.value = '' })
+onBeforeUnmount(() => {
+  latestRead++
+  credential.value = ''
+})
 async function submit() {
   if (busy.value) return
   busy.value = true; error.value = ''; done.value = false
@@ -31,7 +48,9 @@ async function submit() {
 <template>
   <section class="card">
     <h1>Recovery mailbox</h1>
-    <p v-if="status">Verified address: {{ status.verified_address || 'None' }}. Verification delivery: {{ status.verification_delivery }}{{ status.pending_address ? ` (${status.pending_address})` : '' }}.</p>
+    <p v-if="loading" role="status">Loading mailbox status…</p>
+    <p v-else-if="statusError" role="alert" class="error">{{ statusError }}</p>
+    <p v-else-if="status">Verified address: {{ status.verified_address || 'None' }}. Verification delivery: {{ status.verification_delivery }}{{ status.pending_address ? ` (${status.pending_address})` : '' }}.</p>
     <button type="button" :disabled="busy" @click="reload">Reload status</button>
     <p>A mailbox becomes a recovery destination only after you open its verification link. Your existing verified address remains active until then.</p>
     <p v-if="done" role="status">Verification requested. Check your mailbox and follow the link. Allow a few minutes before requesting another message; this confirmation does not attest delivery.</p>
