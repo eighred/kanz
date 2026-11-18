@@ -123,11 +123,19 @@ func TestPayloadTimestampValidPrecisionAndFallback(t *testing.T) {
 		t.Fatalf("nil fallback changed: %+v error=%v", obs, err)
 	}
 	for _, nanos := range []int32{0, 1, 999999999} {
-		at := time.Unix(evtTime.Unix(), int64(nanos)).UTC()
-		ev := timedMarketEvent("bar", at)
-		bar, ok, err := TranslateBar(env("market.crypto.bar"), ev)
-		if err != nil || !ok || !bar.BucketStart.Equal(at) {
-			t.Fatalf("valid bar precision changed: %+v ok=%v error=%v", bar, ok, err)
+		bucket := evtTime.Truncate(time.Minute)
+		known := time.Unix(ingTime.Unix(), int64(nanos)).UTC()
+		envelope := env("market.crypto.bar")
+		envelope.IngestionTime = timestamppb.New(known)
+		bar, ok, err := TranslateBar(envelope, timedMarketEvent("bar", bucket))
+		if err != nil || !ok || !bar.BucketStart.Equal(bucket) || !bar.KnowledgeTime.Equal(known) {
+			t.Fatalf("aligned bar lost timestamp precision: %+v ok=%v error=%v", bar, ok, err)
+		}
+		if nanos != 0 {
+			shifted := timedMarketEvent("bar", bucket.Add(time.Duration(nanos)))
+			if _, ok, err := TranslateBar(envelope, shifted); err == nil || ok {
+				t.Fatalf("accepted a minute candle shifted by %d ns", nanos)
+			}
 		}
 	}
 }

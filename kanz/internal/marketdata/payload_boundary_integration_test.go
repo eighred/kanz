@@ -90,7 +90,8 @@ func TestPayloadBoundaryJetStreamPostgres(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	trade := &marketpb.MarketDataEvent{InstrumentId: id, EventTime: timestamppb.New(now), Data: &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: decv(100, 0)}}}
 	quote := &marketpb.MarketDataEvent{InstrumentId: id, EventTime: timestamppb.New(now), Data: &marketpb.MarketDataEvent_Quote{Quote: &marketpb.Quote{BidPrice: decv(100, 0), AskPrice: decv(102, 0)}}}
-	bar := barEvent("XBIN", now.Add(-time.Minute), now)
+	barClose := now.Truncate(time.Minute)
+	bar := barEvent("XBIN", barClose.Add(-time.Minute), barClose)
 	bar.InstrumentId = id
 	book := &marketpb.OrderBookSnapshot{InstrumentId: id, EventTime: timestamppb.New(now), Bids: []*marketpb.PriceLevel{{Price: decv(90, 0)}}}
 	twoSided := proto.Clone(book).(*marketpb.OrderBookSnapshot)
