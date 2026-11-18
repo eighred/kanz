@@ -1,4 +1,4 @@
-"""Disposable retained-volume migration; accepts no endpoint or live target."""
+"""Disposable first installation and retained-volume migration; no live endpoints."""
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,8 @@ REDIS_VERSION = "7.4.5"
 LABEL = "io.kanz.valkey-migration"
 KEYS = {"tenant-a:nonce:retained": "claimed", "tenant-b:nonce:retained": "independent",
         "tenant-a:idempotency": 'response:<>&\u2028\n"exact"', "tenant-a:counter": "19"}
-CASES = ["redis_rewrite_preserves_state", "exact_values", "absolute_expiry", "tenant_distinct_keys", "retained_claim_refusal",
+CASES = ["valkey_empty_first_install", "first_install_restart_claim", "first_install_expired_claim_reuse",
+         "redis_rewrite_preserves_state", "exact_values", "absolute_expiry", "tenant_distinct_keys", "retained_claim_refusal",
          "valkey_written_claim", "counter_update", "valkey_restart", "redis_rollback", "expiry_after_rollback", "authentication"]
 
 
@@ -87,7 +88,8 @@ def verify_snapshot(actual, expected):
 
 
 def validate_report(report, source):
-    phases = {"redis": REDIS, "valkey": VALKEY, "valkey_restart": VALKEY, "redis_rollback": REDIS}
+    phases = {"valkey_first_install": VALKEY, "first_install_restart": VALKEY,
+              "redis": REDIS, "valkey": VALKEY, "valkey_restart": VALKEY, "redis_rollback": REDIS}
     if (not re.fullmatch(r"[0-9a-f]{40}", source) or report.get("source") != source
             or report.get("verdict") != "PASS" or report.get("cleanup") != "verified_absent"
             or report.get("cases") != CASES or set(report.get("phases", {})) != set(phases)):
@@ -99,7 +101,8 @@ def validate_report(report, source):
                 or (image == REDIS and observed.get("version") != REDIS_VERSION)):
             raise Refused("unexpected_runtime_identity")
     if (report["phases"]["redis"] != report["phases"]["redis_rollback"]
-            or report["phases"]["valkey"] != report["phases"]["valkey_restart"]):
+            or any(report["phases"][name] != report["phases"]["valkey"]
+                   for name in ("valkey_first_install", "first_install_restart", "valkey_restart"))):
         raise Refused("runtime_identity_changed")
 
 
@@ -107,6 +110,7 @@ class Fixture:
     def __init__(self, name):
         validate_name(name)
         self.name, self.volume = name, name + "-data"
+        self.volume_collision = False
         self.password = secrets.token_hex(24)
         self.cli = "redis-cli"
         self.image = REDIS
@@ -127,6 +131,12 @@ class Fixture:
         item = json.loads(command(["docker", "volume", "inspect", self.volume]))[0]
         if item.get("Labels", {}).get(LABEL) != self.name:
             raise Refused("volume_identity_mismatch")
+
+    def create_volume(self):
+        if self.volume in command(["docker", "volume", "ls", "--format", "{{.Name}}"]).splitlines():
+            self.volume_collision = True
+            raise Refused("fixture_volume_already_exists")
+        command(["docker", "volume", "create", "--label", LABEL + "=" + self.name, self.volume])
 
     def base(self, image):
         return ["docker", "run", "--name", self.name, "--label", LABEL + "=" + self.name,
@@ -217,6 +227,8 @@ class Fixture:
         command(["docker", "rm", self.name])
 
     def cleanup(self):
+        if self.volume_collision:
+            raise Refused("fixture_volume_already_exists")
         if self.name in command(["docker", "ps", "-a", "--format", "{{.Names}}"]).splitlines():
             self.owned()
             command(["docker", "rm", "-f", self.name])
@@ -228,12 +240,60 @@ class Fixture:
             raise Refused("cleanup_not_verified")
 
 
+def wait_for_claim_expiry(fixture, key, expires):
+    # Compare with server time. A key disappearing before its original
+    # deadline reopens admission even if another durable key survived.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        observed = fixture.call("PEXPIRETIME", key)
+        if observed == -2:
+            if fixture.now() < expires:
+                raise Refused("first_install_claim_lost_before_expiry")
+            return
+        if observed != expires:
+            raise Refused("first_install_expiry_changed")
+        time.sleep(.1)
+    raise Refused("first_install_claim_did_not_expire")
+
+
+def first_install(fixture, phases):
+    fixture.create_volume()
+    phases["valkey_first_install"] = fixture.start(VALKEY, True)
+    keyspace = fixture.raw("INFO", "keyspace")
+    if fixture.call("DBSIZE") != 0 or keyspace.splitlines() != ["# Keyspace"]:
+        raise Refused("first_install_keyspace_not_empty")
+    retained = "tenant-a:nonce:first-install"
+    short = "tenant-b:nonce:first-install"
+    expires = fixture.now() + 900_000
+    if fixture.call("SET", retained, "first-claim", "PXAT", expires, "NX") != "OK":
+        raise Refused("first_install_claim_failed")
+    short_expiry = fixture.now() + 8_000
+    if fixture.call("SET", short, "temporary-claim", "PXAT", short_expiry, "NX") != "OK":
+        raise Refused("first_install_claim_failed")
+    expected = {retained: {"value": "first-claim", "expires": expires}}
+    fixture.claim_refused(retained, expires + 60_000)
+    verify_snapshot(fixture.snapshot([retained, short]),
+                    {**expected, short: {"value": "temporary-claim", "expires": short_expiry}})
+    fixture.stop()
+    phases["first_install_restart"] = fixture.start(VALKEY, True)
+    fixture.claim_refused(retained, expires + 60_000)
+    verify_snapshot(fixture.snapshot([retained]), expected)
+    wait_for_claim_expiry(fixture, short, short_expiry)
+    if fixture.call("SET", short, "new-claim", "PXAT", expires, "NX") != "OK":
+        raise Refused("first_install_expired_claim_still_blocked")
+    verify_snapshot(fixture.snapshot([retained, short]), {**expected, short: {"value": "new-claim", "expires": expires}})
+    fixture.stop()
+    fixture.cleanup()
+
+
 def main():
     fixture = Fixture("kanz-valkey-proof-" + uuid.uuid4().hex[:24])
     report = {"source": command(["git", "rev-parse", "HEAD"]), "verdict": "FAIL", "phases": {}, "cleanup": "unknown"}
-    stage = "create"
+    stage = "valkey_first_install"
     try:
-        command(["docker", "volume", "create", "--label", LABEL + "=" + fixture.name, fixture.volume])
+        first_install(fixture, report["phases"])
+        stage = "create"
+        fixture.create_volume()
         stage = "redis_seed"
         report["phases"]["redis"] = fixture.start(REDIS, True)
         expires = fixture.now() + 900_000

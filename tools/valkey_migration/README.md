@@ -1,10 +1,19 @@
-# Retained replay-state migration
+# Valkey first installation and retained replay-state migration
 
-This disposable CI fixture qualifies the existing Tokyo Redis image to the same
-Valkey 9.1.3 image used by application compatibility CI. It accepts no endpoint,
-credentials, volume name or deployment target. Generated Docker containers have
-no network, host ports, host mounts or privileges; only one labelled private
-volume survives the Redis → Valkey → restarted Valkey → Redis sequence.
+The first-install fixture starts the pinned Valkey 9.1.3 image directly on a
+new private volume. It requires an empty keyspace across databases, then claims
+independent tenant keys with different absolute expiration times. After a clean
+Valkey restart, the surviving claim must reject a duplicate without extending
+its deadline. The short-lived claim must become reusable at its original
+deadline. The fixture removes the volume before the retained-state regression.
+This exercises the backend operations on synthetic keys. The two-process
+risk-engine consumer qualification is tracked in #111.
+
+The retained-state fixture starts the Tokyo Redis image on a second fresh
+volume and checks Redis → Valkey → restarted Valkey → Redis using that same
+volume. Both fixtures use the Valkey image selected by application compatibility
+CI. They accept no endpoint, credentials, volume name or deployment target.
+Generated Docker containers have no network, host ports, host mounts or privileges.
 
 Redis holds security-sensitive short-lived replay claims, not merely optional
 cached data. Clearing that state reopens replay admission. The fixture compares
@@ -35,9 +44,8 @@ for offline refusal tests. The workflow runs `proof.py` on an isolated Linux CI
 runner with Docker and records the checked-out commit. A missing runtime, failed
 migration, changed expiry or unknown cleanup is a failure, never a skip.
 
-No active Kubernetes manifest, recovery image or client configuration changes.
-Before a live migration, inventory actual key types, quiesce every writer, take
-and verify a current recoverable backup, preserve the existing PVC/service/auth
-identity, and qualify the rendered workload plus recovery scripts. Do not start
-old Redis on a Valkey RDB snapshot or treat generic protocol compatibility as
-retained-state or rollback proof. Migration ownership remains tracked in #1413.
+First-install acceptance and the caller inventory are tracked in #1541. If an
+installation with retained Redis state is migrated later, inventory actual key
+types, quiesce writers, verify a recoverable backup, preserve the PVC, service
+and authentication identities, and qualify the rendered workload and recovery
+scripts before cutover.
