@@ -22,7 +22,7 @@
 # assertion against pg_roles rather than a comment, and it fails loudly.
 #
 # Usage:  test/backing/up.sh          then eval the exports it prints
-#   Tear down: docker rm -f kanz-ci-postgres kanz-ci-redis kanz-ci-nats kanz-ci-kafka
+#   Optional argument: a unique suffix such as -smoke-42. Use the printed IDs for teardown.
 #
 # The mTLS broker is SEPARATE (test/mtls/up.sh) and deliberately so: this one is
 # the plaintext broker the semantics suite uses, that one proves the production
@@ -38,20 +38,43 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export MSYS2_ARG_CONV_EXCL="*"
 export MSYS_NO_PATHCONV=1
 
-docker rm -f kanz-ci-postgres kanz-ci-redis kanz-ci-nats kanz-ci-kafka >/dev/null 2>&1 || true
+suffix=${1:-}
+[[ $# -le 1 && ( -z "$suffix" || "$suffix" =~ ^-[a-z0-9-]+$ ) ]] || { echo 'Invalid fixture suffix' >&2; exit 1; }
+KANZ_BACKING_RUN=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
+export KANZ_BACKING_RUN
+owned_ids() { docker ps -aq --no-trunc --filter "label=io.kanz.backing.run=$KANZ_BACKING_RUN"; }
+rollback() {
+  local rc=$? ids
+  ids=$(owned_ids) || exit 1
+  if [[ -n "$ids" ]]; then
+    local -a owned
+    mapfile -t owned <<<"$ids"
+    docker rm -fv "${owned[@]}" >/dev/null || exit 1
+    ids=$(owned_ids) && [[ -z "$ids" ]] || exit 1
+  fi
+  exit "$rc"
+}
+trap rollback EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-backing_exports="$(PG_PORT="$PG_PORT" NATS_PORT="$NATS_PORT" bash "$ROOT/test/backing/postgres-nats.sh")"
+backing_exports="$(PG_PORT="$PG_PORT" NATS_PORT="$NATS_PORT" bash "$ROOT/test/backing/postgres-nats.sh" "$suffix")"
 
 # --- Valkey (the `-tags redis` suite) ---------------------------------------
-valkey_exports="$(REDIS_PORT="$REDIS_PORT" bash "$ROOT/test/backing/valkey.sh")"
+valkey_exports="$(REDIS_PORT="$REDIS_PORT" bash "$ROOT/test/backing/valkey.sh" "kanz-ci-redis$suffix")"
 
 # --- Redpanda, single-node Kafka API -----------------------------------------
-kafka_exports="$(KAFKA_PORT="$KAFKA_PORT" bash "$ROOT/test/backing/kafka.sh")"
+kafka_exports="$(KAFKA_PORT="$KAFKA_PORT" bash "$ROOT/test/backing/kafka.sh" "kanz-ci-kafka$suffix")"
 
 # Bootstrap from the canonical ConfigMap, then check the broker's current
 # stream inventory before printing any connection settings. Requires PyYAML.
-python3 -B "$ROOT/test/backing/nats_topology.py" bootstrap "nats://127.0.0.1:${NATS_PORT}"
+topology="$ROOT/test/backing/nats_topology.py"
+if command -v cygpath >/dev/null; then topology=$(cygpath -w "$topology"); fi
+python3 -B "$topology" bootstrap "nats://127.0.0.1:${NATS_PORT}"
 
+ids=$(owned_ids)
+mapfile -t owned <<<"$ids"
+[[ ${#owned[@]} == 4 ]] || { echo 'Backing stack ownership incomplete' >&2; exit 1; }
 cat <<EOF
 
 All four backing services are up. Export these, then run the suite:
@@ -62,6 +85,8 @@ All four backing services are up. Export these, then run the suite:
   go test -p 1 ./...
   go test -tags redis -p 1 ./pkg/redisadapter ./services/webhook_ingest/... ./services/api_gateway/...
 
+  Tear down this stack: docker rm -fv ${owned[*]}
+
 ORDER WARNING — run any real migration BEFORE the suite, never after.
 internal/migrate's tests share this database and DROP schema_migrations at
 setup, leaving their own fixture rows behind. Run \`kanz-migrate\` afterwards and
@@ -69,3 +94,4 @@ it collides at version 1; run it before and the suite erases its ledger. CI is
 only safe here because its OMS migrate step precedes \`go test\`. Tracked
 separately — do not work around it by editing a migration.
 EOF
+trap - EXIT INT TERM

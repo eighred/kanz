@@ -183,3 +183,32 @@ func TestEvaluateScenarioRequiresExplicitShockMagnitude(t *testing.T) {
 		t.Fatalf("explicit zero shift returned %+v, err=%v", response, err)
 	}
 }
+
+func TestEvaluateScenarioRequiresPriceShockInstrument(t *testing.T) {
+	e, s := newEngine()
+	applyPosition(t, s, "PORT-1", "BANK", 1000, time.Now().Add(-time.Second))
+
+	req := v1.ScenarioRequest{
+		PortfolioID: "PORT-1",
+		Shocks: []v1.ScenarioShock{
+			v1.ParallelShift{Pct: &commonpb.Decimal{Coefficient: -2, Exponent: -1}},
+			v1.PriceShock{InstrumentID: "OTHER", Pct: &commonpb.Decimal{Coefficient: 5, Exponent: -1}},
+		},
+	}
+	response, err := e.EvaluateScenario(context.Background(), req)
+	if err != nil || response.Projected == nil {
+		t.Fatalf("watchlist instrument returned %+v, err=%v", response, err)
+	}
+	gross, ok := response.Projected.Lookup(compute.MeasureGrossExposure)
+	if !ok || decValue(gross.Value) != 800 {
+		t.Fatalf("watchlist gross=%+v, found=%v, want 800 USD from the parallel shift", gross, ok)
+	}
+
+	for _, instrument := range []v1.InstrumentID{"", " \t\u00a0"} {
+		req.Shocks[1] = v1.PriceShock{InstrumentID: instrument, Pct: &commonpb.Decimal{Coefficient: 5, Exponent: -1}}
+		response, err := e.EvaluateScenario(context.Background(), req)
+		if !errors.Is(err, v1.ErrScenarioUnresolvable) || !strings.Contains(err.Error(), "price_shock_names_no_instrument") || response.Projected != nil {
+			t.Fatalf("instrument %q returned %+v, err=%v", instrument, response, err)
+		}
+	}
+}

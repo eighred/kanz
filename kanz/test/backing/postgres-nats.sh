@@ -14,13 +14,13 @@ nats_endpoint="127.0.0.1:$nats_port"
 ids=()
 cleanup() { if ((${#ids[@]})); then docker rm -fv "${ids[@]}" >/dev/null; fi; }
 trap cleanup EXIT
-pg=$(docker create --name "kanz-ci-postgres$suffix" -p "$pg_endpoint:5432" \
+pg=$(docker create --label "io.kanz.backing.run=${KANZ_BACKING_RUN:-standalone}" --name "kanz-ci-postgres$suffix" -p "$pg_endpoint:5432" \
   -e POSTGRES_USER=kanz -e POSTGRES_PASSWORD=kanz -e POSTGRES_DB=kanz \
   postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9)
 ids+=("$pg")
 config="$(cd "$(dirname "$0")" && pwd)/nats-dev.conf"
 if command -v cygpath >/dev/null; then config=$(cygpath -w "$config"); fi
-nats=$(docker create --name "kanz-ci-nats$suffix" -p "$nats_endpoint:4222" \
+nats=$(docker create --label "io.kanz.backing.run=${KANZ_BACKING_RUN:-standalone}" --name "kanz-ci-nats$suffix" -p "$nats_endpoint:4222" \
   -v "$config:/etc/nats/nats-dev.conf:ro" \
   nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da -c /etc/nats/nats-dev.conf)
 ids+=("$nats")

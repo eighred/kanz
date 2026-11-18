@@ -85,6 +85,9 @@ func (m *Memory) Coverage(_ context.Context, q CoverageQuery) ([]Coverage, error
 		if !q.AsOf.IsZero() && c.RecordedAt.After(q.AsOf) {
 			continue
 		}
+		if !c.Resolution.alignedBucket(c.BucketStart) {
+			return nil, c.gridError()
+		}
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool {

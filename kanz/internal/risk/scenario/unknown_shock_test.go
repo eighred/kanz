@@ -100,3 +100,24 @@ func TestIncompleteSectorTargetsRefuseBeforeValuation(t *testing.T) {
 		}
 	}
 }
+
+func TestMissingPriceShockInstrumentsRefuseBeforeValuation(t *testing.T) {
+	for _, positions := range [][]domain.Position{nil, {{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime}}} {
+		p := makePortfolio(positions...)
+		batch := []v1.ScenarioShock{
+			v1.PriceShock{InstrumentID: "A", Pct: pct(-5, -1)},
+			v1.PriceShock{InstrumentID: "", Pct: pct(1, 0)},
+			v1.PriceShock{InstrumentID: " \t\u00a0", Pct: pct(1, 0)},
+		}
+		want := v1.InputCoverage{ExcludedCount: 2, Exclusions: []v1.InputExclusion{
+			{Reason: "price_shock_names_no_instrument"},
+			{Reason: "price_shock_names_no_instrument"},
+		}}
+		for _, reval := range []scenario.Revaluer{nil, forbiddenRevaluer{t}} {
+			got, cov := scenario.EvaluateReval(p, batch, nil, reval)
+			if got != nil || !reflect.DeepEqual(cov, want) {
+				t.Fatalf("got measures=%v coverage=%+v, want nil and %+v", got, cov, want)
+			}
+		}
+	}
+}

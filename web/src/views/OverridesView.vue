@@ -135,7 +135,7 @@ function when(ts: string | undefined): string {
  * datamaster holds is still evidence even when this client cannot decimalise it.
  */
 function price(p: PendingOverride): string | null {
-  return formatRational(p.chosen_price)
+  return typeof p.chosen_price === 'string' ? formatRational(p.chosen_price) : null
 }
 
 /**
@@ -164,7 +164,7 @@ function cancel() {
 
 async function sign() {
   const p = confirming.value
-  if (!p || busy.value) return
+  if (!p || busy.value || price(p) === null) return
   busy.value = true
   actionError.value = ''
   try {
@@ -385,7 +385,7 @@ async function sign() {
     <p v-if="actionError" class="error" role="alert">{{ actionError }}</p>
 
     <div class="actions">
-      <button :disabled="busy" @click="sign">{{ busy ? 'Approving…' : 'Approve the override' }}</button>
+      <button :disabled="busy || price(confirming) === null" @click="sign">{{ busy ? 'Approving…' : 'Approve the override' }}</button>
       <button class="quiet" :disabled="busy" @click="cancel">Cancel</button>
     </div>
   </div>

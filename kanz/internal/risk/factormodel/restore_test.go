@@ -1,11 +1,13 @@
 package factormodel_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/eighred/kanz/internal/risk/factormodel"
+	"github.com/eighred/kanz/internal/risk/publish"
 	factorpb "github.com/eighred/kanz/kanz-schemas-go/factor/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -75,5 +77,57 @@ func TestRestoreRejectsIndefiniteCovariance(t *testing.T) {
 	s.Covariance.Dimension, s.Covariance.Values = 2, []float64{1, 2, 2, 1}
 	if _, err := factormodel.FromSnapshot(s); err == nil {
 		t.Fatal("negative variance direction accepted")
+	}
+}
+
+func TestRestoreChecksCovarianceAcrossFactorUnits(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values [][]float64
+		valid  bool
+	}{
+		{"negative spread variance", [][]float64{{1e20, 0, 0}, {0, 1, 2}, {0, 2, 1}}, false},
+		{"zero variance with a coupling", [][]float64{{1e20, 1e-100}, {1e-100, 0}}, false},
+		// Every pairwise correlation is in [-1,1] but the (1,-1,-1)
+		// contrast of the last three factors has negative variance.
+		{"indefinite three-factor block", [][]float64{{1e20, 0, 0, 0}, {0, 1, .9, .9}, {0, .9, 1, -.9}, {0, .9, -.9, 1}}, false},
+		// Outer products of (1e150, 1e-150, 0) give a singular PSD matrix.
+		{"mixed-unit singular", [][]float64{{1e300, 1, 0}, {1, 1e-300, 0}, {0, 0, 0}}, true},
+		{"subnormal independent", [][]float64{{math.MaxFloat64, 0}, {0, math.SmallestNonzeroFloat64}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := retainedFixture()
+			s.Model.Factors = nil
+			s.Covariance.Values = nil
+			s.Covariance.Dimension = uint32(len(tc.values))
+			for i, row := range tc.values {
+				s.Model.Factors = append(s.Model.Factors, &factorpb.Factor{Name: fmt.Sprint("factor", i), Type: factorpb.FactorType_FACTOR_TYPE_STATISTICAL})
+				s.Covariance.Values = append(s.Covariance.Values, row...)
+			}
+			for _, e := range s.Exposures {
+				e.Loadings = make([]float64, len(tc.values))
+				e.Loadings[0] = 1
+			}
+			m, err := factormodel.FromSnapshot(s)
+			if !tc.valid {
+				if err == nil || m != nil {
+					t.Fatal("invalid covariance restored")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire := publish.ToProtoFactorModelSnapshot(m)
+			restored, err := factormodel.FromSnapshot(wire)
+			if err != nil || !proto.Equal(s.Covariance, wire.Covariance) {
+				t.Fatalf("covariance round trip: %v, %v", wire.Covariance, err)
+			}
+			got := restored.Risk(map[string]float64{"A": 1}).Total
+			want := math.Sqrt(tc.values[0][0])
+			if got != want {
+				t.Fatalf("one-unit risk %g, want %g", got, want)
+			}
+		})
 	}
 }

@@ -71,6 +71,13 @@ func TestDatedPanelProvenanceSurvivesRealJetStream(t *testing.T) {
 	if model.InputProvenance["panel_digest"] == "" {
 		t.Fatal("fit produced no dated provenance")
 	}
+	// A zero-variance factor cannot covary with any other. The large
+	// variance must not mask this defect when validating a publish.
+	invalid := *model
+	invalid.FactorCov = [][]float64{{1e20, 1}, {1, 0}}
+	if err := publisher.EmitFactorModel(ctx, &invalid); err == nil {
+		t.Fatal("published a covariance with a zero-variance coupling")
+	}
 	if err := publisher.EmitFactorModel(ctx, model); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +95,9 @@ func TestDatedPanelProvenanceSurvivesRealJetStream(t *testing.T) {
 	var snapshot factorpb.FactorModelSnapshot
 	if err := proto.Unmarshal(payload, &snapshot); err != nil {
 		t.Fatal(err)
+	}
+	if !proto.Equal(snapshot.Covariance, publish.ToProtoFactorModelSnapshot(model).Covariance) {
+		t.Fatal("retained different factor covariance")
 	}
 	if !maps.Equal(snapshot.InputProvenance, model.InputProvenance) {
 		t.Fatalf("durable artifact lost panel provenance: %v", snapshot.InputProvenance)

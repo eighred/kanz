@@ -621,3 +621,66 @@ func TestOKXExactContractDecimals(t *testing.T) {
 		}
 	}
 }
+
+func TestOKXContractDatesRequireARealListingBeforeExpiry(t *testing.T) {
+	for _, kind := range []InstType{OptionInstruments, FutureInstruments} {
+		row := func(id string, exp, list int64) string {
+			if kind == OptionInstruments {
+				return okxOption(id, "BTC-USD", "C", "60000", exp, list)
+			}
+			return okxFuture(id, "BTC-USD", exp, list)
+		}
+		for _, tc := range []struct {
+			name      string
+			exp, list int64
+			override  time.Time
+			valid     bool
+		}{
+			{"expiry equals listing", listed.UnixMilli(), listed.UnixMilli(), time.Time{}, false},
+			{"expiry before listing", listed.UnixMilli() - 1, listed.UnixMilli(), time.Time{}, false},
+			{"invalid listing despite override", expiry.UnixMilli(), 0, listed, false},
+			{"unrepresentable expiry", 253402300800000, listed.UnixMilli(), time.Time{}, false},
+			{"unrepresentable listing", 253402300800001, 253402300800000, time.Time{}, false},
+			{"earlier override", expiry.UnixMilli(), listed.UnixMilli(), listed.Add(-time.Microsecond), false},
+			{"equal override", expiry.UnixMilli(), listed.UnixMilli(), listed, true},
+			{"historical correction", expiry.UnixMilli(), listed.UnixMilli(), expiry.Add(time.Hour), true},
+		} {
+			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write(okxCatalogue(row("control", expiry.UnixMilli(), listed.Add(-time.Hour).UnixMilli()), row("case", tc.exp, tc.list)))
+				}))
+				defer srv.Close()
+				ref, err := NewOKXReference(srv.URL, mapping(), Options{AsOfOverride: tc.override})
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch, err := ref.Chain(t.Context(), kind, "BTC-USD")
+				if err != nil {
+					t.Fatal(err)
+				}
+				records, err := batch.Loadable()
+				if !tc.valid {
+					if !errors.Is(err, ErrPartialChain) || len(records) != 0 || len(batch.Mapped) != 1 || len(batch.Refused) != 1 || batch.Refused[0].InstID != "case" {
+						t.Fatalf("invalid chronology: %+v, %v", batch, err)
+					}
+					return
+				}
+				if err != nil || len(records) != 2 || !records[1].AsOf.Equal(tc.override) {
+					t.Fatalf("valid effective time: %+v, %v", batch, err)
+				}
+			})
+		}
+	}
+}
+
+func TestOKXCorrectionFitsPersistedEffectiveTime(t *testing.T) {
+	for _, override := range []time.Time{listed.Add(time.Nanosecond), time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)} {
+		batch, err := ParseOKXInstruments(okxCatalogue(preciseOptionRow()), mapping(), Options{AsOfOverride: override})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if records, err := batch.Loadable(); !errors.Is(err, ErrPartialChain) || len(records) != 0 || len(batch.Refused) != 1 || !strings.Contains(batch.Refused[0].Reason, "effective time") {
+			t.Fatalf("override %s: %+v, %v", override, batch, err)
+		}
+	}
+}

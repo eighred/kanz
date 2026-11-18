@@ -100,16 +100,30 @@ def validate_report(report, source):
                 or (image == VALKEY and observed.get("version") != "9.1.3")
                 or (image == REDIS and observed.get("version") != REDIS_VERSION)):
             raise Refused("unexpected_runtime_identity")
-    if (report["phases"]["redis"] != report["phases"]["redis_rollback"]
-            or any(report["phases"][name] != report["phases"]["valkey"]
-                   for name in ("valkey_first_install", "first_install_restart", "valkey_restart"))):
-        raise Refused("runtime_identity_changed")
+        if observed["imageID"] != report["phases"]["valkey" if image == VALKEY else "redis"]["imageID"]:
+            raise Refused("runtime_identity_changed")
+        for field, length in (("containerID", 64), ("serverRunID", 40), ("volumeGeneration", 32)):
+            if not re.fullmatch(r"[0-9a-f]{%d}" % length, observed.get(field, "")):
+                raise Refused("missing_lifetime_identity")
+    observed_phases = report["phases"]
+    for field in ("containerID", "serverRunID"):
+        if len({phase[field] for phase in observed_phases.values()}) != len(phases):
+            raise Refused("repeated_server_lifetime")
+    fresh = observed_phases["valkey_first_install"]["volumeGeneration"]
+    retained = observed_phases["redis"]["volumeGeneration"]
+    if fresh == retained or any(
+        observed_phases[name]["volumeGeneration"] != (fresh if name in ("valkey_first_install", "first_install_restart") else retained)
+        for name in phases
+    ):
+        raise Refused("unexpected_volume_generation")
+
 
 
 class Fixture:
     def __init__(self, name):
         validate_name(name)
         self.name, self.volume = name, name + "-data"
+        self.volume_generation = None
         self.volume_collision = False
         self.password = secrets.token_hex(24)
         self.cli = "redis-cli"
@@ -125,18 +139,23 @@ class Fixture:
         mounts = item.get("Mounts", [])
         if len(mounts) != 1 or mounts[0].get("Name") != self.volume or mounts[0].get("Destination") != "/data":
             raise Refused("unexpected_fixture_mount")
-        return item["Image"]
+        return item
 
     def volume_owned(self):
         item = json.loads(command(["docker", "volume", "inspect", self.volume]))[0]
-        if item.get("Labels", {}).get(LABEL) != self.name:
+        labels = item.get("Labels") or {}
+        if (labels.get(LABEL) != self.name or not self.volume_generation
+                or labels.get(LABEL + ".generation") != self.volume_generation):
             raise Refused("volume_identity_mismatch")
 
     def create_volume(self):
         if self.volume in command(["docker", "volume", "ls", "--format", "{{.Name}}"]).splitlines():
             self.volume_collision = True
             raise Refused("fixture_volume_already_exists")
-        command(["docker", "volume", "create", "--label", LABEL + "=" + self.name, self.volume])
+        self.volume_generation = uuid.uuid4().hex
+        command(["docker", "volume", "create", "--label", LABEL + "=" + self.name,
+                 "--label", LABEL + ".generation=" + self.volume_generation, self.volume])
+        self.volume_owned()
 
     def base(self, image):
         return ["docker", "run", "--name", self.name, "--label", LABEL + "=" + self.name,
@@ -184,7 +203,9 @@ class Fixture:
         unauth = command(["docker", "exec", self.name, self.cli, "--raw", "PING"])
         if not unauth.startswith("NOAUTH "):
             raise Refused("unauthenticated_connection_not_refused")
-        return {"image": image, "imageID": loaded, "version": version}
+        return {"image": image, "imageID": loaded["Image"], "version": version,
+                "containerID": loaded["Id"], "serverRunID": server_info.get("run_id", ""),
+                "volumeGeneration": self.volume_generation}
 
     def raw(self, *args):
         return command(["docker", "exec", "-e", "REDISCLI_AUTH=" + self.password, self.name, self.cli, "--raw", *map(str, args)])

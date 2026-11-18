@@ -94,9 +94,10 @@ const (
 	// is in a different sector", which is a real answer and is not recorded.
 	SkipUnclassified = "unclassified_instrument"
 	// SkipShockNamesNoSector: the SectorShock lacks a taxonomy or code,
-	// so there is nothing to match against. A malformed shock, and the only
-	// reason here that is the caller's rather than the estate's.
+	// so there is nothing to match against.
 	SkipShockNamesNoSector = "sector_shock_names_no_sector"
+	// SkipShockNamesNoInstrument: a PriceShock lacks an instrument to target.
+	SkipShockNamesNoInstrument = "price_shock_names_no_instrument"
 	// SkipNoRevaluer: a VolShock was requested and no Revaluer is wired, so the
 	// evaluation runs on the linear path where a vol bump has NO EXPRESSION —
 	// not a small effect, none. A whole-evaluation exclusion like
@@ -140,16 +141,20 @@ const (
 // ExcludedCount is non-zero — see v1.ErrScenarioUnresolvable for why a refusal
 // and not a quality flag.
 func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...Option) (*domain.MeasureSet, v1.InputCoverage) {
-	unknownType, invalidMagnitude, missingSectors := hasUnknownShock(shocks)
-	if unknownType || invalidMagnitude || missingSectors > 0 {
+	preflight := hasUnknownShock(shocks)
+	if preflight.unknownType || preflight.invalidMagnitude || preflight.missingSectors > 0 || preflight.missingInstruments > 0 {
 		var cov compute.Coverage
-		if unknownType {
+		switch {
+		case preflight.unknownType:
 			cov.ExcludeWhole(SkipUnknownShockType)
-		} else if invalidMagnitude {
+		case preflight.invalidMagnitude:
 			cov.ExcludeWhole(SkipInvalidShockMagnitude)
-		} else {
-			for range missingSectors {
+		default:
+			for range preflight.missingSectors {
 				cov.ExcludeWhole(SkipShockNamesNoSector)
+			}
+			for range preflight.missingInstruments {
+				cov.ExcludeWhole(SkipShockNamesNoInstrument)
 			}
 		}
 		return nil, cov.Result()
@@ -174,32 +179,43 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 	return compute.ComputeMeasures(shocked, registry, nil), cov.result()
 }
 
+type shockPreflight struct {
+	unknownType        bool
+	invalidMagnitude   bool
+	missingSectors     int
+	missingInstruments int
+}
+
 // hasUnknownShock validates the entire batch before cloning, applying any
 // shock, or invoking a revaluer. Do not call Description: callers implement
 // this open interface, and a label cannot establish supported semantics.
-func hasUnknownShock(shocks []v1.ScenarioShock) (unknownType, invalidMagnitude bool, missingSectors int) {
+func hasUnknownShock(shocks []v1.ScenarioShock) shockPreflight {
+	var result shockPreflight
 	for _, shock := range shocks {
 		var size *commonpb.Decimal
 		switch s := shock.(type) {
 		case v1.PriceShock:
 			size = s.Pct
+			if strings.TrimSpace(string(s.InstrumentID)) == "" {
+				result.missingInstruments++
+			}
 		case v1.ParallelShift:
 			size = s.Pct
 		case v1.SectorShock:
 			size = s.Pct
 			if !sectorIdentified(s.Taxonomy, s.Code) {
-				missingSectors++
+				result.missingSectors++
 			}
 		case v1.VolShock:
 			size = s.AbsBump
 		default:
-			return true, false, 0
+			return shockPreflight{unknownType: true}
 		}
 		if size == nil || !dec.InDomain(size) {
-			invalidMagnitude = true
+			result.invalidMagnitude = true
 		}
 	}
-	return false, invalidMagnitude, missingSectors
+	return result
 }
 
 func sectorIdentified(taxonomy, code string) bool {

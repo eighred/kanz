@@ -53,6 +53,12 @@ func (r Resolution) Interval() (time.Duration, bool) {
 	return d, ok
 }
 
+// alignedBucket reports whether the start is a UTC boundary of this series.
+func (r Resolution) alignedBucket(start time.Time) bool {
+	interval, ok := r.Interval()
+	return ok && !start.IsZero() && start.Equal(start.UTC().Truncate(interval))
+}
+
 // Valid reports whether r is a resolution this platform stores.
 func (r Resolution) Valid() bool {
 	_, ok := resolutions[r]
@@ -165,6 +171,8 @@ func (b Bar) Validate() error {
 		return fmt.Errorf("%w: resolution %q is not one this platform stores", ErrInvalidBar, b.Resolution)
 	case b.BucketStart.IsZero():
 		return fmt.Errorf("%w: bucket_start is required", ErrInvalidBar)
+	case !b.Resolution.alignedBucket(b.BucketStart):
+		return b.gridError()
 	case b.KnowledgeTime.IsZero():
 		return fmt.Errorf("%w: knowledge_time is required — without it the bar cannot be read "+
 			"point-in-time, which is this store's whole contract", ErrInvalidBar)
@@ -226,6 +234,10 @@ type BarQuery struct {
 
 // ErrBarRevisionConflict identifies different observations claiming one immutable bar revision.
 var ErrBarRevisionConflict = errors.New("store: conflicting OHLCV bar revision")
+
+func (b Bar) gridError() error {
+	return fmt.Errorf("%w: bucket_start %s is off the %s UTC grid", ErrInvalidBar, b.BucketStart, b.Resolution)
+}
 
 func (b Bar) revisionConflict() error {
 	return fmt.Errorf("%w: %s at %s, %s bucket %s, known %s", ErrBarRevisionConflict,

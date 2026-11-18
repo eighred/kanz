@@ -292,7 +292,7 @@ func mapOKXRow(row okxInstrument, m Mapping, opt Options) (terms.Record, string)
 			"instrument entirely", row.Uly)
 	}
 
-	asOf, reason := resolveAsOf(row, opt)
+	asOf, expiry, reason := contractDates(row, opt)
 	if reason != "" {
 		return terms.Record{}, reason
 	}
@@ -309,13 +309,13 @@ func mapOKXRow(row okxInstrument, m Mapping, opt Options) (terms.Record, string)
 
 	switch kind {
 	case terms.KindOption:
-		o, oreason := okxOptionTerms(row, underlyingID)
+		o, oreason := okxOptionTerms(row, underlyingID, expiry)
 		if oreason != "" {
 			return terms.Record{}, oreason
 		}
 		ct.Terms = &referencepb.ContractTerms_Option{Option: o}
 	default:
-		f, freason := okxFutureTerms(row, underlyingID)
+		f, freason := okxFutureTerms(row, underlyingID, expiry)
 		if freason != "" {
 			return terms.Record{}, freason
 		}
@@ -331,12 +331,30 @@ func mapOKXRow(row okxInstrument, m Mapping, opt Options) (terms.Record, string)
 	}, ""
 }
 
-// resolveAsOf returns the record's effective time — see ParseOKXInstruments.
-func resolveAsOf(row okxInstrument, opt Options) (time.Time, string) {
-	if !opt.AsOfOverride.IsZero() {
-		return opt.AsOfOverride.UTC(), ""
+// A correction may supersede expired terms, but cannot predate the listing.
+func contractDates(row okxInstrument, opt Options) (time.Time, time.Time, string) {
+	listed, reason := okxMillis(row.ListTime, "listing time (listTime)")
+	if reason != "" {
+		return time.Time{}, time.Time{}, reason
 	}
-	return okxMillis(row.ListTime, "listing time (listTime)")
+	expiry, reason := okxMillis(row.ExpTime, "expiry (expTime)")
+	if reason != "" {
+		return time.Time{}, time.Time{}, reason
+	}
+	if !expiry.After(listed) {
+		return time.Time{}, time.Time{}, "expTime must be later than listTime"
+	}
+	if opt.AsOfOverride.IsZero() {
+		return listed, expiry, ""
+	}
+	effective := opt.AsOfOverride.UTC()
+	if effective.Before(listed) {
+		return time.Time{}, time.Time{}, "effective time override precedes listTime"
+	}
+	if timestamppb.New(effective).CheckValid() != nil || effective.Nanosecond()%1000 != 0 {
+		return time.Time{}, time.Time{}, "effective time override is not representable by the terms store"
+	}
+	return effective, expiry, ""
 }
 
 // okxOptionTerms maps an OPTION row.
@@ -347,7 +365,7 @@ func resolveAsOf(row okxInstrument, opt Options) (time.Time, string) {
 // refusal: the option is priced linearly and a missing-terms counter increments,
 // forever, for a row that was loaded. Refusing here instead makes it a line an
 // operator reads once.
-func okxOptionTerms(row okxInstrument, underlyingID string) (*referencepb.OptionTerms, string) {
+func okxOptionTerms(row okxInstrument, underlyingID string, expiry time.Time) (*referencepb.OptionTerms, string) {
 	// STRIKE IS IN THE QUOTE CURRENCY, UNSCALED. OKX's stk for BTC-USD-241227-
 	// 60000-C is "60000" and means 60000 USD per unit of BTC — the same units the
 	// underlying's spot price is quoted in, which is what Black-Scholes requires.
@@ -359,10 +377,6 @@ func okxOptionTerms(row okxInstrument, underlyingID string) (*referencepb.Option
 		return nil, reason
 	}
 	mult, reason := okxContractUnits(row)
-	if reason != "" {
-		return nil, reason
-	}
-	expiry, reason := okxMillis(row.ExpTime, "expiry (expTime)")
 	if reason != "" {
 		return nil, reason
 	}
@@ -392,11 +406,7 @@ func okxOptionTerms(row okxInstrument, underlyingID string) (*referencepb.Option
 // millisecond expiry and the contract-size arithmetic are the same three
 // decisions as an option's, minus the strike and the put/call. What it buys is
 // that a dated future stops being an instrument with no terms at all.
-func okxFutureTerms(row okxInstrument, underlyingID string) (*referencepb.FutureTerms, string) {
-	expiry, reason := okxMillis(row.ExpTime, "expiry (expTime)")
-	if reason != "" {
-		return nil, reason
-	}
+func okxFutureTerms(row okxInstrument, underlyingID string, expiry time.Time) (*referencepb.FutureTerms, string) {
 	size, reason := okxContractUnits(row)
 	if reason != "" {
 		return nil, reason
@@ -563,5 +573,9 @@ func okxMillis(s, field string) (time.Time, string) {
 	if ms <= 0 {
 		return time.Time{}, fmt.Sprintf("%s %q is not a positive Unix millisecond timestamp", field, s)
 	}
-	return time.UnixMilli(ms).UTC(), ""
+	instant := time.UnixMilli(ms).UTC()
+	if timestamppb.New(instant).CheckValid() != nil {
+		return time.Time{}, fmt.Sprintf("%s %q is outside the timestamp domain", field, s)
+	}
+	return instant, ""
 }

@@ -51,7 +51,7 @@ class MigrationBoundaryTests(unittest.TestCase):
                 "HostConfig": {"NetworkMode": "none"}, "Image": "sha256:actual",
                 "Mounts": [{"Name": NAME + "-data", "Destination": "/data"}]}
         with patch.object(proof, "command", side_effect=[json.dumps([good]), "sha256:actual"]):
-            self.assertEqual(fixture.owned(), "sha256:actual")
+            self.assertEqual(fixture.owned(), good)
         bads = []
         for mutate in (lambda x: x["Config"]["Labels"].clear(),
                        lambda x: x["Config"].update(Image="redis:latest"),
@@ -135,11 +135,18 @@ class MigrationBoundaryTests(unittest.TestCase):
                   "phases": {"redis": identity(proof.REDIS, "7.4.5"), "redis_rollback": identity(proof.REDIS, "7.4.5"),
                              **{phase: identity(proof.VALKEY, "9.1.3") for phase in
                                 ("valkey", "valkey_restart", "valkey_first_install", "first_install_restart")}}}
+        for i, (name, phase) in enumerate(report["phases"].items(), start=1):
+            phase.update(containerID=f"{i:064x}", serverRunID=f"{i:040x}",
+                         volumeGeneration=("c" if "first_install" in name else "d") * 32)
         proof.validate_report(report, "a" * 40)
         for mutate in (lambda x: x.update(source="c" * 40), lambda x: x.update(cleanup="unknown"),
                        lambda x: x.update(cases=proof.CASES[:-1]), lambda x: x["phases"].pop("redis_rollback"),
                        lambda x: x["phases"]["valkey"].update(image="valkey:latest"),
                        lambda x: x["phases"].pop("valkey_first_install"),
+                       lambda x: x["phases"].update(valkey_restart=x["phases"]["valkey"]),
+                       lambda x: x["phases"]["redis_rollback"].update(serverRunID=x["phases"]["redis"]["serverRunID"]),
+                       lambda x: x["phases"]["first_install_restart"].update(volumeGeneration="d" * 32),
+                       lambda x: x["phases"]["valkey_restart"].update(volumeGeneration="e" * 32),
                        lambda x: x["phases"]["first_install_restart"].update(imageID="sha256:" + "c" * 64),
                        lambda x: x["phases"]["redis_rollback"].update(version="7.9.0")):
             changed = copy.deepcopy(report)

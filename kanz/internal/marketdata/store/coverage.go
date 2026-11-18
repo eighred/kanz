@@ -96,6 +96,9 @@ func (c Coverage) Validate() error {
 	if c.BucketStart.IsZero() {
 		return fmt.Errorf("%w: zero bucket_start", ErrInvalidCoverage)
 	}
+	if !c.Resolution.alignedBucket(c.BucketStart) {
+		return c.gridError()
+	}
 	if c.Attestor == "" {
 		return fmt.Errorf("%w: empty attestor — a coverage claim nothing can be traced to "+
 			"cannot be audited, and an unauditable claim is worse than no claim", ErrInvalidCoverage)
@@ -118,6 +121,10 @@ func (c Coverage) Validate() error {
 	return nil
 }
 
+func (c Coverage) gridError() error {
+	return fmt.Errorf("%w: bucket_start %s is off the %s UTC grid", ErrInvalidCoverage, c.BucketStart, c.Resolution)
+}
+
 // Whole reports that the subscription was proven live for the ENTIRE interval.
 //
 // This is the one claim the bar series cannot make about itself, and the only
@@ -127,7 +134,7 @@ func (c Coverage) Validate() error {
 // and no attestor would know. It is "we were looking, for all of it".
 func (c Coverage) Whole() bool {
 	interval, ok := c.Resolution.Interval()
-	return ok && interval > 0 && c.Observed >= interval
+	return ok && c.Resolution.alignedBucket(c.BucketStart) && c.Observed >= interval
 }
 
 // CoverageQuery selects a coverage series. Empty From/To are unbounded.
