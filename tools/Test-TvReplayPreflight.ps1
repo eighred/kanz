@@ -38,6 +38,7 @@ function git {
         throw 'Preflight references an absent or untracked source input.'
     }
     if ($file -ceq $canonicalLock) { $fixtureState.lockReads++ }
+    if ($fixtureState.mode -ceq 'changed-helper' -and $op -ceq 'rev-parse' -and $file -ceq 'tools/tv-sync-restored-proof.sh') { return ('0' * 40) }
     if ($fixtureState.mode -ceq 'missing-lock' -and $file -ceq $canonicalLock) { $global:LASTEXITCODE = 1; return '' }
     if ($fixtureState.mode -ceq 'changed-source' -and $op -ceq 'rev-parse' -and $file -ceq $canonicalLock) { return ('0' * 40) }
     & $nativeGit -C $repoRoot hash-object -- (Join-Path $repoRoot $file)
@@ -63,5 +64,14 @@ foreach ($case in @(
     }
     if ($case.Mode -cne 'old-release' -and ($fixtureState.readLock -or $fixtureState.checkedVerifier)) { throw 'Invalid provenance reached release acceptance.' }
 }
+$fixtureState.mode = 'changed-helper'
+foreach ($tv in @($false, $true)) {
+    $message = ''
+    try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Restore -QualifyTVSync:$tv }
+    catch { $message = $_.Exception.Message }
+    if ($message -cne 'Recovery source tv-sync-restored-proof.sh is not the exact blob merged into origin/main.') {
+        throw "Unreviewed restore helper reached the wrong boundary: $message"
+    }
+}
 $global:LASTEXITCODE = 0
-Write-Output 'replay-preflight-fixtures=3 PASS (offline boundaries only)'
+Write-Output 'replay-preflight-fixtures=5 PASS (offline boundaries only)'

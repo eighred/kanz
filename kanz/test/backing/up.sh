@@ -29,10 +29,6 @@
 # transport. Neither substitutes for the other.
 set -euo pipefail
 
-# Docker on Windows needs native paths for -v; Linux CI does not.
-hostpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
-export MSYS2_ARG_CONV_EXCL="*"
-
 PG_PORT="${PG_PORT:-5432}"
 NATS_PORT="${NATS_PORT:-4222}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
@@ -44,105 +40,23 @@ export MSYS_NO_PATHCONV=1
 
 docker rm -f kanz-ci-postgres kanz-ci-redis kanz-ci-nats kanz-ci-kafka >/dev/null 2>&1 || true
 
-# --- Postgres ---------------------------------------------------------------
-# Image and credentials match kanz-ci.yml's service container.
-docker run -d --name kanz-ci-postgres -p "${PG_PORT}:5432" \
-  -e POSTGRES_USER=kanz -e POSTGRES_PASSWORD=kanz -e POSTGRES_DB=kanz \
-  postgres:16-alpine >/dev/null
+backing_exports="$(PG_PORT="$PG_PORT" NATS_PORT="$NATS_PORT" bash "$ROOT/test/backing/postgres-nats.sh")"
 
 # --- Valkey (the `-tags redis` suite) ---------------------------------------
 valkey_exports="$(REDIS_PORT="$REDIS_PORT" bash "$ROOT/test/backing/valkey.sh")"
 
-# --- NATS, plaintext, JetStream ---------------------------------------------
-# -c nats-dev.conf, not bare -js: the broker needs the MT-02 tenant routing
-# mappings or every order published by the gateway / webhook-ingest lands on a
-# subject nothing subscribes. See test/backing/nats-dev.conf for why a wildcard
-# is the right shape on a single-account broker.
-docker run -d --name kanz-ci-nats -p "${NATS_PORT}:4222"   -v "$(hostpath "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nats-dev.conf")":/etc/nats/nats-dev.conf:ro   nats:2 -c /etc/nats/nats-dev.conf >/dev/null
-
 # --- Redpanda, single-node Kafka API -----------------------------------------
 kafka_exports="$(KAFKA_PORT="$KAFKA_PORT" bash "$ROOT/test/backing/kafka.sh")"
 
-wait_for() { # wait_for <label> <seconds> <command...>
-  label="$1"; deadline="$2"; shift 2
-  for _ in $(seq 1 "$deadline"); do
-    if "$@" >/dev/null 2>&1; then echo "  $label ready"; return 0; fi
-    sleep 1
-  done
-  echo "FAIL: $label did not become ready in ${deadline}s"
-  docker logs "kanz-ci-${label}" 2>&1 | tail -20
-  exit 1
-}
-nats_ready()  { docker logs kanz-ci-nats  2>&1 | grep -q "Server is ready"; }
-
-echo "waiting for backing services..."
-wait_for postgres 60 docker exec kanz-ci-postgres pg_isready -U kanz
-wait_for nats     60 nats_ready
-
-# --- The application role ----------------------------------------------------
-# Created NOSUPERUSER, then VERIFIED. Creating it correctly and checking it are
-# different acts: a future edit here, a hand-patched local database, or a role
-# that already existed with different attributes all produce a DSN that looks
-# right and silently disables RLS.
-docker exec kanz-ci-postgres psql -U kanz -d kanz -q -v ON_ERROR_STOP=1 \
-  -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
-  -c "CREATE DATABASE kanzapp OWNER kanzapp;" >/dev/null
-docker exec kanz-ci-postgres psql -U kanz -d kanzapp -q -v ON_ERROR_STOP=1 \
-  -c "GRANT ALL ON SCHEMA public TO kanzapp;" >/dev/null
-
-# A single deterministic token rather than two booleans: psql renders bool as
-# `t`/`f` unquoted but `false` under ::text, so comparing the raw values invites
-# a check that is really testing psql's formatting. An absent role yields an
-# empty string, which is also not CONSTRAINED — so a missing role fails here too
-# rather than sailing past a comparison that only ever saw the happy shape.
-attrs="$(docker exec kanz-ci-postgres psql -U kanz -d kanz -tAc \
-  "select case when rolsuper or rolbypassrls then 'BYPASSES_RLS' else 'CONSTRAINED' end
-     from pg_roles where rolname = 'kanzapp'")"
-attrs="$(echo "$attrs" | tr -d '\r\n')"
-if [ "$attrs" != "CONSTRAINED" ]; then
-  echo "FAIL: the kanzapp role is not RLS-constrained (got '$attrs', want 'CONSTRAINED')."
-  echo "      A superuser — or any role with BYPASSRLS — is exempt from every row-level"
-  echo "      security policy in the schema. The multi-tenant isolation tests would still"
-  echo "      PASS, because the policies they exist to prove would never be consulted."
-  echo "      That is a false green, not a configuration detail. Refusing to hand out a DSN."
-  exit 1
-fi
-echo "  role kanzapp verified NOSUPERUSER / NOBYPASSRLS — RLS will be enforced"
-
-# --- The NATS topology -------------------------------------------------------
-# Extracted from the ConfigMap production applies, never copied — same stance as
-# test/mtls/up.sh, and for the same reason: a copy drifts and the drift is
-# invisible until a service meets a real spine. A JetStream broker with no
-# streams answers "no response from stream", which reads as a transport fault
-# and is not one.
-awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
-  "$ROOT/infra/nats/bootstrap-job.yaml" > /tmp/kanz-backing-bootstrap.sh
-test -s /tmp/kanz-backing-bootstrap.sh || { echo "FAIL: could not extract bootstrap.sh from infra/nats/bootstrap-job.yaml"; exit 1; }
-
-NATS_BOX_IMAGE="$(awk '/image: *natsio\/nats-box/{sub(/^[[:space:]]*image:[[:space:]]*/,"");print;exit}' \
-  "$ROOT/infra/nats/bootstrap-job.yaml")"
-test -n "$NATS_BOX_IMAGE" || { echo "FAIL: could not read the nats-box image from infra/nats/bootstrap-job.yaml"; exit 1; }
-
-docker run --rm -i --network host \
-  -e NATS_URL="nats://localhost:${NATS_PORT}" -e NATS_REPLICAS=1 \
-  "$NATS_BOX_IMAGE" sh -s < /tmp/kanz-backing-bootstrap.sh > /tmp/kanz-backing-bootstrap.log 2>&1 || {
-    echo "FAIL: the bootstrap script did not complete"; cat /tmp/kanz-backing-bootstrap.log; exit 1; }
-
-# Derived from the script, never listed here: a stream added to the Job is
-# required by this check the moment it is added.
-EXPECTED="$(awk '/^[[:space:]]*ensure_stream[[:space:]]+[A-Z]/{print $2}' /tmp/kanz-backing-bootstrap.sh | sort -u)"
-test -n "$EXPECTED" || { echo "FAIL: parsed no stream names out of bootstrap.sh — the check would be vacuous"; exit 1; }
-MISSING=""
-for s in $EXPECTED; do grep -qw "$s" /tmp/kanz-backing-bootstrap.log || MISSING="$MISSING $s"; done
-[ -z "$MISSING" ] || { echo "FAIL: bootstrap ran but these streams are absent:$MISSING"; cat /tmp/kanz-backing-bootstrap.log; exit 1; }
-echo "  NATS topology provisioned: $(echo $EXPECTED | wc -w) streams"
+# Bootstrap from the canonical ConfigMap, then check the broker's current
+# stream inventory before printing any connection settings. Requires PyYAML.
+python3 -B "$ROOT/test/backing/nats_topology.py" bootstrap "nats://127.0.0.1:${NATS_PORT}"
 
 cat <<EOF
 
 All four backing services are up. Export these, then run the suite:
 
-  export TEST_POSTGRES_URL='postgres://kanzapp:kanz@localhost:${PG_PORT}/kanzapp?sslmode=disable'
-  export TEST_NATS_URL='nats://localhost:${NATS_PORT}'
+  $backing_exports
   $kafka_exports
   $valkey_exports
   go test -p 1 ./...
