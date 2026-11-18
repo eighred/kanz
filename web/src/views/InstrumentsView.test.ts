@@ -172,7 +172,12 @@ describe('an empty catalogue is a statement, not a blank table', () => {
     const signal = new AbortController().signal
     expect((await api.instruments.list('acme', signal)).instruments).toEqual([])
     expect((await api.instruments.list('acme', signal)).instruments).toEqual(routes)
-    expect(get).toHaveBeenCalledWith('/api/v1/instruments', { signal })
+    expect(get).toHaveBeenCalledWith('/api/v1/instruments', { signal, expectedStatus: 200 })
+  })
+
+  it('refuses a partial HTTP response with a valid empty page', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ ...base, instruments: [] }, { status: 206 }))
+    await expect(api.instruments.list('acme', new AbortController().signal)).rejects.toThrow('Unexpected success status')
   })
 
   it('explains a 404 rather than claiming the platform trades nothing', async () => {

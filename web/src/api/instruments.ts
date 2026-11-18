@@ -77,7 +77,7 @@ export const instruments = {
    * estate that genuinely trades nothing.
    */
   async list(tenant: string, signal: AbortSignal): Promise<InstrumentsResponse> {
-    const value = await api.get<unknown>('/api/v1/instruments', { signal })
+    const value = await api.get<unknown>('/api/v1/instruments', { signal, expectedStatus: 200 })
     if (!value || typeof value !== 'object' || !tenant.trim() ||
         !('owner_tenant' in value) || value.owner_tenant !== tenant ||
         !('instruments' in value) || !Array.isArray(value.instruments) || !value.instruments.every(isRoute)) {
