@@ -67,6 +67,12 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/image
         value: redis
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/exec/command
+        value: ["sh", "-c", 'redis-cli -a "$(cat /run/secrets/redis/password)" --no-auth-warning ping']
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/exec/command
+        value: ["sh", "-c", 'redis-cli -a "$(cat /run/secrets/redis/password)" --no-auth-warning ping']
       - op: add
         path: /spec/template/spec/containers/0/resources
         value:

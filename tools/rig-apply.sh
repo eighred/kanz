@@ -121,6 +121,7 @@ apply_deploy() {
   # resolves to nothing — Redis's own start script then refuses to run rather than
   # come up unauthenticated (see redis.yaml's command block). Applying it raw was a
   # second, undeclared deviation from the "one patch path" this stage exists to be.
+  kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/valkey-clients.yaml
   python3 tools/rig_dev_patch.py kanz/infra/messaging/redis.yaml | kubectl --context "$KUBECTL_CONTEXT" apply -f -
 
   # The rig runs a curated subset — the trading loop — not the whole 23-service

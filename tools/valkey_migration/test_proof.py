@@ -29,6 +29,13 @@ class MigrationBoundaryTests(unittest.TestCase):
         self.assertEqual(claim["spec"]["accessModes"], ["ReadWriteOnce"])
         self.assertEqual(claim["spec"]["resources"]["requests"]["storage"], "1Gi")
 
+    def test_rig_applies_the_cache_ingress_before_the_cache(self):
+        root = proof.Path(proof.__file__).resolve().parents[2]
+        lines = [line.strip() for line in (root / "tools/rig-apply.sh").read_text(encoding="utf-8").splitlines()]
+        policy = 'kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/valkey-clients.yaml'
+        install = 'python3 tools/rig_dev_patch.py kanz/infra/messaging/redis.yaml | kubectl --context "$KUBECTL_CONTEXT" apply -f -'
+        self.assertLess(lines.index(policy), lines.index(install))
+
     def test_names_refused_before_commands(self):
         with patch.object(proof, "command") as call:
             for name in ("redis", NAME + "/..", NAME + "-data", "kanz-valkey-proof-" + "a" * 23, NAME.upper()):

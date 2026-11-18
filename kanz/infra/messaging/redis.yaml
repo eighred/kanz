@@ -75,13 +75,20 @@ spec:
             - { containerPort: 6379, name: redis }
           livenessProbe:
             exec:
-              # redis-cli must AUTHENTICATE, or the probe gets NOAUTH and kills a healthy pod.
-              command: ["sh", "-c", "redis-cli -a \"$(cat /run/secrets/redis/password)\" --no-auth-warning ping"]
+              # A protocol error must produce a failing process status for the kubelet.
+              command: &authenticatedPing
+                - sh
+                - -ec
+                - |-
+                  REDISCLI_AUTH="$(cat /run/secrets/redis/password)"
+                  test -n "$REDISCLI_AUTH"
+                  export REDISCLI_AUTH
+                  exec redis-cli -e --raw ping
             initialDelaySeconds: 10
             periodSeconds: 15
           readinessProbe:
             exec:
-              command: ["sh", "-c", "redis-cli -a \"$(cat /run/secrets/redis/password)\" --no-auth-warning ping"]
+              command: *authenticatedPing
             initialDelaySeconds: 2
             periodSeconds: 5
           securityContext:
