@@ -37,6 +37,32 @@ describe('resolving who this browser is', () => {
     expect(me).toHaveBeenCalledTimes(2)
   })
 
+  it.each([
+    { action: 'signIn', status: 401 },
+    { action: 'redeem', status: 200 },
+    { action: 'forget', status: 200 },
+  ])('keeps a later $action when an earlier identity lookup returns $status', async ({ action, status }) => {
+    vi.restoreAllMocks()
+    const s = useSession()
+    client.setUnauthenticatedHandler(() => s.forget())
+    let reply!: (value: Response) => void
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(new Promise<Response>(resolve => { reply = resolve }))
+    const lookup = s.resolve()
+    if (action === 'signIn') {
+      vi.spyOn(client.auth, 'login').mockResolvedValue(identity)
+      await s.signIn(identity.subject, 'password')
+    } else if (action === 'redeem') {
+      vi.spyOn(client.auth, 'redeem').mockResolvedValue(identity)
+      await s.redeem('invitation', 'password')
+    } else {
+      s.forget()
+    }
+    reply(Response.json({ ...identity, subject: 'former-account' }, { status }))
+    await lookup
+    expect(s.resolved).toBe(true)
+    expect(s.identity).toEqual(action === 'forget' ? null : identity)
+  })
+
   it('asks the server only once', async () => {
     const me = vi.spyOn(client.auth, 'me').mockResolvedValue(identity)
     const s = useSession()
