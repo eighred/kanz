@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { control, describe, ready, type Node } from '../api/control'
 
 // NODE LIFECYCLE: the actions Estate deliberately does not carry (#371).
@@ -20,6 +20,7 @@ type Action = 'cordon' | 'uncordon' | 'drain' | 'region'
 
 /** pending is the action awaiting confirmation, or null when none is. */
 const pending = ref<{ node: Node; action: Action } | null>(null)
+const dialog = ref<HTMLDialogElement>()
 /** typed is the drain confirmation input — see requiresTypedName. */
 const typed = ref('')
 /** region is the target label for a move. */
@@ -63,15 +64,32 @@ onMounted(() => {
 })
 onUnmounted(() => clearInterval(timer))
 
-function ask(n: Node, action: Action) {
+async function ask(n: Node, action: Action) {
   pending.value = { node: n, action }
   typed.value = ''
   region.value = n.region ?? ''
   actionError.value = ''
   notice.value = ''
+  await nextTick()
+  dialog.value?.showModal()
 }
 
-function cancel() {
+function keepTabInside(event: KeyboardEvent) {
+  const controls = dialog.value?.querySelectorAll<HTMLElement>('input:enabled, button:enabled')
+  if (!controls?.length) return
+  const first = controls[0]!
+  const last = controls[controls.length - 1]!
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+function closeConfirmation() {
+  dialog.value?.close()
   pending.value = null
   typed.value = ''
 }
@@ -129,8 +147,7 @@ async function run() {
         notice.value = `${p.node.name} is labelled ${region.value.trim()}.`
         break
     }
-    pending.value = null
-    typed.value = ''
+    closeConfirmation()
     await load()
   } catch (e) {
     // The action failed, so the node is unchanged. Keeping the dialog open
@@ -195,7 +212,8 @@ const titles: Record<Action, string> = {
 
   <!-- THE CONFIRMATION. One panel for all four actions, because four dialogs
        are four places for the wording to drift from what the button does. -->
-  <div v-if="pending" class="confirm card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+  <dialog v-if="pending" ref="dialog" class="confirm card" aria-labelledby="confirm-title"
+          @cancel.prevent="!busy && closeConfirmation()" @keydown.tab="keepTabInside">
     <h2 id="confirm-title">{{ titles[pending.action] }}</h2>
 
     <p class="muted">
@@ -237,7 +255,12 @@ const titles: Record<Action, string> = {
       <button :disabled="!confirmable()" :class="pending.action === 'drain' ? 'danger' : ''" @click="run">
         {{ busy ? 'Working…' : titles[pending.action] }}
       </button>
-      <button class="quiet" :disabled="busy" @click="cancel">Cancel</button>
+      <button class="quiet" :disabled="busy" autofocus @click="closeConfirmation">Cancel</button>
     </div>
-  </div>
+  </dialog>
 </template>
+
+<style scoped>
+dialog.confirm { margin: auto; max-height: 90vh; overflow-y: auto; }
+dialog::backdrop { background-color: rgb(0 0 0 / 45%); }
+</style>
