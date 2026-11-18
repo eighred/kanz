@@ -51,7 +51,7 @@ describe('credential presence on the operator wire', () => {
     await flushPromises()
     expect(button(wrapper, 'Set keys')).toBeDefined()
     await button(wrapper, 'Replace keys')!.trigger('click')
-    expect(wrapper.get('input[name="confirm-venue"]').exists()).toBe(true)
+    expect(wrapper.find('input[name="confirm-venue"]').exists()).toBe(true)
   })
 
   it('accepts an empty protobuf venue list', async () => {
