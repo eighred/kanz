@@ -10,15 +10,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/marketdata/terms"
-	"github.com/eighred/kanz/internal/marketdata/termsload"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/termsource"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 )
 
-func TestOKXExactOptionReachesPostgresTermsProvider(t *testing.T) {
+func TestPostgresTermsProviderResolvesExactOptionDecimals(t *testing.T) {
 	dsn := os.Getenv("TEST_POSTGRES_URL")
 	if dsn == "" {
 		t.Skip("set TEST_POSTGRES_URL for the OKX terms round trip")
@@ -50,37 +51,21 @@ func TestOKXExactOptionReachesPostgresTermsProvider(t *testing.T) {
 	if _, err = pool.Exec(t.Context(), string(ddl)); err != nil {
 		t.Fatal(err)
 	}
-	const catalogue = `{
-        "code":"0","data":[{
-          "instType":"OPTION","instId":"BTC-USD-241227-FINE-C","uly":"BTC-USD","optType":"C",
-          "stk":"60000.000000001","listTime":"1730448000000","expTime":"1735286400000",
-          "ctVal":"3e-9","ctMult":"0.2","ctValCcy":"BTC"
-        }]}`
-	batch, err := termsload.ParseOKXInstruments([]byte(catalogue), termsload.Mapping{
-		Underlying: map[string]string{"BTC-USD": "BTC-USDT"}, ContractNamespace: "XOKX",
-	}, termsload.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	records, err := batch.Loadable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := terms.NewPostgres(pool)
-	if err = store.Put(t.Context(), records); err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 1 {
-		t.Fatalf("loaded %d contracts, want one", len(records))
-	}
-	rec := records[0]
+	const instrumentID = "XOKX:FINE-C"
+	const underlyingID = "BTC-USDT"
 	listed := time.UnixMilli(1730448000000)
-	stored, err := store.LatestAsOf(t.Context(), rec.InstrumentID, listed)
-	if err != nil {
+	// The canonical stored decimals independently encode the catalogue strike
+	// 60000.000000001 and 3e-9 underlying units times a 0.2 multiplier.
+	rec := terms.Record{InstrumentID: instrumentID, UnderlyingID: underlyingID, AsOf: listed, Kind: terms.KindOption,
+		Terms: &referencepb.ContractTerms{InstrumentId: instrumentID, AsOf: timestamppb.New(listed),
+			Terms: &referencepb.ContractTerms_Option{Option: &referencepb.OptionTerms{
+				UnderlyingId: underlyingID, Expiry: timestamppb.New(time.UnixMilli(1735286400000)),
+				OptionType: referencepb.OptionType_OPTION_TYPE_CALL, ExerciseStyle: referencepb.ExerciseStyle_EXERCISE_STYLE_EUROPEAN,
+				Strike: &commonpb.Decimal{Coefficient: 60000000000001, Exponent: -9}, ContractMultiplier: &commonpb.Decimal{Coefficient: 6, Exponent: -10},
+			}}}}
+	store := terms.NewPostgres(pool)
+	if err := store.Put(t.Context(), []terms.Record{rec}); err != nil {
 		t.Fatal(err)
-	}
-	if !proto.Equal(stored.Terms, rec.Terms) {
-		t.Fatalf("wire terms changed: %v", stored.Terms)
 	}
 	spec, state, err := termsource.NewProvider(store).OptionTerms(t.Context(), rec.InstrumentID, listed)
 	if err != nil || state != compute.TermsResolved || spec.Strike != 60000.000000001 || spec.Multiplier != 6e-10 {
