@@ -271,7 +271,7 @@ async def test_worker_fallback_requires_matching_scope_and_prior_domain_time():
         assert out.mode == PredictionMode.PREDICTION_MODE_DEGRADED
         if tenant == "test-tenant" and feature_set == original.feature_set_ref and delta >= 0:
             assert out.degraded_reason == REASON_INFERENCE_UNAVAILABLE
-            assert out.as_of == original.as_of
+            assert out.as_of == fv.as_of
             assert out.value == 0.75
         else:
             assert out.degraded_reason == REASON_NO_CACHED_PREDICTION

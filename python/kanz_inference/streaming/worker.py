@@ -75,10 +75,8 @@ class LastKnownCache:
     feature set and subject. Read by the degraded-fallback path when ``Model.predict``
     raises — implements PRED-02 §2.1's "cache fallback" behaviour.
 
-    No TTL (cached PredictionEnvelope carries its own ``as_of``,
-    consumers can branch on staleness). Eviction is overwrite-on-
-    next-store. Single asyncio event loop ⇒ no lock needed; dict
-    read/write is GIL-atomic. Mirrors the RISK-11 ``Cache`` shape.
+    Out-of-order delivery cannot replace a newer observation. The worker
+    checks its time against the requesting feature vector before reuse.
     """
 
     _entries: dict[tuple[str, str, str], PredictionEnvelope] = field(default_factory=dict)
@@ -218,7 +216,7 @@ class StreamingWorker:
                 mode=PredictionMode.PREDICTION_MODE_DEGRADED,
                 degraded_reason=REASON_INFERENCE_UNAVAILABLE,
                 feature_vector_event_id=env.event_id,
-                as_of=cached.as_of,
+                as_of=fv.as_of,
             )
         return PredictionEnvelope(
             subject_id=fv.subject_id,
