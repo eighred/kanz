@@ -726,21 +726,8 @@ func (m *Monitor) gcBooksLocked() {
 // fold, each of which takes its own lock, and reaching into two foreign locks
 // while holding the one that guards every book in this process is how a monitor
 // stops monitoring anything.
-// ONE PASS, ONE ALLOCATION, and both halves of that were measured (#810). The
-// copy runs on every position FACT, and it used to scan the map three times —
-// once for the positions and the NAV, and twice more for navCurrency, whose
-// result was thrown away and recomputed for the NAV's own currency code — while
-// growing book.Positions from nil, which reallocates and re-copies as it doubles.
-// Preallocating to len(positions) and folding the currency into the same pass
-// took the 50-holding snapshot from 59 allocations to 53 and the 1000-holding one
-// from 1013 to 1003, on top of the far larger win from evicting the flats that
-// made those maps big in the first place.
-//
-// It also settles a disagreement the two navCurrency calls could produce: Go
-// randomizes map iteration per range, so on a book holding more than one currency
-// the BaseCurrency and the NAV's currency code were each "the first non-empty one
-// seen" in a DIFFERENT order, and could name different currencies on the same
-// snapshot. One pass makes them the same value by construction.
+// The snapshot retains every position. Its proxy NAV requires complete
+// valuations in one currency; a later cash and mark join can establish equity.
 func (m *Monitor) snapshotLocked(key bookKey) *evaluationSnapshot {
 	b := m.books[key]
 	// Eligibility belongs to this capture. A separate held check could observe
@@ -751,19 +738,13 @@ func (m *Monitor) snapshotLocked(key bookKey) *evaluationSnapshot {
 	}
 	positions := b.positions
 	out := make([]comp.Position, 0, len(positions))
-	var nav *commonpb.Decimal
-	// THE CURRENCY THE HOLDINGS ARE IN. It was left unset while nothing read it;
-	// comp.JoinEquity does, and refuses to net cash against positions without it
-	// rather than assuming they match (#787).
-	currency := ""
 	for _, p := range positions {
 		out = append(out, p)
-		if p.MarketValue != nil {
-			nav = addDecimal(nav, p.MarketValue.GetAmount())
-		}
-		if currency == "" {
-			currency = p.MarketValue.GetCurrencyCode()
-		}
+	}
+	currency, amount := positionValue(out)
+	var nav *commonpb.Money
+	if amount != nil {
+		nav = &commonpb.Money{Amount: amount, CurrencyCode: currency}
 	}
 	b.nextCapture++
 	return &evaluationSnapshot{key: key, owner: b, revision: b.revision, order: b.nextCapture, Book: &comp.Book{
@@ -771,7 +752,7 @@ func (m *Monitor) snapshotLocked(key bookKey) *evaluationSnapshot {
 		BaseCurrency: currency,
 		NAVBasis:     comp.NAVBasisGrossPositions,
 		Positions:    out,
-		NAV:          &commonpb.Money{Amount: nav, CurrencyCode: currency},
+		NAV:          nav,
 	}}
 }
 
@@ -975,29 +956,56 @@ func ratFromDecimal(d *commonpb.Decimal) *big.Rat {
 	return r.Quo(r, scale)
 }
 
-// addDecimal returns a+b exactly, aligning to the smaller exponent. nil is zero.
-func addDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
-	if a == nil {
-		a = &commonpb.Decimal{}
-	}
-	if b == nil {
-		b = &commonpb.Decimal{}
-	}
-	exp := a.GetExponent()
-	if b.GetExponent() < exp {
-		exp = b.GetExponent()
-	}
-	pow := func(n int32) int64 {
-		p := int64(1)
-		for ; n > 0; n-- {
-			p *= 10
+// positionValue returns the unambiguous denomination even when a missing
+// price prevents a proxy NAV, so JoinEquity can still use complete live marks.
+func positionValue(positions []comp.Position) (string, *commonpb.Decimal) {
+	var currency string
+	var scale int32
+	complete := len(positions) > 0
+	for i, p := range positions {
+		mv := p.MarketValue
+		code := mv.GetCurrencyCode()
+		if code != "" {
+			if currency != "" && code != currency {
+				return "", nil
+			}
+			currency = code
 		}
-		return p
+		amount := mv.GetAmount()
+		if amount == nil || code == "" || !dec.InDomain(amount) {
+			complete = false
+			continue
+		}
+		if i == 0 || amount.Exponent < scale {
+			scale = amount.Exponent
+		}
 	}
-	return &commonpb.Decimal{
-		Coefficient: a.GetCoefficient()*pow(a.GetExponent()-exp) + b.GetCoefficient()*pow(b.GetExponent()-exp),
-		Exponent:    exp,
+	if !complete {
+		return currency, nil
 	}
+
+	// Sum at the finest input scale. An intermediate coefficient may exceed
+	// int64 and cancel again before the final amount is materialized.
+	var sum, term, power big.Int
+	ten := big.NewInt(10)
+	for _, p := range positions {
+		d := p.MarketValue.Amount
+		term.SetInt64(d.Coefficient)
+		if gap := d.Exponent - scale; gap > 0 {
+			power.Exp(ten, power.SetInt64(int64(gap)), nil)
+			term.Mul(&term, &power)
+		}
+		sum.Add(&sum, &term)
+	}
+	var remainder big.Int
+	for !sum.IsInt64() {
+		sum.QuoRem(&sum, ten, &remainder)
+		scale++
+		if remainder.Sign() != 0 || !dec.InDomain(&commonpb.Decimal{Exponent: scale}) {
+			return currency, nil
+		}
+	}
+	return currency, &commonpb.Decimal{Coefficient: sum.Int64(), Exponent: scale}
 }
 
 // observeCashDrag reports one book's idle-cash drag to the treasury observer.

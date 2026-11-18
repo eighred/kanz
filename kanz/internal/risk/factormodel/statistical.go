@@ -222,6 +222,13 @@ func blend(fund, stat *Model, regression *regressionFit) (*Model, error) {
 	factors := make([]Factor, 0, k)
 	factors = append(factors, fund.Factors...)
 	factors = append(factors, stat.Factors...)
+	names := make(map[string]struct{}, k)
+	for _, f := range factors {
+		if _, exists := names[f.Name]; exists {
+			return nil, fmt.Errorf("factormodel: duplicate blended factor name %q", f.Name)
+		}
+		names[f.Name] = struct{}{}
+	}
 
 	n := len(fund.Instruments)
 	loadings := make([][]float64, n)

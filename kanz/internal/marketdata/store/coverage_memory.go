@@ -82,6 +82,9 @@ func (m *Memory) Coverage(_ context.Context, q CoverageQuery) ([]Coverage, error
 		if !q.To.IsZero() && !c.BucketStart.Before(q.To) {
 			continue
 		}
+		if !q.AsOf.IsZero() && c.RecordedAt.After(q.AsOf) {
+			continue
+		}
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool {

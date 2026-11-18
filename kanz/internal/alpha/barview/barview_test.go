@@ -427,3 +427,20 @@ func TestTheSeamIsSatisfied(t *testing.T) {
 		t.Fatalf("MIC through the seam = %q", seam.MIC())
 	}
 }
+
+func TestCoverageUsesOnlyProofKnownAtDecision(t *testing.T) {
+	at := origin.Add(3 * time.Minute)
+	timely := attestation(0, time.Minute)
+	timely.RecordedAt = at
+	partial := attestation(1, time.Second)
+	late := attestation(1, time.Minute)
+	late.RecordedAt = at.Add(time.Minute)
+	other := attestation(0, time.Minute)
+	other.Attestor = "later-feed"
+	other.RecordedAt = late.RecordedAt
+	m := memWith(t, nil, []store.Coverage{timely, partial, late, other})
+	got := run(t, viewAt(t, m, at, 3), at).Coverage
+	if got.Quiet != 1 || got.Unknown != 2 || got.Sound() {
+		t.Fatalf("decision coverage = %+v", got)
+	}
+}

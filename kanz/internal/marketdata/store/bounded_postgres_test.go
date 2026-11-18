@@ -145,3 +145,26 @@ func BenchmarkBoundedPostgres(b *testing.B) {
 		})
 	}
 }
+
+func TestObservationRevisionsUsePersistedTimestampPrecision(t *testing.T) {
+	s := boundedPostgres(t)
+	first := obs("PRECISION", 1, dec(10, 0), PriceKindClose, 1)
+	first.ObservationTime = first.ObservationTime.Add(7 * time.Nanosecond)
+	first.KnowledgeTime = first.KnowledgeTime.Add(11 * time.Nanosecond)
+	mustPut(t, s, first, first)
+	same := first
+	same.KnowledgeTime = same.KnowledgeTime.Add(time.Nanosecond)
+	same.Price = dec(11, 0)
+	if err := s.Put(t.Context(), []Observation{same}); !errors.Is(err, ErrObservationConflict) {
+		t.Fatalf("same persisted identity: %v", err)
+	}
+	next := same
+	next.KnowledgeTime = next.KnowledgeTime.Add(time.Microsecond)
+	mustPut(t, s, next, next)
+	for _, want := range []Observation{first, next} {
+		got, ok, err := s.LatestAsOf(t.Context(), want.InstrumentID, want.Kind, want.KnowledgeTime)
+		if err != nil || !ok || got.Price.Coefficient != want.Price.Coefficient || !got.KnowledgeTime.Equal(want.KnowledgeTime.Truncate(time.Microsecond)) {
+			t.Fatalf("wanted %v, got %v, %v", want, got, err)
+		}
+	}
+}
