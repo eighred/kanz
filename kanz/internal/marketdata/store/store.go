@@ -31,8 +31,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	decimal "github.com/eighred/kanz/internal/dec"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
@@ -93,6 +95,16 @@ func (o Observation) validate() error {
 	return nil
 }
 
+// ErrObservationConflict identifies an attempt to change an immutable revision.
+var ErrObservationConflict = errors.New("store: conflicting price observation")
+
+func (o Observation) compareRevision(stored Observation) error {
+	if o.CurrencyCode != stored.CurrencyCode || decimal.Cmp(o.Price, stored.Price) != 0 {
+		return fmt.Errorf("%w: %s kind %d at %s known %s", ErrObservationConflict, o.InstrumentID, o.Kind, o.ObservationTime.UTC(), o.KnowledgeTime.UTC())
+	}
+	return nil
+}
+
 // MaxHistoryLimit caps bounded analytics reads independently of retained history.
 const MaxHistoryLimit = 10001
 
@@ -126,7 +138,7 @@ type Store interface {
 	// (instrument, observation_time, kind, knowledge_time) tuple is a no-op
 	// (a price at one knowledge_time is immutable — a restatement is a new
 	// knowledge_time, not a mutation). Each observation is validated; an
-	// invalid one fails the whole batch.
+	// invalid or conflicting revision fails the whole batch.
 	Put(ctx context.Context, obs []Observation) error
 
 	// History returns the point-in-time-correct series for q, ordered by

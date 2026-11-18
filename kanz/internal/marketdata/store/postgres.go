@@ -45,7 +45,8 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
 // identity (instrument_id, observation_time, kind, knowledge_time), so an exact
 // re-put is ON CONFLICT DO NOTHING — a price at a given knowledge_time is
 // immutable, and a restatement is a new knowledge_time row, never an update.
-// Written in one transaction so a batch is all-or-nothing.
+// PostgreSQL persists both time axes to microseconds; retries and conflicts
+// use that same identity. A failed batch rolls back every insertion.
 func (p *Postgres) Put(ctx context.Context, obs []Observation) error {
 	if len(obs) == 0 {
 		return nil
@@ -72,18 +73,47 @@ func (p *Postgres) Put(ctx context.Context, obs []Observation) error {
 				(instrument_id, observation_time, kind, price, currency_code, knowledge_time)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (instrument_id, observation_time, kind, knowledge_time) DO NOTHING
-		`, o.InstrumentID, o.ObservationTime.UTC(), int32(o.Kind), price,
-			nullString(o.CurrencyCode), o.KnowledgeTime.UTC())
+		`, o.InstrumentID, o.ObservationTime.UTC().Truncate(time.Microsecond), int32(o.Kind), price,
+			nullString(o.CurrencyCode), o.KnowledgeTime.UTC().Truncate(time.Microsecond))
 	}
 	br := tx.SendBatch(ctx, batch)
-	for range obs {
-		if _, err := br.Exec(); err != nil {
+	var duplicates []Observation
+	for _, o := range obs {
+		tag, err := br.Exec()
+		if err != nil {
 			_ = br.Close()
 			return fmt.Errorf("insert observation: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			duplicates = append(duplicates, o)
 		}
 	}
 	if err := br.Close(); err != nil {
 		return fmt.Errorf("close batch: %w", err)
+	}
+	// A concurrent writer may have committed while the insert waited. Read the
+	// winning immutable revisions in a new READ COMMITTED statement snapshot.
+	if len(duplicates) > 0 {
+		checks := &pgx.Batch{}
+		for _, o := range duplicates {
+			checks.Queue(`SELECT observation_time, kind, price, currency_code, knowledge_time
+    FROM price_observations WHERE instrument_id=$1 AND observation_time=$2 AND kind=$3 AND knowledge_time=$4`,
+				o.InstrumentID, o.ObservationTime.UTC().Truncate(time.Microsecond), int32(o.Kind), o.KnowledgeTime.UTC().Truncate(time.Microsecond))
+		}
+		results := tx.SendBatch(ctx, checks)
+		for _, o := range duplicates {
+			stored, err := scanObservation(results.QueryRow(), o.InstrumentID)
+			if err == nil {
+				err = o.compareRevision(stored)
+			}
+			if err != nil {
+				_ = results.Close()
+				return err
+			}
+		}
+		if err := results.Close(); err != nil {
+			return fmt.Errorf("compare observations: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit put: %w", err)
