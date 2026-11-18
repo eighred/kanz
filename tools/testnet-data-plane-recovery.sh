@@ -131,6 +131,19 @@ nats_restore_evidence() {
     nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}}'
 }
 
+# This isolated drill has no timestamp for an incident, the last recoverable
+# write at that incident, or restoration of the operational service.
+emit_restore_receipt() {
+  local key=$1 sha=$2 release=$3 elapsed=$4 databases=$5 nats=$6 details=$7
+  [[ "$elapsed" =~ ^[0-9]+$ ]] || die 'invalid restore drill duration'
+  jq -n --arg key "$key" --arg sha "$sha" --arg release "$release" --argjson elapsed "$elapsed" \
+    --argjson databases "$databases" --argjson nats "$nats" --argjson details "$details" '
+    $nats + $details + {format:"kanz-testnet-restore-drill-v1",status:"RESTORE_VERIFIED",
+      key:$key,sha256:$sha,source_release_commit:$release,databases:$databases,drill_elapsed_seconds:$elapsed,
+      operational_recovery:{state:"UNKNOWN",rpo_seconds:null,rto_seconds:null,
+        reason:"incident and operational recovery timestamps unavailable"}}'
+}
+
 backup() {
   require_boundary
   refuse_active_writers
@@ -239,7 +252,7 @@ backup() {
 restore() {
   require_boundary
   local started work key archive archive_sha head retention
-  started=$(date -u +%s)
+  started=$SECONDS
   work=$(mktemp -d /var/tmp/kanz-restore.XXXXXX)
   archive="$work/bundle.tar.gz"
   RECOVERY_WORK=$work
@@ -455,18 +468,17 @@ EOF
   [[ "$restored_state" == "$expected_state" ]] || die 'NATS named streams or consumer positions differ from source'
   nats_evidence=$(nats_restore_evidence <<<"$expected_state")
 
-  local elapsed metadata_release
-  elapsed=$(( $(date -u +%s) - started ))
+  local metadata_release details
   metadata_release=$(jq -r .release_commit "$work/extracted/metadata.json")
   if [[ "$TV_MODE" == qualify ]]; then
     local tv_proof
     tv_proof=$(qualify_tv_restored_snapshot "$archive_sha")
     cleanup_tv_restore_namespace || die 'TV drill cleanup did not complete'
-    elapsed=$(( $(date -u +%s) - started ))
-    jq -n --arg key "$key" --arg sha256 "$archive_sha" --arg source_release_commit "$metadata_release" --argjson rto_seconds "$elapsed" --argjson replay "$tv_proof" --argjson nats "$nats_evidence" '{status:"RESTORE_VERIFIED",key:$key,sha256:$sha256,source_release_commit:$source_release_commit,databases:9,rto_seconds:$rto_seconds,tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"} + $nats'
-    return
+    details=$(jq -n --argjson replay "$tv_proof" '{tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"}')
+  else
+    details=$(jq -n --argjson keys "$restored_redis" '{redis_keys:$keys,isolation:"temporary replacement namespace on source-region node"}')
   fi
-  jq -n --arg key "$key" --arg sha256 "$archive_sha" --arg source_release_commit "$metadata_release" --argjson databases "${#DATABASES[@]}" --argjson redis_keys "$restored_redis" --argjson nats "$nats_evidence" --argjson rpo_seconds 0 --argjson rto_seconds "$elapsed" '{status:"RESTORE_VERIFIED",key:$key,sha256:$sha256,source_release_commit:$source_release_commit,databases:$databases,redis_keys:$redis_keys,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,isolation:"temporary replacement namespace on source-region node"} + $nats'
+  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$details"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

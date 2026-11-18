@@ -71,3 +71,14 @@ swapped=$(jq '(.account_details[].stream_detail[].state.messages) |= (if .==2 th
 [[ "$(nats_account_state '$G' <<<"$swapped")" != "$expected" ]]
 missing=$(jq 'del(.account_details[].stream_detail[].consumer_detail[]?.ack_floor)' <<<"$after")
 if nats_account_state '$G' <<<"$missing" >/dev/null 2>&1; then exit 1; fi
+
+for elapsed in 0 23; do
+  receipt=$(emit_restore_receipt fixture-key fixture-sha fixture-release "$elapsed" 8 \
+    "$(nats_restore_evidence <<<"$actual")" '{"redis_keys":0}')
+  jq -e --argjson elapsed "$elapsed" '.format=="kanz-testnet-restore-drill-v1" and
+    .status=="RESTORE_VERIFIED" and .drill_elapsed_seconds==$elapsed and
+    (.operational_recovery | .state=="UNKNOWN" and has("rpo_seconds") and has("rto_seconds") and
+       .rpo_seconds==null and .rto_seconds==null) and
+    (has("rpo_seconds") or has("rto_seconds") or has("verified_at") | not) and
+    .nats_streams==2 and .redis_keys==0' <<<"$receipt" >/dev/null
+done
