@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from inference.v1.feature_vector_pb2 import FeatureVector
-from inference.v1.prediction_pb2 import PredictionEnvelope
+from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.registry import ModelMetadata, Registry
 
@@ -100,8 +100,19 @@ class ShadowComparisonStore:
         shadow_prediction: PredictionEnvelope,
     ) -> None:
         key = (primary.model_id, shadow.model_id)
-        acc = self._acc.setdefault(key, _Acc())
         pv, sv = primary_prediction.value, shadow_prediction.value
+        if (primary_prediction.mode != PredictionMode.PREDICTION_MODE_NORMAL
+                or shadow_prediction.mode != PredictionMode.PREDICTION_MODE_NORMAL
+                or not math.isfinite(pv) or not math.isfinite(sv)):
+            # An outcome belongs to the latest observation. A degraded response
+            # supersedes an older forecast even though its fallback cannot score.
+            pending = self._pending.get(feature_vector.subject_id)
+            if pending is not None:
+                pending.pop(key, None)
+                if not pending:
+                    del self._pending[feature_vector.subject_id]
+            return
+        acc = self._acc.setdefault(key, _Acc())
         acc.observations += 1
         acc.abs_divergence_sum += abs(sv - pv)
         if pv * sv < 0:  # opposite directional sign
@@ -113,14 +124,20 @@ class ShadowComparisonStore:
         both models of every pair that has a pending prediction for it. A
         no-op for an unknown subject (the outcome arrived for something never
         shadow-compared)."""
+        if not math.isfinite(actual):
+            return
         pending = self._pending.pop(subject_id, None)
         if not pending:
             return
         for key, (pv, sv) in pending.items():
             acc = self._acc.setdefault(key, _Acc())
             acc.scored += 1
-            acc.primary_sq_err += (pv - actual) ** 2
-            acc.challenger_sq_err += (sv - actual) ** 2
+            # Multiplication yields infinity on overflow. That pair then has
+            # unavailable RMSE, and the remaining challengers can still score.
+            primary_error = pv - actual
+            challenger_error = sv - actual
+            acc.primary_sq_err += primary_error * primary_error
+            acc.challenger_sq_err += challenger_error * challenger_error
 
     def stats(self, primary_id: str, challenger_id: str) -> ComparisonStats:
         """The accumulated comparison for one pair (zero-valued when the pair
@@ -212,7 +229,8 @@ class Promoter:
             if stats.challenger_rmse is None or stats.primary_rmse is None:
                 reasons.append(f"{cid}: rmse unavailable")
                 continue
-            if stats.challenger_rmse > stats.primary_rmse * (1.0 - self._margin):
+            if (stats.challenger_rmse >= stats.primary_rmse
+                    or stats.challenger_rmse > stats.primary_rmse * (1.0 - self._margin)):
                 reasons.append(
                     f"{cid}: rmse {stats.challenger_rmse:.4g} does not beat "
                     f"champion {stats.primary_rmse:.4g} by {self._margin:.0%}"
@@ -243,4 +261,4 @@ class Promoter:
 
 
 def _rmse(sq_err_sum: float, n: int) -> float | None:
-    return math.sqrt(sq_err_sum / n) if n else None
+    return math.sqrt(sq_err_sum / n) if n and math.isfinite(sq_err_sum) else None

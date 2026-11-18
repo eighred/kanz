@@ -55,12 +55,14 @@ def _registry_with(champion: str, *challengers: str, validate=()) -> Registry:
     return r
 
 
-async def _feed(store, subject, primary_id, pv, challenger_id, sv, actual=None):
+async def _feed(store, subject, primary_id, pv, challenger_id, sv, actual=None, *,
+                primary_mode=PredictionMode.PREDICTION_MODE_NORMAL,
+                challenger_mode=PredictionMode.PREDICTION_MODE_NORMAL):
     fv = FeatureVector(subject_id=subject, feature_set_ref=FS)
     await store.observe(
         fv,
-        _meta(primary_id), PredictionEnvelope(value=pv),
-        _meta(challenger_id), PredictionEnvelope(value=sv),
+        _meta(primary_id), PredictionEnvelope(value=pv, mode=primary_mode),
+        _meta(challenger_id), PredictionEnvelope(value=sv, mode=challenger_mode),
     )
     if actual is not None:
         store.record_outcome(subject, actual)
@@ -187,6 +189,61 @@ async def test_marginal_win_below_margin_is_blocked():
         r, store, min_observations=3, min_scored=3, improvement_margin=0.10
     ).evaluate(FS)
     assert decision.promoted is None
+
+
+@pytest.mark.parametrize(("pv", "sv", "margin", "winner"), [
+    (0, 0, 0.05, None),          # two perfect forecasts tie
+    (2, 2, 0, None),             # even a zero margin requires a win
+    (4, 3, 0.25, "chal@1"),      # exactly 25% improvement
+    (4, 3.25, 0.25, None),       # less than 25% improvement
+    (1e200, 1, 0.05, None),      # champion squared error exceeds float range
+    (1, 1e200, 0.05, None),      # challenger squared error exceeds float range
+])
+async def test_rmse_promotion_boundary(pv, sv, margin, winner):
+    registry = _registry_with("champ@1", "chal@1", validate=("chal@1",))
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", pv, "chal@1", sv, actual=0)
+    decision = Promoter(registry, store, min_observations=1, min_scored=1,
+                        improvement_margin=margin).evaluate(FS)
+    assert decision.promoted == winner
+    assert registry.primary_for_feature_set(FS)[0].model_id == (winner or "champ@1")
+
+
+@pytest.mark.parametrize(("pv", "sv", "modes"), [
+    (float("nan"), 0, {}),
+    (1, float("inf"), {}),
+    (1, 0, {"primary_mode": PredictionMode.PREDICTION_MODE_UNSPECIFIED}),
+    (1, 0, {"challenger_mode": PredictionMode.PREDICTION_MODE_DEGRADED}),
+])
+async def test_unusable_latest_pair_does_not_score_an_older_prediction(pv, sv, modes):
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "chal@1", 1)
+    await _feed(store, "S", "champ@1", pv, "chal@1", sv, **modes)
+    store.record_outcome("S", 0)
+    stats = store.stats("champ@1", "chal@1")
+    assert (stats.observations, stats.scored) == (1, 0)
+
+
+@pytest.mark.parametrize("actual", [float("nan"), float("inf"), float("-inf")])
+async def test_invalid_outcome_leaves_pair_available_for_corrected_value(actual):
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "chal@1", 1)
+    store.record_outcome("S", actual)
+    assert store.stats("champ@1", "chal@1").scored == 0
+    store.record_outcome("S", 1)
+    stats = store.stats("champ@1", "chal@1")
+    assert (stats.scored, stats.primary_rmse, stats.challenger_rmse) == (1, 1.0, 0.0)
+
+
+async def test_overflowing_challenger_preserves_other_pairs_on_the_same_outcome():
+    registry = _registry_with("champ@1", "huge@1", "valid@1", validate=("huge@1", "valid@1"))
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "huge@1", 1e200)
+    await _feed(store, "S", "champ@1", 2, "valid@1", 1)
+    store.record_outcome("S", 1)
+    assert store.stats("champ@1", "huge@1").challenger_rmse is None
+    decision = Promoter(registry, store, min_observations=1, min_scored=1).evaluate(FS)
+    assert decision.promoted == "valid@1"
 
 
 async def test_no_primary_registered():
