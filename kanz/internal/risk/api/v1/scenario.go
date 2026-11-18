@@ -35,11 +35,9 @@ import (
 // "drop the price by 10%"); use a Decimal with coefficient -10 and
 // exponent -2 for that example.
 //
-// A shock against an instrument the portfolio does not hold is a
-// silent no-op — the scenario engine processes it without error so
-// large scenario batches (1000 shocks across a watchlist) succeed
-// regardless of which instruments any given portfolio actually
-// holds.
+// InstrumentID must identify an instrument. A valid ID outside the
+// portfolio is a no-op, allowing one watchlist batch to be evaluated
+// against portfolios with different holdings.
 type PriceShock struct {
 	InstrumentID InstrumentID
 	Pct          *commonpb.Decimal
