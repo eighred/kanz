@@ -151,6 +151,7 @@ def main():
                 raise ValueError("unverified running cache image")
             report["runtimeImageID"] = runtime["imageID"]
             original_uid = server["metadata"]["uid"]
+            report["stage"] = "reapply original cache claim"
             rig_install.install(cache_api, rendered("kanz/infra/messaging/redis.yaml"))
             cache_api("rollout", "status", "statefulset/redis", "--timeout=120s")
             current_uid = cache_api("get", "pod/redis-0", "-o", "jsonpath={.metadata.uid}")

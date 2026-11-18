@@ -39,8 +39,10 @@ class RigCacheSelectionTests(TestCase):
         k = Mock(side_effect=[*reads, "", "", ""])
         rig_install.install(k, self.resources)
         write = k.call_args_list[2]
-        self.assertEqual(write.args[:2], ("apply", "--server-side"))
-        self.assertEqual(json.loads(write.kwargs["data"])["metadata"], self.existing["metadata"])
+        self.assertEqual(write.args[:3], ("patch", "statefulset/redis", "--type=strategic"))
+        patch = json.loads(write.args[-1])
+        self.assertEqual(patch["metadata"], {"uid": "set-uid", "resourceVersion": "17"})
+        self.assertEqual(patch["spec"], {"template": self.original["spec"]["template"]})
 
     def test_incomplete_unknown_or_changed_state_never_writes(self):
         for case in ("orphan", "missing", "legacy", "unknown", "untagged", "replaced", "terminating", "different-ordinal"):
