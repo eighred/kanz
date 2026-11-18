@@ -5,7 +5,7 @@ import ApprovalsView from './ApprovalsView.vue'
 import * as approvalsApi from '../api/approvals'
 import type { PendingApproval, PendingApprovalsResponse } from '../api/approvals'
 import { api, ApiError } from '../api/client'
-import stopLimit from './__fixtures__/pending-stop-limit.json'
+import stopLimit from './test_fixtures/pending-stop-limit.json'
 import { useSession } from '../stores/session'
 
 // WHAT THIS SCREEN IS FOR, AND THEREFORE WHAT IS WORTH TESTING (#371 slice).
