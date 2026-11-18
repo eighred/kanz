@@ -225,3 +225,27 @@ func TestVWAPOverAPinnedCurve(t *testing.T) {
 			"an order on another", err)
 	}
 }
+
+func TestPinnedScheduleSurvivesChangesToSourceCurve(t *testing.T) {
+	sh := pinnedShape(t)
+	v := mustPinned(t, sh)
+	check := func() {
+		t.Helper()
+		if v.Version() != "v-under-test" {
+			t.Fatalf("version changed to %q", v.Version())
+		}
+		for _, name := range []algo.Name{algo.NameVWAP, algo.NamePOV} {
+			p := algo.Plan{Algo: name, InstrumentID: inst, Start: day2, End: day2.Add(24 * time.Hour), Slices: 2, Total: rat(40), MaxParticipation: big.NewRat(1, 10)}
+			got, err := algo.Run(p, algo.ParentState{}, v)
+			if err != nil || len(got) != 2 || got[0].Quantity.Cmp(rat(10)) != 0 || got[1].Quantity.Cmp(rat(30)) != 0 {
+				t.Fatalf("%s: got %v, %v; want 10 and 30", name, got, err)
+			}
+			// A consumer owns the quantities it received, too.
+			got[0].Quantity.SetInt64(0)
+		}
+	}
+	check()
+	sh.Expected[0].SetInt64(1)
+	sh.Expected[24] = rat(9999)
+	check()
+}

@@ -71,11 +71,40 @@ func FromSnapshot(s *factorpb.FactorModelSnapshot) (*Model, error) {
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func retainedCovarianceValid(cov [][]float64) bool {
-	values, _, _ := normalizedEigenSym(cov)
+	// A large variance in an unrelated factor cannot hide a negative-risk
+	// direction. Rescale each positive variance to one by congruence.
+	const tolerance = 1e-12
+	n := len(cov)
+	corr := make([][]float64, n)
+	deviation := make([]float64, n)
+	for i, row := range cov {
+		corr[i] = make([]float64, n)
+		deviation[i] = math.Sqrt(row[i])
+		if deviation[i] > 0 {
+			corr[i][i] = 1
+		}
+	}
+	for i, row := range cov {
+		for j := 0; j < i; j++ {
+			if deviation[i] == 0 || deviation[j] == 0 {
+				if row[j] != 0 {
+					return false
+				}
+				continue
+			}
+			// Divide by the smaller deviation first. Any valid covariance
+			// divided by it is bounded by the larger finite deviation.
+			r := row[j] / math.Min(deviation[i], deviation[j]) / math.Max(deviation[i], deviation[j])
+			if !finite(r) || math.Abs(r) > 1+tolerance {
+				return false
+			}
+			corr[i][j], corr[j][i] = r, r
+		}
+	}
+	values, _ := eigenSym(corr)
 	for _, v := range values {
-		// Permit only rounding noise relative to the matrix scale. A genuinely
-		// indefinite covariance would be clamped to zero risk by Risk().
-		if !finite(v) || v < -1e-12 {
+		// Permit only rounding noise in dimensionless correlation units.
+		if !finite(v) || v < -tolerance {
 			return false
 		}
 	}

@@ -70,6 +70,13 @@ func NewPinned(sh Shape, version string) (*Pinned, error) {
 		return nil, fmt.Errorf("%w: a pinned view names no version, so nothing could say WHICH "+
 			"curve a schedule was derived against and the pin would be unauditable", ErrShape)
 	}
+	// The version names the quantities as they stood at construction. The
+	// caller owns both the original slice and its mutable rationals.
+	expected := make([]*big.Rat, len(sh.Expected))
+	for i, quantity := range sh.Expected {
+		expected[i] = new(big.Rat).Set(quantity)
+	}
+	sh.Expected = expected
 	return &Pinned{shape: sh, version: version}, nil
 }
 

@@ -2,9 +2,11 @@ package termsload
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,5 +72,29 @@ func TestOKXExactOptionDecimalsPersistInPostgres(t *testing.T) {
 	if option.GetStrike().GetCoefficient() != 60000000000001 || option.GetStrike().GetExponent() != -9 ||
 		option.GetContractMultiplier().GetCoefficient() != 6 || option.GetContractMultiplier().GetExponent() != -10 {
 		t.Fatalf("stored option lost precision: %v", option)
+	}
+	if _, err := store.LatestAsOf(t.Context(), rec.InstrumentID, listed.Add(-time.Microsecond)); !errors.Is(err, terms.ErrNoTerms) {
+		t.Fatalf("prelisting read: %v", err)
+	}
+	correction := expiry.Add(time.Hour)
+	corrected, err := ParseOKXInstruments(okxCatalogue(strings.Replace(preciseOptionRow(), "60000.000000001", "60001", 1)), mapping(), Options{AsOfOverride: correction})
+	if err != nil {
+		t.Fatal(err)
+	}
+	amended, err := corrected.Loadable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Put(t.Context(), amended); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		at   time.Time
+		want terms.Record
+	}{{listed, rec}, {correction.Add(-time.Microsecond), rec}, {correction, amended[0]}} {
+		chain, err := store.ChainAsOf(t.Context(), rec.UnderlyingID, tc.at, terms.KindOption)
+		if err != nil || len(chain) != 1 || !proto.Equal(chain[0].Terms, tc.want.Terms) {
+			t.Fatalf("chain at %s: %v, %v", tc.at, chain, err)
+		}
 	}
 }
