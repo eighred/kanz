@@ -113,8 +113,8 @@ export const control = {
       return { venue: row.venue, configured: row.configured === true }
     })
   },
-  provisions: () =>
-    api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions').then((r) => r.provisions ?? []),
+  provisions: (signal?: AbortSignal) =>
+    api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions', { signal }).then((r) => r.provisions ?? []),
 
   /**
    * setVenueKeys writes trading credentials for one venue.
