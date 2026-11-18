@@ -10,9 +10,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/protocol"
 	produceAPI "github.com/segmentio/kafka-go/protocol/produce"
+	"google.golang.org/protobuf/proto"
 	"io"
 	"net/url"
 	"testing"
@@ -113,5 +115,38 @@ func TestPooledUnknownTopicIsNotBrokerAuthorizationEvidence(t *testing.T) {
 	}
 	if requireTopicDenial(err) == nil {
 		t.Fatal("local metadata error accepted as broker denial")
+	}
+}
+
+func TestConsumerCheckpointAndResumeRequireExactFrames(t *testing.T) {
+	for _, phase := range []struct {
+		mode   string
+		offset int64
+		value  string
+	}{{"checkpoint", 0, "before-renewal"}, {"resume", 1, "after-renewal"}} {
+		t.Run(phase.mode, func(t *testing.T) {
+			wire, err := proto.Marshal(&envelopepb.EventFrame{
+				Envelope: &envelopepb.Envelope{EventId: phase.value}, Payload: []byte(phase.value),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := kafka.Message{Topic: "proof-a", Partition: 0, Offset: phase.offset,
+				Key: []byte("proof-a"), Value: wire}
+			if err := checkGroupMessage(phase.mode, message); err != nil {
+				t.Fatal(err)
+			}
+			for _, change := range []func(*kafka.Message){
+				func(m *kafka.Message) { m.Offset++ }, func(m *kafka.Message) { m.Partition++ },
+				func(m *kafka.Message) { m.Topic = "other" }, func(m *kafka.Message) { m.Key = nil },
+				func(m *kafka.Message) { m.Value = nil },
+			} {
+				different := message
+				change(&different)
+				if checkGroupMessage(phase.mode, different) == nil {
+					t.Fatal("accepted a different frame")
+				}
+			}
+		})
 	}
 }
