@@ -62,7 +62,7 @@ describe('every action is confirmed before it reaches the gateway', () => {
     await flushPromises()
 
     expect(cordon).not.toHaveBeenCalled()
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    expect(wrapper.find('dialog[open]').exists()).toBe(true)
   })
 
   it('calls it once the confirmation is accepted', async () => {
@@ -85,7 +85,7 @@ describe('every action is confirmed before it reaches the gateway', () => {
     await flushPromises()
 
     expect(cordon).not.toHaveBeenCalled()
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.find('dialog[open]').exists()).toBe(false)
   })
 })
 
@@ -204,7 +204,7 @@ describe('a refused action is reported rather than assumed', () => {
     await flushPromises()
 
     expect(wrapper.find('[role="alert"]').text()).toMatch(/operator authority/i)
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    expect(wrapper.find('dialog[open]').exists()).toBe(true)
     expect(wrapper.find('[role="status"]').exists()).toBe(false)
   })
 

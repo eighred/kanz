@@ -16,7 +16,7 @@ const passphrase = ref('')
 const typed = ref('')
 const busy = ref(false)
 const formError = ref('')
-const account = ref('')
+const receipt = ref<{ venue: string; account: string } | null>(null)
 
 async function load() {
   try {
@@ -39,7 +39,7 @@ function edit(v: VenueKeyStatus) {
   editing.value = v
   clearSecrets()
   formError.value = ''
-  account.value = ''
+  receipt.value = null
 }
 
 /** clearSecrets is called on every exit from the form, success or not. */
@@ -91,7 +91,7 @@ async function submit() {
     // than key material. Empty means the deployment has no pre-write proof
     // configured — the keys were written UNPROVEN, and saying so is the whole
     // difference between "accepted" and "works".
-    account.value = res.exchange_account_id ?? ''
+    receipt.value = { venue: v.venue, account: typeof res?.exchangeAccountId === 'string' ? res.exchangeAccountId.trim() : '' }
     editing.value = null
     clearSecrets()
     await load()
@@ -115,10 +115,13 @@ async function submit() {
   <p v-if="loading">Loading…</p>
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
 
-  <template v-else>
-    <p v-if="account" class="notice" role="status">
-      Credentials accepted. The exchange reports account <code>{{ account }}</code> for them.
-    </p>
+  <p v-if="receipt" class="notice" role="status">
+    Credentials accepted for {{ receipt.venue }}.
+    <template v-if="receipt.account">The exchange reports account <code>{{ receipt.account }}</code>.</template>
+    <template v-else>The gateway returned no verified exchange account ID.</template>
+  </p>
+
+  <template v-if="!loading && !error">
 
     <table>
       <thead><tr><th>Venue</th><th>Keys</th><th>Actions</th></tr></thead>
