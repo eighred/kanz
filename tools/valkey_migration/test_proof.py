@@ -1,7 +1,7 @@
 import copy
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import proof
 
@@ -81,15 +81,66 @@ class MigrationBoundaryTests(unittest.TestCase):
                 fixture.cleanup()
             self.assertFalse(any("rm" in entry.args[0] for entry in call.call_args_list))
 
+    def test_first_install_refuses_existing_volume_before_start_and_cleanup(self):
+        fixture = proof.Fixture(NAME)
+        with patch.object(proof, "command", return_value=fixture.volume) as command:
+            with self.assertRaisesRegex(proof.Refused, "fixture_volume_already_exists"):
+                fixture.create_volume()
+            with self.assertRaisesRegex(proof.Refused, "fixture_volume_already_exists"):
+                fixture.cleanup()
+            command.assert_called_once_with(["docker", "volume", "ls", "--format", "{{.Name}}"])
+
+    def test_first_install_requires_an_empty_keyspace_across_databases(self):
+        for count, keyspace in ((1, "# Keyspace"), (0, "# Keyspace\ndb7:keys=1,expires=1"), (0, "")):
+            with self.subTest(count=count, keyspace=keyspace):
+                fixture = Mock(spec=proof.Fixture)
+                fixture.call.return_value = count
+                fixture.raw.return_value = keyspace
+                with self.assertRaisesRegex(proof.Refused, "first_install_keyspace_not_empty"):
+                    proof.first_install(fixture, {})
+                fixture.call.assert_called_once_with("DBSIZE")
+
+    def test_first_install_restarts_valkey_and_rechecks_both_claims(self):
+        fixture = Mock(spec=proof.Fixture)
+        fixture.start.side_effect = ["fresh", "restarted"]
+        fixture.now.side_effect = [1000, 1000, 9000]
+        fixture.raw.return_value = "# Keyspace"
+        fixture.call.side_effect = [0, "OK", "OK", -2, "OK"]
+        a, b = "tenant-a:nonce:first-install", "tenant-b:nonce:first-install"
+        retained = {a: {"value": "first-claim", "expires": 901000}}
+        fixture.snapshot.side_effect = [
+            {**retained, b: {"value": "temporary-claim", "expires": 9000}}, retained,
+            {**retained, b: {"value": "new-claim", "expires": 901000}},
+        ]
+        phases = {}
+        proof.first_install(fixture, phases)
+        self.assertEqual(phases, {"valkey_first_install": "fresh", "first_install_restart": "restarted"})
+        self.assertEqual(fixture.start.call_args_list, [call(proof.VALKEY, True)] * 2)
+        self.assertEqual(fixture.claim_refused.call_args_list, [call(a, 961000)] * 2)
+        self.assertEqual(fixture.stop.call_count, 2)
+        fixture.cleanup.assert_called_once_with()
+
+    def test_expiry_refuses_lost_or_renewed_claim(self):
+        for observed, expected in ((-2, "lost_before_expiry"), (2001, "expiry_changed"), (-1, "expiry_changed")):
+            with self.subTest(observed=observed):
+                fixture = Mock(spec=proof.Fixture)
+                fixture.call.return_value = observed
+                fixture.now.return_value = 1999
+                with self.assertRaisesRegex(proof.Refused, expected):
+                    proof.wait_for_claim_expiry(fixture, "key", 2000)
+
     def test_evidence_requires_exact_complete_runtime_and_cleanup(self):
         identity = lambda image, version: {"image": image, "version": version, "imageID": "sha256:" + "b" * 64}
         report = {"source": "a" * 40, "verdict": "PASS", "cleanup": "verified_absent", "cases": proof.CASES,
                   "phases": {"redis": identity(proof.REDIS, "7.4.5"), "redis_rollback": identity(proof.REDIS, "7.4.5"),
-                             "valkey": identity(proof.VALKEY, "9.1.3"), "valkey_restart": identity(proof.VALKEY, "9.1.3")}}
+                             **{phase: identity(proof.VALKEY, "9.1.3") for phase in
+                                ("valkey", "valkey_restart", "valkey_first_install", "first_install_restart")}}}
         proof.validate_report(report, "a" * 40)
         for mutate in (lambda x: x.update(source="c" * 40), lambda x: x.update(cleanup="unknown"),
                        lambda x: x.update(cases=proof.CASES[:-1]), lambda x: x["phases"].pop("redis_rollback"),
                        lambda x: x["phases"]["valkey"].update(image="valkey:latest"),
+                       lambda x: x["phases"].pop("valkey_first_install"),
+                       lambda x: x["phases"]["first_install_restart"].update(imageID="sha256:" + "c" * 64),
                        lambda x: x["phases"]["redis_rollback"].update(version="7.9.0")):
             changed = copy.deepcopy(report)
             mutate(changed)
