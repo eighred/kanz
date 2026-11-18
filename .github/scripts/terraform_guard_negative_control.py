@@ -239,6 +239,52 @@ def parse_phase(output, exit_code, assertion_line, negative=False):
             "output_sha256": digest(output.encode("utf-8")), "exit_code": exit_code}
 
 
+def user_data_control(work, original, command):
+    template = "user_data.sh.tftpl"
+    golden = work / "baseline.tftpl"
+    canonical = original[template].replace(b"\r\n", b"\n")
+    lines = canonical.splitlines(keepends=True)
+    require(len(lines) > 2 and lines[0] == b"#!/usr/bin/env bash\n" and b"\r" not in canonical,
+            "unexpected bootstrap template format")
+    changed = lines[0] + b"umask 077\n" + b"".join(lines[1:])
+    mixed = b"".join(line.replace(b"\n", b"\r\n") if i % 2 else line
+                     for i, line in enumerate(lines))
+    original_fixture = original[FIXTURE].decode("utf-8")
+    # Every variant uses the actual mocked EC2 resource and its own mocked EBS
+    # ID. The independent LF template supplies the reference bytes in that run.
+    marker = '  assert {'
+    require(marker in original_fixture, "missing mock resource assertions")
+    oracle = 'templatefile("${path.module}/baseline.tftpl", local.node_bootstrap_inputs)'
+    receipts = {}
+    try:
+        with golden.open("xb") as target:
+            target.write(canonical)
+        for name, data in (("lf", canonical), ("crlf", canonical.replace(b"\n", b"\r\n")),
+                           ("mixed", mixed), ("semantic", changed)):
+            expected = oracle
+            if name == "semantic":
+                expected = f'replace({oracle}, "#!/usr/bin/env bash\\n", "#!/usr/bin/env bash\\numask 077\\n")'
+            assertion = (
+                '  assert {\n'
+                f'    condition     = aws_instance.node.user_data == {expected}\n'
+                '    error_message = "Rendered EC2 user data differs from the expected bootstrap bytes."\n'
+                '  }\n\n'
+            )
+            fixture = original_fixture.replace(marker, assertion + marker, 1).encode("utf-8")
+            (work / FIXTURE).write_bytes(fixture)
+            (work / template).write_bytes(data)
+            code, output = command("test", "-json", "-no-color", "-filter=" + FIXTURE)
+            receipts[name] = parse_phase(output, code, 0)
+            receipts[name]["template_sha256"] = digest(data)
+            require(golden.read_bytes() == canonical and (work / FIXTURE).read_bytes() == fixture
+                    and (work / template).read_bytes() == data, "render control inputs changed")
+    finally:
+        (work / FIXTURE).write_bytes(original[FIXTURE])
+        (work / template).write_bytes(original[template])
+        golden.unlink(missing_ok=True)
+    return receipts
+
+
 def qualify(module, scratch_parent, terraform, runner=run_cli, emit=print):
     original, assertion_line = read_inputs(module)
     hashes = {name: digest(data) for name, data in original.items()}
@@ -296,6 +342,9 @@ def qualify(module, scratch_parent, terraform, runner=run_cli, emit=print):
             phase("restored")
             require({name: digest((work / name).read_bytes()) for name in INPUTS} == hashes,
                     "restored test modified an input")
+        receipt["user_data"] = user_data_control(work, original, command)
+        require({name: digest((work / name).read_bytes()) for name in INPUTS} == hashes,
+                "render control did not restore its inputs")
     require({name: digest((module / name).read_bytes()) for name in INPUTS} == hashes,
             "source checkout changed during qualification")
     return receipt

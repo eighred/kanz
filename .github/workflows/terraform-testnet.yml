@@ -86,7 +86,7 @@ jobs:
       # and credential-free environment, and initializes without a backend. The
       # original four mock runs must pass before and after the AMI-only mutation;
       # a generic CLI failure cannot satisfy the named assertion control.
-      - name: Qualify positive, named AMI refusal, and restored mock tests
+      - name: Qualify mock resource guards and bootstrap rendering across checkout formats
         if: steps.scope.outputs.run == 'true'
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
