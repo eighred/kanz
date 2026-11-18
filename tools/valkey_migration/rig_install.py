@@ -53,12 +53,16 @@ def selection(k, desired):
     metadata = current["metadata"]
     uid = claim["metadata"].get("uid")
     containers = current["spec"]["template"]["spec"]["containers"]
+    claims = current["spec"]["volumeClaimTemplates"]
     if (not uid or metadata.get("annotations", {}).get(ORIGINAL_CLAIM) != uid
             or metadata.get("deletionTimestamp") or claim["metadata"].get("deletionTimestamp")
             or not metadata.get("uid") or not metadata.get("resourceVersion")
             or [(c["name"], c["image"]) for c in containers] != [("redis", container["image"])]
             or current["spec"].get("replicas") != 1 or current["spec"].get("ordinals", {}).get("start", 0) != 0
-            or [t["metadata"]["name"] for t in current["spec"]["volumeClaimTemplates"]] != ["data"]):
+            or current["spec"]["serviceName"] != desired["spec"]["serviceName"]
+            or current["spec"]["selector"] != desired["spec"]["selector"]
+            or [t["metadata"]["name"] for t in claims] != ["data"]
+            or any(claims[0]["spec"].get(key) != value for key, value in template["spec"].items())):
         raise Refused("cache image or original PVC identity differs; retained-state migration review required")
     return metadata
 
@@ -82,10 +86,12 @@ def install(k, resources, preflight=False):
         # another engine. A partial installation requires explicit inspection.
         k("create", MANAGER, "-f", "-", data=json.dumps(desired))
     else:
-        desired["metadata"].setdefault("annotations", {})[ORIGINAL_CLAIM] = owner["annotations"][ORIGINAL_CLAIM]
-        # The UID and resourceVersion make replacement or concurrent edits fail.
-        desired["metadata"].update(uid=owner["uid"], resourceVersion=owner["resourceVersion"])
-        k("apply", "--server-side", MANAGER, "-f", "-", data=json.dumps(desired))
+        # A strategic patch reconciles only declared pod-template fields; the
+        # API keeps defaulted immutable claim templates and unrelated fields.
+        # UID and resourceVersion make replacement or concurrent edits fail.
+        patch = {"metadata": {"uid": owner["uid"], "resourceVersion": owner["resourceVersion"]},
+                 "spec": {"template": desired["spec"]["template"]}}
+        k("patch", "statefulset/redis", "--type=strategic", MANAGER, "--patch", json.dumps(patch))
     for doc in resources:
         if doc["kind"] != "StatefulSet":
             k("apply", "-f", "-", data=json.dumps(doc))
