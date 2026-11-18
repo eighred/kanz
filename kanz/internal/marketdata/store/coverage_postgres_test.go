@@ -194,3 +194,25 @@ func TestPostgresCoverageRefusesANegativeObservation(t *testing.T) {
 			"every writer that does not go through PutCoverage")
 	}
 }
+
+func TestPostgresCoverageRestrictsRetainedProofByKnowledgeTime(t *testing.T) {
+	p := NewPostgres(newCoveragePool(t))
+	early := cov(0, time.Second, "feed")
+	late := cov(0, time.Minute, "feed")
+	late.RecordedAt = early.RecordedAt.Add(time.Hour + time.Nanosecond)
+	other := cov(0, time.Minute, "independent")
+	if err := p.PutCoverage(t.Context(), []Coverage{early, late, other, late}); err != nil {
+		t.Fatal(err)
+	}
+	q := CoverageQuery{InstrumentID: early.InstrumentID, Venue: early.Venue, Resolution: early.Resolution}
+	for _, tc := range []struct {
+		at    time.Time
+		count int
+	}{{early.RecordedAt.Add(-time.Microsecond), 0}, {early.RecordedAt, 1}, {late.RecordedAt.Truncate(time.Microsecond), 1}, {late.RecordedAt, 1}, {late.RecordedAt.Truncate(time.Microsecond).Add(time.Microsecond), 2}, {time.Time{}, 2}} {
+		q.AsOf = tc.at
+		rows, err := p.Coverage(t.Context(), q)
+		if err != nil || len(rows) != tc.count || (tc.count == 1 && rows[0].Attestor != other.Attestor) {
+			t.Errorf("at %v: %v, %v", tc.at, rows, err)
+		}
+	}
+}

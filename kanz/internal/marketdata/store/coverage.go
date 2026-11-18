@@ -139,6 +139,8 @@ type CoverageQuery struct {
 	// uses, so a window queried from both stores means one thing.
 	From time.Time
 	To   time.Time
+	// AsOf is inclusive on RecordedAt. A zero cutoff includes every retained proof.
+	AsOf time.Time
 }
 
 // CoverageStore is the ingestion-coverage record's durable surface.

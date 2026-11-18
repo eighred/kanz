@@ -191,6 +191,7 @@ func (v *View) At(ctx context.Context, at time.Time) (alpha.Reading, error) {
 		Resolution:   v.cfg.Resolution,
 		From:         from,
 		To:           to,
+		AsOf:         at,
 	})
 	if err != nil {
 		return alpha.Reading{}, fmt.Errorf("barview: coverage: %w", err)
