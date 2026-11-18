@@ -37,9 +37,29 @@ function access(value: unknown): UserAccess {
   return row as unknown as UserAccess
 }
 
+const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
+const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(nonempty)
+
+function hasPrincipal(value: unknown): value is Record<string, unknown> & { subject: string; tenant: string } {
+  return !!value && typeof value === 'object' && 'subject' in value && nonempty(value.subject) &&
+    'tenant' in value && nonempty(value.tenant)
+}
+
 export const users = {
-  permissions: () => api.get<IdentityPermissions>('/auth/permissions'),
-  gatewayPermissions: () => api.get<GatewayPermissions>('/api/v1/permissions'),
+  async permissions(): Promise<IdentityPermissions> {
+    const body = await api.get<unknown>('/auth/permissions')
+    if (!hasPrincipal(body) || typeof body.identity_admin !== 'boolean') throw new Error('Identity permissions are invalid.')
+    return { subject: body.subject, tenant: body.tenant, identity_admin: body.identity_admin }
+  },
+  async gatewayPermissions(authority: IdentityPermissions): Promise<GatewayPermissions> {
+    const body = await api.get<unknown>('/api/v1/permissions')
+    if (!hasPrincipal(body) || body.subject !== authority.subject || body.tenant !== authority.tenant ||
+        !strings(body.capabilities) || !strings(body.portfolios) || !Array.isArray(body.routes) ||
+        !body.routes.every(route => route && nonempty(route.Pattern) && nonempty(route.Capability))) {
+      throw new Error('The gateway returned invalid permissions for this account.')
+    }
+    return { subject: body.subject, tenant: body.tenant, capabilities: body.capabilities, portfolios: body.portfolios, routes: body.routes }
+  },
   list: async (after = '') => {
     const body = await api.get<unknown>(`/api/identity/users?after=${encodeURIComponent(after)}`)
     if (!body || typeof body !== 'object') throw new Error('Identity returned an invalid directory page.')
