@@ -16,11 +16,12 @@ Schedule node additions outside maintenance on the sole control-plane node.
 The provisioning Job runs on the control plane because it mounts the cluster
 join token and the host's SSH bootstrap key.
 
-While the control-plane node is cordoned, an authorized
-`POST /v1/control/nodes` returns HTTP 409. The response names the node and
-explains how to uncordon it. The operator rejects the request before creating
-the provisioning Job or its Secret. After maintenance, confirm the node is
-Ready and schedulable, then retry Add Node.
+When the operator sees the control-plane node is cordoned, it rejects an
+authorized `POST /v1/control/nodes` before creating the provisioning Job or
+its Secret. The gateway returns HTTP 409, names the node, and explains how to
+uncordon it. If the operator itself is offline during a server upgrade, node
+provisioning is unavailable for that window. After maintenance, confirm the
+operator is available and the node is Ready and schedulable, then retry.
 
 ## Driving a local gateway with a pre-minted bearer
 
