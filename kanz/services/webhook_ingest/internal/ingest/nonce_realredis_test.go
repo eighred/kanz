@@ -19,7 +19,10 @@ package ingest
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +30,75 @@ import (
 
 	"github.com/eighred/kanz/pkg/redisadapter"
 )
+
+// Disconnect only this client's sockets. Other test consumers continue to use
+// the same Valkey instance, including its original retained replay claims.
+func TestWebhookRetainsReplayClaimsAcrossValkeyOutage(t *testing.T) {
+	address := os.Getenv("TEST_REDIS_URL")
+	if address == "" {
+		t.Skip("TEST_REDIS_URL unset")
+	}
+	opts, err := redis.ParseURL(address)
+	if err != nil {
+		t.Fatal("invalid test Redis protocol URL")
+	}
+	dial := redis.NewDialer(opts)
+	var mu sync.Mutex
+	var sockets []net.Conn
+	offline := false
+	opts.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if offline {
+			return nil, net.ErrClosed
+		}
+		conn, err := dial(ctx, network, addr)
+		if err == nil {
+			sockets = append(sockets, conn)
+		}
+		return conn, err
+	}
+	client := redis.NewClient(opts)
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewRedisNonces(redisadapter.New(client), time.Minute, realLease)
+	published := &brokenPublisher{}
+	pipeline := pipelineOver(t, store, published)
+	nonce := time.Now().Format("150405.000000000")
+	first := body("buy", "1", "absolute_qty", "before-outage-"+nonce)
+	second := body("buy", "1", "absolute_qty", "during-outage-"+nonce)
+	if err := post(t, pipeline, first); err != nil || published.commands() != 1 {
+		t.Fatalf("initial admission: %v, commands=%d", err, published.commands())
+	}
+	mu.Lock()
+	offline = true
+	for _, conn := range sockets {
+		_ = conn.Close()
+	}
+	mu.Unlock()
+	if err := post(t, pipeline, second); !errors.Is(err, ErrNonceStoreUnavailable) ||
+		errors.Is(err, ErrReplayed) || published.commands() != 1 {
+		t.Fatalf("disconnected admission: %v, commands=%d", err, published.commands())
+	}
+	mu.Lock()
+	offline = false
+	mu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
+	for client.Ping(t.Context()).Err() != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("client did not reconnect to Valkey")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := post(t, pipeline, first); !errors.Is(err, ErrReplayed) || published.commands() != 1 {
+		t.Fatalf("previously committed alert: %v, commands=%d", err, published.commands())
+	}
+	if err := post(t, pipeline, second); err != nil || published.commands() != 2 {
+		t.Fatalf("retry after recovery: %v, commands=%d", err, published.commands())
+	}
+	if err := post(t, pipeline, second); !errors.Is(err, ErrReplayed) || published.commands() != 2 {
+		t.Fatalf("duplicate after recovery: %v, commands=%d", err, published.commands())
+	}
+}
 
 const (
 	realWindow = 2 * time.Second

@@ -18,7 +18,7 @@ class ValkeyEvidenceTests(unittest.TestCase):
         ]
 
     def test_complete_inventory(self):
-        self.assertEqual(sum(map(len, REQUIRED.values())), 13)
+        self.assertEqual(sum(map(len, REQUIRED.values())), 14)
         self.assertEqual(len(REQUIRED), 3)
         verify(self.events(), required=REQUIRED)
 
