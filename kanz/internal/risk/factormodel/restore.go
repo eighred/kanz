@@ -71,23 +71,7 @@ func FromSnapshot(s *factorpb.FactorModelSnapshot) (*Model, error) {
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func retainedCovarianceValid(cov [][]float64) bool {
-	var scale float64
-	for _, row := range cov {
-		for _, v := range row {
-			scale = math.Max(scale, math.Abs(v))
-		}
-	}
-	if scale == 0 {
-		return true
-	}
-	normalized := make([][]float64, len(cov))
-	for i, row := range cov {
-		normalized[i] = make([]float64, len(row))
-		for j, v := range row {
-			normalized[i][j] = v / scale
-		}
-	}
-	values, _ := eigenSym(normalized)
+	values, _, _ := normalizedEigenSym(cov)
 	for _, v := range values {
 		// Permit only rounding noise relative to the matrix scale. A genuinely
 		// indefinite covariance would be clamped to zero risk by Risk().

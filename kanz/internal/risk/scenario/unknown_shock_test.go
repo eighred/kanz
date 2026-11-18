@@ -82,3 +82,21 @@ func TestInvalidMagnitudeRefusesWholeBatchBeforeValuation(t *testing.T) {
 		}
 	}
 }
+
+func TestIncompleteSectorTargetsRefuseBeforeValuation(t *testing.T) {
+	for _, positions := range [][]domain.Position{nil, {{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime}}} {
+		p := makePortfolio(positions...)
+		batch := []v1.ScenarioShock{v1.ParallelShift{Pct: pct(-5, -1)}, v1.SectorShock{Pct: pct(1, 0)}, v1.SectorShock{Taxonomy: "GICS", Code: " ", Pct: pct(1, 0)}, v1.SectorShock{Code: "10", Pct: pct(1, 0)}}
+		for _, reval := range []scenario.Revaluer{nil, forbiddenRevaluer{t}} {
+			got, cov := scenario.EvaluateReval(p, batch, nil, reval, scenario.WithClassifier(classifierFor(map[string]string{"A": "10"})))
+			if got != nil || cov.ExcludedCount != 3 || cov.Contributed != 0 || len(cov.Exclusions) != 3 {
+				t.Fatalf("malformed sector batch returned %+v, %+v", got, cov)
+			}
+			for _, ex := range cov.Exclusions {
+				if ex.Reason != scenario.SkipShockNamesNoSector || ex.InstrumentID != "" {
+					t.Fatal(ex)
+				}
+			}
+		}
+	}
+}

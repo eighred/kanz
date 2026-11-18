@@ -33,10 +33,12 @@ TV_SOURCE=''
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
 
+if [[ "$OPERATION" == restore || "$TV_MODE" == qualify ]]; then
+  source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
+fi
 case "$TV_MODE" in
   off) [[ -z "$TV_PAIR_BASE64" ]] || die 'TV release inputs require explicit qualification' ;;
   qualify)
-    source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
     load_tv_restore_pair
     DATABASES+=(tv_sync)
     ;;
@@ -131,6 +133,29 @@ nats_restore_evidence() {
     nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}}'
 }
 
+verify_postgres_inventory() {
+  local dir=$1 row database file
+  shift
+  local -A required=() seen=()
+  for database in "$@"; do required[$database]=1; done
+  [[ -f "$dir/source.tsv" && ! -L "$dir/source.tsv" && -r "$dir/source.tsv" ]] || die 'missing database inventory'
+  # Restore consumes each newline-terminated row with read. Reject a truncated
+  # final row rather than counting a database that restore would never visit.
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ "$row" =~ ^([a-z_]+)\|[0-9]+\|[0-9]+\|0\|[0-9A-F]+/[0-9A-F]+$ ]] || die 'invalid database inventory row'
+    database=${BASH_REMATCH[1]}
+    [[ -n "${required[$database]:-}" && -z "${seen[$database]:-}" ]] || die 'unexpected or duplicate database'
+    seen[$database]=1
+    file="$dir/$database.dump"
+    [[ -f "$file" && ! -L "$file" && -r "$file" && "$(head -c 5 "$file")" == PGDMP ]] || die 'missing or unreadable custom database dump'
+  done <"$dir/source.tsv"
+  [[ "$(tail -c 1 "$dir/source.tsv" | od -An -tu1 | tr -d '[:space:]')" == 10 && ${#seen[@]} == "$#" ]] || die 'incomplete database inventory'
+  for file in "$dir"/*.dump; do
+    database=${file##*/}; database=${database%.dump}
+    [[ "$database" =~ ^[a-z_]+$ && -n "${seen[$database]:-}" ]] || die 'unexpected database dump'
+  done
+}
+
 # This isolated drill has no timestamp for an incident, the last recoverable
 # write at that incident, or restoration of the operational service.
 emit_restore_receipt() {
@@ -182,12 +207,7 @@ backup() {
     ' _ "$database" >>"$work/postgres/source.tsv"
   done
 
-  k -n "$MSG_NS" exec redis-0 -c redis -- sh -ceu '
-    auth=$(cat /run/secrets/redis/password)
-    redis-cli -a "$auth" --no-auth-warning SAVE >/dev/null
-    redis-cli -a "$auth" --no-auth-warning --raw DBSIZE
-    redis-cli -a "$auth" --no-auth-warning --raw LASTSAVE
-  ' >"$work/redis/source.txt"
+  redis_backup_checkpoint >"$work/redis/source.txt" || die 'Redis did not confirm a current authenticated checkpoint'
   k -n "$MSG_NS" exec redis-0 -c redis -- cat /data/dump.rdb >"$work/redis/dump.rdb"
   [[ -s "$work/redis/dump.rdb" ]] || die 'Redis produced an empty RDB artifact'
 
@@ -249,6 +269,25 @@ backup() {
     '{status:"BACKUP_VERIFIED",backup_id:$backup_id,key:$key,sha256:$sha256,object_lock_retain_until:$retain_until,elapsed_seconds:$elapsed_seconds}'
 }
 
+redis_backup_checkpoint() {
+  k -n "$MSG_NS" exec redis-0 -c redis -- sh -ceu '
+    auth=$(cat /run/secrets/redis/password)
+    [ -n "$auth" ] || exit 1
+    redis() { redis-cli -a "$auth" --no-auth-warning --raw "$@" 2>/dev/null; }
+    # redis-cli can exit successfully with an error reply. An older dump on
+    # disk cannot stand in for an acknowledged synchronous SAVE.
+    [ "$(redis PING)" = PONG ] && [ "$(redis SAVE)" = OK ] || exit 1
+    keys=$(redis DBSIZE)
+    last=$(redis LASTSAVE)
+    for value in "$keys" "$last"; do
+      case "$value" in ""|*[!0-9]*|0?*) exit 1;; esac
+      [ "${#value}" -le 16 ] && [ "$value" -le 9007199254740991 ] || exit 1
+    done
+    [ "$last" -gt 0 ] || exit 1
+    printf "%s\n%s\n" "$keys" "$last"
+  '
+}
+
 restore() {
   require_boundary
   local started work key archive archive_sha head retention
@@ -259,11 +298,7 @@ restore() {
   RECOVERY_ARCHIVE=$archive
   cleanup_restore() {
     local rc=$?
-    if [[ "$TV_MODE" == qualify ]]; then
-      if ! cleanup_tv_restore_namespace; then printf '%s\n' 'recovery-refused: owned TV drill cleanup unverified' >&2; rc=2; fi
-    else
-      [[ "$DRILL_NS" == kanz-recovery-drill ]] && k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    fi
+    if ! cleanup_tv_restore_namespace; then printf '%s\n' 'recovery-refused: owned drill cleanup unverified' >&2; rc=2; fi
     [[ "$RECOVERY_WORK" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$RECOVERY_WORK"
     exit "$rc"
   }
@@ -287,11 +322,9 @@ restore() {
 
   local owner_posture='ALTER ROLE kanz_restore CREATEDB NOSUPERUSER NOBYPASSRLS'
   local tv_logging=''
+  verify_postgres_inventory "$work/extracted/postgres" "${DATABASES[@]}"
   if [[ "$TV_MODE" == qualify ]]; then
     jq -e '.tv_sync=={tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}' "$work/extracted/metadata.json" >/dev/null || die 'artifact lacks explicit TV history inventory'
-    [[ "$(cut -d'|' -f1 "$work/extracted/postgres/source.tsv" | LC_ALL=C sort)" == "$(printf '%s\n' "${DATABASES[@]}" | LC_ALL=C sort)" ]] || die 'TV archive database inventory mismatch'
-    for database in "${DATABASES[@]}"; do [[ -s "$work/extracted/postgres/$database.dump" ]] || die 'TV archive database member missing'; done
-    begin_tv_restore_namespace
     owner_posture='ALTER ROLE kanz_restore CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS'
     # PostgreSQL 16 logging controls: no statement text, including error,
     # duration and sampled statements, during isolated role provisioning.
@@ -306,15 +339,9 @@ restore() {
       log_parameter_max_length: "0"
       log_parameter_max_length_on_error: "0"'
 
-  else
-    k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=true >/dev/null
   fi
-
+  begin_tv_restore_namespace
   cat <<EOF | k apply -f - >/dev/null
-apiVersion: v1
-kind: Namespace
-metadata: { name: ${DRILL_NS}, labels: { kanz.io/purpose: recovery-drill } }
----
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: { name: default-deny, namespace: ${DRILL_NS} }
@@ -473,12 +500,12 @@ EOF
   if [[ "$TV_MODE" == qualify ]]; then
     local tv_proof
     tv_proof=$(qualify_tv_restored_snapshot "$archive_sha")
-    cleanup_tv_restore_namespace || die 'TV drill cleanup did not complete'
-    details=$(jq -n --argjson replay "$tv_proof" '{tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"}')
+    details=$(jq -n --argjson replay "$tv_proof" '{tv_sync:$replay,scope:"isolated restored archive only; not current target or genesis readiness"}')
   else
     details=$(jq -n --argjson keys "$restored_redis" '{redis_keys:$keys,isolation:"temporary replacement namespace on source-region node"}')
   fi
-  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$details"
+  cleanup_tv_restore_namespace || die 'drill cleanup did not complete'
+  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$(jq '.cleanup="verified"' <<<"$details")"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

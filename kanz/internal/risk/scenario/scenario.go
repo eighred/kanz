@@ -30,6 +30,7 @@ package scenario
 
 import (
 	"context"
+	"strings"
 
 	"github.com/eighred/kanz/internal/dec"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -92,7 +93,7 @@ const (
 	// so whether the shock applies to it is unknown. DISTINCT FROM "the position
 	// is in a different sector", which is a real answer and is not recorded.
 	SkipUnclassified = "unclassified_instrument"
-	// SkipShockNamesNoSector: the SectorShock carries neither taxonomy nor code,
+	// SkipShockNamesNoSector: the SectorShock lacks a taxonomy or code,
 	// so there is nothing to match against. A malformed shock, and the only
 	// reason here that is the caller's rather than the estate's.
 	SkipShockNamesNoSector = "sector_shock_names_no_sector"
@@ -139,13 +140,17 @@ const (
 // ExcludedCount is non-zero — see v1.ErrScenarioUnresolvable for why a refusal
 // and not a quality flag.
 func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...Option) (*domain.MeasureSet, v1.InputCoverage) {
-	unknownType, invalidMagnitude := hasUnknownShock(shocks)
-	if unknownType || invalidMagnitude {
+	unknownType, invalidMagnitude, missingSectors := hasUnknownShock(shocks)
+	if unknownType || invalidMagnitude || missingSectors > 0 {
 		var cov compute.Coverage
 		if unknownType {
 			cov.ExcludeWhole(SkipUnknownShockType)
-		} else {
+		} else if invalidMagnitude {
 			cov.ExcludeWhole(SkipInvalidShockMagnitude)
+		} else {
+			for range missingSectors {
+				cov.ExcludeWhole(SkipShockNamesNoSector)
+			}
 		}
 		return nil, cov.Result()
 	}
@@ -172,7 +177,7 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 // hasUnknownShock validates the entire batch before cloning, applying any
 // shock, or invoking a revaluer. Do not call Description: callers implement
 // this open interface, and a label cannot establish supported semantics.
-func hasUnknownShock(shocks []v1.ScenarioShock) (unknownType, invalidMagnitude bool) {
+func hasUnknownShock(shocks []v1.ScenarioShock) (unknownType, invalidMagnitude bool, missingSectors int) {
 	for _, shock := range shocks {
 		var size *commonpb.Decimal
 		switch s := shock.(type) {
@@ -182,16 +187,23 @@ func hasUnknownShock(shocks []v1.ScenarioShock) (unknownType, invalidMagnitude b
 			size = s.Pct
 		case v1.SectorShock:
 			size = s.Pct
+			if !sectorIdentified(s.Taxonomy, s.Code) {
+				missingSectors++
+			}
 		case v1.VolShock:
 			size = s.AbsBump
 		default:
-			return true, false
+			return true, false, 0
 		}
 		if size == nil || !dec.InDomain(size) {
 			invalidMagnitude = true
 		}
 	}
-	return false, invalidMagnitude
+	return false, invalidMagnitude, missingSectors
+}
+
+func sectorIdentified(taxonomy, code string) bool {
+	return strings.TrimSpace(taxonomy) != "" && strings.TrimSpace(code) != ""
 }
 
 // shockCoverage is compute.Coverage plus the per-EVALUATION dedup a shock batch
@@ -247,11 +259,6 @@ func (s *shockCoverage) noRevaluerWired() {
 	s.noRevaluer = true
 	s.cov.ExcludeWhole(SkipNoRevaluer)
 }
-
-// malformedShock records a shock that named no sector. Per SHOCK and not
-// deduped, because each malformed entry in a curve is its own defect in the
-// caller's request.
-func (s *shockCoverage) malformedShock() { s.cov.ExcludeWhole(SkipShockNamesNoSector) }
 
 // unclassified records a holding whose sector the wired classifier does not
 // know, so whether any sector shock applies to it is unknown.
@@ -391,10 +398,6 @@ func applyParallelShift(p *domain.Portfolio, s v1.ParallelShift) {
 // The two unresolved cases are recorded, and the caller refuses on them.
 func applySectorShock(p *domain.Portfolio, s v1.SectorShock, c factor.Classifier, cov *shockCoverage) {
 	want := factor.Sector{Taxonomy: s.Taxonomy, Code: s.Code}
-	if want.IsZero() {
-		cov.malformedShock()
-		return
-	}
 	if c == nil {
 		cov.noClassifierWired()
 		return
@@ -402,7 +405,7 @@ func applySectorShock(p *domain.Portfolio, s v1.SectorShock, c factor.Classifier
 	asOf := p.AsOf()
 	for _, pos := range p.Positions() {
 		cl, ok := c.Classify(context.Background(), string(pos.InstrumentID), asOf)
-		if !ok {
+		if !ok || !sectorIdentified(cl.Sector.Taxonomy, cl.Sector.Code) {
 			cov.unclassified(pos.InstrumentID)
 			continue
 		}

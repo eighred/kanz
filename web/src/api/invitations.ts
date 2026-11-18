@@ -43,10 +43,23 @@ function summary(value: unknown): InvitationSummary {
   return row as unknown as InvitationSummary
 }
 
-function issued(value: unknown): CreatedInvitation {
+type Issuer = { subject: string; tenant: string }
+
+function sameGrants(received: string[], reviewed: string[]): boolean {
+  const expected = [...reviewed].sort()
+  return received.length === expected.length && [...received].sort().every((grant, i) => grant === expected[i])
+}
+
+function issued(value: unknown, request: CreateInvitation, issuer: Issuer, previousId?: string): CreatedInvitation {
   const row = summary(value) as CreatedInvitation
   if (typeof row.invite_token !== 'string' || !row.invite_token || row.note !== undefined && typeof row.note !== 'string') {
     throw new Error('Identity returned an invalid invitation response.')
+  }
+  if (!row.invite_id.trim() || row.invite_id === previousId || row.subject !== request.subject ||
+      row.tenant !== issuer.tenant || row.created_by !== issuer.subject || row.state !== 'pending' || !row.redeemable ||
+      row.redeemed_at || row.revoked_at || row.reissued_as || !Number.isFinite(Date.parse(row.expires_at)) ||
+      !sameGrants(row.roles, request.roles) || !sameGrants(row.portfolios, request.portfolios)) {
+    throw new Error('The invitation receipt does not match the reviewed offer.')
   }
   return row
 }
@@ -59,8 +72,12 @@ export const invitations = {
     }
     return body.map(summary)
   },
-  create: async (request: CreateInvitation) =>
-    issued(await api.post<unknown>('/api/identity/invites', request)),
+  create: async (request: CreateInvitation, issuer: Issuer) =>
+    issued(await api.post<unknown>('/api/identity/invites', request), request, issuer),
   revoke: async (invite: InvitationSummary) => summary(await api.post<unknown>(`/api/identity/invites/${encodeURIComponent(invite.invite_id)}/revoke`, { revision: requireRevision(invite.revision) })),
-  reissue: async (invite: InvitationSummary) => issued(await api.post<unknown>(`/api/identity/invites/${encodeURIComponent(invite.invite_id)}/reissue`, { revision: requireRevision(invite.revision) })),
+  reissue: async (invite: InvitationSummary, issuer: Issuer) => {
+    if (invite.tenant !== issuer.tenant) throw new Error('The reviewed invitation belongs to another tenant.')
+    const body = await api.post<unknown>(`/api/identity/invites/${encodeURIComponent(invite.invite_id)}/reissue`, { revision: requireRevision(invite.revision) })
+    return issued(body, invite, issuer, invite.invite_id)
+  },
 }

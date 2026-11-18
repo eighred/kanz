@@ -19,6 +19,7 @@ const rows = ref<Provision[]>([])
 const error = ref('')
 const loading = ref(true)
 let timer: ReturnType<typeof setInterval> | undefined
+let activeRead: AbortController | undefined
 
 // A run is a Job that takes minutes, so a static page would be wrong within
 // seconds of opening it. Same cadence as Estate.
@@ -31,16 +32,21 @@ const running = computed(() => rows.value.filter((p) => !settled(p)).length)
 const failed = computed(() => rows.value.filter((p) => p.status === 'PROVISION_STATUS_FAILED').length)
 
 async function load(initial = false) {
+  activeRead?.abort()
+  const read = new AbortController()
+  activeRead = read
   if (initial) loading.value = true
   try {
-    rows.value = await control.provisions()
+    const latest = await control.provisions(read.signal)
+    if (read.signal.aborted) return
+    rows.value = latest
     error.value = ''
   } catch (e) {
     // A 404 is "this gateway fronts no control plane", not "no provisioning has
     // ever run". Drawn as an empty table the two are indistinguishable.
-    error.value = describe(e)
+    if (!read.signal.aborted) error.value = describe(e)
   } finally {
-    loading.value = false
+    if (!read.signal.aborted) loading.value = false
   }
 }
 
@@ -48,7 +54,7 @@ onMounted(() => {
   void load(true)
   timer = setInterval(() => void load(), REFRESH_MS)
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => { clearInterval(timer); activeRead?.abort() })
 
 /** label turns the enum name into something readable. */
 function label(status?: string): string {

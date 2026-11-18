@@ -34,7 +34,7 @@ it('refuses unsafe wire values and commands before any mutation request', async 
     const put = vi.spyOn(api, 'put')
     const post = vi.spyOn(api, 'post')
     await expect(users.update({ ...account, revision } as unknown as UserAccess, ['kanz-user'], [])).rejects.toThrow()
-    await expect(invitations.reissue({ ...invitation, revision } as unknown as InvitationSummary)).rejects.toThrow()
+    await expect(invitations.reissue({ ...invitation, revision } as unknown as InvitationSummary, { subject: 'admin', tenant: 'acme' })).rejects.toThrow()
     expect(put).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
   }
