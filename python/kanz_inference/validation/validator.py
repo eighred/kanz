@@ -169,12 +169,17 @@ class Validator:
         n = len(preds)
         reasons: list[str] = []
 
-        if n < t.min_samples:
+        if n == 0 or n < t.min_samples:
+            reasons.append(f"only {n} samples (minimum {max(1, t.min_samples)})")
+        elif not all(math.isfinite(p) and math.isfinite(a) for p, a in zip(preds, actuals)):
+            reasons.append("non-finite prediction or realized outcome")
+        elif not all(0.0 <= c <= 1.0 for c in confs):
+            reasons.append("confidence outside [0, 1]")
+        if reasons:
             metrics = ValidationMetrics(
                 n=n, rmse=math.inf, mae=math.inf, bias=0.0,
                 calibration_error=math.inf, calibrated=False, stability_ratio=math.inf,
             )
-            reasons.append(f"only {n} samples (< min {t.min_samples})")
             return ValidationResult(
                 model_id=model_id, passed=False, metrics=metrics,
                 recommended_confidence_threshold=1.0, reasons=tuple(reasons),
@@ -195,6 +200,12 @@ class Validator:
             calibration_error=calibration_error, calibrated=calibrated,
             stability_ratio=stability_ratio,
         )
+
+        if not all(math.isfinite(value) for value in (rmse, mae, bias, stability_ratio)):
+            return ValidationResult(
+                model_id=model_id, passed=False, metrics=metrics,
+                recommended_confidence_threshold=1.0, reasons=("non-finite holdout error metrics",),
+            )
 
         passed = True
         if t.max_rmse is not None and rmse > t.max_rmse:

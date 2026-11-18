@@ -64,10 +64,10 @@ class ValidationRecord:
     model_id: str
     """The model this record validates — matches ModelMetadata.model_id."""
 
-    validated_at: datetime
-    """When the validation ran. UTC-aware; for audit/traceability."""
+    validated_at: datetime | None
+    """When the validation ran. A missing timestamp cannot support approval."""
 
-    expires_at: datetime
+    expires_at: datetime | None
     """When the validation lapses and a revalidation is required. UTC-
     aware. A validation is current only while ``now < expires_at`` — the
     revalidation cadence model-risk policy mandates, not an open-ended
@@ -87,7 +87,12 @@ class ValidationRecord:
         """True when this validation both passed and has not expired as
         of ``now`` (UTC-aware). The exact predicate the primary gate
         applies."""
-        return self.passed and self.expires_at > now
+        return (
+            self.passed is True
+            and self.validated_at is not None and self.validated_at.utcoffset() is not None
+            and self.expires_at is not None and self.expires_at.utcoffset() is not None
+            and self.validated_at <= now < self.expires_at
+        )
 
 
 @dataclass(frozen=True)

@@ -69,7 +69,11 @@ def test_register_card_starts_in_draft():
 def test_full_approval_flow_records_approver_and_time():
     now = datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
     wf = ApprovalWorkflow(clock=lambda: now)
-    wf.register_card(_card())
+    record = ValidationRecord(
+        model_id="vol-forecast@1.4.2", validated_at=now,
+        expires_at=now + timedelta(days=1), passed=True,
+    )
+    wf.register_card(_card(validation=record))
     wf.submit("vol-forecast@1.4.2")
     assert wf.status("vol-forecast@1.4.2") == ApprovalStatus.PENDING_REVIEW
     wf.approve("vol-forecast@1.4.2", approver="risk-officer@eighred")
@@ -78,6 +82,27 @@ def test_full_approval_flow_records_approver_and_time():
     state = wf.state("vol-forecast@1.4.2")
     assert state.approver == "risk-officer@eighred"
     assert state.decided_at == now
+
+
+def test_card_refuses_another_models_validation():
+    workflow = ApprovalWorkflow()
+    with pytest.raises(ValueError, match="ValidationRecord.model_id"):
+        workflow.register_card(_card(validation=_valid("other-model@1")))
+    assert workflow.status("vol-forecast@1.4.2") is None
+
+
+def test_future_validation_cannot_approve_a_card():
+    now = datetime(2026, 6, 21, tzinfo=timezone.utc)
+    record = ValidationRecord(
+        model_id="m@1", validated_at=now + timedelta(hours=1),
+        expires_at=now + timedelta(days=1), passed=True,
+    )
+    workflow = ApprovalWorkflow(clock=lambda: now)
+    workflow.register_card(_card("m@1", validation=record))
+    workflow.submit("m@1")
+    with pytest.raises(ApprovalError, match="validation"):
+        workflow.approve("m@1", "reviewer")
+    assert workflow.status("m@1") == ApprovalStatus.PENDING_REVIEW
 
 
 def test_rejection_records_reason():

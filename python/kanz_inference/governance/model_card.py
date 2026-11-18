@@ -109,6 +109,8 @@ class ApprovalWorkflow:
             raise ValueError("ModelCard.model_id required")
         if card.lineage.model_id != card.model_id:
             raise ValueError("LineageRecord.model_id must match the card's model_id")
+        if card.validation is not None and card.validation.model_id != card.model_id:
+            raise ValueError("ValidationRecord.model_id must match the card's model_id")
         existing = self._states.get(card.model_id)
         if existing is not None and existing.status in (
             ApprovalStatus.PENDING_REVIEW,
@@ -141,13 +143,14 @@ class ApprovalWorkflow:
                 f"cannot approve {model_id} from {state.status.value}; submit it first"
             )
         record = self._cards[model_id].validation
-        if record is None or not record.is_valid(self._clock()):
+        now = self._clock()
+        if record is None or not record.is_valid(now):
             raise ApprovalError(
                 f"cannot approve {model_id}: a recorded, non-expired, passing "
                 "validation is required"
             )
         self._states[model_id] = ApprovalState(
-            ApprovalStatus.APPROVED, approver=approver, decided_at=self._clock()
+            ApprovalStatus.APPROVED, approver=approver, decided_at=now
         )
 
     def reject(self, model_id: str, approver: str, reason: str) -> None:
