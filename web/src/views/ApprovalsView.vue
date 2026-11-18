@@ -10,6 +10,7 @@ import {
   type PendingApproval,
   type Reading,
 } from '../api/approvals'
+import { ApiError } from '../api/client'
 import { formatDecimal } from '../api/decimal'
 import { useSession } from '../stores/session'
 
@@ -212,9 +213,15 @@ async function sign() {
     confirming.value = null
     await load()
   } catch (e) {
-    // The publish failed, so nothing was signed and the order is untouched.
-    // Keeping the panel open puts the reason beside what was being attempted.
-    actionError.value = describeApproveFailure(e)
+    // A missing acknowledgement can follow a successful publish. Require a fresh
+    // queue read before offering another signature.
+    if (!(e instanceof ApiError) || (e.status >= 500 && !(e.status === 503 && e.message === 'order writes are disabled'))) {
+      confirming.value = null
+      entries.value = []
+      error.value = `Submission for ${p.order_id} could not be confirmed. Reload the queue and review its current state before taking further action.`
+    } else {
+      actionError.value = describeApproveFailure(e)
+    }
   } finally {
     busy.value = false
   }
@@ -232,7 +239,10 @@ async function sign() {
   <p v-if="loading">Loading…</p>
 
   <!-- 404 AND 403 ARRIVE HERE AS DIFFERENT SENTENCES. Absent is not forbidden. -->
-  <p v-else-if="error" class="error" role="alert">{{ error }}</p>
+  <template v-else-if="error">
+    <p class="error" role="alert">{{ error }}</p>
+    <button @click="load(true)">Reload queue</button>
+  </template>
 
   <template v-else>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>

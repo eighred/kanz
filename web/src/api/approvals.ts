@@ -183,11 +183,14 @@ export const approvals = {
    * #444 closed on the override path, and dual control over a forgeable identity
    * is theatre.
    */
-  approve: (orderId: string, digest: string) =>
-    api.post<{ order_id?: string; status?: string }>(
-      `/api/v1/orders/${encodeURIComponent(orderId)}/approve`,
-      { digest },
-    ),
+  async approve(orderId: string, digest: string): Promise<void> {
+    const receipt = await api.post<{ order_id?: unknown; status?: unknown } | null>(
+      `/api/v1/orders/${encodeURIComponent(orderId)}/approve`, { digest }, 202,
+    )
+    if (receipt?.order_id !== orderId || receipt.status !== 'approval_submitted') {
+      throw new Error('Invalid approval submission receipt.')
+    }
+  },
 }
 
 /**
@@ -253,8 +256,6 @@ export function describeApproveFailure(e: unknown): string {
       return 'This gateway registers no approve route, so no signature can be given here. Dual control is not configured on this deployment.'
     case 503:
       return 'Order writes are disabled on this gateway, so the approval was not submitted. The order is still held.'
-    case 502:
-      return 'The approval could not be published to the bus, so it never reached the OMS. The order is still held — nothing was signed.'
     default:
       return e.message
   }
