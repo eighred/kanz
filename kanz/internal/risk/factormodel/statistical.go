@@ -135,13 +135,17 @@ func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 		if p.Characteristics == nil {
 			return nil, fmt.Errorf("factormodel: Blend requires a CharacteristicProvider")
 		}
-		fund, residuals, err := fitFundamental(ctx, cfg, instruments, asOf, p.Characteristics, p.Returns)
+		fund, regression, err := fitFundamental(ctx, cfg, instruments, asOf, p.Characteristics, p.Returns)
 		if err != nil {
 			return nil, err
 		}
-		stat := fitStatistical(fund.Instruments, residuals, cfg.statFactors(), "SPC")
-		m := blend(fund, stat)
+		stat := fitStatistical(fund.Instruments, regression.residuals, cfg.statFactors(), "SPC")
+		m, err := blend(fund, stat, regression)
+		if err != nil {
+			return nil, err
+		}
 		m.InputProvenance = fund.InputProvenance
+		m.InputProvenance["blend_covariance"] = "aligned-joint-v1"
 		return m, nil
 	default: // Fundamental
 		if p.Characteristics == nil {
@@ -208,12 +212,10 @@ func fitStatistical(instruments []string, returns [][]float64, k int, namePrefix
 	return newModel(factors, instruments, loadings, factorCov, specific)
 }
 
-// blend concatenates a fundamental model with a statistical model fit on its
-// residuals into one model: stacked loadings, a block-diagonal factor covariance
-// (the two factor blocks are orthogonal in-sample — the PCs are of the residuals,
-// which the OLS makes orthogonal to the fundamental factors), and the residual-
-// of-residual specific variance from the statistical pass.
-func blend(fund, stat *Model) *Model {
+// blend estimates all factor covariances from the same dated observations.
+// Cross-sectional regression does not imply zero time-series covariance
+// between fundamental factor returns and residual principal components.
+func blend(fund, stat *Model, regression *regressionFit) (*Model, error) {
 	kf, ks := len(fund.Factors), len(stat.Factors)
 	k := kf + ks
 	factors := make([]Factor, 0, k)
@@ -229,18 +231,33 @@ func blend(fund, stat *Model) *Model {
 		loadings[i] = row
 	}
 
-	factorCov := make([][]float64, k)
-	for a := 0; a < k; a++ {
-		factorCov[a] = make([]float64, k)
+	// The return of each residual PC on date t is its loading vector
+	// projected onto that date's instrument residuals.
+	jointReturns := make([][]float64, k)
+	copy(jointReturns, regression.factorReturns)
+	for j := range ks {
+		scores := make([]float64, len(regression.residuals[0]))
+		for i, row := range regression.residuals {
+			for t, value := range row {
+				scores[t] += stat.Loadings[i][j] * value
+			}
+		}
+		jointReturns[kf+j] = scores
 	}
-	for a := 0; a < kf; a++ {
-		copy(factorCov[a][:kf], fund.FactorCov[a])
+	cov := sampleCov(jointReturns)
+	for _, row := range cov {
+		for _, v := range row {
+			if !finite(v) {
+				return nil, fmt.Errorf("factormodel: nonfinite blend covariance")
+			}
+		}
 	}
-	for a := 0; a < ks; a++ {
-		copy(factorCov[kf+a][kf:], stat.FactorCov[a])
+	for _, specific := range stat.SpecificVar {
+		if !finite(specific) {
+			return nil, fmt.Errorf("factormodel: nonfinite blend specific variance")
+		}
 	}
-	// The statistical pass on the residuals leaves the truly idiosyncratic part.
-	return newModel(factors, fund.Instruments, loadings, factorCov, stat.SpecificVar)
+	return newModel(factors, fund.Instruments, loadings, cov, stat.SpecificVar), nil
 }
 
 // alignedReturns refuses incomplete universes: an absent history is not a

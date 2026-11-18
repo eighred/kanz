@@ -65,11 +65,12 @@ func TestCrossSectionalFit_RecoversFactorReturns(t *testing.T) {
 			returns[i][t] = b[i][0]*f[0][t] + b[i][1]*f[1][t]
 		}
 	}
-	factorCov, specific, residuals, err := crossSectionalFit(b, returns, DefaultRidge)
+	fit, err := crossSectionalFit(b, returns, DefaultRidge)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	factorCov, specific, residuals := fit.factorCov, fit.specific, fit.residuals
 	wantCov := sampleCov(f)
 	for i := 0; i < 2; i++ {
 		for j := 0; j < 2; j++ {

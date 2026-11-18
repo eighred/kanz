@@ -3,6 +3,7 @@ package factormodel
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,10 +86,8 @@ func TestFit_Dispatch(t *testing.T) {
 	if len(bl.Factors) != kf+2 {
 		t.Fatalf("blend should stack %d fundamental + 2 statistical factors, got %d", kf, len(bl.Factors))
 	}
-	// Block-diagonal factor covariance: a fundamental factor is uncorrelated with
-	// a statistical residual factor.
-	if bl.FactorCov[0][kf] != 0 {
-		t.Fatalf("blend factor covariance must be block-diagonal, got off-block %.6f", bl.FactorCov[0][kf])
+	if !strings.HasSuffix(bl.ModelID, "-JOINT1") || bl.InputProvenance["blend_covariance"] != "aligned-joint-v1" {
+		t.Fatalf("blend estimator identity missing: %s, %v", bl.ModelID, bl.InputProvenance)
 	}
 }
 
@@ -96,5 +95,43 @@ func TestFit_Dispatch(t *testing.T) {
 func TestFit_RequiresReturns(t *testing.T) {
 	if _, err := Fit(context.Background(), Config{Type: Statistical}, []string{"A"}, time.Now(), Providers{}); err == nil {
 		t.Fatal("Fit without a ReturnsProvider must error")
+	}
+}
+
+// Full retention reconstructs every observed instrument return as fitted
+// fundamental return plus residual. Portfolio P&L variance can therefore be
+// calculated directly from the dated returns without any factor operations.
+func TestBlendReconstructsObservedPortfolioVarianceWithRidge(t *testing.T) {
+	at := time.Date(2026, 1, 12, 0, 0, 0, 0, time.UTC)
+	ids := []string{"A", "B", "C"}
+	chars := staticChars{"A": {Industry: "IND"}, "B": {Industry: "IND"}, "C": {Industry: "IND"}}
+	m, err := Fit(context.Background(), Config{Type: Blend, StatFactors: 3, Ridge: 3}, ids, at, Providers{Characteristics: chars, Returns: testReturns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retainedCovarianceValid(m.FactorCov) {
+		t.Fatalf("joint covariance is not positive semidefinite: %v", m.FactorCov)
+	}
+	for _, weights := range [][]float64{{100, 100, 100}, {100, -50, 30}, {0, 0, 100}} {
+		var values = map[string]float64{}
+		profit := make([]float64, len(testReturns["A"]))
+		for i, id := range ids {
+			values[id] = weights[i]
+			for j, r := range testReturns[id] {
+				profit[j] += weights[i] * r
+			}
+		}
+		// Pairwise differences give unbiased sample variance directly.
+		var sum float64
+		for i, x := range profit {
+			for _, y := range profit[:i] {
+				sum += (x - y) * (x - y)
+			}
+		}
+		want := sum / float64(len(profit)*(len(profit)-1))
+		risk := m.Risk(values).Total
+		if got := risk * risk; !finite(got) || math.Abs(got-want) > 1e-10 {
+			t.Errorf("portfolio %v: variance %.12g, want %.12g in squared currency units", weights, got, want)
+		}
 	}
 }
