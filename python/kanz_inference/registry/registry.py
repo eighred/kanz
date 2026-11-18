@@ -87,7 +87,7 @@ class ValidationRecord:
         """True when this validation both passed and has not expired as
         of ``now`` (UTC-aware). The exact predicate the primary gate
         applies."""
-        return self.passed and self.expires_at > now
+        return self.passed and self.validated_at <= now < self.expires_at
 
 
 @dataclass(frozen=True)
