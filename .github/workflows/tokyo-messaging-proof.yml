@@ -4,6 +4,9 @@ on:
     paths:
       - 'tools/tokyo_messaging_proof/**'
       - 'tools/feed_identity/**'
+      - 'kanz/test/backing/up.sh'
+      - 'kanz/test/backing/*postgres-nats.sh'
+      - 'kanz/test/backing/nats-dev.conf'
       - 'tools/testnet-data-plane-recovery.sh'
       - 'tools/tv-sync-restored-proof.sh'
       - 'tools/Invoke-TestnetDataPlaneRecovery.ps1'
@@ -16,6 +19,9 @@ on:
     paths:
       - 'tools/tokyo_messaging_proof/**'
       - 'tools/feed_identity/**'
+      - 'kanz/test/backing/up.sh'
+      - 'kanz/test/backing/*postgres-nats.sh'
+      - 'kanz/test/backing/nats-dev.conf'
       - 'tools/testnet-data-plane-recovery.sh'
       - 'tools/tv-sync-restored-proof.sh'
       - 'tools/Invoke-TestnetDataPlaneRecovery.ps1'
@@ -46,6 +52,8 @@ jobs:
         run: bash tools/tokyo_messaging_proof/check_postgres_inventory.sh
       - name: Require an authenticated current Redis checkpoint before archiving
         run: bash tools/tokyo_messaging_proof/check_redis_backup.sh
+      - name: Check local PostgreSQL and NATS with external loopback clients
+        run: bash kanz/test/backing/check-postgres-nats.sh
       - run: bash tools/feed_identity/install.sh
       - name: Verify UID-scoped cleanup of the ordinary restore namespace
         run: bash tools/tokyo_messaging_proof/check_restore_namespace.sh
