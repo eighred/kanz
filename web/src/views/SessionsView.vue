@@ -2,20 +2,14 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, ApiError } from '../api/client'
+import { isTimestamp } from '../api/timestamp'
 import { useSession } from '../stores/session'
 interface BrowserSession { id: string; created_at: string; expires_at: string; current: boolean }
-function sessionTime(value: unknown): boolean {
-  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(value) ||
-      !Number.isFinite(Date.parse(value))) return false
-  // Date.parse normalizes impossible calendar dates, including February 30.
-  const wallTime = value.slice(0, 19)
-  return new Date(wallTime + 'Z').toISOString().startsWith(wallTime)
-}
 function isSession(value: unknown): value is BrowserSession {
   if (!value || typeof value !== 'object') return false
   const row = value as Record<string, unknown>
   return typeof row.id === 'string' && /^[0-9a-f]{64}$/.test(row.id) && typeof row.current === 'boolean' &&
-    sessionTime(row.created_at) && sessionTime(row.expires_at)
+    isTimestamp(row.created_at) && isTimestamp(row.expires_at)
 }
 const rows = ref<BrowserSession[] | null>(null)
 const busy = ref(false)
