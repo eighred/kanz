@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -178,6 +179,31 @@ async def test_cooldown_is_per_model_feature():
     await trigger.handle(Envelope(), _drift_payload(feature="rsi_14"))
     await trigger.handle(Envelope(), _drift_payload(feature="macd"))
     assert len(sink.requests) == 2
+
+
+async def test_concurrent_redelivery_retries_only_the_failed_recipient():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class FlakySink(RecordingSink):
+        async def request_revalidation(self, request):
+            if request.model_id == "b@2" and not entered.is_set():
+                entered.set()
+                await release.wait()
+                raise OSError("temporary delivery failure")
+            await super().request_revalidation(request)
+
+    sink = FlakySink()
+    trigger = DriftTrigger(StaticModelResolver({"rsi_14": ["a@1", "b@2"]}), sink)
+    first = asyncio.create_task(trigger.handle(Envelope(), _drift_payload()))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    second = asyncio.create_task(trigger.handle(Envelope(), _drift_payload()))
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(OSError):
+        await first
+    await asyncio.wait_for(second, timeout=2)
+    assert [request.model_id for request in sink.requests] == ["a@1", "b@2"]
 
 
 # --- Plumbing ---------------------------------------------------------
