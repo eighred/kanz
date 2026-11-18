@@ -68,7 +68,9 @@ kafka_exports="$(KAFKA_PORT="$KAFKA_PORT" bash "$ROOT/test/backing/kafka.sh" "ka
 
 # Bootstrap from the canonical ConfigMap, then check the broker's current
 # stream inventory before printing any connection settings. Requires PyYAML.
-python3 -B "$ROOT/test/backing/nats_topology.py" bootstrap "nats://127.0.0.1:${NATS_PORT}"
+topology="$ROOT/test/backing/nats_topology.py"
+if command -v cygpath >/dev/null; then topology=$(cygpath -w "$topology"); fi
+python3 -B "$topology" bootstrap "nats://127.0.0.1:${NATS_PORT}"
 
 ids=$(owned_ids)
 mapfile -t owned <<<"$ids"
