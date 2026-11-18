@@ -1,4 +1,4 @@
-package termsload
+package engine_test
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/marketdata/terms"
+	"github.com/eighred/kanz/internal/marketdata/termsload"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/termsource"
 )
@@ -49,7 +50,19 @@ func TestOKXExactOptionReachesPostgresTermsProvider(t *testing.T) {
 	if _, err = pool.Exec(t.Context(), string(ddl)); err != nil {
 		t.Fatal(err)
 	}
-	records, err := parse(t, okxCatalogue(preciseOptionRow())).Loadable()
+	const catalogue = `{
+        "code":"0","data":[{
+          "instType":"OPTION","instId":"BTC-USD-241227-FINE-C","uly":"BTC-USD","optType":"C",
+          "stk":"60000.000000001","listTime":"1730448000000","expTime":"1735286400000",
+          "ctVal":"3e-9","ctMult":"0.2","ctValCcy":"BTC"
+        }]}`
+	batch, err := termsload.ParseOKXInstruments([]byte(catalogue), termsload.Mapping{
+		Underlying: map[string]string{"BTC-USD": "BTC-USDT"}, ContractNamespace: "XOKX",
+	}, termsload.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := batch.Loadable()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +70,11 @@ func TestOKXExactOptionReachesPostgresTermsProvider(t *testing.T) {
 	if err = store.Put(t.Context(), records); err != nil {
 		t.Fatal(err)
 	}
+	if len(records) != 1 {
+		t.Fatalf("loaded %d contracts, want one", len(records))
+	}
 	rec := records[0]
+	listed := time.UnixMilli(1730448000000)
 	stored, err := store.LatestAsOf(t.Context(), rec.InstrumentID, listed)
 	if err != nil {
 		t.Fatal(err)
