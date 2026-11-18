@@ -57,7 +57,7 @@ def cpu_identity(cpu, source):
     flags = {item["Key"]: item["Value"] for item in info["Settings"]}
     toolchain, = [line.split()[1] for line in (ROOT / "kanz/go.mod").read_text().splitlines()
                   if line.startswith("toolchain ")]
-    if (info["Path"] != "github.com/eighred/kanz/internal/risk/benchmarks/option_gpu_comparison"
+    if (info["Path"] != "github.com/eighred/kanz/services/risk_engine/tools/option_gpu_comparison"
             or info["GoVersion"] != toolchain or flags.get("vcs.revision") != source
             or flags.get("vcs.modified") != "false" or flags.get("vcs") != "git"):
         raise ValueError("CPU worker source, package or toolchain mismatch")
