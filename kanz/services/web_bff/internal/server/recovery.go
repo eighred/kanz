@@ -3,9 +3,41 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/eighred/kanz/internal/identity"
 )
+
+func mailboxStatus(body []byte) (identity.MailboxStatus, bool) {
+	var wire struct {
+		Address        *string         `json:"verified_address"`
+		VerifiedAt     json.RawMessage `json:"verified_at"`
+		PendingAddress *string         `json:"pending_address"`
+		Delivery       *string         `json:"verification_delivery"`
+	}
+	if json.Unmarshal(body, &wire) != nil || wire.Address == nil || wire.PendingAddress == nil || wire.Delivery == nil {
+		return identity.MailboxStatus{}, false
+	}
+	// A confirmed empty mailbox has a present null timestamp. A missing
+	// timestamp leaves the verification state unknown.
+	var verifiedAt *time.Time
+	if json.Unmarshal(wire.VerifiedAt, &verifiedAt) != nil || (*wire.Address == "") != (verifiedAt == nil) {
+		return identity.MailboxStatus{}, false
+	}
+	switch *wire.Delivery {
+	case "none", "consumed":
+		if *wire.PendingAddress != "" {
+			return identity.MailboxStatus{}, false
+		}
+	case "pending", "sending", "sent", "failed", "expired", "invalidated":
+		if *wire.PendingAddress == "" {
+			return identity.MailboxStatus{}, false
+		}
+	default:
+		return identity.MailboxStatus{}, false
+	}
+	return identity.MailboxStatus{Address: *wire.Address, VerifiedAt: verifiedAt, PendingAddress: *wire.PendingAddress, Delivery: *wire.Delivery}, true
+}
 
 func (s *Server) handleRecovery(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -30,8 +62,8 @@ func (s *Server) handleRecovery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if resp.Status == 200 {
-			var status identity.MailboxStatus
-			if err = json.Unmarshal(resp.Body, &status); err != nil {
+			status, valid := mailboxStatus(resp.Body)
+			if !valid {
 				writeJSON(w, 502, map[string]string{"error": "mailbox status unavailable"})
 				return
 			}

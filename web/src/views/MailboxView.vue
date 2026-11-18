@@ -6,7 +6,19 @@ const credential = ref('')
 const busy = ref(false)
 const error = ref('')
 const done = ref(false)
-type MailboxStatus = { verified_address: string; pending_address: string; verification_delivery: string }
+type MailboxStatus = { verified_address: string; verified_at: string | null; pending_address: string; verification_delivery: string }
+function isMailboxStatus(value: unknown): value is MailboxStatus {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Partial<MailboxStatus>
+  if (typeof row.verified_address !== 'string' || typeof row.pending_address !== 'string' ||
+      typeof row.verification_delivery !== 'string') return false
+  if (row.verified_address === '' ? row.verified_at !== null :
+    typeof row.verified_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(row.verified_at) ||
+      !Number.isFinite(Date.parse(row.verified_at))) return false
+  return row.pending_address === ''
+    ? ['none', 'consumed'].includes(row.verification_delivery)
+    : ['pending', 'sending', 'sent', 'failed', 'expired', 'invalidated'].includes(row.verification_delivery)
+}
 const status = ref<MailboxStatus | null>(null)
 const statusError = ref('')
 const loading = ref(true)
@@ -17,7 +29,8 @@ async function reload() {
   status.value = null
   statusError.value = ''
   try {
-    const result = await api.get<MailboxStatus>('/auth/mailbox')
+    const result = await api.get<unknown>('/auth/mailbox')
+    if (!isMailboxStatus(result)) throw new Error('Invalid mailbox status.')
     if (read === latestRead) status.value = result
   } catch {
     if (read === latestRead) statusError.value = 'Mailbox status could not be loaded. Recovery may not be configured.'

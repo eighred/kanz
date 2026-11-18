@@ -48,7 +48,7 @@ it('refuses mismatched resets, submits once, and clears password fields after re
   expect(w.get('[role="alert"]').text()).toContain('invalid, expired, or already used')
 })
 it('enrollment requires a current credential and displays durable delivery status', async () => {
-  vi.spyOn(api, 'get').mockResolvedValue({ verified_address: '', pending_address: 'person@example.test', verification_delivery: 'failed' })
+  vi.spyOn(api, 'get').mockResolvedValue({ verified_address: '', verified_at: null, pending_address: 'person@example.test', verification_delivery: 'failed' })
   const post = vi.spyOn(api, 'post').mockResolvedValue({ status: 'accepted' })
   const w = mount(MailboxView, options); await flushPromises()
   expect(w.text()).toContain('Verification delivery: failed')

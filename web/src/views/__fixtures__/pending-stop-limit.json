@@ -1,0 +1,38 @@
+{
+  "pending":  [
+    {
+      "order_id":  "order-stop-limit",
+      "command":  {
+        "order_id":  "order-stop-limit",
+        "portfolio_id":  "fund-a",
+        "instrument_id":  "BTC-USD",
+        "side":  "SIDE_BUY",
+        "quantity":  {
+          "coefficient":  "10",
+          "exponent":  -1
+        },
+        "order_type":  "ORDER_TYPE_STOP_LIMIT",
+        "limit_price":  {
+          "coefficient":  "9007199254740994",
+          "exponent":  -2
+        },
+        "stop_price":  {
+          "coefficient":  "9007199254740993",
+          "exponent":  -2
+        },
+        "time_in_force":  "TIME_IN_FORCE_GTD",
+        "expire_at":  "2099-02-28T19:30:00.123456789Z",
+        "venue":  "BINANCE",
+        "parent_order_id":  "",
+        "margin_mode":  "MARGIN_MODE_UNSPECIFIED"
+      },
+      "proposer":  "maker",
+      "act":  "ORDER_SUBMISSION",
+      "digest":  "b1946ac92492d2347c6235b4d2611184b1946ac92492d2347c6235b4d2611184",
+      "state":  "pending",
+      "last_refusal_reason":  "",
+      "last_refused_by":  ""
+    }
+  ],
+  "owner_tenant":  "acme"
+}

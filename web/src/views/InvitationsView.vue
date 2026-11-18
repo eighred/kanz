@@ -1,7 +1,16 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invitations, type CreatedInvitation, type InvitationSummary } from '../api/invitations'
 
+import { useSession } from '../stores/session'
+
+const session = useSession()
+let issuerVersion = 0
+function currentIssuer() {
+  const identity = session.identity
+  if (!identity?.tenant || !identity.subject) throw new Error('The issuing account could not be verified.')
+  return { tenant: identity.tenant, subject: identity.subject }
+}
 const entries = ref<InvitationSummary[]>([])
 const subject = ref('')
 const rolesText = ref('')
@@ -51,12 +60,15 @@ async function create() {
   created.value = null
   copied.value = false
   busy.value = true
+  const version = issuerVersion
   try {
-    created.value = await invitations.create({
+    const issued = await invitations.create({
       subject: subject.value.trim(),
       roles: roles.value,
       portfolios: portfolios.value,
-    })
+    }, currentIssuer())
+    if (version !== issuerVersion) return
+    created.value = issued
     subject.value = ''
     rolesText.value = ''
     portfoliosText.value = ''
@@ -91,7 +103,10 @@ async function change() {
   dismissSecret()
   try {
     if (action === 'reissue') {
-      created.value = await invitations.reissue(invite)
+      const version = issuerVersion
+      const issued = await invitations.reissue(invite, currentIssuer())
+      if (version !== issuerVersion) return
+      created.value = issued
       message.value = 'Invitation reissued. The previous token is revoked.'
     } else {
       await invitations.revoke(invite)
@@ -104,7 +119,14 @@ async function change() {
   } finally { busy.value = false }
 }
 
-onBeforeUnmount(dismissSecret)
+function forgetIssuer() {
+  issuerVersion++
+  dismissSecret()
+  review.value = null
+  message.value = ''
+}
+watch([() => session.identity?.subject, () => session.identity?.tenant], forgetIssuer, { flush: 'sync' })
+onBeforeUnmount(forgetIssuer)
 
 function dismissSecret() {
   created.value = null

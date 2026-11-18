@@ -31,6 +31,38 @@ function button(wrapper: Awaited<ReturnType<typeof open>>, label: string) {
 
 beforeEach(() => vi.restoreAllMocks())
 
+describe('credential presence on the operator wire', () => {
+  it.each([
+    null, [], { venues: null }, { venues: [null] }, { venues: [{ venue: '' }] }, { venues: [{ venue: '..' }] },
+    { venues: [{ venue: 'okx', configured: 'true' }] }, { venues: [{ venue: 'okx', configured: null }] },
+    { venues: [{ venue: 'okx', configured: true }, { venue: 'okx' }] },
+  ])('refuses malformed presence before offering either write form', async body => {
+    vi.spyOn(http, 'get').mockResolvedValue(body)
+    const wrapper = mount(VenuesView)
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toContain('invalid venue credential status')
+    expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('No venues returned')
+  })
+
+  it.each([{ venue: 'binance' }, { venue: 'binance', configured: false }])('supports omitted and explicit false without changing replacement confirmation', async unconfigured => {
+    vi.spyOn(http, 'get').mockResolvedValue({ venues: [unconfigured, { venue: 'okx', configured: true }] })
+    const wrapper = mount(VenuesView)
+    await flushPromises()
+    expect(button(wrapper, 'Set keys')).toBeDefined()
+    await button(wrapper, 'Replace keys')!.trigger('click')
+    expect(wrapper.find('input[name="confirm-venue"]').exists()).toBe(true)
+  })
+
+  it('accepts an empty protobuf venue list', async () => {
+    vi.spyOn(http, 'get').mockResolvedValue({})
+    const wrapper = mount(VenuesView)
+    await flushPromises()
+    expect(wrapper.text()).toContain('No venues returned.')
+    expect(wrapper.find('[role=alert]').exists()).toBe(false)
+  })
+})
+
 describe('a key is never rendered back', () => {
   it('shows presence only, never material', async () => {
     const wrapper = await open([configured])

@@ -64,10 +64,8 @@ function cancel() {
  * there is not a form error — it is an outage on the capital path. So a replace
  * asks for the venue's name to be typed; a first-time write does not.
  *
- * `configured` is omitted by protojson when false, so only an explicit true
- * counts — an unknown state is treated as "not configured", which asks for LESS
- * friction. That is the safe direction here: the dangerous act is overwriting,
- * and a venue reported as unconfigured has nothing to overwrite.
+ * The inventory parser normalizes ProtoJSON's omitted false flag. A malformed
+ * flag or conflicting entry prevents the inventory from offering a write.
  */
 function replacing(): boolean {
   return editing.value?.configured === true
