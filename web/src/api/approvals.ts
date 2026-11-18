@@ -1,4 +1,5 @@
 import { api, ApiError } from './client'
+import { checkWireDecimal } from './financial-wire'
 import type { Decimal } from './decimal'
 
 // The dual-control queue, as the browser sees it (#371, #539, #558).
@@ -157,7 +158,15 @@ export const approvals = {
    * the gateway's own comment says so, because "nothing to approve" and "the OMS
    * is unreachable" look identical that way and only one of them is fine.
    */
-  list: () => api.get<PendingApprovalsResponse>('/api/v1/orders/pending-approvals'),
+  async list() {
+    const response = await api.get<PendingApprovalsResponse>('/api/v1/orders/pending-approvals')
+    for (const entry of response.pending ?? []) {
+      checkWireDecimal(entry.command?.quantity)
+      checkWireDecimal(entry.command?.limit_price)
+      checkWireDecimal(entry.command?.stop_price)
+    }
+    return response
+  },
 
   /**
    * approve gives the second signature. It returns when the command is PUBLISHED.

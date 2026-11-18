@@ -1,4 +1,5 @@
 import { api, ApiError } from './client'
+import { checkWireDecimal, checkWireMoney } from './financial-wire'
 import type { Decimal, Money } from './decimal'
 
 // The risk read surface, as the browser sees it (#399).
@@ -150,14 +151,28 @@ export const risk = {
    * a 404 here can also mean "this deployment serves no order history" — which
    * is not "this portfolio has never traded". describeOrders separates them.
    */
-  orders: (id: string, limit?: number) =>
-    api.get<OrdersResponse>(
+  async orders(id: string, limit?: number) {
+    const response = await api.get<OrdersResponse>(
       `/api/v1/portfolios/${encodeURIComponent(id)}/orders` + (limit ? `?limit=${limit}` : ''),
-    ),
+    )
+    for (const order of response.orders ?? []) {
+      checkWireDecimal(order.quantity)
+      checkWireDecimal(order.filled_quantity)
+      checkWireMoney(order.limit_price)
+      checkWireMoney(order.average_fill_price)
+    }
+    return response
+  },
 
   /** exposure reads one portfolio's decomposition. */
-  exposure: (id: string) =>
-    api.get<ExposureResponse>(`/api/v1/portfolios/${encodeURIComponent(id)}/exposure`),
+  async exposure(id: string) {
+    const response = await api.get<ExposureResponse>(`/api/v1/portfolios/${encodeURIComponent(id)}/exposure`)
+    for (const row of response.set?.exposures ?? []) {
+      checkWireMoney(row.gross)
+      checkWireMoney(row.net)
+    }
+    return response
+  },
 }
 
 /**
