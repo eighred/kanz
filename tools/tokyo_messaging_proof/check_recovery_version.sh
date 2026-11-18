@@ -49,3 +49,18 @@ for case_name in absent suspended changed_head expired changed_download corrupt;
   [[ ! -s "$work/result" ]]
 done
 echo 'Verified pinned S3 requests and six object custody refusals'
+
+# Inspect the production backup paths at its first post-allocation API call.
+# A refused lookup must also remove the private directory.
+path_record="$work/observed-directory"
+require_boundary() { :; }
+refuse_active_writers() { :; }
+k() {
+  [[ "$*" == *"get cluster kanz-testnet-postgres"* ]] || return 1
+  [[ "$(stat -c %a "$RECOVERY_WORK")" == 700 && "$work" == "$RECOVERY_WORK/payload" &&
+     "$archive" == "$RECOVERY_WORK/bundle.tar.gz" ]] || return 1
+  echo "$RECOVERY_WORK" >"$path_record"
+  return 1
+}
+if (backup) >/dev/null 2>&1; then exit 1; fi
+[[ -s "$path_record" && ! -e "$(cat "$path_record")" ]]

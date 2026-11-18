@@ -268,23 +268,22 @@ backup() {
   local started backup_id work archive key archive_sha primary
   started=$(date -u +%s)
   backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RELEASE_COMMIT" | cut -c1-12)"
-  work=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
-  archive="${work}.tar.gz"
-  RECOVERY_WORK=$work
-  RECOVERY_ARCHIVE=$archive
+  RECOVERY_WORK=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
+  work="$RECOVERY_WORK/payload"
+  RECOVERY_ARCHIVE="$RECOVERY_WORK/bundle.tar.gz"
+  archive=$RECOVERY_ARCHIVE
   key="testnet/data-plane/${backup_id}/bundle.tar.gz"
-  primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
-  [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
 
   cleanup_backup() {
     local rc=$?
     if ! cleanup_backup_runner; then printf '%s\n' 'recovery-refused: backup runner cleanup unverified' >&2; rc=2; fi
     [[ "$RECOVERY_WORK" == /var/tmp/kanz-backup-* ]] && rm -rf -- "$RECOVERY_WORK"
-    [[ "$RECOVERY_ARCHIVE" == /var/tmp/kanz-backup-*.tar.gz ]] && rm -f -- "$RECOVERY_ARCHIVE" "${RECOVERY_ARCHIVE}.download"
     exit "$rc"
   }
   trap cleanup_backup EXIT
 
+  primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
+  [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
   mkdir -p "$work/postgres" "$work/nats" "$work/redis"
   : >"$work/postgres/source.tsv"
   local database
