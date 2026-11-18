@@ -63,6 +63,10 @@ patches:
       - op: add
         path: /spec/template/metadata/labels/kanz.io~1failure-domain
         value: single-node
+      # Preserve the deployed Redis image through the image mapping below.
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: redis
       - op: add
         path: /spec/template/spec/containers/0/resources
         value:

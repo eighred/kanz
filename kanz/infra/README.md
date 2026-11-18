@@ -10,6 +10,22 @@ for a single-node **k3s** cluster stood up by hand — used when standing up
 the full manifest set (SPIRE + NATS + the trading loop) outside both of
 those paths.
 
+## Accounting database topology
+
+Provision a dedicated accounting database with the migration role as schema
+owner. An existing shared database using named migration sets is compatible
+when the accounting target schema is the only schema containing a
+`ledger_entries` table. Keep accounting schema changes under the migration
+runner's advisory lock.
+
+On each invocation, `kanz-migrate` executes the read-only preflight bundled
+with accounting migration 0003 before recording or applying any migration.
+The historical SQL enumerates policies by table name across the database.
+A second ledger table in another schema causes the preflight to refuse with
+SQLSTATE `55000`. Check the selected database and migration role's
+`search_path` before retrying. Keep both schemas and their policy histories
+intact while resolving the database assignment.
+
 ## Adding a node during single-server k3s maintenance
 
 Schedule node additions outside maintenance on the sole control-plane node.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { users, type UserAccess, type IdentityPermissions, type GatewayPermissions } from '../api/users'
+import { users, UnconfirmedAccessUpdate, type UserAccess, type IdentityPermissions, type GatewayPermissions } from '../api/users'
 
 const authority = ref<IdentityPermissions | null>(null)
 const gateway = ref<GatewayPermissions | null>(null)
@@ -41,7 +41,16 @@ async function save() {
   if (!selected.value) return
   const user = selected.value
   await run(async () => {
-    await users.update(user, split(roles.value), split(portfolios.value))
+    try {
+      await users.update(user, split(roles.value), split(portfolios.value))
+    } catch (e) {
+      if (e instanceof UnconfirmedAccessUpdate) {
+        selected.value = null
+        rows.value = null
+        next.value = ''
+      }
+      throw e
+    }
     selected.value = null
     message.value = 'Access updated and previous sessions revoked. The account holder must sign in again.'
     await load()

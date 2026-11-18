@@ -60,6 +60,22 @@ async function main() {
       if (kind === 'executions') body = { retainedFrom: '2026-01-01T00:00:00Z', executions: Array.from({ length: count }, (_, i) => ({ id: `${id}-fill-${i}`, orderId: `${id}-order-${i}`, instrument: 'BTC-USD', venue: 'MOCK', side: 'buy', qty, price: qty, ...(i % 2 ? { fee: '0' } : {}), time: '2026-01-02T00:00:00Z' })) }
       try { await reply(body) } catch (error) { if (id !== 'B') throw error } // deliberately aborted old request
     })
+    await page.clock.install({ time: new Date('2026-11-18T12:00:00Z') })
+    let portfolioReads = 0
+    await page.route('**/api/v1/portfolios', route => {
+      portfolioReads++
+      return route.fulfill({ json: { owner_tenant: 'fixture-tenant', portfolios: [
+        { portfolio_id: 'prior', position_count: 0, as_of: '2026-11-17T12:01:00Z' },
+        { portfolio_id: 'future', position_count: 0, as_of: '2026-11-19T12:01:00Z' },
+      ] } })
+    })
+    await page.goto(base + '/portfolios')
+    const priorFold = page.getByRole('row').filter({ hasText: 'prior' })
+    await priorFold.getByText('23h ago', { exact: true }).waitFor()
+    await page.getByRole('row').filter({ hasText: 'future' }).getByText('Unknown', { exact: true }).waitFor()
+    await page.clock.fastForward(120_000)
+    await priorFold.getByText('1d ago (stale)', { exact: true }).waitFor()
+    assert.equal(portfolioReads, 1, 'age should advance without another portfolio read')
     await page.goto(base + '/broker-accounts/A')
     await page.getByRole('link', { name: 'Skip to main content' }).waitFor({ state: 'attached' })
     await page.keyboard.press('Tab')

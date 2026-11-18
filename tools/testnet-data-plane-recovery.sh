@@ -23,6 +23,9 @@ readonly NATS_IMAGE='nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f9
 readonly NATS_BOX_IMAGE='natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c'
 RECOVERY_WORK=''
 RECOVERY_ARCHIVE=''
+RUNNER_UID=''
+RUNNER_NONCE=''
+readonly NATS_RUNNER=nats-backup-runner
 DRILL_UID=''
 TV_OWNER_NONCE=''
 TV_PAIR=''
@@ -86,22 +89,45 @@ refuse_active_writers() {
   [[ "$(k -n "$MSG_NS" get job nats-bootstrap -o jsonpath='{.status.succeeded}')" == 1 ]] || die 'NATS topology is not provisioned'
 }
 
-clone_job_as_runner() {
-  local namespace=$1 job=$2 pod=$3 container=$4
-  k -n "$namespace" delete pod "$pod" --ignore-not-found=true --wait=true >/dev/null
-  local job_json
-  job_json=$(k -n "$namespace" get job "$job" -o json)
-  printf '%s' "$job_json" | jq \
-    --arg pod "$pod" --arg container "$container" '
+create_backup_runner() {
+  local job_json created
+  job_json=$(k -n "$MSG_NS" get job nats-bootstrap -o json)
+  RUNNER_NONCE=$(cat /proc/sys/kernel/random/uuid)
+  created=$(printf '%s' "$job_json" | jq \
+    --arg pod "$NATS_RUNNER" --arg container bootstrap --arg owner "$RUNNER_NONCE" '
       .kind="Pod" | .apiVersion="v1" | .metadata.name=$pod |
       del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,
           .metadata.generation,.metadata.annotations,.metadata.ownerReferences,.status) |
+      .metadata.annotations={"kanz.io/recovery-owner":$owner} |
       .spec=.spec.template.spec | del(.spec.template) |
       .spec.restartPolicy="Never" |
       (.spec.containers[] | select(.name==$container) | .command)=["sleep","1800"] |
       (.spec.containers[] | select(.name==$container) | .args)=[]' |
-    k create -f - >/dev/null
-  k -n "$namespace" wait --for=condition=Ready "pod/$pod" --timeout=120s >/dev/null
+    k -n "$MSG_NS" create -f - -o json) || die 'could not create the backup runner'
+  RUNNER_UID=$(backup_runner_uid <<<"$created") || die 'invalid created backup runner identity'
+}
+
+backup_runner_uid() {
+  jq -er --arg ns "$MSG_NS" --arg name "$NATS_RUNNER" --arg owner "$RUNNER_NONCE" '
+    select(.kind=="Pod" and .metadata.namespace==$ns and .metadata.name==$name and
+           .metadata.annotations."kanz.io/recovery-owner"==$owner) |
+    .metadata.uid | strings | select(test("^[0-9a-f-]{36}$"))'
+}
+
+cleanup_backup_runner() {
+  [[ -n "$RUNNER_NONCE" ]] || return 0
+  local current uid
+  current=$(k -n "$MSG_NS" get pod "$NATS_RUNNER" --ignore-not-found -o json) || return 1
+  if [[ -n "$current" ]]; then
+    # The nonce also identifies an owned pod if the create response was lost.
+    uid=$(backup_runner_uid <<<"$current") || return 1
+    [[ -z "$RUNNER_UID" || "$RUNNER_UID" == "$uid" ]] || return 1
+    jq -n --arg uid "$uid" '{kind:"DeleteOptions",apiVersion:"v1",preconditions:{uid:$uid}}' |
+      k delete --raw "/api/v1/namespaces/$MSG_NS/pods/$NATS_RUNNER" -f - >/dev/null || return 1
+    k -n "$MSG_NS" wait --for=delete "pod/$NATS_RUNNER" --timeout=90s >/dev/null || return 1
+  fi
+  RUNNER_UID=''
+  RUNNER_NONCE=''
 }
 
 wait_for_pod_selector() {
@@ -225,12 +251,12 @@ verify_postgres_inventory() {
 # This isolated drill has no timestamp for an incident, the last recoverable
 # write at that incident, or restoration of the operational service.
 emit_restore_receipt() {
-  local key=$1 sha=$2 release=$3 elapsed=$4 databases=$5 nats=$6 details=$7
+  local key=$1 sha=$2 release=$3 elapsed=$4 databases=$5 nats=$6 details=$7 version=$8
   [[ "$elapsed" =~ ^[0-9]+$ ]] || die 'invalid restore drill duration'
   jq -n --arg key "$key" --arg sha "$sha" --arg release "$release" --argjson elapsed "$elapsed" \
-    --argjson databases "$databases" --argjson nats "$nats" --argjson details "$details" '
+    --argjson databases "$databases" --argjson nats "$nats" --argjson details "$details" --arg version "$version" '
     $nats + $details + {format:"kanz-testnet-restore-drill-v1",status:"RESTORE_VERIFIED",
-      key:$key,sha256:$sha,source_release_commit:$release,databases:$databases,drill_elapsed_seconds:$elapsed,
+      key:$key,version_id:$version,sha256:$sha,source_release_commit:$release,databases:$databases,drill_elapsed_seconds:$elapsed,
       operational_recovery:{state:"UNKNOWN",rpo_seconds:null,rto_seconds:null,
         reason:"incident and operational recovery timestamps unavailable"}}'
 }
@@ -239,26 +265,25 @@ backup() {
   require_boundary
   refuse_active_writers
 
-  local started backup_id work archive key archive_sha retain_until primary nats_runner
+  local started backup_id work archive key archive_sha primary
   started=$(date -u +%s)
   backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RELEASE_COMMIT" | cut -c1-12)"
-  work=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
-  archive="/var/tmp/kanz-data-plane-${backup_id}.tar.gz"
-  RECOVERY_WORK=$work
-  RECOVERY_ARCHIVE=$archive
+  RECOVERY_WORK=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
+  work="$RECOVERY_WORK/payload"
+  RECOVERY_ARCHIVE="$RECOVERY_WORK/bundle.tar.gz"
+  archive=$RECOVERY_ARCHIVE
   key="testnet/data-plane/${backup_id}/bundle.tar.gz"
-  primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
-  [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
-  nats_runner=nats-backup-runner
 
   cleanup_backup() {
-    k -n "$DATA_NS" delete pod postgres-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    k -n "$MSG_NS" delete pod nats-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    local rc=$?
+    if ! cleanup_backup_runner; then printf '%s\n' 'recovery-refused: backup runner cleanup unverified' >&2; rc=2; fi
     [[ "$RECOVERY_WORK" == /var/tmp/kanz-backup-* ]] && rm -rf -- "$RECOVERY_WORK"
-    [[ "$RECOVERY_ARCHIVE" == /var/tmp/kanz-data-plane-*.tar.gz ]] && rm -f -- "$RECOVERY_ARCHIVE" "${RECOVERY_ARCHIVE}.download"
+    exit "$rc"
   }
   trap cleanup_backup EXIT
 
+  primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
+  [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
   mkdir -p "$work/postgres" "$work/nats" "$work/redis"
   : >"$work/postgres/source.tsv"
   local database
@@ -275,14 +300,19 @@ backup() {
   k -n "$MSG_NS" exec redis-0 -c redis -- cat /data/dump.rdb >"$work/redis/dump.rdb"
   [[ -s "$work/redis/dump.rdb" ]] || die 'Redis produced an empty RDB artifact'
 
-  clone_job_as_runner "$MSG_NS" nats-bootstrap "$nats_runner" bootstrap
-  k -n "$MSG_NS" exec "$nats_runner" -c bootstrap -- sh -ceu '
+  create_backup_runner
+  k -n "$MSG_NS" wait --for=condition=Ready "pod/$NATS_RUNNER" --timeout=120s >/dev/null
+  local runner
+  runner=$(k -n "$MSG_NS" get pod "$NATS_RUNNER" -o json | backup_runner_uid)
+  [[ "$runner" == "$RUNNER_UID" ]] || die 'backup runner identity changed before snapshot'
+  k -n "$MSG_NS" exec "$NATS_RUNNER" -c bootstrap -- sh -ceu '
     rm -rf /tmp/nats-backup
     nats --server "$NATS_URL" --tlscert "$NATS_CERT" --tlskey "$NATS_KEY" --tlsca "$NATS_CA" \
       account backup --check --critical-warnings --force /tmp/nats-backup >/dev/null
     tar -C /tmp -czf - nats-backup
   ' >"$work/nats/account.tar.gz"
   [[ -s "$work/nats/account.tar.gz" ]] || die 'NATS produced an empty account backup'
+  cleanup_backup_runner || die 'backup runner cleanup unverified'
 
   local pf
   timeout 30 /usr/local/bin/k3s kubectl -n "$MSG_NS" port-forward --address 127.0.0.1 pod/nats-0 18222:8222 >"$work/nats/port-forward.log" 2>&1 & pf=$!
@@ -311,26 +341,48 @@ backup() {
   tar -C "$work" -czf "$archive" .
   archive_sha=$(sha256sum "$archive" | awk '{print $1}')
 
-  aws s3api put-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
-    --body "$archive" --server-side-encryption aws:kms --ssekms-key-id "$RECOVERY_KMS_KEY_ARN" \
-    --checksum-algorithm SHA256 --metadata "sha256=${archive_sha},format=kanz-testnet-data-plane-v2" >/dev/null
-  aws s3api get-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
-    --checksum-mode ENABLED "${archive}.download" >/dev/null
-  [[ "$(sha256sum "${archive}.download" | awk '{print $1}')" == "$archive_sha" ]] || die 'downloaded recovery artifact checksum differs from upload'
-
-  local head retention elapsed
-  head=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" --checksum-mode ENABLED)
-  retention=$(aws s3api get-object-retention --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key")
-  jq -e --arg kms "$RECOVERY_KMS_KEY_ARN" --arg sha "$archive_sha" '
-    .ServerSideEncryption=="aws:kms" and .SSEKMSKeyId==$kms and
-    .Metadata.sha256==$sha and (.ContentLength > 0)
-  ' <<<"$head" >/dev/null || die 'S3 object lacks the required KMS, checksum, or content boundary'
-  jq -e '.Retention.Mode=="GOVERNANCE" and (.Retention.RetainUntilDate | length > 0)' <<<"$retention" >/dev/null || die 'S3 object lacks Governance retention'
-  retain_until=$(jq -r .Retention.RetainUntilDate <<<"$retention")
+  local evidence elapsed
+  evidence=$(upload_recovery_archive "$key" "$archive" "$archive_sha") || die 'backup object verification failed'
   elapsed=$(( $(date -u +%s) - started ))
   jq -n --arg backup_id "$backup_id" --arg key "$key" --arg sha256 "$archive_sha" \
-    --arg retain_until "$retain_until" --argjson elapsed_seconds "$elapsed" \
-    '{status:"BACKUP_VERIFIED",backup_id:$backup_id,key:$key,sha256:$sha256,object_lock_retain_until:$retain_until,elapsed_seconds:$elapsed_seconds}'
+    --argjson evidence "$evidence" --argjson elapsed_seconds "$elapsed" \
+    '$evidence + {status:"BACKUP_VERIFIED",backup_id:$backup_id,key:$key,sha256:$sha256,elapsed_seconds:$elapsed_seconds}'
+}
+
+object_version() {
+  jq -ser 'select(length==1) | .[0].VersionId | strings |
+    select(length>0 and .!="null" and (test("[[:cntrl:]]")|not))'
+}
+
+upload_recovery_archive() {
+  local key=$1 archive=$2 sha=$3 version
+  version=$(aws s3api put-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
+    --body "$archive" --server-side-encryption aws:kms --ssekms-key-id "$RECOVERY_KMS_KEY_ARN" \
+    --checksum-algorithm SHA256 --metadata "sha256=${sha},format=kanz-testnet-data-plane-v2" \
+    --output json | object_version) || die 'upload did not identify an immutable object version'
+  read_recovery_archive "$key" "$version" "${archive}.download" "$sha"
+}
+
+read_recovery_archive() {
+  local key=$1 version=$2 destination=$3 expected_sha=${4:-} head retention sha until returned
+  local -a object=(--region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" "--version-id=$version" --output json)
+  head=$(aws s3api head-object "${object[@]}" --checksum-mode ENABLED) || die 'could not inspect recovery version'
+  [[ "$(object_version <<<"$head")" == "$version" ]] || die 'recovery object version changed'
+  sha=$(jq -er --arg kms "$RECOVERY_KMS_KEY_ARN" '
+    select(.ServerSideEncryption=="aws:kms" and .SSEKMSKeyId==$kms and (.ContentLength|numbers)>0) |
+    .Metadata.sha256 | strings | select(test("^[0-9a-f]{64}$"))' <<<"$head") || die 'invalid recovery object metadata'
+  [[ -z "$expected_sha" || "$sha" == "$expected_sha" ]] || die 'recovery object differs from upload'
+  retention=$(aws s3api get-object-retention "${object[@]}") || die 'could not inspect recovery retention'
+  until=$(jq -er 'select(.Retention.Mode=="GOVERNANCE") | .Retention.RetainUntilDate | strings | select(length>0)' \
+    <<<"$retention") || die 'artifact lacks Governance retention'
+  local expires
+  expires=$(date -d "$until" +%s) || die 'invalid recovery retention date'
+  (( expires > $(date +%s) )) || die 'recovery retention expired'
+  returned=$(aws s3api get-object "${object[@]}" --checksum-mode ENABLED "$destination" | object_version) || die 'could not download recovery version'
+  [[ "$returned" == "$version" ]] || die 'downloaded version differs from locked metadata'
+  [[ "$(sha256sum "$destination" | awk '{print $1}')" == "$sha" ]] || die 'artifact checksum differs from locked metadata'
+  jq -n --arg version "$version" --arg sha "$sha" --arg until "$until" \
+    '{version_id:$version,sha256:$sha,object_lock_retain_until:$until}'
 }
 
 redis_backup_checkpoint() {
@@ -354,7 +406,7 @@ redis_backup_checkpoint() {
 
 restore() {
   require_boundary
-  local started work key archive archive_sha head retention
+  local started work key archive archive_sha version object_evidence
   started=$SECONDS
   work=$(mktemp -d /var/tmp/kanz-restore.XXXXXX)
   archive="$work/bundle.tar.gz"
@@ -370,14 +422,10 @@ restore() {
 
   key=$(aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
   [[ "$key" == testnet/data-plane/*/bundle.tar.gz ]] || die 'no bounded data-plane recovery artifact exists'
-  head=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" --checksum-mode ENABLED)
-  retention=$(aws s3api get-object-retention --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key")
-  archive_sha=$(jq -r '.Metadata.sha256 // empty' <<<"$head")
-  jq -e --arg kms "$RECOVERY_KMS_KEY_ARN" '.ServerSideEncryption=="aws:kms" and .SSEKMSKeyId==$kms and (.ContentLength > 0)' <<<"$head" >/dev/null || die 'artifact lacks the required KMS boundary'
-  jq -e '.Retention.Mode=="GOVERNANCE" and (.Retention.RetainUntilDate | length > 0)' <<<"$retention" >/dev/null || die 'artifact lacks Governance retention'
-  [[ "$archive_sha" =~ ^[0-9a-f]{64}$ ]] || die 'artifact lacks SHA-256 metadata'
-  aws s3api get-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" --checksum-mode ENABLED "$archive" >/dev/null
-  [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$archive_sha" ]] || die 'artifact checksum differs from locked metadata'
+  version=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
+    --output json | object_version) || die 'selected recovery key has no immutable version'
+  object_evidence=$(read_recovery_archive "$key" "$version" "$archive") || die 'restore object verification failed'
+  archive_sha=$(jq -er .sha256 <<<"$object_evidence")
   tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))' && die 'artifact contains an unsafe path'
   mkdir "$work/extracted"
   tar -C "$work/extracted" -xzf "$archive"
@@ -575,7 +623,7 @@ EOF
     details=$(jq -n --argjson keys "$restored_redis" '{redis_keys:$keys,isolation:"temporary replacement namespace on source-region node"}')
   fi
   cleanup_tv_restore_namespace || die 'drill cleanup did not complete'
-  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$(jq --argjson ledger "$(migration_ledger_evidence "$archive_format")" '.cleanup="verified" | .postgres_migration_ledger=$ledger' <<<"$details")"
+  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$(jq --argjson ledger "$(migration_ledger_evidence "$archive_format")" '.cleanup="verified" | .postgres_migration_ledger=$ledger' <<<"$details")" "$version"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

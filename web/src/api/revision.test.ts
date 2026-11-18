@@ -13,9 +13,13 @@ it('retains adjacent large revisions and the signed upper boundary as decimal te
     const row = { ...account, revision }
     vi.spyOn(api, 'get').mockResolvedValueOnce({ users: [row], next_cursor: '' })
     const page = await users.list(account.tenant)
-    const put = vi.spyOn(api, 'put').mockResolvedValueOnce(row)
-    expect((await users.update(page.users[0]!, ['kanz-user'], [])).revision).toBe(revision)
-    expect(put).toHaveBeenLastCalledWith('/api/identity/users/alice/access', { revision, roles: ['kanz-user'], portfolios: [] })
+    expect(page.users[0]!.revision).toBe(revision)
+    if (revision !== '9223372036854775807') {
+      const next = (BigInt(revision) + 1n).toString()
+      const put = vi.spyOn(api, 'put').mockResolvedValueOnce({ ...row, revision: next, session_epoch: '9007199254740993' })
+      expect((await users.update(page.users[0]!, ['kanz-user'], [])).revision).toBe(next)
+      expect(put).toHaveBeenLastCalledWith('/api/identity/users/alice/access', { revision, roles: ['kanz-user'], portfolios: [] }, 200)
+    }
     vi.spyOn(api, 'get').mockResolvedValueOnce([{ ...invitation, revision }])
     const list = await invitations.list()
     const post = vi.spyOn(api, 'post').mockResolvedValueOnce({ ...invitation, revision })

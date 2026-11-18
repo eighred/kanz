@@ -23,8 +23,13 @@ const UnclassifiedSector = "UNCLASSIFIED"
 // portfolio base currency (the sector aggregate is base-currency; cross-currency
 // roll-up needs an FX layer this package does not have). Positions with a nil
 // MarketValue are skipped (matching ComputeExposure). Output is sorted by bucket
-// key for deterministic iteration.
+// key for deterministic iteration. Without a classifier the sector dimension
+// is unavailable. A configured classifier with a missing mapping contributes
+// to the UNCLASSIFIED bucket.
 func SectorExposure(ctx context.Context, p *domain.Portfolio, c Classifier) []domain.Exposure {
+	if c == nil {
+		return nil
+	}
 	base := p.BaseCurrency()
 	baseStr := string(base)
 	bySector := make(map[string]*domain.Exposure)
@@ -65,12 +70,13 @@ func SectorExposure(ctx context.Context, p *domain.Portfolio, c Classifier) []do
 
 // ComputeExposure returns the full ExposureSet including the SECTOR dimension,
 // layering SectorExposure onto compute.ComputeExposure's instrument + currency
-// dimensions. The engine/query path uses this when a Classifier is wired; absent
-// one it calls compute.ComputeExposure directly (two dimensions) — that
-// signature stays untouched, as the RISK-06 deferral note intended.
+// dimensions. Without sector rows it returns those two canonical dimensions.
 func ComputeExposure(ctx context.Context, p *domain.Portfolio, c Classifier) *domain.ExposureSet {
 	base := compute.ComputeExposure(p)
-	items := base.Items()
-	items = append(items, SectorExposure(ctx, p, c)...)
+	sectors := SectorExposure(ctx, p, c)
+	if len(sectors) == 0 {
+		return base
+	}
+	items := append(base.Items(), sectors...)
 	return domain.NewExposureSet(p.ID(), p.AsOf(), items)
 }

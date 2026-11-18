@@ -441,10 +441,7 @@ func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domai
 		// gross — an operator reading a large UNCLASSIFIED bucket is being told
 		// about a reference-data gap, which is the honest answer and the one a
 		// silently absent dimension could not give.
-		es := compute.ComputeExposure(p)
-		if e.classifier != nil {
-			es = factor.ComputeExposure(ctx, p, e.classifier)
-		}
+		es := factor.ComputeExposure(ctx, p, e.classifier)
 		e.cache.StoreExposure(id, es)
 		return es, p.LogPosition(), true, nil
 	}

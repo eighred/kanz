@@ -41,7 +41,7 @@ func TestListInstrumentsReportsTheConfiguredSetInOrder(t *testing.T) {
 	s := &Server{
 		venue: listingVenue{mic: "XBIN", syms: execution.StaticSymbolMap{
 			"ETH-USD": "ETHUSDT",
-			"BTC-USD": "BTCUSDT",
+			"BTC-USD": "XBTUSD",
 			"SOL-USD": "SOLUSDT",
 		}},
 		logger: quiet(),
@@ -58,6 +58,10 @@ func TestListInstrumentsReportsTheConfiguredSetInOrder(t *testing.T) {
 	var ids []string
 	for _, in := range resp.GetInstruments() {
 		ids = append(ids, in.GetInstrumentId())
+		if in.GetInstrumentId() == "BTC-USD" && (in.GetVenueSymbol() != "XBTUSD" ||
+			in.GetBaseAsset() != "" || in.GetQuoteAsset() != "" || in.GetQuoteMismatch()) {
+			t.Errorf("unresolved venue symbol must retain its listing with unknown assets: %v", in)
+		}
 		if in.GetVenueSymbol() == "" {
 			t.Errorf("%s carries no venue symbol; the canonical id alone does not say what is being bought",
 				in.GetInstrumentId())

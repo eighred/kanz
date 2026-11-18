@@ -3,7 +3,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 import InstrumentsView from './InstrumentsView.vue'
 import * as api from '../api/instruments'
-import { ApiError } from '../api/client'
+import { api as client, ApiError } from '../api/client'
+import { createPinia } from 'pinia'
+import { useSession } from '../stores/session'
 import type { InstrumentsResponse } from '../api/instruments'
 
 // THE CLAIMS THIS SCREEN MAKES:
@@ -35,7 +37,9 @@ async function open(resp: InstrumentsResponse | Error) {
   const r = router()
   await r.push('/instruments')
   await r.isReady()
-  const wrapper = mount(InstrumentsView, { global: { plugins: [r] } })
+  const pinia = createPinia()
+  useSession(pinia).identity = { subject: 'operator', tenant: 'acme', expires_at: '2099-01-01' }
+  const wrapper = mount(InstrumentsView, { global: { plugins: [r, pinia] } })
   await flushPromises()
   return wrapper
 }
@@ -145,6 +149,37 @@ describe('an empty catalogue is a statement, not a blank table', () => {
   // catalogue, which is a different sentence from "it can trade nothing" — and
   // presenting the first as the second would report a routing gap as a platform
   // with no markets.
+  it.each([
+    {}, { owner_tenant: 'acme' }, { owner_tenant: 'foreign', instruments: [] },
+    { ...base, instruments: [base.instruments[0], { ...base.instruments[1], mic: '' }] },
+    { ...base, instruments: [base.instruments[0], { ...base.instruments[0], venue_symbol: 'other' }] },
+    { ...base, instruments: [{ ...base.instruments[0], quote_mismatch: 'false' }] },
+    { ...base, instruments: [{ ...base.instruments[0], base_asset: '', quote_asset: '' }] },
+  ])('refuses an ambiguous or malformed catalogue before displaying any route', async body => {
+    const list = api.instruments.list
+    vi.spyOn(client, 'get').mockResolvedValue(body)
+    await expect(list('acme', new AbortController().signal)).rejects.toThrow()
+  })
+
+  it('accepts a scoped empty catalogue and both current and legacy route shapes', async () => {
+    const routes = [
+      ...base.instruments,
+      { instrument_id: 'LEGACY', venue_symbol: 'legacy', mic: 'XBIN' },
+      { instrument_id: 'UNRESOLVED', venue_symbol: 'custom', mic: 'XBIN', base_asset: '', quote_asset: '', quote_mismatch: false },
+    ]
+    const get = vi.spyOn(client, 'get').mockResolvedValueOnce({ ...base, instruments: [] })
+      .mockResolvedValueOnce({ ...base, instruments: routes })
+    const signal = new AbortController().signal
+    expect((await api.instruments.list('acme', signal)).instruments).toEqual([])
+    expect((await api.instruments.list('acme', signal)).instruments).toEqual(routes)
+    expect(get).toHaveBeenCalledWith('/api/v1/instruments', { signal, expectedStatus: 200 })
+  })
+
+  it('refuses a partial HTTP response with a valid empty page', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ ...base, instruments: [] }, { status: 206 }))
+    await expect(api.instruments.list('acme', new AbortController().signal)).rejects.toThrow('Unexpected success status')
+  })
+
   it('explains a 404 rather than claiming the platform trades nothing', async () => {
     const wrapper = await open(new ApiError(404, 'not found'))
 

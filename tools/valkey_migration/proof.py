@@ -5,8 +5,11 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sys
 import time
 import uuid
+
+import yaml
 
 REDIS = "redis@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08"
 VALKEY = "valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b"
@@ -119,6 +122,21 @@ def validate_report(report, source):
 
 
 
+def rig_workload():
+    root = Path(__file__).resolve().parents[2]
+    raw = command([sys.executable, str(root / "tools/rig_dev_patch.py"),
+                   str(root / "kanz/infra/messaging/redis.yaml")])
+    resources = list(yaml.safe_load_all(raw))
+    stateful, = [doc for doc in resources if doc and doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "redis"]
+    pod = stateful["spec"]["template"]["spec"]
+    container, = pod["containers"]
+    mounts = {m["name"]: m["mountPath"] for m in container["volumeMounts"]}
+    if (container["image"] != VALKEY or mounts != {"data": "/data", "secret": "/run/secrets/redis"}
+            or not any(v.get("secret", {}).get("secretName") == "redis-auth" for v in pod["volumes"])):
+        raise Refused("unexpected_rig_workload")
+    return container
+
+
 class Fixture:
     def __init__(self, name):
         validate_name(name)
@@ -164,14 +182,26 @@ class Fixture:
                 "--pids-limit=64", "--log-driver=json-file", "--log-opt=max-size=1m", "--log-opt=max-file=1",
                 "--mount", "type=volume,src=" + self.volume + ",dst=/data"]
 
-    def start(self, image, preamble):
+    def start(self, image, preamble, workload=None):
         self.volume_owned()
         self.image = image
         self.cli = "valkey-cli" if image == VALKEY else "redis-cli"
         server = "valkey-server" if image == VALKEY else "redis-server"
         # No host mounts or host ports. The same private volume crosses all phases.
-        command(self.base(image) + ["--rm", "-i", image, "sh", "-c", "cat > /data/proof.conf"], config(self.password, preamble), timeout=180)
-        command(self.base(image) + ["-d", image, server, "/data/proof.conf"], timeout=180)
+        if workload is None:
+            command(self.base(image) + ["--rm", "-i", image, "sh", "-c", "cat > /data/proof.conf"], config(self.password, preamble), timeout=180)
+            command(self.base(image) + ["-d", image, server, "/data/proof.conf"], timeout=180)
+        else:
+            # The rig mounts its password before the workload starts. Supply an
+            # ephemeral fixture secret without a host file, then exec that command.
+            secret = "/run/secrets/redis"
+            command(self.base(image) + ["--tmpfs", secret + ":rw,noexec,nosuid,nodev,uid=999,gid=999,mode=0700,size=16k",
+                    "-d", image, "sh", "-ec", 'while [ ! -f /run/secrets/redis/password ]; do sleep 0.1; done; exec "$@"',
+                    "rig-workload", *workload["command"]], timeout=180)
+            self.owned()
+            command(["docker", "exec", "-i", self.name, "sh", "-ec",
+                     "cd /run/secrets/redis; umask 077; cat >seed; mv seed password"], self.password)
+
         loaded = self.owned()
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -195,8 +225,15 @@ class Fixture:
         version = server_info.get("valkey_version") if image == VALKEY else server_info.get("redis_version")
         if (image == VALKEY and version != "9.1.3") or (image == REDIS and version != REDIS_VERSION):
             raise Refused("unexpected_server_version")
-        for key, value in {"appendonly": "yes", "appendfsync": "always", "maxmemory-policy": "noeviction", "maxmemory": "67108864",
-                           "aof-use-rdb-preamble": "yes" if preamble else "no"}.items():
+        expected = {"appendonly": "yes", "appendfsync": "always", "maxmemory-policy": "noeviction",
+                    "aof-use-rdb-preamble": "yes" if preamble else "no"}
+        if workload is None:
+            expected["maxmemory"] = "67108864"
+        else:
+            for probe in ("livenessProbe", "readinessProbe"):
+                if command(["docker", "exec", self.name, *workload[probe]["exec"]["command"]]) != "PONG":
+                    raise Refused("workload_probe_failed")
+        for key, value in expected.items():
             result = self.call("CONFIG", "GET", key)
             if result not in ([key, value], {key: value}):
                 raise Refused("persistence_configuration_mismatch")
@@ -277,9 +314,9 @@ def wait_for_claim_expiry(fixture, key, expires):
     raise Refused("first_install_claim_did_not_expire")
 
 
-def first_install(fixture, phases):
+def first_install(fixture, phases, workload):
     fixture.create_volume()
-    phases["valkey_first_install"] = fixture.start(VALKEY, True)
+    phases["valkey_first_install"] = fixture.start(VALKEY, True, workload)
     keyspace = fixture.raw("INFO", "keyspace")
     if fixture.call("DBSIZE") != 0 or keyspace.splitlines() != ["# Keyspace"]:
         raise Refused("first_install_keyspace_not_empty")
@@ -296,7 +333,7 @@ def first_install(fixture, phases):
     verify_snapshot(fixture.snapshot([retained, short]),
                     {**expected, short: {"value": "temporary-claim", "expires": short_expiry}})
     fixture.stop()
-    phases["first_install_restart"] = fixture.start(VALKEY, True)
+    phases["first_install_restart"] = fixture.start(VALKEY, True, workload)
     fixture.claim_refused(retained, expires + 60_000)
     verify_snapshot(fixture.snapshot([retained]), expected)
     wait_for_claim_expiry(fixture, short, short_expiry)
@@ -312,7 +349,7 @@ def main():
     report = {"source": command(["git", "rev-parse", "HEAD"]), "verdict": "FAIL", "phases": {}, "cleanup": "unknown"}
     stage = "valkey_first_install"
     try:
-        first_install(fixture, report["phases"])
+        first_install(fixture, report["phases"], rig_workload())
         stage = "create"
         fixture.create_volume()
         stage = "redis_seed"
