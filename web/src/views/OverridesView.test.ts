@@ -180,6 +180,7 @@ describe('the chosen price survives exactly', () => {
     expect(dialog.exists()).toBe(true)
     expect(dialog.text()).toContain('130.5')
     expect(dialog.text()).toContain('vendor confirmed after corp action')
+    expect(button(wrapper, 'Approve the override')!.attributes('disabled')).toBeUndefined()
   })
 
   it('states a price it cannot render exactly rather than rounding it', async () => {
@@ -203,13 +204,18 @@ describe('the chosen price survives exactly', () => {
     expect(cell.text()).not.toContain('0')
   })
 
-  it('refuses to let the confirmation stand behind an unrenderable price', async () => {
-    const wrapper = await open([entry({ chosen_price: '1/3' })])
+  it.each(['1/3', '', undefined, 130 as unknown as string])('withholds signature for an unrenderable wire price %s', async chosen_price => {
+    const approve = vi.spyOn(overridesApi.overrides, 'approve')
+    const wrapper = await open([entry({ chosen_price })])
     await button(wrapper, 'Approve')!.trigger('click')
 
     const dialog = wrapper.find('[role="dialog"]')
     expect(dialog.text()).toContain('Do not sign this')
     expect(dialog.text()).toContain('nobody has read')
+    const submit = button(wrapper, 'Approve the override')!
+    expect(submit.attributes('disabled')).toBeDefined()
+    submit.element.dispatchEvent(new MouseEvent('click'))
+    expect(approve).not.toHaveBeenCalled()
   })
 })
 

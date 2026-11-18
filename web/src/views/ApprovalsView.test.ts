@@ -196,7 +196,7 @@ describe('a refused entry does not read as untouched work', () => {
 describe('the maker’s order terms at signing', () => {
   it('displays the exact stop, limit, GTD expiry and scope from the gateway ProtoJSON', async () => {
     vi.spyOn(api, 'get').mockResolvedValue(stopLimit)
-    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({ order_id: 'order-stop-limit', status: 'approval_submitted' })
+    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue(undefined)
     const wrapper = mount(ApprovalsView)
     await flushPromises()
     await button(wrapper, 'Approve')!.trigger('click')
@@ -234,7 +234,7 @@ describe('the digest survives, whole', () => {
   it('passes the entry’s own digest to the approve route, not another entry’s', async () => {
     const approve = vi
       .spyOn(approvalsApi.approvals, 'approve')
-      .mockResolvedValue({ order_id: 'ord-2', status: 'approval_submitted' })
+      .mockResolvedValue(undefined)
     const wrapper = await open({
       pending: [entry({ order_id: 'ord-1' }), entry({ order_id: 'ord-2', digest: OTHER_DIGEST })],
     })
@@ -249,7 +249,7 @@ describe('the digest survives, whole', () => {
   })
 
   it('offers no approve affordance for an entry carrying no digest', async () => {
-    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({})
+    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue(undefined)
     const wrapper = await open({ pending: [entry({ digest: '' })] })
 
     expect(button(wrapper, 'Approve')).toBeUndefined()
@@ -273,10 +273,7 @@ describe('the digest survives, whole', () => {
 
 describe('the 202 is not an approval', () => {
   it('reports the approval as submitted and says it is not yet approved', async () => {
-    vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({
-      order_id: 'ord-1',
-      status: 'approval_submitted',
-    })
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ order_id: 'ord-1', status: 'approval_submitted' })
     const wrapper = await open({ pending: [entry()] })
 
     await button(wrapper, 'Approve')!.trigger('click')
@@ -289,11 +286,12 @@ describe('the 202 is not an approval', () => {
     expect(status).toMatch(/SUBMITTED/)
     expect(status).toMatch(/not approved yet/i)
     expect(status).toContain('ord-1')
+    expect(post).toHaveBeenCalledExactlyOnceWith('/api/v1/orders/ord-1/approve', { digest: DIGEST }, 202)
   })
 
   it('re-reads the queue afterwards, because that is where the answer appears', async () => {
     const list = vi.spyOn(approvalsApi.approvals, 'list').mockResolvedValue({ pending: [entry()] })
-    vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({})
+    vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue(undefined)
     const wrapper = mount(ApprovalsView)
     await flushPromises()
 
@@ -320,7 +318,7 @@ describe('the 202 is not an approval', () => {
         }),
       ],
     })
-    vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({})
+    vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue(undefined)
     const wrapper = mount(ApprovalsView)
     await flushPromises()
 
@@ -331,6 +329,32 @@ describe('the 202 is not an approval', () => {
     expect(stateCell(wrapper).text()).toBe('REFUSED')
     expect(wrapper.text()).toContain('Your signature was refused')
     expect(wrapper.text()).toMatch(/find another approver/i)
+  })
+
+  it.each([
+    new Response('null', { status: 202 }), new Response('{}', { status: 202 }),
+    Response.json({ order_id: 'another-order', status: 'approval_submitted' }, { status: 202 }),
+    Response.json({ order_id: 'ord-1', status: 'approved' }, { status: 202 }),
+    Response.json({ order_id: 'ord-1', status: 'approval_submitted' }, { status: 200 }),
+    new Response('{', { status: 202 }), new Response(null, { status: 204 }),
+    new Response('Unavailable', { status: 502 }), new Response('Timed out', { status: 408 }), new Error('Connection closed'),
+  ])('requires a fresh read after an unknown submission outcome', async response => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    if (response instanceof Error) fetch.mockRejectedValueOnce(response)
+    else fetch.mockResolvedValueOnce(response)
+    const wrapper = await open({ pending: [entry()] })
+    await button(wrapper, 'Approve')!.trigger('click')
+    await button(wrapper, 'Submit approval')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('Submission for ord-1 could not be confirmed')
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(button(wrapper, 'Submit approval')).toBeUndefined()
+    expect(button(wrapper, 'Approve')).toBeUndefined()
+    await button(wrapper, 'Reload queue')!.trigger('click')
+    await flushPromises()
+    expect(button(wrapper, 'Approve')).toBeDefined()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 
   it('reports a failed publish as nothing having been signed, and keeps the panel open', async () => {
@@ -351,7 +375,7 @@ describe('the 202 is not an approval', () => {
 
 describe('self-approval is shown, not swallowed', () => {
   it('withholds the approve affordance from the proposer and says why', async () => {
-    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({})
+    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue(undefined)
     const wrapper = await open({ pending: [entry({ proposer: 'user:alice' })] })
 
     expect(button(wrapper, 'Approve')).toBeUndefined()

@@ -12,7 +12,7 @@ it('retains adjacent large revisions and the signed upper boundary as decimal te
   for (const revision of ['0', '9007199254740992', '9007199254740993', '9223372036854775807']) {
     const row = { ...account, revision }
     vi.spyOn(api, 'get').mockResolvedValueOnce({ users: [row], next_cursor: '' })
-    const page = await users.list()
+    const page = await users.list(account.tenant)
     const put = vi.spyOn(api, 'put').mockResolvedValueOnce(row)
     expect((await users.update(page.users[0]!, ['kanz-user'], [])).revision).toBe(revision)
     expect(put).toHaveBeenLastCalledWith('/api/identity/users/alice/access', { revision, roles: ['kanz-user'], portfolios: [] })
@@ -28,7 +28,7 @@ it('refuses unsafe wire values and commands before any mutation request', async 
   for (const revision of [0, 7, 9007199254740992, -1, null, undefined, '', '-1', '+1', '01', ' 1', '1.0', '1e3', '9223372036854775808']) {
     expect(isRevision(revision)).toBe(false)
     vi.spyOn(api, 'get').mockResolvedValueOnce({ users: [{ ...account, revision }], next_cursor: '' })
-    await expect(users.list()).rejects.toThrow()
+    await expect(users.list(account.tenant)).rejects.toThrow()
     vi.spyOn(api, 'get').mockResolvedValueOnce([{ ...invitation, revision }])
     await expect(invitations.list()).rejects.toThrow()
     const put = vi.spyOn(api, 'put')
@@ -42,7 +42,7 @@ it('refuses unsafe wire values and commands before any mutation request', async 
 
 it('also refuses a rounded or missing epoch and unsafe mutation responses', async () => {
   vi.spyOn(api, 'get').mockResolvedValueOnce({ users: [{ ...account, session_epoch: 7 }], next_cursor: '' })
-  await expect(users.list()).rejects.toThrow()
+  await expect(users.list(account.tenant)).rejects.toThrow()
   vi.spyOn(api, 'put').mockResolvedValueOnce({ ...account, revision: 7 })
   await expect(users.update(account, account.roles, account.portfolios)).rejects.toThrow()
   vi.spyOn(api, 'post').mockResolvedValueOnce({ ...invitation, revision: 7 })

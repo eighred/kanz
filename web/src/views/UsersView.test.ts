@@ -81,6 +81,48 @@ it.each([{ routes: [] }, { routes: [{ Pattern: 'GET /api/v1/permissions', Capabi
   expect(wrapper.text()).toContain('Portfolio claims: none asserted')
   expect(wrapper.findAll('details li').map(row => row.text())).toEqual(routes.map(route => route.Pattern + ' · ' + route.Capability))
 })
+it('rejects a mixed-tenant first page as a whole and permits a fresh empty read', async () => {
+  vi.mocked(users.list).mockRestore()
+  const foreign = { ...alice, tenant: 'other-tenant', subject: 'foreign-user' }
+  vi.spyOn(api, 'get').mockResolvedValueOnce({ users: [alice, foreign], next_cursor: '' })
+    .mockResolvedValueOnce({ users: [], next_cursor: '' })
+  const wrapper = mount(UsersView)
+  await flushPromises()
+  expect(wrapper.get('[role="alert"]').text()).toContain('verified account scope')
+  expect(wrapper.find('table').exists()).toBe(false)
+  expect(wrapper.text()).not.toContain('foreign-user')
+  expect(wrapper.text()).not.toContain('No users found.')
+  await wrapper.get('button').trigger('click'); await flushPromises()
+  expect(wrapper.text()).toContain('No users found.')
+  wrapper.unmount()
+})
+
+it('keeps an authenticated directory page on a rejected continuation and retries the same cursor', async () => {
+  vi.mocked(users.list).mockRestore()
+  // UsersFor returns 25 ordered accounts on a full page. The last subject is the cursor.
+  const first = Array.from({ length: 25 }, (_, i) => ({ ...alice, subject: 'user-' + String(i).padStart(2, '0') }))
+  const next = { ...alice, subject: 'user-25' }
+  const foreign = { ...alice, subject: 'user-26', tenant: 'unrelated' }
+  const get = vi.spyOn(api, 'get').mockResolvedValueOnce({ users: first, next_cursor: 'user-24' })
+    .mockResolvedValueOnce({ users: [next, foreign], next_cursor: '' })
+    .mockResolvedValueOnce({ users: [next], next_cursor: '' })
+  const wrapper = mount(UsersView)
+  await flushPromises()
+  const more = wrapper.findAll('button').find(b => b.text() === 'Load more users')!
+  await more.trigger('click'); await flushPromises()
+  expect(wrapper.get('[role="alert"]').text()).toContain('verified account scope')
+  expect(wrapper.findAll('tbody tr')).toHaveLength(25)
+  expect(wrapper.find('[aria-label="Edit access for user-24"]').exists()).toBe(true)
+  expect(wrapper.text()).not.toContain('user-25')
+  expect(wrapper.text()).not.toContain('user-26')
+  await more.trigger('click'); await flushPromises()
+  expect(get.mock.calls.map(([path]) => path)).toEqual(['/api/identity/users?after=', '/api/identity/users?after=user-24', '/api/identity/users?after=user-24'])
+  expect(wrapper.findAll('tbody tr')).toHaveLength(26)
+  expect(wrapper.find('[aria-label="Edit access for user-25"]').exists()).toBe(true)
+  expect(wrapper.text()).not.toContain('Load more users')
+  wrapper.unmount()
+})
+
 it('does not invent permissions when the gateway is unavailable', async () => {
   vi.mocked(users.gatewayPermissions).mockRejectedValue(new Error('service unavailable'))
   const wrapper = mount(UsersView); await flushPromises()

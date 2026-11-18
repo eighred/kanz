@@ -47,6 +47,39 @@ it.each([null, {}, { revoked: false }, { revoked: 'true' }])('requires a positiv
   expect(replace).not.toHaveBeenCalled()
   wrapper.unmount()
 })
+it.each([
+  {}, { sessions: null }, { sessions: [null] },
+  { sessions: [current, { ...other, current: 'false' }] }, { sessions: [{ ...current, current: null }] },
+  { sessions: [{ ...current, id: 'unknown' }] }, { sessions: [current, { ...current, current: false }] },
+  { sessions: [current, { ...other, current: true }] },
+  { sessions: [{ ...current, created_at: '2026-02-30T01:00:00Z' }] }, { sessions: [{ ...current, expires_at: 1700000000 }] },
+])('removes inventory actions after an invalid refresh and recovers on a valid read', async invalid => {
+  vi.spyOn(api, 'get').mockResolvedValueOnce({ sessions: [current] }).mockResolvedValueOnce(invalid)
+    .mockResolvedValueOnce({ sessions: [{ ...current, created_at: '2026-09-01T03:00:00.123456789+03:00' }, other] })
+  const post = vi.spyOn(api, 'post')
+  const forget = vi.spyOn(useSession(), 'forget')
+  const wrapper = mount(SessionsView, options)
+  await flushPromises()
+  expect(wrapper.findAll('tbody button')).toHaveLength(1)
+  await wrapper.get('button').trigger('click'); await flushPromises()
+  expect(wrapper.find('tbody button').exists()).toBe(false)
+  expect(wrapper.get('[role="alert"]').text()).toContain('unavailable')
+  expect(wrapper.text()).not.toContain('No active sessions')
+  expect(post).not.toHaveBeenCalled()
+  expect(forget).not.toHaveBeenCalled()
+  expect(replace).not.toHaveBeenCalled()
+  await wrapper.get('button').trigger('click'); await flushPromises()
+  expect(wrapper.findAll('tbody button').map(button => button.text())).toEqual(['Sign out this browser', 'Sign out session'])
+  wrapper.unmount()
+})
+it('renders a verified empty session list', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({ sessions: [] })
+  const wrapper = mount(SessionsView, options)
+  await flushPromises()
+  expect(wrapper.text()).toContain('No active sessions.')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  wrapper.unmount()
+})
 it('does not present a failed load as empty inventory', async () => {
   vi.spyOn(api, 'get').mockRejectedValue(new ApiError(503, 'Session service unavailable'))
   const w = mount(SessionsView, options); await flushPromises()

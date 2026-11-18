@@ -5,7 +5,7 @@ import { users, type UserAccess, type IdentityPermissions, type GatewayPermissio
 const authority = ref<IdentityPermissions | null>(null)
 const gateway = ref<GatewayPermissions | null>(null)
 const gatewayError = ref('')
-const rows = ref<UserAccess[]>([])
+const rows = ref<UserAccess[] | null>(null)
 const next = ref('')
 const selected = ref<UserAccess | null>(null)
 const roles = ref('')
@@ -15,8 +15,14 @@ const error = ref('')
 const message = ref('')
 const split = (value: string) => value.split(',').map(x => x.trim()).filter(Boolean)
 async function load(after = '') {
-  const page = await users.list(after)
-  rows.value = after ? [...rows.value, ...page.users] : page.users
+  if (!authority.value?.identity_admin) return
+  if (!after) {
+    rows.value = null
+    next.value = ''
+    selected.value = null
+  }
+  const page = await users.list(authority.value.tenant, after)
+  rows.value = [...(rows.value ?? []), ...page.users]
   next.value = page.next_cursor
 }
 function edit(user: UserAccess) {
@@ -76,8 +82,8 @@ onMounted(() => run(async () => {
       </template>
       <template v-if="authority.identity_admin">
         <h2>Tenant users</h2>
-        <button :disabled="busy" @click="run(async () => { selected = null; await load() })">Reload users</button>
-        <table>
+        <button :disabled="busy" @click="run(() => load())">Reload users</button>
+        <table v-if="rows?.length">
           <thead><tr><th>Subject</th><th>Status</th><th>Roles</th><th>Portfolio claims</th><th>Created by</th><th>Created</th><th>Last account update</th><th>Actions</th></tr></thead>
           <tbody><tr v-for="user in rows" :key="user.subject">
             <td>{{ user.subject }}</td><td>{{ user.status }}</td><td>{{ user.roles.join(', ') }}</td><td>{{ user.portfolios.join(', ') || 'none' }}</td>
@@ -86,7 +92,7 @@ onMounted(() => run(async () => {
               <button :disabled="busy || (user.subject === authority.subject && user.status === 'active')" :aria-label="`${user.status === 'active' ? 'Disable' : 'Enable'} ${user.subject}`" @click="setStatus(user)">{{ user.status === 'active' ? 'Disable' : 'Enable' }}</button></td>
           </tr></tbody>
         </table>
-        <p v-if="!rows.length && !busy">No users found.</p>
+        <p v-if="rows && !rows.length && !busy">No users found.</p>
         <button v-if="next" :disabled="busy" @click="run(() => load(next))">Load more users</button>
         <form v-if="selected" @submit.prevent="save">
           <h2>Edit access for {{ selected.subject }}</h2>

@@ -43,7 +43,7 @@ export function setUnauthenticatedHandler(fn: () => void): void {
   onUnauthenticated = fn
 }
 
-async function request<T>(method: string, path: string, body?: unknown, acceptConflict = false, signal?: AbortSignal): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, acceptConflict = false, signal?: AbortSignal, expectedStatus?: number): Promise<T> {
   const res = await fetch(path, {
     method,
     signal,
@@ -75,6 +75,7 @@ async function request<T>(method: string, path: string, body?: unknown, acceptCo
     signal?.throwIfAborted()
     throw new ApiError(res.status, message, code)
   }
+  if (expectedStatus !== undefined && res.status !== expectedStatus) throw new Error('Unexpected success status.')
   if (res.status === 204) return undefined as T
   const value = (await res.json()) as T
   signal?.throwIfAborted()
@@ -83,7 +84,7 @@ async function request<T>(method: string, path: string, body?: unknown, acceptCo
 
 export const api = {
   get: <T>(path: string, options?: { acceptConflict?: boolean; signal?: AbortSignal }) => request<T>('GET', path, undefined, options?.acceptConflict, options?.signal),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
+  post: <T>(path: string, body?: unknown, expectedStatus?: number) => request<T>('POST', path, body, false, undefined, expectedStatus),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
 }
 
