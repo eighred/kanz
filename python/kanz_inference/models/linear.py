@@ -71,7 +71,7 @@ class ModelSpec:
 
     validated_at: datetime | None = None
     expires_at: datetime | None = None
-    validation_passed: bool = True
+    validation_passed: bool = False
     artifact_uri: str = ""
     report_uri: str = ""
 

@@ -120,7 +120,7 @@ def _spec_from(card: dict) -> ModelSpec:
         bias=float(card.get("bias", 0.0)),
         validated_at=when("validated_at"),
         expires_at=when("expires_at"),
-        validation_passed=bool(card.get("validation_passed", True)),
+        validation_passed=card.get("validation_passed") is True,
         artifact_uri=card.get("artifact_uri", ""),
         report_uri=card.get("report_uri", ""),
         scale=float(card.get("scale", 1.0)),

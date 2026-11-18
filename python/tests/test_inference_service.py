@@ -16,6 +16,7 @@ when it has nothing to serve.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -23,8 +24,8 @@ from inference.v1.feature_vector_pb2 import FeatureValue, FeatureVector
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.models.linear import LinearModel, ModelSpec
-from kanz_inference.registry.registry import Registry, ValidationRecord
-from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, require_primary
+from kanz_inference.registry.registry import Registry, ValidationError, ValidationRecord
+from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, load_specs, require_primary
 
 FEATURE_SET = "portfolio-risk:1"
 
@@ -118,6 +119,26 @@ async def test_a_validated_model_serves():
     entry = registry.primary_for_feature_set(FEATURE_SET)
     assert entry is not None
     assert entry[0].model_id == "portfolio-risk@1.0.0"
+
+
+@pytest.mark.parametrize("verdict", [{}, {"validation_passed": False}, {"validation_passed": "false"},
+                                      {"validation_passed": 1}, {"validation_passed": None},
+                                      {"validation_passed": True}])
+def test_startup_requires_explicit_passing_verdict(tmp_path, verdict):
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    card = {
+        "model_id": "fixture@1", "feature_set_ref": FEATURE_SET, "weights": {"x": 1},
+        "confidence_threshold": 0.6, "validated_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": "2026-01-03T00:00:00+00:00", **verdict,
+    }
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(card), encoding="utf-8")
+    specs = load_specs(path)
+    if verdict.get("validation_passed") is True:
+        require_primary(build_registry(specs, clock=lambda: now))
+    else:
+        with pytest.raises(ValidationError):
+            build_registry(specs, clock=lambda: now)
 
 
 # --- The service refuses to serve nothing ------------------------------
