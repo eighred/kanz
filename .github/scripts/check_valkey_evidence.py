@@ -14,6 +14,7 @@ REQUIRED = {
     },
     "services/webhook_ingest/internal/ingest": {
         "TestARealRedisAdmitsAnAlertExactlyOnce",
+        "TestWebhookRetainsReplayClaimsAcrossValkeyOutage",
         "TestARealRedisHoldsTheClaimForTheWholeWindow",
         "TestARealRedisFreesAClaimNothingActedOn",
         "TestARealRedisReleasesAClaimHeldByADeadPod",
@@ -33,4 +34,4 @@ if __name__ == "__main__":
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 13 Valkey compatibility cases passed in 3 complete packages")
+        print(f"All {sum(map(len, REQUIRED.values()))} Valkey compatibility cases passed in {len(REQUIRED)} complete packages")

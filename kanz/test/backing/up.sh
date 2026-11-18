@@ -50,8 +50,8 @@ docker run -d --name kanz-ci-postgres -p "${PG_PORT}:5432" \
   -e POSTGRES_USER=kanz -e POSTGRES_PASSWORD=kanz -e POSTGRES_DB=kanz \
   postgres:16-alpine >/dev/null
 
-# --- Redis (the `-tags redis` suite) ----------------------------------------
-docker run -d --name kanz-ci-redis -p "${REDIS_PORT}:6379" redis:7-alpine >/dev/null
+# --- Valkey (the `-tags redis` suite) ---------------------------------------
+valkey_exports="$(REDIS_PORT="$REDIS_PORT" bash "$ROOT/test/backing/valkey.sh")"
 
 # --- NATS, plaintext, JetStream ---------------------------------------------
 # -c nats-dev.conf, not bare -js: the broker needs the MT-02 tenant routing
@@ -89,7 +89,6 @@ kafka_ready() { docker logs kanz-ci-kafka 2>&1 | grep -q "Kafka Server started";
 
 echo "waiting for backing services..."
 wait_for postgres 60 docker exec kanz-ci-postgres pg_isready -U kanz
-wait_for redis    30 docker exec kanz-ci-redis redis-cli ping
 wait_for nats     60 nats_ready
 wait_for kafka   180 kafka_ready
 
@@ -158,7 +157,9 @@ All four backing services are up. Export these, then run the suite:
   export TEST_POSTGRES_URL='postgres://kanzapp:kanz@localhost:${PG_PORT}/kanzapp?sslmode=disable'
   export TEST_NATS_URL='nats://localhost:${NATS_PORT}'
   export TEST_KAFKA_BROKERS='localhost:${KAFKA_PORT}'
+  $valkey_exports
   go test -p 1 ./...
+  go test -tags redis -p 1 ./pkg/redisadapter ./services/webhook_ingest/... ./services/api_gateway/...
 
 ORDER WARNING — run any real migration BEFORE the suite, never after.
 internal/migrate's tests share this database and DROP schema_migrations at

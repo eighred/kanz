@@ -126,13 +126,16 @@ class QualificationTests(unittest.TestCase):
                 self.assertIsNone(re.fullmatch(pattern, bad))
 
     def test_records_are_verified_on_both_sides_of_one_broker_restart(self):
-        self.assertEqual(qualify.CASES[-6:], (
+        self.assertEqual(qualify.CASES[4:], (
             ('verify', 'proof-bootstrap', 'verify'),
             ('reprovision', 'proof-bootstrap', 'reprovision'),
             ('verify-reprovision', 'proof-bootstrap', 'verify'),
             ('checkpoint', 'proof-a', 'checkpoint'),
             ('verify-after-restart', 'proof-bootstrap', 'verify'),
-            ('resume', 'proof-a', 'resume')))
+            ('resume', 'proof-a', 'resume'),
+            ('verify-after-restore', 'proof-bootstrap', 'verify'),
+            ('restored-offset', 'proof-a', 'restored-offset'),
+            ('restored-denial', 'proof-ungranted', 'ungranted')))
         uid = '00000000-0000-0000-0000-000000000001'
         old, new = ('containerd://' + v * 64 for v in ('a', 'b'))
         meta = {'uid': uid, 'name': 'redpanda-aaa-bbb'}
