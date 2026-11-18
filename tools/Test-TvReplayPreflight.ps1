@@ -73,5 +73,48 @@ foreach ($tv in @($false, $true)) {
         throw "Unreviewed restore helper reached the wrong boundary: $message"
     }
 }
+$fixtureState.mode = 'transport'
+$fixtureState | Add-Member -NotePropertyName parameterPath -NotePropertyValue ''
+$fixtureState | Add-Member -NotePropertyName payloadSize -NotePropertyValue 0
+# Intercept the native executable resolution and its two expected calls. No
+# real KMS/SSM process or network connection is started in this fixture.
+function Get-Command {
+    param([string]$Name, [string]$CommandType)
+    if ($Name -ceq 'aws.exe') { return [pscustomobject]@{ Source = 'Invoke-OfflineRecoveryAws' } }
+    Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
+}
+function Invoke-OfflineRecoveryAws {
+    if ($args[0] -ceq 'kms' -and $args[1] -ceq 'describe-key') {
+        return 'arn:aws:kms:ap-northeast-3:012619468098:key/fixture'
+    }
+    if ($args[0] -cne 'ssm' -or $args[1] -cne 'send-command') { throw 'Unexpected offline AWS operation.' }
+    $reference = $args[[Array]::IndexOf($args, '--parameters') + 1]
+    if (-not $reference.StartsWith('file://')) { throw 'SSM parameters not file-backed.' }
+    $fixtureState.parameterPath = $reference.Substring(7)
+    $fixtureState.payloadSize = [IO.FileInfo]::new($fixtureState.parameterPath).Length
+    $received = Get-Content -LiteralPath $fixtureState.parameterPath -Raw | ConvertFrom-Json
+    foreach ($name in @('testnet-data-plane-recovery.sh', 'tv-sync-restored-proof.sh')) {
+        $stage = @($received.commands | Where-Object { $_.StartsWith("printf '%s' '") -and $_.EndsWith(('/' + $name + '"')) })
+        if ($stage.Count -ne 1 -or $stage[0] -cnotmatch "^printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| gzip -dc > ") {
+            throw 'Missing source decompression stage.'
+        }
+        $encoded = [IO.MemoryStream]::new([Convert]::FromBase64String($Matches[1]))
+        $gzip = [IO.Compression.GZipStream]::new($encoded, [IO.Compression.CompressionMode]::Decompress)
+        $decoded = [IO.MemoryStream]::new()
+        try {
+            $gzip.CopyTo($decoded)
+            if ([Convert]::ToBase64String($decoded.ToArray()) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $name)))) {
+                throw 'Decoded recovery source differs from the checked bytes.'
+            }
+        } finally { $decoded.Dispose(); $gzip.Dispose(); $encoded.Dispose() }
+    }
+    throw 'Verified offline SSM payload.'
+}
+$message = ''
+try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Restore }
+catch { $message = $_.Exception.Message }
+if ($message -cne 'Verified offline SSM payload.' -or (Test-Path -LiteralPath $fixtureState.parameterPath)) {
+    throw "Offline source transport or parameter cleanup failed: $message"
+}
 $global:LASTEXITCODE = 0
-Write-Output 'replay-preflight-fixtures=5 PASS (offline boundaries only)'
+Write-Output "replay-preflight-fixtures=6 PASS; ordinary restore parameter bytes=$($fixtureState.payloadSize) (offline boundaries only)"

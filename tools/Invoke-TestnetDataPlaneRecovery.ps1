@@ -40,7 +40,12 @@ function Get-MergedRecoveryPayload([string]$name) {
         if ($process.ExitCode -ne 0) { throw 'Could not verify recovery payload bytes.' }
     } finally { $process.Dispose() }
     if ($actual -cne $merged) { throw "Recovery source $name is not the exact blob merged into origin/main." }
-    [Convert]::ToBase64String($bytes)
+    $buffer = [IO.MemoryStream]::new()
+    try {
+        $gzip = [IO.Compression.GZipStream]::new($buffer, [IO.Compression.CompressionMode]::Compress, $true)
+        try { $gzip.Write($bytes, 0, $bytes.Length) } finally { $gzip.Dispose() }
+        [Convert]::ToBase64String($buffer.ToArray())
+    } finally { $buffer.Dispose() }
 }
 
 $encoded = Get-MergedRecoveryPayload 'testnet-data-plane-recovery.sh'
@@ -49,7 +54,7 @@ $pairEncoded = ''
 $helperCommands = @()
 if ($Operation -eq 'Restore' -or $QualifyTVSync) {
     $helperEncoded = Get-MergedRecoveryPayload 'tv-sync-restored-proof.sh'
-    $helperCommands = @("printf '%s' '$helperEncoded' | base64 -d > `"`$work/tv-sync-restored-proof.sh`"", "chmod 0700 `"`$work/tv-sync-restored-proof.sh`"")
+    $helperCommands = @("printf '%s' '$helperEncoded' | base64 -d | gzip -dc > `"`$work/tv-sync-restored-proof.sh`"", "chmod 0700 `"`$work/tv-sync-restored-proof.sh`"")
 }
 if ($QualifyTVSync) {
     if ($InstanceId -cne 'i-0ee1235614219f089' -or $Region -cne 'ap-northeast-1' -or $RecoveryBucket -cne 'kanz-testnet-tokyo-recovery-012619468098') { throw 'TV recovery target is not the reviewed Tokyo boundary.' }
@@ -105,13 +110,19 @@ $commands = @(
     'cleanup_source() { rc=$?; rm -f -- "$work/testnet-data-plane-recovery.sh" "$work/tv-sync-restored-proof.sh" || rc=2; rmdir -- "$work" || rc=2; exit "$rc"; }',
     'trap cleanup_source EXIT'
 ) + $helperCommands + @(
-    "printf '%s' '$encoded' | base64 -d > `"`$work/testnet-data-plane-recovery.sh`"",
+    "printf '%s' '$encoded' | base64 -d | gzip -dc > `"`$work/testnet-data-plane-recovery.sh`"",
     "chmod 0700 `"`$work/testnet-data-plane-recovery.sh`"",
     "`"`$work/testnet-data-plane-recovery.sh`" '$($Operation.ToLowerInvariant())' '$RecoveryBucket' '$kmsArn' '$releaseCommit' '$tvMode' '$pairEncoded'"
 )
 $parameters = @{ commands = $commands } | ConvertTo-Json -Compress -Depth 4
-$commandId = (& $aws ssm send-command --profile $Profile --region $Region --instance-ids $InstanceId --document-name AWS-RunShellScript --comment "Kanz data-plane $Operation from merged $releaseCommit" --parameters $parameters --query Command.CommandId --output text).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $commandId) { throw 'AWS rejected the recovery command.' }
+# Keep reviewed source and public release metadata out of the Windows native
+# command-line length/JSON quoting boundary. Credentials remain in the pods.
+$parameterPath = [IO.Path]::GetTempFileName()
+try {
+    [IO.File]::WriteAllText($parameterPath, $parameters, [Text.UTF8Encoding]::new($false))
+    $commandId = (& $aws ssm send-command --profile $Profile --region $Region --instance-ids $InstanceId --document-name AWS-RunShellScript --comment "Kanz data-plane $Operation from merged $releaseCommit" --parameters "file://$parameterPath" --query Command.CommandId --output text).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $commandId) { throw 'AWS rejected the recovery command.' }
+} finally { Remove-Item -LiteralPath $parameterPath -Force }
 
 $deadline = [DateTime]::UtcNow.AddMinutes(20)
 do {
