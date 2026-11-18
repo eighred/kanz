@@ -19,6 +19,9 @@ docker start "$id" >/dev/null
 for _ in $(seq 1 60); do
   if docker exec "$id" rpk cluster info -X brokers=127.0.0.1:9092 >/dev/null 2>&1; then
     [[ "$(docker port "$id" 19092/tcp)" == "$endpoint" ]]
+    [[ "$(docker exec "$id" rpk cluster config get auto_create_topics_enabled)" == false ]] || {
+      echo 'Local Redpanda permits implicit topics' >&2; exit 1;
+    }
     printf "export TEST_KAFKA_BROKERS='%s'\n" "$endpoint"
     trap - EXIT
     exit 0

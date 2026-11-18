@@ -7,6 +7,7 @@ on:
       - 'kanz/test/backing/up.sh'
       - 'kanz/test/backing/check-stack.sh'
       - 'kanz/test/backing/kafka.sh'
+      - 'kanz/test/backing/check-kafka.sh'
       - 'kanz/test/backing/valkey.sh'
       - 'kanz/test/backing/*postgres-nats.sh'
       - 'kanz/test/backing/nats-dev.conf'
@@ -27,6 +28,7 @@ on:
       - 'kanz/test/backing/up.sh'
       - 'kanz/test/backing/check-stack.sh'
       - 'kanz/test/backing/kafka.sh'
+      - 'kanz/test/backing/check-kafka.sh'
       - 'kanz/test/backing/valkey.sh'
       - 'kanz/test/backing/*postgres-nats.sh'
       - 'kanz/test/backing/nats-dev.conf'
@@ -66,6 +68,8 @@ jobs:
         run: bash tools/tokyo_messaging_proof/check_redis_backup.sh
       - name: Check local PostgreSQL and NATS with external loopback clients
         run: bash kanz/test/backing/check-postgres-nats.sh
+      - name: Verify local Redpanda explicit topic provisioning policy
+        run: bash kanz/test/backing/check-kafka.sh
       - name: Verify transactional local backing startup and retry
         run: bash kanz/test/backing/check-stack.sh
       - run: bash tools/feed_identity/install.sh
