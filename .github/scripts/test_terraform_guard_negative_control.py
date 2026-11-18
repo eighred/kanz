@@ -173,11 +173,14 @@ class DisposableCopyTests(unittest.TestCase):
         for name, data in self.inputs.items():
             (self.module / name).write_bytes(data)
         self.test_calls = []
+        self.render_inputs = []
 
     def fake_runner(self, argv, cwd, env):
         self.assertEqual(argv[0], "verified-terraform")
         self.assertNotEqual(cwd, self.module)
-        self.assertEqual(set(p.name for p in cwd.iterdir()), set(guard.INPUTS))
+        golden = cwd / "baseline.tftpl"
+        expected_names = set(guard.INPUTS) | ({golden.name} if golden.exists() else set())
+        self.assertEqual(set(p.name for p in cwd.iterdir()), expected_names)
         self.assertTrue(Path(env["HOME"]).is_relative_to(cwd.parent))
         self.assertTrue(Path(env["TF_DATA_DIR"]).is_relative_to(cwd.parent))
         self.assertEqual(Path(env["TF_CLI_CONFIG_FILE"]).read_bytes(), b"")
@@ -193,6 +196,11 @@ class DisposableCopyTests(unittest.TestCase):
             return 0, '{"terraform_version":"1.15.8"}'
         if command == ["test", "-json", "-no-color", "-filter=testnet.tftest.hcl"]:
             data = {name: (cwd / name).read_bytes() for name in guard.INPUTS}
+            if golden.exists():
+                self.assertEqual(golden.read_bytes(), self.inputs["user_data.sh.tftpl"].replace(b"\r\n", b"\n"))
+                self.assertIn(b'aws_instance.node.user_data == ', data[guard.FIXTURE])
+                self.render_inputs.append(data["user_data.sh.tftpl"])
+                return 0, encode(transcript())
             negative = guard.MUTANT_AMI in data["main.tf"]
             self.assertEqual(data[guard.FIXTURE], self.inputs[guard.FIXTURE])
             for name in set(guard.INPUTS) - {"main.tf"}:
@@ -226,8 +234,29 @@ class DisposableCopyTests(unittest.TestCase):
             receipt = self.qualify()
         self.assertEqual([negative for negative, _ in self.test_calls], [False, True, False])
         self.assertEqual(set(receipt["phases"]), {"positive", "negative", "restored"})
+        self.assertEqual(list(receipt["user_data"]), ["lf", "crlf", "mixed", "semantic"])
+        lf, crlf, mixed, semantic = self.render_inputs
+        self.assertNotIn(b"\r", lf)
+        self.assertEqual(crlf, lf.replace(b"\n", b"\r\n"))
+        self.assertNotEqual(mixed, crlf)
+        self.assertNotEqual(mixed, lf)
+        self.assertEqual(mixed.replace(b"\r\n", b"\n"), lf)
+        self.assertEqual(semantic, lf.replace(b"#!/usr/bin/env bash\n", b"#!/usr/bin/env bash\numask 077\n", 1))
         self.assertTrue(all(not cwd.exists() for _, cwd in self.test_calls))
         self.assertEqual({n: (self.module / n).read_bytes() for n in guard.INPUTS}, self.inputs)
+
+    def test_semantic_render_failure_rejects_the_complete_qualification(self):
+        def runner(argv, cwd, env):
+            result = self.fake_runner(argv, cwd, env)
+            if argv[1] == "test" and len(self.render_inputs) == 4:
+                return 1, "unrelated Terraform failure\n"
+            return result
+
+        with self.assertRaises(guard.QualificationError):
+            self.qualify(runner)
+        self.assertEqual(len(self.render_inputs), 4)
+        self.assertEqual({n: (self.module / n).read_bytes() for n in guard.INPUTS}, self.inputs)
+        self.assertTrue(all(not cwd.exists() for _, cwd in self.test_calls))
 
     def test_unrelated_negative_error_and_exception_still_restore_but_refuse(self):
         for exception in (False, True):
