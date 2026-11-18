@@ -37,7 +37,10 @@ var testReturns = matrixReturns{
 func TestFitStatistical_ReconstructsCovariance(t *testing.T) {
 	ids := []string{"A", "B", "C"}
 	returns := [][]float64{testReturns["A"], testReturns["B"], testReturns["C"]}
-	m := fitStatistical(ids, returns, 3, "PC")
+	m, err := fitStatistical(ids, returns, 3, "PC")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	s := sampleCov(returns)
 	values := map[string]float64{"A": 100, "B": -50, "C": 30}
