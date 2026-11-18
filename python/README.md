@@ -44,6 +44,23 @@ real broker suites; unset values skip those integrations. Use disposable brokers
 and report skips. Python dependency and image tests are in
 [kanz-ci.yml](../.github/workflows/kanz-ci.yml).
 
+### Measure inference interference
+
+With the generated SDK and dependencies above, set `KANZ_TEST_NATS_SERVER` to a
+local NATS server executable and run `python -B python/tests/test_inference_interference.py -v`
+from the repository root. The fixture starts its own loopback JetStream and inference
+process in disposable storage. It scores a synthetic two-feature linear model with
+explanations and an interactive admission limit of one. It compares 128 RPCs and
+128 feature FACTs separately and together at up to 16 concurrent RPCs, then checks
+that a smaller batch succeeds after the durable consumer drains.
+
+The JSON report includes client-observed RPC p95/p99, time from feature publication
+start to scored FACT receipt, streaming throughput, overlapping completions,
+admission refusals and final pending acknowledgements. The fixture checks model
+identity, numerical outputs and committed message counts. Latency and throughput
+are observations for the named workload. A production capacity contract and pool
+placement remain decisions under #1348 and #1545.
+
 ## Run inference
 
 Run `python -m kanz_inference` with the same `PYTHONPATH`. Configuration is read
