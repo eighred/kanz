@@ -33,7 +33,11 @@ class MigrationBoundaryTests(unittest.TestCase):
         root = proof.Path(proof.__file__).resolve().parents[2]
         lines = [line.strip() for line in (root / "tools/rig-apply.sh").read_text(encoding="utf-8").splitlines()]
         policy = 'kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/valkey-clients.yaml'
-        install = 'python3 tools/rig_dev_patch.py kanz/infra/messaging/redis.yaml | kubectl --context "$KUBECTL_CONTEXT" apply -f -'
+        preflight = 'python3 tools/valkey_migration/rig_install.py preflight "$KUBECTL_CONTEXT"'
+        secrets = 'kubectl --context "$KUBECTL_CONTEXT" apply -f "$DEPLOY_DIR/rig-dev-secrets.yaml"'
+        install = 'python3 tools/valkey_migration/rig_install.py install "$KUBECTL_CONTEXT"'
+        self.assertLess(lines.index(preflight), lines.index(secrets))
+        self.assertLess(lines.index(secrets), lines.index(policy))
         self.assertLess(lines.index(policy), lines.index(install))
 
     def test_names_refused_before_commands(self):

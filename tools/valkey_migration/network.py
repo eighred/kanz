@@ -16,6 +16,7 @@ import yaml
 
 from tools.tokyo_messaging_proof import proof as messaging
 from tools.valkey_migration import proof as migration
+from tools.valkey_migration import rig_install
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = ROOT / "kanz/infra/messaging/valkey-clients.yaml"
@@ -137,7 +138,11 @@ def main():
             sts, = [d for d in cache if d["kind"] == "StatefulSet"]
             if sts["spec"]["template"]["spec"]["containers"][0]["image"] != migration.VALKEY:
                 raise ValueError("unexpected rig image")
-            create(cache)
+            def cache_api(*args, data=None):
+                return k("-n", MESSAGING, *args, data=data)
+
+            rig_install.install(cache_api, cache, preflight=True)
+            rig_install.install(cache_api, cache)
             k("-n", MESSAGING, "rollout", "status", "statefulset/redis", "--timeout=210s")
             server = json.loads(k("-n", MESSAGING, "get", "pod/redis-0", "-o", "json"))
             runtime, = server["status"]["containerStatuses"]
@@ -145,6 +150,13 @@ def main():
                     not re.search(r"sha256:[0-9a-f]{64}$", runtime["imageID"])):
                 raise ValueError("unverified running cache image")
             report["runtimeImageID"] = runtime["imageID"]
+            original_uid = server["metadata"]["uid"]
+            rig_install.install(cache_api, rendered("kanz/infra/messaging/redis.yaml"))
+            cache_api("rollout", "status", "statefulset/redis", "--timeout=120s")
+            current_uid = cache_api("get", "pod/redis-0", "-o", "jsonpath={.metadata.uid}")
+            if current_uid != original_uid:
+                raise ValueError("reapply replaced cache pod")
+            report["originalClaimReapply"] = True
             env_names = {}
             for app in CLIENTS:
                 pod, env_names[app] = client_pod(app)
