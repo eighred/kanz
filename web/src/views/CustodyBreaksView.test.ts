@@ -51,7 +51,8 @@ describe('custody exact review', () => {
       await flushPromises()
       for (const action of ['Claim', 'Explain']) {
         const trigger = wrapper.findAll('tbody button').filter(b => b.text() === action)[1]!
-        trigger.element.focus()
+        const triggerElement = trigger.element as HTMLButtonElement
+        triggerElement.focus()
         await trigger.trigger('click')
         expect(document.activeElement).toBe(action === 'Explain' ? wrapper.get('textarea').element : button(wrapper, 'Review action').element)
         if (action === 'Explain') await wrapper.get('textarea').setValue('Cash settlement in progress')
