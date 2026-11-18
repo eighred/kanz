@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stand up the four backing services the test suite gates on, exactly as
-# kanz-ci.yml stands them up.
+# Stand up the four backing services the test suite gates on. Local Kafka API
+# tests use Redpanda; CI also exercises the legacy Kafka implementation.
 #
 # WHY THIS EXISTS. Without them, `go test ./...` is GREEN AND HOLLOW. Measured on
 # a clean checkout: across the 24 packages that read TEST_POSTGRES_URL,
@@ -60,19 +60,8 @@ valkey_exports="$(REDIS_PORT="$REDIS_PORT" bash "$ROOT/test/backing/valkey.sh")"
 # is the right shape on a single-account broker.
 docker run -d --name kanz-ci-nats -p "${NATS_PORT}:4222"   -v "$(hostpath "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nats-dev.conf")":/etc/nats/nats-dev.conf:ro   nats:2 -c /etc/nats/nats-dev.conf >/dev/null
 
-# --- Kafka, single-node KRaft -----------------------------------------------
-docker run -d --name kanz-ci-kafka -p "${KAFKA_PORT}:9092" \
-  -e KAFKA_NODE_ID=1 \
-  -e KAFKA_PROCESS_ROLES=broker,controller \
-  -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
-  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
-  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
-  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
-  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
-  -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
-  -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false \
-  apache/kafka:3.9.0 >/dev/null
+# --- Redpanda, single-node Kafka API -----------------------------------------
+kafka_exports="$(KAFKA_PORT="$KAFKA_PORT" bash "$ROOT/test/backing/kafka.sh")"
 
 wait_for() { # wait_for <label> <seconds> <command...>
   label="$1"; deadline="$2"; shift 2
@@ -85,12 +74,10 @@ wait_for() { # wait_for <label> <seconds> <command...>
   exit 1
 }
 nats_ready()  { docker logs kanz-ci-nats  2>&1 | grep -q "Server is ready"; }
-kafka_ready() { docker logs kanz-ci-kafka 2>&1 | grep -q "Kafka Server started"; }
 
 echo "waiting for backing services..."
 wait_for postgres 60 docker exec kanz-ci-postgres pg_isready -U kanz
 wait_for nats     60 nats_ready
-wait_for kafka   180 kafka_ready
 
 # --- The application role ----------------------------------------------------
 # Created NOSUPERUSER, then VERIFIED. Creating it correctly and checking it are
@@ -156,7 +143,7 @@ All four backing services are up. Export these, then run the suite:
 
   export TEST_POSTGRES_URL='postgres://kanzapp:kanz@localhost:${PG_PORT}/kanzapp?sslmode=disable'
   export TEST_NATS_URL='nats://localhost:${NATS_PORT}'
-  export TEST_KAFKA_BROKERS='localhost:${KAFKA_PORT}'
+  $kafka_exports
   $valkey_exports
   go test -p 1 ./...
   go test -tags redis -p 1 ./pkg/redisadapter ./services/webhook_ingest/... ./services/api_gateway/...

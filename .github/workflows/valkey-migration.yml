@@ -43,6 +43,15 @@ jobs:
           cli=(docker run --rm --network host "$image" valkey-cli --raw -u "$TEST_REDIS_URL")
           test "$("${cli[@]}" PING)" = PONG
           "${cli[@]}" INFO server | tr -d '\r' | grep -Fx "valkey_version:$TEST_VALKEY_VERSION"
+          retry="${name}-retry"
+          bash tools/valkey_migration/backing_collision.sh "$id" 16379 "$retry"
+          docker rm -fv "$id"
+          trap - EXIT
+          exports="$(REDIS_PORT=16379 bash kanz/test/backing/valkey.sh "$retry")"
+          id="$(docker inspect -f '{{.Id}}' "$retry")"
+          trap 'docker rm -fv "$id" >/dev/null' EXIT
+          eval "$exports"
+          test "$("${cli[@]}" PING)" = PONG
       - name: Preserve replay claims through Valkey migration and Redis rollback
         run: python3 -B tools/valkey_migration/proof.py
       - name: Preserve sanitized migration evidence
