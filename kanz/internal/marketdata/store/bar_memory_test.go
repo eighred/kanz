@@ -321,3 +321,56 @@ func derefCount(p *int64) int64 {
 	}
 	return *p
 }
+
+func TestBarRevisionsAreImmutable(t *testing.T) {
+	for name, newStore := range map[string]func(*testing.T) BarStore{
+		"memory":   func(*testing.T) BarStore { return NewMemory() },
+		"postgres": func(t *testing.T) BarStore { return NewPostgres(newBarPool(t)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := newStore(t)
+			ctx := context.Background()
+			input := bar(0, 10500, 1)
+			if err := st.PutBars(ctx, []Bar{input}); err != nil {
+				t.Fatal(err)
+			}
+			// Mutating a value held by the caller cannot change the stored version.
+			input.Close.Coefficient = 10100
+			*input.TradeCount = 41
+			same := bar(0, 10500, 1)
+			same.Close = d(105, 0)
+			if err := st.PutBars(ctx, []Bar{same}); err != nil {
+				t.Fatalf("equivalent decimal was not idempotent: %v", err)
+			}
+			for _, batch := range [][]Bar{
+				{bar(10, 10000, 11), bar(0, 10200, 1)},
+				{bar(10, 10000, 11), bar(10, 10100, 11)},
+			} {
+				if err := st.PutBars(ctx, batch); !errors.Is(err, ErrBarRevisionConflict) {
+					t.Fatalf("conflicting batch: got %v", err)
+				}
+			}
+			query := BarQuery{InstrumentID: input.InstrumentID, Venue: input.Venue, Resolution: input.Resolution}
+			bars, err := st.Bars(ctx, query)
+			if err != nil || len(bars) != 1 || !SameCandle(bars[0], same) {
+				t.Fatalf("post-conflict series: %+v, %v", bars, err)
+			}
+			bars[0].Close.Coefficient = 10100
+			*bars[0].TradeCount = 41
+			correction := bar(0, 10200, 2)
+			if err := st.PutBars(ctx, []Bar{correction}); err != nil {
+				t.Fatal(err)
+			}
+			query.AsOf = same.KnowledgeTime
+			old, err := st.Bars(ctx, query)
+			if err != nil || len(old) != 1 || !SameCandle(old[0], same) {
+				t.Fatalf("prior version changed: %+v, %v", old, err)
+			}
+			query.AsOf = correction.KnowledgeTime
+			latest, err := st.Bars(ctx, query)
+			if err != nil || len(latest) != 1 || !SameCandle(latest[0], correction) {
+				t.Fatalf("restatement missing: %+v, %v", latest, err)
+			}
+		})
+	}
+}

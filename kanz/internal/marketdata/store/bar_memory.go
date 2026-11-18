@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+
+	"google.golang.org/protobuf/proto"
 	"sort"
 )
 
@@ -34,17 +37,25 @@ func (m *Memory) PutBars(_ context.Context, bars []Bar) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.bars == nil {
-		m.bars = map[barKey]Bar{}
-	}
+	pending := make(map[barKey]Bar)
 	for _, b := range bars {
-		m.bars[barKey{
-			instrumentID:  b.InstrumentID,
-			venue:         b.Venue,
-			resolution:    b.Resolution,
-			bucketUnixNs:  b.BucketStart.UTC().UnixNano(),
-			knowledgeUnix: b.KnowledgeTime.UTC().UnixNano(),
-		}] = b
+		key := barKey{b.InstrumentID, b.Venue, b.Resolution, b.BucketStart.UTC().UnixNano(), b.KnowledgeTime.UTC().UnixNano()}
+		existing, ok := m.bars[key]
+		if !ok {
+			existing, ok = pending[key]
+		}
+		if ok {
+			if !SameCandle(existing, b) {
+				return b.revisionConflict()
+			}
+			continue
+		}
+		pending[key] = cloneBar(b)
+	}
+	if m.bars == nil {
+		m.bars = pending
+	} else {
+		maps.Copy(m.bars, pending)
 	}
 	return nil
 }
@@ -92,10 +103,24 @@ func (m *Memory) Bars(_ context.Context, q BarQuery) ([]Bar, error) {
 
 	out := make([]Bar, 0, len(latest))
 	for _, b := range latest {
-		out = append(out, b)
+		out = append(out, cloneBar(b))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BucketStart.Before(out[j].BucketStart) })
 	return out, nil
+}
+
+// A caller may reuse its protobufs and trade count after a write or read.
+func cloneBar(b Bar) Bar {
+	b.Open = proto.CloneOf(b.Open)
+	b.High = proto.CloneOf(b.High)
+	b.Low = proto.CloneOf(b.Low)
+	b.Close = proto.CloneOf(b.Close)
+	b.Volume = proto.CloneOf(b.Volume)
+	if b.TradeCount != nil {
+		count := *b.TradeCount
+		b.TradeCount = &count
+	}
+	return b
 }
 
 // barCount reports how many bar versions are held, for tests that need to prove
