@@ -110,14 +110,14 @@ export const control = {
    * The same rule applies here — the credential is passed straight through and
    * is never put in a URL, a query string, a thrown error or a console.
    *
-   * The reply carries exchange_account_id, which is the exchange's OWN id for
+   * The reply carries exchangeAccountId, which is the exchange's OWN id for
    * the account these keys spend, as reported during the pre-write proof. It is
    * a public fact and never key material — it is the only evidence the caller
    * gets that the credential actually works, so it is returned rather than
    * discarded.
    */
   setVenueKeys: (venue: string, apiKey: string, apiSecret: string, passphrase: string) =>
-    api.put<{ exchange_account_id?: string }>(
+    api.put<{ exchangeAccountId?: string }>(
       `/api/v1/control/venues/${encodeURIComponent(venue)}/keys`,
       { api_key: apiKey, api_secret: apiSecret, passphrase },
     ),
