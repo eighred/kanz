@@ -6,6 +6,14 @@ paths and PVC identity remain compatible with its gateway and webhook
 consumers. Each acknowledged AOF write is fsynced. The Tokyo data overlay
 retains its existing Redis image and command.
 
+Before applying dev Secrets or network policy, `tools/rig-apply.sh --deploy`
+checks the cache StatefulSet and its ordinal-zero PVC. A first install creates
+both by name and records the PVC's Kubernetes UID on the StatefulSet. A reapply
+requires that original claim and the same pinned Valkey image. An existing
+Redis deployment, unmarked Valkey installation, orphaned or missing PVC, or
+failed API read stops deployment. A partial install can leave a reserved PVC.
+Inspect its ownership and retained data before any recovery decision (#1541).
+
 The first-install fixture renders the same dev-secret adaptation as
 `tools/rig-apply.sh`. It starts that workload command on a new private
 volume, checks its effective persistence configuration, and executes both
