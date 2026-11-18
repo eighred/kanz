@@ -67,3 +67,33 @@ describe('capital admission evidence', () => {
     expect(wrapper.text()).toContain('verdict disagrees')
   })
 })
+
+it('renders a reported PASS without any control evidence as UNKNOWN', async () => {
+  vi.spyOn(preflightApi.preflight, 'status').mockResolvedValue({ ...evidence('PASS'), checks: [] })
+  const wrapper = mount(PreflightView)
+  await flushPromises()
+  expect(wrapper.find('.preflight-verdict').text()).toBe('UNKNOWN')
+  expect(wrapper.text()).toContain('no controls')
+  wrapper.unmount()
+})
+
+it('keeps a newer unavailable verdict when an older passing poll finishes', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  let finish!: (result: PreflightStatus) => void
+  vi.spyOn(preflightApi.preflight, 'status')
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    .mockRejectedValueOnce(new Error('offline'))
+  const wrapper = mount(PreflightView)
+  try {
+    await vi.advanceTimersByTimeAsync(30_000)
+    await flushPromises()
+    expect(wrapper.find('.preflight-verdict').text()).toBe('UNKNOWN')
+    finish(evidence('PASS'))
+    await flushPromises()
+    expect(wrapper.find('.preflight-verdict').text()).toBe('UNKNOWN')
+    expect(wrapper.text()).toContain('unreachable')
+  } finally {
+    wrapper.unmount()
+    vi.useRealTimers()
+  }
+})
