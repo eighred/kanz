@@ -672,3 +672,15 @@ func TestOKXContractDatesRequireARealListingBeforeExpiry(t *testing.T) {
 		}
 	}
 }
+
+func TestOKXCorrectionFitsPersistedEffectiveTime(t *testing.T) {
+	for _, override := range []time.Time{listed.Add(time.Nanosecond), time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)} {
+		batch, err := ParseOKXInstruments(okxCatalogue(preciseOptionRow()), mapping(), Options{AsOfOverride: override})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if records, err := batch.Loadable(); !errors.Is(err, ErrPartialChain) || len(records) != 0 || len(batch.Refused) != 1 || !strings.Contains(batch.Refused[0].Reason, "effective time") {
+			t.Fatalf("override %s: %+v, %v", override, batch, err)
+		}
+	}
+}

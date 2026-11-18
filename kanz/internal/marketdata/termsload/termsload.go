@@ -190,6 +190,11 @@ type Options struct {
 	// by re-running: the second run presents the same primary key and the store
 	// keeps the first, immutable, wrong row.
 	//
+	// An override requires the venue's actual listTime. It must be at or after
+	// that listing and representable by both the protobuf timestamp and the
+	// contract store's microsecond primary key. It may follow expiry when
+	// correcting historical terms.
+	//
 	// Setting this to a later instant is how that is fixed. It writes the corrected
 	// terms as a new as_of version beside the wrong one, which LatestAsOf then
 	// prefers — the same mechanism a genuine amendment uses, which is the point:
