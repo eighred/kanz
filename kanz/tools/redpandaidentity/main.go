@@ -248,7 +248,7 @@ func run() error {
 		}
 	}
 	switch mode {
-	case "bootstrap":
+	case "bootstrap", "reprovision":
 		stage = "bootstrap-topics"
 		if sa != "proof-bootstrap" {
 			return errors.New("bootstrap identity required")
@@ -257,15 +257,44 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		for _, err := range r.Errors {
-			if err != nil {
-				return err
+		if r == nil || len(r.Errors) != 2 {
+			return errors.New("incomplete topic creation results")
+		}
+		for _, topic := range []string{"proof-a", "proof-b"} {
+			result, ok := r.Errors[topic]
+			if !ok {
+				return errors.New("missing topic creation result")
 			}
+			if result != nil && !errors.Is(result, kafka.TopicAlreadyExists) {
+				return result
+			}
+			if mode == "reprovision" && result == nil {
+				return errors.New("populated topic unexpectedly required creation")
+			}
+		}
+		metadata, err := c.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{"proof-a", "proof-b"}})
+		if err != nil {
+			return err
+		}
+		if metadata == nil || len(metadata.Topics) != 2 {
+			return errors.New("expected both fixture topics")
+		}
+		seen := make(map[string]bool)
+		for _, topic := range metadata.Topics {
+			if topic.Error != nil || (topic.Name != "proof-a" && topic.Name != "proof-b") || seen[topic.Name] ||
+				len(topic.Partitions) != 1 || topic.Partitions[0].ID != 0 || topic.Partitions[0].Error != nil ||
+				len(topic.Partitions[0].Replicas) != 1 {
+				return errors.New("unexpected provisioned topic topology")
+			}
+			seen[topic.Name] = true
 		}
 		stage = "bootstrap-acls"
 		ar, err := c.CreateACLs(ctx, &kafka.CreateACLsRequest{ACLs: acls})
 		if err != nil {
 			return err
+		}
+		if ar == nil || len(ar.Errors) != len(acls) {
+			return errors.New("incomplete ACL creation results")
 		}
 		for _, err := range ar.Errors {
 			if err != nil {

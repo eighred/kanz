@@ -126,8 +126,10 @@ class QualificationTests(unittest.TestCase):
                 self.assertIsNone(re.fullmatch(pattern, bad))
 
     def test_records_are_verified_on_both_sides_of_one_broker_restart(self):
-        self.assertEqual(qualify.CASES[-2:], (
+        self.assertEqual(qualify.CASES[-4:], (
             ('verify', 'proof-bootstrap', 'verify'),
+            ('reprovision', 'proof-bootstrap', 'reprovision'),
+            ('verify-reprovision', 'proof-bootstrap', 'verify'),
             ('verify-after-restart', 'proof-bootstrap', 'verify')))
         uid = '00000000-0000-0000-0000-000000000001'
         old, new = ('containerd://' + v * 64 for v in ('a', 'b'))

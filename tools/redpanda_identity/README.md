@@ -34,6 +34,8 @@ topic authorization errors. The `proof-ungranted` identity has no grant in
 the topic ACL inventory; it has a valid SPIRE registration and a distinct DN
 mapping. This case does not prove refusal of an unmapped certificate subject.
 Bootstrap reads require exactly two expected records per topic. The fixture then
+reapplies topic and ACL provisioning against both populated topics, checks their
+single-partition, single-replica topology and reads both original sequences again. It then
 requests a graceful shutdown of the broker process. It checks that Kubernetes
 restarted the container exactly once on the original pod and data volume,
 observes the old container's successful exit, and repeats the read with a fresh

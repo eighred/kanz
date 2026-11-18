@@ -21,7 +21,8 @@ REDPANDA = 'docker.redpanda.com/redpandadata/redpanda:v26.2.6@sha256:8b1076e0d61
 SAS = ('proof-bootstrap', 'proof-a', 'proof-b', 'proof-ungranted')
 CASES = (('bootstrap','proof-bootstrap','bootstrap'), ('client-a','proof-a','publish'),
          ('client-b','proof-b','publish'), ('ungranted','proof-ungranted','ungranted'),
-         ('verify','proof-bootstrap','verify'), ('verify-after-restart','proof-bootstrap','verify'))
+         ('verify','proof-bootstrap','verify'), ('reprovision','proof-bootstrap','reprovision'),
+         ('verify-reprovision','proof-bootstrap','verify'), ('verify-after-restart','proof-bootstrap','verify'))
 
 
 # Export only these fixed strings. Build output itself can contain repository
