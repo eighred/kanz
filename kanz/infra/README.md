@@ -10,6 +10,18 @@ for a single-node **k3s** cluster stood up by hand — used when standing up
 the full manifest set (SPIRE + NATS + the trading loop) outside both of
 those paths.
 
+## Adding a node during single-server k3s maintenance
+
+Schedule node additions outside maintenance on the sole control-plane node.
+The provisioning Job runs on the control plane because it mounts the cluster
+join token and the host's SSH bootstrap key.
+
+While the control-plane node is cordoned, an authorized
+`POST /v1/control/nodes` returns HTTP 409. The response names the node and
+explains how to uncordon it. The operator rejects the request before creating
+the provisioning Job or its Secret. After maintenance, confirm the node is
+Ready and schedulable, then retry Add Node.
+
 ## Driving a local gateway with a pre-minted bearer
 
 The browser is the operator interface. Independent administrative tools and
