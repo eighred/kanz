@@ -160,7 +160,7 @@ func (m StaticSymbolMap) Instruments() []InstrumentSymbol {
 		// Resolved HERE, once, where both halves of the mapping are in hand —
 		// so the catalogue, the startup check and the picker cannot form
 		// different opinions about what a position is denominated in (#407).
-		if res, isPair := instrument.Resolve(id, sym); isPair {
+		if res, isPair := instrument.Resolve(id, sym); isPair && res.Known {
 			in.Pair = res.Pair
 			in.QuoteMismatch = res.Mismatched
 		}
