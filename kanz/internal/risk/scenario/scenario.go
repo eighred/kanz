@@ -31,6 +31,9 @@ package scenario
 import (
 	"context"
 
+	"github.com/eighred/kanz/internal/dec"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/compute/factor"
@@ -79,7 +82,8 @@ func WithRevaluer(r Revaluer) Option {
 const (
 	// SkipUnknownShockType rejects a batch containing a shock neither valuation
 	// path can apply. One exclusion per evaluation, independent of book size.
-	SkipUnknownShockType = "unknown_shock_type"
+	SkipUnknownShockType      = "unknown_shock_type"
+	SkipInvalidShockMagnitude = "invalid_shock_magnitude"
 	// SkipNoClassifier: no factor.Classifier is wired, so NO position's sector
 	// can be resolved and a SectorShock reaches nothing. A whole-evaluation
 	// exclusion (empty instrument id), not one per position — the shock never
@@ -136,9 +140,14 @@ const (
 // ExcludedCount is non-zero — see v1.ErrScenarioUnresolvable for why a refusal
 // and not a quality flag.
 func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...Option) (*domain.MeasureSet, v1.InputCoverage) {
-	if hasUnknownShock(shocks) {
+	unknownType, invalidMagnitude := hasUnknownShock(shocks)
+	if unknownType || invalidMagnitude {
 		var cov compute.Coverage
-		cov.ExcludeWhole(SkipUnknownShockType)
+		if unknownType {
+			cov.ExcludeWhole(SkipUnknownShockType)
+		} else {
+			cov.ExcludeWhole(SkipInvalidShockMagnitude)
+		}
 		return nil, cov.Result()
 	}
 	var cfg evalConfig
@@ -164,15 +173,26 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 // hasUnknownShock validates the entire batch before cloning, applying any
 // shock, or invoking a revaluer. Do not call Description: callers implement
 // this open interface, and a label cannot establish supported semantics.
-func hasUnknownShock(shocks []v1.ScenarioShock) bool {
+func hasUnknownShock(shocks []v1.ScenarioShock) (unknownType, invalidMagnitude bool) {
 	for _, shock := range shocks {
-		switch shock.(type) {
-		case v1.PriceShock, v1.ParallelShift, v1.SectorShock, v1.VolShock:
+		var size *commonpb.Decimal
+		switch s := shock.(type) {
+		case v1.PriceShock:
+			size = s.Pct
+		case v1.ParallelShift:
+			size = s.Pct
+		case v1.SectorShock:
+			size = s.Pct
+		case v1.VolShock:
+			size = s.AbsBump
 		default:
-			return true
+			return true, false
+		}
+		if size == nil || !dec.InDomain(size) {
+			invalidMagnitude = true
 		}
 	}
-	return false
+	return false, invalidMagnitude
 }
 
 // shockCoverage is compute.Coverage plus the per-EVALUATION dedup a shock batch
