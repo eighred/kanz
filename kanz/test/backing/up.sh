@@ -48,33 +48,9 @@ valkey_exports="$(REDIS_PORT="$REDIS_PORT" bash "$ROOT/test/backing/valkey.sh")"
 # --- Redpanda, single-node Kafka API -----------------------------------------
 kafka_exports="$(KAFKA_PORT="$KAFKA_PORT" bash "$ROOT/test/backing/kafka.sh")"
 
-# --- The NATS topology -------------------------------------------------------
-# Extracted from the ConfigMap production applies, never copied — same stance as
-# test/mtls/up.sh, and for the same reason: a copy drifts and the drift is
-# invisible until a service meets a real spine. A JetStream broker with no
-# streams answers "no response from stream", which reads as a transport fault
-# and is not one.
-awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
-  "$ROOT/infra/nats/bootstrap-job.yaml" > /tmp/kanz-backing-bootstrap.sh
-test -s /tmp/kanz-backing-bootstrap.sh || { echo "FAIL: could not extract bootstrap.sh from infra/nats/bootstrap-job.yaml"; exit 1; }
-
-NATS_BOX_IMAGE="$(awk '/image: *natsio\/nats-box/{sub(/^[[:space:]]*image:[[:space:]]*/,"");print;exit}' \
-  "$ROOT/infra/nats/bootstrap-job.yaml")"
-test -n "$NATS_BOX_IMAGE" || { echo "FAIL: could not read the nats-box image from infra/nats/bootstrap-job.yaml"; exit 1; }
-
-docker run --rm -i --network host \
-  -e NATS_URL="nats://127.0.0.1:${NATS_PORT}" -e NATS_REPLICAS=1 \
-  "$NATS_BOX_IMAGE" sh -s < /tmp/kanz-backing-bootstrap.sh > /tmp/kanz-backing-bootstrap.log 2>&1 || {
-    echo "FAIL: the bootstrap script did not complete"; cat /tmp/kanz-backing-bootstrap.log; exit 1; }
-
-# Derived from the script, never listed here: a stream added to the Job is
-# required by this check the moment it is added.
-EXPECTED="$(awk '/^[[:space:]]*ensure_stream[[:space:]]+[A-Z]/{print $2}' /tmp/kanz-backing-bootstrap.sh | sort -u)"
-test -n "$EXPECTED" || { echo "FAIL: parsed no stream names out of bootstrap.sh — the check would be vacuous"; exit 1; }
-MISSING=""
-for s in $EXPECTED; do grep -qw "$s" /tmp/kanz-backing-bootstrap.log || MISSING="$MISSING $s"; done
-[ -z "$MISSING" ] || { echo "FAIL: bootstrap ran but these streams are absent:$MISSING"; cat /tmp/kanz-backing-bootstrap.log; exit 1; }
-echo "  NATS topology provisioned: $(echo $EXPECTED | wc -w) streams"
+# Bootstrap from the canonical ConfigMap, then check the broker's current
+# stream inventory before printing any connection settings. Requires PyYAML.
+python3 -B "$ROOT/test/backing/nats_topology.py" bootstrap "nats://127.0.0.1:${NATS_PORT}"
 
 cat <<EOF
 

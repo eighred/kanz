@@ -29,3 +29,21 @@ record = json.load(sys.stdin)
 if record["seq"] != 1 or record["subject"] != "fixture.sample" or base64.b64decode(record["data"], validate=True) != sys.argv[1].encode():
     sys.exit("Published message differs from the stored record")
 ' "fixture$suffix"
+cli stream rm BACKING --force >/dev/null
+topology="$(dirname "$0")/nats_topology.py"
+python3 -B "$topology" bootstrap "$TEST_NATS_URL"
+for value in first second; do cli pub risk.position.fixture.one "$value" >/dev/null; done
+cli pub risk.position.fixture.two third >/dev/null
+cli stream info POSITION --json | python3 -c '
+import json, sys
+info = json.load(sys.stdin)
+if (info["state"]["messages"], info["config"]["max_age"], info["config"]["max_msgs_per_subject"]) != (2, 0, 1):
+    sys.exit("POSITION failed to retain one message per subject without expiry")
+'
+python3 -B "$topology" check "$TEST_NATS_URL"
+cli stream edit POSITION --force --max-msgs-per-subject=2 >/dev/null
+if failure=$(python3 -B "$topology" check "$TEST_NATS_URL" 2>&1); then echo 'Changed POSITION retention accepted' >&2; exit 1; fi
+grep -Fq 'observed stream configuration differs from canonical source' <<<"$failure"
+cli stream rm POSITION --force >/dev/null
+if failure=$(python3 -B "$topology" check "$TEST_NATS_URL" 2>&1); then echo 'Missing POSITION accepted' >&2; exit 1; fi
+grep -Fq 'live stream inventory differs from canonical declarations' <<<"$failure"
