@@ -146,6 +146,9 @@ func scanBar(row pgx.Row, b Bar) (Bar, error) {
 		&b.TradeCount, &b.KnowledgeTime); err != nil {
 		return Bar{}, fmt.Errorf("scan bar: %w", err)
 	}
+	if !b.Resolution.alignedBucket(b.BucketStart) {
+		return Bar{}, b.gridError()
+	}
 	for _, f := range []struct {
 		raw []byte
 		dst **commonpb.Decimal

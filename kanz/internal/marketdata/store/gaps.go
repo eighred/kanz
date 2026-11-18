@@ -111,7 +111,7 @@ func WindowOf(bars []Bar, from, to time.Time, res Resolution) (Window, bool) {
 	w := Window{Buckets: int(to.Sub(first) / interval)}
 	seen := make(map[int64]bool, len(bars))
 	for i := range bars {
-		if bars[i].Resolution != res {
+		if bars[i].Resolution != res || !res.alignedBucket(bars[i].BucketStart) {
 			continue
 		}
 		s := bars[i].BucketStart.UTC()
@@ -160,6 +160,9 @@ func ContiguousSuffix(bars []Bar) []Bar {
 	res := bars[len(bars)-1].Resolution
 	interval, ok := res.Interval()
 	if !ok || interval <= 0 {
+		return nil
+	}
+	if !res.alignedBucket(bars[len(bars)-1].BucketStart) {
 		return nil
 	}
 	start := len(bars) - 1
@@ -259,7 +262,7 @@ func AttestedWindowOf(bars []Bar, cov []Coverage, from, to time.Time, res Resolu
 
 	seen := make(map[int64]bool, len(bars))
 	for i := range bars {
-		if bars[i].Resolution != res {
+		if bars[i].Resolution != res || !res.alignedBucket(bars[i].BucketStart) {
 			continue
 		}
 		s := bars[i].BucketStart.UTC()

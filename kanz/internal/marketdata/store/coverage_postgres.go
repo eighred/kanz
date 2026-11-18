@@ -113,6 +113,9 @@ func (p *Postgres) Coverage(ctx context.Context, q CoverageQuery) ([]Coverage, e
 		if err := rows.Scan(&c.BucketStart, &observedNs, &c.Breaks, &c.Attestor, &c.RecordedAt); err != nil {
 			return nil, fmt.Errorf("scan coverage: %w", err)
 		}
+		if !c.Resolution.alignedBucket(c.BucketStart) {
+			return nil, c.gridError()
+		}
 		c.Observed = time.Duration(observedNs)
 		out = append(out, c)
 	}

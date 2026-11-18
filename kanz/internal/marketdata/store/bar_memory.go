@@ -99,6 +99,9 @@ func (m *Memory) Bars(_ context.Context, q BarQuery) ([]Bar, error) {
 		if !q.AsOf.IsZero() && b.KnowledgeTime.After(q.AsOf) {
 			continue
 		}
+		if !b.Resolution.alignedBucket(b.BucketStart) {
+			return nil, b.gridError()
+		}
 		if cur, ok := latest[k.bucketUnixNs]; ok && !b.KnowledgeTime.After(cur.KnowledgeTime) {
 			continue
 		}
