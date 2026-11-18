@@ -32,12 +32,11 @@ import (
 	"context"
 
 	"github.com/eighred/kanz/internal/dec"
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
-
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/compute/factor"
 	"github.com/eighred/kanz/internal/risk/domain"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // Option customizes an Evaluate call. Variadic so existing two-positional

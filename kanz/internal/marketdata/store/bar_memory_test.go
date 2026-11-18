@@ -374,3 +374,33 @@ func TestBarRevisionsAreImmutable(t *testing.T) {
 		})
 	}
 }
+
+func TestConcurrentBarRevisionsChooseOneCompleteBatch(t *testing.T) {
+	for name, newStore := range map[string]func(*testing.T) BarStore{
+		"memory":   func(*testing.T) BarStore { return NewMemory() },
+		"postgres": func(t *testing.T) BarStore { return NewPostgres(newBarPool(t)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newStore(t)
+			start := make(chan struct{})
+			results := make(chan error, 2)
+			ctx := context.Background()
+			for writer := range 2 {
+				go func() {
+					<-start
+					price := int64(10000 + writer)
+					results <- store.PutBars(ctx, []Bar{bar(1+writer, price, 5), bar(0, price, 5)})
+				}()
+			}
+			close(start)
+			first, second := <-results, <-results
+			if !((first == nil && errors.Is(second, ErrBarRevisionConflict)) || (second == nil && errors.Is(first, ErrBarRevisionConflict))) {
+				t.Fatalf("competing commits returned %v and %v", first, second)
+			}
+			got, err := store.Bars(ctx, BarQuery{InstrumentID: "BTC-USDT", Venue: "XBIN", Resolution: Resolution1m})
+			if err != nil || len(got) != 2 || !got[0].BucketStart.Equal(barT0) || !SameCandle(got[0], got[1]) {
+				t.Fatalf("committed bars do not belong to one complete batch: %+v, %v", got, err)
+			}
+		})
+	}
+}

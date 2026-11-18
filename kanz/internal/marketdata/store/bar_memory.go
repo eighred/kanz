@@ -5,15 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 
 	"google.golang.org/protobuf/proto"
-	"sort"
 )
 
-// barKey is a bar's full bitemporal identity within one series, so a restatement
-// (same bucket, newer knowledge_time) is a distinct entry and an exact re-put
-// overwrites in place — idempotent, exactly as the Postgres ON CONFLICT DO
-// NOTHING is.
+// barKey identifies one immutable knowledge-time revision of a venue candle.
 type barKey struct {
 	instrumentID  string
 	venue         string

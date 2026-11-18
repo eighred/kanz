@@ -3,9 +3,10 @@ package factormodel
 import (
 	"context"
 	"fmt"
-	"github.com/eighred/kanz/internal/marketdata/returns"
 	"sort"
 	"time"
+
+	"github.com/eighred/kanz/internal/marketdata/returns"
 )
 
 // FACTOR-01c — the statistical factor model (PCA) and the model selector. Where
