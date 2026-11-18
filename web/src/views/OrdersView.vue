@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed } from 'vue'
+import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
-import { describeRisk, risk, type OrderSummary, type OrdersResponse } from '../api/risk'
+import { risk, type OrderSummary } from '../api/risk'
 import { formatDecimal, formatMoney } from '../api/decimal'
 
 // ONE PORTFOLIO'S TRADING HISTORY (#399).
@@ -21,19 +22,7 @@ import { formatDecimal, formatMoney } from '../api/decimal'
 const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 
-const data = ref<OrdersResponse | null>(null)
-const error = ref('')
-const loading = ref(true)
-
-onMounted(async () => {
-  try {
-    data.value = await risk.orders(id.value)
-  } catch (e) {
-    error.value = describeRisk(e)
-  } finally {
-    loading.value = false
-  }
-})
+const { data, error, loading } = usePortfolioRead(id, risk.orders)
 
 const orders = computed<OrderSummary[]>(() => data.value?.orders ?? [])
 

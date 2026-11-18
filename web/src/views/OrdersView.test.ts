@@ -115,3 +115,19 @@ describe('a refusal is not an empty history', () => {
     expect(wrapper.find('table').exists()).toBe(false)
   })
 })
+
+it('reloads a reused portfolio route and ignores a late order response', async () => {
+  let finish!: (value: OrdersResponse) => void
+  vi.spyOn(api.risk, 'orders').mockImplementation((id) => id === 'A'
+    ? new Promise(resolve => { finish = resolve })
+    : Promise.resolve({ orders: [{ order_id: 'current-order' }], unindexed: '0' }))
+  const r = router()
+  await r.push('/portfolios/A/orders')
+  const wrapper = mount(OrdersView, { global: { plugins: [r] } })
+  await r.push('/portfolios/B/orders')
+  await flushPromises()
+  finish({ orders: [{ order_id: 'previous-order' }], unindexed: '0' })
+  await flushPromises()
+  expect(wrapper.text()).toContain('current-order')
+  expect(wrapper.text()).not.toContain('previous-order')
+})

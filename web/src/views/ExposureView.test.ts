@@ -136,3 +136,22 @@ describe('a refusal is not an empty portfolio', () => {
     expect(wrapper.find('table').exists()).toBe(false)
   })
 })
+
+it('clears the previous portfolio exposure while the next portfolio is loading or refused', async () => {
+  let refuse!: (reason: Error) => void
+  vi.spyOn(api.risk, 'exposure').mockResolvedValueOnce(base)
+    .mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject }))
+  const r = router()
+  await r.push('/portfolios/A/exposure')
+  const wrapper = mount(ExposureView, { global: { plugins: [r] } })
+  await flushPromises()
+  expect(wrapper.text()).toContain('9007199254740993.01 USD')
+  await r.push('/portfolios/B/exposure')
+  await flushPromises()
+  expect(wrapper.text()).toContain('Loading')
+  expect(wrapper.text()).not.toContain('9007199254740993.01 USD')
+  refuse(new ApiError(404, 'unavailable'))
+  await flushPromises()
+  expect(wrapper.find('[role=alert]').exists()).toBe(true)
+  expect(wrapper.find('table').exists()).toBe(false)
+})
