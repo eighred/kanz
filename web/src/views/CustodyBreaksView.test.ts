@@ -18,7 +18,7 @@ describe('custody exact review', () => {
   it('requires review, preserves the retry identity, and reloads after evidence', async () => {
     const read = vi.spyOn(custody, 'breaks').mockResolvedValue([row])
     const act = vi.spyOn(custody, 'act').mockRejectedValueOnce(new Error('network lost')).mockResolvedValueOnce(receipt)
-    const wrapper = mount(CustodyBreaksView)
+    const wrapper = mount(CustodyBreaksView, { attachTo: document.body })
     await flushPromises()
     await button(wrapper, 'Claim').trigger('click')
     expect(act).not.toHaveBeenCalled()
@@ -29,6 +29,7 @@ describe('custody exact review', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('Retry this same reviewed request')
     const first = act.mock.calls[0]?.[1]
+    expect(document.activeElement).toBe(button(wrapper, 'Confirm reviewed action').element)
     expect(first?.review_contract).toBe('exact-v1')
     expect(first).not.toHaveProperty('actor')
     expect(first).not.toHaveProperty('assignee')
@@ -37,13 +38,36 @@ describe('custody exact review', () => {
     expect(act.mock.calls[1]?.[1]).toEqual(first)
     expect(read).toHaveBeenCalledTimes(2)
     expect(wrapper.find('[role="status"]').text()).toContain('verified-human')
+    expect(document.activeElement).toBe(wrapper.get('[role="status"]').element)
     expect(wrapper.find('[aria-label="Custody action review"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('moves keyboard focus through both reviews and returns to the invoking row on cancel', async () => {
+    vi.spyOn(custody, 'breaks').mockResolvedValue([row, { ...row, break_id: 'PF|CUST|quantity|ETH/USD', key: 'ETH/USD' }])
+    const act = vi.spyOn(custody, 'act')
+    const wrapper = mount(CustodyBreaksView, { attachTo: document.body })
+    try {
+      await flushPromises()
+      for (const action of ['Claim', 'Explain']) {
+        const trigger = wrapper.findAll('tbody button').filter(b => b.text() === action)[1]!
+        trigger.element.focus()
+        await trigger.trigger('click')
+        expect(document.activeElement).toBe(action === 'Explain' ? wrapper.get('textarea').element : button(wrapper, 'Review action').element)
+        if (action === 'Explain') await wrapper.get('textarea').setValue('Cash settlement in progress')
+        await button(wrapper, 'Review action').trigger('click')
+        expect(document.activeElement).toBe(button(wrapper, 'Confirm reviewed action').element)
+        await button(wrapper, 'Cancel').trigger('click')
+        expect(document.activeElement).toBe(trigger.element)
+        expect(act).not.toHaveBeenCalled()
+      }
+    } finally { wrapper.unmount() }
   })
 
   it('requires a fresh review after a revision conflict', async () => {
     vi.spyOn(custody, 'breaks').mockResolvedValue([row])
     vi.spyOn(custody, 'act').mockRejectedValue(new ApiError(409, 'private database detail'))
-    const wrapper = mount(CustodyBreaksView)
+    const wrapper = mount(CustodyBreaksView, { attachTo: document.body })
     await flushPromises()
     await button(wrapper, 'Explain').trigger('click')
     expect(button(wrapper, 'Review action').attributes('disabled')).toBeDefined()
@@ -52,8 +76,10 @@ describe('custody exact review', () => {
     await button(wrapper, 'Confirm reviewed action').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('review a fresh action')
+    expect(document.activeElement).toBe(wrapper.get('[role="alert"]').element)
     expect(wrapper.text()).not.toContain('private database detail')
     expect(wrapper.find('[aria-label="Custody action review"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('does not offer actions or present legacy rounded numbers as exact', async () => {
