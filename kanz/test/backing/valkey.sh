@@ -9,7 +9,7 @@ image='valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beeb
 version='9.1.3'
 [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le 65535 ]] || { echo 'Invalid REDIS_PORT' >&2; exit 1; }
 [[ "$name" =~ ^kanz-ci-redis(-[a-z0-9-]+)?$ ]] || { echo 'Invalid fixture name' >&2; exit 1; }
-id="$(docker create --name "$name" -p "127.0.0.1:${port}:6379" "$image")"
+id="$(docker create --label "io.kanz.backing.run=${KANZ_BACKING_RUN:-standalone}" --name "$name" -p "127.0.0.1:${port}:6379" "$image")"
 trap 'docker rm -fv "$id" >/dev/null' EXIT
 docker start "$id" >/dev/null
 ready=false
