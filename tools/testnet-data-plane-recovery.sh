@@ -207,12 +207,7 @@ backup() {
     ' _ "$database" >>"$work/postgres/source.tsv"
   done
 
-  k -n "$MSG_NS" exec redis-0 -c redis -- sh -ceu '
-    auth=$(cat /run/secrets/redis/password)
-    redis-cli -a "$auth" --no-auth-warning SAVE >/dev/null
-    redis-cli -a "$auth" --no-auth-warning --raw DBSIZE
-    redis-cli -a "$auth" --no-auth-warning --raw LASTSAVE
-  ' >"$work/redis/source.txt"
+  redis_backup_checkpoint >"$work/redis/source.txt" || die 'Redis did not confirm a current authenticated checkpoint'
   k -n "$MSG_NS" exec redis-0 -c redis -- cat /data/dump.rdb >"$work/redis/dump.rdb"
   [[ -s "$work/redis/dump.rdb" ]] || die 'Redis produced an empty RDB artifact'
 
@@ -272,6 +267,25 @@ backup() {
   jq -n --arg backup_id "$backup_id" --arg key "$key" --arg sha256 "$archive_sha" \
     --arg retain_until "$retain_until" --argjson elapsed_seconds "$elapsed" \
     '{status:"BACKUP_VERIFIED",backup_id:$backup_id,key:$key,sha256:$sha256,object_lock_retain_until:$retain_until,elapsed_seconds:$elapsed_seconds}'
+}
+
+redis_backup_checkpoint() {
+  k -n "$MSG_NS" exec redis-0 -c redis -- sh -ceu '
+    auth=$(cat /run/secrets/redis/password)
+    [ -n "$auth" ] || exit 1
+    redis() { redis-cli -a "$auth" --no-auth-warning --raw "$@" 2>/dev/null; }
+    # redis-cli can exit successfully with an error reply. An older dump on
+    # disk cannot stand in for an acknowledged synchronous SAVE.
+    [ "$(redis PING)" = PONG ] && [ "$(redis SAVE)" = OK ] || exit 1
+    keys=$(redis DBSIZE)
+    last=$(redis LASTSAVE)
+    for value in "$keys" "$last"; do
+      case "$value" in ""|*[!0-9]*|0?*) exit 1;; esac
+      [ "${#value}" -le 16 ] && [ "$value" -le 9007199254740991 ] || exit 1
+    done
+    [ "$last" -gt 0 ] || exit 1
+    printf "%s\n%s\n" "$keys" "$last"
+  '
 }
 
 restore() {

@@ -44,6 +44,8 @@ jobs:
         run: bash tools/tokyo_messaging_proof/check_jetstream_restore.sh
       - name: Check complete PostgreSQL archive inventories for both restore modes
         run: bash tools/tokyo_messaging_proof/check_postgres_inventory.sh
+      - name: Require an authenticated current Redis checkpoint before archiving
+        run: bash tools/tokyo_messaging_proof/check_redis_backup.sh
       - run: bash tools/feed_identity/install.sh
       - name: Verify UID-scoped cleanup of the ordinary restore namespace
         run: bash tools/tokyo_messaging_proof/check_restore_namespace.sh
