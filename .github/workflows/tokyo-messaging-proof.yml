@@ -64,6 +64,8 @@ jobs:
         run: bash tools/tokyo_messaging_proof/check_writer_inventory.sh
       - name: Check complete PostgreSQL archive inventories for both restore modes
         run: bash tools/tokyo_messaging_proof/check_postgres_inventory.sh
+      - name: Reconcile migration ledgers after real PostgreSQL restore
+        run: bash tools/tokyo_messaging_proof/check_migration_ledger.sh
       - name: Require an authenticated current Redis checkpoint before archiving
         run: bash tools/tokyo_messaging_proof/check_redis_backup.sh
       - name: Check local PostgreSQL and NATS with external loopback clients

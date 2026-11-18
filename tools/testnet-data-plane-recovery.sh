@@ -149,16 +149,66 @@ nats_restore_evidence() {
     nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}}'
 }
 
+# PostgreSQL 16 provides sha256(bytea). JSON framing distinguishes fields and
+# row boundaries; C collation orders sets independently of database locale.
+# The original single-set ledger predates the set_name column.
+migration_ledger_sql() {
+  cat <<'SQL'
+select encode(sha256(convert_to(coalesce(jsonb_agg(
+    jsonb_build_array(set_name, version, name, checksum)
+    order by set_name collate "C", version), '[]'::jsonb)::text, 'UTF8')), 'hex')
+from (select coalesce(to_jsonb(m)->>'set_name','') as set_name,
+             version, name, checksum from public.schema_migrations m) ledger
+SQL
+}
+
+source_postgres_inventory_row() {
+  k -n "$DATA_NS" exec "$1" -c postgres -- psql --username postgres --dbname "$2" \
+    --no-psqlrc --tuples-only --no-align --set ON_ERROR_STOP=1 --command "
+    select current_database(), (select count(*) from schema_migrations),
+      (select count(*) from pg_class where relkind='r' and relnamespace='public'::regnamespace),
+      (select count(*) from pg_class where relkind='r' and relrowsecurity and not relforcerowsecurity),
+      pg_current_wal_lsn(), ($(migration_ledger_sql))"
+}
+
+restored_migration_ledger() {
+  k -n "$DRILL_NS" exec postgres-restore -c restore -- bash -ceu '
+    export PGPASSWORD="$(cat /run/secrets/postgres/password)"
+    exec psql --host "$(cat /run/secrets/postgres/host)" --username kanz_restore --dbname "$1" \
+      --no-psqlrc --tuples-only --no-align --set ON_ERROR_STOP=1 --command "$2"
+  ' _ "$1" "$(migration_ledger_sql)"
+}
+
+verify_migration_ledger() {
+  local expected=$1 observed=$2
+  [[ "$expected" =~ ^[0-9a-f]{64}$ && "$observed" == "$expected" ]] ||
+    die 'restored PostgreSQL migration ledger differs from source'
+}
+
+migration_ledger_evidence() {
+  case "$1" in
+    kanz-testnet-data-plane-v2) printf '%s\n' '{"state":"VERIFIED","format":"set-version-name-checksum-sha256-v1"}' ;;
+    kanz-testnet-data-plane-v1) printf '%s\n' '{"state":"UNKNOWN","reason":"historical archive contains migration row counts only"}' ;;
+    *) die 'unsupported migration ledger format' ;;
+  esac
+}
+
 verify_postgres_inventory() {
-  local dir=$1 row database file
-  shift
+  local dir=$1 format=$2 row database file
+  local row_pattern='^([a-z_]+)\|[0-9]+\|[0-9]+\|0\|[0-9A-F]+/[0-9A-F]+'
+  case "$format" in
+    kanz-testnet-data-plane-v1) ;;
+    kanz-testnet-data-plane-v2) row_pattern+='\|[0-9a-f]{64}' ;;
+    *) die 'unsupported database inventory format' ;;
+  esac
+  shift 2
   local -A required=() seen=()
   for database in "$@"; do required[$database]=1; done
   [[ -f "$dir/source.tsv" && ! -L "$dir/source.tsv" && -r "$dir/source.tsv" ]] || die 'missing database inventory'
   # Restore consumes each newline-terminated row with read. Reject a truncated
   # final row rather than counting a database that restore would never visit.
   while IFS= read -r row || [[ -n "$row" ]]; do
-    [[ "$row" =~ ^([a-z_]+)\|[0-9]+\|[0-9]+\|0\|[0-9A-F]+/[0-9A-F]+$ ]] || die 'invalid database inventory row'
+    [[ "$row" =~ ${row_pattern}$ ]] || die 'invalid database inventory row'
     database=${BASH_REMATCH[1]}
     [[ -n "${required[$database]:-}" && -z "${seen[$database]:-}" ]] || die 'unexpected or duplicate database'
     seen[$database]=1
@@ -217,11 +267,9 @@ backup() {
       exec pg_dump --username postgres --dbname "$1" \
         --format=custom --compress=zstd:3 --no-owner --no-privileges
     ' _ "$database" >"$work/postgres/${database}.dump"
-    k -n "$DATA_NS" exec "$primary" -c postgres -- bash -ceu '
-      psql --username postgres --dbname "$1" --no-psqlrc --tuples-only --no-align \
-        --command "select current_database(), (select count(*) from schema_migrations), (select count(*) from pg_class where relkind='"'"'r'"'"' and relnamespace=(select oid from pg_namespace where nspname='"'"'public'"'"')), (select count(*) from pg_class where relkind='"'"'r'"'"' and relrowsecurity and not relforcerowsecurity), pg_current_wal_lsn()"
-    ' _ "$database" >>"$work/postgres/source.tsv"
+    source_postgres_inventory_row "$primary" "$database" >>"$work/postgres/source.tsv"
   done
+  verify_postgres_inventory "$work/postgres" kanz-testnet-data-plane-v2 "${DATABASES[@]}"
 
   redis_backup_checkpoint >"$work/redis/source.txt" || die 'Redis did not confirm a current authenticated checkpoint'
   k -n "$MSG_NS" exec redis-0 -c redis -- cat /data/dump.rdb >"$work/redis/dump.rdb"
@@ -257,7 +305,7 @@ backup() {
     --arg backup_id "$backup_id" --arg created_at "$(date -u +%FT%TZ)" \
     --arg release_commit "$RELEASE_COMMIT" --arg source_region ap-northeast-1 \
     --arg source_instance i-0ee1235614219f089 --arg tv_mode "$TV_MODE" \
-    '{format:"kanz-testnet-data-plane-v1",backup_id:$backup_id,created_at:$created_at,release_commit:$release_commit,source_region:$source_region,source_instance:$source_instance,quiesced:true} + (if $tv_mode=="qualify" then {tv_sync:{tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}} else {} end)' \
+    '{format:"kanz-testnet-data-plane-v2",backup_id:$backup_id,created_at:$created_at,release_commit:$release_commit,source_region:$source_region,source_instance:$source_instance,quiesced:true} + (if $tv_mode=="qualify" then {tv_sync:{tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}} else {} end)' \
     >"$work/metadata.json"
   (cd "$work" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum >MANIFEST.sha256)
   tar -C "$work" -czf "$archive" .
@@ -265,7 +313,7 @@ backup() {
 
   aws s3api put-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
     --body "$archive" --server-side-encryption aws:kms --ssekms-key-id "$RECOVERY_KMS_KEY_ARN" \
-    --checksum-algorithm SHA256 --metadata "sha256=${archive_sha},format=kanz-testnet-data-plane-v1" >/dev/null
+    --checksum-algorithm SHA256 --metadata "sha256=${archive_sha},format=kanz-testnet-data-plane-v2" >/dev/null
   aws s3api get-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
     --checksum-mode ENABLED "${archive}.download" >/dev/null
   [[ "$(sha256sum "${archive}.download" | awk '{print $1}')" == "$archive_sha" ]] || die 'downloaded recovery artifact checksum differs from upload'
@@ -334,11 +382,13 @@ restore() {
   mkdir "$work/extracted"
   tar -C "$work/extracted" -xzf "$archive"
   (cd "$work/extracted" && sha256sum --check --strict MANIFEST.sha256 >/dev/null) || die 'artifact member checksum failed'
-  jq -e '.format=="kanz-testnet-data-plane-v1" and .quiesced==true' "$work/extracted/metadata.json" >/dev/null || die 'artifact is incompatible or not quiesced'
+  local archive_format
+  archive_format=$(jq -er 'select(.quiesced==true) | .format |
+    select(.=="kanz-testnet-data-plane-v1" or .=="kanz-testnet-data-plane-v2")' "$work/extracted/metadata.json") || die 'artifact is incompatible or not quiesced'
 
   local owner_posture='ALTER ROLE kanz_restore CREATEDB NOSUPERUSER NOBYPASSRLS'
   local tv_logging=''
-  verify_postgres_inventory "$work/extracted/postgres" "${DATABASES[@]}"
+  verify_postgres_inventory "$work/extracted/postgres" "$archive_format" "${DATABASES[@]}"
   if [[ "$TV_MODE" == qualify ]]; then
     jq -e '.tv_sync=={tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}' "$work/extracted/metadata.json" >/dev/null || die 'artifact lacks explicit TV history inventory'
     owner_posture='ALTER ROLE kanz_restore CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS'
@@ -476,8 +526,8 @@ EOF
   done
   [[ "$postgres_ready" == 1 ]] || die 'restored PostgreSQL service did not become reachable'
 
-  local database expected_migrations expected_tables expected_unsafe source_lsn restored
-  while IFS='|' read -r database expected_migrations expected_tables expected_unsafe source_lsn; do
+  local database expected_migrations expected_tables expected_unsafe source_lsn expected_ledger restored
+  while IFS='|' read -r database expected_migrations expected_tables expected_unsafe source_lsn expected_ledger; do
     [[ " ${DATABASES[*]} " == *" $database "* ]] || die "artifact names unexpected database $database"
     k -n "$DRILL_NS" exec -i postgres-restore -c restore -- bash -ceu '
       export PGPASSWORD="$(cat /run/secrets/postgres/password)"
@@ -490,6 +540,10 @@ EOF
       psql --host "$(cat /run/secrets/postgres/host)" --username kanz_restore --dbname "$1" --no-psqlrc --tuples-only --no-align --field-separator="|" --command "select (select count(*) from schema_migrations), (select count(*) from pg_class where relkind='"'"'r'"'"' and relnamespace=(select oid from pg_namespace where nspname='"'"'public'"'"')), (select count(*) from pg_class where relkind='"'"'r'"'"' and relrowsecurity and not relforcerowsecurity)"
     ' _ "$database")
     [[ "$restored" == "$expected_migrations|$expected_tables|$expected_unsafe" && "$expected_unsafe" == 0 ]] || die "PostgreSQL invariant mismatch for $database"
+    if [[ "$archive_format" == kanz-testnet-data-plane-v2 ]]; then
+      restored=$(restored_migration_ledger "$database") || die 'cannot read restored PostgreSQL migration ledger'
+      verify_migration_ledger "$expected_ledger" "$restored"
+    fi
   done <"$work/extracted/postgres/source.tsv"
 
   k -n "$DRILL_NS" exec -i redis-restore -c redis -- sh -ceu 'cat > /data/dump.rdb; touch /data/restore.ready' <"$work/extracted/redis/dump.rdb"
@@ -521,7 +575,7 @@ EOF
     details=$(jq -n --argjson keys "$restored_redis" '{redis_keys:$keys,isolation:"temporary replacement namespace on source-region node"}')
   fi
   cleanup_tv_restore_namespace || die 'drill cleanup did not complete'
-  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$(jq '.cleanup="verified"' <<<"$details")"
+  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$(jq --argjson ledger "$(migration_ledger_evidence "$archive_format")" '.cleanup="verified" | .postgres_migration_ledger=$ledger' <<<"$details")"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
