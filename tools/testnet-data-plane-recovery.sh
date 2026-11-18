@@ -131,6 +131,29 @@ nats_restore_evidence() {
     nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}}'
 }
 
+verify_postgres_inventory() {
+  local dir=$1 row database file
+  shift
+  local -A required=() seen=()
+  for database in "$@"; do required[$database]=1; done
+  [[ -f "$dir/source.tsv" && ! -L "$dir/source.tsv" && -r "$dir/source.tsv" ]] || die 'missing database inventory'
+  # Restore consumes each newline-terminated row with read. Reject a truncated
+  # final row rather than counting a database that restore would never visit.
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ "$row" =~ ^([a-z_]+)\|[0-9]+\|[0-9]+\|0\|[0-9A-F]+/[0-9A-F]+$ ]] || die 'invalid database inventory row'
+    database=${BASH_REMATCH[1]}
+    [[ -n "${required[$database]:-}" && -z "${seen[$database]:-}" ]] || die 'unexpected or duplicate database'
+    seen[$database]=1
+    file="$dir/$database.dump"
+    [[ -f "$file" && ! -L "$file" && -r "$file" && "$(head -c 5 "$file")" == PGDMP ]] || die 'missing or unreadable custom database dump'
+  done <"$dir/source.tsv"
+  [[ "$(tail -c 1 "$dir/source.tsv" | od -An -tu1 | tr -d '[:space:]')" == 10 && ${#seen[@]} == "$#" ]] || die 'incomplete database inventory'
+  for file in "$dir"/*.dump; do
+    database=${file##*/}; database=${database%.dump}
+    [[ "$database" =~ ^[a-z_]+$ && -n "${seen[$database]:-}" ]] || die 'unexpected database dump'
+  done
+}
+
 # This isolated drill has no timestamp for an incident, the last recoverable
 # write at that incident, or restoration of the operational service.
 emit_restore_receipt() {
@@ -287,10 +310,9 @@ restore() {
 
   local owner_posture='ALTER ROLE kanz_restore CREATEDB NOSUPERUSER NOBYPASSRLS'
   local tv_logging=''
+  verify_postgres_inventory "$work/extracted/postgres" "${DATABASES[@]}"
   if [[ "$TV_MODE" == qualify ]]; then
     jq -e '.tv_sync=={tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}' "$work/extracted/metadata.json" >/dev/null || die 'artifact lacks explicit TV history inventory'
-    [[ "$(cut -d'|' -f1 "$work/extracted/postgres/source.tsv" | LC_ALL=C sort)" == "$(printf '%s\n' "${DATABASES[@]}" | LC_ALL=C sort)" ]] || die 'TV archive database inventory mismatch'
-    for database in "${DATABASES[@]}"; do [[ -s "$work/extracted/postgres/$database.dump" ]] || die 'TV archive database member missing'; done
     begin_tv_restore_namespace
     owner_posture='ALTER ROLE kanz_restore CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS'
     # PostgreSQL 16 logging controls: no statement text, including error,

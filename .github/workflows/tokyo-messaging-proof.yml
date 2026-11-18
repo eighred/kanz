@@ -38,6 +38,8 @@ jobs:
       - run: python3 -B -m unittest discover -s tools/feed_identity -p 'test_*.py'
       - name: Check named JetStream state after account restore
         run: bash tools/tokyo_messaging_proof/check_jetstream_restore.sh
+      - name: Check complete PostgreSQL archive inventories for both restore modes
+        run: bash tools/tokyo_messaging_proof/check_postgres_inventory.sh
       - run: bash tools/feed_identity/install.sh
       - name: Prove staged messaging isolation with real dependencies
         run: python3 -B tools/tokyo_messaging_proof/proof.py
