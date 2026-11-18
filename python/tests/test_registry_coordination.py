@@ -84,6 +84,24 @@ async def _deliver(topic: _FakeTopic, *targets: CoordinatedRegistry) -> None:
             await t.apply(event)
 
 
+@pytest.mark.parametrize("missing", ["validated_at", "expires_at", "passed"])
+async def test_incomplete_replayed_validation_supersedes_prior_evidence(missing):
+    local = Registry()
+    record = _valid("m@1")
+    local.record_validation(record)
+    replica = CoordinatedRegistry(local=local, publisher=_FakeTopic(), loader=_StubLoader(), origin="replica")
+    wire = RegistryEvent(
+        op="record_validation", origin="source", model_id=record.model_id,
+        validated_at=record.validated_at, expires_at=record.expires_at, passed=True,
+    ).to_dict()
+    del wire[missing]
+    await replica.apply(RegistryEvent.from_dict(wire))
+    replayed = local.validation_for(record.model_id)
+    assert replayed is not None and not replayed.is_valid(datetime.now(timezone.utc))
+    if missing != "passed":
+        assert getattr(replayed, missing) is None
+
+
 @pytest.mark.asyncio
 async def test_register_converges_across_replicas():
     topic = _FakeTopic()
