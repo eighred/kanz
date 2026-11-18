@@ -52,7 +52,9 @@ from the repository root. The fixture starts its own loopback JetStream and infe
 process in disposable storage. It scores a synthetic two-feature linear model with
 explanations and an interactive admission limit of one. It compares 128 RPCs and
 128 feature FACTs separately and together at up to 16 concurrent RPCs, then checks
-that a smaller batch succeeds after the durable consumer drains.
+that a smaller batch succeeds after the durable consumer drains. The Linux Python
+CI job runs this fixture with the shipped dependency locks and checksum-pinned
+NATS Server 2.12.6.
 
 The JSON report includes client-observed RPC p95/p99, time from feature publication
 start to scored FACT receipt, streaming throughput, overlapping completions,
