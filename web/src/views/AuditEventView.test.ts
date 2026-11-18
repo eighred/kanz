@@ -28,6 +28,37 @@ describe('audit event investigation', () => {
     expect(wrapper.text()).toContain('intentionally omitted')
   })
 
+  it('follows an ancestry link and discards a superseded detail or lineage response', async () => {
+    const route = await router()
+    const parent = { ...record, event_id: 'parent', event_type: 'parent.fact' }
+    const other = { ...record, event_id: 'other', event_type: 'other.fact' }
+    let finishDetail!: (value: AuditRecord) => void
+    let finishLineage!: (value: { target: AuditRecord; ancestry: AuditRecord[] }) => void
+    vi.spyOn(audit, 'event').mockResolvedValueOnce(record)
+      .mockImplementationOnce(() => new Promise(resolve => { finishDetail = resolve }))
+      .mockResolvedValueOnce(other).mockResolvedValueOnce(parent)
+    const lineage = vi.spyOn(audit, 'lineage').mockResolvedValueOnce({ target: record, ancestry: [parent, record] })
+      .mockImplementationOnce(() => new Promise(resolve => { finishLineage = resolve }))
+      .mockResolvedValueOnce({ target: parent, ancestry: [parent] })
+    const wrapper = mount(AuditEventView, { global: { plugins: [route] } })
+    await flushPromises()
+    await wrapper.get('a[href="/audit/events/parent"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('order.recorded')
+    await route.push('/audit/events/other')
+    await flushPromises()
+    finishDetail(parent)
+    await flushPromises()
+    expect(lineage.mock.calls.map(([id]) => id)).toEqual(['event-1', 'other'])
+    expect(wrapper.text()).toContain('other.fact')
+    await route.push('/audit/events/parent')
+    await flushPromises()
+    finishLineage({ target: other, ancestry: [other] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('parent.fact')
+    expect(wrapper.text()).not.toContain('other.fact')
+  })
+
   it('keeps a lineage failure visible without discarding the event', async () => {
     vi.spyOn(audit, 'event').mockResolvedValue(record)
     vi.spyOn(audit, 'lineage').mockRejectedValue(new Error('private detail'))
