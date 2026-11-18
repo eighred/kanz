@@ -38,7 +38,7 @@ export class Unauthenticated extends ApiError {
 // that made it.
 let onUnauthenticated: (() => void) | null = null
 
-/** Register the callback invoked whenever a request is refused with 401. */
+/** Register the callback for a 401 outside the store-owned identity lookup. */
 export function setUnauthenticatedHandler(fn: () => void): void {
   onUnauthenticated = fn
 }
@@ -54,7 +54,9 @@ async function request<T>(method: string, path: string, body?: unknown, acceptCo
 
   signal?.throwIfAborted()
   if (res.status === 401) {
-    onUnauthenticated?.()
+    // The store resolves /auth/me against its current state. A late lookup
+    // can belong to the session that existed before a new sign-in.
+    if (path !== '/auth/me') onUnauthenticated?.()
     throw new Unauthenticated()
   }
   if (!res.ok && !(acceptConflict && res.status === 409)) {

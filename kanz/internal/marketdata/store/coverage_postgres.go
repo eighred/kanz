@@ -45,6 +45,12 @@ func (p *Postgres) PutCoverage(ctx context.Context, cov []Coverage) error {
 		// The row that PROVED MORE wins wholesale: observed_ns, breaks and
 		// recorded_at all come from it, so the stored row is one attestor's
 		// coherent claim rather than the best-looking field from each.
+		// PostgreSQL persists microseconds. Only round knowledge time forward,
+		// so a newly retained proof cannot qualify before its actual arrival.
+		recordedAt := c.RecordedAt.UTC().Truncate(time.Microsecond)
+		if recordedAt.Before(c.RecordedAt) {
+			recordedAt = recordedAt.Add(time.Microsecond)
+		}
 		batch.Queue(`
 			INSERT INTO ingestion_coverage
 				(instrument_id, venue, resolution, bucket_start,
@@ -58,7 +64,7 @@ func (p *Postgres) PutCoverage(ctx context.Context, cov []Coverage) error {
 				recorded_at = CASE WHEN EXCLUDED.observed_ns > ingestion_coverage.observed_ns
 				                   THEN EXCLUDED.recorded_at ELSE ingestion_coverage.recorded_at END
 		`, c.InstrumentID, c.Venue, string(c.Resolution), c.BucketStart.UTC(),
-			int64(c.Observed), c.Breaks, c.Attestor, c.RecordedAt.UTC())
+			int64(c.Observed), c.Breaks, c.Attestor, recordedAt)
 	}
 	br := tx.SendBatch(ctx, batch)
 	for range cov {
@@ -92,8 +98,9 @@ func (p *Postgres) Coverage(ctx context.Context, q CoverageQuery) ([]Coverage, e
 		  AND resolution = $3
 		  AND ($4::timestamptz IS NULL OR bucket_start >= $4)
 		  AND ($5::timestamptz IS NULL OR bucket_start < $5)
+		  AND ($6::timestamptz IS NULL OR recorded_at <= $6)
 		ORDER BY bucket_start, attestor
-	`, q.InstrumentID, q.Venue, string(q.Resolution), nullTime(q.From), nullTime(q.To))
+	`, q.InstrumentID, q.Venue, string(q.Resolution), nullTime(q.From), nullTime(q.To), nullTime(q.AsOf))
 	if err != nil {
 		return nil, fmt.Errorf("query coverage %s@%s: %w", q.InstrumentID, q.Venue, err)
 	}

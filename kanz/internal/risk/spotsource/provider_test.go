@@ -240,6 +240,11 @@ func TestACorrectionIsInvisibleUntilTheValuationTimePassesIt(t *testing.T) {
 	if err := mem.Put(ctx, []store.Observation{original, correction}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
+	conflict := correction
+	conflict.KnowledgeTime = original.KnowledgeTime
+	if err := mem.Put(ctx, []store.Observation{conflict}); !errors.Is(err, store.ErrObservationConflict) {
+		t.Fatalf("conflicting original: %v", err)
+	}
 	p := mustProvider(t, mem)
 
 	before, ok := p.Spot(ctx, "AAPL", obsTime.Add(24*time.Hour))

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -197,5 +198,76 @@ func TestMemory_StoredValueIsolated(t *testing.T) {
 	again, _ := s.History(context.Background(), Query{InstrumentID: "AAPL"})
 	if again[0].Price.Coefficient != 100 {
 		t.Fatalf("stored value bled from returned-copy mutation: %d", again[0].Price.Coefficient)
+	}
+}
+
+func TestImmutablePriceObservations(t *testing.T) {
+	for name, open := range map[string]func(*testing.T) Store{
+		"memory":   func(*testing.T) Store { return NewMemory() },
+		"postgres": func(t *testing.T) Store { return boundedPostgres(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := open(t)
+			first := obs("A", 1, dec(123, -1), PriceKindClose, 1)
+			first.CurrencyCode = "USD"
+			equal := first
+			equal.Price = dec(1230, -2)
+			mustPut(t, s, first, equal)
+			mustPut(t, s, equal)
+			later := first
+			later.KnowledgeTime = day(2)
+			later.Price = dec(13, 0)
+			changedPrice, changedCurrency := first, first
+			changedPrice.Price = dec(99, 0)
+			changedCurrency.CurrencyCode = ""
+			fresh := first
+			fresh.InstrumentID = "B"
+			for _, bad := range []Observation{changedPrice, changedCurrency} {
+				if err := s.Put(t.Context(), []Observation{fresh, bad}); !errors.Is(err, ErrObservationConflict) {
+					t.Fatalf("conflict: %v", err)
+				}
+			}
+			freshConflict := fresh
+			freshConflict.Price = dec(2, 0)
+			if err := s.Put(t.Context(), []Observation{fresh, freshConflict}); !errors.Is(err, ErrObservationConflict) {
+				t.Fatalf("in-batch conflict: %v", err)
+			}
+			if _, ok, err := s.LatestAsOf(t.Context(), "B", PriceKindClose, day(2)); ok || err != nil {
+				t.Fatalf("partial batch: found=%v err=%v", ok, err)
+			}
+			mustPut(t, s, later)
+			for _, want := range []Observation{first, later} {
+				got, ok, err := s.LatestAsOf(t.Context(), "A", PriceKindClose, want.KnowledgeTime)
+				if err != nil || !ok || want.compareRevision(got) != nil || got.Price.Coefficient != want.Price.Coefficient {
+					t.Fatalf("at %v: %v, %v", want.KnowledgeTime, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCompetingScalarPriceBatchesKeepOneWinner(t *testing.T) {
+	for name, open := range map[string]func(*testing.T) Store{"memory": func(*testing.T) Store { return NewMemory() }, "postgres": func(t *testing.T) Store { return boundedPostgres(t) }} {
+		t.Run(name, func(t *testing.T) {
+			s := open(t)
+			start := make(chan struct{})
+			results := make(chan error, 2)
+			for writer := range 2 {
+				go func() {
+					<-start
+					price := dec(int64(writer+1), 0)
+					results <- s.Put(t.Context(), []Observation{obs("race", writer+2, price, PriceKindClose, 5), obs("race", 1, price, PriceKindClose, 5)})
+				}()
+			}
+			close(start)
+			a, b := <-results, <-results
+			if !((a == nil && errors.Is(b, ErrObservationConflict)) || (b == nil && errors.Is(a, ErrObservationConflict))) {
+				t.Fatalf("competing returns: %v, %v", a, b)
+			}
+			rows, err := s.History(t.Context(), Query{InstrumentID: "race", Kind: PriceKindClose})
+			if err != nil || len(rows) != 2 || rows[0].Price.Coefficient != rows[1].Price.Coefficient || !rows[1].ObservationTime.Equal(day(int(rows[0].Price.Coefficient+1))) {
+				t.Fatalf("partial winner: %v, %v", rows, err)
+			}
+		})
 	}
 }

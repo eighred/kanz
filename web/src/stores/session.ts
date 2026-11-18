@@ -11,7 +11,7 @@ import { auth, Unauthenticated, type Identity } from '../api/client'
 export const useSession = defineStore('session', {
   state: () => ({
     identity: null as Identity | null,
-    resolved: false, // whether we have asked the server yet
+    resolved: false, // whether the server confirmed this browser's identity or sign-out
   }),
   getters: {
     signedIn: (s) => s.identity !== null,
@@ -21,13 +21,13 @@ export const useSession = defineStore('session', {
     async resolve() {
       if (this.resolved) return
       try {
-        this.identity = await auth.me()
+        const identity = await auth.me()
+        if (!this.resolved) this.identity = identity
       } catch (e) {
         if (!(e instanceof Unauthenticated)) throw e
-        this.identity = null
-      } finally {
-        this.resolved = true
+        if (!this.resolved) this.identity = null
       }
+      this.resolved = true
     },
     async signIn(subject: string, credential: string) {
       this.identity = await auth.login(subject, credential)

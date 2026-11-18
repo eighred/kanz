@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -19,7 +20,7 @@ type Memory struct {
 	// byInstrument keyed by instrument id → identity key → observation. The
 	// identity key is the full (observation_time, kind, knowledge_time) tuple,
 	// so a restatement (same observation_time + kind, newer knowledge_time) is a
-	// distinct entry and an exact re-put overwrites in place (idempotent).
+	// distinct entry and a retry must agree with the retained value.
 	byInstrument map[string]map[obsKey]Observation
 
 	// bars is the OHLCV series (#425), keyed by its full bitemporal identity so
@@ -52,13 +53,32 @@ func (m *Memory) Put(_ context.Context, obs []Observation) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	pending := make(map[string]map[obsKey]Observation)
 	for _, o := range obs {
-		byKey, ok := m.byInstrument[o.InstrumentID]
+		key := keyOf(o)
+		stored, ok := m.byInstrument[o.InstrumentID][key]
+		batch := pending[o.InstrumentID]
 		if !ok {
-			byKey = make(map[obsKey]Observation)
-			m.byInstrument[o.InstrumentID] = byKey
+			stored, ok = batch[key]
 		}
-		byKey[keyOf(o)] = cloneObs(o)
+		if ok {
+			if err := o.compareRevision(stored); err != nil {
+				return err
+			}
+			continue
+		}
+		if batch == nil {
+			batch = make(map[obsKey]Observation)
+			pending[o.InstrumentID] = batch
+		}
+		batch[key] = cloneObs(o)
+	}
+	for id, batch := range pending {
+		if existing := m.byInstrument[id]; existing != nil {
+			maps.Copy(existing, batch)
+		} else {
+			m.byInstrument[id] = batch
+		}
 	}
 	return nil
 }

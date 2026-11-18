@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/services/web_bff/internal/identityclient"
@@ -56,8 +57,8 @@ func (s *Server) handleMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		var status identity.MFAStatus
-		if json.Unmarshal(resp.Body, &status) != nil {
+		status, ok := projectMFAStatus(resp.Body, time.Now())
+		if !ok {
 			writeJSON(w, 502, map[string]string{"error": "MFA status unavailable"})
 			return
 		}
@@ -79,4 +80,36 @@ func (s *Server) handleMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.completeLogin(w, r, &tok, nil)
+}
+
+func projectMFAStatus(body []byte, now time.Time) (identity.MFAStatus, bool) {
+	// Presence matters: an omitted enabled flag must never suggest that this
+	// account can enroll its first factor without recent verification.
+	var wire struct {
+		Enabled       *bool                `json:"enabled"`
+		Recent        *bool                `json:"recent"`
+		VerifiedUntil *time.Time           `json:"verified_until"`
+		Factors       []identity.MFAFactor `json:"factors"`
+	}
+	if json.Unmarshal(body, &wire) != nil || wire.Enabled == nil || wire.Recent == nil || wire.Factors == nil {
+		return identity.MFAStatus{}, false
+	}
+	for _, factor := range wire.Factors {
+		if strings.TrimSpace(factor.ID) == "" || strings.TrimSpace(factor.Name) == "" || factor.CreatedAt.IsZero() {
+			return identity.MFAStatus{}, false
+		}
+	}
+	status := identity.MFAStatus{Enabled: *wire.Enabled, Factors: wire.Factors}
+	if !*wire.Recent {
+		return status, wire.VerifiedUntil == nil
+	}
+	if !status.Enabled || wire.VerifiedUntil == nil || wire.VerifiedUntil.IsZero() {
+		return identity.MFAStatus{}, false
+	}
+	// The upstream status can expire while its response is in flight.
+	if wire.VerifiedUntil.After(now) {
+		status.Recent = true
+		status.VerifiedUntil = wire.VerifiedUntil
+	}
+	return status, true
 }

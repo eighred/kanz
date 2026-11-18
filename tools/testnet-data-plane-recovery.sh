@@ -98,6 +98,52 @@ wait_for_pod_selector() {
   die "no pod appeared for selector $selector in namespace $namespace"
 }
 
+# The bootstrap principal backs up __system__ only. The isolated replacement
+# has no account configuration, so the CLI restores that account into $G.
+# Both old v1 archives and new backups contain the pinned server's detailed jsz.
+nats_account_state() {
+  jq -ceS --arg account "$1" '
+    def name: if type=="string" and length>0 then . else error("missing identity") end;
+    def count: if type=="number" and .>=0 and .<=9007199254740991 and floor==.
+               then . else error("missing or imprecise sequence/count") end;
+    def position: {consumer_seq:(.consumer_seq|count),stream_seq:(.stream_seq|count)};
+    def named: sort_by(.name) |
+      if (map(.name)|unique|length)==length then . else error("duplicate identity") end;
+    [.account_details[] | select(.name==$account and .id==$account)] |
+    if length!=1 then error("expected one backup account") else .[0].stream_detail end |
+    if type!="array" or length==0 then error("missing stream inventory") else . end |
+    map(. as $stream |
+      {name:(.name|name), messages:(.state.messages|count), bytes:(.state.bytes|count),
+       first_seq:(.state.first_seq|count), last_seq:(.state.last_seq|count),
+       consumers:((.consumer_detail // []) | map(
+         if .stream_name!=$stream.name or (.config|type)!="object" or
+             (.config.durable_name!=null and .config.durable_name!=.name)
+           then error("inconsistent consumer identity") else . end |
+         {name:(.name|name), durable:.config.durable_name, delivered:(.delivered|position),
+          ack_floor:(.ack_floor|position), ack_pending:(.num_ack_pending|count),
+          pending:(.num_pending|count)}) | named)} |
+      if (.consumers|length)!=($stream.state.consumer_count|count)
+        then error("incomplete consumer inventory") else . end) | named'
+}
+
+nats_restore_evidence() {
+  jq -c '{nats_streams:length,nats_consumers:(map(.consumers|length)|add),nats_messages:(map(.messages)|add),
+    nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}}'
+}
+
+# This isolated drill has no timestamp for an incident, the last recoverable
+# write at that incident, or restoration of the operational service.
+emit_restore_receipt() {
+  local key=$1 sha=$2 release=$3 elapsed=$4 databases=$5 nats=$6 details=$7
+  [[ "$elapsed" =~ ^[0-9]+$ ]] || die 'invalid restore drill duration'
+  jq -n --arg key "$key" --arg sha "$sha" --arg release "$release" --argjson elapsed "$elapsed" \
+    --argjson databases "$databases" --argjson nats "$nats" --argjson details "$details" '
+    $nats + $details + {format:"kanz-testnet-restore-drill-v1",status:"RESTORE_VERIFIED",
+      key:$key,sha256:$sha,source_release_commit:$release,databases:$databases,drill_elapsed_seconds:$elapsed,
+      operational_recovery:{state:"UNKNOWN",rpo_seconds:null,rto_seconds:null,
+        reason:"incident and operational recovery timestamps unavailable"}}'
+}
+
 backup() {
   require_boundary
   refuse_active_writers
@@ -169,6 +215,7 @@ backup() {
   kill "$pf" >/dev/null 2>&1 || true
   wait "$pf" 2>/dev/null || true
   rm -f "$work/nats/port-forward.log"
+  nats_account_state __system__ <"$work/nats/source.json" >/dev/null || die 'NATS backup account inventory incomplete'
 
   jq -n \
     --arg backup_id "$backup_id" --arg created_at "$(date -u +%FT%TZ)" \
@@ -205,7 +252,7 @@ backup() {
 restore() {
   require_boundary
   local started work key archive archive_sha head retention
-  started=$(date -u +%s)
+  started=$SECONDS
   work=$(mktemp -d /var/tmp/kanz-restore.XXXXXX)
   archive="$work/bundle.tar.gz"
   RECOVERY_WORK=$work
@@ -414,29 +461,30 @@ EOF
 
   k -n "$DRILL_NS" exec -i nats-restore -c restore -- sh -ceu 'tar -C /restore -xzf -' <"$work/extracted/nats/account.tar.gz"
   k -n "$DRILL_NS" exec nats-restore -c restore -- nats --server nats://127.0.0.1:4222 account restore /restore/nats-backup >/dev/null
-  local expected_streams expected_consumers expected_messages restored_jsz
-  expected_streams=$(jq '.streams // 0' "$work/extracted/nats/source.json")
-  expected_consumers=$(jq '[.account_details[]? | .stream_detail[]? | (.consumer_detail // [] | length)] | add // 0' "$work/extracted/nats/source.json")
-  expected_messages=$(jq '[.account_details[]? | .stream_detail[]? | (.state.messages // 0)] | add // 0' "$work/extracted/nats/source.json")
-  restored_jsz=$(k -n "$DRILL_NS" exec nats-restore -c restore -- wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true')
-  jq -e --argjson streams "$expected_streams" --argjson consumers "$expected_consumers" --argjson messages "$expected_messages" '(.streams // 0)==$streams and ([.account_details[]? | .stream_detail[]? | (.consumer_detail // [] | length)] | add // 0)==$consumers and ([.account_details[]? | .stream_detail[]? | (.state.messages // 0)] | add // 0)==$messages' <<<"$restored_jsz" >/dev/null || die 'NATS restored totals differ from source'
+  local expected_state restored_state nats_evidence
+  expected_state=$(nats_account_state __system__ <"$work/extracted/nats/source.json") || die 'NATS source account inventory incomplete'
+  restored_state=$(k -n "$DRILL_NS" exec nats-restore -c restore -- wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true&config=true' |
+    nats_account_state '$G') || die 'NATS restored account inventory incomplete'
+  [[ "$restored_state" == "$expected_state" ]] || die 'NATS named streams or consumer positions differ from source'
+  nats_evidence=$(nats_restore_evidence <<<"$expected_state")
 
-  local elapsed metadata_release
-  elapsed=$(( $(date -u +%s) - started ))
+  local metadata_release details
   metadata_release=$(jq -r .release_commit "$work/extracted/metadata.json")
   if [[ "$TV_MODE" == qualify ]]; then
     local tv_proof
     tv_proof=$(qualify_tv_restored_snapshot "$archive_sha")
     cleanup_tv_restore_namespace || die 'TV drill cleanup did not complete'
-    elapsed=$(( $(date -u +%s) - started ))
-    jq -n --arg key "$key" --arg sha256 "$archive_sha" --arg source_release_commit "$metadata_release" --argjson rto_seconds "$elapsed" --argjson replay "$tv_proof" '{status:"RESTORE_VERIFIED",key:$key,sha256:$sha256,source_release_commit:$source_release_commit,databases:9,rto_seconds:$rto_seconds,tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"}'
-    return
+    details=$(jq -n --argjson replay "$tv_proof" '{tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"}')
+  else
+    details=$(jq -n --argjson keys "$restored_redis" '{redis_keys:$keys,isolation:"temporary replacement namespace on source-region node"}')
   fi
-  jq -n --arg key "$key" --arg sha256 "$archive_sha" --arg source_release_commit "$metadata_release" --argjson databases "${#DATABASES[@]}" --argjson redis_keys "$restored_redis" --argjson nats_streams "$expected_streams" --argjson nats_consumers "$expected_consumers" --argjson nats_messages "$expected_messages" --argjson rpo_seconds 0 --argjson rto_seconds "$elapsed" '{status:"RESTORE_VERIFIED",key:$key,sha256:$sha256,source_release_commit:$source_release_commit,databases:$databases,redis_keys:$redis_keys,nats_streams:$nats_streams,nats_consumers:$nats_consumers,nats_messages:$nats_messages,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,isolation:"temporary replacement namespace on source-region node"}'
+  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$details"
 }
 
-case "$OPERATION" in
-  backup) backup ;;
-  restore) restore ;;
-  *) die 'usage: testnet-data-plane-recovery.sh backup|restore BUCKET KMS_KEY_ARN RELEASE_COMMIT' ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "$OPERATION" in
+    backup) backup ;;
+    restore) restore ;;
+    *) die 'usage: testnet-data-plane-recovery.sh backup|restore BUCKET KMS_KEY_ARN RELEASE_COMMIT' ;;
+  esac
+fi

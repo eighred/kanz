@@ -24,7 +24,8 @@ async function perform(action: () => Promise<void>) {
 }
 async function revoke(row: BrowserSession) {
   await perform(async () => {
-    await api.post(`/auth/sessions/${encodeURIComponent(row.id)}/revoke`, {})
+    const receipt = await api.post<{ revoked?: unknown } | null>(`/auth/sessions/${encodeURIComponent(row.id)}/revoke`, {})
+    if (receipt?.revoked !== true) throw new Error('Invalid revocation receipt.')
     if (!mounted) return
     if (row.current) { session.forget(); await router.replace('/login'); return }
     message.value = 'Session signed out.'

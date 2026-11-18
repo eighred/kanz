@@ -51,7 +51,7 @@ async function setStatus(user: UserAccess) {
 }
 onMounted(() => run(async () => {
   authority.value = await users.permissions()
-  try { gateway.value = await users.gatewayPermissions() }
+  try { gateway.value = await users.gatewayPermissions(authority.value) }
   catch (e) { gatewayError.value = e instanceof Error ? e.message : 'Gateway permissions are unavailable.' }
   if (authority.value.identity_admin) await load()
 }))

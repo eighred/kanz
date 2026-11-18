@@ -29,6 +29,24 @@ it('clears browser identity only after current-session revocation commits', asyn
   await w.get('tbody button').trigger('click'); await flushPromises()
   expect(forget).toHaveBeenCalledTimes(1); expect(replace).toHaveBeenCalledWith('/login'); w.unmount()
 })
+it.each([null, {}, { revoked: false }, { revoked: 'true' }])('requires a positive revocation receipt before changing either session', async receipt => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({ sessions: [current, other] })
+  vi.spyOn(api, 'post').mockResolvedValue(receipt)
+  const forget = vi.spyOn(useSession(), 'forget')
+  const wrapper = mount(SessionsView, options)
+  await flushPromises()
+  for (const button of wrapper.findAll('tbody button')) {
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('Session signed out.')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+  }
+  expect(get).toHaveBeenCalledOnce()
+  expect(forget).not.toHaveBeenCalled()
+  expect(replace).not.toHaveBeenCalled()
+  wrapper.unmount()
+})
 it('does not present a failed load as empty inventory', async () => {
   vi.spyOn(api, 'get').mockRejectedValue(new ApiError(503, 'Session service unavailable'))
   const w = mount(SessionsView, options); await flushPromises()

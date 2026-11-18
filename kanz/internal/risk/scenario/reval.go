@@ -2,15 +2,15 @@ package scenario
 
 import (
 	"context"
-	"github.com/eighred/kanz/internal/dec"
+	"math/big"
 	"time"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
-
+	"github.com/eighred/kanz/internal/dec"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/compute/factor"
 	"github.com/eighred/kanz/internal/risk/domain"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // Full-revaluation scenarios (DERIV-01e). EvaluateReval is the sibling of
@@ -46,7 +46,7 @@ type Revaluer interface {
 // record (#1035). One entry point means a new shock class is considered once.
 //
 // It returns the SAME shock-application coverage Evaluate does, and for the same
-// reason: sectorFrac resolves each position's sector through the classifier, so
+// reason: the revaluation path resolves each position's sector through the classifier, so
 // this path had the identical silent degradation (#640). It carries no caller
 // today — EvaluateReval is a tracked dark seam in
 // test/arch/no_dark_measure_seam_test.go, blocked on a Revaluer — and wiring it
@@ -87,13 +87,25 @@ func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revalu
 	// of any holding, so it is one whole-book exclusion. Recording it per
 	// position would make a deployment-wide gap look like a per-instrument data
 	// hole and would scale the count with the book size.
-	if cfg.classifier == nil && hasSectorShock(shocks) {
+	needsSector := hasSectorShock(shocks)
+	if cfg.classifier == nil && needsSector {
 		cov.noClassifierWired()
 	}
 	ctx := context.Background()
 	asOf := p.AsOf()
 	for _, pos := range cp.Positions() {
-		priceFrac := parallelFrac + instrumentPriceFrac(shocks, pos.InstrumentID) + sectorFrac(ctx, cfg.classifier, pos, asOf, shocks, cov)
+		var sector *factor.Sector
+		if needsSector && cfg.classifier != nil {
+			cl, ok := cfg.classifier.Classify(ctx, string(pos.InstrumentID), asOf)
+			if ok {
+				sector = &cl.Sector
+				cov.resolved(pos.InstrumentID)
+			} else {
+				cov.unclassified(pos.InstrumentID)
+			}
+		}
+		adjustments, instrumentFrac, sectorFrac := matchedPriceShocks(shocks, pos.InstrumentID, sector)
+		priceFrac := parallelFrac + instrumentFrac + sectorFrac
 		rs := compute.RevalShocks{PriceFrac: priceFrac, GlobalVolBump: globalVol, VolByUnderlying: volByUnderlying}
 		result := reval.RevalueOption(ctx, string(pos.InstrumentID), asOf, pos.MarketValue, rs)
 		if result.Status == compute.RevalPriced && result.Value != nil {
@@ -101,17 +113,34 @@ func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revalu
 			cp.SetPosition(pos)
 			continue
 		}
+		// Keep the established additive approximation for an unassessed holding.
+		// Its coverage records why this number cannot certify the scenario.
+		approximation := pos.MarketValue
+		if priceFrac != 0 && approximation != nil {
+			approximation = compute.ShockMoney(approximation, fracDecimal(priceFrac))
+		}
 		if result.Status != compute.RevalKnownLinear {
 			reason := result.Reason
 			if reason == "" {
 				reason = compute.SkipInvalidPricing
 			}
 			cov.revaluationUnassessed(pos.InstrumentID, reason)
+			pos.MarketValue = approximation
+			cp.SetPosition(pos)
+			continue
 		}
-		// Keep every holding in the approximation. Coverage prevents an
-		// unassessed option/classification from looking like a complete stress.
-		if priceFrac != 0 && pos.MarketValue != nil {
-			pos.MarketValue = compute.ShockMoney(pos.MarketValue, fracDecimal(priceFrac))
+		if len(adjustments) > 0 {
+			value, ok := linearValue(pos.MarketValue, adjustments)
+			if !ok {
+				cov.revaluationUnassessed(pos.InstrumentID, compute.SkipInvalidPricing)
+				continue
+			}
+			// The Decimal scale is observable on the wire. Keep the existing
+			// representation when its amount equals the independently exact result.
+			if approximation.GetAmount() != nil && dec.Cmp(approximation.Amount, value.Amount) == 0 {
+				value = approximation
+			}
+			pos.MarketValue = value
 			cp.SetPosition(pos)
 		}
 	}
@@ -150,15 +179,62 @@ func collectGlobalShocks(shocks []v1.ScenarioShock) (parallelFrac, globalVol flo
 	return parallelFrac, globalVol, volByUnderlying
 }
 
-// instrumentPriceFrac sums the per-instrument PriceShocks for one instrument.
-func instrumentPriceFrac(shocks []v1.ScenarioShock, id domain.InstrumentID) float64 {
-	var frac float64
+// Preserve the ordered Decimal shocks for linear positions and the existing
+// additive instrument and sector inputs for option pricing.
+func matchedPriceShocks(shocks []v1.ScenarioShock, id domain.InstrumentID, sector *factor.Sector) (adjustments []*commonpb.Decimal, instrumentFrac, sectorFrac float64) {
 	for _, sh := range shocks {
-		if s, ok := sh.(v1.PriceShock); ok && s.InstrumentID == id {
-			frac += dec.Float64Or(s.Pct, 0)
+		var pct *commonpb.Decimal
+		switch s := sh.(type) {
+		case v1.ParallelShift:
+			pct = s.Pct
+		case v1.PriceShock:
+			if s.InstrumentID == id {
+				pct = s.Pct
+				instrumentFrac += dec.Float64Or(pct, 0)
+			}
+		case v1.SectorShock:
+			if sector != nil && sector.Taxonomy == s.Taxonomy && sector.Code == s.Code {
+				pct = s.Pct
+				sectorFrac += dec.Float64Or(pct, 0)
+			}
+		}
+		if pct != nil && pct.Coefficient != 0 {
+			adjustments = append(adjustments, pct)
 		}
 	}
-	return frac
+	return adjustments, instrumentFrac, sectorFrac
+}
+
+// Each linear shock scales the latest market value. Keep every factor exact
+// and require each resulting position valuation to fit the Decimal contract.
+func linearValue(m *commonpb.Money, adjustments []*commonpb.Decimal) (*commonpb.Money, bool) {
+	if m.GetAmount() == nil {
+		return nil, false
+	}
+	value, ok := dec.FromProtoChecked(m.Amount)
+	if !ok {
+		return nil, false
+	}
+	one := big.NewRat(1, 1)
+	for _, pct := range adjustments {
+		scale := dec.FromProto(pct) // Evaluate preflights every magnitude.
+		value.Mul(value, scale.Add(scale, one))
+		candidate := compute.ShockMoney(m, pct)
+		if candidate.GetAmount() != nil {
+			if actual, ok := dec.FromProtoChecked(candidate.Amount); ok && actual.Cmp(value) == 0 {
+				m = candidate
+				continue
+			}
+		}
+		// The canonical arithmetic may coarsen a coefficient. Materialize the
+		// exact value if possible; an approximation cannot certify coverage.
+		amount, ok := dec.ToProtoExact(value)
+		if !ok {
+			return nil, false
+		}
+		m = &commonpb.Money{Amount: amount, CurrencyCode: m.CurrencyCode}
+	}
+	return m, true
 }
 
 // hasSectorShock reports whether the batch contains a SectorShock at all. With
@@ -174,36 +250,7 @@ func hasSectorShock(shocks []v1.ScenarioShock) bool {
 	return false
 }
 
-// sectorFrac sums the SectorShocks that match the position's sector, resolved
-// point-in-time. An unresolvable sector contributes 0 AND is recorded on cov —
-// the caller refuses on a non-empty coverage rather than treating "sector
-// unknown" as "not in the shocked sector", which is the linear path's rule
-// (applySectorShock) stated once for both paths.
-//
-// The nil-classifier case is NOT handled here: it is a property of the whole
-// evaluation, so cloneWithReval records it once before the position loop rather
-// than once per holding.
-func sectorFrac(ctx context.Context, classifier factor.Classifier, pos domain.Position, asOf time.Time, shocks []v1.ScenarioShock, cov *shockCoverage) float64 {
-	if classifier == nil || !hasSectorShock(shocks) {
-		return 0
-	}
-	cl, ok := classifier.Classify(ctx, string(pos.InstrumentID), asOf)
-	if !ok {
-		cov.unclassified(pos.InstrumentID)
-		return 0
-	}
-	cov.resolved(pos.InstrumentID)
-	var frac float64
-	for _, sh := range shocks {
-		if s, ok := sh.(v1.SectorShock); ok && cl.Sector.Taxonomy == s.Taxonomy && cl.Sector.Code == s.Code {
-			frac += dec.Float64Or(s.Pct, 0)
-		}
-	}
-	return frac
-}
-
-// fracDecimal converts a float fraction back to a Decimal at 1e-6 precision for
-// the linear ShockMoney fallback.
+// fracDecimal encodes the six-place approximation used for additive revaluation.
 func fracDecimal(f float64) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: int64(f * 1e6), Exponent: -6}
 }
