@@ -187,3 +187,14 @@ func TestUnassessedOptionKeepsItsExcludedAdditiveApproximation(t *testing.T) {
 		t.Fatalf("excluded approximation: %v", m.Value)
 	}
 }
+
+func TestIncompleteClassificationCannotEstablishSectorMismatch(t *testing.T) {
+	p := makePortfolio(domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime}, domain.Position{InstrumentID: "B", MarketValue: money(50, 0, "USD"), AsOf: baseTime})
+	classifier := classifierFor(map[string]string{"A": " ", "B": "45"})
+	for _, r := range []scenario.Revaluer{nil, linearOnlyRevaluer{}} {
+		_, cov := scenario.EvaluateReval(p, []v1.ScenarioShock{v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-1, -1)}}, nil, r, scenario.WithClassifier(classifier))
+		if cov.ExcludedCount != 1 || cov.Contributed != 1 || len(cov.Exclusions) != 1 || cov.Exclusions[0].Reason != scenario.SkipUnclassified || cov.Exclusions[0].InstrumentID != "A" {
+			t.Fatalf("incomplete sector counted as known: %+v", cov)
+		}
+	}
+}

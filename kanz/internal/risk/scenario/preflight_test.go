@@ -9,7 +9,7 @@ import (
 
 func TestShockPreflightZeroAllocations(t *testing.T) {
 	zero := &commonpb.Decimal{}
-	valid := []v1.ScenarioShock{v1.PriceShock{Pct: zero}, v1.ParallelShift{Pct: zero}, v1.SectorShock{Pct: zero}, v1.VolShock{AbsBump: zero}}
+	valid := []v1.ScenarioShock{v1.PriceShock{Pct: zero}, v1.ParallelShift{Pct: zero}, v1.SectorShock{Taxonomy: "GICS", Code: "10", Pct: zero}, v1.VolShock{AbsBump: zero}}
 	for _, tc := range []struct {
 		shocks           []v1.ScenarioShock
 		unknown, invalid bool
@@ -19,7 +19,7 @@ func TestShockPreflightZeroAllocations(t *testing.T) {
 		{[]v1.ScenarioShock{v1.PriceShock{}}, false, true},
 	} {
 		var unknown, invalid bool
-		allocs := testing.AllocsPerRun(1000, func() { unknown, invalid = hasUnknownShock(tc.shocks) })
+		allocs := testing.AllocsPerRun(1000, func() { unknown, invalid, _ = hasUnknownShock(tc.shocks) })
 		if unknown != tc.unknown || invalid != tc.invalid || allocs != 0 {
 			t.Fatalf("unknown=%v invalid=%v allocations=%v", unknown, invalid, allocs)
 		}
