@@ -5,6 +5,8 @@ on:
       - 'tools/tokyo_messaging_proof/**'
       - 'tools/feed_identity/**'
       - 'tools/testnet-data-plane-recovery.sh'
+      - 'tools/tv-sync-restored-proof.sh'
+      - 'tools/Invoke-TestnetDataPlaneRecovery.ps1'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/overlays/testnet_tokyo/**'
@@ -15,6 +17,8 @@ on:
       - 'tools/tokyo_messaging_proof/**'
       - 'tools/feed_identity/**'
       - 'tools/testnet-data-plane-recovery.sh'
+      - 'tools/tv-sync-restored-proof.sh'
+      - 'tools/Invoke-TestnetDataPlaneRecovery.ps1'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/overlays/testnet_tokyo/**'
@@ -41,6 +45,8 @@ jobs:
       - name: Check complete PostgreSQL archive inventories for both restore modes
         run: bash tools/tokyo_messaging_proof/check_postgres_inventory.sh
       - run: bash tools/feed_identity/install.sh
+      - name: Verify UID-scoped cleanup of the ordinary restore namespace
+        run: bash tools/tokyo_messaging_proof/check_restore_namespace.sh
       - name: Prove staged messaging isolation with real dependencies
         run: python3 -B tools/tokyo_messaging_proof/proof.py
       - name: Remove disposable cluster after interruption

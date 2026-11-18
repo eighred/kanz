@@ -33,10 +33,12 @@ TV_SOURCE=''
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
 
+if [[ "$OPERATION" == restore || "$TV_MODE" == qualify ]]; then
+  source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
+fi
 case "$TV_MODE" in
   off) [[ -z "$TV_PAIR_BASE64" ]] || die 'TV release inputs require explicit qualification' ;;
   qualify)
-    source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
     load_tv_restore_pair
     DATABASES+=(tv_sync)
     ;;
@@ -282,11 +284,7 @@ restore() {
   RECOVERY_ARCHIVE=$archive
   cleanup_restore() {
     local rc=$?
-    if [[ "$TV_MODE" == qualify ]]; then
-      if ! cleanup_tv_restore_namespace; then printf '%s\n' 'recovery-refused: owned TV drill cleanup unverified' >&2; rc=2; fi
-    else
-      [[ "$DRILL_NS" == kanz-recovery-drill ]] && k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    fi
+    if ! cleanup_tv_restore_namespace; then printf '%s\n' 'recovery-refused: owned drill cleanup unverified' >&2; rc=2; fi
     [[ "$RECOVERY_WORK" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$RECOVERY_WORK"
     exit "$rc"
   }
@@ -313,7 +311,6 @@ restore() {
   verify_postgres_inventory "$work/extracted/postgres" "${DATABASES[@]}"
   if [[ "$TV_MODE" == qualify ]]; then
     jq -e '.tv_sync=={tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}' "$work/extracted/metadata.json" >/dev/null || die 'artifact lacks explicit TV history inventory'
-    begin_tv_restore_namespace
     owner_posture='ALTER ROLE kanz_restore CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS'
     # PostgreSQL 16 logging controls: no statement text, including error,
     # duration and sampled statements, during isolated role provisioning.
@@ -328,15 +325,9 @@ restore() {
       log_parameter_max_length: "0"
       log_parameter_max_length_on_error: "0"'
 
-  else
-    k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=true >/dev/null
   fi
-
+  begin_tv_restore_namespace
   cat <<EOF | k apply -f - >/dev/null
-apiVersion: v1
-kind: Namespace
-metadata: { name: ${DRILL_NS}, labels: { kanz.io/purpose: recovery-drill } }
----
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: { name: default-deny, namespace: ${DRILL_NS} }
@@ -495,12 +486,12 @@ EOF
   if [[ "$TV_MODE" == qualify ]]; then
     local tv_proof
     tv_proof=$(qualify_tv_restored_snapshot "$archive_sha")
-    cleanup_tv_restore_namespace || die 'TV drill cleanup did not complete'
-    details=$(jq -n --argjson replay "$tv_proof" '{tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"}')
+    details=$(jq -n --argjson replay "$tv_proof" '{tv_sync:$replay,scope:"isolated restored archive only; not current target or genesis readiness"}')
   else
     details=$(jq -n --argjson keys "$restored_redis" '{redis_keys:$keys,isolation:"temporary replacement namespace on source-region node"}')
   fi
-  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$details"
+  cleanup_tv_restore_namespace || die 'drill cleanup did not complete'
+  emit_restore_receipt "$key" "$archive_sha" "$metadata_release" "$(( SECONDS - started ))" "${#DATABASES[@]}" "$nats_evidence" "$(jq '.cleanup="verified"' <<<"$details")"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

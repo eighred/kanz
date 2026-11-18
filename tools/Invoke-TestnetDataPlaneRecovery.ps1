@@ -14,20 +14,43 @@ param(
 $ErrorActionPreference = 'Stop'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$scriptPath = Join-Path $PSScriptRoot 'testnet-data-plane-recovery.sh'
 
 & git -C $repoRoot fetch origin main --quiet
 if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
 $releaseCommit = (& git -C $repoRoot rev-parse origin/main).Trim()
-$workingBlob = (& git -C $repoRoot hash-object $scriptPath).Trim()
-$mergedBlob = (& git -C $repoRoot rev-parse "${releaseCommit}:tools/testnet-data-plane-recovery.sh" 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or $workingBlob -ne $mergedBlob) {
-    throw 'Recovery is refused: the local recovery script is not the exact blob merged into origin/main.'
+function Get-MergedRecoveryPayload([string]$name) {
+    # Hash and stage the same byte array. Re-reading the path after the
+    # provenance check could stage different bytes during a checkout change.
+    $bytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $name))
+    $merged = (& git -C $repoRoot rev-parse "${releaseCommit}:tools/$name" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $merged -cnotmatch '^[0-9a-f]{40}$') { throw 'Recovery source unavailable.' }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+    $start.Arguments = 'hash-object --stdin'
+    $start.WorkingDirectory = $repoRoot
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $process.StandardInput.BaseStream.Close()
+        $actual = $process.StandardOutput.ReadToEnd().Trim()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw 'Could not verify recovery payload bytes.' }
+    } finally { $process.Dispose() }
+    if ($actual -cne $merged) { throw "Recovery source $name is not the exact blob merged into origin/main." }
+    [Convert]::ToBase64String($bytes)
 }
 
+$encoded = Get-MergedRecoveryPayload 'testnet-data-plane-recovery.sh'
 $tvMode = 'off'
 $pairEncoded = ''
 $helperCommands = @()
+if ($Operation -eq 'Restore' -or $QualifyTVSync) {
+    $helperEncoded = Get-MergedRecoveryPayload 'tv-sync-restored-proof.sh'
+    $helperCommands = @("printf '%s' '$helperEncoded' | base64 -d > `"`$work/tv-sync-restored-proof.sh`"", "chmod 0700 `"`$work/tv-sync-restored-proof.sh`"")
+}
 if ($QualifyTVSync) {
     if ($InstanceId -cne 'i-0ee1235614219f089' -or $Region -cne 'ap-northeast-1' -or $RecoveryBucket -cne 'kanz-testnet-tokyo-recovery-012619468098') { throw 'TV recovery target is not the reviewed Tokyo boundary.' }
     $head = (& git -C $repoRoot rev-parse HEAD).Trim()
@@ -65,9 +88,6 @@ if ($QualifyTVSync) {
     $platformDigest = Resolve-TvReplayPlatform -Aws $aws -Profile $Profile -RootDigest $rootDigest
     $pair | Add-Member -NotePropertyName runtime_platform_digest -NotePropertyValue $platformDigest
     $pairEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($pair | ConvertTo-Json -Compress -Depth 8)))
-    $helperRaw = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tv-sync-restored-proof.sh')).Replace("`r`n", "`n")
-    $helperEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($helperRaw))
-    $helperCommands = @("printf '%s' '$helperEncoded' | base64 -d > `"`$work/tv-sync-restored-proof.sh`"", "chmod 0700 `"`$work/tv-sync-restored-proof.sh`"")
     $tvMode = 'qualify'
 }
 
@@ -76,8 +96,6 @@ if ($LASTEXITCODE -ne 0 -or $kmsArn -notmatch '^arn:aws:kms:ap-northeast-3:01261
     throw 'Could not resolve the bounded Osaka recovery KMS key.'
 }
 
-$raw = [IO.File]::ReadAllText($scriptPath).Replace([string]([char]13) + [char]10, [string][char]10)
-$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($raw))
 $commands = @(
     'set -Eeuo pipefail',
     'umask 077',
