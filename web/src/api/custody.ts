@@ -50,7 +50,11 @@ export const custody = {
     const value = await api.post<CustodyEvidence>(`/api/v1/custody/breaks/${encodeURIComponent(row.break_id)}/actions`, decision)
     const state = (s: ActionState) => s && statuses.includes(s.status) && typeof s.assignee === 'string' && typeof s.explanation === 'string' && revision(s.revision)
     if (!value || value.request_id !== decision.request_id || value.break_id !== row.break_id || value.action !== decision.action || typeof value.actor !== 'string' || !value.actor.trim() || !Number.isFinite(Date.parse(value.recorded_at)) || !state(value.before) || !state(value.after) || value.before.revision !== row.revision || BigInt(value.after.revision) !== BigInt(row.revision) + 1n || value.before.status !== row.status || value.before.assignee !== (row.assignee || '') || value.before.explanation !== (row.explanation || '') || !value.values || value.values.ibor !== row.ibor || value.values.custodian !== row.custodian || value.values.difference !== row.difference) throw new Error('Custody action evidence could not be verified.')
-    if (decision.action === 'claim' ? value.after.status !== 'assigned' || value.after.assignee !== value.actor : value.after.status !== 'explained' || value.after.explanation !== decision.explanation) throw new Error('Custody action evidence could not be verified.')
+    const { before, after } = value
+    const matchesDecision = decision.action === 'claim'
+      ? after.status === 'assigned' && after.assignee === value.actor && after.explanation === before.explanation
+      : after.status === 'explained' && after.explanation === decision.explanation && after.assignee === before.assignee
+    if (!matchesDecision) throw new Error('Custody action evidence could not be verified.')
     return value
   },
 }
