@@ -7,10 +7,10 @@ Build the CPU baseline at the source revision under test and use a local virtual
 ```sh
 go build -trimpath -buildvcs=true -o "$TMPDIR/option-price-cpu" .
 python -B ../../../rust/crates/option_pricing/reference/american_reference.py --check
-python -B compare.py --cpu-worker "$TMPDIR/option-price-cpu" --device '<exact FP64 GPU name>' > result.json
+python -B compare.py --cpu-worker "$TMPDIR/option-price-cpu" --device '<exact FP64 GPU name>' --output "$TMPDIR/option-price-result.json"
 ```
 
-On Windows, pass the path to the built `.exe`. Keep output outside the checkout. The worker executable, application sources, oracle, shuffled input and source revision are recorded by digest or Git identity. Retain `go version -m` for the CPU binary alongside the record to establish its build source and toolchain. Device identity, memory, driver, OpenCL and Python library versions are recorded by the GPU process.
+On Windows, pass the path to the built `.exe`. Choose a new receipt path outside the checkout. The harness verifies the CPU binary's embedded Go package, toolchain, clean Git revision and matching clean checkout using `go version -m -json`. It records digests for the binary, sources, oracle and shuffled input. The GPU process reports device identity, memory, driver, OpenCL and Python library versions. Each verified batch is checkpointed atomically with nonfinal status. The final receipt includes the matched inventories, or the failed backend, sample, phase and available child exit code.
 
 Each of the 100 samples starts one process per backend, alternating backend order. Both workers consume the same seed-1546 permutation of the eight contracts twice. First-batch latency includes process startup, runtime initialization, OpenCL program loading or compilation, JSON transfer, calculation, return transfer and parent-side numerical validation. The second batch measures a warm process. The platform's normal compiler and OS file caches persist between processes. OpenCL event durations for uploads, kernel and downloads are additional device-side observations. Nearest-rank p99 is calculated from complete batches. The experiment covers prices only.
 
