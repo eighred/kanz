@@ -1,12 +1,12 @@
 # American option GPU comparison
 
-This disposable workload prices the eight American contracts in the [independent Decimal Snell reference](../../../rust/crates/option_pricing/tests/american_reference.json). It compares the existing Go `pricing.Price` call (one goroutine per contract) with an FP64 OpenCL 1.2 implementation of the same 200-step Cox–Ross–Rubinstein tree. The values are synthetic per-unit option prices. No service or scheduler calls the tool.
+This disposable workload prices the eight American contracts in the [independent Decimal Snell reference](../../../../../rust/crates/option_pricing/tests/american_reference.json). It compares the existing Go `pricing.Price` call (one goroutine per contract) with an FP64 OpenCL 1.2 implementation of the same 200-step Cox–Ross–Rubinstein tree. The values are synthetic per-unit option prices. No service or scheduler calls the tool.
 
 Build the CPU baseline at the source revision under test and use a local virtual environment with a compatible OpenCL ICD. The tested Python environment used Python 3.14.4, NumPy 2.5.5 and PyOpenCL 2026.1.5. From this directory:
 
 ```sh
 go build -trimpath -buildvcs=true -o "$TMPDIR/option-price-cpu" .
-python -B ../../../rust/crates/option_pricing/reference/american_reference.py --check
+python -B ../../../../../rust/crates/option_pricing/reference/american_reference.py --check
 python -B compare.py --cpu-worker "$TMPDIR/option-price-cpu" --device '<exact FP64 GPU name>' --output "$TMPDIR/option-price-result.json"
 ```
 

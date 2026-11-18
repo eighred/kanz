@@ -39,7 +39,7 @@ class ComparisonTests(unittest.TestCase):
             compare.check([2.0 + 1e-12, 3.0], expected, [1e-10] * 2, original)
 
     def test_cpu_build_binding(self):
-        identity = {"Path": "github.com/eighred/kanz/tools/option_gpu_comparison", "GoVersion": "go1.27.4",
+        identity = {"Path": "github.com/eighred/kanz/internal/risk/benchmarks/option_gpu_comparison", "GoVersion": "go1.27.4",
                     "Settings": [{"Key": k, "Value": v} for k, v in
                                  (("vcs", "git"), ("vcs.revision", "abc"), ("vcs.modified", "false"))]}
         for field, wrong in (("Path", "another/pkg"), ("GoVersion", "go1.0"), ("Settings", [])):
