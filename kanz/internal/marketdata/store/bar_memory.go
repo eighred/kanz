@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -17,6 +17,12 @@ type barKey struct {
 	resolution    Resolution
 	bucketUnixNs  int64
 	knowledgeUnix int64
+}
+
+// barRevisionKey uses the same instrument, venue, resolution, bucket and
+// knowledge time as the durable candle's conflict target.
+func barRevisionKey(instrumentID, venue string, resolution Resolution, bucketStart, knowledgeTime time.Time) barKey {
+	return barKey{instrumentID: instrumentID, venue: venue, resolution: resolution, bucketUnixNs: bucketStart.UnixNano(), knowledgeUnix: knowledgeTime.UnixNano()}
 }
 
 // PutBars stores bars idempotently. See BarStore.
@@ -36,10 +42,10 @@ func (m *Memory) PutBars(_ context.Context, bars []Bar) error {
 	defer m.mu.Unlock()
 	pending := make(map[barKey]Bar)
 	for _, b := range bars {
-		key := barKey{b.InstrumentID, b.Venue, b.Resolution, b.BucketStart.UTC().UnixNano(), b.KnowledgeTime.UTC().UnixNano()}
-		existing, ok := m.bars[key]
+		key := barRevisionKey(b.InstrumentID, b.Venue, b.Resolution, b.BucketStart, b.KnowledgeTime)
+		existing, ok := pending[key]
 		if !ok {
-			existing, ok = pending[key]
+			existing, ok = m.bars[barRevisionKey(b.InstrumentID, b.Venue, b.Resolution, b.BucketStart, b.KnowledgeTime)]
 		}
 		if ok {
 			if !SameCandle(existing, b) {
@@ -50,9 +56,10 @@ func (m *Memory) PutBars(_ context.Context, bars []Bar) error {
 		pending[key] = cloneBar(b)
 	}
 	if m.bars == nil {
-		m.bars = pending
-	} else {
-		maps.Copy(m.bars, pending)
+		m.bars = make(map[barKey]Bar, len(pending))
+	}
+	for _, b := range pending {
+		m.bars[barRevisionKey(b.InstrumentID, b.Venue, b.Resolution, b.BucketStart, b.KnowledgeTime)] = b
 	}
 	return nil
 }
