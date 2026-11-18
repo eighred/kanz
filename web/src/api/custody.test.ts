@@ -44,6 +44,22 @@ describe('custody response boundary', () => {
     expect(post).toHaveBeenCalledWith('/api/v1/custody/breaks/BTC%2FUSD%3Fx%23y/actions', decision)
   })
 
+  it.each(['claim', 'explain'] as const)('requires %s evidence to preserve the untouched field', async action => {
+    const row = { ...item, status: 'explained', assignee: 'previous-owner', explanation: 'Wire pending',
+      revision: '9007199254740993', values_state: 'exact' as const, actions_enabled: true }
+    const decision = { action, request_id: 'request-1', expected_revision: row.revision, review_contract: 'exact-v1' as const,
+      ...(action === 'explain' ? { explanation: 'Wire reconciled' } : {}) }
+    const before = { status: row.status, assignee: row.assignee, explanation: row.explanation, revision: row.revision }
+    const after = { ...before, revision: '9007199254740994', ...(action === 'claim'
+      ? { status: 'assigned', assignee: 'operator' } : { status: 'explained', explanation: 'Wire reconciled' }) }
+    const receipt = { request_id: decision.request_id, break_id: row.break_id, actor: 'operator', action,
+      recorded_at: '2026-01-02T01:00:00Z', before, after, values: { ibor: row.ibor, custodian: row.custodian, difference: row.difference } }
+    const post = vi.spyOn(api, 'post').mockResolvedValueOnce(receipt)
+    expect(await custody.act(row, decision)).toEqual(receipt)
+    post.mockResolvedValueOnce({ ...receipt, after: { ...after, [action === 'claim' ? 'explanation' : 'assignee']: '' } })
+    await expect(custody.act(row, decision)).rejects.toThrow('evidence could not be verified')
+  })
+
   it('accepts only evidence for the exact reviewed figures and state', async () => {
     const row = { ...item, status: 'open', revision: '9007199254740993', values_state: 'exact' as const, actions_enabled: true }
     const decision = { action: 'claim' as const, request_id: 'request-1', expected_revision: row.revision, review_contract: 'exact-v1' as const }

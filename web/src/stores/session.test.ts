@@ -14,20 +14,53 @@ describe('resolving who this browser is', () => {
   it('treats a 401 from /auth/me as signed out, not as an error to surface', async () => {
     // Every signed-out visitor gets a 401 here. Letting it propagate would put
     // an error banner in front of the sign-in form.
-    vi.spyOn(client.auth, 'me').mockRejectedValue(new Unauthenticated())
+    const me = vi.spyOn(client.auth, 'me').mockRejectedValue(new Unauthenticated())
     const s = useSession()
     await s.resolve()
     expect(s.signedIn).toBe(false)
     expect(s.resolved).toBe(true)
+    await s.resolve()
+    expect(me).toHaveBeenCalledOnce()
   })
 
   it('propagates a real failure rather than reporting the user as signed out', async () => {
     // A 502 means the BFF could not answer. Reporting that as "signed out"
     // would send the operator to sign in again during an outage, and the
     // successful-looking login that follows would fail for a different reason.
-    vi.spyOn(client.auth, 'me').mockRejectedValue(new client.ApiError(502, 'gateway down'))
+    const me = vi.spyOn(client.auth, 'me').mockRejectedValueOnce(new client.ApiError(502, 'gateway down')).mockResolvedValueOnce(identity)
     const s = useSession()
     await expect(s.resolve()).rejects.toBeInstanceOf(client.ApiError)
+    expect(s.resolved).toBe(false)
+    await s.resolve()
+    expect(s.identity).toEqual(identity)
+    expect(s.resolved).toBe(true)
+    expect(me).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { action: 'signIn', status: 401 },
+    { action: 'redeem', status: 200 },
+    { action: 'forget', status: 200 },
+  ])('keeps a later $action when an earlier identity lookup returns $status', async ({ action, status }) => {
+    vi.restoreAllMocks()
+    const s = useSession()
+    client.setUnauthenticatedHandler(() => s.forget())
+    let reply!: (value: Response) => void
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(new Promise<Response>(resolve => { reply = resolve }))
+    const lookup = s.resolve()
+    if (action === 'signIn') {
+      vi.spyOn(client.auth, 'login').mockResolvedValue(identity)
+      await s.signIn(identity.subject, 'password')
+    } else if (action === 'redeem') {
+      vi.spyOn(client.auth, 'redeem').mockResolvedValue(identity)
+      await s.redeem('invitation', 'password')
+    } else {
+      s.forget()
+    }
+    reply(Response.json({ ...identity, subject: 'former-account' }, { status }))
+    await lookup
+    expect(s.resolved).toBe(true)
+    expect(s.identity).toEqual(action === 'forget' ? null : identity)
   })
 
   it('asks the server only once', async () => {

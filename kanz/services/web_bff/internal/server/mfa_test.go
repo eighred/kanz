@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,69 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/services/web_bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web_bff/internal/session"
 )
+
+func TestMFAStatusProjectsOnlyConfirmedState(t *testing.T) {
+	h := newHarness(t)
+	id, err := h.srv.sessions.Create(context.Background(), session.Session{Subject: "person", Tenant: "tenant", AccessToken: "fixture-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mfa" || r.Header.Get("Authorization") != "Bearer fixture-token" {
+			t.Error("unexpected upstream MFA request")
+		}
+		_, _ = fmt.Fprint(w, upstreamBody)
+	}))
+	defer upstream.Close()
+	h.srv.identity = identityclient.New(upstream.URL, "", time.Second)
+	// The issuer's clock can run slightly ahead of the BFF's clock.
+	future := time.Now().UTC().Add(5*time.Minute + 30*time.Second).Format(time.RFC3339Nano)
+	recent := func(until string) string {
+		return fmt.Sprintf(`{"enabled":true,"recent":true,"verified_until":%q,"factors":[{"id":"key","name":"Security key","created_at":"2026-01-01T00:00:00Z","last_used_at":null}],"token":"private-extra"}`, until)
+	}
+	for _, tc := range []struct {
+		name, body      string
+		code            int
+		enabled, recent bool
+	}{
+		{"unenrolled", `{"enabled":false,"recent":false,"factors":[]}`, 200, false, false},
+		{"fresh", recent(future), 200, true, true},
+		{"expired in transit", recent("2020-01-01T00:00:00Z"), 200, true, false},
+		{"null", "null", 502, false, false},
+		{"missing flags", `{"factors":[]}`, 502, false, false},
+		{"null enabled", `{"enabled":null,"recent":false,"factors":[]}`, 502, false, false},
+		{"wrong recent type", `{"enabled":true,"recent":"true","factors":[]}`, 502, false, false},
+		{"missing factors", `{"enabled":false,"recent":false}`, 502, false, false},
+		{"invalid factor", `{"enabled":true,"recent":false,"factors":[{}]}`, 502, false, false},
+		{"missing cutoff", `{"enabled":true,"recent":true,"factors":[]}`, 502, false, false},
+		{"malformed cutoff", recent("bad"), 502, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamBody = tc.body
+			r := httptest.NewRequest("GET", "http://app/auth/mfa", nil)
+			r.AddCookie(&http.Cookie{Name: sessionCookie, Value: id})
+			w := httptest.NewRecorder()
+			h.srv.ServeHTTP(w, r)
+			if w.Code != tc.code || strings.Contains(w.Body.String(), "private-extra") {
+				t.Fatalf("unexpected projected response: %d %s", w.Code, w.Body.String())
+			}
+			if tc.code == 200 {
+				var status identity.MFAStatus
+				if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil || status.Enabled != tc.enabled || status.Recent != tc.recent || status.Factors == nil || (status.VerifiedUntil != nil) != tc.recent {
+					t.Fatalf("wrong MFA state: %s", w.Body.String())
+				}
+				if tc.recent && (status.VerifiedUntil.Format(time.RFC3339Nano) != future || len(status.Factors) != 1 || status.Factors[0].ID != "key") {
+					t.Fatalf("lost verified MFA details: %s", w.Body.String())
+				}
+			}
+		})
+	}
+}
 
 func TestMFAProxySeparatesPublicChallengesFromBearerSessions(t *testing.T) {
 	h := newHarness(t)
