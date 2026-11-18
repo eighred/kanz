@@ -182,18 +182,20 @@ func TestTheStoreStillHoldsTheRolledUpResolutions(t *testing.T) {
 	ctx := context.Background()
 
 	for _, res := range []store.Resolution{store.Resolution1h, store.Resolution1d} {
+		width, _ := res.Interval()
+		start := barTime.Truncate(width)
 		b := store.Bar{
 			InstrumentID:  "BTC-USDT",
 			Venue:         "XBIN",
 			Resolution:    res,
-			BucketStart:   barTime,
+			BucketStart:   start,
 			Open:          &commonpb.Decimal{Coefficient: 10000, Exponent: -2},
 			High:          &commonpb.Decimal{Coefficient: 11000, Exponent: -2},
 			Low:           &commonpb.Decimal{Coefficient: 9000, Exponent: -2},
 			Close:         &commonpb.Decimal{Coefficient: 10500, Exponent: -2},
 			Volume:        &commonpb.Decimal{Coefficient: 15, Exponent: -1},
 			TradeCount:    ptrTo(int64(42)),
-			KnowledgeTime: barTime.Add(time.Minute),
+			KnowledgeTime: start.Add(width),
 		}
 		if err := m.PutBars(ctx, []store.Bar{b}); err != nil {
 			t.Fatalf("the store refused a %s bar a rollup would write: %v", res, err)
