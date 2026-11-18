@@ -57,14 +57,30 @@ require_boundary() {
   fi
 }
 
+check_writer_namespace() {
+  local ns=$1 namespace pods count
+  namespace=$(k get namespace "$ns" --ignore-not-found -o json) || die "cannot establish writer namespace $ns"
+  [[ -n "$namespace" ]] || return 0
+  jq -se --arg ns "$ns" 'length==1 and (.[0] | .kind=="Namespace" and .metadata.name==$ns and
+    (.metadata.uid|type=="string" and length>0) and .status.phase=="Active")' \
+    <<<"$namespace" >/dev/null || die "incomplete writer namespace $ns"
+  pods=$(k -n "$ns" get pods -o json) || die "cannot read writer pods in $ns"
+  count=$(jq -ser --arg ns "$ns" '
+    if length==1 then .[0] else error("expected one pod list") end |
+    if ((.kind=="List" or .kind=="PodList") and (.items|type=="array") and
+        ((.metadata.continue // "")=="") and all(.items[];
+          .kind=="Pod" and .metadata.namespace==$ns and
+          (.metadata.name|type=="string" and length>0) and
+          (.metadata.uid|type=="string" and length>0) and
+          (.status.phase|type=="string" and length>0)))
+    then [.items[] | select(.status.phase!="Succeeded" and .status.phase!="Failed")] | length
+    else error("incomplete pod inventory") end' <<<"$pods") || die "incomplete writer pods in $ns"
+  [[ "$count" == 0 ]] || die "$ns has $count non-terminal pod(s); quiesce every writer before a cross-database backup"
+}
+
 refuse_active_writers() {
-  local ns count
-  for ns in kanz-services kanz-venues; do
-    if k get namespace "$ns" >/dev/null 2>&1; then
-      count=$(k -n "$ns" get pods -o json | jq '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed")] | length')
-      [[ "$count" == 0 ]] || die "$ns has $count non-terminal pod(s); quiesce every writer before a cross-database backup"
-    fi
-  done
+  local ns
+  for ns in kanz-services kanz-venues; do check_writer_namespace "$ns"; done
   [[ "$(k -n "$DATA_NS" get job postgres-provisioner -o jsonpath='{.status.succeeded}')" == 1 ]] || die 'PostgreSQL roles are not provisioned'
   [[ "$(k -n "$DATA_NS" get job postgres-migrations -o jsonpath='{.status.succeeded}')" == 1 ]] || die 'PostgreSQL migrations are not complete'
   [[ "$(k -n "$MSG_NS" get job nats-bootstrap -o jsonpath='{.status.succeeded}')" == 1 ]] || die 'NATS topology is not provisioned'

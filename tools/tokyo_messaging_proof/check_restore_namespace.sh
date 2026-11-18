@@ -41,3 +41,18 @@ if (DRILL_UID="$foreign"; cleanup_tv_restore_namespace); then echo 'Stale UID ac
 [[ -n "$(k get ns "$DRILL_NS" -o name)" ]]
 cleanup_tv_restore_namespace
 [[ -z "$DRILL_UID" && -z "$TV_OWNER_NONCE" && -z "$(k get ns "$DRILL_NS" --ignore-not-found -o name)" ]]
+
+# The same isolated API provides real NotFound, empty and non-terminal lists.
+check_writer_namespace kanz-services
+k create namespace kanz-services >/dev/null
+check_writer_namespace kanz-services
+k create -n kanz-services -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata: {name: writer}
+spec:
+  schedulingGates: [{name: kanz.io/fixture}]
+  containers: [{name: writer, image: registry.k8s.io/pause:3.10, imagePullPolicy: Never}]
+EOF
+if (check_writer_namespace kanz-services); then echo 'Pending writer accepted' >&2; exit 1; fi
+echo 'Verified writer namespace absent, empty and non-terminal states with the private API'
