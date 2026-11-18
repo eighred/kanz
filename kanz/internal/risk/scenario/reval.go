@@ -97,7 +97,7 @@ func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revalu
 		var sector *factor.Sector
 		if needsSector && cfg.classifier != nil {
 			cl, ok := cfg.classifier.Classify(ctx, string(pos.InstrumentID), asOf)
-			if ok {
+			if ok && sectorIdentified(cl.Sector.Taxonomy, cl.Sector.Code) {
 				sector = &cl.Sector
 				cov.resolved(pos.InstrumentID)
 			} else {

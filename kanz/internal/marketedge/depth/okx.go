@@ -227,6 +227,14 @@ func (s *OKXSource) readBook(ctx context.Context) (*okxBookMessage, error) {
 	if msg.Event != "" {
 		return nil, nil // subscribe ack
 	}
+	if msg.Arg.Channel != "books" || msg.Arg.InstID == "" || msg.Arg.InstID != s.instID {
+		s.reset()
+		return nil, fmt.Errorf("okx depth: unexpected book identity %q/%q", msg.Arg.Channel, msg.Arg.InstID)
+	}
+	if msg.Action != "snapshot" && msg.Action != "update" {
+		s.reset()
+		return nil, fmt.Errorf("okx depth: unknown book action %q", msg.Action)
+	}
 	return &msg, nil
 }
 

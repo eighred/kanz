@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -222,5 +223,39 @@ func TestOKXSource_SubscribeErrorSurfaces(t *testing.T) {
 	defer cancel()
 	if _, err := s.Recv(ctx); err == nil {
 		t.Fatal("Recv = nil error on a rejected subscribe — a book that will never arrive must fail loud")
+	}
+}
+
+func TestOKXSourceRejectsMisboundFramesAndRequiresFreshAnchor(t *testing.T) {
+	for _, action := range []string{"snapshot", "update"} {
+		for _, tc := range []struct{ name, from, to string }{
+			{"channel", "books", "books5"}, {"instrument", "BTC-USDT", "ETH-USDT"},
+			{"missing-instrument", "BTC-USDT", ""}, {"action", action, "replace"},
+		} {
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				frame := strings.Replace(okxBook(action, 101, 100, "999"), tc.from, tc.to, 1)
+				frames := []string{frame}
+				if action == "update" {
+					frames = append([]string{okxBook("snapshot", 100, -1, "100")}, frames...)
+				}
+				f := newFakeOKXDepth(t, [][]string{frames, {okxBook("update", 102, 101, "999"), okxBook("snapshot", 200, -1, "200"), okxBook("update", 201, 200, "201")}})
+				s := okxSourceOver(f)
+				defer func() { _ = s.Close() }()
+				if action == "update" {
+					if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 100 {
+						t.Fatal("missing first anchor")
+					}
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+				defer cancel()
+				got, err := s.Recv(ctx)
+				if err == nil || got.Snapshot != nil || got.Delta != nil {
+					t.Fatalf("misbound frame returned %+v, %v", got, err)
+				}
+				if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 200 || recvOK(t, s).Delta.GetPrevUpdateSequence() != 200 || f.connCount() != 2 {
+					t.Fatal("subscription did not re-anchor before emitting its next delta")
+				}
+			})
+		}
 	}
 }

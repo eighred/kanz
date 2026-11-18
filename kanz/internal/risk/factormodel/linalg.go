@@ -15,17 +15,38 @@ import "math"
 // eigenvector for values[i]; the pairs are unsorted (the caller sorts by
 // descending value to pick principal components).
 func eigenSym(sym [][]float64) (values []float64, vectors [][]float64) {
+	values, vectors, scale := normalizedEigenSym(sym)
+	for i := range values {
+		values[i] *= scale
+	}
+	return values, vectors
+}
+
+// Jacobi's convergence test operates in units of the largest matrix entry.
+// This preserves rotations when return units change and avoids squaring a
+// dimensional covariance that can underflow before the first sweep.
+func normalizedEigenSym(sym [][]float64) (values []float64, vectors [][]float64, scale float64) {
+	for _, row := range sym {
+		for _, x := range row {
+			scale = math.Max(scale, math.Abs(x))
+		}
+	}
 	n := len(sym)
 	a := make([][]float64, n)
 	for i := range a {
-		a[i] = append([]float64(nil), sym[i]...)
+		a[i] = make([]float64, n)
+		if scale != 0 {
+			for j, x := range sym[i] {
+				a[i][j] = x / scale
+			}
+		}
 	}
 	// v accumulates the rotations — its columns are the eigenvectors.
 	v := identity(n)
 	const maxSweeps = 100
 	for sweep := 0; sweep < maxSweeps; sweep++ {
 		off := offDiagonal(a)
-		if off < 1e-18 {
+		if off <= 1e-30 {
 			break
 		}
 		for p := 0; p < n-1; p++ {
@@ -35,7 +56,7 @@ func eigenSym(sym [][]float64) (values []float64, vectors [][]float64) {
 				}
 				// Jacobi rotation angle zeroing a[p][q].
 				theta := (a[q][q] - a[p][p]) / (2 * a[p][q])
-				t := math.Copysign(1, theta) / (math.Abs(theta) + math.Sqrt(theta*theta+1))
+				t := math.Copysign(1, theta) / (math.Abs(theta) + math.Hypot(theta, 1))
 				if theta == 0 {
 					t = 1
 				}
@@ -55,7 +76,7 @@ func eigenSym(sym [][]float64) (values []float64, vectors [][]float64) {
 		}
 		vectors[i] = col
 	}
-	return values, vectors
+	return values, vectors, scale
 }
 
 func identity(n int) [][]float64 {

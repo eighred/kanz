@@ -103,7 +103,7 @@ type Model struct {
 }
 
 // DefaultModelID derives a model's canonical id from the configuration that
-// produced it — "STATISTICAL-3F-250D-DATED1", "FUNDAMENTAL-250D-DATED1".
+// produced it, including the solver version for models with statistical factors.
 //
 // THE ESTIMATION PARAMETERS ARE IN THE ID ON PURPOSE, and it is the whole
 // difference between an id that identifies a model and one that identifies a
@@ -132,6 +132,9 @@ func DefaultModelID(cfg Config) string {
 		}{DescriptorPolicy, cfg.StyleFactors, cfg.ridge()})
 		digest := sha256.Sum256(policy)
 		parts = append(parts, fmt.Sprintf("DESC1-%x", digest[:8]))
+	}
+	if cfg.Type == Statistical || cfg.Type == Blend {
+		parts = append(parts, "PCA2")
 	}
 	if cfg.Type == Blend {
 		parts = append(parts, "JOINT1")

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -475,13 +476,16 @@ func okxContractUnits(row okxInstrument) (*commonpb.Decimal, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	units, ok := dec.ToProtoScaled(new(big.Rat).Mul(ctVal, ctMult))
+	units, ok := exactTermDecimal(new(big.Rat).Mul(ctVal, ctMult))
 	if !ok {
 		return nil, fmt.Sprintf("contract size ctVal(%s) × ctMult(%s) is not representable as an "+
 			"exact Decimal", row.CtVal, row.CtMult)
 	}
 	return units, ""
 }
+
+// Bound the significand and exponent before constructing a rational from venue text.
+var venueDecimal = regexp.MustCompile("^[+-]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE]([+-]?[0-9]+))?$")
 
 // positiveRat parses a venue decimal string exactly and refuses a non-positive
 // or absent one. field names it the way OKX does, so a refusal can be looked up
@@ -490,6 +494,19 @@ func positiveRat(s, field string) (*big.Rat, string) {
 	t := strings.TrimSpace(s)
 	if t == "" {
 		return nil, field + " is absent"
+	}
+	if len(t) > 256 {
+		return nil, field + " exceeds the supported decimal length"
+	}
+	parts := venueDecimal.FindStringSubmatch(t)
+	if parts == nil {
+		return nil, fmt.Sprintf("%s %q is not a decimal number", field, s)
+	}
+	if parts[1] != "" {
+		exp, err := strconv.ParseInt(parts[1], 10, 16)
+		if err != nil || exp < -128 || exp > 128 {
+			return nil, field + " exceeds the supported decimal exponent"
+		}
 	}
 	r, err := dec.ParseRat(t)
 	if err != nil {
@@ -511,11 +528,20 @@ func positiveDecimal(s, field string) (*commonpb.Decimal, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	d, ok := dec.ToProtoScaled(r)
+	d, ok := exactTermDecimal(r)
 	if !ok {
 		return nil, fmt.Sprintf("%s %q is not representable as an exact Decimal", field, s)
 	}
 	return d, ""
+}
+
+// Retain the stored Decimal representation when it already represents the
+// venue term exactly. A rounded legacy amount cannot identify an immutable term.
+func exactTermDecimal(r *big.Rat) (*commonpb.Decimal, bool) {
+	if d, ok := dec.ToProtoScaled(r); ok && dec.InDomain(d) && dec.FromProto(d).Cmp(r) == 0 {
+		return d, true
+	}
+	return dec.ToProtoExact(r)
 }
 
 // okxMillis parses one of OKX's Unix-millisecond timestamp strings.

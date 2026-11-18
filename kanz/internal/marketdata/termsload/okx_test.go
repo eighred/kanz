@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 
 	"github.com/eighred/kanz/internal/dec"
@@ -579,5 +580,44 @@ func TestChainRefusesRowsOutsideRequestedPartition(t *testing.T) {
 				t.Fatalf("partition mismatch returned %d records, err=%v", len(got.Mapped), err)
 			}
 		})
+	}
+}
+
+func preciseOptionRow() string {
+	row := okxOption("FINE-C", "BTC-USD", "C", "60000.000000001", expiry.UnixMilli(), listed.UnixMilli())
+	return strings.NewReplacer(`"ctVal":"0.01"`, `"ctVal":"3e-9"`, `"ctMult":"1"`, `"ctMult":"0.2"`).Replace(row)
+}
+
+func TestOKXExactContractDecimals(t *testing.T) {
+	future := strings.NewReplacer(`"tickSz":"0.1"`, `"tickSz":"7e-11"`, `"ctVal":"100"`, `"ctVal":"0.123456789"`).Replace(okxFuture("FINE-F", "BTC-USD", expiry.UnixMilli(), listed.UnixMilli()))
+	b := parse(t, okxCatalogue(preciseOptionRow(), future, okxOption("LEGACY", "BTC-USD", "C", "60000", expiry.UnixMilli(), listed.UnixMilli())))
+	records, err := b.Loadable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := records[0].Terms.GetOption()
+	f := records[1].Terms.GetFuture()
+	for _, tc := range []struct {
+		value *commonpb.Decimal
+		exact string
+	}{{o.Strike, "60000.000000001"}, {o.ContractMultiplier, "0.0000000006"}, {f.TickSize, "0.00000000007"}, {f.ContractSize, "0.123456789"}} {
+		if tc.value == nil || dec.FromProto(tc.value).Cmp(dec.Rat(tc.exact)) != 0 {
+			t.Fatalf("%v does not encode %s", tc.value, tc.exact)
+		}
+	}
+	legacy := records[2].Terms.GetOption()
+	if legacy.Strike.Coefficient != 6000000000000 || legacy.Strike.Exponent != -8 || legacy.ContractMultiplier.Coefficient != 1000000 || legacy.ContractMultiplier.Exponent != -8 {
+		t.Fatalf("legacy representation changed: %v", legacy)
+	}
+	for _, tc := range []struct{ row, field string }{
+		{strings.Replace(preciseOptionRow(), "60000.000000001", "1234567890123456789.1", 1), "stk"},
+		{strings.Replace(preciseOptionRow(), "3e-9", "1234567890123456789.1234567", 1), "ctVal"},
+		{strings.Replace(future, "7e-11", "1/3", 1), "tickSz"},
+		{strings.Replace(future, "7e-11", "1e999999999", 1), "tickSz"},
+	} {
+		bad := parse(t, okxCatalogue(preciseOptionRow(), tc.row))
+		if _, err := bad.Loadable(); err == nil || len(bad.Refused) != 1 || !strings.Contains(bad.Refused[0].Reason, tc.field) {
+			t.Fatalf("unrepresentable %s: %+v error=%v", tc.field, bad, err)
+		}
 	}
 }

@@ -114,6 +114,9 @@ func Fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 	// as-of the caller asked for; a model that leaves this function unnamed is a
 	// number nobody can reproduce, which is the defect #1039 records.
 	m.ModelID, m.AsOf = cfg.modelID(), asOf
+	if cfg.Type == Statistical || cfg.Type == Blend {
+		m.InputProvenance["pca_solver"] = "scale-relative-jacobi-v2"
+	}
 	return m, nil
 }
 
@@ -129,7 +132,10 @@ func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 		if err != nil {
 			return nil, err
 		}
-		m := fitStatistical(universe, panel.Values, cfg.statFactors(), "PC")
+		m, err := fitStatistical(universe, panel.Values, cfg.statFactors(), "PC")
+		if err != nil {
+			return nil, err
+		}
 		m.InputProvenance = panel.Params()
 		return m, nil
 	case Blend:
@@ -140,7 +146,10 @@ func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 		if err != nil {
 			return nil, err
 		}
-		stat := fitStatistical(fund.Instruments, regression.residuals, cfg.statFactors(), "SPC")
+		stat, err := fitStatistical(fund.Instruments, regression.residuals, cfg.statFactors(), "SPC")
+		if err != nil {
+			return nil, err
+		}
 		m, err := blend(fund, stat, regression)
 		if err != nil {
 			return nil, err
@@ -162,10 +171,15 @@ func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 // covariance is diagonal in the (uncorrelated) eigenvalues, and the specific
 // variance is each instrument's total variance net of what the kept components
 // explain. namePrefix labels the factors ("PC" / "SPC" for the blend residuals).
-func fitStatistical(instruments []string, returns [][]float64, k int, namePrefix string) *Model {
+func fitStatistical(instruments []string, returns [][]float64, k int, namePrefix string) (*Model, error) {
 	n := len(instruments)
 	cov := sampleCov(returns)
 	vals, vecs := eigenSym(cov)
+	for _, value := range vals {
+		if !finite(value) {
+			return nil, fmt.Errorf("factormodel: nonfinite statistical covariance")
+		}
+	}
 
 	// Order eigenpairs by descending eigenvalue; keep the top k (≤ n).
 	order := make([]int, n)
@@ -210,7 +224,7 @@ func fitStatistical(instruments []string, returns [][]float64, k int, namePrefix
 		}
 		specific[id] = s
 	}
-	return newModel(factors, instruments, loadings, factorCov, specific)
+	return newModel(factors, instruments, loadings, factorCov, specific), nil
 }
 
 // blend estimates all factor covariances from the same dated observations.
