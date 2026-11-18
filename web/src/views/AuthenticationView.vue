@@ -15,16 +15,27 @@ const message = ref('')
 const session = useSession()
 const controller = new AbortController()
 let expiryTimer: ReturnType<typeof setTimeout> | undefined
+const timestamp = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value))
+
 async function load() {
-  const loaded = await api.get<Status>('/auth/mfa')
-  if (controller.signal.aborted) return
-  status.value = loaded
   clearTimeout(expiryTimer)
-  if (loaded.recent && loaded.verified_until) {
-    const remaining = Date.parse(loaded.verified_until) - Date.now()
-    if (!Number.isFinite(remaining) || remaining <= 0) loaded.recent = false
-    else expiryTimer = setTimeout(() => { if (status.value) status.value.recent = false }, remaining)
+  status.value = null
+  const loaded = await api.get<Status | null>('/auth/mfa')
+  if (controller.signal.aborted) return
+  if (!loaded || typeof loaded.enabled !== 'boolean' || typeof loaded.recent !== 'boolean' ||
+      !Array.isArray(loaded.factors) || !loaded.factors.every(f => f && typeof f.id === 'string' && f.id.trim() &&
+        typeof f.name === 'string' && f.name.trim() && timestamp(f.created_at) && (f.last_used_at == null || timestamp(f.last_used_at)))) {
+    throw new Error('Invalid MFA status.')
   }
+  if (loaded.recent ? !loaded.enabled || !timestamp(loaded.verified_until) : loaded.verified_until != null) {
+    throw new Error('Invalid MFA verification status.')
+  }
+  const remaining = loaded.recent && loaded.verified_until ? Date.parse(loaded.verified_until) - Date.now() : 0
+  // The identity service issues at most five minutes of step-up assurance.
+  if (remaining > 5 * 60_000) throw new Error('Invalid MFA verification cutoff.')
+  status.value = { ...loaded, recent: remaining > 0 }
+  if (remaining > 0) expiryTimer = setTimeout(() => { if (status.value) status.value.recent = false }, remaining)
 }
 async function perform(action: () => Promise<void>) {
   if (busy.value) return
@@ -47,7 +58,7 @@ async function stepup() {
     const c = await api.post<MFACeremony>('/auth/mfa/stepup/begin', {})
     const credential = await webAuthn(c, false, controller.signal)
     await api.post('/auth/mfa/stepup/finish', { id: c.id, credential })
-    await session.resolve(); message.value = 'Verified. Privileged access is available for five minutes. Return to your action and submit it explicitly.'
+    await session.resolve(); message.value = 'Security key verified. Return to your action and submit it explicitly.'
   })
 }
 async function remove(f: Factor) {
