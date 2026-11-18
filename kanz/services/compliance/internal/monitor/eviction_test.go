@@ -2,6 +2,8 @@ package monitor
 
 import (
 	"context"
+	"math"
+	"strconv"
 	"testing"
 	"time"
 
@@ -340,22 +342,13 @@ func TestAnEmptyBookIsNotReEvaluated(t *testing.T) {
 	}
 }
 
-// TestSnapshotAllocatesOncePerHolding is the named assertion behind the
-// snapshot half of #810. The copy runs on EVERY position FACT, so an allocation
-// per holding is the floor and anything above it is per-event garbage: the
-// version this replaced grew book.Positions from nil (reallocating and
-// re-copying as it doubled) and scanned the map twice more for a currency it
-// computed and threw away.
-func TestSnapshotAllocatesOncePerHolding(t *testing.T) {
-	const n = 50
+// Capturing a large same-scale book allocates a bounded number of objects.
+func TestSnapshotAllocationsRemainBounded(t *testing.T) {
+	const n = 1000
 	m := NewMonitor(comp.NewEngine(nil), comp.NewMandateRegistry(), nil, nil, nil, nil)
 	seedBook(m, evictionKey, n)
-	got := testing.AllocsPerRun(100, func() { _ = m.snapshot(evictionKey) })
-	// One per holding for the running NAV sum, plus a small constant for the
-	// Book, the positions slice and the NAV Money.
-	if max := float64(n + 5); got > max {
-		t.Errorf("snapshot of a %d-holding book allocates %.0f times, want at most %.0f — "+
-			"the per-FACT copy is growing its slice from nil or re-scanning the map", n, got, max)
+	if got := testing.AllocsPerRun(100, func() { _ = m.snapshot(evictionKey) }); got > 16 {
+		t.Errorf("snapshot of %d holdings allocated %.0f objects", n, got)
 	}
 }
 
@@ -381,4 +374,60 @@ func TestSnapshotNamesOneCurrency(t *testing.T) {
 
 func instName(i int) string {
 	return string(rune('A'+i/26)) + string(rune('A'+i%26)) + "X"
+}
+
+func TestSnapshotRequiresAnExactSingleCurrencyPositionsTotal(t *testing.T) {
+	money := func(c int64, e int32, currency string) *commonpb.Money {
+		return &commonpb.Money{Amount: decv(c, e), CurrencyCode: currency}
+	}
+	for _, tc := range []struct {
+		name     string
+		values   []*commonpb.Money
+		currency string
+		amount   *commonpb.Decimal
+	}{
+		{"cancelling intermediate overflow", []*commonpb.Money{money(math.MaxInt64, 0, "USD"), money(1, 0, "USD"), money(-math.MaxInt64, 0, "USD")}, "USD", decv(1, 0)},
+		{"mixed scales", []*commonpb.Money{money(1, 2, "USD"), money(-1, -2, "USD")}, "USD", decv(9999, -2)},
+		{"representable overflow", []*commonpb.Money{money(5e18, 0, "USD"), money(5e18, 0, "USD")}, "USD", decv(1e18, 1)},
+		{"precision loss", []*commonpb.Money{money(1e18, 0, "USD"), money(1, -18, "USD")}, "USD", nil},
+		{"missing valuation", []*commonpb.Money{money(9, 0, "USD"), nil}, "USD", nil},
+		{"missing amount", []*commonpb.Money{money(9, 0, "USD"), {CurrencyCode: "USD"}}, "USD", nil},
+		{"unstated currency", []*commonpb.Money{money(9, 0, "USD"), money(1, 0, "")}, "USD", nil},
+		{"mixed currency", []*commonpb.Money{money(9, 0, "USD"), money(1, 0, "EUR")}, "", nil},
+		{"out of domain", []*commonpb.Money{money(1, math.MaxInt32, "USD")}, "USD", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMonitor(nil, nil, nil, nil, nil, nil)
+			holdings := map[string]comp.Position{}
+			for i, v := range tc.values {
+				id := strconv.Itoa(i)
+				holdings[id] = comp.Position{InstrumentID: id, Quantity: decv(1, 0), MarketValue: v}
+			}
+			m.books[evictionKey] = &book{positions: holdings}
+			for range 30 {
+				got := m.snapshot(evictionKey)
+				if (got.NAV == nil) != (tc.amount == nil) || got.BaseCurrency != tc.currency || !proto.Equal(got.NAV.GetAmount(), tc.amount) || len(got.Positions) != len(holdings) || got.NAVBasis != comp.NAVBasisGrossPositions {
+					t.Fatalf("snapshot: %+v", got.Book)
+				}
+				for _, p := range got.Positions {
+					if !proto.Equal(p.MarketValue, holdings[p.InstrumentID].MarketValue) {
+						t.Fatalf("changed position %s", p.InstrumentID)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSnapshotCanUpgradeAMissingCostToMarkedEquity(t *testing.T) {
+	f := leveredBook(t, 2, 0, 100, 7)
+	foldMark(t, f.marks, "B", 20, t0)
+	f.mon.books[evictionKey] = &book{positions: map[string]comp.Position{
+		"AAPL": {InstrumentID: "AAPL", Quantity: decv(2, 0), MarketValue: &commonpb.Money{Amount: decv(1, 0), CurrencyCode: "USD"}},
+		"B":    {InstrumentID: "B", Quantity: decv(3, 0)},
+	}}
+	got := f.mon.snapshot(evictionKey)
+	if got.NAVBasis != comp.NAVBasisEquity || ratFromDecimal(got.NAV.Amount).RatString() != "267" {
+		t.Fatalf("marked equity: %+v", got.Book)
+	}
 }
