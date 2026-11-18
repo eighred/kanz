@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { risk, describeRisk, type PortfolioSummary } from '../api/risk'
 
 // THE SCREEN THAT HAD NOWHERE TO GET AN ID (#399).
@@ -19,9 +19,13 @@ const rows = ref<PortfolioSummary[]>([])
 const error = ref('')
 const loading = ref(true)
 
+const now = ref(Date.now())
+let clock: ReturnType<typeof setInterval>
 onMounted(async () => {
+  clock = setInterval(() => { now.value = Date.now() }, 60_000)
   try {
     rows.value = await risk.portfolios()
+    now.value = Date.now()
   } catch (e) {
     // A 404 here does NOT mean "you have no portfolios" — the gateway answers
     // it for "not yours" too, so that a status code cannot enumerate another
@@ -33,29 +37,27 @@ onMounted(async () => {
   }
 })
 
-/** age renders as_of as a coarse duration. Staleness is why the column exists. */
-function age(iso: string): string {
-  if (!iso) return '—'
-  const ms = Date.now() - new Date(iso).getTime()
-  if (!Number.isFinite(ms) || ms < 0) return '—'
-  const days = Math.floor(ms / 86_400_000)
-  if (days >= 1) return `${days}d`
-  const hours = Math.floor(ms / 3_600_000)
-  if (hours >= 1) return `${hours}h`
-  return `${Math.max(1, Math.floor(ms / 60_000))}m`
+onUnmounted(() => clearInterval(clock))
+
+// The gateway emits UTC protobuf timestamps. Refuse malformed or future values
+// before assigning the same healthy style as a recent observation.
+function freshness(iso: string, current: number) {
+  if (typeof iso !== 'string') return { label: 'Unknown', warning: true }
+  const folded = Date.parse(iso)
+  const age = current - folded
+  if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(iso) || !Number.isFinite(folded) ||
+      new Date(folded).toISOString().slice(0, 19) !== iso.slice(0, 19) || age < 0) {
+    return { label: 'Unknown', warning: true }
+  }
+  const minutes = Math.floor(age / 60_000)
+  if (minutes < 1) return { label: 'Less than 1m ago', warning: false }
+  if (minutes < 60) return { label: `${minutes}m ago`, warning: false }
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return { label: `${hours}h ago`, warning: false }
+  return { label: `${Math.floor(hours / 24)}d ago (stale)`, warning: true }
 }
 
-// A PORTFOLIO NOT FOLDED IN A DAY IS WORTH SEEING AS SUCH. The engine reports
-// as_of; this is the only screen where two otherwise identical rows differ by
-// it, so it is the only place the difference can be noticed before someone acts
-// on a stale figure.
-const STALE_MS = 86_400_000
-
-function stale(iso: string): boolean {
-  if (!iso) return true
-  const t = new Date(iso).getTime()
-  return !Number.isFinite(t) || Date.now() - t > STALE_MS
-}
+const portfolios = computed(() => rows.value.map(row => ({ ...row, freshness: freshness(row.as_of, now.value) })))
 </script>
 
 <template>
@@ -73,7 +75,7 @@ function stale(iso: string): boolean {
       <tr><th>Portfolio</th><th>Currency</th><th>Positions</th><th>Last folded</th></tr>
     </thead>
     <tbody>
-      <tr v-for="p in rows" :key="p.portfolio_id">
+      <tr v-for="p in portfolios" :key="p.portfolio_id">
         <td>
           <!-- THE ID IS THE LINK, not the display name: it is what every risk
                route takes and what an operator needs when reading a URL or an
@@ -85,7 +87,7 @@ function stale(iso: string): boolean {
         </td>
         <td>{{ p.base_currency || '—' }}</td>
         <td>{{ p.position_count }}</td>
-        <td :class="stale(p.as_of) ? 'state-warn' : 'state-ok'">{{ age(p.as_of) }}</td>
+        <td :class="p.freshness.warning ? 'state-warn' : 'state-ok'">{{ p.freshness.label }}</td>
       </tr>
       <tr v-if="rows.length === 0">
         <td colspan="4">

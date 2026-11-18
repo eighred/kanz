@@ -1,13 +1,52 @@
 # Valkey first installation and retained replay-state migration
 
-The first-install fixture starts the pinned Valkey 9.1.3 image directly on a
-new private volume. It requires an empty keyspace across databases, then claims
+The generic rig starts Valkey 9.1.3 at the pinned image digest in
+`kanz/infra/messaging/redis.yaml`. The service DNS name, protocol, secret
+paths and PVC identity remain compatible with its gateway and webhook
+consumers. Each acknowledged AOF write is fsynced. The Tokyo data overlay
+retains its existing Redis image and command.
+
+Before applying dev Secrets or network policy, `tools/rig-apply.sh --deploy`
+checks the cache StatefulSet and its ordinal-zero PVC. A first install creates
+both by name and records the PVC's Kubernetes UID on the StatefulSet. A reapply
+requires that original claim and the same pinned Valkey image. An existing
+Redis deployment, unmarked Valkey installation, orphaned or missing PVC, or
+failed API read stops deployment. A partial install can leave a reserved PVC.
+Inspect its ownership and retained data before any recovery decision (#1541).
+
+The first-install fixture renders the same dev-secret adaptation as
+`tools/rig-apply.sh`. It starts that workload command on a new private
+volume, checks its effective persistence configuration, and executes both
+authenticated probes with an ephemeral password mounted in memory. Missing,
+empty and incorrect passwords must each produce a nonzero probe exit status.
+Restoring the correct secret must restore both authenticated checks. It requires an empty keyspace across databases, then claims
 independent tenant keys with different absolute expiration times. After a clean
 Valkey restart, the surviving claim must reject a duplicate without extending
 its deadline. The short-lived claim must become reusable at its original
 deadline. The fixture removes the volume before the retained-state regression.
 This exercises the backend operations on synthetic keys. The two-process
 risk-engine consumer qualification is tracked in #111.
+
+The generic rig applies `kanz/infra/messaging/valkey-clients.yaml` before the
+cache. On a CNI that enforces NetworkPolicy, only the gateway and webhook
+app labels in `kanz-services` can reach its TCP port 6379. The
+`rig-cache-ingress` CI job starts a fresh kind/Cilium cluster, deploys the
+rendered cache and checks both clients through disposable pods carrying the
+rendered workload labels, service accounts and DSN file mounts. It tests an
+unapproved peer and a gateway-labelled peer in a different namespace before
+and after applying the policy. The pods authenticate with a disposable
+password substituted for the rig value. Both client Secrets still map to the
+same cache credential. NetworkPolicy filters pods by their labels and
+namespace; it does not enforce independent Valkey ACL users.
+
+The `webhook-cache-identity` job runs both replicas of the actual Linux webhook
+entry point, compiled with the production `redis` build tag. It uses the
+documented `--keep-spiffe` render for a SPIRE-authenticated NATS broker,
+the canonical account grants and streams, and freshly generated fixture
+credentials. Each ready pod's IP must appear among the authenticated Valkey
+clients behind the cache ingress policy. Both original webhook processes must
+lose readiness on actual cache loss and regain it on the same PVC. The
+fixture sends no strategy alerts and never opens the trading gate.
 
 The retained-state fixture starts the Tokyo Redis image on a second fresh
 volume and checks Redis → Valkey → restarted Valkey → Redis using that same

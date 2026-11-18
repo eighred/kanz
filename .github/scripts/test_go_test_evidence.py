@@ -67,7 +67,8 @@ class EvidenceTests(unittest.TestCase):
 
     def test_all_supplied_dependencies_are_checked(self):
         for variable in ("TEST_POSTGRES_URL", "TEST_NATS_URL", "TEST_TV_NATS_URL", "TEST_KAFKA_BROKERS", "TEST_REDIS_URL",
-                         "TEST_NATS_MTLS_URL", "TEST_NATS_MTLS_CERT_DIR", "TEST_MFA_BROWSER_SCRIPT"):
+                         "TEST_NATS_MTLS_URL", "TEST_NATS_MTLS_CERT_DIR", "TEST_MFA_BROWSER_SCRIPT",
+                         "TEST_ACCOUNTING_MIGRATION_POSTGRES_URL"):
             with self.subTest(variable=variable):
                 problems, _, _ = check(suite(event("output", "TestReal", "set " + variable), event("skip", "TestReal")))
                 self.assertIn(variable, problems[0])

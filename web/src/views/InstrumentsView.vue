@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useSession } from '../stores/session'
 import {
   byInstrument,
   describeInstruments,
@@ -23,19 +24,23 @@ import {
 const rows = ref<TradeableInstrument[]>([])
 const error = ref('')
 const loading = ref(true)
-const served = ref(true)
-
-onMounted(async () => {
+const session = useSession()
+watch(() => session.identity, async (identity, _, onCleanup) => {
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+  rows.value = []
+  error.value = ''
+  loading.value = true
   try {
-    const resp = await instrumentsApi.list()
-    rows.value = resp.instruments ?? []
+    if (!identity) throw new Error('Missing catalogue reader.')
+    const resp = await instrumentsApi.list(identity.tenant, controller.signal)
+    if (!controller.signal.aborted) rows.value = resp.instruments
   } catch (e) {
-    served.value = false
-    error.value = describeInstruments(e)
+    if (!controller.signal.aborted) error.value = describeInstruments(e)
   } finally {
-    loading.value = false
+    if (!controller.signal.aborted) loading.value = false
   }
-})
+}, { immediate: true, flush: 'sync' })
 
 /** One row per canonical id, carrying every venue that lists it. */
 const grouped = computed(() => byInstrument(rows.value))

@@ -3,6 +3,30 @@ on:
   pull_request:
     paths:
       - 'tools/valkey_migration/**'
+      - 'tools/rig_dev_patch.py'
+      - 'tools/rig-apply.sh'
+      - 'tools/feed_identity/install.sh'
+      - 'tools/feed_identity/proof.py'
+      - 'tools/tokyo_messaging_proof/proof.py'
+      - 'tools/tokyo_messaging_proof/bootstrap-labels.yaml'
+      - 'kanz/infra/security/spire/crds/*.yaml'
+      - 'kanz/infra/security/spire/namespaces.yaml'
+      - 'kanz/infra/security/spire/rbac.yaml'
+      - 'kanz/infra/security/spire/registration.yaml'
+      - 'kanz/infra/security/spire/spire-agent.yaml'
+      - 'kanz/infra/security/spire/spire-server.yaml'
+      - 'kanz/infra/nats/namespace.yaml'
+      - 'kanz/infra/nats/nats.yaml'
+      - 'kanz/infra/nats/tenancy.yaml'
+      - 'kanz/infra/nats/bootstrap-job.yaml'
+      - 'kanz/infra/overlays/testnet_tokyo/data/nats-config-patch.yaml'
+      - 'kanz/services/webhook_ingest/**'
+      - 'kanz/infra/messaging/valkey-clients.yaml'
+      - 'kanz/infra/deploy/rig-dev-secrets.yaml'
+      - 'kanz/infra/deploy/api-gateway-deploy.yaml'
+      - 'kanz/infra/deploy/webhook-ingest-deploy.yaml'
+      - 'kanz/infra/messaging/redis.yaml'
+      - 'kanz/infra/overlays/testnet_tokyo/data/kustomization.yaml'
       - 'kanz/test/backing/valkey.sh'
       - 'kanz/test/backing/up.sh'
       - '.github/workflows/valkey-migration.yml'
@@ -10,6 +34,30 @@ on:
     branches: [main]
     paths:
       - 'tools/valkey_migration/**'
+      - 'tools/rig_dev_patch.py'
+      - 'tools/rig-apply.sh'
+      - 'tools/feed_identity/install.sh'
+      - 'tools/feed_identity/proof.py'
+      - 'tools/tokyo_messaging_proof/proof.py'
+      - 'tools/tokyo_messaging_proof/bootstrap-labels.yaml'
+      - 'kanz/infra/security/spire/crds/*.yaml'
+      - 'kanz/infra/security/spire/namespaces.yaml'
+      - 'kanz/infra/security/spire/rbac.yaml'
+      - 'kanz/infra/security/spire/registration.yaml'
+      - 'kanz/infra/security/spire/spire-agent.yaml'
+      - 'kanz/infra/security/spire/spire-server.yaml'
+      - 'kanz/infra/nats/namespace.yaml'
+      - 'kanz/infra/nats/nats.yaml'
+      - 'kanz/infra/nats/tenancy.yaml'
+      - 'kanz/infra/nats/bootstrap-job.yaml'
+      - 'kanz/infra/overlays/testnet_tokyo/data/nats-config-patch.yaml'
+      - 'kanz/services/webhook_ingest/**'
+      - 'kanz/infra/messaging/valkey-clients.yaml'
+      - 'kanz/infra/deploy/rig-dev-secrets.yaml'
+      - 'kanz/infra/deploy/api-gateway-deploy.yaml'
+      - 'kanz/infra/deploy/webhook-ingest-deploy.yaml'
+      - 'kanz/infra/messaging/redis.yaml'
+      - 'kanz/infra/overlays/testnet_tokyo/data/kustomization.yaml'
       - 'kanz/test/backing/valkey.sh'
       - 'kanz/test/backing/up.sh'
       - '.github/workflows/valkey-migration.yml'
@@ -17,6 +65,65 @@ on:
 permissions:
   contents: read
 jobs:
+  webhook-cache-identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache: false
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: 1.69.0
+      - name: Generate the Go SDK and build the actual webhook entry point
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          cd schemas
+          python3 -c 'import yaml; t=yaml.safe_load(open("buf.gen.yaml")); t["plugins"]=[p for p in t["plugins"] if p.get("local") in ("protoc-gen-go","protoc-gen-go-grpc")]; assert len(t["plugins"]) == 2; print(yaml.safe_dump(t))' > "$RUNNER_TEMP/buf.gen.go.yaml"
+          buf generate --template "$RUNNER_TEMP/buf.gen.go.yaml"
+          bash bootstrap-go-sdk.sh
+          cd ../kanz
+          mkdir "$RUNNER_TEMP/valkey-webhook-build"
+          CGO_ENABLED=0 go build -trimpath -mod=readonly -buildvcs=false -tags redis -p 2 -o "$RUNNER_TEMP/valkey-webhook-build/webhook-ingest" ./services/webhook_ingest/cmd/webhook_ingest
+      - run: bash tools/feed_identity/install.sh
+      - run: python3 -B -m tools.valkey_migration.webhook
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: valkey-webhook
+          path: ${{ runner.temp }}/valkey-webhook.json
+          if-no-files-found: error
+  rig-cache-ingress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 17
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: bash tools/feed_identity/install.sh
+      - run: python3 -B -m tools.valkey_migration.network
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: rig-cache-ingress
+          path: ${{ runner.temp }}/rig-cache-ingress.json
+          if-no-files-found: error
   retained-state:
     runs-on: ubuntu-latest
     timeout-minutes: 12
@@ -27,6 +134,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 -B -m unittest discover -s tools/valkey_migration -p 'test_*.py'
       - name: Qualify the local backing endpoint on a non-default port
         shell: bash

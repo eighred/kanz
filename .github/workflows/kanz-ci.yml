@@ -136,7 +136,8 @@ jobs:
           psql -h localhost -U kanz -d kanz -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
             -c "CREATE DATABASE kanzapp OWNER kanzapp;" \
-            -c "CREATE DATABASE kanz_oms_ci OWNER kanzapp;"
+            -c "CREATE DATABASE kanz_oms_ci OWNER kanzapp;" \
+            -c "CREATE DATABASE kanz_accounting_migration_ci OWNER kanzapp;"
           psql -h localhost -U kanz -d kanzapp -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
           psql -h localhost -U kanz -d kanz_oms_ci -v ON_ERROR_STOP=1 \
@@ -604,6 +605,7 @@ jobs:
           TEST_OMS_ON_BUS: "1"
           TEST_INFERENCE_ON_BUS: "1"
           TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
+          TEST_ACCOUNTING_MIGRATION_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_accounting_migration_ci?sslmode=disable
           TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/sessions.cjs
           TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/mfa.cjs
           TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
@@ -972,6 +974,20 @@ jobs:
           echo "gencode: $(grep -m1 -h 'Protobuf Python Version' /tmp/gen/common/v1/money_pb2.py)"
           /tmp/runtime/bin/python -c "import google.protobuf; print('runtime:', google.protobuf.__version__)"
           PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"
+
+      - name: Exercise simultaneous gRPC and JetStream inference with the shipped Python locks
+        env:
+          PYTHONPATH: /tmp/gen:${{ github.workspace }}/python
+          KANZ_TEST_NATS_SERVER: ${{ runner.temp }}/nats-server-v2.12.6-linux-amd64/nats-server
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/nats-server.tgz"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --max-time 60 \
+            https://github.com/nats-io/nats-server/releases/download/v2.12.6/nats-server-v2.12.6-linux-amd64.tar.gz -o "$archive"
+          printf '%s  %s\n' 77fe7dd69ff5144126026b78355900be0ab0bb4339dc61a7621dcc9b9e9d07a6 "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" nats-server-v2.12.6-linux-amd64/nats-server
+          test "$("$KANZ_TEST_NATS_SERVER" --version)" = 'nats-server: v2.12.6'
+          /tmp/runtime/bin/python -B python/tests/test_inference_interference.py -v
 
   ts:
     needs: scope

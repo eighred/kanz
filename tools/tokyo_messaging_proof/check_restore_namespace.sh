@@ -56,3 +56,31 @@ spec:
 EOF
 if (check_writer_namespace kanz-services); then echo 'Pending writer accepted' >&2; exit 1; fi
 echo 'Verified writer namespace absent, empty and non-terminal states with the private API'
+
+k create namespace "$MSG_NS" >/dev/null
+k -n "$MSG_NS" create -f - >/dev/null <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata: {name: nats-bootstrap}
+spec:
+  suspend: true
+  template:
+    spec:
+      schedulingGates: [{name: kanz.io/fixture}]
+      restartPolicy: Never
+      containers: [{name: bootstrap, image: registry.k8s.io/pause:3.10, imagePullPolicy: Never}]
+EOF
+create_backup_runner
+first_uid=$RUNNER_UID
+if (create_backup_runner); then echo 'Replaced an existing backup runner' >&2; exit 1; fi
+if (RUNNER_NONCE=foreign; cleanup_backup_runner); then echo 'Foreign cleanup succeeded' >&2; exit 1; fi
+[[ "$(k -n "$MSG_NS" get pod "$NATS_RUNNER" -o jsonpath='{.metadata.uid}')" == "$first_uid" ]]
+RUNNER_UID='' # Simulate loss of the create response.
+cleanup_backup_runner
+create_backup_runner
+[[ -n "$RUNNER_UID" && "$RUNNER_UID" != "$first_uid" ]]
+if (RUNNER_UID=$first_uid; cleanup_backup_runner); then echo 'Stale UID accepted' >&2; exit 1; fi
+[[ "$(k -n "$MSG_NS" get pod "$NATS_RUNNER" -o jsonpath='{.metadata.uid}')" == "$RUNNER_UID" ]]
+cleanup_backup_runner
+[[ -z "$(k -n "$MSG_NS" get pod "$NATS_RUNNER" --ignore-not-found -o name)" ]]
+echo 'Verified backup runner ownership and cleanup with the private API'

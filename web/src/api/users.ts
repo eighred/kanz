@@ -1,4 +1,4 @@
-import { api } from './client'
+import { api, ApiError } from './client'
 import { isRevision, requireRevision } from './revision'
 
 export interface UserAccess {
@@ -45,6 +45,15 @@ function hasPrincipal(value: unknown): value is Record<string, unknown> & { subj
     'tenant' in value && nonempty(value.tenant)
 }
 
+export class UnconfirmedAccessUpdate extends Error {
+  constructor() { super('Identity did not confirm the reviewed account change. Reload users to check its outcome.') }
+}
+
+function sameGrants(actual: string[], requested: string[]): boolean {
+  const ordered = [...requested].sort()
+  return actual.length === ordered.length && [...actual].sort().every((grant, index) => grant === ordered[index])
+}
+
 export const users = {
   async permissions(): Promise<IdentityPermissions> {
     const body = await api.get<unknown>('/auth/permissions')
@@ -71,7 +80,22 @@ export const users = {
     }
     return { users: accounts, next_cursor: page.next_cursor }
   },
-  update: async (user: UserAccess, roles: string[], portfolios: string[]) =>
-    access(await api.put<unknown>(`${path(user.subject)}/access`, { revision: requireRevision(user.revision), roles, portfolios })),
+  async update(user: UserAccess, roles: string[], portfolios: string[]) {
+    const revision = requireRevision(user.revision)
+    const epoch = requireRevision(user.session_epoch)
+    let result: UserAccess
+    try {
+      result = access(await api.put<unknown>(`${path(user.subject)}/access`, { revision, roles, portfolios }, 200))
+    } catch (e) {
+      if (e instanceof ApiError && e.status < 500) throw e
+      throw new UnconfirmedAccessUpdate()
+    }
+    if (result.subject !== user.subject || result.tenant !== user.tenant || result.status !== user.status ||
+        BigInt(result.revision) !== BigInt(revision) + 1n || BigInt(result.session_epoch) !== BigInt(epoch) + 1n ||
+        !sameGrants(result.roles, roles) || !sameGrants(result.portfolios, portfolios)) {
+      throw new UnconfirmedAccessUpdate()
+    }
+    return result
+  },
   status: (subject: string, status: 'active' | 'disabled') => api.post(`${path(subject)}/${status === 'active' ? 'enable' : 'disable'}`),
 }
