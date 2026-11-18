@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed } from 'vue'
+import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
 import {
   changesMeaning,
   describeFlag,
-  describeRisk,
   risk,
-  type ExposureResponse,
   type ExposureState,
 } from '../api/risk'
 import { formatMoney, isNegative } from '../api/decimal'
@@ -29,22 +28,7 @@ import { formatMoney, isNegative } from '../api/decimal'
 const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 
-const data = ref<ExposureResponse | null>(null)
-const error = ref('')
-const loading = ref(true)
-
-onMounted(async () => {
-  try {
-    data.value = await risk.exposure(id.value)
-  } catch (e) {
-    // A 404 here is BOTH "no such portfolio" and "not yours" — the gateway
-    // collapses them so the route cannot be used to enumerate another tenant's
-    // portfolios by status code. Neither reading is "this portfolio is empty".
-    error.value = describeRisk(e)
-  } finally {
-    loading.value = false
-  }
-})
+const { data, error, loading } = usePortfolioRead(id, risk.exposure)
 
 const flags = computed(() =>
   (data.value?.quality_flags ?? []).filter((f) => f !== 'QUALITY_FLAG_UNSPECIFIED'),

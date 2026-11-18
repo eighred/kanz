@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed } from 'vue'
+import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
-import { describeRisk, risk, type OrderSummary, type OrdersResponse } from '../api/risk'
+import { risk, type OrderSummary } from '../api/risk'
 import { formatDecimal, formatMoney } from '../api/decimal'
 
 // ONE PORTFOLIO'S TRADING HISTORY (#399).
@@ -21,19 +22,9 @@ import { formatDecimal, formatMoney } from '../api/decimal'
 const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 
-const data = ref<OrdersResponse | null>(null)
-const error = ref('')
-const loading = ref(true)
-
-onMounted(async () => {
-  try {
-    data.value = await risk.orders(id.value)
-  } catch (e) {
-    error.value = describeRisk(e)
-  } finally {
-    loading.value = false
-  }
-})
+// OMS returns at most 200 indexed orders and does not expose a total or a cursor.
+const historyLimit = 200
+const { data, error, loading } = usePortfolioRead(id, portfolio => risk.orders(portfolio, historyLimit))
 
 const orders = computed<OrderSummary[]>(() => data.value?.orders ?? [])
 
@@ -98,6 +89,9 @@ function tone(o: OrderSummary): string {
       this is a partial history — not necessarily this portfolio's whole trading record.
     </p>
 
+    <p v-if="orders.length >= historyLimit" class="state-warn" role="status">
+      Showing the {{ historyLimit }} most recent indexed orders. Earlier indexed orders may exist.
+    </p>
     <table>
       <thead>
         <tr>

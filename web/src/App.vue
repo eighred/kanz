@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { workspaces } from './navigation'
-import { useRouter } from 'vue-router'
+import { ref, watch } from 'vue'
+import { START_LOCATION, useRouter } from 'vue-router'
 import { useSession } from './stores/session'
 
 const session = useSession()
 const router = useRouter()
+const main = ref<HTMLElement | null>(null)
+
+watch(router.currentRoute, (to, from) => {
+  if (session.signedIn && from !== START_LOCATION && to.path !== from.path) main.value?.focus()
+}, { flush: 'post' })
 
 function closeMenu(event: Event) {
   const menu = (event.target as HTMLElement).closest('details')
@@ -22,6 +28,7 @@ async function signOut() {
 
 <template>
   <header v-if="session.signedIn" class="topbar">
+    <a class="skip-link" href="#main-content" @click.prevent="main?.focus()">Skip to main content</a>
     <span class="brand">KANZ</span>
     <nav aria-label="Main navigation">
       <RouterLink to="/overview">Workspace</RouterLink>
@@ -41,5 +48,5 @@ async function signOut() {
     </span>
     <button class="quiet" @click="signOut">Sign out</button>
   </header>
-  <main><RouterView /></main>
+  <main id="main-content" ref="main" tabindex="-1"><RouterView /></main>
 </template>

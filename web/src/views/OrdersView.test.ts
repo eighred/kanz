@@ -115,3 +115,29 @@ describe('a refusal is not an empty history', () => {
     expect(wrapper.find('table').exists()).toBe(false)
   })
 })
+
+it('reloads a reused portfolio route and ignores a late order response', async () => {
+  let finish!: (value: OrdersResponse) => void
+  vi.spyOn(api.risk, 'orders').mockImplementation((id) => id === 'A'
+    ? new Promise(resolve => { finish = resolve })
+    : Promise.resolve({ orders: [{ order_id: 'current-order' }], unindexed: '0' }))
+  const r = router()
+  await r.push('/portfolios/A/orders')
+  const wrapper = mount(OrdersView, { global: { plugins: [r] } })
+  await r.push('/portfolios/B/orders')
+  await flushPromises()
+  finish({ orders: [{ order_id: 'previous-order' }], unindexed: '0' })
+  await flushPromises()
+  expect(wrapper.text()).toContain('current-order')
+  expect(wrapper.text()).not.toContain('previous-order')
+})
+
+it('discloses the bounded history independently of unindexed orders', async () => {
+  const orders = Array.from({ length: 200 }, (_, i) => ({ order_id: String(i) }))
+  const wrapper = await open({ orders, unindexed: '3' })
+  expect(api.risk.orders).toHaveBeenCalledWith('PF1', 200)
+  expect(wrapper.find('[role=status]').text()).toContain('Earlier indexed orders may exist')
+  expect(wrapper.find('[role=alert]').text()).toContain('3 order(s)')
+  const shorter = await open({ orders: orders.slice(1), unindexed: '0' })
+  expect(shorter.find('[role=status]').exists()).toBe(false)
+})
