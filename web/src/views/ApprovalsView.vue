@@ -215,7 +215,7 @@ async function sign() {
   } catch (e) {
     // A missing acknowledgement can follow a successful publish. Require a fresh
     // queue read before offering another signature.
-    if (!(e instanceof ApiError) || (e.status >= 500 && !(e.status === 503 && e.message === 'order writes are disabled'))) {
+    if (!(e instanceof ApiError) || e.status === 408 || (e.status >= 500 && !(e.status === 503 && e.message === 'order writes are disabled'))) {
       confirming.value = null
       entries.value = []
       error.value = `Submission for ${p.order_id} could not be confirmed. Reload the queue and review its current state before taking further action.`

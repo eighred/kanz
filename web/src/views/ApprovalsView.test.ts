@@ -337,7 +337,7 @@ describe('the 202 is not an approval', () => {
     Response.json({ order_id: 'ord-1', status: 'approved' }, { status: 202 }),
     Response.json({ order_id: 'ord-1', status: 'approval_submitted' }, { status: 200 }),
     new Response('{', { status: 202 }), new Response(null, { status: 204 }),
-    new Response('Unavailable', { status: 502 }), new Error('Connection closed'),
+    new Response('Unavailable', { status: 502 }), new Response('Timed out', { status: 408 }), new Error('Connection closed'),
   ])('requires a fresh read after an unknown submission outcome', async response => {
     const fetch = vi.spyOn(globalThis, 'fetch')
     if (response instanceof Error) fetch.mockRejectedValueOnce(response)
