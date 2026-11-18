@@ -15,8 +15,8 @@ when it has nothing to serve.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -24,7 +24,7 @@ from inference.v1.feature_vector_pb2 import FeatureValue, FeatureVector
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.models.linear import LinearModel, ModelSpec
-from kanz_inference.registry.registry import Registry, ValidationError, ValidationRecord
+from kanz_inference.registry.registry import Registry, ValidationError
 from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, load_specs, require_primary
 
 FEATURE_SET = "portfolio-risk:1"
@@ -177,6 +177,13 @@ def test_startup_requires_explicit_passing_verdict(tmp_path, verdict):
 
 
 # --- The service refuses to serve nothing ------------------------------
+
+
+def test_later_startup_card_cannot_inherit_an_earlier_cards_validation():
+    first = _spec()
+    replacement = _spec(weights={"different": 1.0}, validated_at=None)
+    with pytest.raises(ValidationError, match="missing validation interval"):
+        build_registry([first, replacement])
 
 
 async def test_the_service_REFUSES_TO_START_with_no_primary_model():
