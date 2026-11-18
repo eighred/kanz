@@ -242,18 +242,20 @@ func (p *Postgres) LatestAsOf(ctx context.Context, instrumentID string, asOf tim
 // its own newest as_of at or before asOf — the reverse direction
 // volsurface.QuoteProvider needs and compute.TermsProvider cannot express.
 //
-// DISTINCT ON gives ONE row per instrument: without it, an instrument amended
-// three times contributes three rows, and the calibrator would fit a surface
-// containing the same strike at three different multipliers. An empty result is
-// not an error — an underlying with no listed derivatives is a real answer, and
-// the caller distinguishes it from a missing load by whether the underlying
-// itself is known.
+// A later amendment can move an instrument to another underlying or kind.
+// Its earlier version must leave the old chain at the same instant that
+// LatestAsOf starts returning the amendment.
 func (p *Postgres) ChainAsOf(ctx context.Context, underlyingID string, asOf time.Time, kind Kind) ([]Record, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT DISTINCT ON (instrument_id) instrument_id, as_of, underlying_id, kind, terms
-		FROM contract_terms
-		WHERE underlying_id = $1 AND as_of <= $2 AND kind = $3
-		ORDER BY instrument_id, as_of DESC`, underlyingID, asOf.UTC(), string(kind))
+		SELECT t.instrument_id, t.as_of, t.underlying_id, t.kind, t.terms
+		FROM contract_terms t
+		WHERE t.underlying_id = $1 AND t.as_of <= $2 AND t.kind = $3
+		  AND NOT EXISTS (
+		    SELECT 1 FROM contract_terms newer
+		    WHERE newer.instrument_id = t.instrument_id
+		      AND newer.as_of > t.as_of AND newer.as_of <= $2
+		  )
+		ORDER BY t.instrument_id`, underlyingID, asOf.UTC(), string(kind))
 	if err != nil {
 		return nil, fmt.Errorf("terms: chain for %s: %w", underlyingID, err)
 	}
