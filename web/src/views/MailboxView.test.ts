@@ -4,8 +4,24 @@ import { api, ApiError } from '../api/client'
 import MailboxView from './MailboxView.vue'
 
 function mailbox(address: string) {
-  return { verified_address: address, pending_address: '', verification_delivery: 'verified' }
+  return { verified_address: address, verified_at: address ? '2026-09-01T00:00:00Z' : null, pending_address: '', verification_delivery: 'none' }
 }
+
+it('displays confirmed empty status', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue(mailbox(''))
+  const wrapper = mount(MailboxView)
+  await flushPromises()
+  expect(wrapper.text()).toContain('Verified address: None. Verification delivery: none.')
+})
+
+it.each([null, {}, { ...mailbox(''), verified_at: undefined }, { ...mailbox(''), verification_delivery: 'typo' },
+  { ...mailbox('user@example.test'), verified_at: null }, { ...mailbox('user@example.test'), verified_at: '1' }, { ...mailbox(''), verification_delivery: 'sent' }])('keeps invalid status unavailable', async value => {
+  vi.spyOn(api, 'get').mockResolvedValue(value)
+  const wrapper = mount(MailboxView)
+  await flushPromises()
+  expect(wrapper.get('[role=alert]').text()).toContain('Mailbox status could not be loaded')
+  expect(wrapper.text()).not.toContain('Verified address: None')
+})
 
 it('clears a failed status read after retry and preserves separate command feedback', async () => {
   vi.spyOn(api, 'get').mockRejectedValueOnce(new Error('offline'))
