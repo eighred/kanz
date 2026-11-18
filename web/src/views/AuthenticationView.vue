@@ -32,10 +32,9 @@ async function load() {
     throw new Error('Invalid MFA verification status.')
   }
   const remaining = loaded.recent && loaded.verified_until ? Date.parse(loaded.verified_until) - Date.now() : 0
-  // The identity service issues at most five minutes of step-up assurance.
-  if (remaining > 5 * 60_000) throw new Error('Invalid MFA verification cutoff.')
   status.value = { ...loaded, recent: remaining > 0 }
-  if (remaining > 0) expiryTimer = setTimeout(() => { if (status.value) status.value.recent = false }, remaining)
+  // The issuer and browser clocks can differ. Limit the local display to one step-up window.
+  if (remaining > 0) expiryTimer = setTimeout(() => { if (status.value) status.value.recent = false }, Math.min(remaining, 5 * 60_000))
 }
 async function perform(action: () => Promise<void>) {
   if (busy.value) return

@@ -23,7 +23,6 @@ it.each([
   { enabled: true, recent: false, factors: [null] },
   { enabled: true, recent: true, factors: [] },
   { enabled: true, recent: true, verified_until: 'not-a-date', factors: [] },
-  { enabled: true, recent: true, verified_until: '2099-01-01T00:00:00Z', factors: [] },
 ])('withholds factor controls for malformed status', async body => {
   vi.spyOn(api, 'get').mockResolvedValue(body)
   const w = mount(AuthenticationView, options)
@@ -31,6 +30,17 @@ it.each([
   expect(w.get('[role="alert"]').text()).toContain('Authentication settings are unavailable')
   expect(w.find('form').exists()).toBe(false)
   expect(w.text()).not.toContain('Recent verification is active')
+  w.unmount()
+})
+
+it('caps the freshness display when the issuer clock runs ahead', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(api, 'get').mockResolvedValue({ enabled: true, recent: true, verified_until: new Date(Date.now() + 330_000).toISOString(), factors: [] })
+  const w = mount(AuthenticationView, options)
+  await flushPromises()
+  expect(w.text()).toContain('Recent verification is active')
+  await vi.advanceTimersByTimeAsync(300_000)
+  expect(w.text()).toContain('Privileged actions may require fresh verification')
   w.unmount()
 })
 

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/identity"
-	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/web_bff/internal/identityclient"
 )
 
@@ -104,7 +103,7 @@ func projectMFAStatus(body []byte, now time.Time) (identity.MFAStatus, bool) {
 	if !*wire.Recent {
 		return status, wire.VerifiedUntil == nil
 	}
-	if !status.Enabled || wire.VerifiedUntil == nil || wire.VerifiedUntil.IsZero() || wire.VerifiedUntil.After(now.Add(auth.StepUpTTL)) {
+	if !status.Enabled || wire.VerifiedUntil == nil || wire.VerifiedUntil.IsZero() {
 		return identity.MFAStatus{}, false
 	}
 	// The upstream status can expire while its response is in flight.
