@@ -39,6 +39,15 @@ password substituted for the rig value. Both client Secrets still map to the
 same cache credential. NetworkPolicy filters pods by their labels and
 namespace; it does not enforce independent Valkey ACL users.
 
+The `webhook-cache-identity` job runs both replicas of the actual Linux webhook
+entry point, compiled with the production `redis` build tag. It uses the
+documented `--keep-spiffe` render for a SPIRE-authenticated NATS broker,
+the canonical account grants and streams, and freshly generated fixture
+credentials. Each ready pod's IP must appear among the authenticated Valkey
+clients behind the cache ingress policy. Both original webhook processes must
+lose readiness on actual cache loss and regain it on the same PVC. The
+fixture sends no strategy alerts and never opens the trading gate.
+
 The retained-state fixture starts the Tokyo Redis image on a second fresh
 volume and checks Redis → Valkey → restarted Valkey → Redis using that same
 volume. Both fixtures use the Valkey image selected by application compatibility
