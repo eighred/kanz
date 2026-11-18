@@ -975,6 +975,20 @@ jobs:
           /tmp/runtime/bin/python -c "import google.protobuf; print('runtime:', google.protobuf.__version__)"
           PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"
 
+      - name: Exercise simultaneous gRPC and JetStream inference with the shipped Python locks
+        env:
+          PYTHONPATH: /tmp/gen:${{ github.workspace }}/python
+          KANZ_TEST_NATS_SERVER: ${{ runner.temp }}/nats-server-v2.12.6-linux-amd64/nats-server
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/nats-server.tgz"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --max-time 60 \
+            https://github.com/nats-io/nats-server/releases/download/v2.12.6/nats-server-v2.12.6-linux-amd64.tar.gz -o "$archive"
+          printf '%s  %s\n' 77fe7dd69ff5144126026b78355900be0ab0bb4339dc61a7621dcc9b9e9d07a6 "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" nats-server-v2.12.6-linux-amd64/nats-server
+          test "$("$KANZ_TEST_NATS_SERVER" --version)" = 'nats-server: v2.12.6'
+          /tmp/runtime/bin/python -B python/tests/test_inference_interference.py -v
+
   ts:
     needs: scope
     if: needs.scope.outputs.application == 'true'
