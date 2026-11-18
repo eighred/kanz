@@ -20,7 +20,8 @@ numeric OID and DER hex. Go string equality alone cannot qualify broker mapping.
 The CN never selects a principal; there is no DEFAULT or catch-all rule.
 A dedicated bootstrap
 identity creates two topics and grants each client only read/write/describe on
-its own topic. The fourth identity has no ACLs. Only bootstrap is a superuser;
+its own topic. The proof-a client can also read the literal proof-a-history consumer group.
+The fourth identity has no ACLs. Only bootstrap is a superuser;
 no tested client receives its credentials or ServiceAccount.
 
 The actual segmentio Kafka client requires the exact broker SPIFFE ID. Both
@@ -34,11 +35,16 @@ topic authorization errors. The `proof-ungranted` identity has no grant in
 the topic ACL inventory; it has a valid SPIRE registration and a distinct DN
 mapping. This case does not prove refusal of an unmapped certificate subject.
 Bootstrap reads require exactly two expected records per topic. The fixture then
+reapplies topic and ACL provisioning against both populated topics, checks their
+single-partition, single-replica topology and reads both original sequences again. It then
 requests a graceful shutdown of the broker process. It checks that Kubernetes
 restarted the container exactly once on the original pod and data volume,
 observes the old container's successful exit, and repeats the read with a fresh
 client. This covers retained fixture records across a broker process restart.
-Consumer-group checkpoint recovery and restore into new storage remain open.
+A separate proof-a Job reads the first keyed frame and synchronously commits its
+group offset before the restart. After the restart another Job opens the same
+group and checks the second frame, key, partition and offset before committing.
+Restore into new storage remains open.
 
 `redpanda-identity-proof.yml` runs the mandatory fixture on Linux with no optional
 skip. Local unit checks:
@@ -60,7 +66,7 @@ only the authenticated TLS listener. Single-node internal RPC binds loopback.
 
 This is not a production mapping rollout, financial event test, durability or
 CA disaster-recovery proof. It does not establish deployed Kafka plugin parity,
-retained offset continuity, arbitrary tenant provisioning or current Go
+production offset continuity, arbitrary tenant provisioning or current Go
 `AuthorizeMesh` broker-peer narrowing. A production migration still needs the
 reviewed mapping/ACL inventory and coordinated issuance, rollout and rollback.
 No live data, active manifests or production permissions change.

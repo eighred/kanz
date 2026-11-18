@@ -83,6 +83,19 @@ async def test_rmse_bound_fails_when_exceeded():
     assert any("rmse" in r for r in res.reasons)
 
 
+@pytest.mark.parametrize(("prediction", "confidence", "actual"), [
+    (math.nan, 0.9, 1.0), (math.inf, 0.9, 1.0), (1.0, 0.9, -math.inf),
+    (1.0, math.nan, 1.0), (1.0, 1.01, 1.0), (1.0, -0.1, 1.0),
+    (1e308, 0.9, -1e308),
+])
+async def test_invalid_holdout_cannot_produce_passing_evidence(prediction, confidence, actual):
+    model = _ScriptedModel("m@1", [prediction], [confidence])
+    result = await Validator(ValidationThresholds(min_samples=1)).validate(model, _samples([actual]))
+    assert not result.to_record().passed
+    assert result.recommended_confidence_threshold == 1.0
+    assert result.reasons
+
+
 async def test_bias_bound_detects_systematic_overprediction():
     v = Validator(ValidationThresholds(min_samples=1, max_abs_bias=0.5))
     model = _ScriptedModel("m@1", [2.0, 2.0, 2.0], [0.9, 0.9, 0.9])

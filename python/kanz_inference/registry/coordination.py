@@ -40,7 +40,7 @@ doesn't double-apply.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Protocol
 
 from kanz_inference.registry.registry import (
@@ -116,7 +116,7 @@ class RegistryEvent:
             primary=d.get("primary", True),
             validated_at=_ts("validated_at"),
             expires_at=_ts("expires_at"),
-            passed=d.get("passed", True),
+            passed=d.get("passed") is True if d["op"] == OP_RECORD_VALIDATION else d.get("passed", True),
             report_uri=d.get("report_uri", ""),
         )
 
@@ -209,8 +209,8 @@ class CoordinatedRegistry:
             self.local.record_validation(
                 ValidationRecord(
                     model_id=event.model_id,
-                    validated_at=event.validated_at or datetime.now(timezone.utc),
-                    expires_at=event.expires_at or datetime.now(timezone.utc),
+                    validated_at=event.validated_at,
+                    expires_at=event.expires_at,
                     passed=event.passed,
                     report_uri=event.report_uri,
                 )

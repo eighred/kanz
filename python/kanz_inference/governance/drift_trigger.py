@@ -29,9 +29,11 @@ the recompute debounce on the Go side.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
@@ -121,6 +123,12 @@ _SEVERITY_NAME = {
 }
 
 
+@dataclass
+class _Delivery:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_success: datetime | None = None
+
+
 class DriftTrigger:
     """Consumes ``data.feature.drift_detected`` and fans out a
     RevalidationRequest per affected model.
@@ -148,8 +156,7 @@ class DriftTrigger:
         self._min_severity = min_severity
         self._cooldown = cooldown
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        # Per-(model_id, feature) last-fired time for cooldown suppression.
-        self._last_fired: dict[tuple[str, str], datetime] = {}
+        self._deliveries: dict[tuple[str, str], _Delivery] = defaultdict(_Delivery)
 
     async def run(
         self, subscriber: Subscriber, group: str, subject: str = SUBJECT_DRIFT_DETECTED
@@ -185,31 +192,28 @@ class DriftTrigger:
             logger.info("drift on feature %r affects no registered model", feature)
             return
 
-        now = self._clock()
         sev = _SEVERITY_NAME.get(event.severity, str(event.severity))
         for model_id in models:
-            key = (model_id, feature)
-            last = self._last_fired.get(key)
-            if last is not None and now - last < self._cooldown:
-                logger.debug(
-                    "revalidation for %s/%s within cooldown — suppressed", model_id, feature
+            delivery = self._deliveries[model_id, feature]
+            async with delivery.lock:
+                now = self._clock()
+                if delivery.last_success is not None and now - delivery.last_success < self._cooldown:
+                    continue
+                request = RevalidationRequest(
+                    model_id=model_id,
+                    feature=feature,
+                    metric=drift.metric,
+                    score=drift.score,
+                    threshold=drift.threshold,
+                    severity=event.severity,
+                    subject=event.subject,
+                    partition_key=event.partition_key,
+                    baseline_ref=drift.baseline_ref,
+                    reason=(
+                        f"drift on feature {feature!r}: {drift.metric} "
+                        f"{drift.score:.4g} > {drift.threshold:.4g} (severity {sev})"
+                    ),
+                    requested_at=now,
                 )
-                continue
-            self._last_fired[key] = now
-            request = RevalidationRequest(
-                model_id=model_id,
-                feature=feature,
-                metric=drift.metric,
-                score=drift.score,
-                threshold=drift.threshold,
-                severity=event.severity,
-                subject=event.subject,
-                partition_key=event.partition_key,
-                baseline_ref=drift.baseline_ref,
-                reason=(
-                    f"drift on feature {feature!r}: {drift.metric} "
-                    f"{drift.score:.4g} > {drift.threshold:.4g} (severity {sev})"
-                ),
-                requested_at=now,
-            )
-            await self._sink.request_revalidation(request)
+                await self._sink.request_revalidation(request)
+                delivery.last_success = self._clock()

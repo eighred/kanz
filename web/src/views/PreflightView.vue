@@ -6,6 +6,7 @@ const result = ref<PreflightStatus | null>(null)
 const loading = ref(true)
 const transportError = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
+let latestRequest = 0
 const REFRESH_MS = 30_000
 
 function knownState(value: unknown): value is PreflightState {
@@ -21,6 +22,9 @@ function normalize(value: PreflightStatus): PreflightStatus {
     status: knownState(check?.status) ? check.status : 'UNKNOWN',
     observed: check?.observed,
   }))
+  if (value.status === 'PASS' && !checks.length) {
+    return { ...value, status: 'UNKNOWN', reason: 'preflight evidence contains no controls', checks }
+  }
   if (value.status === 'PASS' && checks.some((check) => check.status !== 'PASS')) {
     return { ...value, status: 'UNKNOWN', reason: 'preflight verdict disagrees with its controls', checks }
   }
@@ -28,15 +32,19 @@ function normalize(value: PreflightStatus): PreflightStatus {
 }
 
 async function load(initial = false) {
+  const request = ++latestRequest
   if (initial) loading.value = true
   try {
-    result.value = normalize(await preflight.status())
+    const response = await preflight.status()
+    if (request !== latestRequest) return
+    result.value = normalize(response)
     transportError.value = ''
   } catch {
+    if (request !== latestRequest) return
     result.value = null
     transportError.value = 'Preflight evidence is unreachable. Status is UNKNOWN.'
   } finally {
-    loading.value = false
+    if (request === latestRequest) loading.value = false
   }
 }
 
@@ -64,7 +72,10 @@ onMounted(() => {
   void load(true)
   timer = setInterval(() => void load(), REFRESH_MS)
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  latestRequest++
+  clearInterval(timer)
+})
 </script>
 
 <template>
