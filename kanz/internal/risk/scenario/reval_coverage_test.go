@@ -171,3 +171,19 @@ func TestPricedOptionsKeepTheirAdditivePricingInputs(t *testing.T) {
 		t.Fatalf("option inputs: %+v, coverage %+v", reval.shocks, cov)
 	}
 }
+
+func TestUnassessedOptionKeepsItsExcludedAdditiveApproximation(t *testing.T) {
+	p := makePortfolio(domain.Position{InstrumentID: "MYSTERY", MarketValue: money(100, 0, "USD"), AsOf: baseTime})
+	ms, cov := scenario.EvaluateReval(p, []v1.ScenarioShock{
+		v1.ParallelShift{Pct: pct(1, -1)},
+		v1.PriceShock{InstrumentID: "MYSTERY", Pct: pct(-2, -1)},
+	}, nil, partiallyAssessedRevaluer{})
+	if ms == nil || cov.Contributed != 0 || cov.ExcludedCount != 1 || len(cov.Exclusions) != 1 || cov.Exclusions[0].Reason != compute.SkipNoTerms {
+		t.Fatalf("coverage: %+v", cov)
+	}
+	m, ok := ms.Lookup(compute.MeasureGrossExposure)
+	// The legacy estimate is 100 * (1 + 0.1 - 0.2) in six-place USD.
+	if !ok || m.Value.GetCoefficient() != 90000000 || m.Value.GetExponent() != -6 {
+		t.Fatalf("excluded approximation: %v", m.Value)
+	}
+}

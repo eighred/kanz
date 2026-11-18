@@ -113,20 +113,32 @@ func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revalu
 			cp.SetPosition(pos)
 			continue
 		}
+		// Keep the established additive approximation for an unassessed holding.
+		// Its coverage records why this number cannot certify the scenario.
+		approximation := pos.MarketValue
+		if priceFrac != 0 && approximation != nil {
+			approximation = compute.ShockMoney(approximation, fracDecimal(priceFrac))
+		}
 		if result.Status != compute.RevalKnownLinear {
 			reason := result.Reason
 			if reason == "" {
 				reason = compute.SkipInvalidPricing
 			}
 			cov.revaluationUnassessed(pos.InstrumentID, reason)
+			pos.MarketValue = approximation
+			cp.SetPosition(pos)
+			continue
 		}
-		// Keep every holding in the approximation. Coverage prevents an
-		// unassessed option/classification from looking like a complete stress.
 		if len(adjustments) > 0 {
 			value, ok := linearValue(pos.MarketValue, adjustments)
 			if !ok {
 				cov.revaluationUnassessed(pos.InstrumentID, compute.SkipInvalidPricing)
 				continue
+			}
+			// The Decimal scale is observable on the wire. Keep the existing
+			// representation when its amount equals the independently exact result.
+			if approximation.GetAmount() != nil && dec.Cmp(approximation.Amount, value.Amount) == 0 {
+				value = approximation
 			}
 			pos.MarketValue = value
 			cp.SetPosition(pos)
@@ -238,7 +250,7 @@ func hasSectorShock(shocks []v1.ScenarioShock) bool {
 	return false
 }
 
-// fracDecimal encodes a model-derived factor return for factor revaluation.
+// fracDecimal encodes the six-place approximation used for additive revaluation.
 func fracDecimal(f float64) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: int64(f * 1e6), Exponent: -6}
 }
