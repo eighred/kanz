@@ -919,7 +919,7 @@ jobs:
       # client context that VERIFIES the broker from one that merely encrypts —
       # asserting on ssl flags cannot. The image itself never needs it.
       - name: Install Python deps
-        run: pip install grpcio-tools pytest pytest-asyncio nats-py aiokafka prometheus-client cryptography
+        run: pip install grpcio-tools pytest pytest-asyncio nats-py 'aiokafka[snappy]' prometheus-client cryptography
 
       - name: Generate Python schema SDK
         run: |
@@ -968,6 +968,7 @@ jobs:
           python -m venv /tmp/runtime
           /tmp/runtime/bin/pip install --quiet --no-cache-dir --require-hashes \
             --only-binary=:all: -r python/requirements.txt
+          /tmp/runtime/bin/python -c "from aiokafka.codec import snappy_encode, snappy_decode; assert snappy_decode(snappy_encode(b'kanz-record')) == b'kanz-record'"
           echo "gencode: $(grep -m1 -h 'Protobuf Python Version' /tmp/gen/common/v1/money_pb2.py)"
           /tmp/runtime/bin/python -c "import google.protobuf; print('runtime:', google.protobuf.__version__)"
           PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"

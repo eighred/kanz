@@ -14,7 +14,7 @@
 #     --target /tmp/discard \
 #     --python-version 3.12 --implementation cp --abi cp312 \
 #     --platform manylinux2014_x86_64 --only-binary=:all: \
-#     "nats-py>=2.7.0" "aiokafka>=0.10.0" "protobuf>=5.29" "grpcio>=1.62" \
+#     "nats-py>=2.7.0" "aiokafka[snappy]>=0.10.0" "protobuf>=5.29" "grpcio>=1.62" \
 #     "prometheus-client>=0.20"
 #
 # then read `install[].metadata.{name,version}` and
@@ -53,6 +53,8 @@ aiokafka==0.14.0 \
     --hash=sha256:219d2dc66b97b1aaea100697c928024b6a0348b7baa370b824900054bf86916e
 async-timeout==5.0.1 \
     --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c
+cramjam==2.12.1 \
+    --hash=sha256:690a825bbe1cb2407afcf19c4ec75a347ae51834ae2afb83649dde4f32feb152
 grpcio==1.85.1 \
     --hash=sha256:000999ea9bba80217b1625782d638e7a688790f6154e845e18826f7da859bfc7 \
     --hash=sha256:016982ebd21d2b48e955aa808e9db8d628708a35c6eba852cd0e70765826ab06 \

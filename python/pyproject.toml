@@ -9,7 +9,7 @@ description = "Python bus client for the Kanz event backbone (NATS JetStream + K
 requires-python = ">=3.10"
 dependencies = [
     "nats-py>=2.7.0",
-    "aiokafka>=0.10.0",
+    "aiokafka[snappy]>=0.10.0",
     "kanz-schemas>=0.1.0",
     "protobuf>=5.29",
     "grpcio>=1.62",
