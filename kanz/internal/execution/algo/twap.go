@@ -54,6 +54,8 @@ var (
 	ErrEmptyWindow = errors.New("algo: the working window must end after it starts")
 	// ErrWindowTooLong rejects a window whose exact span cannot fit time.Duration.
 	ErrWindowTooLong = errors.New("algo: the working window exceeds the time.Duration domain")
+	// ErrEmptySliceInterval rejects schedules with a slice shorter than a nanosecond.
+	ErrEmptySliceInterval = errors.New("algo: each slice must have a positive-width interval")
 	// ErrNoSlices rejects a plan with no slices.
 	ErrNoSlices = errors.New("algo: slice count must be positive")
 	// ErrCapUnsatisfiable is returned when the requested slice count cannot honour
@@ -98,6 +100,9 @@ func (p Plan) validateWindow() error {
 	if !p.Start.Add(span).Equal(p.End) {
 		return fmt.Errorf("%w: [%s, %s]", ErrWindowTooLong,
 			p.Start.UTC().Format(time.RFC3339Nano), p.End.UTC().Format(time.RFC3339Nano))
+	}
+	if int64(p.Slices) > int64(span) {
+		return fmt.Errorf("%w: %d slices in %s", ErrEmptySliceInterval, p.Slices, span)
 	}
 	return nil
 }

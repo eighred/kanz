@@ -309,3 +309,38 @@ func TestAlgoRun_ANilMarketViewIsUnknownNotAPanic(t *testing.T) {
 		t.Errorf("got %d slices, want 6", len(slices))
 	}
 }
+
+func TestEveryPlannerRequiresRepresentableSliceIntervals(t *testing.T) {
+	for _, name := range []Name{NameTWAP, NameVWAP, NamePOV} {
+		t.Run(string(name), func(t *testing.T) {
+			p := Plan{Algo: name, InstrumentID: "A", Start: seamStart, Total: big.NewRat(2, 1), Slices: 2, MaxParticipation: big.NewRat(1, 1)}
+			p.End = p.Start.Add(time.Nanosecond)
+			children, err := Run(p, ParentState{}, knownMarket{})
+			if !errors.Is(err, ErrEmptySliceInterval) || len(children) != 0 {
+				t.Fatalf("impossible schedule: %v, %v", children, err)
+			}
+			for i := range p.Slices {
+				if _, _, ok := p.Interval(i); ok {
+					t.Fatalf("impossible interval %d accepted", i)
+				}
+			}
+			p.End = p.Start.Add(2 * time.Nanosecond)
+			children, err = Run(p, ParentState{}, knownMarket{})
+			if err != nil || len(children) != 2 {
+				t.Fatalf("two one-nanosecond slices: %v, %v", children, err)
+			}
+			sum := new(big.Rat)
+			for i, c := range children {
+				from, to, ok := p.Interval(i)
+				want := p.Start.Add(time.Duration(i))
+				if !ok || !from.Equal(want) || !to.Equal(want.Add(time.Nanosecond)) || !c.Due.Equal(from) {
+					t.Fatalf("slice %d: %v .. %v, due %v", i, from, to, c.Due)
+				}
+				sum.Add(sum, c.Quantity)
+			}
+			if sum.Cmp(p.Total) != 0 {
+				t.Fatalf("worked %s of %s", sum, p.Total)
+			}
+		})
+	}
+}
