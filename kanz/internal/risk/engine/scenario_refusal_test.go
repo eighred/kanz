@@ -168,3 +168,18 @@ func newEngineWithClassifier(c factor.Classifier) (*engine.EngineImpl, *state.St
 	return engine.New(s, compute.DefaultRegistry(), risk.NewCache(), risk.NewDetector(),
 		engine.WithClassifier(c)), s
 }
+
+func TestEvaluateScenarioRequiresExplicitShockMagnitude(t *testing.T) {
+	e, s := newEngine()
+	applyPosition(t, s, "PORT-1", "BANK", 1000, time.Now().Add(-time.Second))
+	req := v1.ScenarioRequest{PortfolioID: "PORT-1", Shocks: []v1.ScenarioShock{v1.ParallelShift{}}}
+	response, err := e.EvaluateScenario(context.Background(), req)
+	if !errors.Is(err, v1.ErrScenarioUnresolvable) || !strings.Contains(err.Error(), "invalid_shock_magnitude") || response.Projected != nil {
+		t.Fatalf("omitted shift returned %+v, err=%v", response, err)
+	}
+	req.Shocks = []v1.ScenarioShock{v1.ParallelShift{Pct: &commonpb.Decimal{}}}
+	response, err = e.EvaluateScenario(context.Background(), req)
+	if err != nil || response.Projected == nil {
+		t.Fatalf("explicit zero shift returned %+v, err=%v", response, err)
+	}
+}

@@ -147,7 +147,7 @@ func (r *OKXReference) Chain(ctx context.Context, it InstType, uly string) (Batc
 	if err != nil {
 		return Batch{}, fmt.Errorf("termsload: read okx instruments %s %s: %w", it, uly, err)
 	}
-	b, err := ParseOKXInstruments(body, r.mapping, r.opt)
+	b, err := parseOKXInstruments(body, r.mapping, r.opt, it, uly)
 	if err != nil {
 		return Batch{}, fmt.Errorf("termsload: okx instruments %s %s: %w", it, uly, err)
 	}
@@ -221,6 +221,10 @@ type okxInstrument struct {
 // empty catalogue, which is indistinguishable from "this underlying lists no
 // options" and would report a successful load of nothing.
 func ParseOKXInstruments(body []byte, m Mapping, opt Options) (Batch, error) {
+	return parseOKXInstruments(body, m, opt, "", "")
+}
+
+func parseOKXInstruments(body []byte, m Mapping, opt Options, requestedType InstType, requestedUnderlying string) (Batch, error) {
 	if err := m.validate(); err != nil {
 		return Batch{}, err
 	}
@@ -238,6 +242,12 @@ func ParseOKXInstruments(body []byte, m Mapping, opt Options) (Batch, error) {
 
 	var b Batch
 	for _, row := range env.Data {
+		// Verify the venue partition before canonical mapping. Two venue
+		// symbols can legitimately map to the same canonical underlying.
+		if requestedType != "" && (row.InstType != string(requestedType) || row.Uly != requestedUnderlying) {
+			return Batch{}, fmt.Errorf("catalogue row %q belongs to %s/%s, requested %s/%s",
+				row.InstID, row.InstType, row.Uly, requestedType, requestedUnderlying)
+		}
 		rec, reason := mapOKXRow(row, m, opt)
 		if reason != "" {
 			b.Refused = append(b.Refused, Refusal{InstID: row.InstID, Reason: reason})

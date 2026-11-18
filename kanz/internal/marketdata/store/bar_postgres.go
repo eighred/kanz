@@ -50,14 +50,45 @@ func (p *Postgres) PutBars(ctx context.Context, bars []Bar) error {
 			b.TradeCount, b.KnowledgeTime.UTC())
 	}
 	br := tx.SendBatch(ctx, batch)
-	for range bars {
-		if _, err := br.Exec(); err != nil {
+	var duplicates []Bar
+	for _, b := range bars {
+		tag, err := br.Exec()
+		if err != nil {
 			_ = br.Close()
 			return fmt.Errorf("insert bar: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			duplicates = append(duplicates, b)
 		}
 	}
 	if err := br.Close(); err != nil {
 		return fmt.Errorf("close batch: %w", err)
+	}
+	if len(duplicates) > 0 {
+		// A conflicting concurrent insert may have become visible only after
+		// our insert waited. Compare the winners in fresh statement snapshots.
+		checks := &pgx.Batch{}
+		for _, b := range duplicates {
+			checks.Queue(`SELECT bucket_start, open, high, low, close, volume, trade_count, knowledge_time
+				FROM ohlcv_bars WHERE instrument_id=$1 AND venue=$2 AND resolution=$3
+				AND bucket_start=$4 AND knowledge_time=$5`,
+				b.InstrumentID, b.Venue, string(b.Resolution), b.BucketStart.UTC(), b.KnowledgeTime.UTC())
+		}
+		result := tx.SendBatch(ctx, checks)
+		for _, b := range duplicates {
+			stored, err := scanBar(result.QueryRow(), Bar{InstrumentID: b.InstrumentID, Venue: b.Venue, Resolution: b.Resolution})
+			if err != nil {
+				_ = result.Close()
+				return err
+			}
+			if !SameCandle(stored, b) {
+				_ = result.Close()
+				return b.revisionConflict()
+			}
+		}
+		if err := result.Close(); err != nil {
+			return fmt.Errorf("compare bar revisions: %w", err)
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -100,25 +131,32 @@ func (p *Postgres) Bars(ctx context.Context, q BarQuery) ([]Bar, error) {
 
 	var out []Bar
 	for rows.Next() {
-		b := Bar{InstrumentID: q.InstrumentID, Venue: q.Venue, Resolution: q.Resolution}
-		var open, high, low, cl, vol []byte
-		if err := rows.Scan(&b.BucketStart, &open, &high, &low, &cl, &vol,
-			&b.TradeCount, &b.KnowledgeTime); err != nil {
-			return nil, fmt.Errorf("scan bar: %w", err)
-		}
-		for _, f := range []struct {
-			raw []byte
-			dst **commonpb.Decimal
-		}{{open, &b.Open}, {high, &b.High}, {low, &b.Low}, {cl, &b.Close}, {vol, &b.Volume}} {
-			d := &commonpb.Decimal{}
-			if err := proto.Unmarshal(f.raw, d); err != nil {
-				return nil, fmt.Errorf("decode bar %s@%s: %w", q.InstrumentID, b.BucketStart, err)
-			}
-			*f.dst = d
+		b, err := scanBar(rows, Bar{InstrumentID: q.InstrumentID, Venue: q.Venue, Resolution: q.Resolution})
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+func scanBar(row pgx.Row, b Bar) (Bar, error) {
+	var open, high, low, cl, vol []byte
+	if err := row.Scan(&b.BucketStart, &open, &high, &low, &cl, &vol,
+		&b.TradeCount, &b.KnowledgeTime); err != nil {
+		return Bar{}, fmt.Errorf("scan bar: %w", err)
+	}
+	for _, f := range []struct {
+		raw []byte
+		dst **commonpb.Decimal
+	}{{open, &b.Open}, {high, &b.High}, {low, &b.Low}, {cl, &b.Close}, {vol, &b.Volume}} {
+		d := &commonpb.Decimal{}
+		if err := proto.Unmarshal(f.raw, d); err != nil {
+			return Bar{}, fmt.Errorf("decode bar %s@%s: %w", b.InstrumentID, b.BucketStart, err)
+		}
+		*f.dst = d
+	}
+	return b, nil
 }
 
 // barDecimals are one bar's marshaled price columns.

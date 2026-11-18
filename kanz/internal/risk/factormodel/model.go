@@ -133,6 +133,9 @@ func DefaultModelID(cfg Config) string {
 		digest := sha256.Sum256(policy)
 		parts = append(parts, fmt.Sprintf("DESC1-%x", digest[:8]))
 	}
+	if cfg.Type == Blend {
+		parts = append(parts, "JOINT1")
+	}
 	return strings.Join(parts, "-")
 }
 

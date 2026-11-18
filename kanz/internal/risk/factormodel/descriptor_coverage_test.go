@@ -133,19 +133,20 @@ func TestCrossSectionalFitRejectsUnidentifiedAndInvalid(t *testing.T) {
 		for i := range values {
 			values[i] = []float64{.1, .2, .3}
 		}
-		if _, _, _, err := crossSectionalFit(b, values, 1e-8); err == nil {
+		if _, err := crossSectionalFit(b, values, 1e-8); err == nil {
 			t.Fatalf("accepted design %v", b)
 		}
 	}
 	// An independent one-factor OLS reference: f_t = sum(r_i,t)/3.
-	cov, specific, residual, err := crossSectionalFit([][]float64{{1}, {1}, {1}}, [][]float64{{.01, .02, .03}, {.02, .04, .06}, {.03, .06, .09}}, 0)
+	fit, err := crossSectionalFit([][]float64{{1}, {1}, {1}}, [][]float64{{.01, .02, .03}, {.02, .04, .06}, {.03, .06, .09}}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cov, specific, residual := fit.factorCov, fit.specific, fit.residuals
 	if math.Abs(cov[0][0]-.0004) > 1e-15 || math.Abs(specific[0]-.0001) > 1e-15 || math.Abs(residual[2][2]-.03) > 1e-15 {
 		t.Fatalf("OLS reference mismatch %v %v %v", cov, specific, residual)
 	}
-	if _, _, _, err := crossSectionalFit([][]float64{{1}, {1}, {1}}, [][]float64{{math.MaxFloat64, -math.MaxFloat64}, {1, 2}, {3, 4}}, 0); err == nil {
+	if _, err := crossSectionalFit([][]float64{{1}, {1}, {1}}, [][]float64{{math.MaxFloat64, -math.MaxFloat64}, {1, 2}, {3, 4}}, 0); err == nil {
 		t.Fatal("overflow became a model")
 	}
 }
