@@ -1,9 +1,10 @@
 """Regression cases for documentation moves and complete effective inventories."""
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
-from check_readmes import check, check_document
+from check_readmes import check, check_document, source_files
 
 
 class ReadmeChecks(unittest.TestCase):
@@ -30,6 +31,24 @@ class ReadmeChecks(unittest.TestCase):
             self.assertEqual(count, 2)
             self.assertTrue(any("missing heading" in item for item in issues))
             self.assertTrue(any("escapes repository" in item for item in issues))
+
+    def test_ignored_local_artifacts_cannot_supply_a_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".gitignore").write_text("generated/\n", encoding="utf-8")
+            for directory in ("generated", "guide"):
+                (root / directory).mkdir()
+                (root / directory / "index.md").write_text("# Setup\n", encoding="utf-8")
+            (root / "README.md").write_text(
+                "# Project\n[Generated](generated/index.md#setup)\n"
+                "[Generated directory](generated/)\n"
+                "[New guide](guide/index.md#setup)\n[Guides](guide/)\n", encoding="utf-8")
+            result = check(root, source_files(root))
+            self.assertEqual(result["local_links"], 4)
+            self.assertEqual(len(result["issues"]), 2)
+            self.assertTrue(all("outside effective source: generated/" in item
+                                for item in result["issues"]))
 
     def test_new_readmes_count_and_deleted_inputs_do_not(self):
         with tempfile.TemporaryDirectory() as temporary:

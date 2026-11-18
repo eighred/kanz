@@ -1,6 +1,7 @@
 """Check every effective-source README and root contributor guide, offline."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -44,7 +45,7 @@ def anchors(text):
     return result
 
 
-def check_document(root, relative):
+def check_document(root, relative, source_paths=None):
     document = root / relative
     text = document.read_text(encoding="utf-8-sig")
     issues, count = [], 0
@@ -70,11 +71,15 @@ def check_document(root, relative):
         if parsed.scheme or parsed.netloc:
             continue
         count += 1
-        destination = (document.parent / unquote(parsed.path)).resolve() if parsed.path else document
+        link_path = document.parent / unquote(parsed.path) if parsed.path else document
+        destination = link_path.resolve()
         if not destination.is_relative_to(root.resolve()):
             issues.append(f"{relative}:{number}: link escapes repository: {target}")
         elif not destination.exists():
             issues.append(f"{relative}:{number}: missing local target: {target}")
+        elif source_paths is not None and (
+                Path(os.path.abspath(link_path)) not in source_paths or destination not in source_paths):
+            issues.append(f"{relative}:{number}: local target outside effective source: {target}")
         elif parsed.fragment and destination.is_file() and destination.suffix.lower() == ".md":
             if unquote(parsed.fragment) not in anchors(destination.read_text(encoding="utf-8-sig")):
                 issues.append(f"{relative}:{number}: missing heading: {target}")
@@ -86,9 +91,19 @@ def check_document(root, relative):
 def check(root, files):
     readmes = [p for p in files if Path(p).name == "README.md" and (root / p).is_file()]
     guides = [p for p in ("AGENTS.md", "CONTRIBUTING.md") if (root / p).is_file()]
+    source_root = root.resolve()
+    source_paths = {source_root}
+    for relative in files:
+        path = source_root / relative
+        if path.is_file():
+            source_paths.add(path)
+            parent = path.parent
+            while parent not in source_paths:
+                source_paths.add(parent)
+                parent = parent.parent
     links, issues = 0, []
     for relative in sorted(set(readmes + guides)):
-        count, failures = check_document(root, relative)
+        count, failures = check_document(root, relative, source_paths)
         links += count
         issues.extend(failures)
     if not readmes:
