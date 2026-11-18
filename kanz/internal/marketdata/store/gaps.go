@@ -86,8 +86,8 @@ func (w Window) Whole() bool { return w.Missing() == 0 }
 // covers.
 //
 // ok=false when res has no interval. Bars outside the window, and bars of another
-// resolution, are ignored rather than refused: the caller queried one series and
-// this counts that series.
+// resolution, or with a start off the UTC grid, provide no evidence for a
+// bucket in the requested series.
 func WindowOf(bars []Bar, from, to time.Time, res Resolution) (Window, bool) {
 	interval, ok := res.Interval()
 	if !ok || interval <= 0 {
@@ -152,7 +152,8 @@ func WindowOf(bars []Bar, from, to time.Time, res Resolution) (Window, bool) {
 //
 // A bar whose resolution has no interval yields nil — there is no spacing to
 // check, and returning the slice unexamined would vouch for something never
-// looked at.
+// looked at. An aligned final start anchors the run; each exact interval
+// walked backward from that start is necessarily aligned as well.
 func ContiguousSuffix(bars []Bar) []Bar {
 	if len(bars) == 0 {
 		return nil
