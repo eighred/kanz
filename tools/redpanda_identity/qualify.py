@@ -22,7 +22,8 @@ SAS = ('proof-bootstrap', 'proof-a', 'proof-b', 'proof-ungranted')
 CASES = (('bootstrap','proof-bootstrap','bootstrap'), ('client-a','proof-a','publish'),
          ('client-b','proof-b','publish'), ('ungranted','proof-ungranted','ungranted'),
          ('verify','proof-bootstrap','verify'), ('reprovision','proof-bootstrap','reprovision'),
-         ('verify-reprovision','proof-bootstrap','verify'), ('verify-after-restart','proof-bootstrap','verify'))
+         ('verify-reprovision','proof-bootstrap','verify'), ('checkpoint','proof-a','checkpoint'),
+         ('verify-after-restart','proof-bootstrap','verify'), ('resume','proof-a','resume'))
 
 
 # Export only these fixed strings. Build output itself can contain repository
@@ -437,7 +438,7 @@ def main():
                 try:
                     logs=k('-n','kanz-services','logs','job/'+case)
                     match=re.fullmatch(r'PROBE_FAILED_STAGE:([a-z-]+) CLASS:(kafka--?[0-9]{1,5}|tls-certificate|timeout|eof|unexpected-success|other)',logs)
-                    allowed={'configuration','svid','kafka','tls-handshake','bootstrap-topics','bootstrap-acls','own-topic','own-topic-direct','cross-topic-write','cross-topic-read','acl-admin-denial','renewal','renewed-topic','renewed-topic-denial','ungranted-denial','ungranted-write','ungranted-read','exact-records','bounded-replay','replay-peer-denial','renewed-bounded-replay'}
+                    allowed={'configuration','svid','kafka','tls-handshake','bootstrap-topics','bootstrap-acls','own-topic','own-topic-direct','cross-topic-write','cross-topic-read','acl-admin-denial','renewal','renewed-topic','renewed-topic-denial','ungranted-denial','ungranted-write','ungranted-read','exact-records','bounded-replay','replay-peer-denial','renewed-bounded-replay','consumer-checkpoint','consumer-resume'}
                     if match and match[1] in allowed:
                         evidence['probeFailureStage']=match[1]
                         evidence['probeFailureClass']=match[2]

@@ -73,7 +73,7 @@ func produce(ctx context.Context, c *kafka.Client, topic, value string) error {
 		return err
 	}
 	r, err := c.Produce(ctx, &kafka.ProduceRequest{Topic: topic, RequiredAcks: kafka.RequireAll,
-		Records: kafka.NewRecordReader(kafka.Record{Value: kafka.NewBytes(wire)})})
+		Records: kafka.NewRecordReader(kafka.Record{Key: kafka.NewBytes([]byte(topic)), Value: kafka.NewBytes(wire)})})
 	if err != nil {
 		return err
 	}
@@ -182,6 +182,44 @@ func boundedReplay(ctx context.Context, config *tls.Config, topic string, expect
 	return r.Close()
 }
 
+const checkpointGroup = "proof-a-history"
+
+func consumeCheckpoint(ctx context.Context, config *tls.Config, mode string) error {
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{"redpanda.kanz-messaging.svc:9094"}, GroupID: checkpointGroup,
+		Topic: "proof-a", StartOffset: kafka.FirstOffset, CommitInterval: 0,
+		MinBytes: 1, MaxBytes: 4096, MaxWait: time.Second,
+		Dialer: &kafka.Dialer{TLS: config, Timeout: 10 * time.Second},
+	})
+	defer reader.Close()
+	message, err := reader.FetchMessage(ctx)
+	if err != nil {
+		return err
+	}
+	if err := checkGroupMessage(mode, message); err != nil {
+		return err
+	}
+	return reader.CommitMessages(ctx, message)
+}
+
+func checkGroupMessage(mode string, message kafka.Message) error {
+	offset, value := int64(0), "before-renewal"
+	switch mode {
+	case "checkpoint":
+	case "resume":
+		offset, value = 1, "after-renewal"
+	default:
+		return errors.New("unexpected consumer phase")
+	}
+	env, payload, err := bus.Unframe(message.Value)
+	if err != nil || message.Topic != "proof-a" || message.Partition != 0 ||
+		message.Offset != offset || string(message.Key) != "proof-a" ||
+		env.GetEventId() != value || string(payload) != value {
+		return errors.New("group read differs from the expected partition history")
+	}
+	return nil
+}
+
 var errUnexpectedAcceptance = errors.New("forbidden operation accepted")
 
 func requireTopicDenial(err error) error {
@@ -247,6 +285,9 @@ func run() error {
 			acls = append(acls, kafka.ACLEntry{ResourceType: kafka.ResourceTypeTopic, ResourceName: name, ResourcePatternType: kafka.PatternTypeLiteral, Principal: "User:" + name, Host: "*", Operation: op, PermissionType: kafka.ACLPermissionTypeAllow})
 		}
 	}
+	acls = append(acls, kafka.ACLEntry{ResourceType: kafka.ResourceTypeGroup, ResourceName: checkpointGroup,
+		ResourcePatternType: kafka.PatternTypeLiteral, Principal: "User:proof-a", Host: "*",
+		Operation: kafka.ACLOperationTypeRead, PermissionType: kafka.ACLPermissionTypeAllow})
 	switch mode {
 	case "bootstrap", "reprovision":
 		stage = "bootstrap-topics"
@@ -425,6 +466,14 @@ func run() error {
 			if err := requireTopicDenial(directTopic(ctx, transport.TLS, topic, false, "")); err != nil {
 				return err
 			}
+		}
+	case "checkpoint", "resume":
+		stage = "consumer-" + mode
+		if sa != "proof-a" {
+			return errors.New("consumer identity required")
+		}
+		if err := consumeCheckpoint(ctx, transport.TLS, mode); err != nil {
+			return err
 		}
 	case "verify":
 		stage = "exact-records"
