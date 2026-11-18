@@ -37,7 +37,17 @@ def checkpoint(path, record):
             temporary.unlink(missing_ok=True)
             raise
     try:
-        os.replace(temporary, path)
+        # Windows readers can briefly hold the old file without delete sharing.
+        # Retain atomic replacement and fail if access does not recover.
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.025)
     finally:
         temporary.unlink(missing_ok=True)
 

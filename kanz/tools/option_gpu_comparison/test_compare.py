@@ -1,8 +1,10 @@
 """Failure controls for batch verification, provenance and worker lifecycle."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +13,22 @@ import compare
 
 
 class ComparisonTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows delete-sharing semantics")
+    def test_checkpoint_survives_a_brief_external_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "receipt.json"
+            compare.checkpoint(path, {"completed": 1})
+            reader = path.open()
+            release = threading.Timer(0.15, reader.close)
+            release.start()
+            try:
+                compare.checkpoint(path, {"completed": 2})
+            finally:
+                release.join()
+                reader.close()
+            self.assertEqual(json.loads(path.read_bytes()), {"completed": 2})
+            self.assertEqual(list(path.parent.iterdir()), [path])
+
     def test_missing_nonfinite_false_zero_and_nondeterminism(self):
         expected = [2.0, 3.0]
         for actual in ([2.0], [float("nan"), 3.0], [0.0, 3.0]):
