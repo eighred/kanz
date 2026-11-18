@@ -21,7 +21,10 @@ exact values and absolute expiration timestamps across every phase, checks tenan
 key separation and rejected duplicate claims, then proves Valkey-written claims
 and counter changes survive rollback. It also checks authentication, fsync-always,
 no eviction, loaded image identity, clean shutdown and verified resource removal.
-Only fixed verdicts and image/version identities enter the evidence artifact.
+The receipt records each container ID and server run ID, the loaded image and
+version, and the unique generation label on each owned volume. All six server
+lifetimes must differ. The first-install and retained-state runs each keep
+their own volume across restarts.
 
 The initial Redis 7.4.5 AOF includes its normal RDB preamble. An actual attempt
 to load it in Valkey 9.1.3 failed with `unsupported_rdb_version`
