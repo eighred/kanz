@@ -14,20 +14,27 @@ describe('resolving who this browser is', () => {
   it('treats a 401 from /auth/me as signed out, not as an error to surface', async () => {
     // Every signed-out visitor gets a 401 here. Letting it propagate would put
     // an error banner in front of the sign-in form.
-    vi.spyOn(client.auth, 'me').mockRejectedValue(new Unauthenticated())
+    const me = vi.spyOn(client.auth, 'me').mockRejectedValue(new Unauthenticated())
     const s = useSession()
     await s.resolve()
     expect(s.signedIn).toBe(false)
     expect(s.resolved).toBe(true)
+    await s.resolve()
+    expect(me).toHaveBeenCalledOnce()
   })
 
   it('propagates a real failure rather than reporting the user as signed out', async () => {
     // A 502 means the BFF could not answer. Reporting that as "signed out"
     // would send the operator to sign in again during an outage, and the
     // successful-looking login that follows would fail for a different reason.
-    vi.spyOn(client.auth, 'me').mockRejectedValue(new client.ApiError(502, 'gateway down'))
+    const me = vi.spyOn(client.auth, 'me').mockRejectedValueOnce(new client.ApiError(502, 'gateway down')).mockResolvedValueOnce(identity)
     const s = useSession()
     await expect(s.resolve()).rejects.toBeInstanceOf(client.ApiError)
+    expect(s.resolved).toBe(false)
+    await s.resolve()
+    expect(s.identity).toEqual(identity)
+    expect(s.resolved).toBe(true)
+    expect(me).toHaveBeenCalledTimes(2)
   })
 
   it('asks the server only once', async () => {
