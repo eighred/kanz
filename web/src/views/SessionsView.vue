@@ -4,6 +4,19 @@ import { useRouter } from 'vue-router'
 import { api, ApiError } from '../api/client'
 import { useSession } from '../stores/session'
 interface BrowserSession { id: string; created_at: string; expires_at: string; current: boolean }
+function sessionTime(value: unknown): boolean {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(value) ||
+      !Number.isFinite(Date.parse(value))) return false
+  // Date.parse normalizes impossible calendar dates, including February 30.
+  const wallTime = value.slice(0, 19)
+  return new Date(wallTime + 'Z').toISOString().startsWith(wallTime)
+}
+function isSession(value: unknown): value is BrowserSession {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  return typeof row.id === 'string' && /^[0-9a-f]{64}$/.test(row.id) && typeof row.current === 'boolean' &&
+    sessionTime(row.created_at) && sessionTime(row.expires_at)
+}
 const rows = ref<BrowserSession[] | null>(null)
 const busy = ref(false)
 const error = ref('')
@@ -12,8 +25,15 @@ const session = useSession()
 const router = useRouter()
 let mounted = true
 async function load() {
-  const result = await api.get<{ sessions: BrowserSession[] }>('/auth/sessions')
-  if (mounted) rows.value = result.sessions
+  rows.value = null
+  const result = await api.get<unknown>('/auth/sessions')
+  if (!result || typeof result !== 'object' || !('sessions' in result) || !Array.isArray(result.sessions) ||
+      !result.sessions.every(isSession)) throw new Error('Invalid session inventory.')
+  const inventory = result.sessions
+  if (new Set(inventory.map(row => row.id)).size !== inventory.length || inventory.filter(row => row.current).length > 1) {
+    throw new Error('Ambiguous session identity.')
+  }
+  if (mounted) rows.value = inventory
 }
 async function perform(action: () => Promise<void>) {
   if (busy.value) return
