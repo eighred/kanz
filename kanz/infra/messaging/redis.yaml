@@ -1,45 +1,10 @@
-# EXEC-M22 — the replay defence that lets the platform's ENTRANCE run more than one pod.
-#
-# webhook-ingest is the HMAC webhook that receives every TradingView alert. It was pinned to
-# `replicas: 1` with `strategy: Recreate` — not for capacity, but because its nonce cache
-# lived in process memory. Two pods were two caches: a re-delivered alert landing on the
-# other pod was admitted a SECOND time and fanned out a SECOND set of orders against a live
-# exchange, and nothing downstream could catch it (a fresh claim mints a fresh signal_id, so
-# the OMS's admission gate sees two different orders, not a duplicate).
-#
-# So every deploy, node drain and pod eviction took the entrance FULLY OFFLINE, and a
-# TradingView alert arriving in that window hit nothing and was never retried — the fund
-# silently missing the trade.
-#
-# The code to fix it shipped with EXEC-M17. This is the infrastructure it was waiting for.
-#
-# # Why Redis and not Postgres
-#
-# A nonce claim is a TTL'd compare-and-set (`SET key NX PX`), which is precisely what Redis
-# is. Postgres would put a synchronous write on the hot path of EVERY alert, and
-# webhook-ingest deliberately has no database. pkg/redisadapter already exists and is shared
-# with the bus dedup — one adapter in the repository, not two.
-#
-# # Why AOF, on a cache
-#
-# Because it is not a cache. If Redis restarts empty, every nonce it was holding is gone and
-# the replay window SILENTLY REOPENS: an alert re-delivered across that restart is admitted
-# again and trades twice. `appendonly yes` + `everysec` bounds that to at most one second of
-# claims, at a cost that does not matter for a key space this small.
-#
-# `maxmemory-policy noeviction` for the same reason: a nonce evicted under memory pressure is
-# a replay defence that silently forgot, and forgetting is the one thing it must not do. The
-# keys carry their own TTL (the replay window), so the space is self-limiting; if it is not,
-# we want the write to FAIL — webhook-ingest fails closed on a store error and answers 503,
-# which is a retryable refusal rather than a double trade.
-#
-# # The residual, stated plainly
-#
-# This is ONE Redis. It removes the PLANNED outage (every deploy — the common case) and
-# converts the unplanned one into a fail-closed refusal: if Redis is unreachable, the nonce
-# store errors, webhook-ingest refuses the alert with a retryable 503, and NOTHING is double
-# traded. That is strictly better than silently losing the signal, but it is a trade, not a
-# free win. Redis HA (Sentinel) is a separate piece of infra; it is on the board, not here.
+# The shared first-install cache serves gateway idempotency and webhook replay
+# protection using their existing Redis protocol endpoints and secret mounts.
+# A webhook claim acknowledged before a restart must keep its original expiry.
+# AOF fsync on each write and no eviction preserve that property on this PVC.
+# An unavailable store makes webhook ingest refuse a fresh alert. Gateway
+# deduplication is best effort and remains independent of admission controls.
+# The Tokyo testnet overlay pins its existing Redis runtime separately.
 apiVersion: v1
 kind: Service
 metadata:
@@ -63,7 +28,6 @@ metadata:
     app.kubernetes.io/part-of: kanz
 spec:
   serviceName: redis
-  # ONE. See "the residual" above: this is a fail-closed dependency, not a replicated one.
   replicas: 1
   selector:
     matchLabels:
@@ -83,7 +47,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: redis
-          image: redis:7-alpine
+          image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
           # The password is read from a FILE MOUNT at start (SEC-01d) and never appears as a
           # plaintext arg in the pod spec. Redis has no --requirepass-file directive — it
           # REJECTS one ("Bad directive") — so the value is interpolated here.
@@ -106,7 +70,7 @@ spec:
                 echo "redis: password file missing or empty - refusing to start UNAUTHENTICATED" >&2
                 exit 1
               fi
-              exec redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction --requirepass "$PW"
+              exec redis-server --appendonly yes --appendfsync always --maxmemory-policy noeviction --requirepass "$PW"
           ports:
             - { containerPort: 6379, name: redis }
           livenessProbe:

@@ -1,7 +1,15 @@
 # Valkey first installation and retained replay-state migration
 
-The first-install fixture starts the pinned Valkey 9.1.3 image directly on a
-new private volume. It requires an empty keyspace across databases, then claims
+The generic rig starts Valkey 9.1.3 at the pinned image digest in
+`kanz/infra/messaging/redis.yaml`. The service DNS name, protocol, secret
+paths and PVC identity remain compatible with its gateway and webhook
+consumers. Each acknowledged AOF write is fsynced. The Tokyo data overlay
+retains its existing Redis image and command.
+
+The first-install fixture renders the same dev-secret adaptation as
+`tools/rig-apply.sh`. It starts that workload command on a new private
+volume, checks its effective persistence configuration, and executes both
+authenticated probes with an ephemeral password mounted in memory. It requires an empty keyspace across databases, then claims
 independent tenant keys with different absolute expiration times. After a clean
 Valkey restart, the surviving claim must reject a duplicate without extending
 its deadline. The short-lived claim must become reusable at its original
