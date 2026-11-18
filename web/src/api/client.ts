@@ -85,7 +85,7 @@ async function request<T>(method: string, path: string, body?: unknown, acceptCo
 export const api = {
   get: <T>(path: string, options?: { acceptConflict?: boolean; signal?: AbortSignal }) => request<T>('GET', path, undefined, options?.acceptConflict, options?.signal),
   post: <T>(path: string, body?: unknown, expectedStatus?: number) => request<T>('POST', path, body, false, undefined, expectedStatus),
-  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
+  put: <T>(path: string, body?: unknown, expectedStatus?: number) => request<T>('PUT', path, body, false, undefined, expectedStatus),
 }
 
 export interface Identity {

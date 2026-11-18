@@ -51,8 +51,21 @@ export interface TradeableInstrument {
 }
 
 export interface InstrumentsResponse {
-  instruments?: TradeableInstrument[]
-  owner_tenant?: string
+  instruments: TradeableInstrument[]
+  owner_tenant: string
+}
+
+const nonempty = (value: unknown) => typeof value === 'string' && value.trim().length > 0
+
+function isRoute(value: unknown): value is TradeableInstrument {
+  if (!value || typeof value !== 'object') return false
+  const row = value as Record<string, unknown>
+  if (!nonempty(row.instrument_id) || !nonempty(row.venue_symbol) || !nonempty(row.mic)) return false
+  // The original catalogue predates venue symbol resolution.
+  if (row.base_asset === undefined && row.quote_asset === undefined && row.quote_mismatch === undefined) return true
+  if (typeof row.quote_mismatch !== 'boolean') return false
+  if (row.base_asset === '' && row.quote_asset === '') return !row.quote_mismatch
+  return nonempty(row.base_asset) && nonempty(row.quote_asset)
 }
 
 export const instruments = {
@@ -63,7 +76,21 @@ export const instruments = {
    * can also mean "not served here" — describeInstruments separates that from an
    * estate that genuinely trades nothing.
    */
-  list: () => api.get<InstrumentsResponse>('/api/v1/instruments'),
+  async list(tenant: string, signal: AbortSignal): Promise<InstrumentsResponse> {
+    const value = await api.get<unknown>('/api/v1/instruments', { signal })
+    if (!value || typeof value !== 'object' || !tenant.trim() ||
+        !('owner_tenant' in value) || value.owner_tenant !== tenant ||
+        !('instruments' in value) || !Array.isArray(value.instruments) || !value.instruments.every(isRoute)) {
+      throw new Error('Invalid instrument catalogue.')
+    }
+    const seen = new Set<string>()
+    for (const route of value.instruments) {
+      const key = JSON.stringify([route.instrument_id, route.mic])
+      if (seen.has(key)) throw new Error('Ambiguous instrument route.')
+      seen.add(key)
+    }
+    return { owner_tenant: tenant, instruments: value.instruments }
+  },
 }
 
 /**
