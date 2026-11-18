@@ -63,6 +63,7 @@ export interface ProposedCommand {
   limit_price?: Decimal
   stop_price?: Decimal
   time_in_force?: string
+  expire_at?: string
   venue?: string
 }
 

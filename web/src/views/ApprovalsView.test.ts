@@ -4,7 +4,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ApprovalsView from './ApprovalsView.vue'
 import * as approvalsApi from '../api/approvals'
 import type { PendingApproval, PendingApprovalsResponse } from '../api/approvals'
-import { ApiError } from '../api/client'
+import { api, ApiError } from '../api/client'
+import stopLimit from './__fixtures__/pending-stop-limit.json'
 import { useSession } from '../stores/session'
 
 // WHAT THIS SCREEN IS FOR, AND THEREFORE WHAT IS WORTH TESTING (#371 slice).
@@ -52,6 +53,7 @@ function entry(over: Partial<PendingApproval> = {}): PendingApproval {
       instrument_id: 'BTC-USD',
       side: 'SIDE_BUY',
       order_type: 'ORDER_TYPE_LIMIT',
+      time_in_force: 'TIME_IN_FORCE_GTC',
       quantity: { coefficient: '250', exponent: -1 },
       limit_price: { coefficient: '6400000', exponent: -2 },
     },
@@ -188,6 +190,35 @@ describe('a refused entry does not read as untouched work', () => {
     const wrapper = await open({ pending: [entry()] })
     expect(stateCell(wrapper).text()).toBe('pending')
     expect(wrapper.findAll('[role="alert"]')).toHaveLength(0)
+  })
+})
+
+describe('the maker’s order terms at signing', () => {
+  it('displays the exact stop, limit, GTD expiry and scope from the gateway ProtoJSON', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue(stopLimit)
+    const approve = vi.spyOn(approvalsApi.approvals, 'approve').mockResolvedValue({ order_id: 'order-stop-limit', status: 'approval_submitted' })
+    const wrapper = mount(ApprovalsView)
+    await flushPromises()
+    await button(wrapper, 'Approve')!.trigger('click')
+    const review = wrapper.get('[role="dialog"]').text()
+    for (const value of ['Stop trigger: 90071992547409.93', 'Limit price: 90071992547409.94', 'Time in force: gtd',
+      '2099-02-28T19:30:00.123456789Z', 'Portfolio: fund-a', 'Venue: BINANCE']) expect(review).toContain(value)
+    expect(approve).not.toHaveBeenCalled()
+    await button(wrapper, 'Submit approval')!.trigger('click')
+    expect(approve).toHaveBeenCalledExactlyOnceWith('order-stop-limit', DIGEST)
+  })
+  it.each([{ expire_at: '2099-02-30T12:00:00Z' }, { expire_at: null }, { stop_price: null },
+    { limit_price: { coefficient: 'broken', exponent: -2 } }])('withholds signing on malformed decision terms', async change => {
+    const row = stopLimit.pending[0]!
+    vi.spyOn(api, 'get').mockResolvedValue({ ...stopLimit, pending: [{ ...row, command: { ...row.command, ...change } }] })
+    const approve = vi.spyOn(approvalsApi.approvals, 'approve')
+    const wrapper = mount(ApprovalsView)
+    await flushPromises()
+    await button(wrapper, 'Approve')!.trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('Required order terms could not be verified')
+    expect(button(wrapper, 'Submit approval')!.attributes('disabled')).toBeDefined()
+    await button(wrapper, 'Submit approval')!.trigger('click')
+    expect(approve).not.toHaveBeenCalled()
   })
 })
 

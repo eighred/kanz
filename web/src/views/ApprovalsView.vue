@@ -151,9 +151,31 @@ function amount(d: Parameters<typeof formatDecimal>[0]): string {
 
 /** terse strips the protobuf enum prefix for display only. */
 function terse(v: string | undefined, prefix: string): string {
-  if (!v) return '—'
+  if (typeof v !== 'string' || !v) return '—'
   return v.replace(prefix, '').replaceAll('_', ' ').toLowerCase() || '—'
 }
+
+function validExpiry(value: unknown): value is string {
+  // ProtoJSON normalizes timestamps to UTC. Keep the full fractional precision on screen.
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value)) return false
+  const millis = Date.parse(value)
+  return Number.isFinite(millis) && new Date(millis).toISOString().slice(0, 19) === value.slice(0, 19)
+}
+
+const reviewable = computed(() => {
+  const cmd = confirming.value?.command
+  if (!cmd || !cmd.portfolio_id || !cmd.instrument_id) return false
+  const positive = (d: typeof cmd.quantity) => {
+    const value = formatDecimal(d)
+    return value !== null && !value.startsWith('-') && /[1-9]/.test(value)
+  }
+  if (!positive(cmd.quantity)) return false
+  if (!['ORDER_TYPE_MARKET', 'ORDER_TYPE_LIMIT', 'ORDER_TYPE_STOP', 'ORDER_TYPE_STOP_LIMIT'].includes(cmd.order_type ?? '')) return false
+  if ((cmd.order_type === 'ORDER_TYPE_LIMIT' || cmd.order_type === 'ORDER_TYPE_STOP_LIMIT') && !positive(cmd.limit_price)) return false
+  if ((cmd.order_type === 'ORDER_TYPE_STOP' || cmd.order_type === 'ORDER_TYPE_STOP_LIMIT') && !positive(cmd.stop_price)) return false
+  return cmd.time_in_force === 'TIME_IN_FORCE_GTD' ? validExpiry(cmd.expire_at)
+    : ['TIME_IN_FORCE_DAY', 'TIME_IN_FORCE_GTC', 'TIME_IN_FORCE_IOC', 'TIME_IN_FORCE_FOK'].includes(cmd.time_in_force ?? '')
+})
 
 function ask(p: PendingApproval) {
   confirming.value = p
@@ -168,7 +190,7 @@ function cancel() {
 
 async function sign() {
   const p = confirming.value
-  if (!p || busy.value) return
+  if (!p || busy.value || !reviewable.value) return
   busy.value = true
   actionError.value = ''
   try {
@@ -338,11 +360,23 @@ async function sign() {
       {{ terse(confirming.command?.side, 'SIDE_') }}
       {{ amount(confirming.command?.quantity) }}
       {{ confirming.command?.instrument_id || '(no instrument)' }}
-      ({{ terse(confirming.command?.order_type, 'ORDER_TYPE_') }}<template
-        v-if="confirming.command?.limit_price"
-      >
-        @ {{ amount(confirming.command?.limit_price) }}</template
-      >)
+      ({{ terse(confirming.command?.order_type, 'ORDER_TYPE_') }})
+    </p>
+    <p>
+      Portfolio: {{ confirming.command?.portfolio_id || 'Not stated' }} · Venue: {{ confirming.command?.venue || 'Routing default' }}
+    </p>
+    <p v-if="confirming.command?.order_type === 'ORDER_TYPE_LIMIT' || confirming.command?.order_type === 'ORDER_TYPE_STOP_LIMIT'">
+      Limit price: {{ amount(confirming.command.limit_price) }}
+    </p>
+    <p v-if="confirming.command?.order_type === 'ORDER_TYPE_STOP' || confirming.command?.order_type === 'ORDER_TYPE_STOP_LIMIT'">
+      Stop trigger: {{ amount(confirming.command.stop_price) }}
+    </p>
+    <p>Time in force: {{ terse(confirming.command?.time_in_force, 'TIME_IN_FORCE_') }}</p>
+    <p v-if="confirming.command?.time_in_force === 'TIME_IN_FORCE_GTD'">
+      Order expiry: {{ validExpiry(confirming.command.expire_at) ? confirming.command.expire_at : 'Unavailable' }}
+    </p>
+    <p v-if="!reviewable" class="error" role="alert">
+      Required order terms could not be verified. Reload the queue before signing.
     </p>
 
     <p class="muted">
@@ -368,7 +402,7 @@ async function sign() {
     <p v-if="actionError" class="error" role="alert">{{ actionError }}</p>
 
     <div class="actions">
-      <button :disabled="busy" @click="sign">{{ busy ? 'Submitting…' : 'Submit approval' }}</button>
+      <button :disabled="busy || !reviewable" @click="sign">{{ busy ? 'Submitting…' : 'Submit approval' }}</button>
       <button class="quiet" :disabled="busy" @click="cancel">Cancel</button>
     </div>
   </div>
