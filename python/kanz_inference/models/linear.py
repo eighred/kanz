@@ -107,6 +107,12 @@ class LinearModel:
     def __init__(self, spec: ModelSpec) -> None:
         if not spec.weights:
             raise ValueError("linear model: no weights — it would score every input the same")
+        if not math.isfinite(spec.bias) or not all(map(math.isfinite, spec.weights.values())):
+            raise ValueError("linear model requires finite bias and weights")
+        if not 0.0 <= spec.confidence_threshold <= 1.0:
+            raise ValueError("linear model confidence threshold must be in [0, 1]")
+        if not math.isfinite(spec.scale) or spec.scale < 0.0:
+            raise ValueError("linear model confidence scale must be finite and nonnegative")
         self._spec = spec
         self.model_id = spec.model_id
 
@@ -120,25 +126,19 @@ class LinearModel:
 
         missing = sorted(name for name in self._spec.weights if name not in fv.values)
         if missing:
-            # A HOLE IN THE INPUT, not a zero. Scoring it would produce a
-            # confident number from a partial vector — the most dangerous kind
-            # of wrong, because it is indistinguishable from a real one.
-            return PredictionEnvelope(
-                subject_id=fv.subject_id,
-                model=self.model_id,
-                value=0.0,
-                confidence=0.0,  # unknown confidence IS no confidence (PRED-02)
-                mode=PredictionMode.PREDICTION_MODE_DEGRADED,
-                degraded_reason="missing features: " + ", ".join(missing),
-                as_of=as_of,
-            )
+            return self._unavailable(fv, "missing features: " + ", ".join(missing))
 
         value = self._spec.bias
         for name, w in self._spec.weights.items():
-            value += w * fv.values[name].scalar
+            feature = fv.values[name]
+            if feature.WhichOneof("value") != "scalar" or not math.isfinite(feature.scalar):
+                return self._unavailable(fv, f"expected a finite scalar for {name}")
+            value += w * feature.scalar
+        if not math.isfinite(value):
+            return self._unavailable(fv, "non-finite linear score")
 
         confidence = self._confidence(value)
-        degraded = confidence < self._spec.confidence_threshold
+        degraded = confidence < self._spec.confidence_threshold or self._spec.confidence_threshold == 1.0
 
         return PredictionEnvelope(
             subject_id=fv.subject_id,
@@ -151,12 +151,21 @@ class LinearModel:
                 else PredictionMode.PREDICTION_MODE_NORMAL
             ),
             degraded_reason=(
-                f"confidence {confidence:.3f} below the model's threshold "
-                f"{self._spec.confidence_threshold:.3f}"
+                f"model confidence gate (confidence={confidence:.3f}, "
+                f"threshold={self._spec.confidence_threshold:.3f})"
                 if degraded
                 else ""
             ),
             as_of=as_of,
+        )
+
+    def _unavailable(self, fv: FeatureVector, reason: str) -> PredictionEnvelope:
+        return PredictionEnvelope(
+            subject_id=fv.subject_id,
+            model=self.model_id,
+            mode=PredictionMode.PREDICTION_MODE_DEGRADED,
+            degraded_reason=reason,
+            as_of=fv.as_of,
         )
 
     def _confidence(self, value: float) -> float:

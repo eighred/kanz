@@ -94,6 +94,41 @@ async def test_the_model_declares_what_it_could_not_see():
 # --- The registry gate is real ----------------------------------------
 
 
+@pytest.mark.parametrize("feature", [
+    FeatureValue(), FeatureValue(ordinal=0), FeatureValue(categorical="0"),
+    FeatureValue(vector={"values": [0]}), FeatureValue(scalar=float("nan")),
+    FeatureValue(scalar=float("inf")), FeatureValue(scalar=1e308),
+])
+async def test_served_linear_score_requires_finite_scalar_data_and_result(feature):
+    router = RegistryRouter(build_registry([_spec(weights={"x": 2.0})]), explain=True)
+    fv = _fv(x=0)
+    fv.values["x"].CopyFrom(feature)
+    prediction = await router.predict(fv)
+    assert prediction.mode == PredictionMode.PREDICTION_MODE_DEGRADED
+    assert prediction.degraded_reason
+    assert prediction.value == 0 and prediction.confidence == 0
+    assert not prediction.explanation
+
+
+async def test_scalar_zero_is_valid_and_uncalibrated_saturated_score_is_degraded():
+    known = LinearModel(_spec(weights={"x": 1.0}, bias=2.0))
+    prediction = await known.predict(_fv(x=0.0))
+    assert prediction.mode == PredictionMode.PREDICTION_MODE_NORMAL
+    assert prediction.value == 2.0
+    uncalibrated = LinearModel(_spec(weights={"x": 1.0}, confidence_threshold=1.0))
+    assert (await uncalibrated.predict(_fv(x=100.0))).mode == PredictionMode.PREDICTION_MODE_DEGRADED
+
+
+@pytest.mark.parametrize("parameter", [
+    {"weights": {"x": float("inf")}}, {"bias": float("nan")},
+    {"scale": -1.0}, {"scale": float("inf")}, {"confidence_threshold": float("nan")},
+    {"confidence_threshold": -0.1}, {"confidence_threshold": 1.1},
+])
+def test_startup_refuses_unusable_linear_parameters(parameter):
+    with pytest.raises(ValueError, match="linear model"):
+        build_registry([_spec(**parameter)])
+
+
 async def test_an_UNVALIDATED_model_cannot_serve():
     """MLOPS-01a / SR 11-7: no model serves production without recorded,
     current validation. The registry already enforces this; nothing had ever
