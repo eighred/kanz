@@ -60,12 +60,16 @@ export const users = {
     }
     return { subject: body.subject, tenant: body.tenant, capabilities: body.capabilities, portfolios: body.portfolios, routes: body.routes }
   },
-  list: async (after = '') => {
+  list: async (tenant: string, after = '') => {
     const body = await api.get<unknown>(`/api/identity/users?after=${encodeURIComponent(after)}`)
     if (!body || typeof body !== 'object') throw new Error('Identity returned an invalid directory page.')
     const page = body as Record<string, unknown>
     if (!Array.isArray(page.users) || typeof page.next_cursor !== 'string') throw new Error('Identity returned an invalid directory page.')
-    return { users: page.users.map(access), next_cursor: page.next_cursor }
+    const accounts = page.users.map(access)
+    if (accounts.some(account => !nonempty(account.subject) || account.tenant !== tenant)) {
+      throw new Error('Identity returned a directory page outside the verified account scope.')
+    }
+    return { users: accounts, next_cursor: page.next_cursor }
   },
   update: async (user: UserAccess, roles: string[], portfolios: string[]) =>
     access(await api.put<unknown>(`${path(user.subject)}/access`, { revision: requireRevision(user.revision), roles, portfolios })),
