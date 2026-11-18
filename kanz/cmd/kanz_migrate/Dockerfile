@@ -45,6 +45,9 @@ RUN set -eu; \
       svc="$(basename "$(dirname "$d")")"; \
       mkdir -p "/out/migrations/$svc"; \
       cp "$d"/*.sql "/out/migrations/$svc/"; \
+      for preflight in "$d"/*.sql.preflight; do \
+        [ ! -f "$preflight" ] || cp "$preflight" "/out/migrations/$svc/"; \
+      done; \
     done
 
 # Distroless static: no shell, no libc, no package manager. :nonroot is uid 65532,

@@ -10,6 +10,36 @@ NAME = "kanz-valkey-proof-" + "a" * 24
 
 
 class MigrationBoundaryTests(unittest.TestCase):
+    def test_rendered_rig_and_tokyo_keep_separate_cache_selections(self):
+        rig = proof.rig_workload()
+        root = proof.Path(proof.__file__).resolve().parents[2]
+        raw = proof.command(["kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone",
+                             str(root / "kanz/infra/overlays/testnet_tokyo/data")])
+        workload, = [doc for doc in proof.yaml.safe_load_all(raw)
+                     if doc and doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "redis"]
+        tokyo, = workload["spec"]["template"]["spec"]["containers"]
+        self.assertEqual(tokyo["image"], proof.REDIS)
+        self.assertEqual(rig["image"], proof.VALKEY)
+        self.assertIn("exec redis-server --appendonly yes --appendfsync always --maxmemory-policy noeviction", tokyo["command"][2])
+        for probe in ("livenessProbe", "readinessProbe"):
+            self.assertEqual(tokyo[probe]["exec"]["command"],
+                             ["sh", "-c", 'redis-cli -a "$(cat /run/secrets/redis/password)" --no-auth-warning ping'])
+        claim, = workload["spec"]["volumeClaimTemplates"]
+        self.assertEqual(claim["metadata"]["name"], "data")
+        self.assertEqual(claim["spec"]["accessModes"], ["ReadWriteOnce"])
+        self.assertEqual(claim["spec"]["resources"]["requests"]["storage"], "1Gi")
+
+    def test_rig_applies_the_cache_ingress_before_the_cache(self):
+        root = proof.Path(proof.__file__).resolve().parents[2]
+        lines = [line.strip() for line in (root / "tools/rig-apply.sh").read_text(encoding="utf-8").splitlines()]
+        policy = 'kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/valkey-clients.yaml'
+        preflight = 'python3 tools/valkey_migration/rig_install.py preflight "$KUBECTL_CONTEXT"'
+        secrets = 'kubectl --context "$KUBECTL_CONTEXT" apply -f "$DEPLOY_DIR/rig-dev-secrets.yaml"'
+        install = 'python3 tools/valkey_migration/rig_install.py install "$KUBECTL_CONTEXT"'
+        self.assertLess(lines.index(preflight), lines.index(secrets))
+        self.assertLess(lines.index(secrets), lines.index(policy))
+        self.assertLess(lines.index(policy), lines.index(install))
+
     def test_names_refused_before_commands(self):
         with patch.object(proof, "command") as call:
             for name in ("redis", NAME + "/..", NAME + "-data", "kanz-valkey-proof-" + "a" * 23, NAME.upper()):
@@ -97,7 +127,7 @@ class MigrationBoundaryTests(unittest.TestCase):
                 fixture.call.return_value = count
                 fixture.raw.return_value = keyspace
                 with self.assertRaisesRegex(proof.Refused, "first_install_keyspace_not_empty"):
-                    proof.first_install(fixture, {})
+                    proof.first_install(fixture, {}, {})
                 fixture.call.assert_called_once_with("DBSIZE")
 
     def test_first_install_restarts_valkey_and_rechecks_both_claims(self):
@@ -113,9 +143,9 @@ class MigrationBoundaryTests(unittest.TestCase):
             {**retained, b: {"value": "new-claim", "expires": 901000}},
         ]
         phases = {}
-        proof.first_install(fixture, phases)
+        proof.first_install(fixture, phases, {})
         self.assertEqual(phases, {"valkey_first_install": "fresh", "first_install_restart": "restarted"})
-        self.assertEqual(fixture.start.call_args_list, [call(proof.VALKEY, True)] * 2)
+        self.assertEqual(fixture.start.call_args_list, [call(proof.VALKEY, True, {})] * 2)
         self.assertEqual(fixture.claim_refused.call_args_list, [call(a, 961000)] * 2)
         self.assertEqual(fixture.stop.call_count, 2)
         fixture.cleanup.assert_called_once_with()

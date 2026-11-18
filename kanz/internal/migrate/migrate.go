@@ -67,6 +67,9 @@ type Migration struct {
 	Name     string
 	SQL      string
 	Checksum string
+	// Preflight is an optional read-only prerequisite bundled beside this
+	// migration. It is checked on each run, including an interrupted upgrade.
+	Preflight string
 }
 
 // Load reads a service's migrations directory in the repo's existing convention
@@ -105,6 +108,27 @@ func Load(dir string) ([]Migration, error) {
 			SQL:      string(b),
 			Checksum: hex.EncodeToString(sum[:]),
 		})
+	}
+	// Each preflight names its historical SQL file. Reject orphaned checks
+	// instead of silently ignoring a typo that would remove a prerequisite.
+	checks, err := filepath.Glob(filepath.Join(dir, "*.sql.preflight"))
+	if err != nil {
+		return nil, fmt.Errorf("glob preflights: %w", err)
+	}
+	for _, p := range checks {
+		name := strings.TrimSuffix(filepath.Base(p), ".preflight")
+		index := sort.SearchStrings(paths, filepath.Join(dir, name))
+		if index >= len(paths) || filepath.Base(paths[index]) != name {
+			return nil, fmt.Errorf("preflight has no matching migration: %s", name)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read preflight for %s: %w", name, err)
+		}
+		out[index].Preflight = strings.TrimSpace(string(data))
+		if out[index].Preflight == "" {
+			return nil, fmt.Errorf("empty preflight for %s", name)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out, nil
@@ -204,6 +228,20 @@ func (r *Runner) Up(ctx context.Context, migs []Migration) ([]Migration, error) 
 		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, advisoryLockKey)
 	}()
 
+	// Check the whole set under the runner lock before changing a policy or
+	// adopting a migration ledger. Historical checksums cover the original SQL.
+	for _, m := range migs {
+		if m.Preflight == "" {
+			continue
+		}
+		err := pgx.BeginTxFunc(ctx, conn, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, m.Preflight)
+			return err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("preflight for %s: %w", m.Name, err)
+		}
+	}
 	if err := ensureVersionTable(ctx, conn.Conn()); err != nil {
 		return nil, err
 	}

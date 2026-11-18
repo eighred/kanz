@@ -33,6 +33,28 @@ it('keeps a conflicting edit visible without reporting success or retrying it', 
   expect(update).toHaveBeenCalledTimes(1)
   expect(wrapper.text()).not.toContain('Access updated')
 })
+it.each([
+  { subject: 'other' }, { tenant: 'other' }, { status: 'disabled' },
+  { revision: '7' }, { revision: '9' }, { session_epoch: '0' },
+  { roles: ['kanz-admin'] }, { portfolios: ['pf-2'] },
+])('requires a fresh read after an unconfirmed access update', async difference => {
+  const put = vi.spyOn(api, 'put').mockResolvedValue({ ...alice, revision: '8', session_epoch: '1', ...difference })
+  const wrapper = mount(UsersView)
+  await flushPromises()
+  await wrapper.get('[aria-label="Edit access for alice"]').trigger('click')
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+  expect(wrapper.get('[role=alert]').text()).toContain('Reload users to check its outcome')
+  expect(wrapper.text()).not.toContain('Access updated')
+  expect(wrapper.find('form').exists()).toBe(false)
+  expect(wrapper.find('[aria-label="Edit access for alice"]').exists()).toBe(false)
+  await wrapper.get('button').trigger('click')
+  await flushPromises()
+  expect(wrapper.find('[aria-label="Edit access for alice"]').exists()).toBe(true)
+  expect(put).toHaveBeenCalledTimes(1)
+  wrapper.unmount()
+})
+
 it('does not fetch user records or display edit controls for a nonadministrator', async () => {
   vi.mocked(users.permissions).mockResolvedValue({ subject: 'alice', tenant: 'acme', identity_admin: false })
   const wrapper = mount(UsersView); await flushPromises()

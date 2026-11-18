@@ -38,9 +38,15 @@ tools/Invoke-TestnetDataPlaneRecovery.ps1 -Operation Backup|Restore. It refuses
 a backup while application or venue writers are running, streams database,
 Redis and NATS artifacts without exposing mounted credentials to the host, and
 uploads only through the EC2 instance role to the KMS-encrypted, Object-Locked
-Osaka bucket. Restore creates a temporary, network-denied replacement namespace,
-checks every database's migration/table/RLS state plus Redis and NATS totals,
-reports measured RPO/RTO, and deletes the drill namespace. The wrapper refuses
+Osaka bucket. Backup verifies and records the version ID returned by the upload.
+Restore selects the latest key, pins its version and verifies the KMS key,
+unexpired Governance retention and downloaded bytes for that version. Both
+receipts include the key, version ID and SHA-256. A pre-existing NATS backup
+runner prevents a new snapshot. Cleanup requires ownership of the created pod.
+Restore creates a temporary, network-denied replacement namespace, checks each
+database's migration/table/RLS state plus Redis and NATS inventory, deletes the
+drill namespace and reports elapsed drill time. Operational RPO/RTO remain
+unknown until a timed failover exercise measures them. The wrapper refuses
 to execute unless the shell script is the exact blob on origin/main.
 
 The single node, each singleton store, and the local-path volumes are failure

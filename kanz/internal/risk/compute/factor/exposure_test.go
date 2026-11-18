@@ -3,12 +3,14 @@ package factor_test
 import (
 	"context"
 	"math"
+	"reflect"
 	"testing"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/compute/factor"
 	"github.com/eighred/kanz/internal/risk/domain"
 )
@@ -98,6 +100,19 @@ func TestSectorExposure_UnclassifiedCatchAll(t *testing.T) {
 	}
 	if g := mval(un.Gross); g != 400 {
 		t.Fatalf("unclassified gross = %v, want 400 (300 unknown + 100 sectorless)", g)
+	}
+}
+
+func TestMissingClassifierPreservesOnlyBaseDimensions(t *testing.T) {
+	ctx := context.Background()
+	p := portfolio(pos("AAPL", 300, "USD"), pos("VOD", -100, "EUR"))
+	if rows := factor.SectorExposure(ctx, p, nil); len(rows) != 0 {
+		t.Fatalf("absent provider produced sector rows: %v", rows)
+	}
+	got, want := factor.ComputeExposure(ctx, p, nil), compute.ComputeExposure(p)
+	if got.PortfolioID() != want.PortfolioID() || !got.AsOf().Equal(want.AsOf()) ||
+		!reflect.DeepEqual(got.Items(), want.Items()) {
+		t.Fatal("absent classifier changed the canonical instrument or currency exposure")
 	}
 }
 

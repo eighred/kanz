@@ -136,7 +136,8 @@ jobs:
           psql -h localhost -U kanz -d kanz -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
             -c "CREATE DATABASE kanzapp OWNER kanzapp;" \
-            -c "CREATE DATABASE kanz_oms_ci OWNER kanzapp;"
+            -c "CREATE DATABASE kanz_oms_ci OWNER kanzapp;" \
+            -c "CREATE DATABASE kanz_accounting_migration_ci OWNER kanzapp;"
           psql -h localhost -U kanz -d kanzapp -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
           psql -h localhost -U kanz -d kanz_oms_ci -v ON_ERROR_STOP=1 \
@@ -604,6 +605,7 @@ jobs:
           TEST_OMS_ON_BUS: "1"
           TEST_INFERENCE_ON_BUS: "1"
           TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
+          TEST_ACCOUNTING_MIGRATION_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_accounting_migration_ci?sslmode=disable
           TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/sessions.cjs
           TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/web/e2e/mfa.cjs
           TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright

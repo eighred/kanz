@@ -1,0 +1,18 @@
+-- 0003 enumerates ledger_entries policies across this database and applies
+-- them to the unqualified ledger_entries. Refuse an ambiguous accounting
+-- schema before any migration runs, including on a resumed bootstrap.
+DO $$
+BEGIN
+    IF pg_catalog.current_schema() IS NULL OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'ledger_entries' AND c.relkind IN ('r', 'p')
+          AND n.nspname <> pg_catalog.current_schema()
+    ) THEN
+        RAISE EXCEPTION 'accounting requires a target schema and a single ledger_entries table in this database'
+            USING ERRCODE = '55000',
+                  HINT = 'Use the dedicated accounting database and verify its migration search_path before retrying.';
+    END IF;
+END
+$$;

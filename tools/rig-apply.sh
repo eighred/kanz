@@ -107,6 +107,9 @@ apply_deploy() {
     exit 1
   }
   echo "==> applying dev deploy manifests from $DEPLOY_DIR to context $KUBECTL_CONTEXT"
+  # Refuse retained Redis, orphaned claims and an unreadable API before even
+  # updating dev credentials or NetworkPolicy on an existing installation.
+  python3 tools/valkey_migration/rig_install.py preflight "$KUBECTL_CONTEXT"
 
   # oms-db lives in postgres-dev.yaml; the other four dev Secrets live here.
   # Applied before the workloads that mount them.
@@ -121,7 +124,8 @@ apply_deploy() {
   # resolves to nothing — Redis's own start script then refuses to run rather than
   # come up unauthenticated (see redis.yaml's command block). Applying it raw was a
   # second, undeclared deviation from the "one patch path" this stage exists to be.
-  python3 tools/rig_dev_patch.py kanz/infra/messaging/redis.yaml | kubectl --context "$KUBECTL_CONTEXT" apply -f -
+  kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/valkey-clients.yaml
+  python3 tools/valkey_migration/rig_install.py install "$KUBECTL_CONTEXT"
 
   # The rig runs a curated subset — the trading loop — not the whole 23-service
   # estate. This is NOT a glob over *-deploy.yaml, deliberately:
