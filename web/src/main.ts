@@ -21,7 +21,9 @@ setUnauthenticatedHandler(() => {
   const session = useSession()
   const wasSignedIn = session.signedIn
   session.forget()
-  // A rejected request on a public page can already be handling sign-in.
+  // Only navigate if we thought we were signed in. A 401 from the guard's own
+  // /auth/me on a signed-out visitor is the ORDINARY case, and redirecting
+  // there would fight the guard that issued the request.
   if (wasSignedIn && !router.currentRoute.value.meta.public) {
     void router.push({ name: 'login', query: { next: router.currentRoute.value.fullPath } })
   }
