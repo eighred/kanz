@@ -230,9 +230,7 @@ class Fixture:
         if workload is None:
             expected["maxmemory"] = "67108864"
         else:
-            for probe in ("livenessProbe", "readinessProbe"):
-                if command(["docker", "exec", self.name, *workload[probe]["exec"]["command"]]) != "PONG":
-                    raise Refused("workload_probe_failed")
+            self.check_probe_credentials(workload)
         for key, value in expected.items():
             result = self.call("CONFIG", "GET", key)
             if result not in ([key, value], {key: value}):
@@ -243,6 +241,25 @@ class Fixture:
         return {"image": image, "imageID": loaded["Image"], "version": version,
                 "containerID": loaded["Id"], "serverRunID": server_info.get("run_id", ""),
                 "volumeGeneration": self.volume_generation}
+
+    def check_probe_credentials(self, workload):
+        probes = [workload[p]["exec"]["command"] for p in ("livenessProbe", "readinessProbe")]
+        mount = "/run/secrets/redis/password"
+        # Mutate only this fixture's private tmpfs, never the active server password.
+        for invalid in ("", secrets.token_hex(24), None):
+            if invalid is None:
+                command(["docker", "exec", self.name, "rm", mount])
+            else:
+                command(["docker", "exec", "-i", self.name, "sh", "-ec", 'cat > "$1"', "sh", mount], invalid)
+            for probe in probes:
+                status = command(["docker", "exec", self.name, "sh", "-c",
+                                  '"$@" >/dev/null 2>&1; printf "%s" "$?"', "sh", *probe])
+                if status != "1":
+                    raise Refused("invalid_probe_credential_not_refused")
+        command(["docker", "exec", "-i", self.name, "sh", "-ec", 'umask 077; cat > "$1"', "sh", mount], self.password)
+        for probe in probes:
+            if command(["docker", "exec", self.name, *probe]) != "PONG":
+                raise Refused("workload_probe_failed")
 
     def raw(self, *args):
         return command(["docker", "exec", "-e", "REDISCLI_AUTH=" + self.password, self.name, self.cli, "--raw", *map(str, args)])
