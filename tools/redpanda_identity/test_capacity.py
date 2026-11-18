@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import prepare_runner
 import qualify
+import cold_restore
 
 
 class CapacityTests(unittest.TestCase):
@@ -65,6 +66,12 @@ class CapacityTests(unittest.TestCase):
         after = dict(before, containerID='containerd://' + 'b' * 64, restartCount=1,
                      previousContainerID=before['containerID'], previousExitCode=0)
         evidence['brokerRestart'] = {'before': before, 'after': after}
+        evidence['coldRestore'] = {
+            'sourcePod': before['podUID'], 'restoredPod': '00000000-0000-0000-0000-000000000009',
+            'backupSHA256': 'f' * 64, 'restoreSHA256': 'f' * 64,
+            'claims': {name: {'uid': f'00000000-0000-0000-0000-{i:012d}',
+                              'volume': f'pvc-00000000-0000-0000-0000-{i:012d}'}
+                       for i, name in enumerate((cold_restore.SOURCE, cold_restore.BACKUP, cold_restore.RESTORED), 1)}}
         for case, sa, mode in qualify.CASES:
             evidence['observations'].append({'case': case, 'passed': True, 'mode': mode,
                 'identity': qualify.identity(sa), 'subjectDN': 'CN=fixture,O=SPIRE,C=US,' + qualify.subject(sa),
@@ -73,6 +80,17 @@ class CapacityTests(unittest.TestCase):
                 'usedBytes': 10 << 30, 'availableBytes': 30 << 30, 'producerReserveBytes': 5 << 30,
                 'requiredHeadroomBytes': qualify.HEADROOM})
         qualify.validate_report(evidence, sha)
+        for field, value in [('sourcePod', evidence['coldRestore']['restoredPod']),
+                             ('sourcePod', '00000000-0000-0000-0000-000000000088'),
+                             ('restoreSHA256', 'c' * 64), ('claims', {})]:
+            bad = copy.deepcopy(evidence)
+            bad['coldRestore'][field] = value
+            with self.assertRaises(ValueError): qualify.validate_report(bad, sha)
+        for key in ('uid', 'volume'):
+            bad = copy.deepcopy(evidence)
+            claims = bad['coldRestore']['claims']
+            claims[cold_restore.RESTORED][key] = claims[cold_restore.SOURCE][key]
+            with self.assertRaises(ValueError): qualify.validate_report(bad, sha)
         for field, value in [('case', 'other'), ('availableBytes', 7 << 30),
                              ('producerReserveBytes', 0), ('availableBytes', True),
                              ('requiredHeadroomBytes', 0), ('usedBytes', 40 << 30)]:

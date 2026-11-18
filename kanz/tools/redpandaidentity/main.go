@@ -103,6 +103,10 @@ func fetch(ctx context.Context, c *kafka.Client, topic string) ([]string, error)
 		if len(values) >= 8 {
 			return nil, errors.New("unexpected record count")
 		}
+		key, err := kafka.ReadAll(record.Key)
+		if err != nil || string(key) != topic || record.Offset != int64(len(values)) {
+			return nil, errors.New("unexpected fixture key or partition offset")
+		}
 		value, err := kafka.ReadAll(record.Value)
 		if err != nil {
 			return nil, err
@@ -112,6 +116,9 @@ func fetch(ctx context.Context, c *kafka.Client, topic string) ([]string, error)
 			return nil, errors.New("fixture frame mismatch")
 		}
 		values = append(values, string(payload))
+	}
+	if r.HighWatermark != int64(len(values)) {
+		return nil, errors.New("fixture records do not cover the acknowledged range")
 	}
 	return values, nil
 }
@@ -474,6 +481,24 @@ func run() error {
 		}
 		if err := consumeCheckpoint(ctx, transport.TLS, mode); err != nil {
 			return err
+		}
+	case "restored-offset":
+		if sa != "proof-a" {
+			return errors.New("consumer identity required")
+		}
+		offsets, err := c.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
+			GroupID: checkpointGroup, Topics: map[string][]int{"proof-a": {0}},
+		})
+		if err != nil {
+			return err
+		}
+		if offsets == nil || offsets.Error != nil || len(offsets.Topics) != 1 {
+			return errors.New("restored group position unavailable")
+		}
+		partitions := offsets.Topics["proof-a"]
+		if len(partitions) != 1 || partitions[0].Error != nil || partitions[0].Partition != 0 ||
+			partitions[0].CommittedOffset != 2 {
+			return errors.New("restored group does not retain both committed frames")
 		}
 	case "verify":
 		stage = "exact-records"

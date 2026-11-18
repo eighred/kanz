@@ -36,7 +36,7 @@ from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.explain.explainer import PermutationExplainer
 from kanz_inference.models.linear import LinearModel, ModelSpec
-from kanz_inference.registry.registry import Registry
+from kanz_inference.registry.registry import Registry, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,9 @@ def build_registry(specs: Iterable[ModelSpec], *, clock=None) -> Registry:
     registry = Registry(clock=clock)
     for spec in specs:
         record = spec.validation()
-        if record is not None:
-            registry.record_validation(record)
+        if record is None:
+            raise ValidationError(f"{spec.model_id}: missing validation interval on startup model card")
+        registry.record_validation(record)
         # No record, a failed one, or an expired one ⇒ this raises. That is the
         # gate, and it is the whole point of it.
         registry.register(spec.metadata(), LinearModel(spec), primary=True)
@@ -120,7 +121,7 @@ def _spec_from(card: dict) -> ModelSpec:
         bias=float(card.get("bias", 0.0)),
         validated_at=when("validated_at"),
         expires_at=when("expires_at"),
-        validation_passed=bool(card.get("validation_passed", True)),
+        validation_passed=card.get("validation_passed") is True,
         artifact_uri=card.get("artifact_uri", ""),
         report_uri=card.get("report_uri", ""),
         scale=float(card.get("scale", 1.0)),

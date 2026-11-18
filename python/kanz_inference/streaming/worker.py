@@ -71,25 +71,28 @@ class PredictionPublisher(Protocol):
 
 @dataclass
 class LastKnownCache:
-    """In-memory cache of the most recent NORMAL prediction per
-    subject. Read by the degraded-fallback path when ``Model.predict``
+    """In-memory cache of the last NORMAL prediction for each tenant,
+    feature set and subject. Read by the degraded-fallback path when ``Model.predict``
     raises — implements PRED-02 §2.1's "cache fallback" behaviour.
 
-    No TTL (cached PredictionEnvelope carries its own ``as_of``,
-    consumers can branch on staleness). Eviction is overwrite-on-
-    next-store. Single asyncio event loop ⇒ no lock needed; dict
-    read/write is GIL-atomic. Mirrors the RISK-11 ``Cache`` shape.
+    Out-of-order delivery cannot replace a newer observation. The worker
+    checks its time against the requesting feature vector before reuse.
     """
 
-    _entries: dict[str, PredictionEnvelope] = field(default_factory=dict)
+    _entries: dict[tuple[str, str, str], PredictionEnvelope] = field(default_factory=dict)
 
-    def store(self, subject_id: str, prediction: PredictionEnvelope) -> None:
-        if not subject_id:
+    def store(
+        self, tenant_id: str, feature_set_ref: str, subject_id: str, prediction: PredictionEnvelope
+    ) -> None:
+        if not tenant_id or not feature_set_ref or not subject_id or not prediction.HasField("as_of"):
             return
-        self._entries[subject_id] = prediction
+        key = (tenant_id, feature_set_ref, subject_id)
+        previous = self._entries.get(key)
+        if previous is None or previous.as_of.ToNanoseconds() <= prediction.as_of.ToNanoseconds():
+            self._entries[key] = prediction
 
-    def lookup(self, subject_id: str) -> Optional[PredictionEnvelope]:
-        return self._entries.get(subject_id)
+    def lookup(self, tenant_id: str, feature_set_ref: str, subject_id: str) -> Optional[PredictionEnvelope]:
+        return self._entries.get((tenant_id, feature_set_ref, subject_id))
 
 
 # Degraded-reason identifiers from schemas/README.md
@@ -172,7 +175,7 @@ class StreamingWorker:
         # prediction would let it serve later requests as if it were
         # fresh — exactly the trust-laundering PRED-02 §1 forbids.
         if prediction.mode == PredictionMode.PREDICTION_MODE_NORMAL:
-            self._cache.store(fv.subject_id, prediction)
+            self._cache.store(env.tenant_id, fv.feature_set_ref, fv.subject_id, prediction)
 
         try:
             await self._publisher.publish_prediction(env, prediction)
@@ -197,8 +200,12 @@ class StreamingWorker:
         re-emit cached value with DEGRADED mode + ``inference_unavailable``
         reason; cache miss ⇒ zero-valued degraded with ``no_cached_prediction``.
         """
-        cached = self._cache.lookup(fv.subject_id)
-        if cached is not None:
+        cached = self._cache.lookup(env.tenant_id, fv.feature_set_ref, fv.subject_id)
+        if (
+            cached is not None
+            and fv.HasField("as_of")
+            and cached.as_of.ToNanoseconds() <= fv.as_of.ToNanoseconds()
+        ):
             return PredictionEnvelope(
                 subject_id=fv.subject_id,
                 model=cached.model,

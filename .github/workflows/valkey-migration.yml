@@ -3,11 +3,15 @@ on:
   pull_request:
     paths:
       - 'tools/valkey_migration/**'
+      - 'kanz/test/backing/valkey.sh'
+      - 'kanz/test/backing/up.sh'
       - '.github/workflows/valkey-migration.yml'
   push:
     branches: [main]
     paths:
       - 'tools/valkey_migration/**'
+      - 'kanz/test/backing/valkey.sh'
+      - 'kanz/test/backing/up.sh'
       - '.github/workflows/valkey-migration.yml'
   workflow_dispatch:
 permissions:
@@ -24,6 +28,21 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -B -m unittest discover -s tools/valkey_migration -p 'test_*.py'
+      - name: Qualify the local backing endpoint on a non-default port
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="kanz-ci-redis-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          exports="$(REDIS_PORT=16379 bash kanz/test/backing/valkey.sh "$name")"
+          id="$(docker inspect -f '{{.Id}}' "$name")"
+          trap 'docker rm -fv "$id" >/dev/null' EXIT
+          eval "$exports"
+          test "$TEST_REDIS_URL" = 'redis://127.0.0.1:16379/0'
+          test "$TEST_VALKEY_VERSION" = '9.1.3'
+          image="$(docker inspect -f '{{.Image}}' "$id")"
+          cli=(docker run --rm --network host "$image" valkey-cli --raw -u "$TEST_REDIS_URL")
+          test "$("${cli[@]}" PING)" = PONG
+          "${cli[@]}" INFO server | tr -d '\r' | grep -Fx "valkey_version:$TEST_VALKEY_VERSION"
       - name: Preserve replay claims through Valkey migration and Redis rollback
         run: python3 -B tools/valkey_migration/proof.py
       - name: Preserve sanitized migration evidence

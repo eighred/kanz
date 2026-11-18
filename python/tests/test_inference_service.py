@@ -15,6 +15,7 @@ when it has nothing to serve.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,8 +24,8 @@ from inference.v1.feature_vector_pb2 import FeatureValue, FeatureVector
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.models.linear import LinearModel, ModelSpec
-from kanz_inference.registry.registry import Registry, ValidationRecord
-from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, require_primary
+from kanz_inference.registry.registry import Registry, ValidationError
+from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, load_specs, require_primary
 
 FEATURE_SET = "portfolio-risk:1"
 
@@ -93,6 +94,41 @@ async def test_the_model_declares_what_it_could_not_see():
 # --- The registry gate is real ----------------------------------------
 
 
+@pytest.mark.parametrize("feature", [
+    FeatureValue(), FeatureValue(ordinal=0), FeatureValue(categorical="0"),
+    FeatureValue(vector={"values": [0]}), FeatureValue(scalar=float("nan")),
+    FeatureValue(scalar=float("inf")), FeatureValue(scalar=1e308),
+])
+async def test_served_linear_score_requires_finite_scalar_data_and_result(feature):
+    router = RegistryRouter(build_registry([_spec(weights={"x": 2.0})]), explain=True)
+    fv = _fv(x=0)
+    fv.values["x"].CopyFrom(feature)
+    prediction = await router.predict(fv)
+    assert prediction.mode == PredictionMode.PREDICTION_MODE_DEGRADED
+    assert prediction.degraded_reason
+    assert prediction.value == 0 and prediction.confidence == 0
+    assert not prediction.explanation
+
+
+async def test_scalar_zero_is_valid_and_uncalibrated_saturated_score_is_degraded():
+    known = LinearModel(_spec(weights={"x": 1.0}, bias=2.0))
+    prediction = await known.predict(_fv(x=0.0))
+    assert prediction.mode == PredictionMode.PREDICTION_MODE_NORMAL
+    assert prediction.value == 2.0
+    uncalibrated = LinearModel(_spec(weights={"x": 1.0}, confidence_threshold=1.0))
+    assert (await uncalibrated.predict(_fv(x=100.0))).mode == PredictionMode.PREDICTION_MODE_DEGRADED
+
+
+@pytest.mark.parametrize("parameter", [
+    {"weights": {"x": float("inf")}}, {"bias": float("nan")},
+    {"scale": -1.0}, {"scale": float("inf")}, {"confidence_threshold": float("nan")},
+    {"confidence_threshold": -0.1}, {"confidence_threshold": 1.1},
+])
+def test_startup_refuses_unusable_linear_parameters(parameter):
+    with pytest.raises(ValueError, match="linear model"):
+        build_registry([_spec(**parameter)])
+
+
 async def test_an_UNVALIDATED_model_cannot_serve():
     """MLOPS-01a / SR 11-7: no model serves production without recorded,
     current validation. The registry already enforces this; nothing had ever
@@ -120,7 +156,34 @@ async def test_a_validated_model_serves():
     assert entry[0].model_id == "portfolio-risk@1.0.0"
 
 
+@pytest.mark.parametrize("verdict", [{}, {"validation_passed": False}, {"validation_passed": "false"},
+                                      {"validation_passed": 1}, {"validation_passed": None},
+                                      {"validation_passed": True}])
+def test_startup_requires_explicit_passing_verdict(tmp_path, verdict):
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    card = {
+        "model_id": "fixture@1", "feature_set_ref": FEATURE_SET, "weights": {"x": 1},
+        "confidence_threshold": 0.6, "validated_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": "2026-01-03T00:00:00+00:00", **verdict,
+    }
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(card), encoding="utf-8")
+    specs = load_specs(path)
+    if verdict.get("validation_passed") is True:
+        require_primary(build_registry(specs, clock=lambda: now))
+    else:
+        with pytest.raises(ValidationError):
+            build_registry(specs, clock=lambda: now)
+
+
 # --- The service refuses to serve nothing ------------------------------
+
+
+def test_later_startup_card_cannot_inherit_an_earlier_cards_validation():
+    first = _spec()
+    replacement = _spec(weights={"different": 1.0}, validated_at=None)
+    with pytest.raises(ValidationError, match="missing validation interval"):
+        build_registry([first, replacement])
 
 
 async def test_the_service_REFUSES_TO_START_with_no_primary_model():

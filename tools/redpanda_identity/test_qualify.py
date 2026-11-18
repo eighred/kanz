@@ -42,11 +42,29 @@ def boundary(docs, probe, workflow):
 
 class QualificationTests(unittest.TestCase):
     def setUp(self):
-        self.docs=qualify.broker_objects()
+        self.docs=qualify.broker_objects(cold_recovery=True)
         self.probe=(qualify.ROOT/'kanz/tools/redpandaidentity/main.go').read_text()
         self.workflow=(qualify.ROOT/'.github/workflows/redpanda-identity-proof.yml').read_text()
 
     def test_boundary(self): boundary(self.docs,self.probe,self.workflow)
+
+    def test_cold_recovery_mount_belongs_to_single_broker(self):
+        for docs, cold in ((self.docs, True), (qualify.broker_objects(), False)):
+            with self.subTest(cold_recovery=cold):
+                pod = next(d for d in docs if d['kind'] == 'Deployment')['spec']['template']['spec']
+                volume = next(v for v in pod['volumes'] if v['name'] == 'data')
+                config = next(d for d in docs if d['metadata']['name'] == 'redpanda-config')
+                directory = yaml.safe_load(config['data']['redpanda.yaml'])['redpanda']['data_directory']
+                claims = [d['metadata']['name'] for d in docs if d['kind'] == 'PersistentVolumeClaim']
+                self.assertEqual('data-init' in [c['name'] for c in pod['initContainers']], cold)
+                if cold:
+                    self.assertEqual(claims, [qualify.cold_restore.SOURCE])
+                    self.assertEqual(volume, {'name': 'data', 'persistentVolumeClaim': {'claimName': claims[0]}})
+                    self.assertEqual(directory, '/var/lib/redpanda/data/state')
+                else:
+                    self.assertEqual(claims, [])
+                    self.assertEqual(volume, {'name': 'data', 'emptyDir': {'sizeLimit': '2Gi'}})
+                    self.assertEqual(directory, '/var/lib/redpanda/data')
 
     def test_config_mutations(self):
         for field,value in [('kafka_enable_authorization',False),('superusers',['proof-bootstrap','proof-a']),('kafka_mtls_principal_mapping_rules',['DEFAULT'])]:
@@ -126,13 +144,16 @@ class QualificationTests(unittest.TestCase):
                 self.assertIsNone(re.fullmatch(pattern, bad))
 
     def test_records_are_verified_on_both_sides_of_one_broker_restart(self):
-        self.assertEqual(qualify.CASES[-6:], (
+        self.assertEqual(qualify.CASES[4:], (
             ('verify', 'proof-bootstrap', 'verify'),
             ('reprovision', 'proof-bootstrap', 'reprovision'),
             ('verify-reprovision', 'proof-bootstrap', 'verify'),
             ('checkpoint', 'proof-a', 'checkpoint'),
             ('verify-after-restart', 'proof-bootstrap', 'verify'),
-            ('resume', 'proof-a', 'resume')))
+            ('resume', 'proof-a', 'resume'),
+            ('verify-after-restore', 'proof-bootstrap', 'verify'),
+            ('restored-offset', 'proof-a', 'restored-offset'),
+            ('restored-denial', 'proof-ungranted', 'ungranted')))
         uid = '00000000-0000-0000-0000-000000000001'
         old, new = ('containerd://' + v * 64 for v in ('a', 'b'))
         meta = {'uid': uid, 'name': 'redpanda-aaa-bbb'}

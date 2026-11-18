@@ -44,7 +44,14 @@ client. This covers retained fixture records across a broker process restart.
 A separate proof-a Job reads the first keyed frame and synchronously commits its
 group offset before the restart. After the restart another Job opens the same
 group and checks the second frame, key, partition and offset before committing.
-Restore into new storage remains open.
+After that commit, the fixture scales the broker to zero and waits for the
+original pod to disappear. An offline Job mounts its data claim read-only and
+archives the broker state onto a separate PVC. Another Job restores the archive
+onto a fresh claim. Neither Job mounts SPIRE credentials. The verifier checks
+the archive digest, distinct volume and pod identities, then requires the new
+broker to serve both original sequences, the committed group offset of 2 and
+the original denials for an ungranted identity. These checks cover a cold
+same-cluster restore of this single-broker fixture.
 
 `redpanda-identity-proof.yml` runs the mandatory fixture on Linux with no optional
 skip. Local unit checks:

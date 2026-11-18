@@ -10,6 +10,9 @@ import tempfile
 import uuid
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from redpanda_identity import cold_restore
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'feed_identity'))
 import proof as shared
 
@@ -23,7 +26,9 @@ CASES = (('bootstrap','proof-bootstrap','bootstrap'), ('client-a','proof-a','pub
          ('client-b','proof-b','publish'), ('ungranted','proof-ungranted','ungranted'),
          ('verify','proof-bootstrap','verify'), ('reprovision','proof-bootstrap','reprovision'),
          ('verify-reprovision','proof-bootstrap','verify'), ('checkpoint','proof-a','checkpoint'),
-         ('verify-after-restart','proof-bootstrap','verify'), ('resume','proof-a','resume'))
+         ('verify-after-restart','proof-bootstrap','verify'), ('resume','proof-a','resume'),
+         ('verify-after-restore','proof-bootstrap','verify'), ('restored-offset','proof-a','restored-offset'),
+         ('restored-denial','proof-ungranted','ungranted'))
 
 
 # Export only these fixed strings. Build output itself can contain repository
@@ -220,7 +225,7 @@ def spire_objects():
     return docs
 
 
-def broker_objects():
+def broker_objects(*, cold_recovery=False):
     metadata = lambda name: {'name':name,'namespace':'kanz-messaging'}
     config = {'redpanda':{
       'data_directory':'/var/lib/redpanda/data','node_id':0,'seed_servers':[],
@@ -242,6 +247,17 @@ def broker_objects():
       'securityContext':{'allowPrivilegeEscalation':False,'readOnlyRootFilesystem':True,'capabilities':{'drop':['ALL']}},
       'volumeMounts':[{'name':'helper','mountPath':'/etc/helper','readOnly':True},{'name':'certs','mountPath':'/certs'}, {'name':'spiffe','mountPath':'/run/spiffe','readOnly':True}]}
     init = dict(helper, name='svid-init', args=helper['args']+['-daemon-mode=false'])
+    docs = shared.manifests('kanz/infra/nats/namespace.yaml')
+    init_containers = [init]
+    data_volume = {'name': 'data', 'emptyDir': {'sizeLimit': '2Gi'}}
+    if cold_recovery:
+        config['redpanda']['data_directory'] += '/state'
+        docs.append(cold_restore.claim(cold_restore.SOURCE))
+        data_volume = {'name': 'data', 'persistentVolumeClaim': {'claimName': cold_restore.SOURCE}}
+        init_containers.insert(0, {'name': 'data-init', 'image': shared.PINS['busybox:1.36'],
+                                   'command': ['mkdir', '-p', '/data/state'],
+                                   'securityContext': helper['securityContext'], 'resources': helper['resources'],
+                                   'volumeMounts': [{'name': 'data', 'mountPath': '/data'}]})
     broker = {'name':'redpanda','image':REDPANDA,'command':['/opt/redpanda/bin/redpanda'],
       'args':['--redpanda-cfg','/etc/redpanda/redpanda.yaml','--smp','1','--memory','768M','--reserve-memory','0M','--overprovisioned'],
       'resources':{'requests':{'cpu':'500m','memory':'1Gi'},'limits':{'cpu':'2','memory':'1536Mi'}},
@@ -249,7 +265,7 @@ def broker_objects():
       'volumeMounts':[{'name':'config','mountPath':'/etc/redpanda','readOnly':True},{'name':'data','mountPath':'/var/lib/redpanda/data'},
                       {'name':'certs','mountPath':'/certs','readOnly':True},{'name':'tmp','mountPath':'/tmp'}],
       'readinessProbe':{'tcpSocket':{'port':9094},'initialDelaySeconds':3,'periodSeconds':2}}
-    docs = shared.manifests('kanz/infra/nats/namespace.yaml') + [
+    docs += [
       {'apiVersion':'v1','kind':'ServiceAccount','metadata':metadata('redpanda')},
       {'apiVersion':'v1','kind':'ConfigMap','metadata':metadata('redpanda-config'),
        'data':{'redpanda.yaml':yaml.safe_dump(config),'.bootstrap.yaml':yaml.safe_dump(bootstrap)}},
@@ -260,9 +276,9 @@ def broker_objects():
        'spec':{'replicas':1,'selector':{'matchLabels':{'app':'redpanda'}},'template':{'metadata':{'labels':{'app':'redpanda'}},
          'spec':{'serviceAccountName':'redpanda','automountServiceAccountToken':False,
            'securityContext':{'runAsNonRoot':True,'runAsUser':101,'runAsGroup':101,'fsGroup':101,'seccompProfile':{'type':'RuntimeDefault'}},
-           'initContainers':[init],'containers':[broker,helper],
+           'initContainers':init_containers,'containers':[broker,helper],
            'volumes':[{'name':'config','configMap':{'name':'redpanda-config'}},{'name':'helper','configMap':{'name':'redpanda-helper'}},
-                      {'name':'certs','emptyDir':{'medium':'Memory'}},{'name':'data','emptyDir':{'sizeLimit':'2Gi'}},{'name':'tmp','emptyDir':{}},
+                      {'name':'certs','emptyDir':{'medium':'Memory'}},data_volume,{'name':'tmp','emptyDir':{}},
                       {'name':'spiffe','csi':{'driver':'csi.spiffe.io','readOnly':True}}]}}}}]
     shared.pin_images(docs)
     return docs
@@ -295,8 +311,8 @@ def validate_observation(result, sa, mode, sha):
 
 
 def broker_restart_evidence(before, after):
-    # A replacement pod would have a new emptyDir. Require the same pod and the
-    # exact previous container as Kubernetes' clean termination observation.
+    # Require the same pod and the exact previous container as Kubernetes'
+    # clean termination observation. Cold recovery uses a separate pod and PVC.
     keys = {'podUID', 'containerID', 'restartCount'}
     if (not isinstance(before, dict) or set(before) != keys
             or not isinstance(after, dict) or set(after) != keys | {'previousContainerID', 'previousExitCode'}
@@ -360,6 +376,9 @@ def validate_report(evidence, sha):
     if not isinstance(restart, dict) or set(restart) != {'before', 'after'}:
         raise ValueError('missing broker restart evidence')
     broker_restart_evidence(restart['before'], restart['after'])
+    cold_restore.evidence(evidence.get('coldRestore'))
+    if evidence['coldRestore']['sourcePod'] != restart['after']['podUID']:
+        raise ValueError('backup source differs from the checkpointed broker')
     observations = evidence.get('observations')
     storage = evidence.get('storageObservations')
     if not isinstance(observations, list) or len(observations) != len(CASES) or not isinstance(storage, list) or len(storage) != len(CASES):
@@ -412,7 +431,7 @@ def main():
             registration[0]['spec']['ttl']='60s'
             apply(registration)
             evidence['stage']='install Redpanda'
-            apply(broker_objects())
+            apply(broker_objects(cold_recovery=True))
             apply(policies())
             k('-n','kanz-messaging','rollout','status','deployment/redpanda','--timeout=240s')
             for sa in SAS: apply([{'apiVersion':'v1','kind':'ServiceAccount','metadata':{'name':sa,'namespace':'kanz-services'}}])
@@ -420,6 +439,9 @@ def main():
                 if case == 'verify-after-restart':
                     evidence['stage'] = 'restart disposable broker'
                     evidence['brokerRestart'] = restart_broker(k)
+                if case == 'verify-after-restore':
+                    evidence['stage'] = 'restore offline backup into new storage'
+                    evidence['coldRestore'] = cold_restore.recover(k, shared.PINS['busybox:1.36'])
                 evidence['stage']='storage preflight '+case
                 storage = preflight_storage(k, evidence, case)
                 evidence['storageObservations'].append(dict(storage, case=case))

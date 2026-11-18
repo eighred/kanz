@@ -19,23 +19,14 @@ import { formatMoney, isNegative } from '../api/decimal'
 // value. A valuation that is quietly wrong is worse than one that fails to
 // render, which is why an unrenderable figure shows as "—" and never as 0.
 //
-// THE QUALITY FLAGS ARE NOT DECORATION. CURRENCY_EXCLUDED means positions were
-// OMITTED from these totals, so the real exposure is LARGER than what is shown.
-// The proto says a gate that must not under-report has to refuse to act on such
-// a response. A screen cannot refuse on the reader's behalf, so it says plainly
-// that the totals are incomplete rather than printing them as totals.
+// Excluding a signed position can move net exposure in either direction.
 
 const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 
 const { data, error, loading } = usePortfolioRead(id, risk.exposure)
 
-const flags = computed(() =>
-  (data.value?.quality_flags ?? []).filter((f) => f !== 'QUALITY_FLAG_UNSPECIFIED'),
-)
-
-/** underReporting is true when any flag changes what the totals MEAN. */
-const underReporting = computed(() => flags.value.some(changesMeaning))
+const flags = computed(() => data.value?.quality_flags ?? [])
 
 /** byDimension groups the flat exposure list into one table per axis. */
 const byDimension = computed(() => {
@@ -76,21 +67,10 @@ function money(m: Parameters<typeof formatMoney>[0]): string {
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
 
   <template v-else>
-    <!-- A MEANING-CHANGING FLAG GETS THE ERROR TREATMENT, not a hint. It does
-         not mean the data is old; it means the figures below were computed over
-         part of the book and do not stand on their own. Driven by the shared
-         list in api/risk.ts rather than a comparison written here, because a
-         hardcoded one silently renders the NEXT such flag as a low-severity
-         hint (#527). -->
     <p v-for="f in flags" :key="f"
        :class="changesMeaning(f) ? 'error' : 'hint'"
        :role="changesMeaning(f) ? 'alert' : undefined">
       {{ describeFlag(f) }}
-    </p>
-
-    <p v-if="underReporting" class="muted">
-      The figures below are shown because hiding them would be worse — but they are a floor, not a
-      total.
     </p>
 
     <section v-for="[dimension, rows] in byDimension" :key="dimension">

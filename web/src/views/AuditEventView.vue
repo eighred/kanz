@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { audit, describeAudit, type AuditLineage, type AuditRecord } from '../api/audit'
 
@@ -11,14 +11,32 @@ const error = ref('')
 const lineageError = ref('')
 const loading = ref(true)
 
-onMounted(async () => {
+watch(id, async (eventID, _, onCleanup) => {
+  let current = true
+  onCleanup(() => { current = false })
+  record.value = null
+  lineage.value = null
+  error.value = ''
+  lineageError.value = ''
+  loading.value = true
   try {
-    record.value = await audit.event(id.value)
-    try { lineage.value = await audit.lineage(id.value) }
-    catch (e) { lineageError.value = describeAudit(e) }
-  } catch (e) { error.value = describeAudit(e) }
-  finally { loading.value = false }
-})
+    const event = await audit.event(eventID)
+    if (!current) return
+    record.value = event
+    loading.value = false
+    try {
+      const ancestry = await audit.lineage(eventID)
+      if (current) lineage.value = ancestry
+    } catch (e) {
+      if (current) lineageError.value = describeAudit(e)
+    }
+  } catch (e) {
+    if (current) {
+      error.value = describeAudit(e)
+      loading.value = false
+    }
+  }
+}, { immediate: true })
 </script>
 
 <template>
@@ -52,7 +70,8 @@ onMounted(async () => {
 
     <h2>Direct causal ancestry</h2>
     <p v-if="lineageError" class="error" role="alert">{{ lineageError }}</p>
-    <ol v-else-if="lineage" class="lineage-list">
+    <p v-else-if="!lineage" role="status">Loading ancestry…</p>
+    <ol v-else class="lineage-list">
       <li v-for="item in lineage.ancestry" :key="item.event_id" :aria-current="item.event_id === id ? 'true' : undefined">
         <RouterLink :to="{ name: 'audit-event', params: { id: item.event_id } }"><code>{{ item.event_id }}</code></RouterLink>
         <span>{{ item.event_type }} · {{ item.occurred_at }}</span>

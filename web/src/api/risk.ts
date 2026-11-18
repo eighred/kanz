@@ -1,4 +1,5 @@
 import { api, ApiError } from './client'
+import { checkWireDecimal, checkWireMoney } from './financial-wire'
 import type { Decimal, Money } from './decimal'
 
 // The risk read surface, as the browser sees it (#399).
@@ -65,21 +66,9 @@ export type QualityFlag =
   | 'QUALITY_FLAG_CURRENCY_EXCLUDED'
   | 'QUALITY_FLAG_INPUTS_UNRESOLVED'
 
-/**
- * MEANING_CHANGING are the flags that change what the numbers ARE, as opposed
- * to how fresh they are. They get the error treatment; DEGRADED and STALE get a
- * hint. Listed once, because the alternative is every screen re-deciding — and
- * the failure mode of that is a new flag rendering as a low-severity hint
- * simply because nobody updated a comparison in a template.
- */
-export const MEANING_CHANGING: readonly QualityFlag[] = [
-  'QUALITY_FLAG_CURRENCY_EXCLUDED',
-  'QUALITY_FLAG_INPUTS_UNRESOLVED',
-]
-
-/** changesMeaning reports whether a flag makes the number beside it unusable. */
+/** Only known freshness flags can be presented as ordinary age warnings. */
 export function changesMeaning(f: QualityFlag): boolean {
-  return MEANING_CHANGING.includes(f)
+  return f !== 'QUALITY_FLAG_STALE' && f !== 'QUALITY_FLAG_DEGRADED'
 }
 
 export interface ExposureResponse {
@@ -93,7 +82,7 @@ export interface ExposureResponse {
 export function describeFlag(f: QualityFlag): string {
   switch (f) {
     case 'QUALITY_FLAG_CURRENCY_EXCLUDED':
-      return 'Positions in a currency the engine could not convert are MISSING from these totals. The real exposure is larger than what is shown — do not read these as a complete book.'
+      return 'Positions in a currency the engine could not convert are missing from these figures. Omitted positions may increase or decrease net exposure.'
     case 'QUALITY_FLAG_INPUTS_UNRESOLVED':
       return 'Data the engine needed was not there, so at least one figure was computed over part of the book — possibly over none of it. A zero here does not mean zero risk. Do not act on these numbers.'
     case 'QUALITY_FLAG_DEGRADED':
@@ -101,7 +90,7 @@ export function describeFlag(f: QualityFlag): string {
     case 'QUALITY_FLAG_STALE':
       return 'This data is older than the request asked for, though the engine itself is healthy.'
     default:
-      return f
+      return `The engine returned an unrecognized quality flag (${f}). The reliability of these figures is unknown.`
   }
 }
 
@@ -162,14 +151,28 @@ export const risk = {
    * a 404 here can also mean "this deployment serves no order history" — which
    * is not "this portfolio has never traded". describeOrders separates them.
    */
-  orders: (id: string, limit?: number) =>
-    api.get<OrdersResponse>(
+  async orders(id: string, limit?: number) {
+    const response = await api.get<OrdersResponse>(
       `/api/v1/portfolios/${encodeURIComponent(id)}/orders` + (limit ? `?limit=${limit}` : ''),
-    ),
+    )
+    for (const order of response.orders ?? []) {
+      checkWireDecimal(order.quantity)
+      checkWireDecimal(order.filled_quantity)
+      checkWireMoney(order.limit_price)
+      checkWireMoney(order.average_fill_price)
+    }
+    return response
+  },
 
   /** exposure reads one portfolio's decomposition. */
-  exposure: (id: string) =>
-    api.get<ExposureResponse>(`/api/v1/portfolios/${encodeURIComponent(id)}/exposure`),
+  async exposure(id: string) {
+    const response = await api.get<ExposureResponse>(`/api/v1/portfolios/${encodeURIComponent(id)}/exposure`)
+    for (const row of response.set?.exposures ?? []) {
+      checkWireMoney(row.gross)
+      checkWireMoney(row.net)
+    }
+    return response
+  },
 }
 
 /**

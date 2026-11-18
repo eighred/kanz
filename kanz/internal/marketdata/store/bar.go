@@ -224,6 +224,14 @@ type BarQuery struct {
 	AsOf time.Time
 }
 
+// ErrBarRevisionConflict identifies different observations claiming one immutable bar revision.
+var ErrBarRevisionConflict = errors.New("store: conflicting OHLCV bar revision")
+
+func (b Bar) revisionConflict() error {
+	return fmt.Errorf("%w: %s at %s, %s bucket %s, known %s", ErrBarRevisionConflict,
+		b.InstrumentID, b.Venue, b.Resolution, b.BucketStart.UTC(), b.KnowledgeTime.UTC())
+}
+
 // BarStore is the durable OHLCV series.
 //
 // SEPARATE FROM Store, deliberately. The scalar series answers "what was the
@@ -235,7 +243,7 @@ type BarStore interface {
 	// PutBars stores bars idempotently: re-putting an identical
 	// (instrument, venue, resolution, bucket_start, knowledge_time) tuple is a
 	// no-op. A restatement is a new knowledge_time, never a mutation. An invalid
-	// bar fails the whole batch.
+	// bar or conflicting revision fails the whole batch.
 	PutBars(ctx context.Context, bars []Bar) error
 
 	// Bars returns the point-in-time-correct series, ordered by BucketStart

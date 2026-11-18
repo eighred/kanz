@@ -144,11 +144,20 @@ func distinctLabels(instruments []string, chars map[string]Characteristics, pick
 	return out
 }
 
+// regressionFit retains the aligned series needed to estimate joint covariance
+// with the residual PCs. The series are transient and never enter the model snapshot.
+type regressionFit struct {
+	factorReturns [][]float64
+	factorCov     [][]float64
+	specific      []float64
+	residuals     [][]float64
+}
+
 // crossSectionalFit refuses unidentified designs before ridge regularization.
 // QR of [B; sqrt(ridge) I] avoids squaring the design condition number.
-func crossSectionalFit(b [][]float64, values [][]float64, ridge float64) ([][]float64, []float64, [][]float64, error) {
-	fail := func() ([][]float64, []float64, [][]float64, error) {
-		return nil, nil, nil, fmt.Errorf("factormodel: invalid or unidentified cross-sectional fit")
+func crossSectionalFit(b [][]float64, values [][]float64, ridge float64) (*regressionFit, error) {
+	fail := func() (*regressionFit, error) {
+		return nil, fmt.Errorf("factormodel: invalid or unidentified cross-sectional fit")
 	}
 	n := len(b)
 	if n < 2 || len(b[0]) == 0 || len(values) != n || len(values[0]) < 2 || !finiteDescriptor(ridge) || ridge < 0 {
@@ -236,13 +245,13 @@ func crossSectionalFit(b [][]float64, values [][]float64, ridge float64) ([][]fl
 			return fail()
 		}
 	}
-	return cov, specific, residuals, nil
+	return &regressionFit{factorReturns: series, factorCov: cov, specific: specific, residuals: residuals}, nil
 }
 
 // fitFundamental builds the fundamental model over the universe, returning the
 // model plus the residual return series (N×L, instrument-row order) the blend
 // model runs PCA on. instruments is sorted for a deterministic universe order.
-func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf time.Time, chars CharacteristicProvider, rp ReturnsProvider) (*Model, [][]float64, error) {
+func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf time.Time, chars CharacteristicProvider, rp ReturnsProvider) (*Model, *regressionFit, error) {
 	if asOf.IsZero() || !finiteDescriptor(cfg.Ridge) || cfg.Ridge < 0 {
 		return nil, nil, fmt.Errorf("factormodel: invalid horizon or ridge")
 	}
@@ -323,16 +332,16 @@ func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf 
 	if err != nil {
 		return nil, nil, err
 	}
-	factorCov, specificSlice, residuals, err := crossSectionalFit(loadings, panel.Values, cfg.ridge())
+	fit, err := crossSectionalFit(loadings, panel.Values, cfg.ridge())
 	if err != nil {
 		return nil, nil, err
 	}
 
 	specific := make(map[string]float64, len(universe))
 	for i, id := range universe {
-		specific[id] = specificSlice[i]
+		specific[id] = fit.specific[i]
 	}
-	m := newModel(factors, universe, loadings, factorCov, specific)
+	m := newModel(factors, universe, loadings, fit.factorCov, specific)
 	m.InputProvenance = panel.Params()
 	descriptor, err := json.Marshal(struct {
 		Policy   string
@@ -354,5 +363,5 @@ func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf 
 	}
 	combined := sha256.Sum256([]byte(panel.Digest + ":" + hex.EncodeToString(digest[:])))
 	m.InputProvenance["input_digest"] = hex.EncodeToString(combined[:])
-	return m, residuals, nil
+	return m, fit, nil
 }

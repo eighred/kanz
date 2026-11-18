@@ -72,6 +72,7 @@ def _make_envelope(event_id: str = "evt-1") -> Envelope:
     env = Envelope()
     env.event_id = event_id
     env.correlation_id = event_id
+    env.tenant_id = "test-tenant"
     return env
 
 
@@ -133,7 +134,7 @@ async def test_handle_caches_only_normal_predictions():
         subscriber=FakeSubscriber(), model=model, publisher=pub, cache=cache
     )
     await worker.handle(_make_envelope(), _make_feature_vector().SerializeToString())
-    assert cache.lookup("AAPL") is not None
+    assert cache.lookup("test-tenant", "equity-momentum:7", "AAPL") is not None
 
 
 async def test_handle_does_not_cache_degraded_predictions():
@@ -149,14 +150,14 @@ async def test_handle_does_not_cache_degraded_predictions():
         subscriber=FakeSubscriber(), model=model, publisher=pub, cache=cache
     )
     await worker.handle(_make_envelope(), _make_feature_vector().SerializeToString())
-    assert cache.lookup("AAPL") is None
+    assert cache.lookup("test-tenant", "equity-momentum:7", "AAPL") is None
 
 
 async def test_handle_model_exception_falls_back_to_cache_hit():
     # PRED-02 §2.1 — model unavailable, cache has prior NORMAL
     # value, return cached + DEGRADED + inference_unavailable.
     cache = LastKnownCache()
-    cache.store("AAPL", _normal_prediction(value=1.23))
+    cache.store("test-tenant", "equity-momentum:7", "AAPL", _normal_prediction(value=1.23))
 
     model = FakeModel(exc=RuntimeError("model server down"))
     pub = FakePublisher()
@@ -218,19 +219,60 @@ async def test_handle_malformed_payload_raises():
 
 def test_last_known_cache_overwrite_replaces_previous():
     c = LastKnownCache()
-    c.store("AAPL", _normal_prediction(value=1.0))
-    c.store("AAPL", _normal_prediction(value=2.0))
-    got = c.lookup("AAPL")
+    c.store("test-tenant", "equity-momentum:7", "AAPL", _normal_prediction(value=1.0))
+    c.store("test-tenant", "equity-momentum:7", "AAPL", _normal_prediction(value=2.0))
+    older = _normal_prediction(value=3.0)
+    older.as_of.seconds -= 1
+    c.store("test-tenant", "equity-momentum:7", "AAPL", older)
+    got = c.lookup("test-tenant", "equity-momentum:7", "AAPL")
     assert got is not None
     assert got.value == pytest.approx(2.0)
 
 
 def test_last_known_cache_miss_returns_none():
     c = LastKnownCache()
-    assert c.lookup("UNKNOWN") is None
+    assert c.lookup("test-tenant", "equity-momentum:7", "UNKNOWN") is None
 
 
 def test_last_known_cache_empty_subject_id_is_noop():
     c = LastKnownCache()
-    c.store("", _normal_prediction())  # must not blow up or write phantom entry
-    assert c.lookup("") is None
+    c.store("test-tenant", "equity-momentum:7", "", _normal_prediction())
+    assert c.lookup("test-tenant", "equity-momentum:7", "") is None
+
+
+async def test_worker_fallback_requires_matching_scope_and_prior_domain_time():
+    model = FakeModel(prediction=_normal_prediction())
+    pub = FakePublisher()
+    worker = StreamingWorker(FakeSubscriber(), model, pub)
+    original = _make_feature_vector()
+    for tenant, feature_set in [("test-tenant", original.feature_set_ref), ("", original.feature_set_ref),
+                                ("test-tenant", "")]:
+        env = _make_envelope()
+        env.tenant_id = tenant
+        fv = _make_feature_vector()
+        fv.feature_set_ref = feature_set
+        await worker.handle(env, fv.SerializeToString())
+    model._exc = RuntimeError("model unavailable")
+    for tenant, feature_set, delta in [
+        ("test-tenant", original.feature_set_ref, -1),
+        ("other-tenant", original.feature_set_ref, 1),
+        ("test-tenant", "other:1", 1),
+        ("", original.feature_set_ref, 1),
+        ("test-tenant", "", 1),
+        ("test-tenant", original.feature_set_ref, 1),
+    ]:
+        env = _make_envelope()
+        env.tenant_id = tenant
+        fv = _make_feature_vector()
+        fv.feature_set_ref = feature_set
+        fv.as_of.seconds += delta
+        await worker.handle(env, fv.SerializeToString())
+        out = pub.published[-1][1]
+        assert out.mode == PredictionMode.PREDICTION_MODE_DEGRADED
+        if tenant == "test-tenant" and feature_set == original.feature_set_ref and delta >= 0:
+            assert out.degraded_reason == REASON_INFERENCE_UNAVAILABLE
+            assert out.as_of == fv.as_of
+            assert out.value == 0.75
+        else:
+            assert out.degraded_reason == REASON_NO_CACHED_PREDICTION
+            assert out.value == out.confidence == 0

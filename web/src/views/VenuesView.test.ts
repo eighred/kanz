@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import VenuesView from './VenuesView.vue'
 import * as api from '../api/control'
-import { ApiError } from '../api/client'
+import { api as http, ApiError } from '../api/client'
 import type { VenueKeyStatus } from '../api/control'
 
 // THE MOST DANGEROUS BODY ON THIS SURFACE, and the gateway says so beside its own
@@ -58,7 +58,7 @@ describe('a key is never rendered back', () => {
 
 describe('replacing live credentials asks for the venue name; setting them does not', () => {
   it('writes a first-time credential without extra friction', async () => {
-    const set = vi.spyOn(api.control, 'setVenueKeys').mockResolvedValue({ exchange_account_id: 'acct-1' })
+    const set = vi.spyOn(api.control, 'setVenueKeys').mockResolvedValue({ exchangeAccountId: 'acct-1' })
     const wrapper = await open([notSet])
 
     await button(wrapper, 'Set keys')!.trigger('click')
@@ -119,8 +119,20 @@ describe('the credential does not outlive the interaction', () => {
     expect((wrapper.find('input[name="api-secret"]').element as HTMLInputElement).value).toBe('')
   })
 
+  it('distinguishes an accepted write without account proof from a failed write', async () => {
+    vi.spyOn(http, 'put').mockResolvedValue({})
+    const wrapper = await open([notSet])
+    await button(wrapper, 'Set keys')!.trigger('click')
+    await wrapper.find('input[name="api-key"]').setValue('k')
+    await wrapper.find('input[name="api-secret"]').setValue('s')
+    await button(wrapper, 'Set credentials')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toContain('no verified exchange account ID')
+    expect(wrapper.find('input[name="api-secret"]').exists()).toBe(false)
+  })
+
   it('clears the fields after a successful write, and never echoes the secret', async () => {
-    vi.spyOn(api.control, 'setVenueKeys').mockResolvedValue({ exchange_account_id: 'acct-9' })
+    vi.spyOn(http, 'put').mockResolvedValue({ exchangeAccountId: 'acct-9' })
     const wrapper = await open([notSet])
 
     await button(wrapper, 'Set keys')!.trigger('click')

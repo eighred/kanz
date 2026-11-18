@@ -556,3 +556,28 @@ func keys(m map[string]terms.Record) []string {
 	}
 	return out
 }
+
+func TestChainRefusesRowsOutsideRequestedPartition(t *testing.T) {
+	valid := okxOption("option", "BTC-USD", "C", "60000", expiry.UnixMilli(), listed.UnixMilli())
+	for name, other := range map[string]string{
+		"wrong instrument type": okxFuture("future", "BTC-USD", expiry.UnixMilli(), listed.UnixMilli()),
+		"wrong underlying":      okxOption("other", "BTC-USDT", "C", "60000", expiry.UnixMilli(), listed.UnixMilli()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(okxCatalogue(valid, other))
+			}))
+			defer srv.Close()
+			m := mapping()
+			m.Underlying["BTC-USDT"] = m.Underlying["BTC-USD"]
+			ref, err := NewOKXReference(srv.URL, m, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ref.Chain(context.Background(), OptionInstruments, "BTC-USD")
+			if err == nil || len(got.Mapped) != 0 {
+				t.Fatalf("partition mismatch returned %d records, err=%v", len(got.Mapped), err)
+			}
+		})
+	}
+}

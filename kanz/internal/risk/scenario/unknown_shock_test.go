@@ -60,3 +60,25 @@ func TestUnknownShockRefusesWholeBatchBeforeValuation(t *testing.T) {
 		}
 	}
 }
+
+func TestInvalidMagnitudeRefusesWholeBatchBeforeValuation(t *testing.T) {
+	for _, size := range []*commonpb.Decimal{nil, {Coefficient: 1, Exponent: 65}} {
+		for _, shock := range []v1.ScenarioShock{
+			v1.PriceShock{InstrumentID: "A", Pct: size},
+			v1.ParallelShift{Pct: size},
+			v1.SectorShock{Taxonomy: "GICS", Code: "10", Pct: size},
+			v1.VolShock{AbsBump: size},
+		} {
+			p := makePortfolio()
+			p.SetPosition(domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime})
+			batch := []v1.ScenarioShock{v1.ParallelShift{Pct: pct(-20, -2)}, shock}
+			for _, reval := range []scenario.Revaluer{nil, forbiddenRevaluer{t}} {
+				got, cov := scenario.EvaluateReval(p, batch, nil, reval)
+				want := v1.InputCoverage{ExcludedCount: 1, Exclusions: []v1.InputExclusion{{Reason: "invalid_shock_magnitude"}}}
+				if got != nil || !reflect.DeepEqual(cov, want) {
+					t.Fatalf("%T size=%v returned measures=%v coverage=%+v", shock, size, got, cov)
+				}
+			}
+		}
+	}
+}

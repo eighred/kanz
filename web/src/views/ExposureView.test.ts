@@ -101,16 +101,23 @@ describe('figures never pass through a JS number', () => {
 })
 
 describe('a flag that changes what the totals mean is not a hint', () => {
-  // The proto: positions in an unconvertible currency are OMITTED, so "a
-  // concentration or exposure limit checked against them can pass when the full
-  // book would breach". The number is smaller than the truth.
+  // A displayed net of +100 and an omitted short of -90 give a full net of +10.
+  // An omitted long of +90 gives +190 instead.
   it('presents CURRENCY_EXCLUDED as missing positions, with alert prominence', async () => {
     const wrapper = await open({ ...base, quality_flags: ['QUALITY_FLAG_CURRENCY_EXCLUDED'] })
 
     const alert = wrapper.find('[role="alert"]')
     expect(alert.exists()).toBe(true)
-    expect(alert.text()).toMatch(/MISSING from these totals/i)
-    expect(alert.text()).toMatch(/larger than what is shown/i)
+    expect(alert.text()).toMatch(/missing from these figures/i)
+    expect(alert.text()).toMatch(/increase or decrease net exposure/i)
+    expect(wrapper.text()).not.toMatch(/a floor|larger than what is shown/i)
+  })
+
+  it('marks an unspecified or newly introduced quality flag as unknown', async () => {
+    const wrapper = await open({ ...base, quality_flags: JSON.parse('["QUALITY_FLAG_UNSPECIFIED","QUALITY_FLAG_NEW"]') })
+    const alerts = wrapper.findAll('[role="alert"]')
+    expect(alerts).toHaveLength(2)
+    for (const alert of alerts) expect(alert.text()).toContain('reliability of these figures is unknown')
   })
 
   // Staleness is a different claim: the numbers are complete but old. Rendering

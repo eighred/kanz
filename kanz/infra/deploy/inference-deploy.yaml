@@ -296,8 +296,8 @@ spec:
         #
         # models.json is one card or a JSON array of cards (kanz_inference/service.py:_spec_from):
         #   REQUIRED  model_id, feature_set_ref, confidence_threshold, weights{name: float}
-        #   OPTIONAL  bias, scale, validated_at, expires_at (ISO-8601), validation_passed,
-        #             artifact_uri, report_uri
+        #   PRIMARY   validated_at, expires_at (ISO-8601) and literal JSON validation_passed=true
+        #   OPTIONAL  bias, scale, artifact_uri, report_uri
         # A card whose validation is missing/expired/failed is NOT promoted to PRIMARY, and
         # with no PRIMARY the process exits 2 by design (see the header) rather than serving.
         #

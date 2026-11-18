@@ -32,6 +32,7 @@ async function main() {
     page.setDefaultTimeout(10000)
     const errors = []
     page.on('pageerror', error => errors.push(error.message))
+    let nodeWrites = 0
     let releaseB
     const heldB = new Promise(resolve => { releaseB = resolve })
     const qty = '900719925474099312345.0000000000001'
@@ -40,6 +41,10 @@ async function main() {
       if (url.origin !== base) return route.abort()
       const reply = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
       if (url.pathname === '/auth/me') return reply({ subject: 'fixture-reader', tenant: 'fixture-tenant', expires_at: '2099-01-01T00:00:00Z' })
+      if (url.pathname === '/api/v1/control/nodes' && route.request().method() === 'GET') {
+        return reply({ nodes: [{ name: 'fixture-node', schedulable: true }] })
+      }
+      if (url.pathname.startsWith('/api/v1/control/') && route.request().method() !== 'GET') nodeWrites++
       const match = url.pathname.match(/^\/api\/v1\/broker\/accounts\/([^/]+)\/(state|positions|orders|executions)$/)
       if (!match) {
         if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) return route.fulfill({ status: 404, body: '{}' })
@@ -123,6 +128,23 @@ async function main() {
     await navigate('C')
     await page.getByRole('region', { name: 'Orders in served window', exact: true }).getByText('C-order-0', { exact: true }).waitFor()
     assert.equal(await page.getByRole('navigation', { name: 'Orders in served window pages', exact: true }).count(), 0)
+    await page.goto(base + '/nodes')
+    const drain = page.getByRole('button', { name: 'Drain', exact: true })
+    await drain.focus()
+    await page.keyboard.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'Drain node' })
+    await dialog.waitFor()
+    const cancel = dialog.getByRole('button', { name: 'Cancel' })
+    assert(await cancel.evaluate(element => element === document.activeElement))
+    await page.keyboard.press('Tab')
+    const nameInput = dialog.getByRole('textbox')
+    assert(await nameInput.evaluate(element => element === document.activeElement))
+    await page.keyboard.press('Shift+Tab')
+    assert(await cancel.evaluate(element => element === document.activeElement))
+    await page.keyboard.press('Escape')
+    await dialog.waitFor({ state: 'hidden' })
+    assert(await drain.evaluate(element => element === document.activeElement))
+    assert.equal(nodeWrites, 0)
     assert.deepEqual(errors, [])
     console.log('Broker history Chromium PASS: 10000 rows, bounded DOM, exact strings, missing values, retained warnings, scrolling, resize, stale route refusal')
     })()])
