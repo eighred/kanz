@@ -164,10 +164,14 @@ function validExpiry(value: unknown): value is string {
 
 const reviewable = computed(() => {
   const cmd = confirming.value?.command
-  if (!cmd || !cmd.portfolio_id || !cmd.instrument_id) return false
+  if (!cmd || !cmd.order_id || cmd.order_id !== confirming.value?.order_id ||
+      typeof cmd.portfolio_id !== 'string' || !cmd.portfolio_id.trim() || typeof cmd.instrument_id !== 'string' || !cmd.instrument_id.trim() ||
+      (cmd.venue !== undefined && typeof cmd.venue !== 'string') || (cmd.side !== 'SIDE_BUY' && cmd.side !== 'SIDE_SELL')) return false
   const positive = (d: typeof cmd.quantity) => {
-    const value = formatDecimal(d)
-    return value !== null && !value.startsWith('-') && /[1-9]/.test(value)
+    // The maker's order represents a strictly positive signed 64-bit coefficient.
+    const coefficient = d?.coefficient
+    return typeof coefficient === 'string' && /^[1-9]\d{0,18}$/.test(coefficient) &&
+      BigInt(coefficient) <= 9223372036854775807n && formatDecimal(d) !== null
   }
   if (!positive(cmd.quantity)) return false
   if (!['ORDER_TYPE_MARKET', 'ORDER_TYPE_LIMIT', 'ORDER_TYPE_STOP', 'ORDER_TYPE_STOP_LIMIT'].includes(cmd.order_type ?? '')) return false

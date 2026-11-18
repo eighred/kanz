@@ -48,7 +48,7 @@ function entry(over: Partial<PendingApproval> = {}): PendingApproval {
     last_refusal_reason: '',
     last_refused_by: '',
     command: {
-      order_id: 'ord-1',
+      order_id: over.order_id ?? 'ord-1',
       portfolio_id: 'pf-1',
       instrument_id: 'BTC-USD',
       side: 'SIDE_BUY',
@@ -207,7 +207,8 @@ describe('the maker’s order terms at signing', () => {
     await button(wrapper, 'Submit approval')!.trigger('click')
     expect(approve).toHaveBeenCalledExactlyOnceWith('order-stop-limit', DIGEST)
   })
-  it.each([{ expire_at: '2099-02-30T12:00:00Z' }, { expire_at: null }, { stop_price: null },
+  it.each([{ side: undefined }, { side: 'SIDE_UNSPECIFIED' }, { order_id: 'wrong-order' }, { venue: 7 },
+    { stop_price: { coefficient: '9223372036854775808', exponent: -2 } }, { expire_at: '2099-02-30T12:00:00Z' }, { expire_at: null }, { stop_price: null },
     { limit_price: { coefficient: 'broken', exponent: -2 } }])('withholds signing on malformed decision terms', async change => {
     const row = stopLimit.pending[0]!
     vi.spyOn(api, 'get').mockResolvedValue({ ...stopLimit, pending: [{ ...row, command: { ...row.command, ...change } }] })
