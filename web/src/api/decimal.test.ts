@@ -73,6 +73,17 @@ describe('an out-of-domain exponent is refused, not materialised', () => {
   // A REFUSAL IS NULL, NEVER ZERO. internal/dec makes the same rule at the same
   // boundary: a zero price can be read as "flat" and dropped from downstream
   // checks, so it is never a safe fallback.
+  it('refuses malformed wire types and preserves omitted protobuf defaults', () => {
+    for (const input of [1, '12', [], { coefficient: 12 }, { coefficient: null }, { exponent: null }, { exponent: '2' }]) {
+      const wire = JSON.parse(JSON.stringify(input))
+      expect(formatDecimal(wire)).toBeNull()
+      expect(formatMoney({ amount: wire, currency_code: 'USD' })).toBeNull()
+      expect(isNegative(wire)).toBe(false)
+    }
+    expect(formatDecimal({})).toBe('0')
+    expect(formatDecimal({ exponent: -2 })).toBe('0.00')
+  })
+
   it('refuses a malformed coefficient rather than reading it as zero', () => {
     for (const coefficient of ['', 'abc', '1.5', '1e3', ' 12']) {
       expect(formatDecimal({ coefficient, exponent: 0 })).toBeNull()

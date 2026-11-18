@@ -46,11 +46,10 @@ export interface Money {
  * downstream checks". A figure that cannot be rendered must look unrenderable.
  */
 export function formatDecimal(d: Decimal | undefined | null): string | null {
-  if (!d) return null
-  const raw = d.coefficient ?? '0'
-  const exponent = d.exponent ?? 0
-
-  if (!/^-?\d+$/.test(raw)) return null
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return null
+  // ProtoJSON omits default scalar fields. An explicit invalid field is not a default.
+  const { coefficient: raw = '0', exponent = 0 } = d
+  if (typeof raw !== 'string' || !/^-?\d+$/.test(raw)) return null
   if (!Number.isInteger(exponent) || Math.abs(exponent) > MAX_SAFE_EXPONENT) return null
 
   const rendered = renderBrowserValue(1, raw, exponent)
@@ -180,7 +179,7 @@ export function formatRational(s: string | undefined | null): string | null {
 
 /** isNegative reports the sign without parsing the value as a number. */
 export function isNegative(d: Decimal | undefined | null): boolean {
-  return (d?.coefficient ?? '0').startsWith('-')
+  return typeof d?.coefficient === 'string' && d.coefficient.startsWith('-')
 }
 
 function stripLeadingZeros(s: string): string {
