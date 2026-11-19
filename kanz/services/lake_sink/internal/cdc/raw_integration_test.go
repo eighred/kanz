@@ -298,22 +298,6 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 						case <-time.After(100 * time.Millisecond):
 						}
 					}
-				} else {
-					// OffsetFetch observes broker durability before the reader is
-					// guaranteed to have received its synchronous commit response.
-					// Deliver a marker after that exact offset instead of cancelling
-					// the in-flight commit. Only this marker may end the subscription.
-					if err := client.Publish(workCtx, bus.Message{Subject: topic, Body: nextMarker}); err != nil {
-						t.Fatal("next marker publish failed")
-					}
-					select {
-					case err := <-done:
-						if !errors.Is(err, errReplayMarker) {
-							t.Fatalf("subscription stopped before replay marker: %v", err)
-						}
-					case <-workCtx.Done():
-						t.Fatal("consumer did not reach the replay marker after its commit")
-					}
 				}
 			} else {
 				select {
@@ -359,9 +343,22 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					t.Fatalf("parking lost original bytes: %v", err)
 				}
 			}
-			if mode == "process-crash" {
+			if committed {
 				if err := client.Publish(workCtx, bus.Message{Subject: topic, Body: nextMarker}); err != nil {
 					t.Fatal("next marker publish failed")
+				}
+			}
+			if mode == "flush-failure-dlq-success" {
+				// OffsetFetch can observe broker durability before the reader
+				// receives its commit response. Wait until that same reader
+				// reaches the marker before restarting the group.
+				select {
+				case err := <-done:
+					if !errors.Is(err, errReplayMarker) {
+						t.Fatalf("subscription stopped before replay marker: %v", err)
+					}
+				case <-workCtx.Done():
+					t.Fatal("consumer did not reach the replay marker after its commit")
 				}
 			}
 			readctx, readcancel, err := rawRestartReadContext(workCtx, mode == "process-crash")
