@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -52,9 +53,8 @@ func clientKeyPEM(t *testing.T) ([]byte, ssh.PublicKey) {
 var errUnauthorized = errors.New("unauthorized")
 
 // serveOne handshakes one connection and answers every exec request with reply,
-// then exit-status 0. Minimal: enough to prove sshRun dials, authenticates, opens a
-// session, runs a command, and reads output.
-func serveOne(c net.Conn, cfg *ssh.ServerConfig, reply string, exitStatus uint32) {
+// then exit-status. The test observes the script only on the server side.
+func serveOne(c net.Conn, cfg *ssh.ServerConfig, reply string, exitStatus uint32, received chan<- string) {
 	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
 	if err != nil {
 		_ = c.Close()
@@ -73,9 +73,17 @@ func serveOne(c net.Conn, cfg *ssh.ServerConfig, reply string, exitStatus uint32
 		go func() {
 			for req := range chReqs {
 				if req.Type == "exec" {
+					var command struct{ Value string }
+					if ssh.Unmarshal(req.Payload, &command) != nil || command.Value != "sh -s" {
+						_ = req.Reply(false, nil)
+						_ = ch.Close()
+						return
+					}
+					_ = req.Reply(true, nil)
+					script, _ := io.ReadAll(ch)
+					received <- string(script)
 					_, _ = ch.Write([]byte(reply))
 					_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{exitStatus}))
-					_ = req.Reply(true, nil)
 					_ = ch.Close()
 					return
 				}
@@ -107,8 +115,9 @@ func trustHostKey(t *testing.T, addr string, hostKey ssh.PublicKey) {
 // returns the listener address and the server's own host public key — the caller needs
 // the latter to satisfy sshRun's host key verification (or, in the mismatch tests, to
 // deliberately pin something else).
-func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, exitStatus uint32) (string, ssh.PublicKey) {
+func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, exitStatus uint32) (string, ssh.PublicKey, <-chan string) {
 	t.Helper()
+	received := make(chan string, 1)
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if string(key.Marshal()) == string(authorized.Marshal()) {
@@ -132,10 +141,10 @@ func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, ex
 			if err != nil {
 				return
 			}
-			go serveOne(c, cfg, reply, exitStatus)
+			go serveOne(c, cfg, reply, exitStatus, received)
 		}
 	}()
-	return ln.Addr().String(), hostKey.PublicKey()
+	return ln.Addr().String(), hostKey.PublicKey(), received
 }
 
 // serveOneHanging handshakes one connection, accepts the session/exec request,
@@ -217,8 +226,8 @@ func TestSSHRunHonorsContextOnHungRun(t *testing.T) {
 
 	start := time.Now()
 	const command = "synthetic-private-command"
-	out, err := sshRun(ctx, addr, "root", pem, command)
-	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), command) || out != "" {
+	err := sshRun(ctx, addr, "root", pem, command)
+	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), command) {
 		t.Fatal("a canceled install must report its deadline without disclosing the command or output")
 	}
 	if time.Since(start) > 5*time.Second {
@@ -228,20 +237,20 @@ func TestSSHRunHonorsContextOnHungRun(t *testing.T) {
 
 func TestSSHRunExecutesCommand(t *testing.T) {
 	pemKey, pub := clientKeyPEM(t)
-	addr, hostPub := startEchoSSHServer(t, pub, "k3s installed ok", 0)
+	addr, hostPub, received := startEchoSSHServer(t, pub, "k3s installed ok", 0)
 	trustHostKey(t, addr, hostPub)
 
-	out, err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
+	err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
 	if err != nil {
 		t.Fatalf("sshRun: %v", err)
 	}
-	if !strings.Contains(out, "k3s installed ok") {
-		t.Errorf("output = %q, want it to contain the server reply", out)
+	if <-received != "install-k3s" {
+		t.Fatal("the authenticated server did not receive the install script on stdin")
 	}
 }
 
 func TestSSHRunRejectsBadKey(t *testing.T) {
-	_, err := sshRun(context.Background(), "127.0.0.1:1", "root", []byte("not a key"), "x")
+	err := sshRun(context.Background(), "127.0.0.1:1", "root", []byte("not a key"), "x")
 	if err == nil {
 		t.Fatal("expected an error parsing a bad private key")
 	}
@@ -252,10 +261,10 @@ func TestSSHRunRejectsBadKey(t *testing.T) {
 
 func TestSSHRunReportsOnlyExitStatusAfterRemoteFailure(t *testing.T) {
 	key, public := clientKeyPEM(t)
-	addr, hostKey := startEchoSSHServer(t, public, "synthetic-private-output", 13)
+	addr, hostKey, _ := startEchoSSHServer(t, public, "synthetic-private-output", 13)
 	trustHostKey(t, addr, hostKey)
-	out, err := sshRun(context.Background(), addr, "fixture-user", key, "synthetic-private-command")
-	if err == nil || err.Error() != "remote install exited with status 13" || out != "" {
+	err := sshRun(context.Background(), addr, "fixture-user", key, "synthetic-private-command")
+	if err == nil || err.Error() != "remote install exited with status 13" {
 		t.Fatal("remote failure must report only the operation and numeric exit status")
 	}
 }
@@ -266,22 +275,24 @@ func TestSSHRunReportsOnlyExitStatusAfterRemoteFailure(t *testing.T) {
 // that reinstated an insecure default would leave every other test in this file green.
 func TestSSHRunRefusesWithoutHostKeyPolicy(t *testing.T) {
 	pemKey, pub := clientKeyPEM(t)
-	addr, _ := startEchoSSHServer(t, pub, "k3s installed ok", 0)
+	addr, _, received := startEchoSSHServer(t, pub, "k3s installed ok", 0)
 	// Deliberately no trustHostKey, and cleared explicitly so an ambient value in the
 	// developer's environment cannot turn this assertion into a no-op.
 	t.Setenv(envKnownHostsFile, "")
 	t.Setenv(envHostKey, "")
 	t.Setenv(envInsecureSkip, "")
 
-	out, err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
+	err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
 	if err == nil {
 		t.Fatal("sshRun connected with no host key policy configured — it must fail closed")
 	}
 	if !strings.Contains(err.Error(), envKnownHostsFile) {
 		t.Errorf("err = %v, want it to name %s so an operator knows what to set", err, envKnownHostsFile)
 	}
-	if strings.Contains(out, "k3s installed ok") {
+	select {
+	case <-received:
 		t.Error("the remote command RAN before the host was verified — the token would already be gone")
+	default:
 	}
 }
 
@@ -290,18 +301,20 @@ func TestSSHRunRefusesWithoutHostKeyPolicy(t *testing.T) {
 // host we pinned. The handshake must fail and the command must never reach it.
 func TestSSHRunRejectsWrongHostKey(t *testing.T) {
 	pemKey, pub := clientKeyPEM(t)
-	addr, _ := startEchoSSHServer(t, pub, "k3s installed ok", 0)
+	addr, _, received := startEchoSSHServer(t, pub, "k3s installed ok", 0)
 	trustHostKey(t, addr, newHostKey(t).PublicKey()) // pin a DIFFERENT host's key
 
-	out, err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
+	err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
 	if err == nil {
 		t.Fatal("sshRun accepted a host key that was not the pinned one")
 	}
 	if !strings.Contains(err.Error(), "HOST KEY MISMATCH") {
 		t.Errorf("err = %v, want a mismatch (not merely some handshake failure)", err)
 	}
-	if strings.Contains(out, "k3s installed ok") {
+	select {
+	case <-received:
 		t.Error("the remote command ran against an unverified host")
+	default:
 	}
 }
 
@@ -309,14 +322,14 @@ func TestSSHRunRejectsWrongHostKey(t *testing.T) {
 // it is the form an operator with a fingerprint but no file will reach for.
 func TestSSHRunAcceptsPinnedHostKey(t *testing.T) {
 	pemKey, pub := clientKeyPEM(t)
-	addr, hostPub := startEchoSSHServer(t, pub, "k3s installed ok", 0)
+	addr, hostPub, received := startEchoSSHServer(t, pub, "k3s installed ok", 0)
 	t.Setenv(envHostKey, string(ssh.MarshalAuthorizedKey(hostPub)))
 
-	out, err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
+	err := sshRun(context.Background(), addr, "root", pemKey, "install-k3s")
 	if err != nil {
 		t.Fatalf("sshRun with a correctly pinned host key: %v", err)
 	}
-	if !strings.Contains(out, "k3s installed ok") {
-		t.Errorf("output = %q, want the server reply", out)
+	if <-received != "install-k3s" {
+		t.Fatal("the pinned server did not receive the script on stdin")
 	}
 }

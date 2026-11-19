@@ -1,5 +1,7 @@
 import { api, ApiError } from './client'
 
+export class ProvisionInputError extends Error {}
+
 // The estate control plane, as the browser sees it (#371).
 //
 // TWO JSON CASINGS COEXIST ON /v1 AND THAT IS NOT A MISTAKE TO TIDY HERE. The
@@ -117,8 +119,24 @@ export const control = {
     api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions', { signal }).then((r) => r.provisions ?? []),
 
   async addNode(target: { hostname: string; ip: string; sshUser: string; sshHostKey: string }, key: File, signal: AbortSignal) {
-    const sshPrivateKey = btoa(await key.text())
+    // Both the BFF and gateway cap the JSON body at one MiB. Base64 adds
+    // exactly four ASCII bytes for each three file bytes (including padding).
+    const bodyBytes = new TextEncoder().encode(JSON.stringify({ ...target, sshPrivateKey: '' })).length
+    if (!key.size || bodyBytes + 4 * Math.ceil(key.size / 3) > 1024 * 1024) {
+      throw new ProvisionInputError('Select a nonempty key that fits the one MiB request limit.')
+    }
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await key.arrayBuffer())
+    } catch {
+      throw new ProvisionInputError('The selected key could not be read. Select the file again.')
+    }
     signal.throwIfAborted()
+    const chunks: string[] = []
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)))
+    }
+    const sshPrivateKey = btoa(chunks.join(''))
     const response = await api.post<{ provisionId?: string }>('/api/v1/control/nodes',
       { ...target, sshPrivateKey }, 200, signal)
     if (typeof response?.provisionId !== 'string' || !response.provisionId) {

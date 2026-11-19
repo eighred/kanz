@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { control, describe, settled, type Provision } from '../api/control'
+import { control, describe, ProvisionInputError, settled, type Provision } from '../api/control'
 import { ApiError } from '../api/client'
 
 // NODE PROVISIONING RUNS (#371 slice 4).
@@ -42,7 +42,7 @@ async function submit(event: SubmitEvent) {
   const form = event.currentTarget as HTMLFormElement
   const fields = new FormData(form)
   const key = fields.get('bootstrap')
-  if (!(key instanceof File) || !key.size) return
+  if (!(key instanceof File)) return
   const submission = new AbortController()
   activeSubmission = submission
   submitting.value = true
@@ -59,8 +59,9 @@ async function submit(event: SubmitEvent) {
   } catch (e) {
     if (submission.signal.aborted) return
     // A dropped response may follow Job creation. Never replay the private key.
-    submissionError.value = e instanceof ApiError && e.status === 403
-      ? describe(e) : 'No provisioning receipt was confirmed. Check the runs below before submitting again.'
+    if (e instanceof ProvisionInputError) submissionError.value = e.message
+    else if (e instanceof ApiError && e.status === 403) submissionError.value = describe(e)
+    else submissionError.value = 'No provisioning receipt was confirmed. Check the runs below before submitting again.'
   } finally {
     activeSubmission = undefined
     const input = form.elements.namedItem('bootstrap') as HTMLInputElement | null

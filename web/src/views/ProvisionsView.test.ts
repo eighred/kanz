@@ -60,7 +60,7 @@ it('reports a current upstream failure and recovers on the next poll', async () 
   w.unmount()
 })
 
-async function onboardingForm() {
+async function onboardingForm(key = new File(['synthetic-private-value'], 'fixture.pem')) {
   const w = mount(ProvisionsView, options)
   await flushPromises()
   await w.get('button').trigger('click')
@@ -68,7 +68,7 @@ async function onboardingForm() {
     hostname: ' worker-1 ', ip: '192.0.2.7', user: 'fixture', hostKey: 'fixture-public-key',
   })) await w.get(`[name="${name}"]`).setValue(value)
   const files = new DataTransfer()
-  files.items.add(new File(['synthetic-private-value'], 'fixture.pem', { type: 'text/plain' }))
+  files.items.add(key)
   w.get<HTMLInputElement>('input[type=file]').element.files = files.files
   return w
 }
@@ -136,4 +136,26 @@ it('drops a late submission response after leaving the session', async () => {
   await flushPromises()
   expect(forget).not.toHaveBeenCalled()
   expect(fetch).toHaveBeenCalledTimes(2)
+})
+
+it('serializes the selected bytes exactly including CRLF and non-ASCII bytes', async () => {
+  const fetch = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(body('PROVISION_STATUS_PENDING'))
+    .mockResolvedValueOnce(Response.json({ provisionId: 'new-run' }))
+    .mockResolvedValueOnce(body('PROVISION_STATUS_JOINED'))
+  const w = await onboardingForm(new File([new Uint8Array([13, 10, 0, 0xc3, 0xa9, 0xff])], 'sample'))
+  await w.get('form').trigger('submit')
+  await flushPromises()
+  expect(JSON.parse(String(fetch.mock.calls[1]![1]?.body)).sshPrivateKey).toBe('DQoAw6n/')
+  w.unmount()
+})
+
+it('rejects an oversized file before a state-changing request', async () => {
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(body('PROVISION_STATUS_PENDING'))
+  const w = await onboardingForm(new File([new Uint8Array(786432)], 'oversized'))
+  await w.get('form').trigger('submit')
+  await flushPromises()
+  expect(w.get('[role=alert]').text()).toContain('one MiB request limit')
+  expect(fetch).toHaveBeenCalledOnce()
+  w.unmount()
 })
