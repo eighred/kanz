@@ -21,8 +21,7 @@ import (
 )
 
 // BinanceSource is the live Binance Spot L2 depth feed — a DepthSource over the
-// <symbol>@depth diff stream plus the REST depth snapshot, compiled only under
-// -tags binance so the default binary links no websocket.
+// <symbol>@depth diff stream plus the REST depth snapshot.
 //
 // It implements Binance's documented local-order-book procedure, which exists
 // because the diff stream and the REST snapshot are not synchronised:
@@ -57,6 +56,9 @@ type BinanceSource struct {
 
 	conn    *websocket.Conn
 	lastSeq uint64 // last final-id (u) folded; 0 before the first snapshot
+	// REST snapshots carry receipt time only. Preserve the last emitted venue
+	// timestamp across anchors and reconnects for comparison with the next delta.
+	lastEventMS int64
 	// needSnap forces the next Recv to (re)anchor on a REST snapshot.
 	needSnap bool
 	// firstAfterSnap relaxes the chain rule for exactly one event — the one that
@@ -145,6 +147,7 @@ func (s *BinanceSource) Recv(ctx context.Context) (Update, error) {
 
 		ev, err := s.readEvent(ctx)
 		if err != nil {
+			s.needSnap = true
 			return Update{}, err
 		}
 		switch {
@@ -156,16 +159,25 @@ func (s *BinanceSource) Recv(ctx context.Context) (Update, error) {
 				s.needSnap = true
 				continue
 			}
-			s.firstAfterSnap = false
 		case ev.FirstID != s.lastSeq+1:
 			// A hole in the live chain. Re-anchor rather than fold out of order.
 			s.needSnap = true
 			continue
 		}
 
+		ts := timestamppb.New(time.UnixMilli(ev.EventMS))
+		if ev.EventMS <= 0 || !ts.IsValid() {
+			s.needSnap = true
+			return Update{}, fmt.Errorf("binance depth: invalid venue event time at sequence %d", ev.FinalID)
+		}
+		if ev.EventMS < s.lastEventMS {
+			s.needSnap = true
+			return Update{}, fmt.Errorf("binance depth: venue event time regressed from %d to %d at sequence %d", s.lastEventMS, ev.EventMS, ev.FinalID)
+		}
 		prev := s.lastSeq
-		s.lastSeq = ev.FinalID
-		return Update{Delta: s.deltaProto(ev, prev)}, nil
+		s.lastSeq, s.lastEventMS = ev.FinalID, ev.EventMS
+		s.firstAfterSnap = false
+		return Update{Delta: s.deltaProto(ev, prev, ts)}, nil
 	}
 }
 
@@ -248,12 +260,12 @@ func (s *BinanceSource) snapshotProto(snap *binanceDepthSnapshot) *marketpb.Orde
 	}
 }
 
-func (s *BinanceSource) deltaProto(ev *binanceDepthEvent, prev uint64) *marketpb.OrderBookDelta {
+func (s *BinanceSource) deltaProto(ev *binanceDepthEvent, prev uint64, ts *timestamppb.Timestamp) *marketpb.OrderBookDelta {
 	return &marketpb.OrderBookDelta{
 		InstrumentId:        s.instrumentID,
 		Symbol:              s.symbol,
 		Mic:                 s.mic,
-		EventTime:           timestamppb.New(time.UnixMilli(ev.EventMS).UTC()),
+		EventTime:           ts,
 		FirstUpdateSequence: ev.FirstID,
 		LastUpdateSequence:  ev.FinalID,
 		PrevUpdateSequence:  prev,
