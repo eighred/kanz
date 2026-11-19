@@ -4,10 +4,9 @@
 // (PARITY-05a) and the durable-state apply path run under load — the write-side
 // complement to the k6 read harness (config.js/baseline.js only exercise reads).
 //
-// Rate is an OPEN model (fixed events/sec regardless of downstream speed) so the
-// number measured is "ingest rate the engine sustains", the input to the
-// capacity model (capacity-model.md). Backpressure shows up as publish latency /
-// the OBS-01c bus-pending gauge climbing — the KEDA scale signal.
+// RATE is the offered schedule. The generator publishes serially and reports
+// unsent arrivals separately from JetStream acknowledgements and publish errors.
+// The engine's recompute metrics and consumer lag measure downstream processing.
 //
 //	RATE=5000 DURATION=2m PORTFOLIOS=2000 go run ./test/load/ingest
 //
@@ -29,12 +28,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/eighred/kanz/internal/env"
 	"log"
 	"math/rand"
+	"os"
 	"os/signal"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,6 +42,7 @@ import (
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -77,17 +76,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if rate < 1 {
-		rate = 1
+	if rate < 1 || int64(rate) > int64(time.Second) {
+		log.Fatal("RATE must be between 1 and 1000000000 events/sec")
 	}
-	if portfolios < 1 {
-		portfolios = 1
+	if portfolios < 1 || dur <= 0 {
+		log.Fatal("PORTFOLIOS and DURATION must be positive")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, dur)
-	defer cancel()
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "load-ingest"})
 	if err != nil {
@@ -114,24 +111,29 @@ func main() {
 	// EMPTY IS A DELIBERATE OPT-OUT AND IT SAYS SO. Silently skipping would leave
 	// a run that printed publish numbers and nothing else — indistinguishable from
 	// a run whose engine was unreachable, which is the state that matters.
-	metricsURL := env.Or("INGEST_ENGINE_METRICS_URL", "http://localhost:8081/metrics")
+	metricsURL, configured := os.LookupEnv("INGEST_ENGINE_METRICS_URL")
+	if !configured {
+		metricsURL = "http://localhost:8081/metrics"
+	}
 	capacity := &capacityReport{}
 	if metricsURL == "" {
 		log.Printf("ingest: WARNING — INGEST_ENGINE_METRICS_URL is empty, so this run measures the " +
 			"GENERATOR and the SPINE only. It produces no risk-engine capacity number and nothing " +
 			"from it may be quoted into a resources: block (#231).")
 	} else {
+		pollCtx, stopPoll := context.WithCancel(ctx)
+		capacity.pollOnce(pollCtx, metricsURL)
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			capacity.pollEngine(ctx, metricsURL, time.Second)
+			capacity.pollEngine(pollCtx, metricsURL, time.Second)
 		}()
 		defer func() {
+			stopPoll()
 			wg.Wait()
-			// One last scrape AFTER the run, outside the run context, so the closing
-			// histogram includes the recomputes the final ticks triggered. Bounded on
-			// its own so a dead endpoint cannot hang the report.
+			// Include recomputes visible at the final scrape. The engine may still
+			// have pending work after the generator stops.
 			last, cancelLast := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelLast()
 			capacity.pollOnce(last, metricsURL)
@@ -139,41 +141,16 @@ func main() {
 		}()
 	}
 
-	// Open-model pacing: one tick per (1s / rate). A ticker keeps the target rate
-	// independent of publish latency — a slow broker makes ticks queue, which is
-	// the backpressure signal we want to observe, not hide.
-	interval := time.Second / time.Duration(rate)
-	if interval <= 0 {
-		interval = time.Nanosecond
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	var published, failed int64
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	logEvery := time.NewTicker(10 * time.Second)
-	defer logEvery.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("ingest: done — published=%d failed=%d", atomic.LoadInt64(&published), atomic.LoadInt64(&failed))
-			return
-		case <-logEvery.C:
-			log.Printf("ingest: published=%d failed=%d", atomic.LoadInt64(&published), atomic.LoadInt64(&failed))
-		case <-ticker.C:
-			portfolio := prefix
-			if portfolios > 1 {
-				portfolio = fmt.Sprintf("%s-%04d", prefix, rng.Intn(portfolios))
-			}
-			ev := tick(tenant, portfolio, instruments[rng.Intn(len(instruments))], rng)
-			if err := producer.Publish(ctx, ev); err != nil {
-				atomic.AddInt64(&failed, 1)
-			} else {
-				atomic.AddInt64(&published, 1)
-			}
+	report := driveArrivals(ctx, int64(rate), dur, func(ctx context.Context) error {
+		portfolio := prefix
+		if portfolios > 1 {
+			portfolio = fmt.Sprintf("%s-%04d", prefix, rng.Intn(portfolios))
 		}
-	}
+		ev := tick(tenant, portfolio, instruments[rng.Intn(len(instruments))], rng)
+		return producer.Publish(ctx, ev)
+	})
+	log.Printf("ingest: done %s", report)
 }
 
 // tick builds one PositionState update — a fresh mark on a random instrument of a

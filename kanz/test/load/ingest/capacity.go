@@ -100,11 +100,11 @@ func (c *capacityReport) pollEngine(ctx context.Context, url string, every time.
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		c.pollOnce(ctx, url)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			c.pollOnce(ctx, url)
 		}
 	}
 }
