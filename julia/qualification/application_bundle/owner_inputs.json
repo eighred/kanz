@@ -1,0 +1,79 @@
+{
+  "CompilerSupportLibraries_jll": {
+    "archiveBytes": 28633168,
+    "checksumName": "CompilerSupportLibraries.v1.5.5+2.x86_64-linux-gnu-libgfortran5.tar.gz",
+    "sourcePin": "deps/checksums/compilersupportlibraries",
+    "sourceSHA256": "1a638d0ddbd6fa7c775fd5408cab79054e7cc191181c071e3f11737763694463",
+    "url": "https://github.com/JuliaBinaryWrappers/CompilerSupportLibraries_jll.jl/releases/download/CompilerSupportLibraries-v1.5.5%2B2/CompilerSupportLibraries.v1.5.5.x86_64-linux-gnu-libgfortran5.tar.gz"
+  },
+  "GMP_jll": {
+    "archiveBytes": 534722,
+    "checksumName": "GMP.v6.3.0+2.x86_64-linux-gnu-cxx11.tar.gz",
+    "sourcePin": "deps/checksums/gmp",
+    "sourceSHA256": "6a2a29eb5570c9fc8bd9c118c1fbcd32e42ac9a5cb544de823608221a6d6e7d0",
+    "url": "https://github.com/JuliaBinaryWrappers/GMP_jll.jl/releases/download/GMP-v6.3.0%2B2/GMP.v6.3.0.x86_64-linux-gnu-cxx11.tar.gz"
+  },
+  "LibUV_jll": {
+    "archiveBytes": 929229,
+    "checksumName": "LibUV.v2.0.1+22.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/libuv",
+    "sourceSHA256": "3f4a72a393a0ee56644c1bbc0e883ceb928c26dce328dfc332aa2b3ac832e889",
+    "url": "https://github.com/JuliaBinaryWrappers/LibUV_jll.jl/releases/download/LibUV-v2.0.1%2B22/LibUV.v2.0.1.x86_64-linux-gnu.tar.gz"
+  },
+  "LibUnwind_jll": {
+    "archiveBytes": 1421579,
+    "checksumName": "LibUnwind.v1.8.3+1.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/unwind",
+    "sourceSHA256": "118f078f5a9d379da04cefbdd6836451c9c711608d07f6eee0d15523ee5ec2f3",
+    "url": "https://github.com/JuliaBinaryWrappers/LibUnwind_jll.jl/releases/download/LibUnwind-v1.8.3%2B1/LibUnwind.v1.8.3.x86_64-linux-gnu.tar.gz"
+  },
+  "MPFR_jll": {
+    "archiveBytes": 895682,
+    "checksumName": "MPFR.v4.2.2+0.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/mpfr",
+    "sourceSHA256": "1751eeb840b3fa6ea227dd28b4b8e82e630a120849393d15592e020d34071a09",
+    "url": "https://github.com/JuliaBinaryWrappers/MPFR_jll.jl/releases/download/MPFR-v4.2.2%2B0/MPFR.v4.2.2.x86_64-linux-gnu.tar.gz"
+  },
+  "OpenLibm_jll": {
+    "archiveBytes": 283098,
+    "checksumName": "OpenLibm.v0.8.7+0.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/openlibm",
+    "sourceSHA256": "59fe725bcaf3c8230deb8ba53922648392171209ec2ae230b6ef3ab612ea44ab",
+    "url": "https://github.com/JuliaBinaryWrappers/OpenLibm_jll.jl/releases/download/OpenLibm-v0.8.7%2B0/OpenLibm.v0.8.7.x86_64-linux-gnu.tar.gz"
+  },
+  "PCRE2_jll": {
+    "archiveBytes": 2720846,
+    "checksumName": "PCRE2.v10.47.0+0.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/pcre",
+    "sourceSHA256": "9a89ea7f2508babb12a764dc8e89b9f9eec7b4cf87bb124c1c1dd37936df16c3",
+    "url": "https://github.com/JuliaBinaryWrappers/PCRE2_jll.jl/releases/download/PCRE2-v10.47.0%2B0/PCRE2.v10.47.0.x86_64-linux-gnu.tar.gz"
+  },
+  "Zlib_jll": {
+    "archiveBytes": 918474,
+    "checksumName": "Zlib.v1.3.2+0.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/zlib",
+    "sourceSHA256": "09867d99a869d16e5e4b883bbe10b9966ea5392827ec20e23941eb45c295cc80",
+    "url": "https://github.com/JuliaBinaryWrappers/Zlib_jll.jl/releases/download/Zlib-v1.3.2%2B0/Zlib.v1.3.2.x86_64-linux-gnu.tar.gz"
+  },
+  "Zstd_jll": {
+    "archiveBytes": 661891,
+    "checksumName": "Zstd.v1.5.7+1.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/zstd",
+    "sourceSHA256": "16bccc906a5596bf0e651b96bedf80e0e6b6b189a369d5127ed1384f2953cd79",
+    "url": "https://github.com/JuliaBinaryWrappers/Zstd_jll.jl/releases/download/Zstd-v1.5.7%2B1/Zstd.v1.5.7.x86_64-linux-gnu.tar.gz"
+  },
+  "dSFMT_jll": {
+    "archiveBytes": 6617,
+    "checksumName": "dSFMT.v2.2.5+2.x86_64-linux-gnu.tar.gz",
+    "sourcePin": "deps/checksums/dsfmt",
+    "sourceSHA256": "374d5d5fec2efa2d9c0742f9db332d774e0bd8424ac4221bde3ad4f15dd3f6a3",
+    "url": "https://github.com/JuliaBinaryWrappers/dSFMT_jll.jl/releases/download/dSFMT-v2.2.5%2B2/dSFMT.v2.2.5.x86_64-linux-gnu.tar.gz"
+  },
+  "libLLVM_jll": {
+    "archiveBytes": 107675586,
+    "checksumName": "libLLVM.v20.1.8+2.x86_64-linux-gnu-cxx11-llvm_version+20.tar.gz",
+    "sourcePin": "deps/checksums/llvm",
+    "sourceSHA256": "eabb85f226f11702196c679fe7079286b4458ffedaf35d80f509fdc878aa5198",
+    "url": "https://github.com/JuliaBinaryWrappers/libLLVM_jll.jl/releases/download/libLLVM-v20.1.8%2B2/libLLVM.v20.1.8.x86_64-linux-gnu-cxx11-llvm_version%2B20.tar.gz"
+  }
+}

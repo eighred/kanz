@@ -21,8 +21,31 @@ The local OCI recipe uses the upstream glibc-only distroless Debian 12 base. Ver
 
 ```sh
 docker build --platform linux/amd64 --network none --iidfile /out/image-id \
+  --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
   -f julia/qualification/application_bundle/Dockerfile /out
 python3 -B julia/qualification/application_bundle/corpus.py "$(cat /out/image-id)" "$(git rev-parse HEAD)"
 ```
 
-The standard distribution's 23 JLL owners, positive controls and source-mapping requirements remain in its existing qualification. This profile has a different runtime inventory. Its final image requires its own complete native/advisory and OS ownership, actual ELF and SBOM coverage, signed publication and rollback evidence before release. The existing Eighred mirror currently selects the static and CC Debian 12 bases. Its normal reviewed source update, write-authorized publication and immutable mirror readback precede any organization deployment of a new base. [Base selection and publication](../../../.github/workflows/base-image-mirror.yml) and [Release owner](https://github.com/eighred/kanz/issues/1536)
+Run a trusted Linux parent with GNU readelf against a Docker 29 OCI export of the selected local index. Save both raw signed-base index/platform manifests, the compiler-produced bundle tar and the SHA-256-pinned official Julia tar. For each row of [published native inputs](owner_inputs.json), stage the Julia checksum catalog from `https://raw.githubusercontent.com/JuliaLang/julia/67ac47b9cd855e02134d41d5428ac9f2a73f2694/<sourcePin>` as `checksums-<catalog-name>`. Stage its named publisher URL as `<JLL-name-without-_jll>.tar.gz` in the same directory. The reader verifies Julia's catalog hashes, archive SHA-512, sizes and each real ELF member independently.
+
+```sh
+docker save --output /proof/candidate.oci.tar "$(cat /out/image-id)"
+python3 -B julia/qualification/application_bundle/readback.py \
+  /proof/candidate.oci.tar /inputs/base-index.json /inputs/base-platform.json \
+  /out/bundle.tar /inputs/julia.tar.gz /inputs/native-owners /proof/readback.json "$(cat /out/image-id)"
+```
+
+The reader compares every application file and symbolic link with compiler output. It compares DT_NEEDED names with the SONAMEs provided by the application and each verified base layer, binds four unmodified Julia core files to the official distribution and eighteen shared libraries to eleven native publishers. The launcher and application sysimage are generated outputs. This provides binary provenance; security advisories for the native projects and statically linked code still require their own supported ranges, controls and policy.
+
+Use the repository's checksum-pinned Trivy and Syft archives with the executable and its `.tar.gz` side by side. Stage the complete current read-only Trivy DB under `/cache/db`, the pinned General registry index used by the standard JLL qualifier and an empty writable parent for the results. Run the scanner offline with no credentials, a bounded temporary filesystem and the final OCI export mounted read-only.
+
+```sh
+SYFT_CHECK_FOR_APP_UPDATE=false python3 -B julia/qualification/application_bundle/scan.py \
+  /proof/candidate.oci.tar /proof/readback.json /inputs/tools /cache \
+  /inputs/General.Registry.toml /out/new-scan
+python3 -B -m unittest discover -s julia/qualification -p test_application_bundle.py
+```
+
+This second check binds the actual image config and manifest, the seven canonical package UUIDs in both Trivy and SPDX, eleven archive-derived native wrapper records, the classified Julia runtime in Syft and known-vulnerable HTTP and OpenSSL wrapper controls. It keeps the unmodified results, refuses any applicable wrapper/package finding or critical OS finding, and reports all OS severities. The standard distro's full 23-owner checks remain active.
+
+The production release sequence starts with approved native advisory coverage, an independently verified immutable source build and a reviewed base in the Eighred mirror. Its main-only publisher copies the upstream index and reads it back. A separate credential-limited consumer must establish access to the identical bytes before replacing the candidate's upstream base. The release owner then verifies signed application publication, immutable pull, bounded supervision and rollback; activation remains subject to the existing governance. [Mirror producer](../../../.github/workflows/base-image-mirror.yml) and [release issue](https://github.com/eighred/kanz/issues/1536)

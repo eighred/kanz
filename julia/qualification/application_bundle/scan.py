@@ -1,0 +1,112 @@
+"""Scan the actual saved application image and its independently reconstructed wrapper metadata."""
+import argparse
+from collections import Counter
+import datetime as dt
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import advisory
+import jll_advisory
+from readback import JLL_LIBRARIES
+
+
+MANIFEST = 'opt/kanz/share/kanz/Manifest.toml'
+
+
+def spdx_packages(report, expected):
+    selected = {}
+    for package in report['packages']:
+        if package.get('sourceInfo') != 'package found in: ' + MANIFEST:
+            continue
+        name = package['name']
+        item = expected.get(name, {})
+        purls = [p['referenceLocator'] for p in package['externalRefs'] if p['referenceType'] == 'purl']
+        if (name in selected or package['versionInfo'] != item.get('version')
+                or purls != [f"pkg:julia/{name}@{item['version']}?uuid={item['uuid']}"]):
+            raise ValueError('application SPDX identity differs')
+        selected[name] = item
+    if selected != expected:
+        raise ValueError('application SPDX manifest incomplete')
+
+
+def scan(image, receipt, tools, database, registry, output):
+    output.mkdir()
+    if set(receipt['wrapperMetadata']) != set(JLL_LIBRARIES):
+        raise ValueError('publisher evidence missing from OCI receipt')
+    owners = {}
+    for owner, filenames in JLL_LIBRARIES.items():
+        row = receipt['wrapperMetadata'][owner]
+        actual = {'lib/' + name: receipt['native']['lib/julia/' + name]['sha256'] for name in filenames}
+        if row['publisherFiles'] != actual:
+            raise ValueError('readback publisher scope differs')
+        owners[owner] = {k: row[k] for k in ('version', 'uuid')}
+    for tool, archive_hash in advisory.ARCHIVES.items():
+        advisory.tool_identity(tools / tool, archive_hash)
+    metadata = json.loads((database / 'db' / 'metadata.json').read_bytes())
+    advisory.validate_database(metadata, dt.datetime.now(dt.timezone.utc))
+    before = advisory.digest(database / 'db' / 'trivy.db')
+    jll_advisory.registry_identity(registry.read_bytes(), owners)
+    jll_advisory.registry_identity(registry.read_bytes(), jll_advisory.CONTROL)
+
+    def run(args, cwd=output):
+        subprocess.run(list(map(str, args)), timeout=540, cwd=cwd, check=True,
+                       stdin=subprocess.DEVNULL)
+
+    ignored, config = output / 'empty.ignore', output / 'config.yaml'
+    ignored.write_bytes(b'')
+    config.write_bytes(b'{}\n')
+    options = ['--cache-dir', database, '--cache-backend', 'memory', '--config', config, '--timeout', '8m',
+               '--quiet', '--skip-db-update', '--skip-java-db-update', '--offline-scan', '--scanners', 'vuln',
+               '--ignore-unfixed=false', '--ignorefile', ignored, '--list-all-pkgs', '--format', 'json']
+    http = {'HTTP': {'uuid': advisory.HTTP_UUID, 'version': '1.10.15'}}
+    results = {}
+    for name, expected in [('http', http), ('jll-control', jll_advisory.CONTROL), ('wrappers', owners)]:
+        src = output / name
+        src.mkdir()
+        (src / 'Manifest.toml').write_bytes(jll_advisory.manifest(expected))
+        (src / 'Project.toml').write_bytes(jll_advisory.project(expected))
+        path = output / (name + '.json')
+        run([tools / 'trivy', 'fs', *options, '--output', path, '.'], cwd=src)
+        doc = json.loads(path.read_bytes())
+        result = advisory.manifest_result(doc, 'Manifest.toml')
+        advisory.validate_packages(result, expected)
+        results[name] = result
+        if name == 'http':
+            advisory.validate_control(doc)
+    jll_advisory.validate_control(results['jll-control'])
+
+    trivy, spdx, syft = [output / (name + '.json') for name in ('trivy', 'spdx', 'syft')]
+    run([tools / 'trivy', 'image', *options, '--input', image, '--output', trivy])
+    run([tools / 'trivy', 'convert', '--format', 'spdx-json', '--output', spdx, trivy])
+    run([tools / 'syft', 'scan', 'oci-archive:' + str(image), '-o', 'syft-json=' + str(syft)])
+    t = json.loads(trivy.read_bytes())
+    s = json.loads(syft.read_bytes())
+    if (t['Metadata']['ImageID'] != receipt['config'] or s['source']['metadata']['manifestDigest'] != receipt['manifest']
+            or any(r.get('ExperimentalModifiedFindings') for r in t['Results'])):
+        raise ValueError('OCI scanner identity or unmodified findings differ')
+    advisory.validate_syft(s, receipt['config'])
+    packages = advisory.package_inventory()
+    application = advisory.manifest_result(t, MANIFEST)
+    advisory.validate_packages(application, packages)
+    spdx_packages(json.loads(spdx.read_bytes()), packages)
+    os_results = [r for r in t['Results'] if r['Class'] == 'os-pkgs' and r['Type'] == 'debian']
+    if len(t['Results']) != 2 or len(os_results) != 1 or not os_results[0].get('Packages'):
+        raise ValueError('unexpected image scan scope')
+    counts = Counter(v['Severity'] for v in os_results[0].get('Vulnerabilities', []))
+    if before != advisory.digest(database / 'db' / 'trivy.db'):
+        raise ValueError('scanner database changed during qualification')
+    print('Debian findings:', dict(counts))
+    if counts['CRITICAL'] or application.get('Vulnerabilities') or results['wrappers'].get('Vulnerabilities'):
+        raise ValueError('application, native wrapper or critical OS advisory present')
+    print('Verified seven application packages, eleven native wrapper records and both positive controls.')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    for key in ('image', 'readback', 'tools', 'database', 'registry', 'output'):
+        parser.add_argument(key, type=lambda x: Path(x).resolve())
+    a = parser.parse_args()
+    scan(a.image, json.loads(a.readback.read_bytes()), a.tools, a.database, a.registry, a.output)
