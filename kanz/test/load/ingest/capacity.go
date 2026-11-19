@@ -62,6 +62,8 @@ type engineSample struct {
 	buckets     map[float64]float64 // cumulative recompute-duration buckets
 	obs         float64             // recompute count
 	sum         float64             // total recompute seconds
+	started     float64             // process_start_time_seconds of the observed engine
+	histogramOK bool
 }
 
 // capacityReport accumulates the peaks across a run.
@@ -89,6 +91,8 @@ type capacityReport struct {
 
 	first, last engineSample
 	haveFirst   bool
+	lastReadOK  bool
+	interrupted bool
 }
 
 // pollEngine scrapes the engine endpoint until ctx ends, at `every`.
@@ -117,14 +121,18 @@ func (c *capacityReport) pollOnce(ctx context.Context, url string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.polls++
+	c.lastReadOK = err == nil
 	if err != nil {
 		c.failed++
 		c.lastErr = err
 		return
 	}
 	sample := readEngine(s)
-	if !c.haveFirst {
+	if c.polls == 1 {
 		c.first, c.haveFirst = sample, true
+	} else if c.haveFirst && !c.interrupted {
+		_, _, ok := deltaBuckets(c.last, sample)
+		c.interrupted = !ok
 	}
 	c.last = sample
 
@@ -165,36 +173,59 @@ func readEngine(s promscrape.Scrape) engineSample {
 	e.goSysBytes, e.goSysKnown = s.Value("go_memstats_sys_bytes")
 	e.inflight, e.inflightOK = s.Value("kanz_risk_recompute_inflight")
 	e.queueDepth, e.queueDepthK = s.Value("kanz_risk_recompute_queue_depth")
-	e.sum, _ = s.Value(recomputeDuration + "_sum")
-	e.obs, _ = s.Value(recomputeDuration + "_count")
+	// This histogram has no labels. Combining several engine instances or
+	// treating a missing count as zero would invalidate the run's delta.
+	scalar := func(name string) (float64, bool) {
+		ss := s[name]
+		if len(ss) != 1 || ss[0].Labels != "" || !finiteNonnegative(ss[0].Value) {
+			return 0, false
+		}
+		return ss[0].Value, true
+	}
+	var sumOK, countOK, startOK bool
+	e.sum, sumOK = scalar(recomputeDuration + "_sum")
+	e.obs, countOK = scalar(recomputeDuration + "_count")
+	e.started, startOK = scalar("process_start_time_seconds")
+	e.histogramOK = sumOK && countOK && startOK && e.started > 0 &&
+		math.Trunc(e.obs) == e.obs && e.obs < 1<<53 && (e.obs > 0 || e.sum == 0)
 	e.buckets = map[float64]float64{}
 	for _, b := range s[recomputeDuration+"_bucket"] {
 		le, ok := bucketBound(b.Labels)
-		if !ok {
+		if _, duplicate := e.buckets[le]; !ok || duplicate || !finiteNonnegative(b.Value) || math.Trunc(b.Value) != b.Value {
+			e.histogramOK = false
 			continue
 		}
 		e.buckets[le] = b.Value
 	}
+	overflow, ok := e.buckets[math.Inf(1)]
+	e.histogramOK = e.histogramOK && ok && overflow == e.obs && len(e.buckets) > 1
+	prior := 0.0
+	for _, le := range sortedBounds(e.buckets) {
+		if e.buckets[le] < prior {
+			e.histogramOK = false
+		}
+		prior = e.buckets[le]
+	}
 	return e
+}
+
+func finiteNonnegative(n float64) bool {
+	return n >= 0 && !math.IsInf(n, 1)
 }
 
 // bucketBound pulls `le` out of a histogram bucket's label text. `+Inf` is a
 // legitimate bound and parses as math.Inf(1).
 func bucketBound(labels string) (float64, bool) {
-	i := strings.Index(labels, `le="`)
-	if i < 0 {
+	bound, ok := strings.CutPrefix(labels, `{le="`)
+	if !ok {
 		return 0, false
 	}
-	rest := labels[i+4:]
-	j := strings.IndexByte(rest, '"')
-	if j < 0 {
+	bound, ok = strings.CutSuffix(bound, `"}`)
+	if !ok {
 		return 0, false
 	}
-	v, err := strconv.ParseFloat(rest[:j], 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
+	v, err := strconv.ParseFloat(bound, 64)
+	return v, err == nil && v >= 0
 }
 
 // histogramQuantile answers at BUCKET RESOLUTION: the smallest bucket bound whose
@@ -210,13 +241,8 @@ func histogramQuantile(buckets map[float64]float64, total, q float64) (float64, 
 	if total <= 0 || len(buckets) == 0 {
 		return 0, false
 	}
-	bounds := make([]float64, 0, len(buckets))
-	for le := range buckets {
-		bounds = append(bounds, le)
-	}
-	sort.Float64s(bounds)
 	want := q * total
-	for _, le := range bounds {
+	for _, le := range sortedBounds(buckets) {
 		if buckets[le] >= want {
 			return le, true
 		}
@@ -224,16 +250,37 @@ func histogramQuantile(buckets map[float64]float64, total, q float64) (float64, 
 	return math.Inf(1), true
 }
 
+func sortedBounds(buckets map[float64]float64) []float64 {
+	bounds := make([]float64, 0, len(buckets))
+	for le := range buckets {
+		bounds = append(bounds, le)
+	}
+	sort.Float64s(bounds)
+	return bounds
+}
+
 // deltaBuckets subtracts the opening scrape from the closing one, so the latency
 // distribution describes THIS RUN rather than the engine's whole uptime. A
 // process that has been up for a day carries a histogram dominated by whatever it
 // did yesterday.
-func deltaBuckets(first, last engineSample) (map[float64]float64, float64) {
-	out := map[float64]float64{}
-	for le, v := range last.buckets {
-		out[le] = v - first.buckets[le]
+func deltaBuckets(first, last engineSample) (map[float64]float64, float64, bool) {
+	if !first.histogramOK || !last.histogramOK || first.started != last.started ||
+		last.sum < first.sum || last.obs < first.obs || len(first.buckets) != len(last.buckets) ||
+		(last.obs == first.obs && last.sum != first.sum) {
+		return nil, 0, false
 	}
-	return out, last.obs - first.obs
+	out := map[float64]float64{}
+	prior := 0.0
+	for _, le := range sortedBounds(last.buckets) {
+		before, ok := first.buckets[le]
+		delta := last.buckets[le] - before
+		if !ok || delta < prior {
+			return nil, 0, false
+		}
+		out[le] = delta
+		prior = delta
+	}
+	return out, last.obs - first.obs, true
 }
 
 func humanBytes(b float64) string {
@@ -302,12 +349,13 @@ func (c *capacityReport) render(url string, portfolios int) string {
 			"not exported.\n")
 	}
 
-	buckets, n := deltaBuckets(c.first, c.last)
-	if n <= 0 {
-		fmt.Fprintf(&b, "recompute latency:          NO RECOMPUTES RAN during this run. The engine "+
-			"is up and exporting, and it did not recompute anything — check that it is subscribed "+
-			"to the subject this harness publishes on and that the shard ring assigns it these "+
-			"portfolios.\n")
+	buckets, n, valid := deltaBuckets(c.first, c.last)
+	if !c.haveFirst || !c.lastReadOK || c.polls-c.failed < 2 || c.interrupted || !valid {
+		fmt.Fprintln(&b, "recompute latency:          UNKNOWN — the run lacks a comparable opening and closing histogram from one engine process.")
+		return b.String()
+	}
+	if n == 0 {
+		fmt.Fprintln(&b, "recomputes:                 0 observed between the opening and closing scrapes")
 		return b.String()
 	}
 	fmt.Fprintf(&b, "recomputes:                 %.0f (mean %.1f ms)\n",
@@ -321,7 +369,8 @@ func (c *capacityReport) render(url string, portfolios int) string {
 			continue
 		}
 		if math.IsInf(le, 1) {
-			fmt.Fprintf(&b, "recompute %s:              > 2.5s (over the widest bucket)\n", q.label)
+			bounds := sortedBounds(buckets)
+			fmt.Fprintf(&b, "recompute %s:              > %g seconds (over the widest finite bucket)\n", q.label, bounds[len(bounds)-2])
 			continue
 		}
 		fmt.Fprintf(&b, "recompute %s:              <= %s (bucket resolution)\n",
