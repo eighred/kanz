@@ -39,10 +39,21 @@ a backup while application or venue writers are running, streams database,
 Redis and NATS artifacts without exposing mounted credentials to the host, and
 uploads only through the EC2 instance role to the KMS-encrypted, Object-Locked
 Osaka bucket. Backup verifies and records the version ID returned by the upload.
-Restore selects the latest key, pins its version and verifies the KMS key,
-unexpired Governance retention and downloaded bytes for that version. Both
-receipts include the key, version ID and SHA-256. A pre-existing NATS backup
-runner prevents a new snapshot. Cleanup requires ownership of the created pod.
+Restore selects the latest key by default. Capture the result of the authorized
+backup and use its `Evidence` property when restoring that checkpoint.
+
+```powershell
+$backup = .\tools\Invoke-TestnetDataPlaneRecovery.ps1 -Operation Backup
+# During the later restore drill
+.\tools\Invoke-TestnetDataPlaneRecovery.ps1 -Operation Restore -BackupReceipt $backup.Evidence
+```
+
+This selects the recorded key and version directly and requires the downloaded
+SHA-256 to match the receipt. Both restore modes verify the KMS key, unexpired
+Governance retention and downloaded bytes. Both receipts include the key,
+version ID and SHA-256.
+A pre-existing NATS backup runner prevents a new snapshot. Cleanup requires
+ownership of the created pod.
 Restore creates a temporary, network-denied replacement namespace, checks each
 database's migration/table/RLS state plus Redis and NATS inventory, deletes the
 drill namespace and reports elapsed drill time. Operational RPO/RTO remain

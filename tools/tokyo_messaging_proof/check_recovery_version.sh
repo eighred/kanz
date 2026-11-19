@@ -50,6 +50,73 @@ for case_name in absent suspended changed_head expired changed_download corrupt;
 done
 echo 'Verified pinned S3 requests and six object custody refusals'
 
+# Even the older key now has a newer version. Only the retained receipt
+# identifies the original checkpoint. Default discovery should select today.
+(
+  old_key='testnet/data-plane/20261118T010000Z-123456789abc/bundle.tar.gz'
+  new_key='testnet/data-plane/20261119T010000Z-fedcba987654/bundle.tar.gz'
+  old_version="old+/=v'1"
+  aws() {
+    local op=$2 key='' version='' bytes sha
+    shift 2
+    while (($#)); do
+      case $1 in
+        --key) key=$2; shift ;;
+        --version-id=*) version=${1#*=} ;;
+      esac
+      if [[ $# == 1 && "$op" == get-object ]]; then local output=$1; fi
+      shift
+    done
+    printf '%s|%s|%s\n' "$op" "$key" "$version" >>"$work/history-calls"
+    if [[ "$op" == list-objects-v2 ]]; then printf '%s\n' "$new_key"; return; fi
+    case "$key" in
+      "$old_key") version=${version:-overwritten} ;;
+      "$new_key") version=${version:-latest} ;;
+      *) return 1 ;;
+    esac
+    case "$key:$version" in
+      "$old_key:$old_version") bytes=prior-checkpoint ;;
+      "$old_key:overwritten") bytes=replaced-checkpoint ;;
+      "$new_key:latest") bytes=latest-checkpoint ;;
+      *) return 1 ;;
+    esac
+    sha=$(printf '%s' "$bytes" | sha256sum | cut -d' ' -f1)
+    case "$op" in
+      head-object) jq -n --arg v "$version" --arg s "$sha" --argjson len "${#bytes}" \
+        '{VersionId:$v,Metadata:{sha256:$s},ContentLength:$len,ServerSideEncryption:"aws:kms",SSEKMSKeyId:"fixture-kms"}' ;;
+      get-object-retention) echo '{"Retention":{"Mode":"GOVERNANCE","RetainUntilDate":"2100-01-01T00:00:00Z"}}' ;;
+      get-object) printf '%s' "$bytes" >"$output"; jq -n --arg v "$version" '{VersionId:$v}' ;;
+      *) return 1 ;;
+    esac
+  }
+  old_sha=$(printf '%s' prior-checkpoint | sha256sum | cut -d' ' -f1)
+  selection=$(jq -cn --arg key "$old_key" --arg version "$old_version" --arg sha "$old_sha" \
+    '{key:$key,version_id:$version,sha256:$sha}')
+  result=$(download_restore_archive "$work/selected" "$(printf '%s' "$selection" | base64 -w0)")
+  jq -e --argjson want "$selection" 'contains($want)' <<<"$result" >/dev/null
+  [[ "$(cat "$work/selected")" == prior-checkpoint ]]
+  [[ "$(cat "$work/history-calls")" == "$(printf '%s|%s|%s\n' head-object "$old_key" "$old_version" \
+    get-object-retention "$old_key" "$old_version" get-object "$old_key" "$old_version")" ]]
+  result=$(download_restore_archive "$work/latest")
+  jq -e --arg k "$new_key" '.key==$k and .version_id=="latest"' <<<"$result" >/dev/null
+  [[ "$(cat "$work/latest")" == latest-checkpoint ]]
+
+  for filter in '.sha256=("f"*64)' '.version_id="missing"' '.key="outside"' 'del(.sha256)' '.version_id="null"'; do
+    selected=$(jq -c "$filter" <<<"$selection" | base64 -w0)
+    : >"$work/history-calls"
+    if (download_restore_archive "$work/rejected" "$selected") >"$work/result" 2>/dev/null; then exit 1; fi
+    [[ ! -s "$work/result" && ! -e "$work/rejected" ]]
+    if grep -q '^list-objects-v2|' "$work/history-calls"; then echo 'Invalid receipt fell back to latest' >&2; exit 1; fi
+  done
+  for field in key sha256; do
+    selected=$(jq -c --arg field "$field" '.[$field] |= ("\n" + .)' <<<"$selection" | base64 -w0)
+    : >"$work/history-calls"
+    if (download_restore_archive "$work/rejected" "$selected") >"$work/result" 2>/dev/null; then exit 1; fi
+    [[ ! -s "$work/result" && ! -s "$work/history-calls" && ! -e "$work/rejected" ]]
+  done
+  echo 'Verified selection of a prior version, independent latest discovery and seven receipt refusals'
+)
+
 # Inspect the production backup paths at its first post-allocation API call.
 # A refused lookup must also remove the private directory.
 path_record="$work/observed-directory"
