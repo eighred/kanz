@@ -26,11 +26,20 @@ h.close()
 """
 
 
+def signing_secret():
+    doc, = [d for d in network.messaging.docs("kanz/infra/deploy/rig-dev-secrets.yaml")
+            if d["metadata"]["name"] == "api-gateway-secrets"]
+    data = doc.get("stringData") or {}
+    if doc["metadata"]["namespace"] != NS or set(data) != {"signing-secret"} or not data["signing-secret"]:
+        raise ValueError("unexpected gateway credential mount")
+    data["signing-secret"] = secrets.token_hex(32)
+    return doc
+
+
 class Gateway:
     def __init__(self, k, image):
         self.k = k
         self.image = image
-        self.signing = secrets.token_hex(32)
         self.key = secrets.token_hex(16)
         self.report = {}
 
@@ -50,11 +59,8 @@ class Gateway:
         identity, = [d for d in network.messaging.docs("kanz/infra/deploy/identity-deploy.yaml") if d["kind"] == "Service"]
         create(config, issuer, identity, network.messaging.python_pod("gateway-reader", NS))
         self.k("-n", NS, "wait", "--for=condition=Ready", "pod/gateway-reader", "--timeout=120s")
-        doc, = [d for d in network.messaging.docs("kanz/infra/deploy/rig-dev-secrets.yaml")
-                if d["metadata"]["name"] == "api-gateway-secrets"]
-        if doc["metadata"]["namespace"] != NS or set(doc["stringData"]) != {"signing-secret"}:
-            raise ValueError("unexpected gateway credential mount")
-        doc["stringData"]["signing-secret"] = self.signing
+        doc = signing_secret()
+        self.signing = doc["stringData"]["signing-secret"]
         create(doc)
         raw = network.messaging.feed.command([sys.executable, "tools/rig_dev_patch.py", "--keep-spiffe",
                                               "kanz/infra/deploy/api-gateway-deploy.yaml"])
