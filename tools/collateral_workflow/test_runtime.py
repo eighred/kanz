@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -17,9 +16,10 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(grants, {'publish': {'allow': [subject]}, 'subscribe': {'allow': ['_INBOX.>']}})
         observer, = [s for s in config.splitlines() if s.startswith('{user: observer,')]
         api = json.loads(observer.split('permissions: ', 1)[1][:-1])['publish']['allow']
-        self.assertTrue(api)
-        self.assertTrue(all(re.fullmatch(r'\$JS\.API\.(?:STREAM\.(?:INFO|MSG\.GET)|CONSUMER\.LIST)\.ACCOUNTING', s)
-                            for s in api))
+        self.assertCountEqual(api, ['$JS.API.STREAM.INFO.ACCOUNTING', '$JS.API.STREAM.MSG.GET.ACCOUNTING',
+                                    '$JS.API.CONSUMER.LIST.ACCOUNTING',
+                                    '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.snapshot',
+                                    '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.confirmation.custody'])
 
     def test_diagnostics_do_not_disclose_output(self):
         with patch('runtime.subprocess.run') as run:

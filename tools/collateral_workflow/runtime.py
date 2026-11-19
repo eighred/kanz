@@ -19,6 +19,13 @@ PINS = json.loads((ROOT / 'tools/dev_compose/images.json').read_bytes())
 DATABASE = 'docker.io/library/postgres:16-alpine'
 BROKER = 'docker.io/library/nats:2.10-alpine'
 BOX = 'docker.io/natsio/nats-box:0.14.5'
+PROBE_FAILURES = frozenset({
+    'observer connection failed', 'observer JetStream unavailable', 'accounting stream unavailable',
+    'source publication unavailable', 'source delivery has not been acknowledged exactly',
+    'expected a unique Accounting input durable', 'authenticated gateway request failed',
+    'workflow state, principal or revision differs', 'workflow settlement leg differs',
+    'invalid workflow response', 'checker or instruction revision differs',
+})
 
 
 def public(ref):
@@ -34,6 +41,8 @@ def docker(stage, *args, env=None, data=None, timeout=90):
         raise RuntimeError(stage + ' timed out') from None
     if result.returncode:
         detail = result.stderr.strip()
+        if detail.splitlines() and detail.splitlines()[-1] in PROBE_FAILURES:
+            raise RuntimeError(stage + ': ' + detail.splitlines()[-1])
         if re.fullmatch(r'gateway (?:propose|self-approve|approve|instructed|settled) returned [1-5][0-9]{2}, expected [1-5][0-9]{2}', detail):
             raise RuntimeError(stage + ': ' + detail)
         raise RuntimeError(f'{stage} exited {result.returncode}')
@@ -75,7 +84,10 @@ def nats_configuration():
         grants = {'publish': {'allow': [route]}, 'subscribe': {'allow': ['_INBOX.>']}}
         lines.append('{user: ' + user + ', password: $' + variable + ', permissions: ' + json.dumps(grants) + '},')
     observer = {'publish': {'allow': ['$JS.API.STREAM.INFO.ACCOUNTING', '$JS.API.STREAM.MSG.GET.ACCOUNTING',
-                                      '$JS.API.CONSUMER.LIST.ACCOUNTING']}, 'subscribe': {'allow': ['_INBOX.>']}}
+                                      '$JS.API.CONSUMER.LIST.ACCOUNTING',
+                                      '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.snapshot',
+                                      '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.confirmation.custody']},
+                'subscribe': {'allow': ['_INBOX.>']}}
     lines.append('{user: observer, password: $OBSERVER_KEY, permissions: ' + json.dumps(observer) + '}')
     return '\n'.join(lines + [']}'])
 
@@ -286,6 +298,25 @@ class Estate:
     def published(self):
         return self.observed("SELECT count(published_at) FROM outbox WHERE subject='accounting.collateral.recorded'")
 
+    def diagnose(self):
+        # Export only fixed categories and numeric state. Service errors can contain DSNs.
+        categories = ('store init failed', 'custody config invalid', 'http server failed',
+                      'invalid collateral source authority configuration', 'fill consumer stopped with error',
+                      'metrics server failed', 'permission denied', 'Permissions Violation',
+                      'no such host', 'cannot assign requested address', 'connection refused',
+                      'context deadline exceeded', 'no responders available', 'consumer name already in use')
+        for name in ('accounting', 'gateway', 'nats', 'postgres'):
+            proc = subprocess.run(['docker', 'logs', '--tail', '150', self.name(name)], capture_output=True,
+                                  timeout=10, text=True, errors='replace')
+            messages = proc.stdout + proc.stderr
+            seen = [category for category in categories if category in messages]
+            state = docker('read service state', 'inspect', '-f', '{{.State.Status}} {{.State.ExitCode}}', self.name(name))
+            if re.fullmatch(r'(running|exited|created|dead|restarting) [0-9]+', state):
+                print(name, state, seen, flush=True)
+        counts = json.loads(self.receipt())
+        if len(counts) == 6 and all(type(n) is int for n in counts):
+            print('Database workflow counts:', counts, flush=True)
+
 
 def main(programs):
     if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or os.environ.get('GITHUB_REPOSITORY') != 'eighred/kanz':
@@ -297,6 +328,12 @@ def main(programs):
         try:
             estate.setup()
             estate.recover()
+        except Exception:
+            try:
+                estate.diagnose()
+            except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+                print('Partial estate diagnostics available.', flush=True)
+            raise
         finally:
             estate.clean()
         print('All owned containers, networks and persistent backing volumes were removed.', flush=True)
