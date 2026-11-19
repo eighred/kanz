@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -14,6 +17,7 @@ import (
 const engineScrapeText = `# HELP go_goroutines Number of goroutines that currently exist.
 # TYPE go_goroutines gauge
 go_goroutines 87
+process_start_time_seconds 1795070069
 go_memstats_sys_bytes 4.194304e+07
 process_resident_memory_bytes 2.68435456e+08
 kanz_risk_recompute_inflight 4
@@ -106,8 +110,15 @@ func TestAnUnreadableEndpointRefusesToReport(t *testing.T) {
 // 1s to 2.5s would invent digits the exporter never had, and the number would be
 // quoted as a measurement.
 func TestHistogramQuantileIsBucketResolution(t *testing.T) {
-	b, n := deltaBuckets(emptySample(), readEngine(parse(t, engineScrapeText)))
-	if n != 100 {
+	last := readEngine(parse(t, engineScrapeText))
+	first := last
+	first.obs, first.sum = 0, 0
+	first.buckets = make(map[float64]float64, len(last.buckets))
+	for le := range last.buckets {
+		first.buckets[le] = 0
+	}
+	b, n, valid := deltaBuckets(first, last)
+	if !valid || n != 100 {
 		t.Fatalf("observation delta = %v, want 100", n)
 	}
 	for _, tc := range []struct {
@@ -137,7 +148,51 @@ func TestHistogramQuantileIsBucketResolution(t *testing.T) {
 	}
 }
 
-// emptySample is the zeroed opening scrape the delta is taken against.
-func emptySample() engineSample {
-	return engineSample{buckets: map[float64]float64{}}
+func TestReportRequiresComparableHistogramAcrossTheObservedRun(t *testing.T) {
+	hist := func(start, count int) string {
+		return fmt.Sprintf("process_start_time_seconds %d\n"+
+			"%s_count %d\n%s_sum %d\n%s_bucket{le=\"0.5\"} 0\n%s_bucket{le=\"+Inf\"} %d\n",
+			start, recomputeDuration, count, recomputeDuration, count, recomputeDuration, recomputeDuration, count)
+	}
+	base := hist(10, 5)
+	const unknown = "recompute latency:          UNKNOWN"
+	for _, tc := range []struct {
+		name  string
+		polls []string // empty response denotes a failed HTTP scrape
+		want  string
+	}{
+		{"observed idle", []string{base, base}, "0 observed between the opening and closing scrapes"},
+		{"observed growth", []string{base, hist(10, 7)}, "2 (mean 1000.0 ms)"},
+		{"one sample", []string{base}, unknown},
+		{"missing opening", []string{"", base, base}, unknown},
+		{"missing closing", []string{base, base, ""}, unknown},
+		{"absent series", []string{"go_goroutines 4\n", "go_goroutines 4\n"}, unknown},
+		{"missing count", []string{base, strings.Replace(base, recomputeDuration+"_count 5\n", "", 1)}, unknown},
+		{"missing process identity", []string{base, strings.Replace(base, "process_start_time_seconds 10\n", "", 1)}, unknown},
+		{"counter reset then recovered", []string{base, hist(10, 1), hist(10, 8)}, unknown},
+		{"restart with higher count", []string{base, hist(11, 8)}, unknown},
+		{"different buckets", []string{base, strings.Replace(base, `le="0.5"`, `le="1"`, 1)}, unknown},
+		{"inconsistent count", []string{base, strings.Replace(base, `le="+Inf"} 5`, `le="+Inf"} 7`, 1)}, unknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			index := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				body := tc.polls[index]
+				index++
+				if body == "" {
+					http.Error(w, "metrics unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				_, _ = fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+			var report capacityReport
+			for range tc.polls {
+				report.pollOnce(t.Context(), server.URL)
+			}
+			if out := report.render(server.URL, 1); !strings.Contains(out, tc.want) {
+				t.Errorf("expected %q in report:\n%s", tc.want, out)
+			}
+		})
+	}
 }
