@@ -31,6 +31,12 @@ def cluster_resources(cluster):
     prefix = f"k3d-{cluster}"
     names = {"container": {f"{prefix}-{s}" for s in ("server-0", "server-1", "agent-0", "tools")},
              "network": {prefix}, "volume": {prefix + "-images"}}
+    # k3d deletes by cluster label. A different topology with this label
+    # can still exist even if all four names we expect happen to be absent.
+    labelled = run(["docker", "container", "ls", "--all", "--filter", f"label=k3d.cluster={cluster}",
+                    "--format", "{{.Names}}"]).splitlines()
+    if set(labelled) - names["container"]:
+        raise RuntimeError(f"refusing unexpected containers with cluster label {cluster}")
     found = {}
     for kind, expected in names.items():
         args = ["docker", kind, "ls"]

@@ -7,6 +7,12 @@ import operator_placement as fixture
 
 
 class PlacementCleanupTests(unittest.TestCase):
+    def test_unexpected_topology_with_same_label_is_refused(self):
+        with mock.patch.object(fixture, "run", return_value="k3d-existing-server-2\n") as docker:
+            with self.assertRaisesRegex(RuntimeError, "unexpected containers"):
+                fixture.cluster_resources("existing")
+            docker.assert_called_once()
+
     def test_preexisting_name_refuses_before_creation_or_cleanup(self):
         seen = {"network": {"k3d-existing"}}
         with mock.patch.object(fixture, "cluster_resources", return_value=seen), \
