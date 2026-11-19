@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -87,22 +88,53 @@ func (r *recordedBFFRoutes) HandleFunc(pattern string, handler func(http.Respons
 	r.handlers[pattern] = strings.TrimSuffix(name[strings.LastIndex(name, ".")+1:], "-fm")
 }
 
+func routeExample(pattern string) *http.Request {
+	method, path, found := strings.Cut(pattern, " ")
+	if !found {
+		method, path = http.MethodGet, pattern
+		if pattern == "/api/" {
+			path += "v1/permissions"
+		}
+	}
+	path = strings.NewReplacer("{id}", "fixture-id", "{subject}", "fixture-subject").Replace(path)
+	return httptest.NewRequest(method, path, nil)
+}
+
 func TestBrowserRouteContracts(t *testing.T) {
 	contracts := documentedRoutes(t)
+	staticDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<title>fixture</title>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, withOIDC := range []bool{false, true} {
 		for _, withMetrics := range []bool{false, true} {
 			for _, withStatic := range []bool{false, true} {
 				name := fmt.Sprintf("oidc=%t/metrics=%t/static=%t", withOIDC, withMetrics, withStatic)
 				t.Run(name, func(t *testing.T) {
-					s := new(Server)
+					opts := Options{Identity: testIdentity(t, ""), ClientIP: testClientIP(t),
+						Sessions: session.NewManager(time.Hour), GatewayURL: "http://gateway.invalid",
+					}
 					if withOIDC {
-						s.oidc = new(oidc.Client)
+						opts.OIDC = new(oidc.Client)
 					}
 					if withMetrics {
-						s.metrics = http.NewServeMux()
+						opts.Metrics = http.NewServeMux()
 					}
 					if withStatic {
-						s.static = new(staticHandler)
+						opts.StaticDir = staticDir
+					}
+					s, err := New(&Readiness{}, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() {
+						if err := s.Close(); err != nil {
+							t.Error(err)
+						}
+					})
+					mounted, ok := s.mux.(*http.ServeMux)
+					if !ok {
+						t.Fatalf("cannot inspect mounted patterns on %T", s.mux)
 					}
 					actual := &recordedBFFRoutes{
 						mux: http.NewServeMux(), handlers: make(map[string]string),
@@ -111,6 +143,10 @@ func TestBrowserRouteContracts(t *testing.T) {
 					s.routes(actual)
 					enabled := map[string]bool{"always": true, "oidc": withOIDC, "metrics": withMetrics, "static": withStatic}
 					for pattern, contract := range contracts {
+						_, matched := mounted.Handler(routeExample(pattern))
+						if (matched == pattern) != enabled[contract.profile] {
+							t.Errorf("New matched %q for %q with %s enabled=%t", matched, pattern, contract.profile, enabled[contract.profile])
+						}
 						if !enabled[contract.profile] {
 							continue
 						}
@@ -152,14 +188,8 @@ func TestDocumentedSessionRoutesRefuseMissingSession(t *testing.T) {
 			continue
 		}
 		t.Run(pattern, func(t *testing.T) {
-			method, path, found := strings.Cut(pattern, " ")
-			if !found {
-				method, path = http.MethodGet, pattern+"v1/permissions"
-			}
-			path = strings.NewReplacer("{id}", "fixture-id", "{subject}", "fixture-subject").Replace(path)
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(method, path, nil)
-			s.ServeHTTP(rec, req)
+			s.ServeHTTP(rec, routeExample(pattern))
 			if rec.Code != http.StatusUnauthorized || rec.Header().Get("Content-Type") != "application/json" {
 				t.Fatalf("expected 401 JSON, received %d %q", rec.Code, rec.Header().Get("Content-Type"))
 			}
