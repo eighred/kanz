@@ -15,7 +15,7 @@ K3S_VERSION = "v1.36.4+k3s1"
 K3S_SHA = "835873f37245fc615f547a2fe2af9402a347875f13fa64a1f136de644955ea3f"
 
 
-def run(args, *, data=None, timeout=120, environment=None):
+def run(args, *, data=None, timeout=120, environment=None, public_error=None):
     # Arguments, streams and environment may contain fixture credentials.
     # Report only executable and return code; never include a TimeoutExpired
     # traceback containing the original command line.
@@ -25,6 +25,8 @@ def run(args, *, data=None, timeout=120, environment=None):
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{Path(args[0]).name} timed out after {timeout}s") from None
     if result.returncode:
+        if public_error:
+            raise RuntimeError(public_error(result.stderr))
         raise RuntimeError(f"{Path(args[0]).name} exited {result.returncode}")
     return result.stdout.strip()
 

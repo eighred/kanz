@@ -52,7 +52,9 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
       - name: Assemble the public source and control-plane binaries
-        run: bash tools/operator_onboarding/build.sh
+        run: |
+          /usr/bin/python3 -B -m unittest tools.operator_onboarding.test_proof
+          bash tools/operator_onboarding/build.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: operator-onboarding-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}

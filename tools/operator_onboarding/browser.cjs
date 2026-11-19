@@ -10,6 +10,13 @@ const { execFileSync } = require('node:child_process')
 
 const base = 'https://localhost:18443'
 let stage = 'input'
+const routes = new Map([
+  ['/redeem', 'invitePage'], ['/auth/redeem', 'redeem'], ['/auth/me', 'session'],
+  ['/auth/mfa', 'factors'], ['/auth/mfa/register/begin', 'enrollBegin'], ['/auth/mfa/register/finish', 'enrollFinish'],
+  ['/auth/mfa/stepup/begin', 'stepUpBegin'], ['/auth/mfa/stepup/finish', 'stepUpFinish'],
+  ['/api/v1/control/provisions', 'listRuns'], ['/api/v1/control/nodes', 'addNode'],
+])
+const statuses = new Map()
 
 function tool(name, args, input, env) {
   return execFileSync(name, args, { input, env, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 })
@@ -68,6 +75,13 @@ function serve(identity) {
 }
 
 async function onboard(page, context, input) {
+  // Record only recognized local routes and numeric status. Bodies, query
+  // strings, headers and arbitrary browser exceptions can carry credentials.
+  page.on('response', response => {
+    const url = new URL(response.url())
+    const label = url.origin === base && routes.get(url.pathname)
+    if (label) statuses.set(label, response.status())
+  })
   const cdp = await context.newCDPSession(page)
   await cdp.send('WebAuthn.enable')
   await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'usb',
@@ -161,4 +175,9 @@ async function main() {
   }
 }
 
-main().catch(() => { console.error('Operator browser qualification failed at ' + stage); process.exitCode = 1 })
+main().catch(error => {
+  const category = error.name === 'TimeoutError' ? 'timeout'
+    : /net::ERR_CERT_/.test(error.message) ? 'tls' : 'failure'
+  console.error(JSON.stringify({ stage, category, statuses: Object.fromEntries(statuses) }))
+  process.exitCode = 1
+})

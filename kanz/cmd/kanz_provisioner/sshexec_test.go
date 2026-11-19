@@ -150,7 +150,7 @@ func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, ex
 // serveOneHanging handshakes one connection, accepts the session/exec request,
 // replies true, and then blocks forever without ever writing output or an
 // exit-status. It simulates a remote command that never returns.
-func serveOneHanging(c net.Conn, cfg *ssh.ServerConfig) {
+func serveOneHanging(c net.Conn, cfg *ssh.ServerConfig, beforeSession bool, reached chan<- struct{}) {
 	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
 	if err != nil {
 		_ = c.Close()
@@ -162,6 +162,11 @@ func serveOneHanging(c net.Conn, cfg *ssh.ServerConfig) {
 			_ = nc.Reject(ssh.UnknownChannelType, "only session")
 			continue
 		}
+		if beforeSession {
+			close(reached)
+			_ = sc.Wait()
+			return
+		}
 		ch, chReqs, err := nc.Accept()
 		if err != nil {
 			continue
@@ -171,9 +176,9 @@ func serveOneHanging(c net.Conn, cfg *ssh.ServerConfig) {
 				if req.Type == "exec" {
 					_ = ch
 					_ = req.Reply(true, nil)
-					// Hang forever: never write output, never send exit-status,
-					// never close the channel.
-					select {}
+					close(reached)
+					_ = sc.Wait()
+					return
 				}
 				_ = req.Reply(false, nil)
 			}
@@ -185,7 +190,7 @@ func serveOneHanging(c net.Conn, cfg *ssh.ServerConfig) {
 // startHangingSSHServer runs a minimal SSH server on a random port that accepts
 // the given authorized key and, for any exec request, accepts it but never
 // completes — proving sshRun's ctx-honoring behavior on a truly hung command.
-func startHangingSSHServer(t *testing.T, authorized ssh.PublicKey) (string, ssh.PublicKey) {
+func startHangingSSHServer(t *testing.T, authorized ssh.PublicKey, beforeSession bool, reached chan<- struct{}) (string, ssh.PublicKey) {
 	t.Helper()
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
@@ -210,7 +215,7 @@ func startHangingSSHServer(t *testing.T, authorized ssh.PublicKey) (string, ssh.
 			if err != nil {
 				return
 			}
-			go serveOneHanging(c, cfg)
+			go serveOneHanging(c, cfg, beforeSession, reached)
 		}
 	}()
 	return ln.Addr().String(), hostKey.PublicKey()
@@ -218,7 +223,7 @@ func startHangingSSHServer(t *testing.T, authorized ssh.PublicKey) (string, ssh.
 
 func TestSSHRunHonorsContextOnHungRun(t *testing.T) {
 	pem, pub := clientKeyPEM(t)
-	addr, hostPub := startHangingSSHServer(t, pub) // accepts + auths, never completes exec
+	addr, hostPub := startHangingSSHServer(t, pub, false, make(chan struct{}))
 	trustHostKey(t, addr, hostPub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -232,6 +237,67 @@ func TestSSHRunHonorsContextOnHungRun(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("sshRun did not abort on ctx cancellation (took %s)", time.Since(start))
+	}
+}
+
+func TestSSHRunCancelsPendingSessionOpen(t *testing.T) {
+	key, public := clientKeyPEM(t)
+	reached := make(chan struct{})
+	addr, hostKey := startHangingSSHServer(t, public, true, reached)
+	trustHostKey(t, addr, hostKey)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sshRun(ctx, addr, "fixture", key, "synthetic-script") }()
+	select {
+	case <-reached:
+	case <-time.After(3 * time.Second):
+		t.Fatal("authenticated test server never received a session request")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "synthetic-script") {
+			t.Fatal("the pending session did not return the local cancellation cause")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pending SSH session did not observe cancellation")
+	}
+}
+
+func TestSSHRunBoundsSilentHandshake(t *testing.T) {
+	key, _ := clientKeyPEM(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	addr := listener.Addr().String()
+	trustHostKey(t, addr, newHostKey(t).PublicKey())
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sshRun(ctx, addr, "fixture", key, "synthetic-script") }()
+	select {
+	case c := <-accepted:
+		defer func() { _ = c.Close() }()
+	case <-time.After(3 * time.Second):
+		t.Fatal("test server did not receive the TCP connection")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("expected the handshake deadline")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("silent handshake remained open beyond the deadline")
 	}
 }
 

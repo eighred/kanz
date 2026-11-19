@@ -14,6 +14,9 @@ import (
 // dialTimeout bounds both the TCP dial and the SSH handshake.
 const dialTimeout = 30 * time.Second
 
+// Only this locally produced handshake diagnostic may be reported verbatim.
+type hostVerificationError struct{ error }
+
 // sshRun opens one authenticated session. Only the fixed shell command appears
 // in SSH's exec request. The install script is input to that shell.
 //
@@ -26,17 +29,21 @@ const dialTimeout = 30 * time.Second
 func sshRun(ctx context.Context, addr, user string, pemKey []byte, script string) error {
 	signer, err := ssh.ParsePrivateKey(pemKey)
 	if err != nil {
-		return fmt.Errorf("parse private key: %w", err)
+		return errors.New("parse private key: unsupported, encrypted or malformed SSH bootstrap key")
 	}
 	hostKeys, err := hostKeyCallback()
 	if err != nil {
 		return fmt.Errorf("ssh host key policy: %w", err)
 	}
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeys,
-		Timeout:         dialTimeout,
+		User: user,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: func(name string, remote net.Addr, key ssh.PublicKey) error {
+			if err := hostKeys(name, remote, key); err != nil {
+				return &hostVerificationError{err}
+			}
+			return nil
+		},
 	}
 
 	d := net.Dialer{Timeout: dialTimeout}
@@ -44,17 +51,45 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, script string
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
+	defer func() { _ = conn.Close() }()
+	// NewClientConn and NewSession do not accept a context. Closing the
+	// underlying transport interrupts either phase and a running installer.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline := time.Now().Add(dialTimeout)
+	if parent, ok := ctx.Deadline(); ok && parent.Before(deadline) {
+		deadline = parent
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return errors.New("could not bound the SSH handshake")
+	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("ssh handshake %s: %w", addr, err)
+		if ctx.Err() != nil {
+			return fmt.Errorf("SSH handshake interrupted: %w", ctx.Err())
+		}
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			return fmt.Errorf("SSH handshake timed out: %w", context.DeadlineExceeded)
+		}
+		var verification *hostVerificationError
+		if errors.As(err, &verification) {
+			return fmt.Errorf("SSH host verification: %w", verification)
+		}
+		return errors.New("SSH handshake or user authentication failed")
 	}
 	client := ssh.NewClient(sc, chans, reqs)
 	defer func() { _ = client.Close() }()
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return errors.New("could not clear the SSH handshake deadline")
+	}
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return fmt.Errorf("new session: %w", err)
+		if ctx.Err() != nil {
+			return fmt.Errorf("open SSH session interrupted: %w", ctx.Err())
+		}
+		return errors.New("could not open the authenticated SSH session")
 	}
 	defer func() { _ = sess.Close() }()
 
@@ -62,25 +97,18 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, script string
 	// Stdout/Stderr the SSH client drains both to io.Discard.
 	sess.Stdin = strings.NewReader(script)
 
-	done := make(chan error, 1)
-	go func() { done <- sess.Run("sh -s") }()
-	select {
-	case <-ctx.Done():
-		_ = client.Close()
-		// Cancellation is the selected result; join Run before reading its output.
-		<-done //nolint:errcheck // Cancellation already owns the terminal result.
+	err = sess.Run("sh -s")
+	if ctx.Err() != nil {
 		return fmt.Errorf("remote install interrupted: %w", ctx.Err())
-	case err := <-done:
-		if err != nil {
-			// The command contains the cluster admission token. Both the
-			// output and SSH exit-signal text are controlled by the remote
-			// installer. Only the numeric exit status is safe for Job logs.
-			var exit *ssh.ExitError
-			if errors.As(err, &exit) && exit.ExitStatus() >= 0 {
-				return fmt.Errorf("remote install exited with status %d", exit.ExitStatus())
-			}
-			return errors.New("remote install ended without a confirmed exit status")
-		}
-		return nil
 	}
+	if err != nil {
+		// The script on stdin contains the cluster admission token.
+		// The peer controls exit-signal text. Expose only the numeric status.
+		var exit *ssh.ExitError
+		if errors.As(err, &exit) && exit.ExitStatus() >= 0 {
+			return fmt.Errorf("remote install exited with status %d", exit.ExitStatus())
+		}
+		return errors.New("remote install ended without a confirmed exit status")
+	}
+	return nil
 }

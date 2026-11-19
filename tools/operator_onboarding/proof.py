@@ -22,6 +22,23 @@ NEGATIVE = "kanz77-missing-secret"
 SOCKET = "unix:///run/spiffe/spire-agent.sock"
 
 
+def browser_error(stderr):
+    stages = {"input", "local HTTPS", "Chromium startup", "invitation redemption",
+              "WebAuthn enrollment", "WebAuthn step-up", "node submission"}
+    routes = {"invitePage", "redeem", "session", "factors", "enrollBegin", "enrollFinish",
+              "stepUpBegin", "stepUpFinish", "listRuns", "addNode"}
+    try:
+        report = json.loads(stderr.strip().splitlines()[-1][:1024])
+        stage, category = report["stage"], report["category"]
+        if stage not in stages or category not in {"timeout", "tls", "failure"}:
+            raise ValueError()
+        observed = {key: val for key, val in report["statuses"].items()
+                    if key in routes and type(val) is int and 100 <= val <= 599}
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        return "browser qualification failed; no valid public diagnostic"
+    return f"browser {category} at {stage}; HTTP statuses {json.dumps(observed, sort_keys=True)}"
+
+
 def named(docs, kind, name):
     item, = [item for item in docs if item["kind"] == kind and item["metadata"]["name"] == name]
     return item
@@ -163,6 +180,28 @@ def diagnose_pull(k, namespace, name):
     return obj, events
 
 
+def image_events(obj, events, reason, image, message):
+    for event in events:
+        ref = event.get("involvedObject", {})
+        if (ref.get("uid") == obj["metadata"]["uid"] and ref.get("fieldPath") == "spec.containers{web-bff}" and
+                (event.get("source", {}).get("component") == "kubelet" or
+                 event.get("reportingComponent") == "kubelet") and event.get("reason") == reason):
+            prefix = f'{message} "{image}"'
+            if event.get("message", "").startswith(prefix):
+                yield event["message"][len(prefix):]
+
+
+def unauthorized_pull(obj, events, image):
+    statuses = obj.get("status", {}).get("containerStatuses", [])
+    if not any(s.get("name") == "web-bff" and s.get("image") == image and
+               s.get("state", {}).get("waiting", {}).get("reason") in {"ErrImagePull", "ImagePullBackOff"}
+               for s in statuses):
+        return False
+    reasons = image_events(obj, events, "Failed", image, "Failed to pull image")
+    return any(re.search(r"\b(401 Unauthorized|403 Forbidden|unauthorized|pull access denied|denied: denied)\b",
+                         reason, re.I) for reason in reasons)
+
+
 def registry_proof(k, apply, worker, platform, runtime_env):
     static_path, = [setting["value"] for setting in platform["env"] if setting["name"] == "WEB_BFF_STATIC_DIR"]
     projected = pod("ghcr-cold-pull", "web-bff", platform["image"], worker, {
@@ -176,26 +215,41 @@ def registry_proof(k, apply, worker, platform, runtime_env):
     deadline = time.monotonic() + 140
     while time.monotonic() < deadline:
         obj, events = diagnose_pull(k, NEGATIVE, neg["metadata"]["name"])
-        if any(e["reason"] == "Failed" and re.search(r"unauthorized|denied|401|403",
-                                                      e.get("message", ""), re.I) for e in events):
-            if obj["spec"]["nodeName"] != worker or obj["spec"].get("imagePullSecrets") != [{"name": "ghcr-pull"}]:
+        if unauthorized_pull(obj, events, platform["image"]):
+            if (obj["spec"]["nodeName"] != worker or obj["spec"]["serviceAccountName"] != "web-bff" or
+                    obj["spec"].get("imagePullSecrets") != [{"name": "ghcr-pull"}]):
                 raise RuntimeError("negative pull has wrong placement or ServiceAccount admission")
             break
+        if any(s.get("ready") for s in obj.get("status", {}).get("containerStatuses", [])):
+            raise RuntimeError("worker ran the platform workload with the namespace credential missing")
         time.sleep(2)
     else:
         raise RuntimeError("no explicit unauthenticated GHCR pull failure on fresh worker")
-    print(f"Pod {obj['metadata']['uid']} on {worker}: missing namespace pull secret, GHCR authorization denied.",
-          flush=True)
+    print(json.dumps({"control": "missing registry credential", "worker": worker,
+                      "namespace": NEGATIVE, "podUID": obj["metadata"]["uid"], "serviceAccount": "web-bff",
+                      "imagePullSecrets": ["ghcr-pull"], "image": platform["image"], "cold": True,
+                      "event": "kubelet failed to pull the requested image: registry authorization refused",
+                      "waiting": obj["status"]["containerStatuses"][0]["state"]["waiting"]["reason"]}), flush=True)
     k("-n", NEGATIVE, "delete", "pod/" + neg["metadata"]["name"], "--wait=true")
     assert_cold(worker, platform["image"])
     apply(projected)
     name = projected["metadata"]["name"]
-    k("-n", NS, "wait", "--for=condition=Ready", "pod/" + name, "--timeout=180s")
-    obj, events = diagnose_pull(k, NS, name)
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        obj, events = diagnose_pull(k, NS, name)
+        if unauthorized_pull(obj, events, platform["image"]):
+            raise RuntimeError("GHCR refused the authorized job-local identity for the pinned platform digest")
+        if any(c["type"] == "Ready" and c["status"] == "True" for c in obj["status"].get("conditions", [])):
+            break
+        if obj["status"].get("phase") in {"Failed", "Succeeded"}:
+            raise RuntimeError("the pulled platform process exited before readiness")
+        time.sleep(2)
+    else:
+        raise RuntimeError("platform workload did not reach Ready")
     status, = obj["status"]["containerStatuses"]
     if (obj["spec"]["nodeName"] != worker or obj["spec"]["serviceAccountName"] != "web-bff" or
             obj["spec"].get("imagePullSecrets") != [{"name": "ghcr-pull"}] or not status["ready"] or
-            not any(e["reason"] == "Pulled" and platform["image"] in e.get("message", "") for e in events)):
+            next(image_events(obj, events, "Pulled", platform["image"], "Successfully pulled image"), None) is None):
         raise RuntimeError("positive pod lacks its placement, SA, authenticated pull event or Ready state")
     installed = json.loads(estate.guest(worker, "k3s", "crictl", "inspecti", platform["image"]))["status"]
     if platform["image"] not in installed["repoDigests"] or status["imageID"] not in {
@@ -259,7 +313,7 @@ def main():
         with edge(control, control_ip):
             browser_env = {k: os.environ[k] for k in ("PATH", "HOME", "TEST_MFA_PLAYWRIGHT")}
             receipt = estate.run(["node", str(ROOT / "tools/operator_onboarding/browser.cjs")],
-                                 environment=browser_env,
+                                 environment=browser_env, public_error=browser_error,
                                  data=json.dumps({"base": auth["origin"], "subject": auth["subject"],
                                                   "invite": auth["invite"], "hostname": worker, "ip": worker_ip,
                                                   "sshUser": "ubuntu", "sshHostKey": host_key,
