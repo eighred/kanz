@@ -5,9 +5,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/internal/optimization"
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
@@ -44,6 +47,30 @@ func TestExactProposalRealHTTPPreservesValuesAndNeverPublishes(t *testing.T) {
 	}
 	if p.SchemaVersion != 2 || !p.ReadOnly || p.Trades[0].Notional != "9007199254740993" || p.Trades[0].Quantity != "9007199254740993000000000000" {
 		t.Fatalf("invalid response: %s", body)
+	}
+	// The operator browser qualification consumes this sample. Check the entire
+	// response, allowing only the request-time evaluation timestamp to vary.
+	if p.AsOf.IsZero() {
+		t.Fatal("missing evaluation timestamp")
+	}
+	sample, err := os.ReadFile("testdata/model-proposal-review.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want, got map[string]any
+	if err := json.Unmarshal(sample, &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	asOf, _ := want["AsOf"].(string)
+	if _, err := time.Parse(time.RFC3339Nano, asOf); err != nil {
+		t.Fatal(err)
+	}
+	want["AsOf"] = got["AsOf"]
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("operator proposal fixture differs from served result: %s", body)
 	}
 }
 
