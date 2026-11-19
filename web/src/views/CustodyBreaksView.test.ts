@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import CustodyBreaksView from './CustodyBreaksView.vue'
-import { custody, type CustodyBreak, type CustodyEvidence } from '../api/custody'
-import { ApiError } from '../api/client'
+import { custody, type CustodyBreak, type CustodyDecision, type CustodyEvidence } from '../api/custody'
+import { api, ApiError } from '../api/client'
 
 afterEach(() => vi.restoreAllMocks())
 const row: CustodyBreak = { break_id: 'PF|CUST|quantity|BTC/USD', kind: 'quantity', key: 'BTC/USD', ibor: '1.000000000001', custodian: '1', difference: '0.000000000001', status: 'open', first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-02T00:00:00Z', status_changed_at: '2026-01-01T00:00:00Z', age_seconds: 86400, revision: '1', values_state: 'exact', actions_enabled: true }
@@ -15,6 +15,35 @@ function button(wrapper: ReturnType<typeof mount>, text: string) {
 }
 
 describe('custody exact review', () => {
+  it('identifies the selected break from the queue through confirmation and the recorded receipt', async () => {
+    const other = { ...row, break_id: 'PF2|CUST|quantity|BTC/USD' }
+    vi.spyOn(api, 'get').mockResolvedValue({ breaks: [row, other], count: 2, actions_enabled: true })
+    const post = vi.spyOn(api, 'post').mockImplementation(async (_path, body) => ({
+      ...receipt, break_id: other.break_id, request_id: (body as CustodyDecision).request_id,
+    }))
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      await flushPromises()
+      const rows = wrapper.findAll('tbody tr')
+      expect(rows.map(entry => entry.get('th[scope="row"]').text())).toEqual([row.break_id, other.break_id])
+      await rows[1]!.get('button').trigger('click')
+      const review = wrapper.get('[aria-label="Custody action review"]')
+      expect(review.text()).toContain(other.break_id)
+      await button(wrapper, 'Review action').trigger('click')
+      expect(review.text()).toContain(other.break_id)
+      expect(post).not.toHaveBeenCalled()
+      await button(wrapper, 'Confirm reviewed action').trigger('click')
+      await flushPromises()
+      expect(post).toHaveBeenCalledTimes(1)
+      const [path, decision] = post.mock.calls[0]!
+      expect(path).toBe('/api/v1/custody/breaks/PF2%7CCUST%7Cquantity%7CBTC%2FUSD/actions')
+      const recorded = wrapper.get('[role="status"]').text()
+      expect(recorded).toContain(other.break_id)
+      expect(recorded).toContain((decision as CustodyDecision).request_id)
+      expect(recorded).not.toContain(row.break_id)
+    } finally { wrapper.unmount() }
+  })
+
   it('requires review, preserves the retry identity, and reloads after evidence', async () => {
     const read = vi.spyOn(custody, 'breaks').mockResolvedValue([row])
     const act = vi.spyOn(custody, 'act').mockRejectedValueOnce(new Error('network lost')).mockResolvedValueOnce(receipt)
