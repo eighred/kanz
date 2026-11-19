@@ -68,6 +68,18 @@ func publish(ctx context.Context, kind string) error {
 		return errors.New("fixture broker connection failed")
 	}
 	defer func() { _ = c.Close() }()
+	cfg, event := fixturePublication(kind, at)
+	producer, err := bus.NewProducer(c, cfg)
+	if err != nil {
+		return errors.New("fixture producer refused")
+	}
+	if err := producer.Publish(ctx, event); err != nil {
+		return errors.New("fixture publication failed")
+	}
+	return nil
+}
+
+func fixturePublication(kind string, at time.Time) (bus.ProducerConfig, bus.Event) {
 	source, eventType := "feed", "accounting.collateral.snapshot"
 	var payload proto.Message = snapshot(at)
 	route, key, schema := eventType, portfolio, "collateral.v1.WorkflowSnapshot:1"
@@ -78,16 +90,9 @@ func publish(ctx context.Context, kind string) error {
 			LotId: "lot-1", CustodianId: "custodian", AccountId: "account", CumulativeQuantity: number(60),
 			InstructionRevision: 2, SettledAt: timestamppb.New(at)}
 	}
-	producer, err := bus.NewProducer(c, bus.ProducerConfig{Source: source, ProducerVersion: "rehearsal", Tenant: tenant})
-	if err != nil {
-		return errors.New("fixture producer refused")
-	}
-	err = producer.Publish(ctx, bus.Event{Subject: route, EventType: eventType, EventClass: envelope.EventClass_EVENT_CLASS_FACT,
-		SchemaVersion: 1, Domain: "accounting", EventTime: at, PartitionKey: key, PayloadSchemaRef: schema, Payload: payload})
-	if err != nil {
-		return errors.New("fixture publication failed")
-	}
-	return nil
+	return bus.ProducerConfig{Source: source, ProducerVersion: "rehearsal", Tenant: tenant}, bus.Event{
+		Subject: route, EventType: eventType, EventClass: envelope.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion: 1, Domain: "accounting", EventTime: at, PartitionKey: key, PayloadSchemaRef: schema, Payload: payload}
 }
 
 // The observer waits for the real Accounting durable to acknowledge the last
@@ -116,7 +121,7 @@ func receipt(ctx context.Context, route string, deliveries uint64) error {
 			return errors.New("recorded FACT count differs")
 		}
 		env, payload, err := bus.Unframe(last.Data)
-		if err != nil || env.GetTenantId() != tenant || env.GetEventType() != route || env.GetSource() != "accounting" ||
+		if err != nil || bus.Validate(env) != nil || env.GetTenantId() != tenant || env.GetEventType() != route || env.GetSource() != "accounting" ||
 			env.GetEventClass() != envelope.EventClass_EVENT_CLASS_FACT || env.GetPartitionKey() != workflow ||
 			env.GetPayloadSchemaRef() != "collateral.v1.WorkflowRecorded:1" {
 			return errors.New("recorded FACT envelope differs")
@@ -125,6 +130,9 @@ func receipt(ctx context.Context, route string, deliveries uint64) error {
 		if err := proto.Unmarshal(payload, &state); err != nil || state.WorkflowId != workflow ||
 			state.Revision < 1 || uint64(state.Revision) != deliveries || state.RequestId != env.CorrelationId {
 			return errors.New("recorded FACT revision differs")
+		}
+		if _, ok := dec.InDomainDeep(&state); !ok {
+			return errors.New("recorded workflow decimal is outside the supported domain")
 		}
 		fmt.Printf("%x", sha256.Sum256(payload))
 		return nil
@@ -234,8 +242,9 @@ func gateway(ctx context.Context, mode string) error {
 		return errors.New("workflow state, principal or revision differs")
 	}
 	leg := state.Legs[0]
-	if leg.AgreementId != "CSA1" || leg.LotId != "lot-1" || leg.AccountId != "account" || leg.CustodianId != "custodian" ||
-		leg.Quantity == nil || dec.FromProto(leg.Quantity).Cmp(big.NewRat(60, 1)) != 0 {
+	quantity, ok := dec.FromProtoChecked(leg.GetQuantity())
+	if leg == nil || leg.AgreementId != "CSA1" || leg.LotId != "lot-1" || leg.AccountId != "account" || leg.CustodianId != "custodian" ||
+		leg.Quantity == nil || !ok || quantity.Cmp(big.NewRat(60, 1)) != 0 {
 		return errors.New("workflow settlement leg differs")
 	}
 	if wantStatus == pb.WorkflowStatus_WORKFLOW_STATUS_INSTRUCTED && (state.Actor != "checker" || state.PostingRevision != 2) {
