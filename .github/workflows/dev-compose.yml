@@ -1,0 +1,84 @@
+name: Disposable developer Compose lifecycle
+on:
+  pull_request:
+    paths: &dev_inputs
+      - 'tools/dev_compose/**'
+      - '.github/workflows/dev-compose.yml'
+      - 'kanz/dev/**'
+      - 'kanz/Makefile'
+      - 'kanz/build/go-mod-download.sh'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'schemas/buf*.yaml'
+      - 'schemas/bootstrap-go-sdk.sh'
+      - 'kanz/cmd/kanz_migrate/Dockerfile'
+      - 'kanz/services/api_gateway/Dockerfile'
+      - 'kanz/services/risk_engine/Dockerfile'
+  push:
+    branches: [main]
+    paths: *dev_inputs
+permissions: {}
+jobs:
+  fresh-compose:
+    if: github.repository == 'eighred/kanz' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify qualification parent and disposable virtualization
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -c /dev/kvm
+          python3 -B -m unittest discover -s tools/dev_compose -p 'test_*.py'
+          sudo apt-get -qq update
+          sudo apt-get install -y --no-install-recommends skopeo
+          mkdir -m 700 "$RUNNER_TEMP/dev-inputs"
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: 1.69.0
+      - name: Acquire the two private base images with a transient pull credential
+        env:
+          REGISTRY_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          credential_dir=$(mktemp -d /dev/shm/kanz-dev-auth.XXXXXXXX)
+          trap 'rm -f "$credential_dir/auth.json"; rmdir "$credential_dir"' EXIT
+          printf '{"auths":{}}\n' > "$credential_dir/auth.json"
+          printf '%s' "$REGISTRY_READ_TOKEN" | skopeo login --authfile "$credential_dir/auth.json" \
+            --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          unset REGISTRY_READ_TOKEN
+          for ref in ghcr.io/eighred/base/golang:1.27.4 ghcr.io/eighred/base/distroless-static:nonroot; do
+            expected=$(jq -er --arg ref "$ref" '.[$ref] | select(test("^[0-9a-f]{64}$"))' tools/dev_compose/images.json)
+            dir="$RUNNER_TEMP/dev-inputs/$expected"
+            mkdir "$dir"
+            skopeo inspect --authfile "$credential_dir/auth.json" --raw "docker://$ref" > "$dir/index"
+            echo "$expected  $dir/index" | sha256sum --check --status
+            child=$(jq -er '[.manifests[]|select(.platform.os=="linux" and .platform.architecture=="amd64" and (.platform.variant // "")=="")] | select(length==1) | .[0].digest | select(test("^sha256:[0-9a-f]{64}$"))' "$dir/index")
+            skopeo copy --src-authfile "$credential_dir/auth.json" --retry-times 3 --preserve-digests \
+              "docker://${ref%:*}@$child" "dir:$dir/platform"
+          done
+      - name: Bind all public and private linux/amd64 inputs to the OCI index
+        run: python3 -B tools/dev_compose/acquire.py "$RUNNER_TEMP/dev-inputs"
+      - uses: canonical/setup-lxd@8c6a87bfb56aa48f3fb9b830baa18562d8bfd4ee # v1
+        with:
+          channel: 5.21/stable
+          preseed: |
+            networks:
+              - name: lxdbr0
+                type: bridge
+                config: {ipv4.address: auto, ipv4.nat: 'true', ipv6.address: none}
+            storage_pools:
+              - {name: default, driver: dir}
+            profiles:
+              - name: default
+                devices:
+                  root: {type: disk, path: /, pool: default}
+      - name: Execute ordinary Make and observe namespace and durable-state cleanup
+        run: python3 -B tools/dev_compose/host.py "$RUNNER_TEMP/dev-inputs" "$(command -v buf)"
