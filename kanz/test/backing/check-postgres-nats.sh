@@ -14,11 +14,16 @@ eval "$exports"
 [[ "$(docker port "$pg" 5432/tcp)" == "127.0.0.1:$pg_port" ]]
 [[ "$(docker port "$nats" 4222/tcp)" == "127.0.0.1:$nats_port" ]]
 [[ "$TEST_POSTGRES_URL" == "postgres://kanzapp:kanz@127.0.0.1:$pg_port/kanzapp?sslmode=disable" ]]
+[[ "$TEST_ACCOUNTING_MIGRATION_POSTGRES_URL" == "postgres://kanzapp:kanz@127.0.0.1:$pg_port/kanz_accounting_migration?sslmode=disable" ]]
 [[ "$TEST_NATS_URL" == "nats://127.0.0.1:$nats_port" ]]
 client=$(docker inspect -f '{{.Image}}' "$pg")
-role=$(docker run --rm --network host "$client" psql "$TEST_POSTGRES_URL" -AtX -v ON_ERROR_STOP=1 \
-  -c 'select current_database(), current_user, rolsuper, rolbypassrls from pg_roles where rolname=current_user')
-[[ "$role" == 'kanzapp|kanzapp|f|f' ]]
+database_identity() {
+  docker run --rm --network host "$client" psql "$1" -AtX -v ON_ERROR_STOP=1 \
+    -c 'select current_database(), current_user, rolsuper, rolbypassrls, datdba = pg_roles.oid
+        from pg_roles join pg_database on datname = current_database() where rolname = current_user'
+}
+[[ "$(database_identity "$TEST_POSTGRES_URL")" == 'kanzapp|kanzapp|f|f|t' ]]
+[[ "$(database_identity "$TEST_ACCOUNTING_MIGRATION_POSTGRES_URL")" == 'kanz_accounting_migration|kanzapp|f|f|t' ]]
 box='natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c'
 cli() { docker run --rm --network host "$box" nats --server "$TEST_NATS_URL" "$@"; }
 cli stream add BACKING --subjects fixture.sample --storage file --defaults >/dev/null
