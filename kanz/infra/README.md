@@ -102,6 +102,15 @@ Install `ingress-nginx` separately if the Ingress path is needed.
 
 ## `rig_dev_patch.py` needs `--keep-spiffe` against an mTLS bus
 
+`tools/rig-apply.sh --deploy` uses the simulator's plaintext bus by default.
+With the SPIRE-authenticated broker, use `tools/rig-apply.sh --deploy --keep-spiffe`.
+Both modes require the gateway's cluster-local OIDC identity Service for JWKS
+and revocations. The five-workload rig omits the optional operator control
+routes because it does not provision that upstream. Run
+`tools/rig-apply.sh --check-deploy` with the same cluster and bus options
+to check the prerequisites before deployment. To inspect the exact gateway
+manifest offline, use `tools/rig-apply.sh --render-workload api-gateway-deploy.yaml`.
+
 `tools/rig_dev_patch.py` strips `SPIFFE_ENDPOINT_SOCKET` by default, which is
 correct only against a plaintext broker. `kanz/infra/nats/nats.yaml` serves
 `tls { verify: true, verify_and_map: true }` — mTLS-only — so against it

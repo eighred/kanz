@@ -6,7 +6,6 @@ import ipaddress
 import json
 import re
 import secrets
-import sys
 import time
 
 import yaml
@@ -37,16 +36,18 @@ def signing_secret():
 
 
 class Gateway:
-    def __init__(self, k, image):
+    def __init__(self, k, image, mtls):
         self.k = k
         self.image = image
+        self.mtls = mtls
         self.key = secrets.token_hex(16)
         self.report = {}
 
-    def start(self):
+    def start(self, check_deploy):
         def create(*objects):
             self.k("create", "-f", "-", data=yaml.safe_dump_all(objects))
 
+        check_deploy(ready=False)
         fixture = json.loads(network.messaging.feed.command(["node", "tools/valkey_migration/issuer.mjs"]))
         self.tokens = fixture["tokens"]
         config = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "issuer-public", "namespace": NS},
@@ -59,11 +60,16 @@ class Gateway:
         identity, = [d for d in network.messaging.docs("kanz/infra/deploy/identity-deploy.yaml") if d["kind"] == "Service"]
         create(config, issuer, identity, network.messaging.python_pod("gateway-reader", NS))
         self.k("-n", NS, "wait", "--for=condition=Ready", "pod/gateway-reader", "--timeout=120s")
+        self.k("-n", NS, "wait", "--for=condition=Ready", "pod/fixture-issuer", "--timeout=120s")
+        self.k("-n", NS, "wait", "--for=jsonpath={.endpoints[0].conditions.ready}=true", "endpointslice",
+               "-l", "kubernetes.io/service-name=identity", "--timeout=60s")
+        check_deploy(ready=True)
+        self.report["checkedIssuerPrerequisite"] = True
         doc = signing_secret()
         self.signing = doc["stringData"]["signing-secret"]
         create(doc)
-        raw = network.messaging.feed.command([sys.executable, "tools/rig_dev_patch.py", "--keep-spiffe",
-                                              "kanz/infra/deploy/api-gateway-deploy.yaml"])
+        raw = network.messaging.feed.command(["bash", "tools/rig-apply.sh", "--render-workload", "api-gateway-deploy.yaml",
+                                              *(["--keep-spiffe"] if self.mtls else [])])
         resources = list(yaml.safe_load_all(raw))
         deployment, = [d for d in resources if d["kind"] == "Deployment"]
         spec = deployment["spec"]["template"]["spec"]
@@ -74,8 +80,10 @@ class Gateway:
                     "API_GATEWAY_REVOCATIONS_URI": "http://identity.kanz-services.svc:8087/revocations",
                     "API_GATEWAY_REDIS_URL_FILE": "/run/secrets/redis/redis-url",
                     "API_GATEWAY_SIGNING_SECRET_FILE": "/run/secrets/gateway/signing-secret"}
-        forbidden = {"API_GATEWAY_JWT_SECRET", "API_GATEWAY_JWT_SECRET_FILE", "API_GATEWAY_ALLOW_DEV_HS256"}
-        if (not expected.items() <= env.items() or forbidden.intersection(env) or not env.get("API_GATEWAY_SPIFFE_SOCKET")
+        forbidden = {"API_GATEWAY_JWT_SECRET", "API_GATEWAY_JWT_SECRET_FILE", "API_GATEWAY_ALLOW_DEV_HS256",
+                     "API_GATEWAY_OPERATOR_ADDR", "API_GATEWAY_OPERATOR_ROLE"}
+        if (not expected.items() <= env.items() or forbidden.intersection(env)
+                or bool(env.get("API_GATEWAY_SPIFFE_SOCKET")) != self.mtls
                 or spec["serviceAccountName"] != APP or deployment["spec"]["replicas"] != 2):
             raise ValueError("unexpected gateway identity or cache selection")
         container.update(image=self.image, imagePullPolicy="Never")
@@ -94,9 +102,9 @@ class Gateway:
                     or pod["spec"]["serviceAccountName"] != APP or not re.search(r"sha256:[a-f0-9]{64}$", status["imageID"])):
                 raise ValueError("unverified gateway process")
             logs = self.k("-n", NS, "logs", pod["metadata"]["name"])
-            if not any(row.get("msg") == "bus transport" and row.get("mtls") is True
+            if not any(row.get("msg") == "bus transport" and row.get("mtls") is self.mtls
                        for row in (json.loads(line) for line in logs.splitlines() if line.startswith("{"))):
-                raise ValueError("gateway did not confirm mTLS")
+                raise ValueError("gateway did not confirm the selected broker transport")
             result.append({"uid": pod["metadata"]["uid"], "containerID": status["containerID"],
                            "imageID": status["imageID"], "ip": str(ipaddress.ip_address(pod["status"]["podIP"])),
                            "restarts": status["restartCount"]})

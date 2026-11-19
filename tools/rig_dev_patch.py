@@ -137,7 +137,10 @@ def _rig_image(image, path, container_name):
 
 # Env vars that point a workload at production-only infrastructure the rig does
 # not run. Removed so the workload takes its in-process / plaintext fallback.
-_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS"})
+# The five deployed rig services contain no operator. Its optional control
+# routes require an mTLS upstream and must only be advertised by a deployment
+# which supplies that upstream.
+_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS", "API_GATEWAY_OPERATOR_ADDR", "API_GATEWAY_OPERATOR_ROLE"})
 
 # Env vars the rig must ADD, keyed by manifest filename. The production manifest
 # has no reason to carry these — they exist only because the rig substitutes a

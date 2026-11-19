@@ -61,6 +61,13 @@ Cross-replica duplicates must return 409 independently for each tenant.
 The job tests a fresh key during cache loss and checks both original deadlines,
 expiration and reacquisition after restart on the original PVC.
 
+A second fresh cluster starts the ordinary `rig-apply.sh --deploy` gateway
+render against the single-account simulator broker from `test/backing`.
+It repeats the gateway checks with the same OIDC and Valkey contracts.
+Each fixture calls the CLI's deploy preflight with the issuer absent and
+present, and starts the binary from its selected workload render. The
+simulator receipt identifies its broker mode separately from the mTLS run.
+
 The retained-state fixture starts the Tokyo Redis image on a second fresh
 volume and checks Redis → Valkey → restarted Valkey → Redis using that same
 volume. Both fixtures use the Valkey image selected by application compatibility
