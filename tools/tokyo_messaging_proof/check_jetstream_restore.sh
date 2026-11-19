@@ -38,14 +38,14 @@ for pair in "$source_cli" "$target_cli"; do
 done
 source_nats() { docker exec "$source_cli" nats --server nats://127.0.0.1:4222 "$@"; }
 docker exec "$source_cli" nats --server nats://other:@127.0.0.1:4222 stream add UNRELATED --subjects other --storage file --defaults >/dev/null
-source_nats stream add RECORDS --subjects records --storage file --defaults >/dev/null
+source_nats stream add RECORDS --subjects records --subjects records.extra --storage file --defaults >/dev/null
 source_nats stream add AUDIT --subjects audit --storage file --defaults >/dev/null
 source_nats pub records first >/dev/null
 source_nats pub records second >/dev/null
 source_nats pub audit third >/dev/null
-for durable in LEFT RIGHT; do
-  source_nats consumer add RECORDS "$durable" --pull --ack explicit --defaults >/dev/null
-done
+source_nats consumer add RECORDS LEFT --pull --ack explicit --filter records --defaults >/dev/null
+source_nats consumer add RECORDS RIGHT --pull --ack all --filter records --filter records.extra --defaults >/dev/null
+source_nats consumer add AUDIT UNFILTERED --pull --ack none --defaults >/dev/null
 source_nats consumer next RECORDS LEFT --ack --count 1 >/dev/null
 source_nats account backup --check --critical-warnings --force /tmp/nats-backup >/dev/null
 docker exec "$source_cli" tar -C /tmp -czf - nats-backup | docker exec -i "$target_cli" tar -C /tmp -xzf -
@@ -57,11 +57,14 @@ jq() { docker exec -i "$target_cli" jq "$@"; }
 expected=$(nats_account_state __system__ <<<"$before")
 actual=$(nats_account_state '$G' <<<"$after")
 [[ "$expected" == "$actual" ]]
-nats_restore_evidence <<<"$actual" | jq -e '.nats_streams==2 and .nats_consumers==2 and .nats_messages==3 and
-  .nats_account_state=={format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}' >/dev/null
+nats_restore_evidence <<<"$actual" | jq -e '.nats_streams==2 and .nats_consumers==3 and .nats_messages==3 and
+  .nats_account_state=={format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G",
+    routing:"stream-subjects-consumer-filters-ack-v1"}' >/dev/null
 jq -e 'map(.name)==["AUDIT","RECORDS"] and .[1].messages==2 and
-  .[1].consumers[0].name=="LEFT" and .[1].consumers[0].ack_floor.stream_seq==1 and
-  .[1].consumers[1].name=="RIGHT" and .[1].consumers[1].ack_floor.stream_seq==0' <<<"$actual" >/dev/null
+  (.[0].consumers[0] | .name=="UNFILTERED" and .filters==[] and .ack_policy=="none") and
+  .[1].subjects==["records","records.extra"] and
+  (.[1].consumers[0] | .name=="LEFT" and .ack_floor.stream_seq==1 and .filters==["records"] and .ack_policy=="explicit") and
+  (.[1].consumers[1] | .name=="RIGHT" and .ack_floor.stream_seq==0 and .filters==["records","records.extra"] and .ack_policy=="all")' <<<"$actual" >/dev/null
 if nats_account_state __system__ <<<"$after" >/dev/null 2>&1; then exit 1; fi
 swapped=$(jq '(.account_details[].stream_detail[] | select(.name=="RECORDS") |
   .consumer_detail[]) |= (if .name=="LEFT" then .name="RIGHT" else .name="LEFT" end |
@@ -71,6 +74,31 @@ swapped=$(jq '(.account_details[].stream_detail[].state.messages) |= (if .==2 th
 [[ "$(nats_account_state '$G' <<<"$swapped")" != "$expected" ]]
 missing=$(jq 'del(.account_details[].stream_detail[].consumer_detail[]?.ack_floor)' <<<"$after")
 if nats_account_state '$G' <<<"$missing" >/dev/null 2>&1; then exit 1; fi
+
+# Configuration order does not affect routing. A changed subscription or ACK
+# contract must still differ even with every message count and cursor intact.
+records='.account_details[].stream_detail[] | select(.name=="RECORDS")'
+right="$records | .consumer_detail[] | select(.name==\"RIGHT\")"
+reordered=$(jq "($records | .config.subjects) |= reverse | ($right | .config.filter_subjects) |= reverse" <<<"$after")
+[[ "$(nats_account_state '$G' <<<"$reordered")" == "$expected" ]]
+changed=$(jq "($right | .config.ack_policy) = \"explicit\"" <<<"$after")
+observed=$(nats_account_state '$G' <<<"$changed")
+[[ "$observed" != "$expected" ]]
+missing=$(jq "del($right | .config.ack_policy)" <<<"$after")
+if nats_account_state '$G' <<<"$missing" >/dev/null 2>&1; then exit 1; fi
+missing=$(jq "del($records | .config.subjects)" <<<"$after")
+if nats_account_state '$G' <<<"$missing" >/dev/null 2>&1; then exit 1; fi
+
+target_nats() { docker exec "$target_cli" nats --server nats://127.0.0.1:4222 "$@"; }
+target_state() { docker exec "$target_cli" wget -qO- "$jsz" | nats_account_state '$G'; }
+target_nats stream edit RECORDS --subjects records --subjects records.extra --subjects records.new --force >/dev/null
+changed=$(target_state)
+[[ "$changed" == "$(jq -cS '(.[1].subjects) += ["records.new"]' <<<"$expected")" ]]
+target_nats stream edit RECORDS --subjects records --subjects records.extra --force >/dev/null
+[[ "$(target_state)" == "$expected" ]]
+target_nats consumer edit RECORDS RIGHT --filter records --force >/dev/null
+changed=$(target_state)
+[[ "$changed" == "$(jq -cS '.[1].consumers[1].filters = ["records"]' <<<"$expected")" ]]
 
 for elapsed in 0 23; do
   receipt=$(emit_restore_receipt fixture-key fixture-sha fixture-release "$elapsed" 8 \
