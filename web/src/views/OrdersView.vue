@@ -2,8 +2,9 @@
 import { computed } from 'vue'
 import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
-import { risk, type OrderSummary } from '../api/risk'
-import { formatDecimal, formatMoney } from '../api/decimal'
+import { risk, orderHistoryLimit, type OrderSummary } from '../api/risk'
+import { useSession } from '../stores/session'
+import { formatDecimal } from '../api/decimal'
 
 // ONE PORTFOLIO'S TRADING HISTORY (#399).
 //
@@ -22,29 +23,28 @@ import { formatDecimal, formatMoney } from '../api/decimal'
 const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 
-// OMS returns at most 200 indexed orders and does not expose a total or a cursor.
-const historyLimit = 200
-const { data, error, loading } = usePortfolioRead(id, portfolio => risk.orders(portfolio, historyLimit))
+const session = useSession()
+const selection = computed(() => ({ portfolio: id.value, tenant: session.identity?.tenant, subject: session.identity?.subject }))
+const { data, error, loading } = usePortfolioRead(selection, ({ portfolio, tenant, subject }, signal) => {
+  if (!tenant || !subject) throw new Error('Sign in to read order history.')
+  return risk.orders(portfolio, tenant, signal)
+})
 
 const orders = computed<OrderSummary[]>(() => data.value?.orders ?? [])
 
 // unindexed arrives as a STRING (int64). It is compared as a string rather than
 // parsed: the only question asked of it is "is it zero", and parsing an int64
 // to answer that is how a large one becomes 9007199254740992.
-const unindexed = computed(() => data.value?.unindexed ?? '0')
-const hasUnindexed = computed(() => unindexed.value !== '0' && unindexed.value !== '')
+const unindexed = computed(() => data.value?.unindexed)
+const hasUnindexed = computed(() => unindexed.value !== undefined && unindexed.value !== '0')
 
 function qty(d: Parameters<typeof formatDecimal>[0]): string {
   return formatDecimal(d) ?? '—'
 }
-function money(m: Parameters<typeof formatMoney>[0]): string {
-  return formatMoney(m) ?? '—'
-}
-
-/** label turns the enum name into something readable. */
-function label(status?: string): string {
-  if (!status || status === 'ORDER_STATUS_UNSPECIFIED') return 'unknown'
-  return status.replace(/^ORDER_STATUS_/, '').replaceAll('_', ' ').toLowerCase()
+function enumLabel(value: string | number | undefined, prefix: string): string {
+  if (typeof value === 'number') return `unknown (${value})`
+  if (!value || value === prefix + 'UNSPECIFIED') return 'unknown'
+  return value.replace(prefix, '').replaceAll('_', ' ').toLowerCase()
 }
 
 /** tone colours an order by outcome, with unknown deliberately not green. */
@@ -57,6 +57,7 @@ function tone(o: OrderSummary): string {
       return 'state-bad'
     case 'ORDER_STATUS_CANCELLED':
       return 'state-warn'
+    case 'ORDER_STATUS_WORKING_SCHEDULED':
     case 'ORDER_STATUS_PARTIALLY_FILLED':
     case 'ORDER_STATUS_ROUTED':
     case 'ORDER_STATUS_PENDING_NEW':
@@ -89,14 +90,14 @@ function tone(o: OrderSummary): string {
       this is a partial history — not necessarily this portfolio's whole trading record.
     </p>
 
-    <p v-if="orders.length >= historyLimit" class="state-warn" role="status">
-      Showing the {{ historyLimit }} most recent indexed orders. Earlier indexed orders may exist.
+    <p v-if="orders.length >= orderHistoryLimit" class="state-warn" role="status">
+      Showing the {{ orderHistoryLimit }} most recent indexed orders. Earlier indexed orders may exist.
     </p>
     <table>
       <thead>
         <tr>
           <th>Order</th><th>Instrument</th><th>Side</th><th>Status</th>
-          <th>Quantity</th><th>Filled</th><th>Price</th><th>Avg fill</th>
+          <th>Quantity</th><th>Filled</th><th>Limit price</th><th>Avg fill</th>
         </tr>
       </thead>
       <tbody>
@@ -106,12 +107,12 @@ function tone(o: OrderSummary): string {
             <span v-if="o.venue" class="muted"><br />{{ o.venue }}</span>
           </td>
           <td>{{ o.instrument_id || '—' }}</td>
-          <td>{{ (o.side || '').replace(/^SIDE_/, '').toLowerCase() || '—' }}</td>
-          <td :class="tone(o)">{{ label(o.status) }}</td>
-          <td>{{ qty(o.quantity) }}</td>
+          <td>{{ enumLabel(o.side, 'SIDE_') }}</td>
+          <td :class="tone(o)">{{ enumLabel(o.status, 'ORDER_STATUS_') }}</td>
+          <td>{{ qty(o.ordered_quantity) }}</td>
           <td>{{ qty(o.filled_quantity) }}</td>
-          <td>{{ money(o.limit_price) }}</td>
-          <td>{{ money(o.average_fill_price) }}</td>
+          <td>{{ qty(o.limit_price) }}</td>
+          <td>{{ qty(o.average_fill_price) }}</td>
         </tr>
         <tr v-if="orders.length === 0">
           <td colspan="8">
