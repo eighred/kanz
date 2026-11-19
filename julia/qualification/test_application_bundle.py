@@ -1,17 +1,23 @@
+import datetime as dt
+import hashlib
 import io
+import json
 from pathlib import Path
 import sys
 import tarfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'application_bundle'))
+import pcre2_advisory
+import pcre2_cve
 import readback
 import scan
 
 
 class ApplicationReadbackTests(unittest.TestCase):
     def test_missing_or_substituted_compiler_library(self):
-        selected = readback.DISTRIBUTION | readback.GENERATED
+        selected = readback.DISTRIBUTION | readback.PATCHED | readback.GENERATED
         for removed in ('lib/libjulia.so.1.13.3', 'lib/julia/libgcc_s.so.1', 'lib/julia/sys.so'):
             for replacement in (set(), {'lib/julia/other.so'}):
                 with self.subTest(removed=removed, replacement=replacement):
@@ -35,10 +41,18 @@ class ApplicationReadbackTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'libc.so.6'):
             readback.validate_needed(required, {})
 
+    def test_library_alias_must_resolve_inside_verified_regular_files(self):
+        files = {'lib/current': ['link', 'actual'], 'lib/actual': ['file']}
+        self.assertEqual(readback.link_targets(files), {'lib/current': 'lib/actual'})
+        for target in ('missing', 'current'):
+            files['lib/current'] = ['link', target]
+            with self.assertRaises(ValueError):
+                readback.link_targets(files)
+
     def test_publisher_projection_covers_each_file_once(self):
         names = ['lib/julia/' + f for files in readback.JLL_LIBRARIES.values() for f in files]
         self.assertEqual(len(names), 18)
-        self.assertEqual(set(names), readback.DISTRIBUTION - readback.JULIA_CORE)
+        self.assertEqual(set(names), (readback.DISTRIBUTION - readback.JULIA_CORE) | readback.PATCHED)
         self.assertFalse(set(names) & readback.GENERATED)
 
     def test_spdx_uses_actual_manifest_and_uuid(self):
@@ -49,3 +63,42 @@ class ApplicationReadbackTests(unittest.TestCase):
         for change in ({'sourceInfo': 'package found in: other/Manifest.toml'}, {'versionInfo': '1.1.0'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 scan.spdx_packages({'packages': [{**package, **change}]}, expected)
+
+    def test_pcre2_vendor_controls_and_drift(self):
+        now = dt.datetime(2026, 11, 19, tzinfo=dt.timezone.utc)
+        rows = {k: list(v) for k, v in pcre2_advisory.RANGES.items()}
+        policy = b'fixture publisher policy'
+        checksum = hashlib.sha256(policy).hexdigest()
+        def response(projected):
+            return json.dumps([{'ghsa_id': k, 'cve_id': v[0], 'withdrawn_at': None,
+                                'vulnerabilities': [{'package': {'name': 'PCRE2'}, 'vulnerable_version_range': v[1],
+                                                     'patched_versions': v[2]}]} for k, v in projected.items()]).encode()
+        def envelope(selected, raw):
+            return {'api': pcre2_advisory.API, 'policy': pcre2_advisory.POLICY, 'policySHA256': checksum,
+                    'apiDate': now.isoformat(), 'policyDate': now.isoformat(),
+                    'apiSHA256': hashlib.sha256(raw).hexdigest(), 'rows': selected}
+        raw = response(rows)
+        with patch.object(pcre2_advisory, 'POLICY_HASH', checksum):
+            self.assertEqual(len(pcre2_advisory.validate(envelope(rows, raw), raw, policy, now)), 7)
+            for changed in ({k: v for k, v in rows.items() if k != 'GHSA-r9hj-j2rw-4q3m'},
+                            {**rows, 'GHSA-r9hj-j2rw-4q3m': ['CVE-2026-103111', '<=10.49', '10.50']}):
+                modified = response(changed)
+                with self.assertRaises(ValueError):
+                    pcre2_advisory.validate(envelope(changed, modified), modified, policy, now)
+                with self.assertRaises(ValueError):
+                    pcre2_advisory.validate(envelope(rows, raw), modified, policy, now)
+            with self.assertRaises(ValueError):
+                pcre2_advisory.validate(envelope(rows, raw), raw, policy, now + dt.timedelta(hours=25))
+        with self.assertRaises(ValueError):
+            pcre2_advisory.affected(next(iter(pcre2_advisory.RANGES.values())), '10.50')
+
+    def test_additional_cna_record_requires_unchanged_native_range(self):
+        key = 'CVE-2026-89161'
+        affected = {'vendor': 'PCRE', 'product': 'PCRE2', 'defaultStatus': 'unaffected',
+                    'versions': [{'version': '0', 'lessThan': '10.48', 'status': 'affected', 'versionType': 'custom'}]}
+        doc = {'cveMetadata': {'cveId': key, 'state': 'PUBLISHED'},
+               'containers': {'cna': {'providerMetadata': {'shortName': 'mitre'}, 'affected': [affected]}}}
+        pcre2_cve.validate_cna(key, doc)
+        affected['versions'][0]['lessThan'] = '10.50'
+        with self.assertRaisesRegex(ValueError, 'ranges changed'):
+            pcre2_cve.validate_cna(key, doc)

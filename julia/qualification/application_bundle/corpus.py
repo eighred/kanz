@@ -27,6 +27,10 @@ status = read("/proc/self/status", String)
 @assert occursin(r"(?m)^CapEff:\s+0000000000000000$", status)
 @assert occursin(r"(?m)^NoNewPrivs:\s+1$", status)
 @assert ENV["JULIA_PKG_OFFLINE"] == "true"
+pcre_version = zeros(UInt8, 64)
+@assert ccall((:pcre2_config_8, "libpcre2-8"), Cint, (Cuint, Ptr{UInt8}), 11, pcre_version) > 0
+@assert startswith(unsafe_string(pointer(pcre_version)), "10.49 ")
+@assert occursin(r"^a[0-9]+$", "a49")
 buffer = zeros(UInt8, 1 << 20)
 open("/tmp/bounded", "w") do io
     for _ in 1:16

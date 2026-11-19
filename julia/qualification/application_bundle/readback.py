@@ -10,9 +10,11 @@ import tarfile
 import tempfile
 import tomllib
 import sys
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import jll_advisory
+import pcre2
 
 
 BASE_INDEX = 'be40c00dfabd86576d92666e87e406714d5618342de1a0c213ad232de255172e'
@@ -32,13 +34,15 @@ JLL_LIBRARIES = {
     'LibUV_jll': ['libuv.so.2.0.0'],
     'MPFR_jll': ['libmpfr.so.6.2.2'],
     'OpenLibm_jll': ['libopenlibm.so.4.0'],
-    'PCRE2_jll': ['libpcre2-8.so.0.15.0'],
+    'PCRE2_jll': [pcre2.NEW],
     'Zlib_jll': ['libz.so.1.3.2'],
     'Zstd_jll': ['libzstd.so.1.5.7'],
 }
 JULIA_CORE = {'bin/julia', 'lib/libjulia.so.1.13.3', 'lib/julia/libjulia-codegen.so.1.13.3',
               'lib/julia/libjulia-internal.so.1.13.3'}
-DISTRIBUTION = JULIA_CORE | {'lib/julia/' + name for group in JLL_LIBRARIES.values() for name in group}
+PATCHED = {'lib/julia/' + pcre2.NEW}
+DISTRIBUTION = JULIA_CORE | {'lib/julia/' + name for owner, group in JLL_LIBRARIES.items()
+                             for name in group if owner != 'PCRE2_jll'}
 EMPTY_LAYER = 'sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1'
 UNSHIPPED = re.compile(r'^(lib(?:ssl|crypto|curl|git2|ssh2|nghttp2)\.so(?:\..*)?|(?:p?7z|7zz|7za)(?:\.exe)?)$')
 
@@ -62,6 +66,24 @@ def dynamic(path):
     if any(UNSHIPPED.fullmatch(name) for _, name in names):
         raise ValueError('unselected network or crypto dependency in ELF metadata')
     return names
+
+
+def link_targets(files):
+    targets = {}
+    for name, item in files.items():
+        if item[0] != 'link':
+            continue
+        visited = set()
+        current = name
+        while files.get(current, [None])[0] == 'link':
+            if current in visited:
+                raise ValueError('cyclic application link')
+            visited.add(current)
+            current = posixpath.normpath(posixpath.join(posixpath.dirname(current), files[current][1]))
+        if files.get(current, [None])[0] != 'file':
+            raise ValueError('application link has no regular target')
+        targets[name] = current
+    return targets
 
 
 def contents(archive, prefix='', native=False):
@@ -150,7 +172,7 @@ def validate_needed(*groups):
 
 
 def source_libraries(archive, elfs):
-    if set(elfs) != DISTRIBUTION | GENERATED:
+    if set(elfs) != DISTRIBUTION | PATCHED | GENERATED:
         raise ValueError('required application native member is missing or unexpected')
     required = DISTRIBUTION
     found, projects = set(), {}
@@ -180,8 +202,18 @@ def source_libraries(archive, elfs):
 
 def verify_owner_inputs(directory, owners, elfs):
     ledger = json.loads((Path(__file__).with_name('owner_inputs.json')).read_bytes())
-    if set(ledger) != set(owners) or set(owners) != set(JLL_LIBRARIES):
+    if set(ledger) != set(owners) - {'PCRE2_jll'} or set(owners) != set(JLL_LIBRARIES):
         raise ValueError('native publisher inputs differ from the compiled inventory')
+    pcre_elf = elfs['lib/julia/' + pcre2.NEW]
+    binary = pcre2.publisher(directory / 'PCRE2-10.49')
+    if (pcre_elf['size'] != len(binary) or pcre_elf['sha256'] != pcre2.NEW_HASH
+            or ['SONAME', 'libpcre2-8.so.0'] not in [list(row) for row in pcre_elf['dynamic']]):
+        raise ValueError('patched application PCRE2 runtime differs from the publisher')
+    pcre = owners['PCRE2_jll']
+    if (pcre['uuid'], pcre['version']) != ('efcefdf7-47ab-520b-bdef-62a2eaa19f15', '10.47.0+0'):
+        raise ValueError('unexpected PCRE2 compiler preimage owner')
+    pcre.update(version='10.49.1+0', upstreamVersion='10.49', publisherArchiveSHA256=pcre2.INPUTS['binary'],
+                publisherFiles={'lib/' + pcre2.NEW: pcre2.NEW_HASH})
     for owner, record in ledger.items():
         catalog = directory / record['sourcePin'].replace('deps/checksums/', 'checksums-')
         if hash_file(catalog) != record['sourceSHA256']:
@@ -194,6 +226,15 @@ def verify_owner_inputs(directory, owners, elfs):
         if not record['checksumName'].startswith(libname + '.v' + owners[owner]['version'] + '.x86_64-linux-gnu'):
             raise ValueError('native publisher platform or build version differs')
         path = directory / (libname + '.tar.gz')
+        for kind in ('artifacts', 'recipe'):
+            if hash_file(directory / (libname + '.' + kind)) != record[kind]['sha256']:
+                raise ValueError('native JLL publisher recipe or metadata differs: ' + owner)
+        artifacts = tomllib.loads((directory / (libname + '.artifacts')).read_text())[libname]
+        selected = [row for row in artifacts if row.get('arch') == 'x86_64' and row.get('os') == 'linux'
+                    and row.get('libc') == 'glibc' and 'sanitize' not in row and row.get('git-tree-sha1') == record['assetTree']
+                    and len(row.get('download', [])) == 1 and unquote(row['download'][0]['url']) == unquote(record['url'])]
+        if len(selected) != 1 or selected[0]['download'][0]['sha256'] != hash_file(path):
+            raise ValueError('native JLL publisher target or archive differs: ' + owner)
         with path.open('rb') as stream:
             if path.stat().st_size != record['archiveBytes'] or hashlib.file_digest(stream, 'sha512').hexdigest() != hashes[0]:
                 raise ValueError('independent native publisher archive differs: ' + owner)
@@ -210,7 +251,8 @@ def verify_owner_inputs(directory, owners, elfs):
                 found[item.name] = expected['sha256']
         if found.keys() != pending.keys():
             raise ValueError('native publisher file missing: ' + owner)
-        owners[owner].update(publisherArchiveSHA512=hashes[0], publisherFiles=found)
+        owners[owner].update(publisherArchiveSHA512=hashes[0], publisherArchiveSHA256=selected[0]['download'][0]['sha256'],
+                             publisherRecipe=record['recipe'], publisherFiles=found)
 
 
 def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_inputs):
@@ -223,6 +265,9 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
     base_layers = json.loads(base_platform.read_bytes())['layers']
     with tarfile.open(bundle, 'r:') as packed:
         expected, elfs = contents(packed, native=True)
+    targets = link_targets(expected)
+    if any(targets.get('lib/julia/' + name) != 'lib/julia/' + pcre2.NEW for name in pcre2.ALIAS):
+        raise ValueError('application PCRE2 ABI aliases differ')
     if hash_file(compiler) != JULIA:
         raise ValueError('compiler libraries must come from the pinned Julia distribution')
     with tarfile.open(compiler, 'r|gz') as packed:

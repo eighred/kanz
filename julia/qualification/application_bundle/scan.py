@@ -10,6 +10,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import advisory
 import jll_advisory
+import pcre2_advisory
+import pcre2_cve
 from readback import JLL_LIBRARIES
 
 
@@ -32,7 +34,7 @@ def spdx_packages(report, expected):
         raise ValueError('application SPDX manifest incomplete')
 
 
-def scan(image, receipt, tools, database, registry, output):
+def scan(image, receipt, tools, database, registry, publisher, output):
     output.mkdir()
     if set(receipt['wrapperMetadata']) != set(JLL_LIBRARIES):
         raise ValueError('publisher evidence missing from OCI receipt')
@@ -43,6 +45,14 @@ def scan(image, receipt, tools, database, registry, output):
         if row['publisherFiles'] != actual:
             raise ValueError('readback publisher scope differs')
         owners[owner] = {k: row[k] for k in ('version', 'uuid')}
+    pcre = receipt['wrapperMetadata']['PCRE2_jll']
+    if pcre.get('upstreamVersion') != '10.49' or pcre.get('version') != '10.49.1+0':
+        raise ValueError('PCRE2 vendor controls require the verified patched native runtime')
+    controls = pcre2_advisory.validate(json.loads(publisher.read_bytes()),
+                                       publisher.with_suffix('.api.json').read_bytes(),
+                                       publisher.with_suffix('.policy.md').read_bytes(), dt.datetime.now(dt.timezone.utc))
+    print('PCRE2 publisher controls:', len(controls), 'old-version findings; zero in the reviewed 10.49 ranges')
+    pcre2_cve.validate(publisher.parent / 'cve', dt.datetime.now(dt.timezone.utc))
     for tool, archive_hash in advisory.ARCHIVES.items():
         advisory.tool_identity(tools / tool, archive_hash)
     metadata = json.loads((database / 'db' / 'metadata.json').read_bytes())
@@ -106,7 +116,7 @@ def scan(image, receipt, tools, database, registry, output):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ('image', 'readback', 'tools', 'database', 'registry', 'output'):
+    for key in ('image', 'readback', 'tools', 'database', 'registry', 'pcre2_publisher', 'output'):
         parser.add_argument(key, type=lambda x: Path(x).resolve())
     a = parser.parse_args()
-    scan(a.image, json.loads(a.readback.read_bytes()), a.tools, a.database, a.registry, a.output)
+    scan(a.image, json.loads(a.readback.read_bytes()), a.tools, a.database, a.registry, a.pcre2_publisher, a.output)

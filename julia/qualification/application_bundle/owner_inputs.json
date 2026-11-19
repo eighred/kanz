@@ -1,77 +1,160 @@
 {
   "CompilerSupportLibraries_jll": {
     "archiveBytes": 28633168,
+    "artifacts": {
+      "sha256": "c237f4ed4eaebd3fdff7f3a5fdacd034e7ae3b4627c4fa2ddf562d464f7d152d",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/CompilerSupportLibraries_jll.jl/320897465fd1ac08ce9477898a4a2898e9e3d3fa/Artifacts.toml"
+    },
+    "assetTree": "e0ae8e1988425737cec3f6c615497f3284d9e771",
     "checksumName": "CompilerSupportLibraries.v1.5.5+2.x86_64-linux-gnu-libgfortran5.tar.gz",
+    "recipe": {
+      "sha256": "8d7dbeb9d858f4ea603ee38341a9b9675c329a2402f6f39fbcd0e1e5f872af29",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/00967747008623072bd475bb50e8568b07f11035/C/CompilerSupportLibraries/CompilerSupportLibraries@v1.5/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/compilersupportlibraries",
     "sourceSHA256": "1a638d0ddbd6fa7c775fd5408cab79054e7cc191181c071e3f11737763694463",
     "url": "https://github.com/JuliaBinaryWrappers/CompilerSupportLibraries_jll.jl/releases/download/CompilerSupportLibraries-v1.5.5%2B2/CompilerSupportLibraries.v1.5.5.x86_64-linux-gnu-libgfortran5.tar.gz"
   },
   "GMP_jll": {
     "archiveBytes": 534722,
+    "artifacts": {
+      "sha256": "dc10c487d11f8b63d84efa384dbcea5ae5db717dc99dc05d848bfbaa0f6fb355",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/GMP_jll.jl/868857f582b7515e7877e50cf056aade00097ded/Artifacts.toml"
+    },
+    "assetTree": "2d0044d0922d2f761179ac3cc47eaea74968d4c8",
     "checksumName": "GMP.v6.3.0+2.x86_64-linux-gnu-cxx11.tar.gz",
+    "recipe": {
+      "sha256": "263b8bcbea070e5d08d8fad9bc5b8e5eb58326a3b1f56f00b69361ea48e44be1",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/c52e41b25b1d4c30b6024444ad1b0d3a1f051d57/G/GMP/GMP@6.3.0/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/gmp",
     "sourceSHA256": "6a2a29eb5570c9fc8bd9c118c1fbcd32e42ac9a5cb544de823608221a6d6e7d0",
     "url": "https://github.com/JuliaBinaryWrappers/GMP_jll.jl/releases/download/GMP-v6.3.0%2B2/GMP.v6.3.0.x86_64-linux-gnu-cxx11.tar.gz"
   },
   "LibUV_jll": {
     "archiveBytes": 929229,
+    "artifacts": {
+      "sha256": "dc1830d23d31267a1d97a3578003bce7ca2f48700e43816f565fbffdc87b0cf9",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/LibUV_jll.jl/2b0a6e8ef16cda299c3cf2056d3180ef73557a5c/Artifacts.toml"
+    },
+    "assetTree": "1585899d712c4d6f4aa5321d383134cc7ef76d90",
     "checksumName": "LibUV.v2.0.1+22.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "ee3a8a91e4cf9aded457ee3266459879ac2ef6712a3658c11cd1b64606b953cd",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/17ab0f4a1465f4ad508b3ef7c05ff1ab7f945982/L/LibUV/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/libuv",
     "sourceSHA256": "3f4a72a393a0ee56644c1bbc0e883ceb928c26dce328dfc332aa2b3ac832e889",
     "url": "https://github.com/JuliaBinaryWrappers/LibUV_jll.jl/releases/download/LibUV-v2.0.1%2B22/LibUV.v2.0.1.x86_64-linux-gnu.tar.gz"
   },
   "LibUnwind_jll": {
     "archiveBytes": 1421579,
+    "artifacts": {
+      "sha256": "9a684aa1cc64f8bff22a14648c712e997a4a0830c15322c50550e513424f472e",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/LibUnwind_jll.jl/7e61b2e1b670564fd4f5f2faf61231a6dd162ef6/Artifacts.toml"
+    },
+    "assetTree": "23de180645ded2e1be3fa753912a526359712f5c",
     "checksumName": "LibUnwind.v1.8.3+1.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "8b63bdf277899aff3718c301754e7dfb6a73a913dc6f3fd4670baec823db790e",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/f2a12e62a561e9854f3941b5b2e8a2c2f5c7ec38/L/LibUnwind/LibUnwind@1.8.3/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/unwind",
     "sourceSHA256": "118f078f5a9d379da04cefbdd6836451c9c711608d07f6eee0d15523ee5ec2f3",
     "url": "https://github.com/JuliaBinaryWrappers/LibUnwind_jll.jl/releases/download/LibUnwind-v1.8.3%2B1/LibUnwind.v1.8.3.x86_64-linux-gnu.tar.gz"
   },
   "MPFR_jll": {
     "archiveBytes": 895682,
+    "artifacts": {
+      "sha256": "4f15b0e909ac3863d9c4d0ca841011d585d8d07379822f83152dce05b76ae414",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/MPFR_jll.jl/911633cd3d35732818d5d2da6dfb6585ac2c6e21/Artifacts.toml"
+    },
+    "assetTree": "dc8f0da267040f3273c066a926dc7556306b6b87",
     "checksumName": "MPFR.v4.2.2+0.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "31ed07d97ac1ab7f35a0fef37b14988c53dad9346478f8736a266419cd821fc3",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/4499d58a12fc3a78fa500b8809f943e68f7eec9f/M/MPFR/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/mpfr",
     "sourceSHA256": "1751eeb840b3fa6ea227dd28b4b8e82e630a120849393d15592e020d34071a09",
     "url": "https://github.com/JuliaBinaryWrappers/MPFR_jll.jl/releases/download/MPFR-v4.2.2%2B0/MPFR.v4.2.2.x86_64-linux-gnu.tar.gz"
   },
   "OpenLibm_jll": {
     "archiveBytes": 283098,
+    "artifacts": {
+      "sha256": "624ff70ef506ba9a336d0ffa265186811e0826c4b01b411e32912da250052f0f",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/OpenLibm_jll.jl/bdc75f693fd7c01fa2a53c4ec1043e50fa1cbd4a/Artifacts.toml"
+    },
+    "assetTree": "e66aca4c5e0fd95bf9097315a002529a9ba9b812",
     "checksumName": "OpenLibm.v0.8.7+0.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "8080eb0d5dce4b86aa8e8c2390f1417cfad2db12880933b53b06d86478cf46af",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/9662ccf12a4e682746207d2866d87fb409e7ff54/O/OpenLibm/OpenLibm@0.8.7/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/openlibm",
     "sourceSHA256": "59fe725bcaf3c8230deb8ba53922648392171209ec2ae230b6ef3ab612ea44ab",
     "url": "https://github.com/JuliaBinaryWrappers/OpenLibm_jll.jl/releases/download/OpenLibm-v0.8.7%2B0/OpenLibm.v0.8.7.x86_64-linux-gnu.tar.gz"
   },
-  "PCRE2_jll": {
-    "archiveBytes": 2720846,
-    "checksumName": "PCRE2.v10.47.0+0.x86_64-linux-gnu.tar.gz",
-    "sourcePin": "deps/checksums/pcre",
-    "sourceSHA256": "9a89ea7f2508babb12a764dc8e89b9f9eec7b4cf87bb124c1c1dd37936df16c3",
-    "url": "https://github.com/JuliaBinaryWrappers/PCRE2_jll.jl/releases/download/PCRE2-v10.47.0%2B0/PCRE2.v10.47.0.x86_64-linux-gnu.tar.gz"
-  },
   "Zlib_jll": {
     "archiveBytes": 918474,
+    "artifacts": {
+      "sha256": "98ef617c4f17c4ec18256afcbfe58d31f830ad867166957d500375e82ae4903c",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/Zlib_jll.jl/08cb222c51e5d7babca40ed6016a1591ef2522bb/Artifacts.toml"
+    },
+    "assetTree": "c652246eb89735543c668222880f78bf332a4f9b",
     "checksumName": "Zlib.v1.3.2+0.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "35125b34aca38e684543bef98ee457e406930003ce694d2aaa97601dc98dd8ab",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/c6aeb58674f15f9340222b29568fba05005f52d6/Z/Zlib/Zlib@1.3.2/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/zlib",
     "sourceSHA256": "09867d99a869d16e5e4b883bbe10b9966ea5392827ec20e23941eb45c295cc80",
     "url": "https://github.com/JuliaBinaryWrappers/Zlib_jll.jl/releases/download/Zlib-v1.3.2%2B0/Zlib.v1.3.2.x86_64-linux-gnu.tar.gz"
   },
   "Zstd_jll": {
     "archiveBytes": 661891,
+    "artifacts": {
+      "sha256": "5a709a8810a318c64685d1d6e4d014fc6f5e16079453a0fc6ac3ef6d8755eba5",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/Zstd_jll.jl/122db41df7859c7b07285861de4446b6ddf09233/Artifacts.toml"
+    },
+    "assetTree": "4db1e58d71ac6bbb35ecc832033264c630d5d3b3",
     "checksumName": "Zstd.v1.5.7+1.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "ddcd17bf474f584c12ac9a83237dd26d35754adb12c31f7e15c19c7b6d8a73b6",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/dbd764b283c2da22563bb2d2a1fe82107a7808c2/Z/Zstd/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/zstd",
     "sourceSHA256": "16bccc906a5596bf0e651b96bedf80e0e6b6b189a369d5127ed1384f2953cd79",
     "url": "https://github.com/JuliaBinaryWrappers/Zstd_jll.jl/releases/download/Zstd-v1.5.7%2B1/Zstd.v1.5.7.x86_64-linux-gnu.tar.gz"
   },
   "dSFMT_jll": {
     "archiveBytes": 6617,
+    "artifacts": {
+      "sha256": "608499c0a1b677e79a234d72174f96ff5ec2699eaa321f420568a471ade10bb5",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/dSFMT_jll.jl/d00b45de71227624bfd892b4d5177f89a973cffa/Artifacts.toml"
+    },
+    "assetTree": "059b1cf362cca007c9c3b1251443c8569743f7f3",
     "checksumName": "dSFMT.v2.2.5+2.x86_64-linux-gnu.tar.gz",
+    "recipe": {
+      "sha256": "080b1d21f9351b09dbaa810fde2a755830392311eb27927f9b35f78af9a2af74",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/25744a88459b59a7e530a0121032c338bf146e81/D/dSFMT/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/dsfmt",
     "sourceSHA256": "374d5d5fec2efa2d9c0742f9db332d774e0bd8424ac4221bde3ad4f15dd3f6a3",
     "url": "https://github.com/JuliaBinaryWrappers/dSFMT_jll.jl/releases/download/dSFMT-v2.2.5%2B2/dSFMT.v2.2.5.x86_64-linux-gnu.tar.gz"
   },
   "libLLVM_jll": {
     "archiveBytes": 107675586,
+    "artifacts": {
+      "sha256": "5006457835731b16310d939304efb50f5e5ba0e8f1c9161c2700d5f7bbfcfda8",
+      "url": "https://raw.githubusercontent.com/JuliaBinaryWrappers/libLLVM_jll.jl/4bbb078c8854fc8e89e3b600aaf0f4df587961f6/Artifacts.toml"
+    },
+    "assetTree": "137c0f1dfb6fd9e801c5c7166d3130a4f85847d8",
     "checksumName": "libLLVM.v20.1.8+2.x86_64-linux-gnu-cxx11-llvm_version+20.tar.gz",
+    "recipe": {
+      "sha256": "986789646de4d0424adbd6324559f3308cdc5d1595fdfbbf1fa82e4cc0adb809",
+      "url": "https://raw.githubusercontent.com/JuliaPackaging/Yggdrasil/588bae4f6df186ffa0ef081b0ebd2671efbba9c0/L/LLVM/libLLVM@20/build_tarballs.jl"
+    },
     "sourcePin": "deps/checksums/llvm",
     "sourceSHA256": "eabb85f226f11702196c679fe7079286b4458ffedaf35d80f509fdc878aa5198",
     "url": "https://github.com/JuliaBinaryWrappers/libLLVM_jll.jl/releases/download/libLLVM-v20.1.8%2B2/libLLVM.v20.1.8.x86_64-linux-gnu-cxx11-llvm_version%2B20.tar.gz"

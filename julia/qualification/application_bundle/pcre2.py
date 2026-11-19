@@ -2,10 +2,11 @@
 import argparse
 import ctypes
 import hashlib
-import json
 from pathlib import Path
 import shutil
+import subprocess
 import tarfile
+import tempfile
 import tomllib
 
 
@@ -20,6 +21,8 @@ INPUTS = {
     'common': 'f7af2525845b31a0418f021bd30ce09184295a6471b90723493af2f5a8f052a9',
     'source': '53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384',
     'binary': '81a9d677e1a6e4ecb7f876d7fe941a5fc8d233c6c519bbdf8c1710da9929ae9b',
+    'signer': 'db349e84ea6c7d9dc81c0c9561327500e352e16e2d5aeaf338eaf57cdec56d68',
+    'signature': '195ed167511ccb6b34f9676d5e37f7cc71490ca6ec00fc65851bacb3fb43bdcb',
 }
 URL = 'https://github.com/JuliaBinaryWrappers/PCRE2_jll.jl/releases/download/PCRE2-v10.49.1+0/PCRE2.v10.49.1.x86_64-linux-gnu.tar.gz'
 
@@ -33,6 +36,16 @@ def publisher(inputs):
     for name, checksum in INPUTS.items():
         if digest(inputs / name) != checksum:
             raise ValueError('PCRE2 publisher input differs: ' + name)
+    with tempfile.TemporaryDirectory() as private:
+        keyring = Path(private) / 'publisher.gpg'
+        subprocess.run(['gpg', '--homedir', private, '--batch', '--no-options', '--dearmor', '--output',
+                        keyring, inputs / 'signer'], check=True, timeout=15, stdin=subprocess.DEVNULL)
+        signature = subprocess.check_output(['gpgv', '--homedir', private, '--keyring', keyring, '--status-fd', '1',
+                                             inputs / 'signature', inputs / 'source'], timeout=15, text=True)
+        valid = [line.split() for line in signature.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
+        if (len(valid) != 1 or valid[0][2] != 'BACF71F10404D5761C09D392021DE40BFB63B406'
+                or valid[0][-1] != 'A95536204A3BB489715231282A98E77EB6F24CA8'):
+            raise ValueError('PCRE2 release signer differs')
     rows = tomllib.loads((inputs / 'wrapperArtifacts').read_text())['PCRE2']
     targets = [r for r in rows if {k: r[k] for k in r if k not in ('download', 'git-tree-sha1')} ==
                {'arch': 'x86_64', 'os': 'linux', 'libc': 'glibc'}]
