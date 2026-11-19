@@ -1,6 +1,7 @@
 """Bounded #1348 comparison on a private loopback broker and the real inference entrypoint."""
 import asyncio
 import hashlib
+import http.client
 import importlib.metadata
 import json
 import math
@@ -15,10 +16,11 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import grpc
 import nats
-from nats.js.api import StorageType, StreamConfig
+from nats.js.api import ConsumerConfig, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
 from envelope.v1.event_class_pb2 import EventClass
@@ -27,6 +29,7 @@ from inference.v1.inference_service_pb2_grpc import InferenceServiceStub
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 from kanz_bus import Event, NATSClient, Producer, ProducerConfig, unframe, validate
 from kanz_inference.interactive.servicer import REASON_POOL_SATURATED
+from kanz_inference.observability import ObservabilityServer
 from kanz_inference.publish import SUBJECT_PREDICTION_SCORED
 from kanz_inference.streaming.worker import SUBJECT_FEATURE_COMPUTED
 
@@ -86,6 +89,28 @@ def summary(samples):
         return {}
     ordered = sorted(samples)
     return {f"p{p}_ms": ordered[math.ceil(p * len(ordered) / 100) - 1] * 1000 for p in (95, 99)}
+
+
+def ready_status(port):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/readyz")
+        return connection.getresponse().status
+    except OSError:
+        return None
+    finally:
+        connection.close()
+
+
+async def expect_bind_refusal(env, port):
+    with process([sys.executable, "-B", "-m", "kanz_inference"], env=env) as service:
+        deadline = time.monotonic() + 10
+        while service.poll() is None and time.monotonic() < deadline:
+            if await asyncio.to_thread(ready_status, port) == 200:
+                raise AssertionError("reported ready without a matching feature subscription")
+            await asyncio.sleep(0.025)
+        if service.returncode != 1:
+            raise AssertionError(f"expected a streaming failure, got {service.returncode}")
 
 
 async def phase(name, rpc_n, stream_n, stub, producer, scored, js):
@@ -216,7 +241,17 @@ async def measure(root, binary):
         nc = await nats.connect(url)
         try:
             js = nc.jetstream()
+            # A working NATS connection alone cannot serve streaming traffic.
+            # Start before provisioning, then recover using the same model and endpoints.
+            await expect_bind_refusal(env, metrics_port)
             await js.add_stream(StreamConfig(name="INFERENCE", subjects=["inference.>"], storage=StorageType.MEMORY))
+            # A durable with the right name on this stream may be bound to a
+            # different filter. The service must refuse it without reconfiguring it.
+            await js.add_consumer("INFERENCE", ConsumerConfig(durable_name=GROUP, filter_subject="inference.other"))
+            await expect_bind_refusal(env, metrics_port)
+            if (await js.consumer_info("INFERENCE", GROUP)).config.filter_subject != "inference.other":
+                raise AssertionError("service changed the existing durable")
+            await js.delete_consumer("INFERENCE", GROUP)
             scored = await nc.subscribe(SUBJECT_PREDICTION_SCORED)
             await nc.flush()
             with process([sys.executable, "-B", "-m", "kanz_inference"], env=env) as service:
@@ -225,7 +260,9 @@ async def measure(root, binary):
                         raise RuntimeError("inference process failed to start")
                     try:
                         await js.consumer_info("INFERENCE", GROUP)
-                        break
+                        if await asyncio.to_thread(ready_status, metrics_port) == 200:
+                            break
+                        await asyncio.sleep(0.05)
                     except NotFoundError:
                         await asyncio.sleep(0.05)
                 async with (grpc.aio.insecure_channel(f"127.0.0.1:{grpc_port}") as channel,
@@ -239,6 +276,31 @@ async def measure(root, binary):
                                               ("streaming_only", 0, COUNT), ("mixed", COUNT, COUNT),
                                               ("recovery", 8, 8)):
                         results.append(await phase(name, rpc, stream, stub, emitter, scored, js))
+                await js.delete_consumer("INFERENCE", GROUP)
+                if await asyncio.to_thread(service.wait, timeout=25) != 1:
+                    raise AssertionError("lost durable subscription without a process failure")
+            if os.name == "posix":
+                with process([sys.executable, "-B", "-m", "kanz_inference"], env=env) as restarted:
+                    while await asyncio.to_thread(ready_status, metrics_port) != 200:
+                        if restarted.poll() is not None:
+                            raise RuntimeError("streaming service failed to restart")
+                        await asyncio.sleep(0.05)
+                    restarted.terminate()
+                    if await asyncio.to_thread(restarted.wait, timeout=10) != 0:
+                        raise AssertionError("SIGTERM did not shut down the active streaming service cleanly")
+            with process([sys.executable, "-B", "-m", "kanz_inference"],
+                         env={**env, "KANZ_INFERENCE_NATS_URL": ""}) as interactive:
+                while await asyncio.to_thread(ready_status, metrics_port) != 200:
+                    if interactive.poll() is not None:
+                        raise RuntimeError("interactive-only service failed to start")
+                    await asyncio.sleep(0.05)
+                async with grpc.aio.insecure_channel(f"127.0.0.1:{grpc_port}") as channel:
+                    fv = vector("interactive-only")
+                    check_prediction(await InferenceServiceStub(channel).Predict(fv, timeout=5), fv)
+                if os.name == "posix":
+                    interactive.terminate()
+                    if await asyncio.to_thread(interactive.wait, timeout=10) != 0:
+                        raise AssertionError("SIGTERM did not shut down the service cleanly")
         finally:
             await nc.close()
     return {"model": MODEL, "card_sha256": hashlib.sha256(card.read_bytes()).hexdigest(),
@@ -251,6 +313,47 @@ async def measure(root, binary):
 
 
 class InferenceInterference(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_fetch_withdraws_readiness_before_unsubscribe_finishes(self):
+        health = ObservabilityServer("127.0.0.1:0")
+        health.start()
+        self.addCleanup(health.stop)
+        def state(active):
+            if active:
+                health.mark_ready()
+            else:
+                health.mark_draining()
+        client = NATSClient("nats://127.0.0.1", subscription_state=state)
+        client._js = AsyncMock()
+        sub = client._js.pull_subscribe.return_value
+        info = sub.consumer_info.return_value
+        info.config = ConsumerConfig(durable_name=GROUP, filter_subject=SUBJECT_FEATURE_COMPUTED)
+        fetching, fail_fetch = asyncio.Event(), asyncio.Event()
+        cleaning, finish_cleanup = asyncio.Event(), asyncio.Event()
+
+        async def fetch(**kwargs):
+            fetching.set()
+            await fail_fetch.wait()
+            raise RuntimeError("terminal fetch")
+
+        async def unsubscribe():
+            cleaning.set()
+            await finish_cleanup.wait()
+
+        sub.fetch.side_effect = fetch
+        sub.unsubscribe.side_effect = unsubscribe
+        task = asyncio.create_task(client.subscribe(SUBJECT_FEATURE_COMPUTED, GROUP, AsyncMock()))
+        try:
+            await asyncio.wait_for(fetching.wait(), timeout=3)
+            self.assertEqual(await asyncio.to_thread(ready_status, health.port), 200)
+            fail_fetch.set()
+            await asyncio.wait_for(cleaning.wait(), timeout=3)
+            self.assertEqual(await asyncio.to_thread(ready_status, health.port), 503)
+        finally:
+            fail_fetch.set()
+            finish_cleanup.set()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertIsInstance(task.exception(), RuntimeError)
+
     @unittest.skipUnless(os.environ.get("KANZ_TEST_NATS_SERVER"), "requires a private nats-server executable")
     async def test_shared_process(self):
         asyncio.get_running_loop().set_debug(False)

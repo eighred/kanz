@@ -86,6 +86,74 @@ func (f *fakeOKXDepth) connCount() int {
 	return f.conns
 }
 
+// A valid sequence identifies the next change but cannot supply its event time.
+func TestOKXSourceRefusesInvalidVenueTime(t *testing.T) {
+	for _, action := range []string{"snapshot", "update"} {
+		for _, ts := range []string{"", "invalid", "0", "-1", "253402300800000"} {
+			t.Run(action+"/"+ts, func(t *testing.T) {
+				bad := strings.Replace(okxBook(action, 101, 100, "101"), "1700000000000", ts, 1)
+				if ts == "" {
+					bad = strings.Replace(bad, `"ts":"",`, "", 1)
+				}
+				first := []string{bad}
+				if action == "update" {
+					first = append([]string{okxBook("snapshot", 100, -1, "100")}, first...)
+				}
+				f := newFakeOKXDepth(t, [][]string{first, {okxBook("update", 102, 101, "999"), okxBook("snapshot", 200, -1, "200")}})
+				s := okxSourceOver(f)
+				defer func() { _ = s.Close() }()
+				if action == "update" {
+					recvOK(t, s)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+				defer cancel()
+				u, err := s.Recv(ctx)
+				if err == nil || !strings.Contains(err.Error(), "event time") || u.Snapshot != nil || u.Delta != nil {
+					t.Fatalf("invalid venue time %q: got %+v, err=%v", ts, u, err)
+				}
+				if got := recvOK(t, s).Snapshot; got.GetLastUpdateSequence() != 200 || f.connCount() != 2 {
+					t.Fatalf("missing new anchor: %v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestOKXSourceRequiresNondecreasingVenueTimeAcrossReanchor(t *testing.T) {
+	frame := func(action string, seq, prev int64, ts string) string {
+		return strings.Replace(okxBook(action, seq, prev, "100"), "1700000000000", ts, 1)
+	}
+	const start = "1700000000123"
+	const advanced = "1700000000124"
+	f := newFakeOKXDepth(t, [][]string{
+		{frame("snapshot", 100, -1, start), frame("update", 101, 100, advanced), frame("update", 102, 101, start)},
+		{frame("snapshot", 200, -1, start)},
+		{frame("update", 301, 300, advanced), frame("snapshot", 400, -1, advanced), frame("update", 401, 400, advanced)},
+	})
+	s := okxSourceOver(f)
+	defer func() { _ = s.Close() }()
+	if ts := recvOK(t, s).Snapshot.GetEventTime(); ts.GetSeconds() != 1700000000 || ts.GetNanos() != 123000000 {
+		t.Fatalf("snapshot venue time %v", ts)
+	}
+	if ts := recvOK(t, s).Delta.GetEventTime(); ts.GetSeconds() != 1700000000 || ts.GetNanos() != 124000000 {
+		t.Fatalf("delta venue time %v", ts)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	for _, action := range []string{"delta", "reconnect snapshot"} {
+		u, err := s.Recv(ctx)
+		if err == nil || !strings.Contains(err.Error(), "regressed") || u.Snapshot != nil || u.Delta != nil {
+			t.Fatalf("%s regressed: got %+v, err=%v", action, u, err)
+		}
+	}
+	if got := recvOK(t, s).Snapshot; got.GetLastUpdateSequence() != 400 || got.GetEventTime().GetNanos() != 124000000 {
+		t.Fatalf("new anchor %v", got)
+	}
+	if got := recvOK(t, s).Delta; got.GetPrevUpdateSequence() != 400 || got.GetLastUpdateSequence() != 401 || got.GetEventTime().GetNanos() != 124000000 || f.connCount() != 3 {
+		t.Fatalf("same-millisecond delta %v, connections=%d", got, f.connCount())
+	}
+}
+
 func okxSourceOver(f *fakeOKXDepth) *OKXSource {
 	return NewOKXSource(OKXConfig{
 		InstrumentID: "BTC-USD", InstID: "BTC-USDT", MIC: "OKX",

@@ -8,10 +8,30 @@ param(
     [string]$Region = 'ap-northeast-1',
     [string]$Profile = 'kanz-platform',
     [string]$RecoveryBucket = 'kanz-testnet-tokyo-recovery-012619468098',
-    [switch]$QualifyTVSync
+    [switch]$QualifyTVSync,
+    [ValidateNotNullOrEmpty()]
+    [string]$BackupReceipt
 )
 
 $ErrorActionPreference = 'Stop'
+$receiptArgument = ''
+if ($PSBoundParameters.ContainsKey('BackupReceipt')) {
+    if ($Operation -ne 'Restore') { throw 'A backup receipt can select a restore only.' }
+    $receipt = ConvertFrom-Json -InputObject $BackupReceipt
+    if ($receipt -isnot [pscustomobject] -or $receipt.status -isnot [string] -or $receipt.status -cne 'BACKUP_VERIFIED' -or
+        $receipt.backup_id -isnot [string] -or $receipt.backup_id -cnotmatch '\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\z' -or
+        $receipt.key -isnot [string] -or $receipt.key -cne "testnet/data-plane/$($receipt.backup_id)/bundle.tar.gz" -or
+        $receipt.version_id -isnot [string] -or [string]::IsNullOrEmpty($receipt.version_id) -or
+        [Text.Encoding]::UTF8.GetByteCount($receipt.version_id) -gt 1024 -or
+        $receipt.version_id -ceq 'null' -or $receipt.version_id -match '\p{Cc}' -or
+        $receipt.sha256 -isnot [string] -or $receipt.sha256 -cnotmatch '\A[0-9a-f]{64}\z') {
+        throw 'Expected a verified backup receipt with its matching archive key, immutable version and SHA-256.'
+    }
+    # Only these public identifiers enter the remote command. Opaque S3
+    # versions must survive transport without being interpreted by the shell.
+    $selection = @{ key = $receipt.key; version_id = $receipt.version_id; sha256 = $receipt.sha256 } | ConvertTo-Json -Compress
+    $receiptArgument = " '" + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($selection)) + "'"
+}
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
@@ -112,7 +132,7 @@ $commands = @(
 ) + $helperCommands + @(
     "printf '%s' '$encoded' | base64 -d | gzip -dc > `"`$work/testnet-data-plane-recovery.sh`"",
     "chmod 0700 `"`$work/testnet-data-plane-recovery.sh`"",
-    "`"`$work/testnet-data-plane-recovery.sh`" '$($Operation.ToLowerInvariant())' '$RecoveryBucket' '$kmsArn' '$releaseCommit' '$tvMode' '$pairEncoded'"
+    "`"`$work/testnet-data-plane-recovery.sh`" '$($Operation.ToLowerInvariant())' '$RecoveryBucket' '$kmsArn' '$releaseCommit' '$tvMode' '$pairEncoded'$receiptArgument"
 )
 $parameters = @{ commands = $commands } | ConvertTo-Json -Compress -Depth 4
 # Keep reviewed source and public release metadata out of the Windows native

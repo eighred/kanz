@@ -11,7 +11,9 @@ readonly RECOVERY_KMS_KEY_ARN=${3:-}
 readonly RELEASE_COMMIT=${4:-unknown}
 readonly TV_MODE=${5:-off}
 readonly TV_PAIR_BASE64=${6:-}
+readonly BACKUP_SELECTION=${7:-}
 readonly RECOVERY_REGION=ap-northeast-3
+readonly ARCHIVE_KEY_PATTERN='\Atestnet/data-plane/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}/bundle\.tar\.gz\z'
 readonly DATA_NS=kanz-data
 readonly MSG_NS=kanz-messaging
 readonly DRILL_NS=kanz-recovery-drill
@@ -35,6 +37,10 @@ TV_SOURCE=''
 
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
+
+if (( $# > 7 )) || { (( $# == 7 )) && [[ "$OPERATION" != restore || -z "$BACKUP_SELECTION" ]]; }; then
+  die 'a nonempty backup selection is valid only for a restore'
+fi
 
 if [[ "$OPERATION" == restore || "$TV_MODE" == qualify ]]; then
   source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
@@ -95,11 +101,13 @@ create_backup_runner() {
   RUNNER_NONCE=$(cat /proc/sys/kernel/random/uuid)
   created=$(printf '%s' "$job_json" | jq \
     --arg pod "$NATS_RUNNER" --arg container bootstrap --arg owner "$RUNNER_NONCE" '
-      .kind="Pod" | .apiVersion="v1" | .metadata.name=$pod |
-      del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,
-          .metadata.generation,.metadata.annotations,.metadata.ownerReferences,.status) |
-      .metadata.annotations={"kanz.io/recovery-owner":$owner} |
-      .spec=.spec.template.spec | del(.spec.template) |
+      # Job admission can copy its controller selector onto Job metadata.
+      # A standalone Pod carrying it can be adopted and deleted by that Job.
+      {apiVersion:"v1",kind:"Pod",metadata:{
+        namespace:.metadata.namespace,name:$pod,annotations:{"kanz.io/recovery-owner":$owner},
+        labels:((.metadata.labels // {}) | del(."batch.kubernetes.io/controller-uid",."batch.kubernetes.io/job-name",
+                                              ."controller-uid",."job-name"))
+      },spec:.spec.template.spec} |
       .spec.restartPolicy="Never" |
       (.spec.containers[] | select(.name==$container) | .command)=["sleep","1800"] |
       (.spec.containers[] | select(.name==$container) | .args)=[]' |
@@ -351,7 +359,7 @@ backup() {
 
 object_version() {
   jq -ser 'select(length==1) | .[0].VersionId | strings |
-    select(length>0 and .!="null" and (test("[[:cntrl:]]")|not))'
+    select(length>0 and utf8bytelength<=1024 and .!="null" and (test("[[:cntrl:]]")|not))'
 }
 
 upload_recovery_archive() {
@@ -404,6 +412,41 @@ redis_backup_checkpoint() {
   '
 }
 
+latest_recovery_key() {
+  # The CLI aggregates all pages for JSON output. Rank every object before
+  # validating the winner so an unexpected newer key blocks unattended restore.
+  aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --output json |
+    jq -ser --arg archive "$ARCHIVE_KEY_PATTERN" '
+      def modified:
+        (.LastModified | capture("\\A(?<second>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]+))?(?:Z|\\+00:00)\\z"))
+        // error("invalid S3 modification time") |
+        [(.second + "Z" | fromdateiso8601), ((.fraction // "") | sub("0+\\z"; ""))];
+      select(length==1) | .[0] |
+      select(.IsTruncated!=true and .NextToken==null and .NextContinuationToken==null) |
+      .Contents | arrays | select(length>0 and all(.[]; (.Key | type=="string" and length>0))) |
+      max_by(modified, .Key) | .Key | select(test($archive))'
+}
+
+download_restore_archive() {
+  local destination=$1 selection=${2:-} key version expected_sha='' evidence
+  if [[ -n "$selection" ]]; then
+    selection=$(printf '%s' "$selection" | base64 -d | jq -cse --arg archive "$ARCHIVE_KEY_PATTERN" '
+      select(length==1) | .[0] |
+      select((.key | strings | test($archive)) and
+             (.version_id | strings | length>0 and utf8bytelength<=1024) and .version_id!="null" and (.version_id | test("[[:cntrl:]]") | not) and
+             (.sha256 | strings | test("\\A[0-9a-f]{64}\\z")))') || die 'invalid backup selection'
+    key=$(jq -er .key <<<"$selection")
+    version=$(jq -er .version_id <<<"$selection")
+    expected_sha=$(jq -er .sha256 <<<"$selection")
+  else
+    key=$(latest_recovery_key) || die 'could not select a bounded archive from the complete recovery listing'
+    version=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
+      --output json | object_version) || die 'selected recovery key has no immutable version'
+  fi
+  evidence=$(read_recovery_archive "$key" "$version" "$destination" "$expected_sha") || die 'restore object verification failed'
+  jq -c --arg key "$key" '. + {key:$key}' <<<"$evidence"
+}
+
 restore() {
   require_boundary
   local started work key archive archive_sha version object_evidence
@@ -420,11 +463,9 @@ restore() {
   }
   trap cleanup_restore EXIT
 
-  key=$(aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
-  [[ "$key" == testnet/data-plane/*/bundle.tar.gz ]] || die 'no bounded data-plane recovery artifact exists'
-  version=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
-    --output json | object_version) || die 'selected recovery key has no immutable version'
-  object_evidence=$(read_recovery_archive "$key" "$version" "$archive") || die 'restore object verification failed'
+  object_evidence=$(download_restore_archive "$archive" "$BACKUP_SELECTION") || die 'could not select and verify recovery artifact'
+  key=$(jq -er .key <<<"$object_evidence")
+  version=$(jq -er .version_id <<<"$object_evidence")
   archive_sha=$(jq -er .sha256 <<<"$object_evidence")
   tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))' && die 'artifact contains an unsafe path'
   mkdir "$work/extracted"
