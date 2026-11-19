@@ -6,6 +6,7 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
+jiff = { version = "=1.0.1", default-features = false }
 kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.6"
 prost-types = "=0.14.6"
