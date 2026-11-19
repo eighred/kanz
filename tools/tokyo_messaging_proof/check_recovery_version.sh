@@ -56,6 +56,8 @@ echo 'Verified pinned S3 requests and six object custody refusals'
   old_key='testnet/data-plane/20261118T010000Z-123456789abc/bundle.tar.gz'
   new_key='testnet/data-plane/20261119T010000Z-fedcba987654/bundle.tar.gz'
   old_version="old+/=v'1"
+  listing=$(jq -cn --arg new "$new_key" --arg old "$old_key" \
+    '{Contents:[{Key:$new,LastModified:"2026-11-19T01:00:00Z"},{Key:$old,LastModified:"2026-11-18T01:00:00Z"}]}')
   aws() {
     local op=$2 key='' version='' bytes sha
     shift 2
@@ -68,7 +70,7 @@ echo 'Verified pinned S3 requests and six object custody refusals'
       shift
     done
     printf '%s|%s|%s\n' "$op" "$key" "$version" >>"$work/history-calls"
-    if [[ "$op" == list-objects-v2 ]]; then printf '%s\n' "$new_key"; return; fi
+    if [[ "$op" == list-objects-v2 ]]; then printf '%s\n' "$listing"; return; fi
     case "$key" in
       "$old_key") version=${version:-overwritten} ;;
       "$new_key") version=${version:-latest} ;;
@@ -101,6 +103,26 @@ echo 'Verified pinned S3 requests and six object custody refusals'
   jq -e --arg k "$new_key" '.key==$k and .version_id=="latest"' <<<"$result" >/dev/null
   [[ "$(cat "$work/latest")" == latest-checkpoint ]]
 
+  valid_listing=$listing
+  for filter in '.Contents=[]' '.IsTruncated=true' '.NextToken="pending"' \
+      'del(.Contents[1].LastModified)' 'del(.Contents[1].Key)' '.Contents[0].Key="testnet/data-plane/notes"'; do
+    listing=$(jq -c "$filter" <<<"$valid_listing")
+    : >"$work/history-calls"
+    if (download_restore_archive "$work/refused-latest") >"$work/result" 2>/dev/null; then exit 1; fi
+    [[ "$(cat "$work/history-calls")" == 'list-objects-v2||' && ! -s "$work/result" && ! -e "$work/refused-latest" ]]
+  done
+  listing=$valid_listing
+
+  old_version=$(jq -nr '("\u00e9"*512)')
+  boundary=$(jq -c --arg v "$old_version" '.version_id=$v' <<<"$selection")
+  result=$(download_restore_archive "$work/boundary" "$(printf '%s' "$boundary" | base64 -w0)")
+  jq -e --arg v "$old_version" '.version_id==$v and (.version_id|utf8bytelength)==1024' <<<"$result" >/dev/null
+  : >"$work/history-calls"
+  selected=$(jq -c '.version_id+="a"' <<<"$boundary" | base64 -w0)
+  if (download_restore_archive "$work/rejected" "$selected") >"$work/result" 2>/dev/null; then exit 1; fi
+  [[ ! -s "$work/history-calls" && ! -s "$work/result" && ! -e "$work/rejected" ]]
+  old_version="old+/=v'1"
+
   for filter in '.sha256=("f"*64)' '.version_id="missing"' '.key="outside"' 'del(.sha256)' '.version_id="null"'; do
     selected=$(jq -c "$filter" <<<"$selection" | base64 -w0)
     : >"$work/history-calls"
@@ -114,7 +136,7 @@ echo 'Verified pinned S3 requests and six object custody refusals'
     if (download_restore_archive "$work/rejected" "$selected") >"$work/result" 2>/dev/null; then exit 1; fi
     [[ ! -s "$work/result" && ! -s "$work/history-calls" && ! -e "$work/rejected" ]]
   done
-  echo 'Verified selection of a prior version, independent latest discovery and seven receipt refusals'
+  echo 'Verified retained version selection, complete latest discovery, six listing refusals and eight receipt refusals'
 )
 
 # Inspect the production backup paths at its first post-allocation API call.

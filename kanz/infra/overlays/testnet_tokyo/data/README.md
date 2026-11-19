@@ -39,7 +39,10 @@ a backup while application or venue writers are running, streams database,
 Redis and NATS artifacts without exposing mounted credentials to the host, and
 uploads only through the EC2 instance role to the KMS-encrypted, Object-Locked
 Osaka bucket. Backup verifies and records the version ID returned by the upload.
-Restore selects the latest key by default. Capture the result of the authorized
+Restore selects the most recently modified object under `testnet/data-plane/`
+across all listing pages. Equal modification times select the lexicographically
+greatest key. If the selected key falls outside the backup archive naming
+convention, restore stops. Capture the result of the authorized
 backup and use its `Evidence` property when restoring that checkpoint.
 
 ```powershell

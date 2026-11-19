@@ -13,6 +13,7 @@ readonly TV_MODE=${5:-off}
 readonly TV_PAIR_BASE64=${6:-}
 readonly BACKUP_SELECTION=${7:-}
 readonly RECOVERY_REGION=ap-northeast-3
+readonly ARCHIVE_KEY_PATTERN='\Atestnet/data-plane/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}/bundle\.tar\.gz\z'
 readonly DATA_NS=kanz-data
 readonly MSG_NS=kanz-messaging
 readonly DRILL_NS=kanz-recovery-drill
@@ -356,7 +357,7 @@ backup() {
 
 object_version() {
   jq -ser 'select(length==1) | .[0].VersionId | strings |
-    select(length>0 and .!="null" and (test("[[:cntrl:]]")|not))'
+    select(length>0 and utf8bytelength<=1024 and .!="null" and (test("[[:cntrl:]]")|not))'
 }
 
 upload_recovery_archive() {
@@ -409,20 +410,34 @@ redis_backup_checkpoint() {
   '
 }
 
+latest_recovery_key() {
+  # The CLI aggregates all pages for JSON output. Rank every object before
+  # validating the winner so an unexpected newer key blocks unattended restore.
+  aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --output json |
+    jq -ser --arg archive "$ARCHIVE_KEY_PATTERN" '
+      def modified:
+        (.LastModified | capture("\\A(?<second>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]+))?(?:Z|\\+00:00)\\z"))
+        // error("invalid S3 modification time") |
+        [(.second + "Z" | fromdateiso8601), ((.fraction // "") | sub("0+\\z"; ""))];
+      select(length==1) | .[0] |
+      select(.IsTruncated!=true and .NextToken==null and .NextContinuationToken==null) |
+      .Contents | arrays | select(length>0 and all(.[]; (.Key | type=="string" and length>0))) |
+      max_by(modified, .Key) | .Key | select(test($archive))'
+}
+
 download_restore_archive() {
   local destination=$1 selection=${2:-} key version expected_sha='' evidence
   if [[ -n "$selection" ]]; then
-    selection=$(printf '%s' "$selection" | base64 -d | jq -cse '
+    selection=$(printf '%s' "$selection" | base64 -d | jq -cse --arg archive "$ARCHIVE_KEY_PATTERN" '
       select(length==1) | .[0] |
-      select((.key | strings | test("\\Atestnet/data-plane/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}/bundle\\.tar\\.gz\\z")) and
-             (.version_id | strings | length>0) and .version_id!="null" and (.version_id | test("[[:cntrl:]]") | not) and
+      select((.key | strings | test($archive)) and
+             (.version_id | strings | length>0 and utf8bytelength<=1024) and .version_id!="null" and (.version_id | test("[[:cntrl:]]") | not) and
              (.sha256 | strings | test("\\A[0-9a-f]{64}\\z")))') || die 'invalid backup selection'
     key=$(jq -er .key <<<"$selection")
     version=$(jq -er .version_id <<<"$selection")
     expected_sha=$(jq -er .sha256 <<<"$selection")
   else
-    key=$(aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text) || die 'could not list recovery artifacts'
-    [[ "$key" == testnet/data-plane/*/bundle.tar.gz ]] || die 'no bounded data-plane recovery artifact exists'
+    key=$(latest_recovery_key) || die 'could not select a bounded archive from the complete recovery listing'
     version=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
       --output json | object_version) || die 'selected recovery key has no immutable version'
   fi

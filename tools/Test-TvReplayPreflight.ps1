@@ -131,7 +131,8 @@ if ($message -cne 'Verified offline SSM payload.' -or (Test-Path -LiteralPath $f
     throw "Offline source transport or parameter cleanup failed: $message"
 }
 $backupId = '20261118T010000Z-123456789abc'
-$receiptFixture = @{ status='BACKUP_VERIFIED'; backup_id=$backupId; key="testnet/data-plane/$backupId/bundle.tar.gz"; version_id="old+/=v'1"; sha256='a' * 64 }
+$boundaryVersion = ("$([char]0xE9)" * 508) + "old+/='1"
+$receiptFixture = @{ status='BACKUP_VERIFIED'; backup_id=$backupId; key="testnet/data-plane/$backupId/bundle.tar.gz"; version_id=$boundaryVersion; sha256='a' * 64 }
 $fixtureState.mode = 'backup-result'
 $backup = & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Backup
 if ($backup.CommandId -cne 'fixture-backup-command' -or $backup.Operation -cne 'Backup') { throw 'Expected the completed backup result.' }
@@ -140,7 +141,7 @@ $message = ''
 try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Restore -BackupReceipt $backup.Evidence }
 catch { $message = $_.Exception.Message }
 if ($message -cne 'Verified offline SSM payload.' -or (Test-Path -LiteralPath $fixtureState.parameterPath)) { throw "Receipt transport failed: $message" }
-foreach ($change in @(@{status='RESTORE_VERIFIED'}, @{backup_id='mismatched'}, @{version_id='null'}, @{sha256='short'})) {
+foreach ($change in @(@{status='RESTORE_VERIFIED'}, @{backup_id='mismatched'}, @{version_id='null'}, @{version_id=$boundaryVersion + 'a'}, @{sha256='short'})) {
     $invalid = $receiptFixture.Clone()
     foreach ($field in $change.Keys) { $invalid[$field] = $change[$field] }
     $message = ''
@@ -153,4 +154,4 @@ try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operati
 catch { $message = $_.Exception.Message }
 if ($message -cne 'A backup receipt can select a restore only.') { throw 'Backup accepted restore selection.' }
 $global:LASTEXITCODE = 0
-Write-Output "replay-preflight-fixtures=12 PASS (offline source, transport and receipt selection)"
+Write-Output "replay-preflight-fixtures=13 PASS (offline source, transport and receipt selection)"
