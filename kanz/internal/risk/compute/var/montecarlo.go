@@ -95,9 +95,10 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 		if v < 0 {
 			v = 0
 		}
+		amount := cover.RoundedValue(v, varExponent)
 		return v1.Measure{
 			Name:       compute.MeasureVaR99,
-			Value:      floatToDecimal(v, varExponent),
+			Value:      amount,
 			Coverage:   cover.Result(),
 			Provenance: evaluation,
 		}

@@ -45,6 +45,60 @@ func dval(d *commonpb.Decimal) float64 {
 	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
 }
 
+func TestRegisteredTailMeasuresRefuseUnrepresentableLoss(t *testing.T) {
+	// Two equal -50% returns produce the same one-day loss at every quantile.
+	// The cumulative loss on the fixed-inventory path is twice the one-day loss.
+	ctx := context.Background()
+	reg := compute.DefaultRegistry()
+	varmodel.Register(ctx, reg, fixedProvider{ret: []float64{-0.5, -0.5}}, varmodel.Config{})
+	for _, tc := range []struct {
+		name                           string
+		usd                            int64
+		single, cumulative             int64 // reported cent coefficients, or zero for a refusal
+		refuseSingle, refuseCumulative bool
+	}{
+		{"flat", 0, 0, 0, false, false},
+		{"both_fit", 90_000_000_000_000_000, 4_500_000_000_000_000_000, 9_000_000_000_000_000_000, false, false},
+		{"only_single_fits", 100_000_000_000_000_000, 5_000_000_000_000_000_000, 0, false, true},
+		{"neither_fits", 200_000_000_000_000_000, 0, 0, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := portfolio("USD", domain.Position{InstrumentID: "A", MarketValue: money(tc.usd, "USD")})
+			fraction := int64(10_000)
+			if tc.usd == 0 {
+				fraction = 0
+			}
+			for _, measure := range []struct {
+				name        v1.MeasureName
+				coefficient int64
+				exponent    int32
+				refused     bool
+			}{
+				{compute.MeasureVaR99, tc.single, -2, tc.refuseSingle},
+				{compute.MeasureES99, tc.single, -2, tc.refuseSingle},
+				{compute.MeasureMaxDrawdownAmount, tc.cumulative, -2, tc.refuseCumulative},
+				{compute.MeasureMaxDrawdown, fraction, -4, false},
+			} {
+				set := compute.ComputeMeasures(p, reg, []v1.MeasureName{measure.name})
+				got, ok := set.Lookup(measure.name)
+				if !ok || got.Value == nil || got.Value.Coefficient != measure.coefficient || got.Value.Exponent != measure.exponent ||
+					got.Provenance.Method != v1.MethodHistoricalSimulation || got.Provenance.InputDigest == "" || got.Coverage.Contributed != 1 {
+					t.Errorf("%s: unexpected value, inputs or provenance: %+v", measure.name, got)
+					continue
+				}
+				if measure.refused {
+					if got.Coverage.ExcludedCount != 1 || len(got.Coverage.Exclusions) != 1 ||
+						got.Coverage.Exclusions[0] != (v1.InputExclusion{Reason: compute.SkipInvalidPricing}) {
+						t.Errorf("%s: missing whole-measure refusal: %+v", measure.name, got.Coverage)
+					}
+				} else if got.Coverage.ExcludedCount != 0 {
+					t.Errorf("%s: valid value excluded: %+v", measure.name, got.Coverage)
+				}
+			}
+		})
+	}
+}
+
 // TestHistorical_EmpiricalQuantile pins the historical-simulation arithmetic on
 // a hand-computable distribution: $1000 under returns {-10,-5,0,+5,+10}% gives
 // P&L {-100,-50,0,50,100}; the 1% lower-tail quantile (linear-interpolated) is

@@ -96,10 +96,11 @@ function age(seconds: number): string {
 <template>
   <h1>Custody breaks</h1>
   <p class="muted">Outstanding differences between the investment book of record and custodian statements. Claim an investigation or record an explanation after review. Only reconciliation can resolve a break.</p>
-  <p v-if="evidence" ref="receiptMessage" role="status" tabindex="-1">Recorded {{ evidence.action }} by {{ evidence.actor }} at {{ evidence.recorded_at }} for revision {{ evidence.before.revision }} → {{ evidence.after.revision }}. This receipt records that decision; the queue below shows the latest available state.</p>
+  <p v-if="evidence" ref="receiptMessage" role="status" tabindex="-1">Recorded {{ evidence.action }} for break <code>{{ evidence.break_id }}</code> by {{ evidence.actor }} at {{ evidence.recorded_at }} (revision {{ evidence.before.revision }} → {{ evidence.after.revision }}). Request <code>{{ evidence.request_id }}</code>.</p>
   <p v-if="actionError" ref="errorMessage" class="error" role="alert" tabindex="-1">{{ actionError }}</p>
   <section v-if="selected" class="panel custody-review" aria-label="Custody action review">
     <h2>{{ kind === 'claim' ? 'Claim for my authenticated account' : 'Record explanation' }}</h2>
+    <p>Break ID <code>{{ selected.break_id }}</code></p>
     <p><code>{{ selected.key }}</code> · {{ selected.kind }} · Revision {{ selected.revision }} · {{ selected.status }}</p>
     <p>IBOR: {{ selected.ibor }} · Custodian: {{ selected.custodian }} · Difference: {{ selected.difference }}</p>
     <p>Current assignee: {{ selected.assignee || 'Unassigned' }}. Current explanation: {{ selected.explanation || 'None' }}.</p>
@@ -124,9 +125,10 @@ function age(seconds: number): string {
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
   <div v-else class="table-scroll">
     <table>
-      <thead><tr><th>Age</th><th>Kind / key</th><th>IBOR</th><th>Custodian</th><th>Difference</th><th>Status</th><th>Assignee</th><th>Last detected</th><th>Explanation</th><th>Investigation</th></tr></thead>
+      <thead><tr><th>Break ID</th><th>Age</th><th>Kind / key</th><th>IBOR</th><th>Custodian</th><th>Difference</th><th>Status</th><th>Assignee</th><th>Last detected</th><th>Explanation</th><th>Investigation</th></tr></thead>
       <tbody>
         <tr v-for="item in breaks" :key="item.break_id">
+          <th scope="row"><code>{{ item.break_id }}</code></th>
           <td :class="item.age_seconds >= 86_400 ? 'state-warn' : ''">{{ age(item.age_seconds) }}</td>
           <td>{{ item.kind }}<br /><code>{{ item.key }}</code></td>
           <td v-for="field in figures" :key="field">{{ item.values_state === 'exact' ? item[field] : item.values_state === 'unavailable' ? 'Unavailable' : 'Unverified' }}</td>
@@ -140,7 +142,7 @@ function age(seconds: number): string {
             <span v-else>{{ unavailable(item) }}</span>
           </td>
         </tr>
-        <tr v-if="breaks.length === 0"><td colspan="10">No outstanding custody breaks were returned by the reconciliation service.</td></tr>
+        <tr v-if="breaks.length === 0"><td colspan="11">No outstanding custody breaks were returned by the reconciliation service.</td></tr>
       </tbody>
     </table>
   </div>

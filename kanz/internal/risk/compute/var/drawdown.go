@@ -57,9 +57,10 @@ func MaxDrawdownFraction(cfg Config) compute.ReturnsMeasure {
 			return zeroNamed(compute.MeasureMaxDrawdown, evaluation, cov)
 		}
 		frac, _ := maxDrawdown(pnl, v0)
+		value := cov.RoundedValue(frac, drawdownExponent)
 		return v1.Measure{
 			Name:       compute.MeasureMaxDrawdown,
-			Value:      floatToDecimal(frac, drawdownExponent),
+			Value:      value,
 			Coverage:   cov.Result(),
 			Provenance: evaluation,
 		}
@@ -79,9 +80,10 @@ func MaxDrawdownAmount(cfg Config) compute.ReturnsMeasure {
 			return zeroNamed(compute.MeasureMaxDrawdownAmount, evaluation, cov)
 		}
 		_, amount := maxDrawdown(pnl, v0)
+		value := cov.RoundedValue(amount, varExponent)
 		return v1.Measure{
 			Name:       compute.MeasureMaxDrawdownAmount,
-			Value:      floatToDecimal(amount, varExponent),
+			Value:      value,
 			Coverage:   cov.Result(),
 			Provenance: evaluation,
 		}

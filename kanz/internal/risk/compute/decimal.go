@@ -177,6 +177,16 @@ func floatToDecimal(f float64, exponent int32) *commonpb.Decimal {
 	}
 }
 
+// RoundedValue converts an aggregate risk result at its declared wire scale.
+// A nonfinite or out-of-range coefficient makes the whole measure unassessed.
+func (c *Coverage) RoundedValue(value float64, exponent int32) *commonpb.Decimal {
+	if !representablePricingAmount(value, exponent) {
+		c.ExcludeWhole(SkipInvalidPricing)
+		value = 0
+	}
+	return floatToDecimal(value, exponent)
+}
+
 // decimalSqrt returns √d via float64 round-trip at uncertaintyExp
 // precision. Negative input clamps to zero (sqrt of variance — a
 // real variance is non-negative; negative input means upstream

@@ -161,17 +161,33 @@ nats_account_state() {
     def position: {consumer_seq:(.consumer_seq|count),stream_seq:(.stream_seq|count)};
     def named: sort_by(.name) |
       if (map(.name)|unique|length)==length then . else error("duplicate identity") end;
+    def subjects: if type=="array" and all(.[]; type=="string" and length>0)
+      and (unique|length)==length then sort else error("invalid subject set") end;
+    def stream_subjects:
+      if .subjects==null or .subjects==[] then
+        if (.mirror|type)=="object" or ((.sources|type)=="array" and (.sources|length)>0)
+        then [] else error("missing stream subjects") end
+      else .subjects | subjects end;
+    def filters:
+      (if .filter_subjects==null then [] else .filter_subjects | subjects end) as $many |
+      if .filter_subject==null or .filter_subject=="" then $many
+      elif $many==[] then [.filter_subject] | subjects
+      else error("ambiguous consumer filters") end;
     [.account_details[] | select(.name==$account and .id==$account)] |
     if length!=1 then error("expected one backup account") else .[0].stream_detail end |
     if type!="array" or length==0 then error("missing stream inventory") else . end |
     map(. as $stream |
-      {name:(.name|name), messages:(.state.messages|count), bytes:(.state.bytes|count),
+      if (.config|type)!="object" or .config.name!=.name then error("missing stream configuration") else . end |
+      {name:(.name|name), subjects:(.config|stream_subjects),
+       messages:(.state.messages|count), bytes:(.state.bytes|count),
        first_seq:(.state.first_seq|count), last_seq:(.state.last_seq|count),
        consumers:((.consumer_detail // []) | map(
          if .stream_name!=$stream.name or (.config|type)!="object" or
              (.config.durable_name!=null and .config.durable_name!=.name)
            then error("inconsistent consumer identity") else . end |
-         {name:(.name|name), durable:.config.durable_name, delivered:(.delivered|position),
+         {name:(.name|name), durable:.config.durable_name, filters:(.config|filters),
+          ack_policy:(.config.ack_policy | if IN("all","none","explicit","flow_control") then . else error("unknown ack policy") end),
+          delivered:(.delivered|position),
           ack_floor:(.ack_floor|position), ack_pending:(.num_ack_pending|count),
           pending:(.num_pending|count)}) | named)} |
       if (.consumers|length)!=($stream.state.consumer_count|count)
@@ -180,7 +196,8 @@ nats_account_state() {
 
 nats_restore_evidence() {
   jq -c '{nats_streams:length,nats_consumers:(map(.consumers|length)|add),nats_messages:(map(.messages)|add),
-    nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G"}}'
+    nats_account_state:{format:"named-streams-consumer-state-v1",source:"__system__",restored:"$G",
+      routing:"stream-subjects-consumer-filters-ack-v1"}}'
 }
 
 # PostgreSQL 16 provides sha256(bytea). JSON framing distinguishes fields and
