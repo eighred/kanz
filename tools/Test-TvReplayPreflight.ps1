@@ -87,6 +87,13 @@ function Invoke-OfflineRecoveryAws {
     if ($args[0] -ceq 'kms' -and $args[1] -ceq 'describe-key') {
         return 'arn:aws:kms:ap-northeast-3:012619468098:key/fixture'
     }
+    if ($fixtureState.mode -ceq 'backup-result' -and $args[0] -ceq 'ssm') {
+        if ($args[1] -ceq 'send-command') { return 'fixture-backup-command' }
+        if ($args[1] -ceq 'get-command-invocation' -and $args -ccontains 'fixture-backup-command') {
+            return (@{ Status='Success'; Output=($receiptFixture | ConvertTo-Json); Error='' } | ConvertTo-Json)
+        }
+        throw 'Unexpected offline backup command.'
+    }
     if ($args[0] -cne 'ssm' -or $args[1] -cne 'send-command') { throw 'Unexpected offline AWS operation.' }
     $reference = $args[[Array]::IndexOf($args, '--parameters') + 1]
     if (-not $reference.StartsWith('file://')) { throw 'SSM parameters not file-backed.' }
@@ -96,7 +103,7 @@ function Invoke-OfflineRecoveryAws {
     if ($fixtureState.mode -ceq 'receipt-transport') {
         if ($received.commands[-1] -cnotmatch " '([A-Za-z0-9+/=]+)'$") { throw 'Missing encoded restore selection.' }
         $selected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1])) | ConvertFrom-Json
-        if ($selected.key -cne $backup.key -or $selected.version_id -cne $backup.version_id -or $selected.sha256 -cne $backup.sha256) {
+        if ($selected.key -cne $receiptFixture.key -or $selected.version_id -cne $receiptFixture.version_id -or $selected.sha256 -cne $receiptFixture.sha256) {
             throw 'Restore selection changed in transit.'
         }
     }
@@ -124,14 +131,17 @@ if ($message -cne 'Verified offline SSM payload.' -or (Test-Path -LiteralPath $f
     throw "Offline source transport or parameter cleanup failed: $message"
 }
 $backupId = '20261118T010000Z-123456789abc'
-$backup = @{ status='BACKUP_VERIFIED'; backup_id=$backupId; key="testnet/data-plane/$backupId/bundle.tar.gz"; version_id="old+/=v'1"; sha256='a' * 64 }
+$receiptFixture = @{ status='BACKUP_VERIFIED'; backup_id=$backupId; key="testnet/data-plane/$backupId/bundle.tar.gz"; version_id="old+/=v'1"; sha256='a' * 64 }
+$fixtureState.mode = 'backup-result'
+$backup = & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Backup
+if ($backup.CommandId -cne 'fixture-backup-command' -or $backup.Operation -cne 'Backup') { throw 'Expected the completed backup result.' }
 $fixtureState.mode = 'receipt-transport'
 $message = ''
-try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Restore -BackupReceipt ($backup | ConvertTo-Json) }
+try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Restore -BackupReceipt $backup.Evidence }
 catch { $message = $_.Exception.Message }
 if ($message -cne 'Verified offline SSM payload.' -or (Test-Path -LiteralPath $fixtureState.parameterPath)) { throw "Receipt transport failed: $message" }
 foreach ($change in @(@{status='RESTORE_VERIFIED'}, @{backup_id='mismatched'}, @{version_id='null'}, @{sha256='short'})) {
-    $invalid = $backup.Clone()
+    $invalid = $receiptFixture.Clone()
     foreach ($field in $change.Keys) { $invalid[$field] = $change[$field] }
     $message = ''
     try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Restore -BackupReceipt ($invalid | ConvertTo-Json) }
@@ -139,7 +149,7 @@ foreach ($change in @(@{status='RESTORE_VERIFIED'}, @{backup_id='mismatched'}, @
     if ($message -notlike 'Expected a verified backup receipt*') { throw "Invalid backup receipt reached the wrong boundary: $message" }
 }
 $message = ''
-try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Backup -BackupReceipt ($backup | ConvertTo-Json) }
+try { & (Join-Path $PSScriptRoot 'Invoke-TestnetDataPlaneRecovery.ps1') -Operation Backup -BackupReceipt $backup.Evidence }
 catch { $message = $_.Exception.Message }
 if ($message -cne 'A backup receipt can select a restore only.') { throw 'Backup accepted restore selection.' }
 $global:LASTEXITCODE = 0

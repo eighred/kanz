@@ -108,7 +108,13 @@ echo 'Verified pinned S3 requests and six object custody refusals'
     [[ ! -s "$work/result" && ! -e "$work/rejected" ]]
     if grep -q '^list-objects-v2|' "$work/history-calls"; then echo 'Invalid receipt fell back to latest' >&2; exit 1; fi
   done
-  echo 'Verified selection of a prior version, independent latest discovery and five receipt refusals'
+  for field in key sha256; do
+    selected=$(jq -c --arg field "$field" '.[$field] |= ("\n" + .)' <<<"$selection" | base64 -w0)
+    : >"$work/history-calls"
+    if (download_restore_archive "$work/rejected" "$selected") >"$work/result" 2>/dev/null; then exit 1; fi
+    [[ ! -s "$work/result" && ! -s "$work/history-calls" && ! -e "$work/rejected" ]]
+  done
+  echo 'Verified selection of a prior version, independent latest discovery and seven receipt refusals'
 )
 
 # Inspect the production backup paths at its first post-allocation API call.

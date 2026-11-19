@@ -414,9 +414,9 @@ download_restore_archive() {
   if [[ -n "$selection" ]]; then
     selection=$(printf '%s' "$selection" | base64 -d | jq -cse '
       select(length==1) | .[0] |
-      select((.key | strings | test("^testnet/data-plane/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}/bundle\\.tar\\.gz\\z")) and
+      select((.key | strings | test("\\Atestnet/data-plane/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}/bundle\\.tar\\.gz\\z")) and
              (.version_id | strings | length>0) and .version_id!="null" and (.version_id | test("[[:cntrl:]]") | not) and
-             (.sha256 | strings | test("^[0-9a-f]{64}\\z")))') || die 'invalid backup selection'
+             (.sha256 | strings | test("\\A[0-9a-f]{64}\\z")))') || die 'invalid backup selection'
     key=$(jq -er .key <<<"$selection")
     version=$(jq -er .version_id <<<"$selection")
     expected_sha=$(jq -er .sha256 <<<"$selection")
