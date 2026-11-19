@@ -222,7 +222,7 @@ def assess(snapshot):
         result["plan"]["limitation"] = "legacy ownership advice only; validation dependencies unverified"
     if "work_session" in snapshot:
         result["work_session"] = assess_session(snapshot["work_session"], result.get("validation"),
-                                              snapshot.get("validation_graph"), result["main"])
+                                              snapshot.get("validation_graph"), result["main"], snapshot)
     return result
 
 
