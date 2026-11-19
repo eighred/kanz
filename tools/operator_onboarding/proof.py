@@ -202,6 +202,57 @@ def unauthorized_pull(obj, events, image):
                          reason, re.I) for reason in reasons)
 
 
+def provision_failure(k, pod):
+    name = pod["metadata"]["name"]
+    report = {"waiting": [], "exit": [], "events": [], "install": "unavailable"}
+    for container in pod.get("status", {}).get("containerStatuses", []):
+        if container["name"] != "provisioner":
+            continue
+        state = container.get("state", {})
+        reason = state.get("waiting", {}).get("reason")
+        if reason in {"ContainerCreating", "CreateContainerConfigError", "ErrImageNeverPull", "ImagePullBackOff"}:
+            report["waiting"].append(reason)
+        code = state.get("terminated", {}).get("exitCode")
+        if type(code) is int:
+            report["exit"].append(code)
+            # This exact-source program discards both remote output streams.
+            # Project its own diagnostic onto fixed categories at this boundary.
+            output = k("-n", OPERATOR, "logs", "pod/" + name, "-c", "provisioner", "--tail=1", "--limit-bytes=1500")
+            for marker, category in (("SSH host verification:", "host key rejected"),
+                                     ("SSH handshake or user authentication failed", "SSH authentication"),
+                                     ("dial ", "TCP connection"), ("SSH handshake timed out", "SSH handshake timeout"),
+                                     ("parse private key:", "bootstrap key format"),
+                                     ("read bootstrap key ", "bootstrap key mount"),
+                                     ("remote install interrupted:", "installer interrupted")):
+                if marker in output:
+                    report["install"] = category
+                    break
+            match = re.search(r"remote install exited with status ([0-9]{1,3})$", output)
+            if match:
+                report["install"] = "installer exit " + match[1]
+    events = json.loads(k("-n", OPERATOR, "get", "events", "--field-selector",
+                          "involvedObject.uid=" + pod["metadata"]["uid"], "-o", "json"))["items"]
+    allowed = {"Scheduled", "FailedScheduling", "FailedMount", "Pulled", "Created", "Started", "Failed", "BackOff"}
+    report["events"] = sorted({e["reason"] for e in events if e.get("reason") in allowed})
+    return report
+
+
+def wait_for_join(k, receipt, control):
+    deadline = time.monotonic() + 630
+    while True:
+        job = json.loads(k("-n", OPERATOR, "get", "job/" + receipt, "-o", "json"))
+        if job["spec"]["template"]["spec"].get("nodeSelector") != {"node-role.kubernetes.io/control-plane": "true"}:
+            raise RuntimeError("provisioning Job is missing its canonical control-plane selector")
+        outcomes = {c["type"] for c in job.get("status", {}).get("conditions", []) if c["status"] == "True"}
+        if "Complete" in outcomes:
+            return
+        if outcomes.intersection({"Failed", "FailureTarget"}) or time.monotonic() >= deadline:
+            pods = json.loads(k("-n", OPERATOR, "get", "pods", "-l", "job-name=" + receipt, "-o", "json"))["items"]
+            reports = [provision_failure(k, p) for p in pods if p["spec"].get("nodeName") in {None, control}]
+            raise RuntimeError("provisioning Job failed or expired: " + json.dumps(reports))
+        time.sleep(3)
+
+
 def registry_proof(k, apply, worker, platform, runtime_env):
     static_path, = [setting["value"] for setting in platform["env"] if setting["name"] == "WEB_BFF_STATIC_DIR"]
     projected = pod("ghcr-cold-pull", "web-bff", platform["image"], worker, {
@@ -326,7 +377,7 @@ def main():
         if browser["controlReads"] not in ([200], [503, 200]) or browser["nodePosts"] != 1:
             raise RuntimeError("browser did not confirm the authorized control read and single submission")
         print(f"Browser control-list GET statuses {browser['controlReads']}; exactly one add-node POST.", flush=True)
-        k("-n", OPERATOR, "wait", "--for=condition=complete", "job/" + receipt, "--timeout=360s")
+        wait_for_join(k, receipt, control)
         k("wait", "--for=condition=Ready", "node/" + worker, "--timeout=120s")
         estate.guest(worker, "rm", "/home/ubuntu/.ssh/authorized_keys")
         k("-n", "spire-system", "rollout", "status", "daemonset/spire-agent", "--timeout=180s")

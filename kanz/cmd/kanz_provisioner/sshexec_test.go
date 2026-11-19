@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/pem"
@@ -115,7 +116,7 @@ func trustHostKey(t *testing.T, addr string, hostKey ssh.PublicKey) {
 // returns the listener address and the server's own host public key — the caller needs
 // the latter to satisfy sshRun's host key verification (or, in the mismatch tests, to
 // deliberately pin something else).
-func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, exitStatus uint32) (string, ssh.PublicKey, <-chan string) {
+func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, exitStatus uint32, extraKeys ...ssh.Signer) (string, ssh.PublicKey, <-chan string) {
 	t.Helper()
 	received := make(chan string, 1)
 	cfg := &ssh.ServerConfig{
@@ -128,6 +129,9 @@ func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string, ex
 	}
 	hostKey := newHostKey(t)
 	cfg.AddHostKey(hostKey)
+	for _, key := range extraKeys {
+		cfg.AddHostKey(key)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -397,5 +401,26 @@ func TestSSHRunAcceptsPinnedHostKey(t *testing.T) {
 	}
 	if <-received != "install-k3s" {
 		t.Fatal("the pinned server did not receive the script on stdin")
+	}
+}
+
+func TestSSHSelectsExplicitEd25519PinOnMultiKeyServer(t *testing.T) {
+	clearHostKeyEnv(t)
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemKey, userKey := clientKeyPEM(t)
+	addr, _, received := startEchoSSHServer(t, userKey, "ok", 0, pinned)
+	t.Setenv(envHostKey, string(ssh.MarshalAuthorizedKey(pinned.PublicKey())))
+	if err := sshRun(t.Context(), addr, "test", pemKey, "fixture"); err != nil {
+		t.Fatalf("server offers the explicitly pinned key: %v", err)
+	}
+	if <-received != "fixture" {
+		t.Fatal("verified session did not receive the fixture")
 	}
 }

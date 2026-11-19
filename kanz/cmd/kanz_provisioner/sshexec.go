@@ -31,19 +31,16 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, script string
 	if err != nil {
 		return errors.New("parse private key: unsupported, encrypted or malformed SSH bootstrap key")
 	}
-	hostKeys, err := hostKeyCallback()
+	cfg := &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}}
+	hostKeys, err := hostKeyCallback(cfg)
 	if err != nil {
 		return fmt.Errorf("ssh host key policy: %w", err)
 	}
-	cfg := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: func(name string, remote net.Addr, key ssh.PublicKey) error {
-			if err := hostKeys(name, remote, key); err != nil {
-				return &hostVerificationError{err}
-			}
-			return nil
-		},
+	cfg.HostKeyCallback = func(name string, remote net.Addr, key ssh.PublicKey) error {
+		if err := hostKeys(name, remote, key); err != nil {
+			return &hostVerificationError{err}
+		}
+		return nil
 	}
 
 	d := net.Dialer{Timeout: dialTimeout}

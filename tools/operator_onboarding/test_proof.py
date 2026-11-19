@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.operator_onboarding import estate
-from tools.operator_onboarding.proof import browser_error, image_events, unauthorized_pull
+from tools.operator_onboarding.proof import browser_error, image_events, provision_failure, unauthorized_pull
 
 
 IMAGE = "ghcr.io/eighred/web-bff@sha256:" + "1" * 64
@@ -16,6 +16,16 @@ EVENT = {"involvedObject": {"uid": "worker-pod", "fieldPath": "spec.containers{w
 
 
 class PullEvidenceTest(unittest.TestCase):
+    def test_job_failure_only_reports_numeric_status_and_known_events(self):
+        pod = {"metadata": {"name": "fixture", "uid": "fake"}, "status": {"containerStatuses": [
+            {"name": "provisioner", "state": {"terminated": {"exitCode": 1, "message": "private sentinel"}}}]}}
+        def k(*args):
+            if "logs" in args:
+                return "private sentinel: remote install exited with status 28"
+            return json.dumps({"items": [{"reason": "Started"}, {"reason": "private sentinel"}]})
+        self.assertEqual(provision_failure(k, pod), {
+            "waiting": [], "exit": [1], "install": "installer exit 28", "events": ["Started"]})
+
     def test_encryption_must_be_explicit_after_boot(self):
         with patch.object(estate.time, "sleep"), patch.object(estate, "guest", side_effect=[
                 RuntimeError("CLI not ready"), "Encryption Status: Enabled\nCurrent Rotation Stage: start"]) as guest:
