@@ -1,5 +1,7 @@
 import { api, ApiError } from './client'
 
+export class ProvisionInputError extends Error {}
+
 // The estate control plane, as the browser sees it (#371).
 //
 // TWO JSON CASINGS COEXIST ON /v1 AND THAT IS NOT A MISTAKE TO TIDY HERE. The
@@ -116,6 +118,33 @@ export const control = {
   provisions: (signal?: AbortSignal) =>
     api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions', { signal }).then((r) => r.provisions ?? []),
 
+  async addNode(target: { hostname: string; ip: string; sshUser: string; sshHostKey: string }, key: File, signal: AbortSignal) {
+    // Both the BFF and gateway cap the JSON body at one MiB. Base64 adds
+    // exactly four ASCII bytes for each three file bytes (including padding).
+    const bodyBytes = new TextEncoder().encode(JSON.stringify({ ...target, sshPrivateKey: '' })).length
+    if (!key.size || bodyBytes + 4 * Math.ceil(key.size / 3) > 1024 * 1024) {
+      throw new ProvisionInputError('Select a nonempty key that fits the one MiB request limit.')
+    }
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await key.arrayBuffer())
+    } catch {
+      throw new ProvisionInputError('The selected key could not be read. Select the file again.')
+    }
+    signal.throwIfAborted()
+    const chunks: string[] = []
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)))
+    }
+    const sshPrivateKey = btoa(chunks.join(''))
+    const response = await api.post<{ provisionId?: string }>('/api/v1/control/nodes',
+      { ...target, sshPrivateKey }, 200, signal)
+    if (typeof response?.provisionId !== 'string' || !response.provisionId) {
+      throw new Error('The gateway returned no provisioning receipt.')
+    }
+    return response.provisionId
+  },
+
   /**
    * setVenueKeys writes trading credentials for one venue.
    *
@@ -171,6 +200,7 @@ export function describe(e: unknown): string {
   }
   switch (e.status) {
     case 403:
+      if (e.code === 'mfa_required') return 'Verify your security key on the Authentication page, then try again.'
       return 'Your account does not carry operator authority. Ask an operator to grant it.'
     case 404:
       return 'This gateway fronts no control plane, so there is nothing to list — the estate is not unreachable, it is not configured.'

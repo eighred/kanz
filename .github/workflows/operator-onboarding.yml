@@ -1,0 +1,114 @@
+name: operator-onboarding
+on:
+  pull_request:
+    paths: &onboarding_paths
+      - '.github/workflows/operator-onboarding.yml'
+      - 'tools/operator_onboarding/**'
+      - 'tools/feed_identity/proof.py'
+      - 'web/src/api/control.ts'
+      - 'web/src/views/ProvisionsView*'
+      - 'kanz/services/operator/**'
+      - 'kanz/cmd/kanz_provisioner/**'
+      - 'kanz/infra/deploy/operator-deploy.yaml'
+      - 'kanz/infra/deploy/web-bff-deploy.yaml'
+      - 'kanz/infra/deploy/api-gateway-deploy.yaml'
+      - 'kanz/infra/security/spire/**'
+  push:
+    branches: [main]
+    paths: *onboarding_paths
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: 1.69.0
+      - name: Generate the repository SDK
+        working-directory: schemas
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          buf generate
+          bash bootstrap-go-sdk.sh
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+      - name: Build the normal browser bundle
+        working-directory: web
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Assemble the public source and control-plane binaries
+        run: |
+          /usr/bin/python3 -B -m unittest tools.operator_onboarding.test_proof
+          bash tools/operator_onboarding/build.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: operator-onboarding-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/operator-onboarding.tgz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+  cold-pull:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      packages: read
+    steps:
+      - name: Require the owning repository and an isolated hosted VM
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          test "$HEAD_REPOSITORY" = eighred/kanz
+          test "$GITHUB_REPOSITORY" = eighred/kanz
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -c /dev/kvm
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: operator-onboarding-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+      - run: tar -xzf operator-onboarding.tgz
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - name: Prepare browser and trusted test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libnss3-tools socat python3-cryptography python3-yaml
+          cd web
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx --no-install playwright install --with-deps chromium
+      - uses: canonical/setup-lxd@8c6a87bfb56aa48f3fb9b830baa18562d8bfd4ee # v1
+        with:
+          channel: 5.21/stable
+          preseed: |
+            networks:
+            - name: lxdbr0
+              type: bridge
+              config: {ipv4.address: auto, ipv4.nat: 'true', ipv6.address: none}
+            storage_pools:
+            - {name: default, driver: dir}
+            profiles:
+            - name: default
+              devices:
+                root: {type: disk, path: /, pool: default}
+                eth0: {type: nic, name: eth0, network: lxdbr0}
+      - name: Prove the browser join and authenticated cold platform pull
+        env:
+          GHCR_JOB_TOKEN: ${{ github.token }}
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+        run: /usr/bin/python3 -B -m tools.operator_onboarding.proof

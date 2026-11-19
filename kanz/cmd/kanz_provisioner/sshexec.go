@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
-	"sync"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -14,46 +14,11 @@ import (
 // dialTimeout bounds both the TCP dial and the SSH handshake.
 const dialTimeout = 30 * time.Second
 
-// syncBuffer is the combined stdout+stderr collector, guarded because
-// crypto/ssh copies the two streams from TWO GOROUTINES.
-//
-// This exists because a plain *bytes.Buffer here was a data race, reported twice
-// by CI's race detector (x/crypto/ssh/session.go:514 and :527 both reaching
-// bytes.Buffer from sshRun). The failure it produced was not a crash: a remote
-// command's output came back EMPTY with a nil error, and occasionally as 16 NUL
-// bytes — so a node that failed to provision was reported with no detail at all.
-// It also made TestSSHRunExecutesCommand fail ~75% of whole-package runs.
-//
-// WHY b IS A FIELD AND NOT AN EMBEDDED bytes.Buffer. io.Copy prefers a
-// destination's ReadFrom over Write, and bytes.Buffer.ReadFrom grows and mutates
-// the buffer REGARDLESS of how many bytes it reads — which is why even the stderr
-// copier, which carries no data here, still raced. Embedding would promote
-// ReadFrom and hand io.Copy the racy path straight back. Keeping the buffer
-// unexported and offering only Write forces io.Copy through the mutex.
-//
-// A mutex rather than two separate buffers, deliberately: the two streams stay
-// interleaved in arrival order, which is how sshRun's output has always read and
-// is what makes a k3s install failure legible — the error line keeps its position
-// relative to the output around it.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
+// Only this locally produced handshake diagnostic may be reported verbatim.
+type hostVerificationError struct{ error }
 
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
-}
-
-// sshRun dials addr ("host:port") over SSH as user, authenticating with the PEM
-// private key, runs cmd, and returns its combined stdout+stderr.
+// sshRun opens one authenticated session. Only the fixed shell command appears
+// in SSH's exec request. The install script is input to that shell.
 //
 // BOTH DIRECTIONS ARE AUTHENTICATED, and the second one is not optional. The signer
 // below proves us to the host; HostKeyCallback proves the host to us. This session is
@@ -61,67 +26,86 @@ func (s *syncBuffer) String() string {
 // answering it without checking who answered actually costs, and for the argument this
 // replaces. hostKeyCallback fails closed, so an unconfigured or misconfigured policy
 // stops the provision HERE, before the dial and long before the token is in flight.
-func sshRun(ctx context.Context, addr, user string, pemKey []byte, cmd string) (string, error) {
+func sshRun(ctx context.Context, addr, user string, pemKey []byte, script string) error {
 	signer, err := ssh.ParsePrivateKey(pemKey)
 	if err != nil {
-		return "", fmt.Errorf("parse private key: %w", err)
+		return errors.New("parse private key: unsupported, encrypted or malformed SSH bootstrap key")
 	}
-	hostKeys, err := hostKeyCallback()
+	cfg := &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}}
+	hostKeys, err := hostKeyCallback(cfg)
 	if err != nil {
-		return "", fmt.Errorf("ssh host key policy: %w", err)
+		return fmt.Errorf("ssh host key policy: %w", err)
 	}
-	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeys,
-		Timeout:         dialTimeout,
+	cfg.HostKeyCallback = func(name string, remote net.Addr, key ssh.PublicKey) error {
+		if err := hostKeys(name, remote, key); err != nil {
+			return &hostVerificationError{err}
+		}
+		return nil
 	}
 
 	d := net.Dialer{Timeout: dialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return "", fmt.Errorf("dial %s: %w", addr, err)
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer func() { _ = conn.Close() }()
+	// NewClientConn and NewSession do not accept a context. Closing the
+	// underlying transport interrupts either phase and a running installer.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline := time.Now().Add(dialTimeout)
+	if parent, ok := ctx.Deadline(); ok && parent.Before(deadline) {
+		deadline = parent
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return errors.New("could not bound the SSH handshake")
 	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
-		_ = conn.Close()
-		return "", fmt.Errorf("ssh handshake %s: %w", addr, err)
+		if ctx.Err() != nil {
+			return fmt.Errorf("SSH handshake interrupted: %w", ctx.Err())
+		}
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			return fmt.Errorf("SSH handshake timed out: %w", context.DeadlineExceeded)
+		}
+		var verification *hostVerificationError
+		if errors.As(err, &verification) {
+			return fmt.Errorf("SSH host verification: %w", verification)
+		}
+		return errors.New("SSH handshake or user authentication failed")
 	}
 	client := ssh.NewClient(sc, chans, reqs)
 	defer func() { _ = client.Close() }()
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return errors.New("could not clear the SSH handshake deadline")
+	}
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return "", fmt.Errorf("new session: %w", err)
+		if ctx.Err() != nil {
+			return fmt.Errorf("open SSH session interrupted: %w", ctx.Err())
+		}
+		return errors.New("could not open the authenticated SSH session")
 	}
 	defer func() { _ = sess.Close() }()
 
-	var out syncBuffer
-	sess.Stdout = &out
-	sess.Stderr = &out
+	// The installer can echo its environment on either stream. With nil
+	// Stdout/Stderr the SSH client drains both to io.Discard.
+	sess.Stdin = strings.NewReader(script)
 
-	// crypto/ssh has no context-aware Run. Run in a goroutine and honor ctx by
-	// closing the client on cancellation, which unblocks sess.Run. The <-done
-	// barrier in both branches means out is read only after the goroutine returns.
-	//
-	// THAT BARRIER WAS ONCE MISTAKEN FOR THE WHOLE ARGUMENT, and the sentence that
-	// used to sit here — "so there is no concurrent access to the buffer" — was
-	// false. It reasons only about this goroutine versus the reader. Inside
-	// sess.Run, crypto/ssh copies stdout and stderr from two further goroutines
-	// that write to out concurrently with each other; the barrier says nothing
-	// about them. syncBuffer is what actually makes this safe.
-	done := make(chan error, 1)
-	go func() { done <- sess.Run(cmd) }()
-	select {
-	case <-ctx.Done():
-		_ = client.Close()
-		// Cancellation is the selected result; join Run before reading its output.
-		<-done //nolint:errcheck // Cancellation already owns the terminal result.
-		return out.String(), fmt.Errorf("run %q: %w", cmd, ctx.Err())
-	case err := <-done:
-		if err != nil {
-			return out.String(), fmt.Errorf("run %q: %w", cmd, err)
-		}
-		return out.String(), nil
+	err = sess.Run("sh -s")
+	if ctx.Err() != nil {
+		return fmt.Errorf("remote install interrupted: %w", ctx.Err())
 	}
+	if err != nil {
+		// The script on stdin contains the cluster admission token.
+		// The peer controls exit-signal text. Expose only the numeric status.
+		var exit *ssh.ExitError
+		if errors.As(err, &exit) && exit.ExitStatus() >= 0 {
+			return fmt.Errorf("remote install exited with status %d", exit.ExitStatus())
+		}
+		return errors.New("remote install ended without a confirmed exit status")
+	}
+	return nil
 }
