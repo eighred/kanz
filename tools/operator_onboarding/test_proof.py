@@ -1,7 +1,9 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
+from tools.operator_onboarding import estate
 from tools.operator_onboarding.proof import browser_error, image_events, unauthorized_pull
 
 
@@ -14,6 +16,20 @@ EVENT = {"involvedObject": {"uid": "worker-pod", "fieldPath": "spec.containers{w
 
 
 class PullEvidenceTest(unittest.TestCase):
+    def test_encryption_must_be_explicit_after_boot(self):
+        with patch.object(estate.time, "sleep"), patch.object(estate, "guest", side_effect=[
+                RuntimeError("CLI not ready"), "Encryption Status: Enabled\nCurrent Rotation Stage: start"]) as guest:
+            estate.wait_for_encryption("control")
+            self.assertEqual(guest.call_count, 2)
+        for status in ("Encryption Status: Disabled", "", "Unknown: Encryption Status: Enabled"):
+            with self.subTest(status=status), patch.object(estate, "guest", return_value=status):
+                with self.assertRaisesRegex(RuntimeError, "did not confirm"):
+                    estate.wait_for_encryption("control")
+        with patch.object(estate.time, "monotonic", side_effect=[0, 0, 61]), patch.object(estate.time, "sleep"), \
+                patch.object(estate, "guest", side_effect=RuntimeError("CLI not ready")):
+            with self.assertRaisesRegex(RuntimeError, "unavailable after"):
+                estate.wait_for_encryption("control")
+
     def test_browser_failure_keeps_only_known_stage_and_numeric_status(self):
         report = {"stage": "node submission", "category": "timeout", "statuses": {
             "addNode": 403, "secret": 200, "session": "synthetic-private-value"}}

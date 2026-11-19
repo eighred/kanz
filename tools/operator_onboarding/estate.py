@@ -121,8 +121,23 @@ def start_server(control):
             time.sleep(2)
     guest(control, "k3s", "kubectl", "wait", "--for=condition=Ready",
           "node/" + control, "--timeout=120s", timeout=130)
-    if "Encryption Status: Enabled" not in guest(control, "k3s", "secrets-encrypt", "status"):
-        raise RuntimeError("control-plane secret encryption is unavailable")
+    wait_for_encryption(control)
+
+
+def wait_for_encryption(control):
+    # A Ready node can precede the k3s supervisor's encryption status endpoint.
+    # Never install credentials until the server positively reports encryption.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            status = guest(control, "k3s", "secrets-encrypt", "status", timeout=8)
+        except RuntimeError:
+            time.sleep(2)
+            continue
+        if "Encryption Status: Enabled" in status.splitlines():
+            return
+        raise RuntimeError("control plane did not confirm secret encryption")
+    raise RuntimeError("control-plane encryption status unavailable after 60s")
 
 
 def prepare_worker(worker):
