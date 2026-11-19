@@ -20,10 +20,11 @@ The required observations are initial sync, deletion/self-heal of one actual
 ServiceAccount, same-revision resync, revision change and rollback. Every phase
 requires the six real ServiceAccounts, six exact egress policies, SPIRE namespace
 label and complete Argo resource inventory, with zero Jobs. Rollback must remove
-the second revision's annotation. Explicit resync and rollback operations carry
-a fresh `operation.info` request token; a previous successful operation at the
-same revision cannot satisfy either observation. Every observation has one 120-second success
-deadline; a command that returns after it cannot establish success. Subprocess
+the second revision's annotation. The rollback changes only the desired Git
+revision. Argo must record an automated operation and restore the entire
+inventory before the fixture requests an explicit resync. That separate
+operation carries a fresh `operation.info` token and repeats the readback.
+Both rollback observations share one 120-second deadline. Subprocess
 diagnostics are byte bounded and are not emitted.
 
 CI prerequisites reuse `bash tools/feed_identity/install.sh`, Docker and

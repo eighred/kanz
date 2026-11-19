@@ -134,12 +134,38 @@ class OperatorReadbackTests(unittest.TestCase):
 
 class OperatorOperationTests(unittest.TestCase):
     def application(self):
-        return {"status": {"sync": {"status": "Synced", "revision": "a" * 40},
+        return {"spec": {"source": {"targetRevision": "a" * 40}},
+            "status": {"sync": {"status": "Synced", "revision": "a" * 40},
             "operationState": {"phase": "Succeeded", "finishedAt": "2026-11-17T00:00:00Z",
                                "syncResult": {"revision": "a" * 40}}}}
 
     def test_exact_completed_operation_passes(self):
         self.assertTrue(proof.check_operation(self.application(), "a" * 40))
+
+    def test_manual_success_cannot_prove_an_automatic_rollback(self):
+        self.assertFalse(proof.check_operation(self.application(), "a" * 40, automated=True))
+
+    def test_expired_rollback_cannot_start_manual_resync(self):
+        fixture, resources, clock = self.observed_fixture(1)
+        report = {}
+        original = fixture.observe
+
+        def observe(*args, **kwargs):
+            if kwargs.get("automated"):
+                self.assertEqual(kwargs["deadline"], 120)
+                clock[0] = 120
+                fixture.last_observation = {"readbackMatches": True}
+                return
+            self.assertEqual(kwargs["deadline"], 120)
+            return original(*args, **kwargs)
+
+        fixture.observe = observe
+        fixture.k = mock.Mock(return_value="{}")
+        with mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(TimeoutError):
+                fixture.rollback(resources, "a" * 40, report)
+        self.assertEqual(fixture.k.call_count, 1)
+        self.assertEqual(set(report), {"automaticRollback"})
 
     def test_stale_operation_does_not_prove_rollback(self):
         self.assertFalse(proof.check_operation(self.application(), "b" * 40))
@@ -222,9 +248,7 @@ class OperatorOperationTests(unittest.TestCase):
         def k(*args, timeout=30):
             if "patch" in args:
                 payload = json.loads(args[-1])
-                # Changing the desired revision separately lets automatic sync
-                # finish before this particular manual operation is recorded.
-                self.assertEqual(payload["spec"]["source"]["targetRevision"], "a" * 40)
+                self.assertEqual(set(payload), {"operation"})
                 self.assertEqual(payload["operation"]["sync"]["revision"], "a" * 40)
                 requested.append(payload["operation"]["info"])
                 return "{}"
@@ -239,6 +263,67 @@ class OperatorOperationTests(unittest.TestCase):
             fixture.observe(resources, "a" * 40, None, request_sync=True)
         self.assertEqual(len(requested), 2)
         self.assertNotEqual(requested[0], requested[1])
+
+    def test_rollback_waits_for_automatic_readback_before_manual_resync(self):
+        fixture, resources, clock = self.observed_fixture(1)
+        original = fixture.k
+        revision = "a" * 40
+        token = None
+        reads = []
+
+        def k(*args, timeout=30):
+            nonlocal token
+            if "patch" in args:
+                patch = json.loads(args[-1])
+                if "operation" in patch:
+                    self.assertEqual(set(patch), {"operation"})
+                    self.assertEqual(reads, ["old", "converged", "serviceaccounts", "networkpolicies", "jobs", "namespace"])
+                    token = patch["operation"]["info"]
+                else:
+                    self.assertEqual(patch, {"spec": {"source": {"targetRevision": revision}}})
+                return "{}"
+            value = json.loads(original(*args, timeout=timeout))
+            if "application" in args:
+                state = value["status"]["operationState"]
+                if not reads:
+                    reads.append("old")
+                    state["syncResult"]["revision"] = "b" * 40
+                elif token is None:
+                    reads.append("converged")
+                state["operation"] = {"initiatedBy": {"automated": True}} if token is None else {"info": token}
+            elif token is None:
+                reads.append(next(kind for kind in ("serviceaccounts", "networkpolicies", "jobs", "namespace") if kind in args))
+            return json.dumps(value)
+
+        fixture.k = k
+        report = {}
+        with mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(proof.time, "sleep"):
+            fixture.rollback(resources, revision, report)
+        self.assertTrue(report["automaticRollback"]["automatedOperation"])
+        self.assertTrue(report["automaticRollback"]["readbackMatches"])
+        self.assertTrue(report["rollbackResync"]["requestInfoMatches"])
+
+    def test_rollback_refuses_wrong_revision_without_requesting_sync(self):
+        fixture, resources, clock = self.observed_fixture(5)
+        original = fixture.k
+        patches = []
+
+        def k(*args, timeout=30):
+            if "patch" in args:
+                patches.append(json.loads(args[-1]))
+                return "{}"
+            self.assertIn("application", args)
+            value = json.loads(original(*args, timeout=timeout))
+            value["status"]["operationState"]["operation"] = {"initiatedBy": {"automated": True}}
+            return json.dumps(value)
+
+        fixture.k = k
+        report = {}
+        with mock.patch.object(proof.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(proof.time, "sleep"):
+            with self.assertRaises(TimeoutError):
+                fixture.rollback(resources, "b" * 40, report)
+        self.assertEqual(patches, [{"spec": {"source": {"targetRevision": "b" * 40}}}])
+        self.assertEqual(report, {})
 
     def test_requested_same_revision_stale_success_times_out_without_inventory(self):
         fixture, resources, clock = self.observed_fixture(5)

@@ -112,10 +112,14 @@ def operator_source():
     return files, resources, application, project
 
 
-def check_operation(application, revision, token=None):
+def check_operation(application, revision, token=None, *, automated=False):
     state = application.get("status", {}).get("operationState", {})
     result = state.get("syncResult", {})
     sync = application.get("status", {}).get("sync", {})
+    if application.get("spec", {}).get("source", {}).get("targetRevision") != revision:
+        return False
+    if automated and state.get("operation", {}).get("initiatedBy", {}).get("automated") is not True:
+        return False
     if token is not None and state.get("operation", {}).get("info") != token:
         return False
     if (application.get("operation") or not state.get("finishedAt") or
@@ -156,6 +160,7 @@ def operation_observation(application, revision, token, resources):
         "comparisonRevisionMatches": sync.get("revision") == revision,
         "manualRequest": token is not None,
         "requestInfoMatches": token is not None and state.get("operation", {}).get("info") == token,
+        "automatedOperation": state.get("operation", {}).get("initiatedBy", {}).get("automated") is True,
         "operationPending": bool(application.get("operation")),
         "operationFinished": bool(state.get("finishedAt")),
         "resourceInventoryBounded": bounded,
@@ -364,30 +369,29 @@ class Fixture:
         self.apply([project, application])
         return revisions
 
-    def observe(self, resources, revision, marker, *, request_sync=False):
-        deadline = time.monotonic() + 120
+    def observe(self, resources, revision, marker, *, request_sync=False, automated=False, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + 120
         self.last_observation = {"applicationObserved": False}
+        def remaining():
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise TimeoutError("operator identity reconciliation deadline expired")
+            return min(10, budget)
+
         token = None
         if request_sync:
             token = [{"name": "operator-gitops-request", "value": uuid.uuid4().hex}]
-            # Changing the target first lets automated sync race the separately
-            # queued manual operation. Keep its target and request identity in
-            # one atomic Application update, including a return to an old SHA.
             self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
-                "metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}},
-                "spec": {"source": {"targetRevision": revision}},
-                "operation": {"info": token, "sync": {"revision": revision, "prune": True}}}), timeout=10)
+                "operation": {"info": token, "sync": {"revision": revision, "prune": True}}}), timeout=remaining())
 
         def observed(*args):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("operator identity reconciliation deadline expired")
-            return json.loads(self.k(*args, timeout=min(10, remaining)))
+            return json.loads(self.k(*args, timeout=remaining()))
 
         while time.monotonic() < deadline:
             app = observed("-n", "argocd", "get", "application", APP, "-o", "json")
             self.last_observation = operation_observation(app, revision, token, resources)
-            if check_operation(app, revision, token):
+            if check_operation(app, revision, token, automated=automated):
                 accounts = observed("-n", NAMESPACE, "get", "serviceaccounts", "-o", "json")["items"]
                 policies = observed("-n", NAMESPACE, "get", "networkpolicies", "-o", "json")["items"]
                 jobs = observed("-n", NAMESPACE, "get", "jobs", "-o", "json")["items"]
@@ -414,8 +418,17 @@ class Fixture:
 
     def target(self, revision):
         self.k("-n", "argocd", "patch", "application", APP, "--type=merge", "-p", json.dumps({
-            "metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}},
-            "spec": {"source": {"targetRevision": revision}}}))
+            "spec": {"source": {"targetRevision": revision}}}), timeout=10)
+
+    def rollback(self, resources, revision, report):
+        deadline = time.monotonic() + 120
+        self.stage = "automatic-rollback"
+        self.target(revision)
+        self.observe(resources, revision, None, automated=True, deadline=deadline)
+        report["automaticRollback"] = self.last_observation.copy()
+        self.stage = "rollback-resync"
+        self.observe(resources, revision, None, request_sync=True, deadline=deadline)
+        report["rollbackResync"] = self.last_observation.copy()
 
     def cleanup(self):
         if self.creation_authorization is None:
@@ -454,7 +467,10 @@ def main():
                     fixture.k("-n", NAMESPACE, "delete", "serviceaccount", "kanz-model", "--wait=true")
                 if case == "revision-change":
                     fixture.target(revision)
-                fixture.observe(resources, revision, marker, request_sync=case in ("same-revision-sync", "rollback"))
+                if case == "rollback":
+                    fixture.rollback(resources, revision, report)
+                else:
+                    fixture.observe(resources, revision, marker, request_sync=case == "same-revision-sync")
                 report["cases"].append(case)
             report["passed"] = report["cases"] == list(CASES)
         except Exception as error:
