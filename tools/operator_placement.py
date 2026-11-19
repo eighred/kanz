@@ -121,6 +121,20 @@ def exercise(kubectl, operator_image, provisioner_image, server_names, worker):
     if any(p["metadata"]["uid"] == witness["uid"] for p in query("pods")["items"]):
         raise RuntimeError("drained witness still exists")
     print(report.strip(), flush=True)
+    remaining = query("pods", "-A", "--field-selector", f"spec.nodeName={drained}")["items"]
+    for pod in remaining:
+        metadata = pod["metadata"]
+        if not (metadata.get("annotations", {}).get("kubernetes.io/config.mirror") or
+                any(owner["kind"] == "DaemonSet" for owner in metadata.get("ownerReferences", []))):
+            raise RuntimeError(f"unexpected workload left on drained server: {metadata['name']}")
+    inventory = [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] for p in remaining]
+    print(f"Post-drain inventory on {drained}: {inventory}", flush=True)
+    saved = query("pod", operator["metadata"]["name"], "-n", OPERATOR_NS)
+    if (saved["metadata"]["uid"] != operator["metadata"]["uid"] or saved["spec"]["nodeName"] != retained or
+            not any(c["type"] == "Ready" and c["status"] == "True" for c in saved["status"]["conditions"])):
+        raise RuntimeError("the same operator must remain Ready on the retained control-plane node")
+    print(f"Operator {saved['metadata']['name']} remained Ready on {retained} throughout the drain; "
+          "PDB minAvailable=1, disruptionsAllowed=0", flush=True)
     # This does not evict the operator. It leaves the worker as the only
     # possible placement and signals that the other server completed its drain.
     kubectl("cordon", retained)
