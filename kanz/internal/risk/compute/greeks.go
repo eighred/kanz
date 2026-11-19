@@ -208,7 +208,12 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 				// Linear (non-option) position: Δ≡1 ⇒ contributes its signed
 				// MarketValue to Delta, nothing to higher-order Greeks.
 				if name == MeasureDelta {
-					sum += decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
+					mark, ok := decutil.Float64(pos.MarketValue.GetAmount())
+					if !ok {
+						skipOption(evaluation, string(pos.InstrumentID), SkipNoMarketValue)
+						continue
+					}
+					sum += mark
 					cov.Contributed++
 				}
 				continue
@@ -291,7 +296,12 @@ func positionGreekContribution(ctx context.Context, p GreeksProviders, pos domai
 	if mult == 0 {
 		mult = 1
 	}
-	n := decutil.Float64Or(pos.Quantity, 0) * mult
+	qty, ok := decutil.Float64(pos.Quantity)
+	if !ok {
+		skipOption(p, string(pos.InstrumentID), SkipNoQuantity)
+		return 0, true
+	}
+	n := qty * mult
 	value := sel(g, spot, n)
 	if !representablePricingAmount(value, greekExp) {
 		skipOption(p, string(pos.InstrumentID), SkipInvalidPricing)
