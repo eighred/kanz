@@ -37,10 +37,13 @@ docker exec "$pg" pg_isready -h 127.0.0.1 -U kanz >/dev/null
 # Created NOSUPERUSER, then VERIFIED. Creating it correctly and checking it are
 # different acts: a future edit here, a hand-patched local database, or a role
 # that already existed with different attributes all produce a DSN that looks
-# right and silently disables RLS.
+# right and silently disables RLS. The accounting bootstrap tests need their
+# own database because a ledger_entries table in a neighboring schema is a
+# topology conflict, including one legitimately left by another test package.
 docker exec "$pg" psql -U kanz -d kanz -q -v ON_ERROR_STOP=1 \
   -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
-  -c "CREATE DATABASE kanzapp OWNER kanzapp;" >/dev/null
+  -c "CREATE DATABASE kanzapp OWNER kanzapp;" \
+  -c "CREATE DATABASE kanz_accounting_migration OWNER kanzapp;" >/dev/null
 docker exec "$pg" psql -U kanz -d kanzapp -q -v ON_ERROR_STOP=1 \
   -c "GRANT ALL ON SCHEMA public TO kanzapp;" >/dev/null
 
@@ -64,5 +67,6 @@ fi
 echo "  role kanzapp verified NOSUPERUSER / NOBYPASSRLS" >&2
 
 printf "export TEST_POSTGRES_URL='postgres://kanzapp:kanz@%s/kanzapp?sslmode=disable'\n" "$pg_endpoint"
+printf "export TEST_ACCOUNTING_MIGRATION_POSTGRES_URL='postgres://kanzapp:kanz@%s/kanz_accounting_migration?sslmode=disable'\n" "$pg_endpoint"
 printf "export TEST_NATS_URL='nats://%s'\n" "$nats_endpoint"
 trap - EXIT

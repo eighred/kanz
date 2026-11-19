@@ -33,4 +33,5 @@ done
 for endpoint in "127.0.0.1:$PG_PORT/" "127.0.0.1:$REDIS_PORT/" "127.0.0.1:$NATS_PORT'" "127.0.0.1:$KAFKA_PORT'"; do
   [[ "$result" == *"$endpoint"* ]]
 done
+grep -Fq "export TEST_ACCOUNTING_MIGRATION_POSTGRES_URL='postgres://kanzapp:kanz@127.0.0.1:$PG_PORT/kanz_accounting_migration?sslmode=disable'" <<<"$result"
 printf '%s\n' 'Verified late collision, preserved foreign container, rolled back partial stack and retried all four services'

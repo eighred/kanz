@@ -12,7 +12,7 @@ promotes a challenger only when three independent gates all hold.
 
 A prediction pair alone cannot say which model is *better* — that needs
 ground truth. ``observe`` (the live path) only sees the two predictions,
-so the store also exposes ``record_outcome(subject_id, actual)``: when
+so the store also exposes ``record_outcome(subject_id, actual, as_of=...)``: when
 the realized outcome for a subject arrives (a later consumer joins it),
 the store credits each model's squared error. Live RMSE — real
 out-performance on production traffic — falls out of that. Behavioral
@@ -39,12 +39,14 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
+from google.protobuf.timestamp_pb2 import Timestamp
 from inference.v1.feature_vector_pb2 import FeatureVector
-from inference.v1.prediction_pb2 import PredictionEnvelope
+from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.registry import ModelMetadata, Registry
 
@@ -75,6 +77,12 @@ class _Acc:
     challenger_sq_err: float = 0.0
 
 
+@dataclass(frozen=True)
+class _PendingComparison:
+    as_of_ns: int | None
+    values: tuple[float, float] | None
+
+
 class ShadowComparisonStore:
     """A ``ShadowObserver`` (structural — matches the PRED-10 protocol) that
     accumulates champion/challenger comparison metrics keyed by
@@ -87,9 +95,7 @@ class ShadowComparisonStore:
 
     def __init__(self) -> None:
         self._acc: dict[tuple[str, str], _Acc] = {}
-        # subject_id → {pair_key: (primary_value, challenger_value)} awaiting
-        # an outcome. Latest prediction per (subject, pair) wins.
-        self._pending: dict[str, dict[tuple[str, str], tuple[float, float]]] = {}
+        self._pending: dict[str, dict[tuple[str, str], _PendingComparison]] = {}
 
     async def observe(
         self,
@@ -100,27 +106,56 @@ class ShadowComparisonStore:
         shadow_prediction: PredictionEnvelope,
     ) -> None:
         key = (primary.model_id, shadow.model_id)
-        acc = self._acc.setdefault(key, _Acc())
         pv, sv = primary_prediction.value, shadow_prediction.value
+        usable = (primary_prediction.mode == PredictionMode.PREDICTION_MODE_NORMAL
+                  and shadow_prediction.mode == PredictionMode.PREDICTION_MODE_NORMAL
+                  and math.isfinite(pv) and math.isfinite(sv))
+        as_of_ns = feature_vector.as_of.ToNanoseconds() if feature_vector.HasField("as_of") else None
+        pending = self._pending.setdefault(feature_vector.subject_id, {})
+        previous = pending.get(key)
+        values = (pv, sv) if usable else None
+        if previous is not None and previous.as_of_ns is not None:
+            # Parallel shadow predictions can finish out of order. A dated
+            # outcome cannot distinguish conflicting pairs for the same time.
+            if as_of_ns is None or as_of_ns < previous.as_of_ns:
+                return
+            if as_of_ns == previous.as_of_ns:
+                if values != previous.values:
+                    pending[key] = _PendingComparison(as_of_ns, None)
+                return
+        pending[key] = _PendingComparison(as_of_ns, values)
+        if not usable:
+            return
+        acc = self._acc.setdefault(key, _Acc())
         acc.observations += 1
         acc.abs_divergence_sum += abs(sv - pv)
         if pv * sv < 0:  # opposite directional sign
             acc.disagreements += 1
-        self._pending.setdefault(feature_vector.subject_id, {})[key] = (pv, sv)
 
-    def record_outcome(self, subject_id: str, actual: float) -> None:
+    def record_outcome(self, subject_id: str, actual: float, *, as_of: Timestamp | None = None) -> None:
         """Join a realized outcome for a subject, crediting squared error to
         both models of every pair that has a pending prediction for it. A
-        no-op for an unknown subject (the outcome arrived for something never
-        shadow-compared)."""
-        pending = self._pending.pop(subject_id, None)
+        no-op for an unknown subject or observation time. Dated vectors require
+        the matching feature time. Undated outcomes match only undated vectors."""
+        if not math.isfinite(actual):
+            return
+        pending = self._pending.get(subject_id)
         if not pending:
             return
-        for key, (pv, sv) in pending.items():
-            acc = self._acc.setdefault(key, _Acc())
+        as_of_ns = as_of.ToNanoseconds() if as_of is not None else None
+        for key, comparison in list(pending.items()):
+            if comparison.as_of_ns != as_of_ns:
+                continue
+            del pending[key]
+            if comparison.values is None:
+                continue
+            pv, sv = comparison.values
+            acc = self._acc[key]
             acc.scored += 1
-            acc.primary_sq_err += (pv - actual) ** 2
-            acc.challenger_sq_err += (sv - actual) ** 2
+            acc.primary_sq_err += _squared_error(pv - actual)
+            acc.challenger_sq_err += _squared_error(sv - actual)
+        if not pending:
+            del self._pending[subject_id]
 
     def stats(self, primary_id: str, challenger_id: str) -> ComparisonStats:
         """The accumulated comparison for one pair (zero-valued when the pair
@@ -212,7 +247,8 @@ class Promoter:
             if stats.challenger_rmse is None or stats.primary_rmse is None:
                 reasons.append(f"{cid}: rmse unavailable")
                 continue
-            if stats.challenger_rmse > stats.primary_rmse * (1.0 - self._margin):
+            if (stats.challenger_rmse >= stats.primary_rmse
+                    or stats.challenger_rmse > stats.primary_rmse * (1.0 - self._margin)):
                 reasons.append(
                     f"{cid}: rmse {stats.challenger_rmse:.4g} does not beat "
                     f"champion {stats.primary_rmse:.4g} by {self._margin:.0%}"
@@ -242,5 +278,19 @@ class Promoter:
         )
 
 
+def _squared_error(residual: float) -> float:
+    squared = residual * residual
+    # A subnormal square can round a nonzero residual to zero and fabricate
+    # a winning margin. Keep this pair unavailable, as for overflow.
+    if residual != 0.0 and squared < sys.float_info.min:
+        return math.inf
+    return squared
+
+
 def _rmse(sq_err_sum: float, n: int) -> float | None:
-    return math.sqrt(sq_err_sum / n) if n else None
+    if not n or not math.isfinite(sq_err_sum):
+        return None
+    mean = sq_err_sum / n
+    if sq_err_sum and mean < sys.float_info.min:
+        return None
+    return math.sqrt(mean)

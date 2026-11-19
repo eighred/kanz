@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from inference.v1.feature_vector_pb2 import FeatureVector
+from google.protobuf.timestamp_pb2 import Timestamp
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_inference.registry import ModelMetadata, Registry, ValidationRecord
-from kanz_inference.shadow import ShadowObserver
+from kanz_inference.shadow import ShadowExecutor, ShadowObserver
 from kanz_inference.governance import (
     Promoter,
     ShadowComparisonStore,
@@ -55,15 +57,18 @@ def _registry_with(champion: str, *challengers: str, validate=()) -> Registry:
     return r
 
 
-async def _feed(store, subject, primary_id, pv, challenger_id, sv, actual=None):
-    fv = FeatureVector(subject_id=subject, feature_set_ref=FS)
+async def _feed(store, subject, primary_id, pv, challenger_id, sv, actual=None, *,
+                as_of=None,
+                primary_mode=PredictionMode.PREDICTION_MODE_NORMAL,
+                challenger_mode=PredictionMode.PREDICTION_MODE_NORMAL):
+    fv = FeatureVector(subject_id=subject, feature_set_ref=FS, as_of=as_of)
     await store.observe(
         fv,
-        _meta(primary_id), PredictionEnvelope(value=pv),
-        _meta(challenger_id), PredictionEnvelope(value=sv),
+        _meta(primary_id), PredictionEnvelope(value=pv, mode=primary_mode),
+        _meta(challenger_id), PredictionEnvelope(value=sv, mode=challenger_mode),
     )
     if actual is not None:
-        store.record_outcome(subject, actual)
+        store.record_outcome(subject, actual, as_of=as_of)
 
 
 async def _feed_n(store, n, primary_id, pv, challenger_id, sv, actual, *, scored=None):
@@ -187,6 +192,121 @@ async def test_marginal_win_below_margin_is_blocked():
         r, store, min_observations=3, min_scored=3, improvement_margin=0.10
     ).evaluate(FS)
     assert decision.promoted is None
+
+
+@pytest.mark.parametrize(("pv", "sv", "margin", "winner"), [
+    (0, 0, 0.05, None),          # two perfect forecasts tie
+    (2, 2, 0, None),             # even a zero margin requires a win
+    (4, 3, 0.25, "chal@1"),      # exactly 25% improvement
+    (4, 3.25, 0.25, None),       # less than 25% improvement
+    (1e200, 1, 0.05, None),      # champion squared error exceeds float range
+    (1, 1e200, 0.05, None),      # challenger squared error exceeds float range
+    (2e-162, 1.5e-162, 0.5, None),  # one-sample errors improve by only 25%
+])
+async def test_rmse_promotion_boundary(pv, sv, margin, winner):
+    registry = _registry_with("champ@1", "chal@1", validate=("chal@1",))
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", pv, "chal@1", sv, actual=0)
+    decision = Promoter(registry, store, min_observations=1, min_scored=1,
+                        improvement_margin=margin).evaluate(FS)
+    assert decision.promoted == winner
+    assert registry.primary_for_feature_set(FS)[0].model_id == (winner or "champ@1")
+
+
+@pytest.mark.parametrize(("pv", "sv", "modes"), [
+    (float("nan"), 0, {}),
+    (1, float("inf"), {}),
+    (1, 0, {"primary_mode": PredictionMode.PREDICTION_MODE_UNSPECIFIED}),
+    (1, 0, {"challenger_mode": PredictionMode.PREDICTION_MODE_DEGRADED}),
+])
+async def test_unusable_latest_pair_does_not_score_an_older_prediction(pv, sv, modes):
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "chal@1", 1)
+    await _feed(store, "S", "champ@1", pv, "chal@1", sv, **modes)
+    store.record_outcome("S", 0)
+    stats = store.stats("champ@1", "chal@1")
+    assert (stats.observations, stats.scored) == (1, 0)
+
+
+@pytest.mark.parametrize("actual", [float("nan"), float("inf"), float("-inf")])
+async def test_invalid_outcome_leaves_pair_available_for_corrected_value(actual):
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "chal@1", 1)
+    store.record_outcome("S", actual)
+    assert store.stats("champ@1", "chal@1").scored == 0
+    store.record_outcome("S", 1)
+    stats = store.stats("champ@1", "chal@1")
+    assert (stats.scored, stats.primary_rmse, stats.challenger_rmse) == (1, 1.0, 0.0)
+
+
+async def test_overflowing_challenger_preserves_other_pairs_on_the_same_outcome():
+    registry = _registry_with("champ@1", "huge@1", "valid@1", validate=("huge@1", "valid@1"))
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "huge@1", 1e200)
+    await _feed(store, "S", "champ@1", 2, "valid@1", 1)
+    store.record_outcome("S", 1)
+    assert store.stats("champ@1", "huge@1").challenger_rmse is None
+    decision = Promoter(registry, store, min_observations=1, min_scored=1).evaluate(FS)
+    assert decision.promoted == "valid@1"
+
+
+async def test_averaging_a_normal_squared_error_into_the_subnormal_range_is_unavailable():
+    store = ShadowComparisonStore()
+    await _feed(store, "A", "champ@1", 1.0, "chal@1", 2.0 ** -511, actual=0)
+    await _feed(store, "B", "champ@1", 1.0, "chal@1", 0, actual=0)
+    stats = store.stats("champ@1", "chal@1")
+    assert stats.primary_rmse == 1
+    assert stats.challenger_rmse is None
+
+
+async def test_only_matching_observation_time_scores_each_model_pair():
+    early = Timestamp(seconds=42, nanos=1)
+    late = Timestamp(seconds=42, nanos=2)
+    store = ShadowComparisonStore()
+    await _feed(store, "S", "champ@1", 2, "a@1", 1, as_of=early)
+    await _feed(store, "S", "champ@1", 2, "b@1", 1, as_of=late)
+    store.record_outcome("S", 1)
+    assert store.stats("champ@1", "a@1").scored == 0
+    store.record_outcome("S", 1, as_of=late)
+    assert store.stats("champ@1", "a@1").scored == 0
+    assert store.stats("champ@1", "b@1").challenger_rmse == 0
+    store.record_outcome("S", 3, as_of=early)
+    assert store.stats("champ@1", "a@1").challenger_rmse == 2
+
+
+@pytest.mark.parametrize("consume_before_older_finishes", [True, False])
+async def test_late_shadow_callback_cannot_score_newer_degraded_forecast(consume_before_older_finishes):
+    early, late = Timestamp(seconds=1), Timestamp(seconds=2)
+    release_older = asyncio.Event()
+    newer_finished = asyncio.Event()
+
+    class DelayedShadow(_Stub):
+        async def predict(self, fv):
+            result = await super().predict(fv)
+            if fv.as_of == early:
+                await release_older.wait()
+                result.value = 1
+            else:
+                result.mode = PredictionMode.PREDICTION_MODE_DEGRADED
+                newer_finished.set()
+            return result
+
+    registry = _registry_with("champ@1", "chal@1", validate=("chal@1",))
+    registry.register(_meta("chal@1"), DelayedShadow("chal@1"), primary=False)
+    store = ShadowComparisonStore()
+    executor = ShadowExecutor(registry, observer=store)
+    try:
+        for when in (early, late):
+            await executor.predict(FeatureVector(subject_id="S", feature_set_ref=FS, as_of=when))
+        await asyncio.wait_for(newer_finished.wait(), timeout=2)
+        if consume_before_older_finishes:
+            store.record_outcome("S", 1, as_of=late)
+    finally:
+        release_older.set()
+        await executor.wait_for_shadows()
+    store.record_outcome("S", 1, as_of=late)
+    assert store.stats("champ@1", "chal@1").scored == 0
+    assert Promoter(registry, store, min_observations=1, min_scored=1).evaluate(FS).promoted is None
 
 
 async def test_no_primary_registered():
