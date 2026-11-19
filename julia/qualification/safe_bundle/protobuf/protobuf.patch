@@ -1,0 +1,147 @@
+diff --git a/src/codec/decode.jl b/src/codec/decode.jl
+index c44431d..6ffc4a4 100644
+--- a/src/codec/decode.jl
++++ b/src/codec/decode.jl
+@@ -5,6 +5,37 @@ function decode_tag(d::AbstractProtoDecoder)
+     return field_number, wire_type
+ end
+
++# Retain each singular embedded message's wire boundary so scalar presence,
++# repeated elements and oneof selection can be folded by the generated decoder.
++struct MessageFragments{T}
++    parts::Vector{Vector{UInt8}}
++    MessageFragments{T}() where {T} = new{T}(Vector{UInt8}[])
++end
++
++function read_fragment!(d::ProtoDecoder{IOBuffer}, buffer::MessageFragments, wire_type, endpos::Int)
++    wire_type == LENGTH_DELIMITED || throw(ArgumentError("expected a length-delimited message"))
++    io = get_stream(d)
++    size = Int(vbyte_decode(io, UInt32))
++    available = endpos == 0 ? bytesavailable(io) : min(bytesavailable(io), endpos - position(io))
++    size <= available || throw(EOFError())
++    push!(buffer.parts, read(io, size))
++    return nothing
++end
++
++function decode_fragments end
++
++function Base.getindex(buffer::MessageFragments{T}) where {T}
++    isempty(buffer.parts) && return nothing
++    segments = ((ProtoDecoder(IOBuffer(bytes)), length(bytes), false) for bytes in buffer.parts)
++    return decode_fragments(segments, T)
++end
++
++function finish_discarded!(buffer::MessageFragments)
++    buffer[]
++    Base.empty!(buffer.parts)
++    return nothing
++end
++
+ const _ScalarTypes = Union{Float64,Float32,Int32,Int64,UInt64,UInt32,Bool,String,Vector{UInt8}}
+ const _ScalarTypesEnum = Union{_ScalarTypes,Enum}
+
+diff --git a/src/codegen/decode_methods.jl b/src/codegen/decode_methods.jl
+index c82ce9e..0a7400c 100644
+--- a/src/codegen/decode_methods.jl
++++ b/src/codegen/decode_methods.jl
+@@ -35,6 +35,9 @@ function jl_type_decode_repeated_expr(f::FieldType{ReferencedType}, ctx::Context
+     return "PB.decode!(d, wire_type, $(jl_fieldname(f)))"
+ end
+ function jl_type_decode_expr(f::FieldType{ReferencedType}, ctx::Context)
++    if _is_message(f.type, ctx) && _is_optional_referenced_message(f, ctx)
++        return "PB.Codecs.read_fragment!(d, $(jl_fieldname(f)), wire_type, _endpos)"
++    end
+     _is_message(f.type, ctx) && return "PB.decode!(d, $(jl_fieldname(f)))"
+     return "$(jl_fieldname(f)) = PB.decode(d, $(jl_typename(f.type, ctx)))"
+ end
+@@ -64,14 +67,34 @@ function jl_type_oneof_decode_expr(f::FieldType{ReferencedType}, ctx::Context)
+ end
+ function field_decode_expr(io, field::OneOfType, i, ctx::Context)
+     field_name = jl_fieldname(field)
++    selector = "_message_choice_$(first(field.fields).number)"
++    has_fragments = any(case -> fragment_case(case, ctx), field.fields)
+     for (j, case) in enumerate(field.fields)
+         j += i
+         println(io, "    " ^ 2, j == 2 ? "if " : "elseif ", "field_number == ", string(case.number))
+-        println(io, "    " ^ 3, field_name, " = ", jl_type_oneof_decode_expr(case, ctx))
++        # An unselected message must still be decoded before its value is
++        # discarded. A later choice cannot make a preceding wire error valid.
++        for prior in field.fields
++            prior.number == case.number && continue
++            fragment_case(prior, ctx) || continue
++            println(io, "            if ", selector, " == ", prior.number)
++            println(io, "                PB.Codecs.finish_discarded!(_oneof_fragments_", prior.number, ")")
++            println(io, "            end")
++        end
++        if fragment_case(case, ctx)
++            buffer = "_oneof_fragments_$(case.number)"
++            println(io, "            ", selector, " = ", case.number)
++            println(io, "            PB.Codecs.read_fragment!(d, ", buffer, ", wire_type, _endpos)")
++        else
++            has_fragments && println(io, "            ", selector, " = 0")
++            println(io, "    " ^ 3, field_name, " = ", jl_type_oneof_decode_expr(case, ctx))
++        end
+     end
+     return nothing
+ end
+
++fragment_case(f, ctx) = f isa FieldType{ReferencedType} && _is_message(f.type, ctx)
++
+ function field_decode_expr(io, field::GroupType, i, ::Context)
+     field_name = jl_fieldname(field)
+     println(io, "    " ^ 2, i == 1 ? "if " : "elseif ", "field_number == ", string(field.number))
+@@ -89,11 +112,22 @@ jl_fieldname_deref(f::GroupType, ::Context) = "$(jl_fieldname(f))[]"
+
+ function generate_decode_method(io, t::MessageType, ctx::Context)
+     println(io, "function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:$(safename(t))}, _endpos::Int=0, _group::Bool=false)")
++    println(io, "    return PB.Codecs.decode_fragments(((d, _endpos, _group),), $(safename(t)))")
++    println(io, "end")
++    println(io, "function PB.Codecs.decode_fragments(segments, ::Type{<:$(safename(t))})")
+     n = length(t.fields)
+     has_fields = n > 0
+     for field in t.fields
+         println(io, "    ", jl_fieldname(field)::String, " = ", jl_init_value(field, ctx)::String)
++        if field isa OneOfType
++            any(case -> fragment_case(case, ctx), field.fields) && println(io, "    _message_choice_", first(field.fields).number, " = 0")
++            for case in field.fields
++                fragment_case(case, ctx) || continue
++                println(io, "    _oneof_fragments_", case.number, " = PB.Codecs.MessageFragments{", jl_typename(case.type, ctx), "}()")
++            end
++        end
+     end
++    println(io, "    for (d, _endpos, _group) in segments")
+     println(io, "    while !PB.message_done(d, _endpos, _group)")
+     println(io, "        field_number, wire_type = PB.decode_tag(d)")
+     for (i, field) in enumerate(t.fields)
+@@ -103,6 +137,18 @@ function generate_decode_method(io, t::MessageType, ctx::Context)
+     println(io, "    " ^ (3 - !has_fields), "Base.skip(d, wire_type)")
+     has_fields && println(io, "        end")
+     println(io, "    end")
++    println(io, "    _endpos == 0 || position(PB.Codecs.get_stream(d)) == _endpos || throw(EOFError())")
++    println(io, "    end")
++    for field in t.fields
++        field isa OneOfType || continue
++        for case in field.fields
++            fragment_case(case, ctx) || continue
++            name = jl_fieldname(field)
++            println(io, "    if _message_choice_", first(field.fields).number, " == ", case.number)
++            println(io, "        ", name, " = OneOf(:", jl_fieldname(case), ", _oneof_fragments_", case.number, "[])")
++            println(io, "    end")
++        end
++    end
+     print(io, "    return ")
+     _maybe_parametrize_constructor_to_handle_oneofs(io, t, ctx)
+     print(io, "(")
+diff --git a/src/codegen/defaults.jl b/src/codegen/defaults.jl
+index 993eb43..a3ed796 100644
+--- a/src/codegen/defaults.jl
++++ b/src/codegen/defaults.jl
+@@ -79,7 +79,7 @@ function jl_type_init_value(f::FieldType{ReferencedType}, ctx::Context)
+         return "$(jl_typename(f.type, ctx)[1:end-2]).$(default)"
+     else # message
+         if _is_optional_referenced_message(f, ctx)
+-            return "Ref{Union{Nothing,$(jl_typename(f.type, ctx))}}(nothing)"
++            return "PB.Codecs.MessageFragments{$(jl_typename(f.type, ctx))}()"
+         end
+         return "Ref{$(jl_typename(f.type, ctx))}()"
+     end
