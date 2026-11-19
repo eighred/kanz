@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { control, describe, settled, type Provision } from '../api/control'
+import { control, describe, ProvisionInputError, settled, type Provision } from '../api/control'
+import { ApiError } from '../api/client'
 
 // NODE PROVISIONING RUNS (#371 slice 4).
 //
@@ -18,8 +19,13 @@ import { control, describe, settled, type Provision } from '../api/control'
 const rows = ref<Provision[]>([])
 const error = ref('')
 const loading = ref(true)
+const adding = ref(false)
+const submitting = ref(false)
+const submissionError = ref('')
+const receipt = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
 let activeRead: AbortController | undefined
+let activeSubmission: AbortController | undefined
 
 // A run is a Job that takes minutes, so a static page would be wrong within
 // seconds of opening it. Same cadence as Estate.
@@ -30,6 +36,39 @@ const REFRESH_MS = 30_000
 // then counts as in-flight rather than silently disappearing from both columns.
 const running = computed(() => rows.value.filter((p) => !settled(p)).length)
 const failed = computed(() => rows.value.filter((p) => p.status === 'PROVISION_STATUS_FAILED').length)
+
+async function submit(event: SubmitEvent) {
+  if (submitting.value) return
+  const form = event.currentTarget as HTMLFormElement
+  const fields = new FormData(form)
+  const key = fields.get('bootstrap')
+  if (!(key instanceof File)) return
+  const submission = new AbortController()
+  activeSubmission = submission
+  submitting.value = true
+  submissionError.value = ''
+  receipt.value = ''
+  try {
+    const value = (name: string) => String(fields.get(name)).trim()
+    receipt.value = await control.addNode({
+      hostname: value('hostname'), ip: value('ip'), sshUser: value('user'), sshHostKey: value('hostKey'),
+    }, key, submission.signal)
+    form.reset()
+    adding.value = false
+    await load()
+  } catch (e) {
+    if (submission.signal.aborted) return
+    // A dropped response may follow Job creation. Never replay the private key.
+    if (e instanceof ProvisionInputError) submissionError.value = e.message
+    else if (e instanceof ApiError && e.status === 403) submissionError.value = describe(e)
+    else submissionError.value = 'No provisioning receipt was confirmed. Check the runs below before submitting again.'
+  } finally {
+    activeSubmission = undefined
+    const input = form.elements.namedItem('bootstrap') as HTMLInputElement | null
+    if (input) input.value = ''
+    submitting.value = false
+  }
+}
 
 async function load(initial = false) {
   activeRead?.abort()
@@ -54,7 +93,7 @@ onMounted(() => {
   void load(true)
   timer = setInterval(() => void load(), REFRESH_MS)
 })
-onUnmounted(() => { clearInterval(timer); activeRead?.abort() })
+onUnmounted(() => { clearInterval(timer); activeRead?.abort(); activeSubmission?.abort() })
 
 /** label turns the enum name into something readable. */
 function label(status?: string): string {
@@ -91,6 +130,20 @@ function tone(p: Provision): string {
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
 
   <template v-else>
+    <button v-if="!adding" @click="adding = true; submissionError = ''; receipt = ''">Add node</button>
+    <form v-else class="card" @submit.prevent="submit">
+      <h2>Add node</h2>
+      <label>Hostname <input name="hostname" required autocomplete="off" /></label>
+      <label>IP address <input name="ip" required autocomplete="off" /></label>
+      <label>SSH user <input name="user" required autocomplete="off" /></label>
+      <label>Verified SSH host public key <input name="hostKey" required autocomplete="off" spellcheck="false" /></label>
+      <label>One-use SSH private key (PEM) <input name="bootstrap" type="file" required /></label>
+      <p>Verify the host public key independently. Submitting installs the k3s agent over SSH and joins the target to this estate.</p>
+      <button :disabled="submitting" type="submit">{{ submitting ? 'Submitting…' : 'Provision node' }}</button>
+      <button class="quiet" type="button" :disabled="submitting" @click="adding = false; submissionError = ''">Cancel</button>
+    </form>
+    <p v-if="submissionError" class="error" role="alert">{{ submissionError }}</p>
+    <p v-if="receipt" role="status">Provisioning requested. Run <code>{{ receipt }}</code>.</p>
     <p class="muted">
       {{ rows.length }} run{{ rows.length === 1 ? '' : 's' }} ·
       <span :class="running ? 'state-warn' : 'state-ok'">{{ running }} in flight</span> ·
