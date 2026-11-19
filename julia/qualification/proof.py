@@ -123,15 +123,15 @@ def validate_inventory(inventory, source, runtime_sha256, native_expected):
     validate_worker_inventory(inventory, source, runtime_sha256)
 
 
-def validate_worker_inventory(inventory, source, runtime_sha256, extra_sources=()):
+def validate_worker_inventory(inventory, source, runtime_sha256, extra_sources=(), tracked_bytes=Path.read_bytes):
     if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:
         raise ValueError('packaged development environment boundary differs')
     if inventory['sourceSHA'] != source or inventory['runtime'] != '1.13.3':
         raise ValueError('image source/runtime differs')
     for name, key in [('Project.toml', 'projectSHA256'), ('Manifest.toml', 'manifestSHA256')]:
-        if inventory[key] != hashlib.sha256((ROOT / 'julia' / name).read_bytes()).hexdigest():
+        if inventory[key] != hashlib.sha256(tracked_bytes(ROOT / 'julia' / name)).hexdigest():
             raise ValueError('image locked environment differs')
-    manifest = tomllib.loads((ROOT / 'julia/Manifest.toml').read_text())
+    manifest = tomllib.loads(tracked_bytes(ROOT / 'julia/Manifest.toml').decode())
     expected = {name: {'version': entries[0]['version'], 'treeSHA1': entries[0]['git-tree-sha1']}
                 for name, entries in manifest['deps'].items() if 'git-tree-sha1' in entries[0]}
     if inventory['packages'] != expected or not inventory['generated']:
@@ -146,10 +146,10 @@ def validate_worker_inventory(inventory, source, runtime_sha256, extra_sources=(
     for directory in ('src', 'bin', 'test'):
         for path in (ROOT / 'julia' / directory).rglob('*'):
             if path.is_file():
-                sources[path.relative_to(ROOT / 'julia').as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
-    sources['qualification/isolation.jl'] = hashlib.sha256(Path(__file__).with_name('isolation.jl').read_bytes()).hexdigest()
+                sources[path.relative_to(ROOT / 'julia').as_posix()] = hashlib.sha256(tracked_bytes(path)).hexdigest()
+    sources['qualification/isolation.jl'] = hashlib.sha256(tracked_bytes(Path(__file__).with_name('isolation.jl'))).hexdigest()
     for name in extra_sources:
-        sources['qualification/' + name] = hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+        sources['qualification/' + name] = hashlib.sha256(tracked_bytes(Path(__file__).with_name(name))).hexdigest()
     if (inventory['sources'] != sources or not re.fullmatch('[0-9a-f]{64}', runtime_sha256)
             or inventory['runtimeExecutableSHA256'] != runtime_sha256):
         raise ValueError('image worker/source inventory differs')

@@ -128,7 +128,10 @@ def check_inventory(inventory, source, expected):
                'originalJLLVersion': '3.5.8+0', 'files': {'lib/julia/' + n: v for n, v in PINS['files'].items()}}
     if inventory['nativeOpenSSL'] != openssl:
         raise ValueError('source OpenSSL runtime identity differs')
-    proof.validate_worker_inventory(inventory, source, expected['files']['bin/julia']['sha256'], ['source_candidate.toml'])
+    def committed_bytes(path):
+        return proof.required(['git', 'show', source + ':' + path.relative_to(proof.ROOT).as_posix()])
+    proof.validate_worker_inventory(inventory, source, expected['files']['bin/julia']['sha256'],
+                                    ['source_candidate.toml'], committed_bytes)
 
 
 def check_package_inputs(directory, locked_manifest, locked_pins):
