@@ -1,0 +1,31 @@
+import json
+import re
+import subprocess
+import unittest
+from unittest.mock import patch
+
+from runtime import docker, nats_configuration
+
+
+class RuntimeTest(unittest.TestCase):
+    def test_fixture_publishers_and_observer_are_scoped(self):
+        config = nats_configuration()
+        for user, subject in [('feed', 'accounting.collateral.snapshot'),
+                              ('custody', 'accounting.collateral.confirmation.custody')]:
+            line, = [s for s in config.splitlines() if s.startswith('{user: ' + user + ',')]
+            grants = json.loads(line.split('permissions: ', 1)[1][:-2])
+            self.assertEqual(grants, {'publish': {'allow': [subject]}, 'subscribe': {'allow': ['_INBOX.>']}})
+        observer, = [s for s in config.splitlines() if s.startswith('{user: observer,')]
+        api = json.loads(observer.split('permissions: ', 1)[1][:-1])['publish']['allow']
+        self.assertTrue(api)
+        self.assertTrue(all(re.fullmatch(r'\$JS\.API\.(?:STREAM\.(?:INFO|MSG\.GET)|CONSUMER\.LIST)\.ACCOUNTING', s)
+                            for s in api))
+
+    def test_diagnostics_do_not_disclose_output(self):
+        with patch('runtime.subprocess.run') as run:
+            run.return_value = subprocess.CompletedProcess([], 1, stdout='secret', stderr='private DSN')
+            with self.assertRaisesRegex(RuntimeError, '^approve exited 1$'):
+                docker('approve', 'run')
+            run.return_value.stderr = 'gateway approve returned 409, expected 200'
+            with self.assertRaisesRegex(RuntimeError, '^approve: gateway approve returned 409, expected 200$'):
+                docker('approve', 'run')
