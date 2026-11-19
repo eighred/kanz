@@ -116,7 +116,7 @@ type SVISurface struct {
 // variance smiles, each fitted to raw SVI, then the butterfly + calendar
 // checks gate the result. disc supplies the zero rate per expiry (the
 // PARITY-03a calibrated curve satisfies pricing.DiscountCurve); divYield is
-// the flat dividend/carry yield. A slice needs ≥ 3 valid quotes.
+// the flat dividend/carry yield. Each expiry needs at least three distinct log-moneyness points.
 func FitSVI(quotes []OptionQuote, spot float64, disc pricing.DiscountCurve, divYield float64) (*SVISurface, error) {
 	if !positive(spot) || !finite(divYield) || disc == nil {
 		return nil, fmt.Errorf("%w: spot and discount curve required", ErrSVIFit)
@@ -154,13 +154,15 @@ func FitSVI(quotes []OptionQuote, spot float64, disc pricing.DiscountCurve, divY
 	surf := &SVISurface{}
 	for _, expiry := range sortedFloatKeys(smiles) {
 		pts := smiles[expiry]
-		if len(pts) < 3 {
-			return nil, fmt.Errorf("%w: %d quotes at expiry %.4g (need ≥3)", ErrSVIFit, len(pts), expiry)
-		}
 		ks := make([]float64, len(pts))
 		ws := make([]float64, len(pts))
+		nodes := make(map[float64]struct{}, len(pts))
 		for i, p := range pts {
 			ks[i], ws[i] = p.k, p.w
+			nodes[p.k] = struct{}{}
+		}
+		if len(nodes) < 3 {
+			return nil, fmt.Errorf("%w: %d distinct log-moneyness points at expiry %.4g (need at least 3)", ErrSVIFit, len(nodes), expiry)
 		}
 		params, err := fitSlice(ks, ws)
 		if err != nil {
