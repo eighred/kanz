@@ -75,7 +75,10 @@ func TestNATSConsumerDedupKeepsIndependentDurables(t *testing.T) {
 		stop()
 		for range 2 {
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("subscription returned an error: %v", err)
+				}
 			case <-time.After(5 * time.Second):
 				t.Error("subscription shutdown was not joined")
 			}
