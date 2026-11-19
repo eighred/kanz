@@ -1,23 +1,19 @@
 import { api, ApiError } from './client'
+import { brokerAccount, brokerExecution, brokerOrder, brokerPosition, brokerState } from './broker_contract'
 
-export interface BrokerAccount { id: string; name: string; currency: string }
-export interface BrokerState {
-  id: string; currency: string; balance: string; equity: string
-  realizedPl: string; unrealizedPl: string; openPositions: number
+type OptionalField = 'text?' | 'decimal?' | 'timestamp?'
+type Fields = Record<string, 'text' | 'decimal' | 'timestamp' | 'count' | OptionalField>
+type BrokerRow<S extends Fields> = {
+  [K in keyof S as S[K] extends OptionalField ? never : K]: S[K] extends 'count' ? number : string
+} & {
+  [K in keyof S as S[K] extends OptionalField ? K : never]?: string
 }
-export interface BrokerPosition {
-  instrument: string; side: string; qty: string; avgPrice: string
-  realizedPl: string; unrealizedPl?: string
-}
-export interface BrokerOrder {
-  id: string; instrument: string; venue?: string; side: string; type: string; status: string
-  qty: string; filledQty: string; leavesQty: string; avgFillPrice?: string; limitPrice?: string
-  updatedAt: string; parentOrderId?: string
-}
-export interface BrokerExecution {
-  id: string; orderId: string; instrument: string; venue: string; side: string
-  qty: string; price: string; fee?: string; time: string
-}
+
+export type BrokerAccount = BrokerRow<typeof brokerAccount>
+export type BrokerState = BrokerRow<typeof brokerState>
+export type BrokerPosition = BrokerRow<typeof brokerPosition>
+export type BrokerOrder = BrokerRow<typeof brokerOrder>
+export type BrokerExecution = BrokerRow<typeof brokerExecution>
 export interface BrokerAccountDetail {
   state: BrokerState
   positions: BrokerPosition[]
@@ -32,11 +28,6 @@ function object(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-function strings(row: Record<string, unknown>, required: string[], optional: string[] = []): void {
-  if (required.some((key) => typeof row[key] !== 'string' || row[key] === '')) throw new Error('Invalid broker response.')
-  if (optional.some((key) => row[key] !== undefined && typeof row[key] !== 'string')) throw new Error('Invalid broker response.')
-}
-
 function list<T>(value: unknown, parse: (row: unknown) => T): T[] {
   if (value === null) return [] // Go nil slices are JSON null.
   if (!Array.isArray(value)) throw new Error('Invalid broker response.')
@@ -49,37 +40,25 @@ function time(value: unknown): string | undefined {
   return value
 }
 
-function parseAccount(value: unknown): BrokerAccount {
-  const row = object(value, 'broker account')
-  strings(row, ['id', 'name', 'currency'])
-  return { id: row.id as string, name: row.name as string, currency: row.currency as string }
-}
-
-function parseState(value: unknown): BrokerState {
-  const row = object(value, 'broker state')
-  strings(row, ['id', 'currency', 'balance', 'equity', 'realizedPl', 'unrealizedPl'])
-  if (!Number.isSafeInteger(row.openPositions) || (row.openPositions as number) < 0) throw new Error('Invalid broker response.')
-  return row as unknown as BrokerState
-}
-
-function parsePosition(value: unknown): BrokerPosition {
-  const row = object(value, 'broker position')
-  strings(row, ['instrument', 'side', 'qty', 'avgPrice', 'realizedPl'], ['unrealizedPl'])
-  return row as unknown as BrokerPosition
-}
-
-function parseOrder(value: unknown): BrokerOrder {
-  const row = object(value, 'broker order')
-  strings(row, ['id', 'instrument', 'side', 'type', 'status', 'qty', 'filledQty', 'leavesQty', 'updatedAt'], ['venue', 'avgFillPrice', 'limitPrice', 'parentOrderId'])
-  time(row.updatedAt)
-  return row as unknown as BrokerOrder
-}
-
-function parseExecution(value: unknown): BrokerExecution {
-  const row = object(value, 'broker execution')
-  strings(row, ['id', 'orderId', 'instrument', 'venue', 'side', 'qty', 'price', 'time'], ['fee'])
-  time(row.time)
-  return row as unknown as BrokerExecution
+function readRow<S extends Fields>(value: unknown, fields: S): BrokerRow<S> {
+  const row = object(value, 'broker')
+  const result: Record<string, string | number> = {}
+  for (const [key, kind] of Object.entries(fields)) {
+    const field = row[key]
+    if (kind.endsWith('?') && field === undefined) continue
+    if (kind === 'count') {
+      if (typeof field !== 'number' || !Number.isSafeInteger(field) || field < 0) throw new Error('Invalid broker response.')
+    } else {
+      if (typeof field !== 'string' || (field === '' && kind !== 'text?')) throw new Error('Invalid broker response.')
+      // The projection emits fixed-point text. Preserve all digits without a Number conversion.
+      if ((kind === 'decimal' || kind === 'decimal?') && !/^-?[0-9]+(?:\.[0-9]+)?$/.test(field)) {
+        throw new Error('Invalid broker response.')
+      }
+      if (kind === 'timestamp' || kind === 'timestamp?') time(field)
+    }
+    result[key] = field
+  }
+  return result as BrokerRow<S>
 }
 
 function window<T>(value: unknown, key: string, parse: (row: unknown) => T): { rows: T[]; retainedFrom?: string } {
@@ -90,7 +69,7 @@ function window<T>(value: unknown, key: string, parse: (row: unknown) => T): { r
 export const broker = {
   async accounts(): Promise<BrokerAccount[]> {
     const body = object(await api.get<unknown>('/api/v1/broker/accounts'), 'broker accounts')
-    return list(body.accounts, parseAccount)
+    return list(body.accounts, row => readRow(row, brokerAccount))
   },
   async account(id: string, signal?: AbortSignal): Promise<BrokerAccountDetail> {
     const base = `/api/v1/broker/accounts/${encodeURIComponent(id)}`
@@ -99,12 +78,12 @@ export const broker = {
       api.get<unknown>(`${base}/orders`, { signal }), api.get<unknown>(`${base}/executions`, { signal }),
     ])
     const positions = object(positionsBody, 'positions')
-    const orders = window(ordersBody, 'orders', parseOrder)
-    const executions = window(executionsBody, 'executions', parseExecution)
-    const parsedState = parseState(state)
+    const orders = window(ordersBody, 'orders', row => readRow(row, brokerOrder))
+    const executions = window(executionsBody, 'executions', row => readRow(row, brokerExecution))
+    const parsedState = readRow(state, brokerState)
     if (parsedState.id !== id) throw new Error('Broker account identity differs.')
     return {
-      state: parsedState, positions: list(positions.positions, parsePosition),
+      state: parsedState, positions: list(positions.positions, row => readRow(row, brokerPosition)),
       orders: orders.rows, executions: executions.rows,
       ordersRetainedFrom: orders.retainedFrom, executionsRetainedFrom: executions.retainedFrom,
     }

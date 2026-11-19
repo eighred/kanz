@@ -154,14 +154,16 @@ func (a *account) rebuildLive() {
 
 // --- output DTOs (the TradingView Broker-API JSON shapes) ---
 
+//go:generate go run ../../tools/broker_contract -out ../../../../../web/src/api/broker_contract.ts
+
 // PositionDTO is one net position in an instrument (aggregated across venues).
 type PositionDTO struct {
 	Instrument    string `json:"instrument"`
 	Side          string `json:"side"` // long | short | flat
-	Qty           string `json:"qty"`
-	AvgPrice      string `json:"avgPrice"`
-	RealizedPnl   string `json:"realizedPl"`
-	UnrealizedPnl string `json:"unrealizedPl,omitempty"`
+	Qty           string `json:"qty" broker:"decimal"`
+	AvgPrice      string `json:"avgPrice" broker:"decimal"`
+	RealizedPnl   string `json:"realizedPl" broker:"decimal"`
+	UnrealizedPnl string `json:"unrealizedPl,omitempty" broker:"decimal"`
 }
 
 // OrderDTO is one order's current (or as-of) state.
@@ -172,12 +174,12 @@ type OrderDTO struct {
 	Side         string `json:"side"`
 	Type         string `json:"type"`
 	Status       string `json:"status"`
-	Qty          string `json:"qty"`
-	FilledQty    string `json:"filledQty"`
-	LeavesQty    string `json:"leavesQty"`
-	AvgFillPrice string `json:"avgFillPrice,omitempty"`
-	LimitPrice   string `json:"limitPrice,omitempty"`
-	UpdatedAt    string `json:"updatedAt"`
+	Qty          string `json:"qty" broker:"decimal"`
+	FilledQty    string `json:"filledQty" broker:"decimal"`
+	LeavesQty    string `json:"leavesQty" broker:"decimal"`
+	AvgFillPrice string `json:"avgFillPrice,omitempty" broker:"decimal"`
+	LimitPrice   string `json:"limitPrice,omitempty" broker:"decimal"`
+	UpdatedAt    string `json:"updatedAt" broker:"timestamp"`
 	// ParentOrderID names the working parent this order is a slice of (#435,
 	// #484). Empty for an ordinary order.
 	//
@@ -200,21 +202,21 @@ type ExecutionDTO struct {
 	Instrument string `json:"instrument"`
 	Venue      string `json:"venue"`
 	Side       string `json:"side"`
-	Qty        string `json:"qty"`
-	Price      string `json:"price"`
-	Fee        string `json:"fee,omitempty"`
-	ExecutedAt string `json:"time"`
+	Qty        string `json:"qty" broker:"decimal"`
+	Price      string `json:"price" broker:"decimal"`
+	Fee        string `json:"fee,omitempty" broker:"decimal"`
+	ExecutedAt string `json:"time" broker:"timestamp"`
 }
 
 // StateDTO is the account manager summary (balance/equity/P&L).
 type StateDTO struct {
 	AccountID     string `json:"id"`
 	Currency      string `json:"currency"`
-	Balance       string `json:"balance"`
-	Equity        string `json:"equity"`
-	RealizedPnl   string `json:"realizedPl"`
-	UnrealizedPnl string `json:"unrealizedPl"`
-	OpenPositions int    `json:"openPositions"`
+	Balance       string `json:"balance" broker:"decimal"`
+	Equity        string `json:"equity" broker:"decimal"`
+	RealizedPnl   string `json:"realizedPl" broker:"decimal"`
+	UnrealizedPnl string `json:"unrealizedPl" broker:"decimal"`
+	OpenPositions int    `json:"openPositions" broker:"count"`
 }
 
 // AccountDTO identifies an account in GET /accounts.

@@ -1,0 +1,14 @@
+{
+  "accounts": {"accounts": [{"id": "fund-a", "name": "fund-a", "currency": "USD"}]},
+  "state": {"id": "fund-a", "currency": "USD", "balance": "-0.125", "equity": "-0.125", "realizedPl": "-0.125", "unrealizedPl": "0", "openPositions": 1},
+  "positions": {"positions": [{"instrument": "X", "side": "long", "qty": "9007199254740993", "avgPrice": "3.25", "realizedPl": "-0.125"}]},
+  "orders": {"orders": [{
+    "id": "order-1", "instrument": "X", "side": "buy", "type": "limit", "status": "filled",
+    "qty": "9007199254740993", "filledQty": "9007199254740993", "leavesQty": "0", "avgFillPrice": "3.25", "limitPrice": "4",
+    "updatedAt": "2026-01-02T03:04:05.123456789Z", "parentOrderId": "parent-1"
+  }]},
+  "executions": {"executions": [{
+    "id": "fill-1", "orderId": "order-1", "instrument": "X", "venue": "XNAS", "side": "buy",
+    "qty": "9007199254740993", "price": "3.25", "fee": "0.125", "time": "2026-01-02T03:04:05.123456789Z"
+  }]}
+}
