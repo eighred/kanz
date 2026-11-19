@@ -264,3 +264,8 @@ func (m *Memory) indexOf(id int64) int {
 	}
 	return -1
 }
+
+func (m *Memory) lockDrain(ctx context.Context, key string, wait bool) (drainLease, bool, error) {
+	release, ok, err := m.LockKey(ctx, key, wait)
+	return drainLease{m, release}, ok, err
+}

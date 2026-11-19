@@ -280,7 +280,7 @@ func (r *Relay) Flush(ctx context.Context, key string) (int, error) {
 // stuck order must not shadow the rest of the book — and Flush returns it,
 // because its caller is about to publish the next FACT for this same order.
 func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error, error) {
-	release, ok, err := r.q.LockKey(ctx, key, wait)
+	lease, ok, err := r.q.lockDrain(ctx, key, wait)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -291,12 +291,12 @@ func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error
 		// reach here: wait=true never returns ok=false) would not proceed blind.
 		return 0, errors.New("outbox: another replica is draining " + key), nil
 	}
-	defer release()
+	defer lease.release()
 
 	// READ UNDER THE LOCK. Reading before it would let the loser of the race
 	// hold a snapshot the winner is already publishing from, and then publish
 	// the same records again on the next pass for no reason.
-	pending, err := r.q.Pending(ctx, key, r.batch)
+	pending, err := lease.Pending(ctx, key, r.batch)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -307,7 +307,7 @@ func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error
 			err = r.pub.Publish(ctx, event)
 		}
 		if err != nil {
-			if merr := r.q.MarkFailed(ctx, p.ID, err); merr != nil {
+			if merr := lease.MarkFailed(ctx, p.ID, err); merr != nil {
 				return sent, nil, fmt.Errorf("outbox: %s could not record a failed attempt: %w", key, merr)
 			}
 			inc(r.failures)
@@ -344,7 +344,7 @@ func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error
 			return sent, fmt.Errorf("outbox: %s is stalled on %s (outbox id %d): %w",
 				key, p.Record.EventType, p.ID, err), nil
 		}
-		if err := r.q.MarkPublished(ctx, p.ID); err != nil {
+		if err := lease.MarkPublished(ctx, p.ID); err != nil {
 			// The broker HAS the event. Failing to record that is survivable —
 			// the next pass republishes it, which is the at-least-once direction
 			// every consumer of these FACTs already tolerates — but it must not

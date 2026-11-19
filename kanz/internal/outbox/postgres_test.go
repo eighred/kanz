@@ -45,6 +45,11 @@ func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 
 func newPoolForSchema(t *testing.T, tenant, schema string) *pgxpool.Pool {
 	t.Helper()
+	return newLimitedPoolForSchema(t, tenant, schema, 0)
+}
+
+func newLimitedPoolForSchema(t *testing.T, tenant, schema string, maxConns int32) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run outbox Postgres integration tests")
@@ -52,6 +57,9 @@ func newPoolForSchema(t *testing.T, tenant, schema string) *pgxpool.Pool {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatalf("parse config: %v", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		if _, err := conn.Exec(ctx, "SET search_path TO "+pgx.Identifier{schema}.Sanitize()); err != nil {
