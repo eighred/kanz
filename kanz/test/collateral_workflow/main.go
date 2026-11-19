@@ -110,6 +110,25 @@ func receipt(ctx context.Context, route string, deliveries uint64) error {
 	if err != nil {
 		return errors.New("source publication unavailable")
 	}
+	if route == "accounting.collateral.recorded" {
+		info, err := st.Info(ctx, jetstream.WithSubjectFilter(route))
+		if err != nil || info.State.Subjects[route] != deliveries {
+			return errors.New("recorded FACT count differs")
+		}
+		env, payload, err := bus.Unframe(last.Data)
+		if err != nil || env.GetTenantId() != tenant || env.GetEventType() != route || env.GetSource() != "accounting" ||
+			env.GetEventClass() != envelope.EventClass_EVENT_CLASS_FACT || env.GetPartitionKey() != workflow ||
+			env.GetPayloadSchemaRef() != "collateral.v1.WorkflowRecorded:1" {
+			return errors.New("recorded FACT envelope differs")
+		}
+		var state pb.WorkflowRecorded
+		if err := proto.Unmarshal(payload, &state); err != nil || state.WorkflowId != workflow ||
+			state.Revision < 1 || uint64(state.Revision) != deliveries || state.RequestId != env.CorrelationId {
+			return errors.New("recorded FACT revision differs")
+		}
+		fmt.Printf("%x", sha256.Sum256(payload))
+		return nil
+	}
 	matches := 0
 	consumers := st.ListConsumers(ctx)
 	for c := range consumers.Info() {
@@ -221,6 +240,9 @@ func gateway(ctx context.Context, mode string) error {
 	}
 	if wantStatus == pb.WorkflowStatus_WORKFLOW_STATUS_INSTRUCTED && (state.Actor != "checker" || state.PostingRevision != 2) {
 		return errors.New("checker or instruction revision differs")
+	}
+	if wantStatus == pb.WorkflowStatus_WORKFLOW_STATUS_SETTLED && (state.Actor != "custodian:custodian" || state.RequestId != "confirmation-1") {
+		return errors.New("custody settlement identity differs")
 	}
 	stable, err := proto.MarshalOptions{Deterministic: true}.Marshal(&state)
 	if err != nil {

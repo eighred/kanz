@@ -3,10 +3,17 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from runtime import docker, nats_configuration
+from runtime import Estate, docker, nats_configuration
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_reservation_evidence_requires_the_exact_amount(self):
+        estate = Estate('.', '.')
+        changed = json.dumps(['rehearsal', 'release-workflow', 'CSA1', 'lot-1', '59'])
+        with patch.object(estate, 'observed', return_value=changed):
+            with self.assertRaisesRegex(ValueError, 'reserved obligation differs'):
+                estate.ledger(['a' * 64, 'b' * 64])
+
     def test_fixture_publishers_and_observer_are_scoped(self):
         config = nats_configuration()
         for user, subject in [('feed', 'accounting.collateral.snapshot'),
@@ -19,6 +26,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertCountEqual(api, ['$JS.API.STREAM.INFO.ACCOUNTING', '$JS.API.STREAM.MSG.GET.ACCOUNTING',
                                     '$JS.API.CONSUMER.LIST.ACCOUNTING',
                                     '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.snapshot',
+                                    '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.recorded',
                                     '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.confirmation.custody'])
 
     def test_diagnostics_do_not_disclose_output(self):

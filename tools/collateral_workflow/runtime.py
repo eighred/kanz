@@ -25,6 +25,8 @@ PROBE_FAILURES = frozenset({
     'expected a unique Accounting input durable', 'authenticated gateway request failed',
     'workflow state, principal or revision differs', 'workflow settlement leg differs',
     'invalid workflow response', 'checker or instruction revision differs',
+    'recorded FACT count differs', 'recorded FACT envelope differs', 'recorded FACT revision differs',
+    'custody settlement identity differs',
 })
 
 
@@ -86,6 +88,7 @@ def nats_configuration():
     observer = {'publish': {'allow': ['$JS.API.STREAM.INFO.ACCOUNTING', '$JS.API.STREAM.MSG.GET.ACCOUNTING',
                                       '$JS.API.CONSUMER.LIST.ACCOUNTING',
                                       '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.snapshot',
+                                      '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.recorded',
                                       '$JS.API.DIRECT.GET.ACCOUNTING.accounting.collateral.confirmation.custody']},
                 'subscribe': {'allow': ['_INBOX.>']}}
     lines.append('{user: observer, password: $OBSERVER_KEY, permissions: ' + json.dumps(observer) + '}')
@@ -241,11 +244,14 @@ class Estate:
         wait_for('first acknowledged snapshot', lambda: bool(self.probe('receipt','accounting.collateral.snapshot','1')))
         wait_for('committed authoritative snapshot', lambda: self.observed('SELECT count(*) FROM collateral_snapshots') == '1')
         proposal = self.probe('propose', role='maker')
+        self.verify_fact(1, proposal)
         self.probe('self-approve', role='maker')
         original = self.probe('approve', role='checker')
         if proposal == original or not re.fullmatch(r'[0-9a-f]{64}', original):
             raise ValueError('proposal and instruction must have distinct evidence')
         wait_for('publication of both workflow revisions', lambda: self.published() == '2')
+        self.verify_fact(2, original)
+        pending = self.ledger([proposal, original])
         before = json.loads(self.receipt())
         if before != [1,2,0,1,1,2]:
             raise ValueError('pending approval ledger differs: ' + str(before))
@@ -278,6 +284,9 @@ class Estate:
         wait_for('replayed snapshot acknowledged', lambda: bool(self.probe('receipt','accounting.collateral.snapshot','2')))
         if self.probe('approve',role='checker') != original or json.loads(self.receipt()) != before:
             raise ValueError('ambiguous instruction retry changed durable evidence or created settlement')
+        self.verify_fact(2, original)
+        if self.ledger([proposal, original]) != pending:
+            raise ValueError('recovery changed a reservation, request or outbox record')
         print('Checking a custody confirmation and its independent duplicate delivery.', flush=True)
         effective = datetime.now(timezone.utc).isoformat()
         self.probe('confirm',event_time=effective)
@@ -285,18 +294,54 @@ class Estate:
                  lambda: bool(self.probe('receipt','accounting.collateral.confirmation.custody','1')))
         wait_for('authoritative settlement', lambda: bool(self.probe('settled',role='checker')))
         settled = self.probe('settled',role='checker')
+        self.verify_fact(3, settled)
+        wait_for('published settlement outbox receipt', lambda: self.published() == '3')
+        completed = self.ledger([proposal, original, settled])
+        if completed[0] != pending[0] or completed[1][:2] != pending[1]:
+            raise ValueError('settlement rewrote earlier request or publication evidence')
         self.probe('confirm',event_time=effective)
         wait_for('duplicate confirmation acknowledged',
                  lambda: bool(self.probe('receipt','accounting.collateral.confirmation.custody','2')))
-        wait_for('publication of the settlement', lambda: self.published() == '3')
         if self.probe('settled',role='checker') != settled or json.loads(self.receipt()) != [1,2,1,1,1,3]:
             raise ValueError('duplicate custody confirmation changed the settled workflow')
+        self.verify_fact(3, settled)
+        if self.ledger([proposal, original, settled]) != completed:
+            raise ValueError('duplicate confirmation changed the committed ledger')
         print(f'Released Accounting worker {old_id[:12]} replaced by {replacement[:12]}. Both servers restarted. '
               '20 migrations retained their recorded identity. One approved instruction remained pending across retries. '
               'One custodian confirmation settled the 60 USD leg.', flush=True)
 
     def published(self):
         return self.observed("SELECT count(published_at) FROM outbox WHERE subject='accounting.collateral.recorded'")
+
+    def verify_fact(self, revision, digest):
+        wait_for('recorded workflow FACT ' + str(revision), lambda:
+                 self.probe('receipt', 'accounting.collateral.recorded', str(revision)) == digest)
+
+    def ledger(self, digests):
+        def rows(query):
+            return [json.loads(line) for line in self.observed(query).splitlines()]
+
+        reservation = rows('SELECT json_build_array(tenant_id,workflow_id,agreement_id,lot_id,quantity) FROM collateral_reservations')
+        if reservation != [['rehearsal', 'release-workflow', 'CSA1', 'lot-1', '60']]:
+            raise ValueError('the reserved obligation differs')
+        requests = rows("""SELECT json_build_array(request_id,encode(sha256(evidence),'hex'),digest)
+                           FROM collateral_requests ORDER BY request_id""")
+        if [r[:2] for r in requests] != [['approve-1', digests[1]], ['propose-1', digests[0]]] or any(
+                not re.fullmatch(r'[0-9a-f]{64}', r[2]) for r in requests):
+            raise ValueError('request receipts differ from the observed states')
+        outbox = rows("""SELECT json_build_array(correlation_id,encode(sha256(payload),'hex'),id,published_at)
+                         FROM outbox WHERE subject='accounting.collateral.recorded' ORDER BY id""")
+        identifiers = ['propose-1', 'approve-1', 'confirmation-1'][:len(digests)]
+        if [r[:2] for r in outbox] != [list(pair) for pair in zip(identifiers, digests, strict=True)] or any(
+                r[3] is None for r in outbox):
+            raise ValueError('outbox chronology differs from the published revisions')
+        confirmations = rows("""SELECT json_build_array(source_id,workflow_id,agreement_id,lot_id,returned,
+                                digest=encode(sha256(payload),'hex'),digest) FROM collateral_confirmations""")
+        expected = [['confirmation-1', 'release-workflow', 'CSA1', 'lot-1', False, True]] if len(digests) == 3 else []
+        if [r[:6] for r in confirmations] != expected:
+            raise ValueError('custody confirmation identity or payload differs')
+        return requests, outbox, confirmations
 
     def diagnose(self):
         # Export only fixed categories and numeric state. Service errors can contain DSNs.
