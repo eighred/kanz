@@ -1,0 +1,99 @@
+name: operator-gitops-verification
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - 'tools/operator_gitops_proof/**'
+      - 'tools/feed_identity/**'
+      - 'tools/native_kafka_provision/argo_bootstrap.py'
+      - 'tools/gateway_policy_proof/bounded_process.py'
+      - 'kanz/infra/operator/**'
+      - 'kanz/infra/gitops/applicationset.yaml'
+      - 'kanz/infra/gitops/projects.yaml'
+      - 'kanz/test/arch/*gitops*'
+      - '.github/workflows/operator-gitops-verification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/operator_gitops_proof/**'
+      - 'tools/feed_identity/**'
+      - 'tools/native_kafka_provision/argo_bootstrap.py'
+      - 'tools/gateway_policy_proof/bounded_process.py'
+      - 'kanz/infra/operator/**'
+      - 'kanz/infra/gitops/applicationset.yaml'
+      - 'kanz/infra/gitops/projects.yaml'
+      - 'kanz/test/arch/*gitops*'
+      - '.github/workflows/operator-gitops-verification.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  operator-identities:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - name: Verify source, operation and cleanup refusal controls
+        run: python3 -B -m unittest discover -s tools/operator_gitops_proof -p 'test_*.py' -v
+      - run: bash tools/feed_identity/install.sh
+      - name: Prove operator identity sync, self-heal and rollback without a halt Job
+        run: python3 -B tools/operator_gitops_proof/proof.py
+      - name: Remove only this job's interrupted creation
+        if: always()
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, json, os, pathlib, stat, subprocess, tempfile
+          owner = pathlib.Path(os.environ['RUNNER_TEMP']) / 'operator-gitops-owner.json'
+          try:
+              fd = os.open(owner, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          except FileNotFoundError:
+              raise SystemExit(0)
+          def signature(value):
+              return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                  value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+          try:
+              before = os.fstat(fd)
+              if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 2048:
+                  raise SystemExit('invalid operator cleanup file')
+              raw = os.read(fd, before.st_size + 1)
+              after = os.fstat(fd)
+              if len(raw) != before.st_size or signature(before) != signature(after):
+                  raise SystemExit('changing operator cleanup file')
+          finally:
+              os.close(fd)
+          def unique_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError('duplicate operator cleanup field')
+                  result[key] = value
+              return result
+          identity = json.loads(raw, object_pairs_hook=unique_pairs)
+          spec = importlib.util.spec_from_file_location('operator_proof', 'tools/operator_gitops_proof/proof.py')
+          proof = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(proof)
+          proof.validate_creation_authorization(identity, os.environ['GITHUB_SHA'],
+              os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
+          name = identity['cluster']
+          with tempfile.TemporaryDirectory(prefix='operator-gitops-cleanup-', dir=os.environ['RUNNER_TEMP']) as scratch:
+              config = str(pathlib.Path(scratch) / 'kubeconfig')
+              child = {'PATH': os.environ['PATH'], 'HOME': scratch, 'TMPDIR': scratch, 'KUBECONFIG': config}
+              subprocess.run(['kind', 'delete', 'cluster', '--name', name, '--kubeconfig', config],
+                  env=child, check=True, timeout=180)
+              clusters = subprocess.run(['kind', 'get', 'clusters'], env=child, check=True,
+                  capture_output=True, text=True, timeout=30).stdout.splitlines()
+              if name in clusters:
+                  raise SystemExit('owned operator cluster remains')
+          if signature(owner.stat(follow_symlinks=False)) != signature(after):
+              raise SystemExit('operator cleanup authorization changed')
+          owner.unlink()
+          PY

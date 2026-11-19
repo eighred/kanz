@@ -18,11 +18,15 @@ single `primary` environment at `https://kubernetes.default.svc`.
 | `messaging-kafka` | Kafka manifests | `kanz-messaging` |
 | `workloads` | Workload manifests, including rendered tenant OMS manifests | `kanz-services` |
 | `security` | Security manifests | `kanz-services` |
+| `operator` | Operator ServiceAccounts and egress policies | `kanz-operator` |
 | `observability` | Prometheus, rule ConfigMap, Grafana and node-exporter manifests | `kanz-observability` |
 
 Each generated Application follows `main` and requests automated prune and
 self-heal. A removal in Git can delete an owned resource in the cluster.
-The ApplicationSet excludes specific files by name. The architecture guards
+The ApplicationSet excludes specific files by name. It reconciles operator
+identities while excluding the manual `halt-job.yaml` invocation from sync,
+self-heal and pruning. [Operator instructions](../operator/README.md)
+The architecture guards
 check component coverage, AppProject destinations and the provisioning hook.
 [Sync coverage](../../test/arch/gitops_sync_completeness_test.go) · [Provisioning Jobs](../../test/arch/gitops_provisioning_job_test.go)
 
@@ -46,8 +50,8 @@ The workload installer renders the Tokyo overlay, verifies the annotated
 release and retained ECR digests, and uses the `kanz-bootstrap` field manager.
 Argo Rollouts manages canary progression for the risk-engine Rollout. The
 Terraform foundation, data-plane bootstrap, Vault material and break-glass
-halt invocation have separate owners. The operator identities are tracked in
-[#1342](https://github.com/eighred/kanz/issues/1342).
+halt invocation have separate owners. The primary ApplicationSet manages its
+operator identities in its own destination. [Operator scope](https://github.com/eighred/kanz/issues/1342)
 [Tokyo workload runbook](../overlays/testnet_tokyo/README.md) · [Data-plane runbook](../overlays/testnet_tokyo/data/README.md)
 
 The primary ApplicationSet's raw workload base and the Tokyo overlay declare

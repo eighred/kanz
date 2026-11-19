@@ -49,3 +49,9 @@ jobs:
           name: grafana-kubernetes
           path: ${{ runner.temp }}/grafana-kubernetes.json
           if-no-files-found: error
+
+  operator-identities:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/operator-gitops-verification.yml

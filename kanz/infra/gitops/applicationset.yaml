@@ -82,6 +82,8 @@ spec:
                 # exactly what deploys. See internal/tenantgen's package doc.
                 - { component: workloads, path: kanz/infra/deploy, namespace: kanz-services }
                 - { component: security, path: kanz/infra/security, namespace: kanz-services }
+                # Identities reconcile continuously; the human halt invocation is excluded below.
+                - { component: operator, path: kanz/infra/operator, namespace: kanz-operator }
                 # OBSERVABILITY IS DELIVERED, NOT JUST WRITTEN (#625). Prometheus,
                 # its rules ConfigMap, Grafana and node-exporter were reachable by
                 # no applying path in this repository: an alert rule here was
@@ -141,7 +143,7 @@ spec:
           # TestEveryDevOnlyManifestIsExcludedFromGitOpsSync now derives this
           # requirement from the label itself, for every ApplicationSet and every
           # path, so a third dev-only manifest cannot be added without appearing here.
-          exclude: "{tenancy.yaml,smoke-test.sh,bootstrap-job-dev-plaintext.yaml,postgres-dev.yaml,rig-dev-secrets.yaml}"
+          exclude: "{halt-job.yaml,tenancy.yaml,smoke-test.sh,bootstrap-job-dev-plaintext.yaml,postgres-dev.yaml,rig-dev-secrets.yaml}"
       destination:
         server: "{{.server}}"
         namespace: "{{.namespace}}"

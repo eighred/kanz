@@ -1,42 +1,14 @@
 ---
-# THE OTHER THREE OPERATOR CLIs (SEC-M3c/d). Sibling to halt-job.yaml, not an
-# extension of it, on purpose: halt-job.yaml is kanz-halt's manifest end to
-# end (Namespace + ServiceAccount + NetworkPolicy + Job), and kanz-halt is the
-# one tool of the four actually invoked as a Job. kanz-mandate, kanz-altevent
-# and kanz-household are run from an operator's shell — `go run ./cmd/...`
-# against the cluster, exactly how they were exercised on the rig — so a Job
-# manifest for them would be speculative infrastructure nobody runs. What
-# they DO need, the same as kanz-halt, is a real identity: a ServiceAccount
-# to be issued a distinct SPIFFE SVID, and a NetworkPolicy so a compromised
-# operator credential can still reach only the spine.
+# Operator CLI identities, continuously reconciled by the GitOps operator component.
+# halt-identity.yaml owns the namespace and halt identity; halt-job.yaml remains
+# a separate human invocation. These ServiceAccounts and NetworkPolicies provision
+# identities and egress only. They do not launch any operator command.
 #
-# The kanz-operator Namespace is declared exactly once, in halt-job.yaml —
-# not repeated here. It already carries the `kanz.internal/spiffe: enabled`
-# label that opts every ServiceAccount in this namespace into SPIRE issuance
-# (infra/security/spire/registration.yaml's ClusterSPIFFEID). That CR is a
-# NAMESPACE-WIDE TEMPLATE keyed on (namespace, ServiceAccountName) — there is
-# no per-ServiceAccount registration entry to add anywhere; SPIRE mints
-# spiffe://kanz.internal/ns/kanz-operator/sa/{name} for any ServiceAccount
-# that exists in this already-labeled namespace. Declaring the ServiceAccount
-# below is therefore the entire registration step for each of these three
-# tools. The current ClusterSPIFFEID template and this manifest are the
-# evidence for that registration mechanism.
-#
-# tenancy.yaml's __system__ account already admits all three SVIDs below with
-# a restrictive `permissions` block scoped to exactly the one subject space
-# each tool exists to publish. Until this file existed, none of the three had
-# a ServiceAccount of its own, so none of them could actually be issued that
-# SVID — a pod (or a `go run` process using the node's SPIRE agent socket)
-# with no ServiceAccount of its own falls back to whatever identity its
-# service account defaults to, which on this rig has been kanz-halt's. That
-# SVID's permissions are the halt subject ALONE, so deploying the tenancy.yaml
-# split without this file would have left these three tools authenticating
-# successfully and then being denied every publish they exist to make. This
-# file closes that gap.
-#
-# test/arch/nats_identity_test.go's TestOperatorCLIsHaveServiceAccounts fails
-# the build if tenancy.yaml ever again names an operator SVID with no
-# matching ServiceAccount here (or in halt-job.yaml).
+# The namespace's kanz.internal/spiffe label selects the namespace-wide SPIRE
+# ClusterSPIFFEID template in infra/security/spire/registration.yaml. Each
+# ServiceAccount below therefore names a distinct SVID, matched to its own
+# tenancy.yaml __system__ permission block. TestOperatorCLIsHaveServiceAccounts
+# checks those source bindings; live SVID issuance remains operational evidence.
 
 # kanz-mandate arms the compliance gate (COMP-01f): it publishes a
 # ConfigChanged FACT per (tenant, portfolio) on
@@ -53,7 +25,7 @@ metadata:
     app.kubernetes.io/part-of: kanz
 ---
 # kanz-mandate reaches the broker and nothing else — same posture as
-# kanz-halt-egress in halt-job.yaml, egress restricted to the NATS spine plus
+# kanz-halt-egress in halt-identity.yaml, egress restricted to the NATS spine plus
 # the DNS needed to resolve it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -98,7 +70,7 @@ metadata:
     app.kubernetes.io/part-of: kanz
 ---
 # kanz-altevent reaches the broker and nothing else — same posture as
-# kanz-halt-egress in halt-job.yaml.
+# kanz-halt-egress in halt-identity.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -141,7 +113,7 @@ metadata:
     app.kubernetes.io/part-of: kanz
 ---
 # kanz-household reaches the broker and nothing else — same posture as
-# kanz-halt-egress in halt-job.yaml.
+# kanz-halt-egress in halt-identity.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -237,7 +209,7 @@ metadata:
     app.kubernetes.io/part-of: kanz
 ---
 # kanz-redrive reaches the broker and nothing else — same posture as
-# kanz-halt-egress in halt-job.yaml.
+# kanz-halt-egress in halt-identity.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
