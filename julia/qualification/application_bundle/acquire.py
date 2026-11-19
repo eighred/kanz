@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 import compiler_owners
+import gcc_advisories
 import pcre2
 import linked_advisory
 import pcre2_advisory
@@ -68,8 +69,9 @@ def acquire(directory):
     linked_advisory.collect(directory / 'linked')
     parents = directory / 'compilers'
     parents.mkdir()
-    for name, (url, size, sha) in compiler_owners.INPUTS.items():
+    for name, (url, size, sha) in (compiler_owners.INPUTS | gcc_advisories.SPECS).items():
         fetch(url, parents / name, size, 'sha256', sha)
+    gcc_advisories.collect_headers(parents)
 
 
 if __name__ == '__main__':

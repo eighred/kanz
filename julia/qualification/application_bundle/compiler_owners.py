@@ -4,6 +4,7 @@ import hashlib
 import tarfile
 import tomllib
 
+import gcc_advisories
 import gcc_runtime
 
 
@@ -42,7 +43,7 @@ def require_member(archive, path, expected):
         raise ValueError('LLVM_full parent member missing or ambiguous')
 
 
-def gcc_pending(wrapper, gcc):
+def gcc_pending(wrapper, gcc, mapped):
     rebuilt = wrapper.get('localRebuild')
     valid_pair = ((GCC_RUNTIME, None), (gcc_runtime.REPLACEMENT, gcc_runtime.rebuild_record()))
     if (wrapper['publisherArchiveSHA256'] != GCC_BUNDLE
@@ -52,8 +53,9 @@ def gcc_pending(wrapper, gcc):
     # The prebuilt Julia and LLVM consumers may have instantiated these headers.
     headers = ['CVE-2026-102010', 'CVE-2026-114690', 'CVE-2026-114691', 'CVE-2026-115455', 'CVE-2026-125709']
     if rebuilt:
-        # The GCC PR covers from_chars. The CNA does not identify its GCC 15 upstream change.
-        return {'libstdc++ header consumers': headers, 'libstdc++ advisory mapping': ['CVE-2026-115456']}
+        if mapped != {'CVE-2026-115456': gcc_advisories.FROM_CHARS, 'CVE-2026-125709': gcc_advisories.FILEBUF}:
+            raise ValueError('backport mappings missing for rebuilt GCC')
+        return {'libstdc++ header consumers': headers}
     return {'libstdc++': sorted([*headers, 'CVE-2026-95619', 'CVE-2026-115456'])}
 
 
@@ -84,7 +86,8 @@ def review(directory, receipt):
     wrapper = receipt['wrapperMetadata']['CompilerSupportLibraries_jll']
     gcc = receipt['native']['lib/julia/libstdc++.so.6.0.34']['sha256']
     rebuilt = wrapper.get('localRebuild')
-    gcc_review = gcc_pending(wrapper, gcc)
+    mappings = gcc_advisories.mappings(directory) if rebuilt else {}
+    gcc_review = gcc_pending(wrapper, gcc, mappings)
     return {'image': receipt['image'], 'config': receipt['config'], 'gccRuntime': gcc, 'llvmRuntime': llvm['sha256'],
             'gccShard': GCC_SHARD, 'llvmFork': LLVM_FORK,
             'gcc15ReviewHead': 'a311d911f75385702f25eb0df5f54d46e39ba8da',
@@ -101,7 +104,7 @@ def review(directory, receipt):
                 'f46b50adcf752de0e1e0e24e17f42a5075770f48',
             ],
             'llvmUpstreamFix': '7bb9626d5ab901e5c1a8e9acbbb1684c982401b4',
-            'localRebuild': rebuilt, 'pendingNativeReview': {**gcc_review, 'libLLVM': ['CVE-2026-13573', 'CVE-2026-13574']}}
+            'localRebuild': rebuilt, 'packageOwnerMappings': mappings, 'pendingNativeReview': {**gcc_review, 'libLLVM': ['CVE-2026-13573', 'CVE-2026-13574']}}
 
 
 def require_reviewed_compilers(report):

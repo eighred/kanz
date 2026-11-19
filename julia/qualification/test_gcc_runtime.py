@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'application_bundle'))
+import gcc_advisories
 import gcc_runtime
 import compiler_owners
 
@@ -54,13 +55,27 @@ class GCCRuntimeTests(unittest.TestCase):
     def test_only_reviewed_native_replacement_can_narrow_compiler_findings(self):
         wrapper = {'publisherArchiveSHA256': compiler_owners.GCC_BUNDLE,
                    'publisherFiles': {'lib/' + gcc_runtime.LIB: gcc_runtime.ORIGINAL}}
-        legacy = compiler_owners.gcc_pending(wrapper, gcc_runtime.ORIGINAL)
+        legacy = compiler_owners.gcc_pending(wrapper, gcc_runtime.ORIGINAL, {})
         self.assertEqual(len(legacy['libstdc++']), 7)
         rebuilt = {**wrapper, 'localRebuild': gcc_runtime.rebuild_record()}
-        pending = compiler_owners.gcc_pending(rebuilt, gcc_runtime.REPLACEMENT)
+        mapped = {'CVE-2026-115456': gcc_advisories.FROM_CHARS, 'CVE-2026-125709': gcc_advisories.FILEBUF}
+        with self.assertRaisesRegex(ValueError, 'mappings missing'):
+            compiler_owners.gcc_pending(rebuilt, gcc_runtime.REPLACEMENT, {})
+        pending = compiler_owners.gcc_pending(rebuilt, gcc_runtime.REPLACEMENT, mapped)
         self.assertEqual(len(pending['libstdc++ header consumers']), 5)
-        self.assertEqual(pending['libstdc++ advisory mapping'], ['CVE-2026-115456'])
+        self.assertEqual(set(pending), {'libstdc++ header consumers'})
         for row, elf in [(wrapper, gcc_runtime.REPLACEMENT), (rebuilt, gcc_runtime.ORIGINAL),
                          ({**wrapper, 'localRebuild': {}}, gcc_runtime.REPLACEMENT)]:
             with self.assertRaisesRegex(ValueError, 'runtime differs'):
-                compiler_owners.gcc_pending(row, elf)
+                compiler_owners.gcc_pending(row, elf, mapped)
+
+    def test_incomplete_packager_patch_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, (_, length, _) in (gcc_advisories.SPECS | gcc_advisories.HEADERS).items():
+                (root / name).write_bytes(bytes(length))
+            with self.assertRaisesRegex(ValueError, 'packaging record differs'):
+                gcc_advisories.mappings(root)
+            (root / 'centos-gcc.spec').write_bytes(b'')
+            with self.assertRaisesRegex(ValueError, 'record size differs'):
+                gcc_advisories.mappings(root)
