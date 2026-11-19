@@ -129,6 +129,42 @@ async def _watch_svid(ctx, cert_dir: str, stopping: asyncio.Event) -> None:
             fingerprint = updated
 
 
+async def _run_streaming(router, observability, stopping, nats_url):
+    cert_dir = _env("KANZ_INFERENCE_NATS_CERT_DIR")
+    tls_ctx = mtls.client_context(cert_dir) if cert_dir else None
+    if tls_ctx is None:
+        logger.warning("streaming bus uses plaintext without a SPIFFE identity")
+
+    def bound():
+        if not stopping.is_set():
+            observability.mark_ready()
+
+    async with NATSClient(
+        url=nats_url,
+        name=_env("KANZ_INFERENCE_SOURCE", "inference"),
+        tls=tls_ctx,
+        on_subscribed=bound,
+    ) as client:
+        rotation = None
+        try:
+            if tls_ctx is not None:
+                rotation = asyncio.create_task(_watch_svid(tls_ctx, cert_dir, stopping), name="svid-rotation")
+            producer = Producer(
+                client,
+                ProducerConfig(
+                    source=_env("KANZ_INFERENCE_SOURCE", "inference"),
+                    producer_version=_env("KANZ_INFERENCE_VERSION", "dev"),
+                ),
+            )
+            worker = StreamingWorker(Consumer(client), router, Publisher(producer))
+            await worker.run(_env("KANZ_INFERENCE_CONSUMER_GROUP", DEFAULT_GROUP))
+        finally:
+            observability.mark_draining()
+            if rotation is not None:
+                rotation.cancel()
+                await asyncio.gather(rotation, return_exceptions=True)
+
+
 async def _run() -> int:
     _configure_logging(_env("KANZ_INFERENCE_LOG_LEVEL", "INFO").upper())
 
@@ -188,68 +224,7 @@ async def _run() -> int:
     # carrying prometheus.io/port for a port nothing listens on is an
     # unreachable target, and an absent target appears on no dashboard.
     observability = ObservabilityServer(_env("KANZ_INFERENCE_METRICS_BIND", DEFAULT_METRICS_BIND))
-    observability.start()
-
     stopping = asyncio.Event()
-    tasks: list[asyncio.Task] = []
-
-    nats_url = _env("KANZ_INFERENCE_NATS_URL")
-    client: NATSClient | None = None
-    if nats_url:
-        # SEC-M3 (#241): present this pod's SVID to the broker. The production
-        # broker sets `verify: true` + `verify_and_map`, so WITHOUT this the
-        # streaming path cannot connect at all — and it is the wired half:
-        # risk-engine really does publish inference.feature.computed.
-        #
-        # A missing cert dir is FATAL, not a downgrade to plaintext. A client that
-        # silently falls back reports itself healthy and then either fails every
-        # handshake, or — against a broker still accepting plaintext — connects
-        # under NO identity, which is the state this change exists to remove.
-        tls_ctx = None
-        cert_dir = _env("KANZ_INFERENCE_NATS_CERT_DIR")
-        if cert_dir:
-            tls_ctx = mtls.client_context(cert_dir)
-            logger.info("bus transport: mTLS, SVID from %s", cert_dir)
-        else:
-            logger.warning(
-                "KANZ_INFERENCE_NATS_CERT_DIR is unset - connecting to the bus in PLAINTEXT, "
-                "with no SPIFFE identity. A production broker (verify: true) refuses this "
-                "connection; a broker that accepts it maps this client to no tenancy account."
-            )
-        client = NATSClient(
-            url=nats_url,
-            name=_env("KANZ_INFERENCE_SOURCE", "inference"),
-            tls=tls_ctx,
-        )
-        await client.connect()
-        if tls_ctx is not None:
-            tasks.append(
-                asyncio.create_task(
-                    _watch_svid(tls_ctx, cert_dir, stopping), name="svid-rotation"
-                )
-            )
-        producer = Producer(
-            client,
-            ProducerConfig(
-                source=_env("KANZ_INFERENCE_SOURCE", "inference"),
-                producer_version=_env("KANZ_INFERENCE_VERSION", "dev"),
-            ),
-        )
-        worker = StreamingWorker(Consumer(client), router, Publisher(producer))
-        group = _env("KANZ_INFERENCE_CONSUMER_GROUP", DEFAULT_GROUP)
-        tasks.append(asyncio.create_task(worker.run(group), name="streaming-worker"))
-        logger.info("streaming worker consuming inference.feature.computed (group=%s)", group)
-    else:
-        # An explicit, loud gap — not a silent one. The gRPC path still serves, but
-        # nothing will consume the FeatureVectors the Go engine publishes.
-        logger.warning(
-            "KANZ_INFERENCE_NATS_URL is unset — the STREAMING path is off. "
-            "FeatureVector FACTs on the bus will not be scored."
-        )
-
-    # BOTH paths are wired; only now does this pod claim to be ready.
-    observability.mark_ready()
-
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -257,22 +232,37 @@ async def _run() -> int:
         except NotImplementedError:  # Windows
             pass
 
-    await stopping.wait()
-    logger.info("shutting down")
-    # 503 ON /readyz FIRST, AND THIS IS WHY THE PROBES ARE NO LONGER tcpSocket.
-    # The listening socket stays open until the process exits, so a TCP readiness
-    # check passes for the whole termination grace period and the endpoints
-    # controller keeps sending this pod work it is about to drop. Failing
-    # readiness before anything is torn down is what removes it from the Service
-    # while it can still finish what it has.
-    observability.mark_draining()
-    for t in tasks:
-        t.cancel()
-    await server.stop(grace=10)
-    if client is not None:
-        await client.close()
-    observability.stop()
-    return 0
+    tasks = []
+    try:
+        observability.start()
+        nats_url = _env("KANZ_INFERENCE_NATS_URL")
+        if not nats_url:
+            logger.warning("streaming is disabled; serving interactive gRPC only")
+            observability.mark_ready()
+            await stopping.wait()
+            return 0
+
+        worker = asyncio.create_task(_run_streaming(router, observability, stopping, nats_url), name="streaming-worker")
+        shutdown = asyncio.create_task(stopping.wait(), name="shutdown-request")
+        tasks = [worker, shutdown]
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if worker in done:
+            # A subscription runs until shutdown. Neither a return nor a failed
+            # task can leave this configured pod serving half its contract.
+            error = None if worker.cancelled() else worker.exception()
+            logger.error("streaming worker stopped (%s)", type(error).__name__ if error else "no active consumer")
+            return 1
+        return 0
+    finally:
+        observability.mark_draining()
+        stopping.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await server.stop(grace=10)
+        finally:
+            observability.stop()
 
 
 def main() -> int:

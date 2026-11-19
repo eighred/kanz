@@ -77,8 +77,10 @@ in `kanz_inference/__main__.py`:
 | `KANZ_INFERENCE_NATS_URL`, `KANZ_INFERENCE_NATS_CERT_DIR` | Optional streaming connection and workload mTLS material. |
 | `KANZ_INFERENCE_MAX_IN_FLIGHT` | Bounded interactive admission, default 64. |
 
-The insecure gRPC option is for explicitly isolated fixtures. Missing NATS
-configuration disables streaming; it does not establish broker integration.
+The insecure gRPC option is for explicitly isolated fixtures. With NATS configured,
+`/readyz` returns 200 after JetStream binds the feature consumer. If the worker
+terminates, the service withdraws readiness and exits with status 1 so the
+supervisor can restart it. With the NATS URL unset, readiness covers gRPC alone.
 Keep model approval and credentials out of source and agent context. The Docker
 build uses the repository root: `docker build -f python/Dockerfile .`.
 It generates its own SDK and installs the hash-locked runtime.
