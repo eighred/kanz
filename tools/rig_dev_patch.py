@@ -137,22 +137,15 @@ def _rig_image(image, path, container_name):
 
 # Env vars that point a workload at production-only infrastructure the rig does
 # not run. Removed so the workload takes its in-process / plaintext fallback.
-_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS", "API_GATEWAY_OIDC_ISSUER"})
+# The five deployed rig services contain no operator. Its optional control
+# routes require an mTLS upstream and must only be advertised by a deployment
+# which supplies that upstream.
+_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS", "API_GATEWAY_OPERATOR_ADDR", "API_GATEWAY_OPERATOR_ROLE"})
 
 # Env vars the rig must ADD, keyed by manifest filename. The production manifest
 # has no reason to carry these — they exist only because the rig substitutes a
 # dev mechanism for one it cannot reach.
 _ADD_ENV = {
-    "api-gateway-deploy.yaml": [
-        # The HS256 dev validator's key. api-gateway picks OIDC over HS256 when
-        # API_GATEWAY_OIDC_ISSUER is set (cmd/api_gateway/main.go), which is why
-        # that var is dropped above — the rig cannot reach login.eighred.com, so
-        # with OIDC selected the gateway can authenticate nobody and its order
-        # routes are untestable here. The key is read from the api-gateway-secrets
-        # mount the manifest already declares, so this adds no new volume.
-        {"name": "API_GATEWAY_JWT_SECRET_FILE",
-         "value": "/run/secrets/gateway/jwt-secret"},
-    ],
     "operator-deploy.yaml": [
         # PROSPECTIVE — THIS ENTRY IS NOT REACHED BY THE DOCUMENTED RIG FLOW TODAY.
         # tools/rig-apply.sh's workload list is oms, tv-sync, api-gateway,

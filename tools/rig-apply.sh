@@ -38,7 +38,7 @@ SPIRE_DIR="kanz/infra/security/spire"
 CRD_DIR="$SPIRE_DIR/crds"
 DEPLOY_DIR="kanz/infra/deploy"
 
-usage() { echo "usage: $0 --spire|--deploy [--cluster NAME]" >&2; exit 2; }
+usage() { echo "usage: $0 --spire|--deploy|--check-deploy [--cluster NAME] [--keep-spiffe], or --render-workload MANIFEST [--keep-spiffe]" >&2; exit 2; }
 
 # Fail closed if this isn't being run from the repo root: every path below is
 # repo-relative, and a relative-path kubectl apply that silently no-ops (or
@@ -91,7 +91,41 @@ apply_spire() {
   echo "==> SPIRE applied and rolled out"
 }
 
-apply_deploy() {
+# The rig runs a curated subset — the trading loop — not the whole 23-service
+# estate. This is NOT a glob over *-deploy.yaml, deliberately:
+#   * The in-repo sim venue lives INSIDE the OMS (NewSimVenue), so venue-binance
+#     and venue-okx are not part of the loop and must never run here — they mount
+#     Vault CSI volumes for REAL exchange keys that have no committed dev Secret
+#     (and rig-dev-secrets.yaml is guarded to forbid one).
+#   * risk-engine is an Argo Rollout; a Rollout does nothing without the Argo
+#     Rollouts controller, which the rig does not run.
+#   * The heavy ML / analytics services are off the loop.
+# This list is the SAME set that test/arch/rig_dev_posture_test.go pins as
+# rigWorkloads; that guard asserts this script and it agree, so the two cannot
+# drift. Infra deps (postgres, redis above; NATS already on the spine) complete
+# the loop.
+RIG_WORKLOADS=(
+  oms-deploy.yaml
+  tv-sync-deploy.yaml
+  api-gateway-deploy.yaml
+  webhook-ingest-deploy.yaml
+  compliance-deploy.yaml
+)
+
+# Both offline inspection and deployment use this exact workload renderer.
+render_workload() {
+  local requested="$1" name
+  for name in "${RIG_WORKLOADS[@]}"; do
+    if [ "$requested" = "$name" ]; then
+      python3 tools/rig_dev_patch.py "${bus_mode[@]}" "$DEPLOY_DIR/$name"
+      return
+    fi
+  done
+  echo "FATAL: unknown rig workload $requested" >&2
+  return 2
+}
+
+check_deploy() {
   require_repo_root
   # A regex that edits YAML volume blocks by hand would silently mangle a
   # manifest, and a mangled manifest applied to the rig is the failure this
@@ -106,10 +140,25 @@ apply_deploy() {
     echo "toolchain) and re-run." >&2
     exit 1
   }
-  echo "==> applying dev deploy manifests from $DEPLOY_DIR to context $KUBECTL_CONTEXT"
+  local ready
+  ready="$(kubectl --context "$KUBECTL_CONTEXT" -n kanz-services get endpointslices \
+    -l kubernetes.io/service-name=identity -o 'jsonpath={range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{end}')"
+  if [ -z "$ready" ]; then
+    echo "FATAL: the gateway requires a ready identity Service in kanz-services for OIDC JWKS and revocations" >&2
+    return 1
+  fi
+  if [ "${#bus_mode[@]}" -gt 0 ]; then
+    kubectl --context "$KUBECTL_CONTEXT" -n spire-system rollout status daemonset/spire-agent --timeout=60s
+    kubectl --context "$KUBECTL_CONTEXT" get clusterspiffeid/kanz-workloads -o name
+  fi
   # Refuse retained Redis, orphaned claims and an unreadable API before even
   # updating dev credentials or NetworkPolicy on an existing installation.
   python3 tools/valkey_migration/rig_install.py preflight "$KUBECTL_CONTEXT"
+}
+
+apply_deploy() {
+  check_deploy
+  echo "==> applying dev deploy manifests from $DEPLOY_DIR to context $KUBECTL_CONTEXT"
 
   # oms-db lives in postgres-dev.yaml; the other four dev Secrets live here.
   # Applied before the workloads that mount them.
@@ -127,33 +176,13 @@ apply_deploy() {
   kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/valkey-clients.yaml
   python3 tools/valkey_migration/rig_install.py install "$KUBECTL_CONTEXT"
 
-  # The rig runs a curated subset — the trading loop — not the whole 23-service
-  # estate. This is NOT a glob over *-deploy.yaml, deliberately:
-  #   * The in-repo sim venue lives INSIDE the OMS (NewSimVenue), so venue-binance
-  #     and venue-okx are not part of the loop and must never run here — they mount
-  #     Vault CSI volumes for REAL exchange keys that have no committed dev Secret
-  #     (and rig-dev-secrets.yaml is guarded to forbid one).
-  #   * risk-engine is an Argo Rollout; a Rollout does nothing without the Argo
-  #     Rollouts controller, which the rig does not run.
-  #   * The heavy ML / analytics services are off the loop.
-  # This list is the SAME set that test/arch/rig_dev_posture_test.go pins as
-  # rigWorkloads; that guard asserts this script and it agree, so the two cannot
-  # drift. Infra deps (postgres, redis above; NATS already on the spine) complete
-  # the loop.
-  local RIG_WORKLOADS=(
-    oms-deploy.yaml
-    tv-sync-deploy.yaml
-    api-gateway-deploy.yaml
-    webhook-ingest-deploy.yaml
-    compliance-deploy.yaml
-  )
   local applied=0
   for name in "${RIG_WORKLOADS[@]}"; do
     local f="$DEPLOY_DIR/$name"
     [ -e "$f" ] || { echo "FATAL: rig workload $f is missing; the loop cannot come up without it" >&2; exit 1; }
     # Swap the Vault CSI volumes for the dev Secret; leave the SPIFFE CSI volumes
     # alone, because after --spire they are real.
-    python3 tools/rig_dev_patch.py "$f" | kubectl --context "$KUBECTL_CONTEXT" apply -f -
+    render_workload "$name" | kubectl --context "$KUBECTL_CONTEXT" apply -f -
     applied=$((applied+1))
   done
   [ "$applied" -eq "${#RIG_WORKLOADS[@]}" ] || { echo "FATAL: applied $applied of ${#RIG_WORKLOADS[@]} rig workloads" >&2; exit 1; }
@@ -161,8 +190,11 @@ apply_deploy() {
 }
 
 [ $# -gt 0 ] || usage
+render_name=""
+bus_mode=()
 want_spire=""
 want_deploy=""
+want_check=""
 did=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -172,6 +204,9 @@ while [ $# -gt 0 ]; do
     # this point in the loop, so `--spire --cluster NAME` (flag after --spire)
     # would silently apply against the wrong (default) cluster. All flags are
     # parsed first; the requested stage(s) run once parsing is done.
+    --render-workload) shift; render_name="${1:-}"; [ -n "$render_name" ] || usage; did=1 ;;
+    --keep-spiffe) bus_mode=(--keep-spiffe) ;;
+    --check-deploy) want_check=1; did=1 ;;
     --spire)   want_spire=1; did=1 ;;
     --deploy)  want_deploy=1; did=1 ;;
     --cluster) shift; CLUSTER="${1:-}"; [ -n "$CLUSTER" ] || usage ;;
@@ -180,6 +215,14 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$did" ] || usage
+if [ -n "$render_name" ]; then
+  [ -z "$want_spire$want_deploy$want_check" ] || usage
+  require_repo_root
+  render_workload "$render_name"
+  exit
+fi
+[ "${#bus_mode[@]}" -eq 0 ] || [ -n "$want_deploy$want_check" ] || usage
+[ -z "$want_check" ] || [ -z "$want_deploy$want_spire" ] || usage
 
 # kind contexts are named kind-<cluster>. Every kubectl invocation in this
 # script is pinned to this context so `--cluster NAME` actually selects which
@@ -189,4 +232,5 @@ done
 KUBECTL_CONTEXT="kind-$CLUSTER"
 
 [ -z "$want_spire" ]  || apply_spire
+[ -z "$want_check" ]  || check_deploy
 [ -z "$want_deploy" ] || apply_deploy
