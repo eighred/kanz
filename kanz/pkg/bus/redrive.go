@@ -83,8 +83,9 @@ const (
 	//     against a real broker: the redriven copy lands on the stream.
 	//  2. The CONSUMER's dedup window, which redriveMsgID CANNOT touch, because
 	//     it is keyed on the envelope's idempotency_key rather than on any
-	//     header. Parking calls dedup.Commit(env.IdempotencyKey), holding the key
-	//     for defaultDedupTTL. A redrive inside that window is refused by Claim,
+	//     header. Parking commits the tenant/subscription/group-scoped dispatch
+	//     key for defaultDedupTTL. A redrive to that same dispatch inside the
+	//     window is refused by Claim,
 	//     skipped, and ACKED: the handler never runs, the drain reports
 	//     "redriven 1", and its durable cursor has moved past the parked copy.
 	//     That is the precise shape AGENTS.md forbids — nothing configured and

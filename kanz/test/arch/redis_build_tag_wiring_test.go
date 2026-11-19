@@ -11,36 +11,16 @@ import (
 
 // A SERVICE'S BUILD TAG AND ITS ESTATE WIRING MUST AGREE (#111).
 //
-// There are two shared-state seams behind `-tags redis`, and each service that
-// has one ships a PAIR: `//go:build !redis` (per-instance, in-process) and
-// `//go:build redis` (cross-pod, Redis-backed). Which one is in the binary is
-// decided by the Dockerfile; whether it is USED is decided by a `*_REDIS_URL` in
-// the estate. Those are three separate places, and nothing connected them.
+// Source capability, selected image and endpoint configuration are separate
+// contracts. Existing webhook/gateway images always include their tagged
+// adapter. Risk explicitly offers a tagged shared-dedup target while its final
+// default target remains redis-free; the executable stage edges are checked
+// below. This source guard does not prove a running image or backend.
 //
-// So they drifted, silently, in the direction that looks fine:
-//
-//   - webhook-ingest is coherent — Dockerfile passes `-tags redis`, and
-//     webhook-ingest-deploy.yaml sets WEBHOOK_INGEST_REDIS_URL_FILE.
-//   - risk-engine is NOT. It runs `replicas: 3` plus a KEDA ScaledObject on
-//     PER-INSTANCE dedup, because its Dockerfile carries no tag and nothing sets
-//     RISK_ENGINE_REDIS_URL. The cross-pod deduper it needs is written, compiled
-//     by CI, and linked into no shipped binary.
-//
-// AND THE DRIFT WAS ACTIVELY MISLEADING, which is why this is a guard rather
-// than a comment. pkg/bus/dedup_redis.go asserted "The one production wiring of
-// this deduper is risk-engine (redis build tag, RISK_ENGINE_REDIS_URL set)" and
-// used that claim to BOUND a documented claim-inversion — a safety argument
-// resting on a wiring that did not exist. A reader sizing that risk would have
-// taken the reassurance at face value. Prose cannot keep that honest; this can.
-//
-// THE FAILURE MODES ARE ASYMMETRIC, so the two checks below are too:
-//
-//   - Tagged file, untagged Dockerfile: the capability is dead code that ships.
-//     Bad, but it degrades to the in-process path, which is a real (if weaker)
-//     implementation. Exemptible, with the issue that retires it.
-//   - REDIS_URL set on an untagged binary: the operator asked for cross-pod
-//     shared state and got per-instance, with only a log line saying so. There
-//     is no reading under which that is intended, so it is NOT exemptible.
+// A configured endpoint on a binary lacking the adapter must refuse startup.
+// Risk's runtime tests enforce that refusal; silently using a local window
+// would hide an operator's explicit choice. Default per-instance operation is
+// deliberate and remains supported without endpoint configuration.
 
 // redisTagExempt lists services that ship a `redis`-tagged file WITHOUT building
 // with the tag, each with the issue that retires the entry. Default-deny: a
@@ -48,11 +28,7 @@ import (
 //
 // A DEAD ENTRY IS A FAILURE, not tidy-up: an exemption that outlives its repair
 // is how the next person learns the rule is optional.
-var redisTagExempt = map[string]string{
-	"risk-engine": "#111 — the cross-pod dedup cutover. The tagged file exists and CI compiles it, " +
-		"but the Dockerfile does not pass -tags redis and nothing sets RISK_ENGINE_REDIS_URL, so " +
-		"`replicas: 3` runs on per-instance dedup. Remove this entry when the cutover lands.",
-}
+var redisTagExempt = map[string]string{}
 
 var (
 	reRedisBuildTag = regexp.MustCompile(`(?m)^//go:build\s+redis\s*$`)
@@ -176,11 +152,84 @@ func servicesBuildingWithRedisTag(t *testing.T, servicesDir string) map[string]b
 		if rerr != nil {
 			continue // not every service ships an image
 		}
+		if deployedServiceName(e.Name()) == "risk-engine" {
+			// Risk has two deliberate image targets; a tag in an unreachable stage
+			// or in the default image is not a qualified optional capability.
+			if !riskSharedDedupTargetsValid(b) {
+				t.Error("risk-engine must retain a redis-free default target and a shared-dedup target linked to its tagged build")
+			} else {
+				out["risk-engine"] = true
+			}
+			continue
+		}
 		if reTagsRedis.Match(stripDockerfileComments(b)) {
 			out[deployedServiceName(e.Name())] = true
 		}
 	}
 	return out
+}
+
+// riskSharedDedupTargetsValid follows the source -> build -> runtime edges of
+// the owning Dockerfile. Existing callers build the last target, so its identity
+// is part of the compatibility contract, not merely a named-stage inventory.
+func riskSharedDedupTargetsValid(b []byte) bool {
+	type stage struct {
+		from string
+		body string
+	}
+	stages := map[string]stage{}
+	current, last := "", ""
+	for _, line := range strings.Split(string(stripDockerfileComments(b)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 4 && fields[0] == "FROM" && fields[2] == "AS" {
+			current, last = fields[3], fields[3]
+			if _, duplicate := stages[current]; duplicate {
+				return false
+			}
+			stages[current] = stage{from: fields[1]}
+			continue
+		}
+		value := stages[current]
+		value.body += line + "\n"
+		stages[current] = value
+	}
+	shared, defaults := stages["shared-dedup"], stages["default"]
+	sharedBuild, defaultBuild := stages["build-shared"], stages["build"]
+	return last == "default" && shared.from == "runtime" && defaults.from == "runtime" &&
+		sharedBuild.from == "source" && defaultBuild.from == "source" &&
+		reTagsRedis.MatchString(sharedBuild.body) && !reTagsRedis.MatchString(defaultBuild.body) &&
+		strings.Contains(defaultBuild.body, "go build -trimpath") &&
+		strings.TrimSpace(shared.body) == "COPY --from=build-shared /out/risk-engine /risk-engine" &&
+		strings.TrimSpace(defaults.body) == "COPY --from=build /out/risk-engine /risk-engine"
+}
+
+func TestRiskSharedDedupImageTargetsHaveExecutableEdges(t *testing.T) {
+	path := filepath.Join(moduleRoot(t), "services", "risk_engine", "Dockerfile")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !riskSharedDedupTargetsValid(b) {
+		t.Fatal("owning Dockerfile does not satisfy the optional image contract")
+	}
+	mutants := map[string]string{
+		"missing-tag":                   strings.Replace(string(b), "go build -tags redis -trimpath", "go build -trimpath", 1),
+		"default-links-shared":          strings.Replace(string(b), "COPY --from=build /out/risk-engine", "COPY --from=build-shared /out/risk-engine", 1),
+		"shared-links-default":          strings.Replace(string(b), "COPY --from=build-shared /out/risk-engine", "COPY --from=build /out/risk-engine", 1),
+		"default-compiles-shared":       strings.Replace(string(b), "RUN CGO_ENABLED=0 go build -trimpath", "RUN CGO_ENABLED=0 go build -tags redis -trimpath", 1),
+		"shared-is-default":             string(b) + "\nFROM shared-dedup AS selected\n",
+		"shared-build-has-wrong-source": strings.Replace(string(b), "FROM source AS build-shared", "FROM build AS build-shared", 1),
+	}
+	for name, mutant := range mutants {
+		t.Run(name, func(t *testing.T) {
+			if mutant == string(b) {
+				t.Fatal("mutation did not change its intended edge")
+			}
+			if riskSharedDedupTargetsValid([]byte(mutant)) {
+				t.Fatal("broken executable image edge was accepted")
+			}
+		})
+	}
 }
 
 // stripDockerfileComments removes comment lines before the -tags scan.

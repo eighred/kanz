@@ -13,15 +13,16 @@ import (
 // no-op, not a panic. Register once on the OBS-01a Provider.Registry and share
 // the instance across the producers/consumers in a service.
 type BusMetrics struct {
-	publishTotal   *prometheus.CounterVec   // subject, result
-	publishLatency *prometheus.HistogramVec // subject
-	consumeTotal   *prometheus.CounterVec   // subject, group, result
-	consumeLatency *prometheus.HistogramVec // subject, group
-	consumeHalted  *prometheus.CounterVec   // subject, group
-	dlqParked      *prometheus.CounterVec   // subject, group, class
-	dlqRedrive     *prometheus.CounterVec   // subject, result
-	consumerLag    *prometheus.GaugeVec     // subject, group, partition
-	pending        *prometheus.GaugeVec     // subject, group
+	publishTotal    *prometheus.CounterVec   // subject, result
+	publishLatency  *prometheus.HistogramVec // subject
+	consumeTotal    *prometheus.CounterVec   // subject, group, result
+	consumeLatency  *prometheus.HistogramVec // subject, group
+	dedupSuppressed *prometheus.CounterVec   // subscription filter, group
+	consumeHalted   *prometheus.CounterVec   // subject, group
+	dlqParked       *prometheus.CounterVec   // subject, group, class
+	dlqRedrive      *prometheus.CounterVec   // subject, result
+	consumerLag     *prometheus.GaugeVec     // subject, group, partition
+	pending         *prometheus.GaugeVec     // subject, group
 
 	backlogPollFailures *prometheus.CounterVec // subject, group, transport
 	backlogPollSuccess  *prometheus.GaugeVec   // subject, group, transport — unix seconds
@@ -63,6 +64,10 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 			Name: "kanz_bus_consume_total",
 			Help: "messages dispatched to handlers, by subject, group and result (ok|error).",
 		}, []string{"subject", "group", "result"}),
+		dedupSuppressed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_bus_dedup_suppressed_total",
+			Help: "validated deliveries skipped because the logical dispatch was already claimed, by subscription filter and group.",
+		}, []string{"subject", "group"}),
 		consumeLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "kanz_bus_consume_duration_seconds",
 			Help:    "handler dispatch latency (including retries).",
@@ -188,7 +193,7 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 	}
 	reg.MustRegister(
 		m.publishTotal, m.publishLatency,
-		m.consumeTotal, m.consumeLatency, m.consumeHalted,
+		m.consumeTotal, m.consumeLatency, m.consumeHalted, m.dedupSuppressed,
 		m.dlqParked, m.dlqRedrive,
 		m.consumerLag, m.pending,
 		m.backlogPollFailures, m.backlogPollSuccess,
@@ -253,6 +258,12 @@ func (m *BusMetrics) observeConsume(subject, group string, d time.Duration, err 
 	}
 	m.consumeTotal.WithLabelValues(subject, group, result(err)).Inc()
 	m.consumeLatency.WithLabelValues(subject, group).Observe(d.Seconds())
+}
+
+func (m *BusMetrics) observeDedupSuppression(subject, group string) {
+	if m != nil {
+		m.dedupSuppressed.WithLabelValues(subject, group).Inc()
+	}
 }
 
 // observeConsumeHalt records that a subscription stopped rather than commit

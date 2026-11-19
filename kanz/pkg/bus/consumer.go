@@ -2,6 +2,9 @@ package bus
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -74,9 +77,9 @@ func WithDedupWindow(ttl time.Duration, max int) ConsumerOption {
 // WithDeduper overrides the default in-memory dedup window with a caller-
 // supplied Deduper — notably RedisDedup (DEBT-02a) for cross-pod dedup. Takes
 // precedence over WithDedupWindow's ttl/max. A nil deduper is ignored (the
-// in-memory default stands). The Consumer's pipeline is unchanged: it only ever
-// calls Seen/Record on the Deduper, so the in-memory vs distributed choice is a
-// pure wiring decision at the composition root.
+// in-memory default stands). Claim/Commit/Release receive an opaque, versioned
+// dispatch key, scoped to tenant, subscription subject and consumer group. A
+// shared backend must not let one required domain consumer suppress another.
 func WithDeduper(d Deduper) ConsumerOption {
 	return func(o *consumerOptions) {
 		if d != nil {
@@ -259,7 +262,9 @@ func (c *Consumer) subscribeDelivery(ctx context.Context, subject, group string,
 		// runs (that is the point: it closes the window where two concurrent
 		// deliveries both ran it), and every exit path below must either Commit it
 		// or Release it, or the event is stranded until the lease expires.
-		if !c.dedup.Claim(env.IdempotencyKey) {
+		key := dispatchDedupKey(subject, group, env.TenantId, env.IdempotencyKey)
+		if !c.dedup.Claim(key) {
+			c.metrics.observeDedupSuppression(subject, group)
 			return nil // duplicate within window — ack and skip (not a dispatch)
 		}
 		attemptHandler := h
@@ -304,7 +309,7 @@ func (c *Consumer) subscribeDelivery(ctx context.Context, subject, group string,
 		for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 			attemptsMade = attempt
 			if err := dispatchEvent(ctx, attemptHandler, env, payload); err == nil {
-				c.dedup.Commit(env.IdempotencyKey) // done — hold for the full window
+				c.dedup.Commit(key) // done — hold for the full window
 				endSpan(span, nil)
 				c.metrics.observeConsume(subject, group, time.Since(start), nil)
 				return nil
@@ -324,7 +329,7 @@ func (c *Consumer) subscribeDelivery(ctx context.Context, subject, group string,
 					// Shutting down mid-dispatch. Release, or this event sits claimed
 					// until its lease expires and the redelivery after restart is
 					// silently skipped.
-					c.dedup.Release(env.IdempotencyKey)
+					c.dedup.Release(key)
 					endSpan(span, err)
 					c.metrics.observeConsume(subject, group, time.Since(start), err)
 					return err // ctx canceled during backoff
@@ -335,29 +340,50 @@ func (c *Consumer) subscribeDelivery(ctx context.Context, subject, group string,
 		endSpan(span, lastErr)
 		c.metrics.observeConsume(subject, group, time.Since(start), lastErr)
 		if c.retainedRetries[subject] && !IsTerminal(lastErr) {
-			c.dedup.Release(env.IdempotencyKey)
+			c.dedup.Release(key)
 			return lastErr
 		}
 		if c.dlq != nil {
 			if err := c.publishDLQ(ctx, subject, group, msg, attemptsMade, lastErr); err != nil {
 				// The DLQ publish itself failed, so this event is neither handled nor
 				// parked. Release so the broker's redelivery gets a real second chance.
-				c.dedup.Release(env.IdempotencyKey)
+				c.dedup.Release(key)
 				return err
 			}
-			c.dedup.Commit(env.IdempotencyKey) // DLQ is terminal — dedup future duplicates
+			c.dedup.Commit(key) // DLQ is terminal — dedup future duplicates
 			return nil
 		}
 		// No DLQ: the dispatch failed and the event is going back to the broker.
 		// Release the claim, otherwise the redelivery this return is asking for would
 		// be deduped away by our own stranded claim.
-		c.dedup.Release(env.IdempotencyKey)
+		c.dedup.Release(key)
 		return lastErr
 	}
 	if ready != nil {
 		return c.subscriber.(ReadySubscriber).SubscribeReady(ctx, subject, group, handle, ready)
 	}
 	return c.subscriber.Subscribe(ctx, subject, group, handle)
+}
+
+// dispatchDedupKey identifies the same logical dispatch on every replica, while
+// keeping independently required subscriptions separate. Length prefixes make
+// arbitrary command keys and group names unambiguous; hashing bounds backend
+// key size without changing the envelope or broker's idempotency identity.
+func dispatchDedupKey(subject, group, tenant, key string) string {
+	if key == "" {
+		return "" // preserve the Deduper's explicit empty-key no-op contract
+	}
+	if tenant == "" {
+		tenant = SystemTenant // the validated pre-tenancy replay convention
+	}
+	h := sha256.New()
+	for _, field := range []string{tenant, subject, group, key} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write([]byte(field))
+	}
+	return "dispatch:v1:" + hex.EncodeToString(h.Sum(nil))
 }
 
 // routeToDLQ is the pre-dispatch failure path (unframe/validate). attempts

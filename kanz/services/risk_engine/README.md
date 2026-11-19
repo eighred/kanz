@@ -11,6 +11,31 @@ From `kanz/`, use `go build ./services/risk_engine/...` and
 cases require their named disposable dependencies; a skipped case proves none
 of those boundaries. Deployment manifests are under `kanz/infra/deploy/`.
 
+## Optional shared dedup
+
+The default image and an absent `RISK_ENGINE_REDIS_URL` retain per-instance bus
+dedup. The explicitly selected Docker target `shared-dedup` includes the existing
+`redis` adapter and accepts the same `RISK_ENGINE_REDIS_URL_FILE` secret contract.
+Declaring an endpoint on the default image, or supplying a malformed endpoint on
+the shared image, refuses startup before listeners or transport I/O. Runtime
+backend errors continue processing under handler idempotency; they never invent
+a duplicate hit. `kanz_risk_shared_dedup_configured` reports selection, while the
+closed `operation` labels on `kanz_risk_shared_dedup_errors_total` report failures.
+Selection is not backend readiness, and endpoint/error text is not logged.
+Endpoint URLs select address, authentication and database only; query/fragment
+options refuse startup. A hostname is mandatory; bracketed IPv6 is supported.
+An omitted port means 6379; an explicit port must be in 1..65535.
+Dial/read/write/pool waits each have a fixed one-second budget and SDK retries
+are disabled. These socket budgets do not establish an
+absolute operating-system wall-clock bound for a complete dispatch.
+
+The [unselected component](../../infra/overlays/risk_shared_dedup/README.md)
+defines the separate secret and network boundary plus the outstanding #1753
+dispatch-identity prerequisite. It supplies no qualified image digest or active
+cutover. Complete two-instance Valkey/NATS qualification and immutable artifact
+selection are required before deployment. #111 remains open until exact-main
+acceptance; #1541's actual retained-state migration is separately authorized.
+
 ## Optional Julia calibration comparison
 
 Go remains authoritative. The optional Julia worker receives one detached latest-cache
