@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+import compiler_owners
 import pcre2
 import linked_advisory
 import pcre2_advisory
@@ -65,6 +66,10 @@ def acquire(directory):
     pcre2_advisory.collect(pcre / 'publisher.json')
     pcre2_cve.collect(pcre / 'cve')
     linked_advisory.collect(directory / 'linked')
+    parents = directory / 'compilers'
+    parents.mkdir()
+    for name, (url, size, sha) in compiler_owners.INPUTS.items():
+        fetch(url, parents / name, size, 'sha256', sha)
 
 
 if __name__ == '__main__':

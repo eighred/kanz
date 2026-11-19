@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'application_bundle'))
+import compiler_owners
 import linked_advisory
 import linked_ancestry
 import pcre2_advisory
@@ -67,6 +68,30 @@ class ApplicationReadbackTests(unittest.TestCase):
         for change in ({'sourceInfo': 'package found in: other/Manifest.toml'}, {'versionInfo': '1.1.0'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 scan.spdx_packages({'packages': [{**package, **change}]}, expected)
+
+    def test_compiler_parent_requires_matching_real_member_and_refuses_unreviewed_owners(self):
+        member = 'lib/libLLVM.so.20.1jl'
+        original = b'opaque test ELF'
+        expected = {'size': len(original), 'sha256': hashlib.sha256(original).hexdigest()}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'parent.tar.gz'
+            for names in ([member], [], [member, member]):
+                with tarfile.open(path, 'w:gz') as archive:
+                    for name in names:
+                        entry = tarfile.TarInfo(name)
+                        entry.size = len(original)
+                        archive.addfile(entry, io.BytesIO(original))
+                if len(names) == 1:
+                    compiler_owners.require_member(path, member, expected)
+                    for change in ({'size': 1}, {'sha256': 'other'}):
+                        with self.assertRaisesRegex(ValueError, 'differs from OCI'):
+                            compiler_owners.require_member(path, member, {**expected, **change})
+                else:
+                    with self.assertRaisesRegex(ValueError, 'missing or ambiguous'):
+                        compiler_owners.require_member(path, member, expected)
+        for owner in ('libstdc++', 'libLLVM'):
+            with self.assertRaisesRegex(ValueError, 'native compiler runtime acceptance pending'):
+                compiler_owners.require_reviewed_compilers({'pendingNativeReview': {owner: ['control']}})
 
     def test_linked_native_commit_objects_and_pre_fix_controls(self):
         objects = {}

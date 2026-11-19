@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import advisory
+import compiler_owners
 import jll_advisory
 import linked_advisory
 import pcre2_advisory
@@ -122,6 +123,9 @@ def scan(image, receipt, runtime, tools, database, registry, publisher, output):
     if counts['CRITICAL'] or application.get('Vulnerabilities') or results['wrappers'].get('Vulnerabilities'):
         raise ValueError('application, native wrapper or critical OS advisory present')
     print('Verified seven application packages, eleven native wrapper records, the CA data owner and both positive controls.')
+    compilers = compiler_owners.review(publisher.parent.parent / 'compilers', receipt)
+    (output / 'compiler-owners.json').write_text(json.dumps(compilers, sort_keys=True, indent=2) + '\n')
+    compiler_owners.require_reviewed_compilers(compilers)
 
 
 if __name__ == '__main__':
