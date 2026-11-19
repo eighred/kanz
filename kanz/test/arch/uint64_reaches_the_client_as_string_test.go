@@ -71,7 +71,7 @@ func integerWireSources(t *testing.T) map[string]string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out[path] = string(b)
+		out[path] = strings.ReplaceAll(string(b), "\r\n", "\n")
 	}
 	return out
 }
