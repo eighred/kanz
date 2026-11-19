@@ -63,8 +63,9 @@ After a changed artifact, check, head/base or decision, recollect and reassess.
 
 ## Recover branches and PRs
 
-For `/branches`, inventory first; for an explicit branch or `/branches fix`,
-recover the best feasible in-scope candidate through the shared workflow.
+For `/branches`, inspect the named branch or inventory branches when no target
+is given. With `/branches fix` or a request to recover work, resume the best
+feasible in-scope candidate through the shared workflow.
 Match refs to current PR heads and owning worktrees. Inspect merge-base,
 unique commits and actual diffs against current main; commits already applied
 under another SHA may leave no remaining behavior. Age, a deleted upstream or

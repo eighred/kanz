@@ -12,7 +12,7 @@ or print them while diagnosing configuration.
 
 | Area | Entry guidance |
 |---|---|
-| Documentation integrity | `python -B tools/check_readmes.py --inventory` from the repository root; checks every effective-source README and root contributor guide offline. |
+| Documentation integrity | `python -B tools/check_readmes.py --inventory` checks local links and headings in READMEs, contributor guides and Kanz Forge instructions. |
 | Disposable messaging/workload identity | [Feed identity](feed_identity/README.md), [Redpanda identity](redpanda_identity/README.md), [NATS GitOps](nats_gitops_proof/README.md). |
 | Browser/network and observability qualification | [Gateway policy](gateway_policy_proof/README.md), [Grafana](grafana_proof/README.md), [Tokyo messaging policy](tokyo_messaging_proof/README.md). |
 | Image and release evidence | [Rust audit tooling](rust_audit_tools/README.md), [signed promotion](signed_promotion/README.md). |

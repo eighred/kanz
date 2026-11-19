@@ -1,6 +1,6 @@
 {
   "name": "kanz-forge",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Eighred engineering and AI-agent coordination for Kanz: organize, investigate, implement, verify and deliver.",
   "author": {
     "name": "Eighred"
@@ -8,7 +8,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Kanz Forge",
-    "shortDescription": "Organize, build and verify Kanz with coordinated agents.",
+    "shortDescription": "Choose Kanz workflows for investigation, changes and delivery.",
     "longDescription": "Eighred workflows for repository organization, source investigation, controlled implementation, explicit native-agent coordination, security and financial verification, and reviewed delivery. Uses current code, AGENTS.md, Issues and PR evidence.",
     "developerName": "Eighred",
     "category": "Productivity",

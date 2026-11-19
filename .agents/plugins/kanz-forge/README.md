@@ -9,7 +9,11 @@ results and deliver reviewed work.
 
 ## Start in this repository
 
-Open a trusted checkout in Codex and use `Kanz /help` or `Kanz /doctor`.
+Open a trusted checkout in Codex and describe the result you need. For example,
+“Why did this PR fail?” asks Codex to inspect the failing job. “Fix the
+failure and test the change” also asks it to repair and verify the code.
+Codex selects the relevant Forge workflows as evidence changes. Use `Kanz /help`
+to browse shortcuts or `Kanz /doctor` to inspect what this chat can use.
 The repository skill at `.agents/skills/kanz-forge/SKILL.md` routes directly to
 this package's maintained workflows. It needs no plugin-cache installation.
 Repository skill discovery and installed plugin discovery are separate states;
