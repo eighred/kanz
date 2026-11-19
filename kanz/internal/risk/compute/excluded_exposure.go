@@ -16,7 +16,7 @@ type ExcludedExposure struct {
 
 func (e *ExcludedExposure) Add(value *commonpb.Decimal) {
 	amount, valid := decutil.FromProtoChecked(value)
-	if !valid {
+	if value == nil || !valid {
 		e.unknown = true
 		return
 	}
