@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -95,6 +96,8 @@ func NewOKXReference(baseURL string, m Mapping, opt Options) (*OKXReference, err
 	if err := m.validate(); err != nil {
 		return nil, err
 	}
+	m.Underlying = maps.Clone(m.Underlying)
+	m.Contract = maps.Clone(m.Contract)
 	return &OKXReference{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    netdial.NewHTTPClient(2 * time.Minute),
@@ -144,9 +147,12 @@ func (r *OKXReference) Chain(ctx context.Context, it InstType, uly string) (Batc
 	if resp.StatusCode != http.StatusOK {
 		return Batch{}, fmt.Errorf("termsload: okx instruments %s %s: HTTP %d", it, uly, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, okxCatalogueLimit))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, okxCatalogueLimit+1))
 	if err != nil {
 		return Batch{}, fmt.Errorf("termsload: read okx instruments %s %s: %w", it, uly, err)
+	}
+	if len(body) > okxCatalogueLimit {
+		return Batch{}, fmt.Errorf("termsload: okx catalogue exceeds %d bytes", okxCatalogueLimit)
 	}
 	b, err := parseOKXInstruments(body, r.mapping, r.opt, it, uly)
 	if err != nil {
@@ -239,6 +245,10 @@ func parseOKXInstruments(body []byte, m Mapping, opt Options, requestedType Inst
 	}
 	if env.Code != "0" {
 		return Batch{}, fmt.Errorf("termsload: okx refused inside a 200: code %s: %s", env.Code, env.Msg)
+	}
+
+	if env.Data == nil {
+		return Batch{}, errors.New("termsload: okx catalogue response requires a data array")
 	}
 
 	var b Batch
