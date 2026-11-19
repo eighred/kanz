@@ -11,6 +11,9 @@ From `kanz/`, build with `go build ./services/web_bff/...` and test with
 the built SPA, pinned Node/Rust tooling and real Chromium as configured in CI.
 See [the web guide](../../../web/README.md) for asset generation.
 
+See the [browser HTTP route contracts](routes.md) for the registered operations,
+authorities, request shapes and refusal formats in each server profile.
+
 ## Browser boundary
 
 The BFF serves the SPA and its cookie-authenticated API on one origin. Before

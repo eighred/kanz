@@ -83,7 +83,7 @@ type Server struct {
 	logger        *slog.Logger
 	metrics       http.Handler
 	preflight     *preflightEvidence
-	mux           *http.ServeMux
+	mux           http.Handler
 	browserOrigin http.CrossOriginProtection
 }
 
@@ -117,6 +117,7 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	mux := http.NewServeMux()
 	s := &Server{
 		readiness:     readiness,
 		identity:      opts.Identity,
@@ -130,12 +131,12 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		logger:        logger,
 		metrics:       opts.Metrics,
 		preflight:     newPreflightEvidence(opts.PreflightEvidencePath, opts.PreflightEvidenceMaxAge),
-		mux:           http.NewServeMux(),
+		mux:           mux,
 	}
 	if opts.GatewayTransport != nil {
 		s.proxy.Transport = opts.GatewayTransport
 	}
-	s.routes()
+	s.routes(mux)
 	// The browser-facing origin owns these headers, including proxied errors.
 	// ReverseProxy otherwise appends upstream headers to our response policy.
 	s.proxy.ModifyResponse = func(r *http.Response) error {
@@ -166,67 +167,76 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // knows nothing about what a handler holds open.
 func (s *Server) Close() error { return s.static.Close() }
 
-func (s *Server) routes() {
-	s.mux.HandleFunc("GET /auth/mfa", s.handleMFA)
+type routeRegistrar interface {
+	Handle(string, http.Handler)
+	HandleFunc(string, func(http.ResponseWriter, *http.Request))
+}
+
+func (s *Server) routes(mux routeRegistrar) {
+	mux.HandleFunc("GET /auth/mfa", s.handleMFA)
 	for _, path := range []string{"register/begin", "register/finish", "login/finish", "stepup/begin", "stepup/finish", "remove"} {
-		s.mux.HandleFunc("POST /auth/mfa/"+path, s.handleMFA)
+		mux.HandleFunc("POST /auth/mfa/"+path, s.handleMFA)
 	}
 
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-		defer cancel()
-		if !s.readiness.Ready() || s.sessions.Ping(ctx) != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-	})
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /readyz", s.handleReady)
 	if s.metrics != nil {
-		s.mux.Handle("GET /metrics", s.metrics)
+		mux.Handle("GET /metrics", s.metrics)
 	}
 	// POST is the CREDENTIAL login; GET is the optional OIDC redirect start.
 	// Same path, different methods, because to a browser they are one idea.
-	s.mux.HandleFunc("POST /auth/login", s.handleCredentialLogin)
-	s.mux.HandleFunc("POST /auth/redeem", s.handleRedeem)
+	mux.HandleFunc("POST /auth/login", s.handleCredentialLogin)
+	mux.HandleFunc("POST /auth/redeem", s.handleRedeem)
 	if s.oidc != nil {
-		s.mux.HandleFunc("GET /auth/login", s.handleLogin)
-		s.mux.HandleFunc("GET /auth/callback", s.handleCallback)
+		mux.HandleFunc("GET /auth/login", s.handleLogin)
+		mux.HandleFunc("GET /auth/callback", s.handleCallback)
 	}
-	s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
-	s.mux.HandleFunc("POST /auth/credential", s.handleCredentialRotation)
-	s.mux.HandleFunc("POST /auth/mailbox", s.handleRecovery)
-	s.mux.HandleFunc("GET /auth/mailbox", s.handleRecovery)
-	s.mux.HandleFunc("POST /auth/mailbox/verify", s.handleRecovery)
-	s.mux.HandleFunc("POST /auth/recovery", s.handleRecovery)
-	s.mux.HandleFunc("POST /auth/recovery/consume", s.handleRecovery)
-	s.mux.HandleFunc("GET /auth/me", s.handleMe)
-	s.mux.HandleFunc("GET /auth/sessions", s.handleSessions)
-	s.mux.HandleFunc("POST /auth/sessions/{id}/revoke", s.handleRevokeSession)
+	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	mux.HandleFunc("POST /auth/credential", s.handleCredentialRotation)
+	mux.HandleFunc("POST /auth/mailbox", s.handleRecovery)
+	mux.HandleFunc("GET /auth/mailbox", s.handleRecovery)
+	mux.HandleFunc("POST /auth/mailbox/verify", s.handleRecovery)
+	mux.HandleFunc("POST /auth/recovery", s.handleRecovery)
+	mux.HandleFunc("POST /auth/recovery/consume", s.handleRecovery)
+	mux.HandleFunc("GET /auth/me", s.handleMe)
+	mux.HandleFunc("GET /auth/sessions", s.handleSessions)
+	mux.HandleFunc("POST /auth/sessions/{id}/revoke", s.handleRevokeSession)
 	// Identity provisioning is a separate authority from the gateway API. These
 	// two exact routes keep its bearer in the BFF session while avoiding a broad
 	// identity proxy that would expose future administrative endpoints by
 	// accident.
-	s.mux.HandleFunc("GET /api/identity/invites", s.handleInvites)
-	s.mux.HandleFunc("POST /api/identity/invites", s.handleInvites)
-	s.mux.HandleFunc("POST /api/identity/invites/{id}/revoke", s.handleInvites)
-	s.mux.HandleFunc("POST /api/identity/invites/{id}/reissue", s.handleInvites)
-	s.mux.HandleFunc("GET /api/identity/users", s.handleIdentityAccess)
-	s.mux.HandleFunc("PUT /api/identity/users/{subject}/access", s.handleIdentityAccess)
-	s.mux.HandleFunc("POST /api/identity/users/{subject}/disable", s.handleIdentityAccess)
-	s.mux.HandleFunc("POST /api/identity/users/{subject}/enable", s.handleIdentityAccess)
-	s.mux.HandleFunc("GET /auth/permissions", s.handleIdentityAccess)
-	s.mux.HandleFunc("GET /api/preflight", s.handlePreflight)
+	mux.HandleFunc("GET /api/identity/invites", s.handleInvites)
+	mux.HandleFunc("POST /api/identity/invites", s.handleInvites)
+	mux.HandleFunc("POST /api/identity/invites/{id}/revoke", s.handleInvites)
+	mux.HandleFunc("POST /api/identity/invites/{id}/reissue", s.handleInvites)
+	mux.HandleFunc("GET /api/identity/users", s.handleIdentityAccess)
+	mux.HandleFunc("PUT /api/identity/users/{subject}/access", s.handleIdentityAccess)
+	mux.HandleFunc("POST /api/identity/users/{subject}/disable", s.handleIdentityAccess)
+	mux.HandleFunc("POST /api/identity/users/{subject}/enable", s.handleIdentityAccess)
+	mux.HandleFunc("GET /auth/permissions", s.handleIdentityAccess)
+	mux.HandleFunc("GET /api/preflight", s.handlePreflight)
 	// Everything under /api/ is proxied to the gateway as the session's caller.
-	s.mux.HandleFunc("/api/", s.handleProxy)
+	mux.HandleFunc("/api/", s.handleProxy)
 	// The SPA last, on "/" — every route above is registered on a more specific
 	// pattern, so ServeMux prefers them. Registered only when a build is
 	// configured, so an API-only deployment 404s rather than serving nothing.
 	if s.static != nil {
-		s.mux.Handle("/", s.static)
+		mux.Handle("/", s.static)
 	}
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+	if !s.readiness.Ready() || s.sessions.Ping(ctx) != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
