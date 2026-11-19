@@ -33,7 +33,7 @@ class AdvisoryTests(unittest.TestCase):
 
     def scan(self):
         return {'Trivy': {'Version': '0.72.0'}, 'Metadata': {'ImageID': 'sha256:' + 'a'*64},
-                'Results': [{'Type': 'julia', 'Target': 'opt/julia/Manifest.toml', 'Packages': [
+                'Results': [{'Type': 'julia', 'Target': 'opt/kanz-jl/Manifest.toml', 'Packages': [
                     {'Name': n, 'ID': p['uuid'], 'Version': p['version']} for n,p in self.expected().items()]}]}
 
     def test_image_inventory_requires_uuid_version_source_and_no_advisories(self):
@@ -63,9 +63,21 @@ class AdvisoryTests(unittest.TestCase):
         r['Vulnerabilities']=[]
         with self.assertRaises(ValueError):a.validate_control(scan)
 
+    def test_distribution_manifest_cannot_stand_in_for_the_worker(self):
+        scan = self.scan()
+        scan['Results'][0]['Target'] = 'opt/julia/Manifest.toml'
+        with self.assertRaisesRegex(ValueError, 'missing or ambiguous'):
+            a.validate_image_scan(scan, scan['Metadata']['ImageID'], self.expected())
+        package = {'name': 'ProtoBuf', 'versionInfo': '1.3.0',
+                   'sourceInfo': 'package found in: opt/julia/Manifest.toml',
+                   'externalRefs': [{'referenceType': 'purl', 'referenceLocator':
+                                     'pkg:julia/ProtoBuf@1.3.0?uuid=' + a.EXTERNAL_UUIDS['ProtoBuf']}]}
+        with self.assertRaisesRegex(ValueError, 'inventory differs'):
+            a.validate_spdx({'packages': [package]}, self.expected())
+
     def test_spdx_requires_real_julia_uuid_qualified_packages(self):
         expected=self.expected();uuid=expected['ProtoBuf']['uuid']
-        package={'name':'ProtoBuf','versionInfo':'1.3.0','sourceInfo':'package found in: opt/julia/Manifest.toml',
+        package={'name':'ProtoBuf','versionInfo':'1.3.0','sourceInfo':'package found in: opt/kanz-jl/Manifest.toml',
                  'externalRefs':[{'referenceType':'purl','referenceLocator':'pkg:julia/ProtoBuf@1.3.0?uuid='+uuid}]}
         a.validate_spdx({'packages':[package]},expected)
         for purl in ['pkg:generic/ProtoBuf@1.3.0','pkg:julia/ProtoBuf@1.3.0?uuid=wrong',

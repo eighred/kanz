@@ -81,12 +81,17 @@ def validate_packages(result, expected):
         raise ValueError('Julia UUID/version scan inventory differs or findings modified')
 
 
+# The worker project lives at the final image WORKDIR. Julia's distribution
+# and external packages can contain additional manifests with unrelated owners.
+WORKER_MANIFEST = 'opt/kanz-jl/Manifest.toml'
+
+
 def validate_image_scan(scan, image, expected):
     if scan.get('Metadata', {}).get('ImageID') != image:
         raise ValueError('scanner image identity differs')
     if any(r.get('ExperimentalModifiedFindings') for r in scan.get('Results', [])):
         raise ValueError('image findings suppressed or modified')
-    result = manifest_result(scan, 'opt/julia/Manifest.toml')
+    result = manifest_result(scan, WORKER_MANIFEST)
     validate_packages(result, expected)
     if result.get('Vulnerabilities'):
         raise ValueError('known Julia dependency advisory refuses qualification')
@@ -106,7 +111,7 @@ def validate_control(scan):
 def validate_spdx(sbom, expected):
     found = {}
     for package in sbom.get('packages', []):
-        if package.get('sourceInfo') != 'package found in: opt/julia/Manifest.toml':
+        if package.get('sourceInfo') != 'package found in: ' + WORKER_MANIFEST:
             continue
         purls = [ref['referenceLocator'] for ref in package.get('externalRefs', []) if ref.get('referenceType') == 'purl']
         if len(purls) != 1:
