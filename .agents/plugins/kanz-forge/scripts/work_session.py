@@ -8,18 +8,37 @@ def text(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def keyed(rows, label):
+def keyed(rows, label, field="id"):
     result = {}
     if not isinstance(rows, list):
         raise ValueError(f"{label} must be a list")
     for row in rows:
-        if not isinstance(row, dict) or not text(row.get("id")) or row["id"] in result:
+        if not isinstance(row, dict) or not text(row.get(field)) or row[field] in result:
             raise ValueError(f"{label} require unique nonempty IDs")
-        result[row["id"]] = row
+        result[row[field]] = row
     return result
 
 
-def assess_session(session, validation, graph=None, current_main=None):
+def completed_issues(snapshot, targets):
+    repository = snapshot.get("repository")
+    if (not isinstance(repository, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repository, re.ASCII)
+            or ".." in repository):
+        raise ValueError("issue closure needs the reviewed repository identity")
+    prefix = f"https://github.com/{repository}/issues/"
+    issue_url = re.compile(re.escape(prefix) + r"[1-9][0-9]*")
+    if any(not issue_url.fullmatch(key) or target.get("initial_state") != "OPEN"
+           for key, target in targets.items()):
+        raise ValueError("issue closure targets need canonical issue URLs and observed initial OPEN state")
+    open_issues = keyed(snapshot.get("issues"), "current open issues", "url")
+    if any(type(row.get("number")) is not int or row["number"] <= 0 or url != prefix + str(row["number"])
+           for url, row in open_issues.items()):
+        raise ValueError("open issue inventory must match the reviewed repository and issue numbers")
+    states = keyed(snapshot.get("issue_states", []), "current issue states", "url")
+    return {url for url, row in states.items() if url in targets and url not in open_issues
+            and row.get("state") == "CLOSED" and row.get("stateReason") == "COMPLETED"}
+
+
+def assess_session(session, validation, graph=None, current_main=None, snapshot=None):
     """Reduce source-reviewed decisions; the graph and main receipts stay external."""
     count = session["requested_count"]
     if type(count) is not int or count <= 0 or not text(session.get("selection_evidence")):
@@ -27,6 +46,11 @@ def assess_session(session, validation, graph=None, current_main=None):
     targets = keyed(session["targets"], "initial targets")
     if len(targets) > count or any(not text(t.get("acceptance_evidence")) for t in targets.values()):
         raise ValueError("initial targets exceed the request or lack acceptance evidence")
+    outcome = session.get("outcome", "main_acceptance")
+    if outcome not in ("main_acceptance", "issue_closure"):
+        raise ValueError("unknown work session outcome")
+    if outcome == "issue_closure":
+        tracker_completed = completed_issues(snapshot or {}, targets)
     findings = keyed(session.get("findings", []), "findings")
     if targets.keys() & findings.keys():
         raise ValueError("discovered findings cannot replace initial targets")
@@ -108,7 +132,7 @@ def assess_session(session, validation, graph=None, current_main=None):
     verified_repairs = sorted(repairs & accepted)
     deferred = {key: {name: f[name] for name in ("reason", "reentry", "evidence", "tracker")}
                 for key, f in findings.items() if f["disposition"] == "defer"}
-    return {
+    result = {
         "requested_count": count, "selected_count": len(targets),
         "unfilled_count": count - len(targets), "initial_verified_on_main": verified_targets,
         "initial_remaining": sorted(targets.keys() - accepted),
@@ -120,3 +144,9 @@ def assess_session(session, validation, graph=None, current_main=None):
                     and not required and not blocked,
         "authority": "reviewed evidence only; never dispatch, merge, close issues or clear a hold",
     }
+    if outcome == "issue_closure":
+        closed = sorted(tracker_completed.intersection(verified_targets))
+        result["initial_closed_as_completed"] = closed
+        result["closures_remaining"] = count - len(closed)
+        result["complete"] = result["complete"] and len(closed) == count
+    return result

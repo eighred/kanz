@@ -88,6 +88,20 @@ database, scheduler, GitHub writer or inference of safety from file proximity.
 - `requested_count`: positive integer; `selection_evidence`: reviewed initial
   inventory/source locator; `targets`: unique `{id, acceptance_evidence}` records.
   An empty or smaller target set reports unfilled slots and cannot complete.
+- When the request counts closed issues, use `outcome: issue_closure`. Keep the
+  snapshot's `repository` (owner/repo). Use each selected issue's canonical GitHub
+  URL as its target ID and record the observed `initial_state: OPEN` at selection.
+  After full acceptance on main and tracker closure, read each issue from GitHub
+  again (for example, `gh issue view URL --json url,state,stateReason`). Supply
+  those objects as `issue_states` alongside the collector's current open `issues`
+  inventory in the reviewed snapshot. A conflicting open record vetoes a stale
+  closure observation. Count only
+  `initial_closed_as_completed` toward the request. A reopened issue, closure as
+  not planned, PR merge or newly discovered repair cannot fill a slot. Report
+  `closures_remaining` even when all selected changes have passed on main.
+  For sequential merges, recheck every counted target's acceptance on the final
+  common main revision and use that SHA as each receipt's `merge_sha`. Keep the
+  individual PR merge revisions in the evidence for traceability.
 - `findings`: unique `{id, parent, relation, disposition, evidence, tracker}`.
   `relation` is `required`, `related` or `independent`; `disposition` is `repair`
   or `defer`. Parents lead to initial targets. A deferred record also supplies

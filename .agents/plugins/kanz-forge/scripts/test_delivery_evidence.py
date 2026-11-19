@@ -25,6 +25,52 @@ def snapshot():
 
 
 class DeliveryEvidenceTests(unittest.TestCase):
+    def test_requested_issue_closures_require_initial_open_and_current_completed_issues(self):
+        from test_work_session import fixture, receipt
+        data = snapshot()
+        data["repository"] = "eighred/kanz"
+        data["issues"] = []
+        url = "https://github.com/eighred/kanz/issues/42"
+        target = dict(id=url, initial_state="OPEN", acceptance_evidence="original issue acceptance")
+        proof = receipt(url)
+        proof["merge_sha"] = MAIN
+        data["work_session"] = dict(fixture(), outcome="issue_closure", targets=[target], main_acceptance=[proof])
+        data["validation_graph"] = dict(main_revision=MAIN, nodes=[dict(
+            id="actual-main", kind="gate", subject="main", revision=MAIN,
+            validation=dict(data["main"], inventory_evidence="complete reviewed inventory",
+                            observed=[dict(data["main"]["observed"][0], evidence="actual main job")]))], edges=[])
+        completed = dict(url=url, state="CLOSED", stateReason="COMPLETED")
+        for observation in (None, dict(completed, state="OPEN"), dict(completed, stateReason="NOT_PLANNED"),
+                            dict(completed, stateReason=None), dict(completed, url=url + "1")):
+            with self.subTest(observation=observation):
+                data["issue_states"] = [observation] if observation else []
+                result = assess(data)["work_session"]
+                self.assertEqual(result["initial_verified_on_main"], [url])
+                self.assertEqual(result["initial_closed_as_completed"], [])
+                self.assertEqual(result["closures_remaining"], 1)
+                self.assertFalse(result["complete"])
+        data["issue_states"] = [completed]
+        self.assertTrue(assess(data)["work_session"]["complete"])
+        data["issues"] = [dict(number=42, url=url)]
+        self.assertEqual(assess(data)["work_session"]["closures_remaining"], 1)
+        del data["issues"]
+        with self.assertRaisesRegex(ValueError, "current open issues"):
+            assess(data)
+        data["issues"] = []
+        data["work_session"]["requested_count"] = 30
+        result = assess(data)["work_session"]
+        self.assertEqual(result["initial_closed_as_completed"], [url])
+        self.assertEqual(result["closures_remaining"], 29)
+        self.assertFalse(result["complete"])
+        proof["all_acceptance_passed"] = False
+        self.assertEqual(assess(data)["work_session"]["initial_closed_as_completed"], [])
+        for key, state in ((url, "CLOSED"), (url.replace("/issues/", "/pull/"), "OPEN"),
+                           (url.replace("/kanz/", "/other/"), "OPEN"), (url + "/slice", "OPEN")):
+            with self.subTest(key=key, state=state):
+                target.update(id=key, initial_state=state)
+                with self.assertRaisesRegex(ValueError, "issue closure targets"):
+                    assess(data)
+
     def test_session_acceptance_is_bound_through_adapter_to_actual_main_gate(self):
         from test_work_session import fixture, receipt
         data = snapshot()
