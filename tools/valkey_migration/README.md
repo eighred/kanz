@@ -48,6 +48,19 @@ clients behind the cache ingress policy. Both original webhook processes must
 lose readiness on actual cache loss and regain it on the same PVC. The
 fixture sends no strategy alerts and never opens the trading gate.
 
+The generic rig gateway requires its configured OIDC issuer, audience, JWKS
+and revocation feed. Supply the identity Service in `kanz-services` before
+bringing up the gateway. The migration job serves the public key and revocation
+snapshot for a disposable ES256 issuer at the same cluster-local addresses.
+It creates a fresh signing key for each run, keeps the private key in memory,
+and uses short-lived reader tokens for two tenants sharing the same subject.
+Both replicas run the compiled gateway entry point. A signed read must succeed,
+and anonymous and revoked readers must receive 401. A signed POST to the
+read-only permissions path returns 405 while acquiring an idempotency claim.
+Cross-replica duplicates must return 409 independently for each tenant.
+The job tests a fresh key during cache loss and checks both original deadlines,
+expiration and reacquisition after restart on the original PVC.
+
 The retained-state fixture starts the Tokyo Redis image on a second fresh
 volume and checks Redis → Valkey → restarted Valkey → Redis using that same
 volume. Both fixtures use the Valkey image selected by application compatibility

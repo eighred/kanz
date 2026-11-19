@@ -12,7 +12,7 @@ import uuid
 
 import yaml
 
-from tools.valkey_migration import network, rig_install
+from tools.valkey_migration import gateway, network, rig_install
 
 messaging = network.messaging
 feed = messaging.feed
@@ -50,6 +50,11 @@ def main():
     if set(build.iterdir()) != {binary} or not binary.is_file():
         raise ValueError("expected a single compiled application executable")
     image = "kanz-webhook-fixture:" + name
+    gateway_build = runner_temp / "valkey-gateway-build"
+    gateway_binary = gateway_build / gateway.APP
+    if set(gateway_build.iterdir()) != {gateway_binary} or not gateway_binary.is_file():
+        raise ValueError("expected a single compiled gateway executable")
+    gateway_image = "kanz-gateway-fixture:" + name
     report = {"source": source, "executableSHA256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "policySHA256": hashlib.sha256(network.POLICY.read_bytes()).hexdigest(),
               "passed": False, "cleanupPassed": False}
@@ -68,6 +73,10 @@ def main():
 
         def cache(*args, data=None):
             return k("-n", CACHE_NS, *args, data=data)
+
+        gateway_probe = gateway.Gateway(k, gateway_image)
+        report["gateway"] = gateway_probe.report
+        report["gateway"]["executableSHA256"] = hashlib.sha256(gateway_binary.read_bytes()).hexdigest()
 
         def pods():
             return json.loads(k("-n", APP_NS, "get", "pods", "-l", "app=" + APP, "-o", "json"))["items"]
@@ -109,9 +118,12 @@ def main():
             feed.command(["docker", "build", "-t", image, "-f", "-", str(build)],
                          data='FROM scratch\nCOPY webhook-ingest /webhook-ingest\nUSER 65532:65532\nENTRYPOINT ["/webhook-ingest"]\n')
             report["fixtureImageID"] = feed.command(["docker", "image", "inspect", "--format", "{{.Id}}", image])
+            feed.command(["docker", "build", "-t", gateway_image, "-f", "-", str(gateway_build)],
+                         data='FROM scratch\nCOPY api-gateway /api-gateway\nUSER 65532:65532\nENTRYPOINT ["/api-gateway"]\n')
+            report["gateway"]["fixtureImageID"] = feed.command(["docker", "image", "inspect", "--format", "{{.Id}}", gateway_image])
             report["stage"] = "enforcing cluster and workload identities"
             feed.create_enforcing_cluster(name, scratch)
-            feed.command(["kind", "load", "docker-image", image, "--name", name])
+            feed.command(["kind", "load", "docker-image", image, gateway_image, "--name", name])
             crds = [d for path in sorted((ROOT / "kanz/infra/security/spire/crds").glob("*.yaml"))
                     for d in messaging.docs(str(path.relative_to(ROOT)))]
             apply(crds)
@@ -127,7 +139,7 @@ def main():
             apply(messaging.bootstrap_objects())
             cache("wait", "--for=condition=complete", "job/nats-bootstrap", "--timeout=220s")
             report["stage"] = "guarded fresh Valkey and policy"
-            apply([doc for doc in network.fixture_secrets() if doc["metadata"]["name"] in ("redis-auth", APP + "-redis")])
+            apply(network.fixture_secrets())
             apply([webhook_config(), yaml.safe_load(network.POLICY.read_text(encoding="utf-8"))])
             policy = json.loads(cache("get", "networkpolicy", "-o", "json"))["items"]
             if [p["spec"] for p in policy] != [yaml.safe_load(network.POLICY.read_text(encoding="utf-8"))["spec"]]:
@@ -153,9 +165,13 @@ def main():
             apply(resources)
             k("-n", APP_NS, "rollout", "status", "deployment/" + APP, "--timeout=210s")
             report["initialClients"] = authenticated_clients()
+            report["stage"] = "real OIDC gateway and tenant-scoped claims"
+            gateway_probe.start()
+            gateway_probe.initial()
             report["stage"] = "real cache outage"
             cache("scale", "statefulset/redis", "--replicas=0")
             cache("wait", "--for=delete", "pod/redis-0", "--timeout=120s")
+            gateway_probe.outage()
             k("-n", APP_NS, "wait", "--for=condition=Ready=False", "pod", "-l", "app=" + APP, "--timeout=100s")
             report["unreadyDuringOutage"] = sorted(p["metadata"]["uid"] for p in pods())
             if report["unreadyDuringOutage"] != [r["podUID"] for r in report["initialClients"]]:
@@ -168,11 +184,15 @@ def main():
             if (report["initialClients"] != report["recoveredClients"]
                     or cache("get", "pvc/data-redis-0", "-o", "jsonpath={.metadata.uid}") != claim_uid):
                 raise ValueError("recovery changed webhook processes or original claim")
+            report["stage"] = "same gateway processes and absolute claim expiry"
+            gateway_probe.recovered()
             report["passed"] = True
         finally:
             feed.command(["kind", "delete", "cluster", "--name", name, "--kubeconfig", cfg], timeout=180)
             if report.get("fixtureImageID"):
                 feed.command(["docker", "image", "rm", image])
+            if report["gateway"].get("fixtureImageID"):
+                feed.command(["docker", "image", "rm", gateway_image])
             report["cleanupPassed"] = name not in feed.command(["kind", "get", "clusters"]).splitlines()
             report["passed"] &= report["cleanupPassed"]
             artifact.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
