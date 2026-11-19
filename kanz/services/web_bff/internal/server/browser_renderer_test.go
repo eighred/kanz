@@ -13,6 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
 	"github.com/eighred/kanz/services/web_bff/internal/session"
 )
 
@@ -41,18 +46,35 @@ func TestBrowserRendererProductionBundle(t *testing.T) {
 	if script == "" {
 		t.Skip("requires production dist and actual Chromium")
 	}
+	// Use the gateway's ProtoJSON convention for an OMS order. Keep the
+	// explicitly noncanonical legacy numerals separate to exercise fallback.
+	marshal := protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}
+	canonical, err := marshal.Marshal(&orderpb.OrderState{
+		OrderId: "canonical", PortfolioId: "fixture", InstrumentId: "BTC-USD",
+		Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED,
+		OrderedQuantity:  &commonpb.Decimal{Coefficient: 9007199254740993, Exponent: -2},
+		FilledQuantity:   &commonpb.Decimal{Coefficient: 25, Exponent: -2},
+		LimitPrice:       &commonpb.Decimal{Coefficient: 150, Exponent: -2},
+		AverageFillPrice: &commonpb.Decimal{Coefficient: 147, Exponent: -2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := map[string]any{"owner_tenant": "fixture", "unindexed": "0", "orders": []any{
+		json.RawMessage(canonical),
+		map[string]any{"order_id": "legacy", "portfolio_id": "fixture",
+			"ordered_quantity": map[string]any{"coefficient": strings.Repeat("9", 129), "exponent": -2},
+			"filled_quantity":  map[string]any{"coefficient": "-0", "exponent": -2}},
+	}}
 	var requests atomic.Int32
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/portfolios/fixture/orders" || r.Header.Get("Authorization") != "Bearer synthetic-render-fixture" || r.Header.Get("Cookie") != "" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/portfolios/fixture/orders" || r.URL.RawQuery != "limit=200" || r.Header.Get("Authorization") != "Bearer synthetic-render-fixture" || r.Header.Get("Cookie") != "" {
 			http.Error(w, "refused", http.StatusForbidden)
 			return
 		}
 		requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"unindexed": "0", "orders": []any{
-			map[string]any{"order_id": "canonical", "quantity": map[string]any{"coefficient": "9007199254740993", "exponent": -2}, "filled_quantity": map[string]any{"coefficient": "-0", "exponent": -2}, "limit_price": map[string]any{"amount": map[string]any{"coefficient": "150", "exponent": -2}, "currency_code": "USD"}},
-			map[string]any{"order_id": "legacy", "quantity": map[string]any{"coefficient": strings.Repeat("9", 129), "exponent": -2}},
-		}})
+		_ = json.NewEncoder(w).Encode(page)
 	}))
 	defer gateway.Close()
 	base := bffWithIdentity(t, "http://127.0.0.1:1", gateway.URL)
