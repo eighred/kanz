@@ -145,6 +145,7 @@ REQUIRED = {
         "TestPositionPrecisionTinyRepeatingSnapshotRefusesWithoutLosingFill",
         "TestARedeliveredFillIsFoldedOnceByEveryStore",
         "TestARedeliveredFillStillAnnouncesInEveryStore",
+        "TestTenantPositionReplayAfterProcessExit",
         "TestApprovedPositionFeesPreserveQuantityCostAndReplayClaims",
         "TestBackdatedExecutionReplaysCostBasisRatherThanArrivalOrder",
         "TestBookApplyRefusesNonPositiveQuantity",
