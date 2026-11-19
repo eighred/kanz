@@ -3,10 +3,18 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from runtime import Estate, docker, nats_configuration
+from runtime import BROKER_PRINCIPALS, Estate, docker, nats_configuration
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_generated_broker_passwords_are_unambiguous_config_strings(self):
+        value = '58e0' + 'a5' * 26
+        with patch('runtime.secrets.token_hex', return_value=value):
+            estate = Estate('.', '.')
+        for principal in BROKER_PRINCIPALS:
+            self.assertEqual(estate.secrets[principal], 'k' + value)
+        self.assertEqual(estate.secrets['owner'], value)
+
     def test_broker_requires_an_authenticated_jetstream_response(self):
         estate = Estate('.', '.')
         for raw, ready in [('{}', False), ('', False),

@@ -19,6 +19,7 @@ PINS = json.loads((ROOT / 'tools/dev_compose/images.json').read_bytes())
 DATABASE = 'docker.io/library/postgres:16-alpine'
 BROKER = 'docker.io/library/nats:2.10-alpine'
 BOX = 'docker.io/natsio/nats-box:0.14.5'
+BROKER_PRINCIPALS = ('admin', 'accounting', 'feed', 'custody', 'observer')
 PROBE_FAILURES = frozenset({
     'observer connection failed', 'observer JetStream unavailable', 'accounting stream unavailable',
     'source publication unavailable', 'source delivery has not been acknowledged exactly',
@@ -108,8 +109,10 @@ class Estate:
         self.lease = uuid.uuid4().hex
         self.label = 'kanz.collateral.lease=' + self.lease
         self.prefix = 'collateral-' + self.lease[:12]
-        self.secrets = {name: secrets.token_hex(28) for name in
-                        ('admin', 'accounting', 'feed', 'custody', 'observer', 'postgres', 'owner', 'runtime', 'issuer', 'signing')}
+        self.secrets = {name: secrets.token_hex(28) for name in ('postgres', 'owner', 'runtime', 'issuer', 'signing')}
+        # NATS parses unquoted environment substitutions as configuration values.
+        # Some random hexadecimal strings start like scientific notation.
+        self.secrets.update({name: 'k' + secrets.token_hex(28) for name in BROKER_PRINCIPALS})
         self.tokens = {}
 
     def name(self, suffix):
@@ -220,7 +223,7 @@ class Estate:
         self.create('nats', public(BROKER), 'data', command=['-c','/fixture.conf'],
                     extra=['--mount', f'type=bind,src={conf},dst=/fixture.conf,readonly',
                            '--mount', 'type=volume,src=' + self.name('natsdata') + ',dst=/data'],
-                    env={k.upper() + '_KEY':self.secrets[k] for k in ('admin','accounting','feed','custody','observer')})
+                    env={k.upper() + '_KEY': self.secrets[k] for k in BROKER_PRINCIPALS})
         admin = {'NATS_URL': 'nats://nats:4222', 'NATS_USER': 'admin', 'NATS_PASSWORD': self.secrets['admin']}
         wait_for('authenticated JetStream readiness', lambda: self.broker_ready(admin))
         bootstrap = (ROOT / 'kanz/infra/nats/bootstrap-job.yaml').read_text().split('  bootstrap.sh: |\n', 1)[1].split('\n---', 1)[0]
@@ -366,7 +369,8 @@ class Estate:
                       'invalid collateral source authority configuration', 'fill consumer stopped with error',
                       'metrics server failed', 'permission denied', 'Permissions Violation',
                       'no such host', 'cannot assign requested address', 'connection refused',
-                      'context deadline exceeded', 'no responders available', 'consumer name already in use')
+                      'context deadline exceeded', 'no responders available', 'consumer name already in use',
+                      'could not be parsed')
         for name in ('nats', 'postgres', 'accounting', 'gateway'):
             try:
                 state = docker('read service state', 'inspect', '-f', '{{.State.Status}} {{.State.ExitCode}}', self.name(name))
