@@ -2,6 +2,7 @@
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import tempfile
@@ -25,6 +26,71 @@ def run(args, *, stdin=None, cwd=ROOT, env=None, timeout=300):
     return result.stdout
 
 
+def cluster_resources(cluster):
+    """Only exact k3d names in this invocation's private namespace."""
+    prefix = f"k3d-{cluster}"
+    names = {"container": {f"{prefix}-{s}" for s in ("server-0", "server-1", "agent-0", "tools")},
+             "network": {prefix}, "volume": {prefix + "-images"}}
+    found = {}
+    for kind, expected in names.items():
+        args = ["docker", kind, "ls"]
+        if kind == "container":
+            args.append("--all")
+        field = "Names" if kind == "container" else "Name"
+        listed = run([*args, "--filter", f"name={prefix}", "--format", "{{." + field + "}}"])
+        found[kind] = expected.intersection(listed.splitlines())
+    return found
+
+
+def remove_cluster(cluster, cluster_tool):
+    resources = cluster_resources(cluster)
+    if not any(resources.values()):
+        return  # k3d has already rolled back a failed create.
+    identifiers = {}
+    for kind, names in resources.items():
+        for name in names:
+            # The k3d network carries only app=k3d. Its exact name was checked
+            # absent before creation. Node containers and the image volume
+            # additionally carry the cluster label.
+            labels_path = ".Config.Labels" if kind == "container" else ".Labels"
+            labels = json.loads(run(["docker", kind, "inspect", name, "--format", "{{json " + labels_path + "}}"]))
+            if (not labels or labels.get("app") != "k3d" or
+                    (kind != "network" and labels.get("k3d.cluster") != cluster)):
+                raise RuntimeError(f"refusing to delete a foreign {kind}: {name}")
+            if kind != "volume":
+                identifiers[name] = run(["docker", kind, "inspect", name, "--format", "{{.Id}}"]).strip()
+    if resources["container"]:
+        try:
+            cluster_tool("cluster", "delete", cluster)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            print(f"k3d cleanup incomplete: {error}", flush=True)
+    # A failure before the first node exists can leave just k3d's network
+    # and image volume. k3d cannot discover a cluster from those alone.
+    remaining = cluster_resources(cluster)
+    for kind in ("container", "network", "volume"):
+        for name in remaining[kind]:
+            if name not in resources[kind]:
+                raise RuntimeError(f"unexpected {kind} appeared during cleanup: {name}")
+            args = ["docker", kind, "rm"]
+            if kind == "container":
+                args.extend(["--force", "--volumes"])
+            run([*args, identifiers.get(name, name)])
+    if any(cluster_resources(cluster).values()):
+        raise RuntimeError("owned k3d resources remain after cleanup")
+
+
+@contextmanager
+def fresh_cluster(cluster, cluster_tool):
+    if any(cluster_resources(cluster).values()):
+        raise RuntimeError(f"refusing to use a pre-existing cluster name: {cluster}")
+    try:
+        yield
+    finally:
+        # Python exception chaining preserves the create/exercise error as
+        # well as a cleanup failure. The lease starts before k3d creates anything.
+        remove_cluster(cluster, cluster_tool)
+
+
 def compile_images(directory, cluster):
     env = dict(os.environ, GOOS="linux", GOARCH="amd64", CGO_ENABLED="0")
     builds = [
@@ -43,6 +109,8 @@ def compile_images(directory, cluster):
         dockerfile.extend(["USER 65532:65532", f'ENTRYPOINT ["/{entry}"]'])
         (path / "Dockerfile").write_text("\n".join(dockerfile) + "\n", encoding="ascii")
         tag = f"kanz-placement-{cluster}/{entry}:fixture"
+        if run(["docker", "image", "ls", "--quiet", tag]).strip():
+            raise RuntimeError(f"refusing to replace pre-existing image: {tag}")
         run(["docker", "build", "-t", tag, str(path)])
         yield tag
 
@@ -163,12 +231,12 @@ def main():
         try:
             for image in compile_images(Path(build), cluster):
                 images.append(image)
-            cluster_tool("cluster", "create", cluster, "--servers", "2", "--agents", "1",
-                 "--servers-memory", "1600m", "--agents-memory", "1100m", "--image", K3S,
-                 "--api-port", "127.0.0.1:0", "--no-lb", "--kubeconfig-update-default=false",
-                 "--kubeconfig-switch-context=false", "--k3s-arg",
-                 "--disable=traefik,servicelb,metrics-server,local-storage@server:*", "--timeout", "180s")
-            try:
+            with fresh_cluster(cluster, cluster_tool):
+                cluster_tool("cluster", "create", cluster, "--servers", "2", "--agents", "1",
+                             "--servers-memory", "1600m", "--agents-memory", "1100m", "--image", K3S,
+                             "--api-port", "127.0.0.1:0", "--no-lb", "--kubeconfig-update-default=false",
+                             "--kubeconfig-switch-context=false", "--k3s-arg",
+                             "--disable=traefik,servicelb,metrics-server,local-storage@server:*", "--timeout", "180s")
                 cluster_tool("image", "import", "--cluster", cluster, *images)
                 # Never read a host kubeconfig or accept an existing cluster.
                 def kubectl(*args, stdin=None):
@@ -178,11 +246,11 @@ def main():
                 servers = [server, f"k3d-{cluster}-server-1"]
                 kubectl("wait", "--for=condition=Ready", "node", *servers, worker, "--timeout=120s")
                 exercise(kubectl, *images, servers, worker)
-            finally:
-                cluster_tool("cluster", "delete", cluster)
         finally:
             if images:
                 run(["docker", "image", "rm", *images])
+                if any(run(["docker", "image", "ls", "--quiet", tag]).strip() for tag in images):
+                    raise RuntimeError("fixture image tags remain after cleanup")
 
 
 if __name__ == "__main__":

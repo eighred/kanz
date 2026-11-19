@@ -12,6 +12,7 @@ on:
       - 'schemas/**'
       - '.github/actions/setup_buf/**'
       - 'tools/operator_placement.py'
+      - 'tools/test_operator_placement.py'
       - '.github/workflows/operator-placement.yml'
   push:
     branches: [main]
@@ -52,6 +53,7 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/k3d"
       - name: Verify credential confinement and worker placement during a real drain
         run: |
+          "$RUNNER_TEMP/placement-venv/bin/python" -B -m unittest discover -s tools -p 'test_operator_placement.py' -v
           cd kanz
           go test -p 1 ./test/arch -run 'Test(ProvisioningJobsArePinnedToControlPlane|ProbeJobIsNotPinned)$' -count=1 -v
           cd ..
