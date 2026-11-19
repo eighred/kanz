@@ -14,6 +14,7 @@ import curl_runtime
 import native_inventory
 import native_mapping
 import openssl_advisory
+import openssl_registry
 import openssl_runtime
 import proof
 import source_candidate_oci
@@ -80,11 +81,13 @@ def ancestry_evidence(producer, directory):
             'comparisons': len(producer['vendorFixes'])}
 
 
-def source_catalog(index, records, producer, acquired, now):
+def source_catalog(index, records, producer, acquired, now, registry):
     if (not acquired.tzinfo or not now.tzinfo or not dt.timedelta(0) <= now - acquired <= dt.timedelta(hours=1)):
         raise ValueError('source catalog outside qualification window')
-    matches = openssl_advisory.catalog(index, records, PINS['version_base'])
-    control = openssl_advisory.catalog(index, records, '3.5.8')
+    extra = openssl_registry.published_records(openssl_advisory.index_names(index), registry, now)
+    matches = openssl_advisory.complete_matches(index, records, extra, PINS['version_base'])
+    control = openssl_advisory.complete_matches(index, records, extra, '3.5.8')
+    records = {**records, **extra}
     if 'CVE-2026-84782' not in control or not matches or set(matches) != set(producer['vendorFixes']):
         raise ValueError('source fixes do not cover the complete release baseline or affected control')
     hashes = {name: digest(raw.encode()) for name, raw in records.items()}
@@ -205,13 +208,17 @@ def verify(inputs, artifact, upstream, output):
             report['failureStage'] = 'development-source-catalog'
             acquired = dt.datetime.now(dt.timezone.utc)
             index, records = openssl_advisory.fetch_catalog(proof.required)
-            report['sourceCatalog'] = source_catalog(index, records, producer, acquired, dt.datetime.now(dt.timezone.utc))
+            now = lambda: dt.datetime.now(dt.timezone.utc)
+            registry = openssl_registry.fetch(proof.required, openssl_advisory.index_names(index), now)
+            snapshot = json.dumps({'index': index, 'records': records, 'registryCoverage': registry}).encode()
+            (output / 'openssl-catalog.json').write_bytes(snapshot)
+            report['catalogSHA256'] = digest(snapshot)
+            report['sourceCatalog'] = source_catalog(index, records, producer, acquired, now(), registry)
             report['failureStage'] = 'libcurl-release-catalog'
             curl_report = {}
             curl_advisory.qualify_backend(proof.required, report['inventory'], lambda: dt.datetime.now(dt.timezone.utc),
                                           curl_report, PINS['curl_backend'])
             report['libcurlCatalog'] = curl_report
-            (output / 'openssl-catalog.json').write_text(json.dumps({'index': index, 'records': records}), encoding='utf-8')
             report.pop('failureStage')
             report['passed'] = True
         finally:

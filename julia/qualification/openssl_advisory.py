@@ -7,19 +7,12 @@ import json
 import re
 import time
 
+import openssl_registry
+from openssl_registry import pairs
 import openssl_runtime
 
 URL = 'https://openssl-library.org/news/secjson/'
 SCOPE = 'OpenSSL-native-component-only-other-native-ownership-unqualified'
-
-
-def pairs(items):
-    result = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError('duplicate advisory JSON key')
-        result[key] = value
-    return result
 
 
 def version(value):
@@ -92,6 +85,10 @@ def catalog(index, records, target):
         raise ValueError('OpenSSL catalog inventory differs')
     if sum(len(raw.encode()) for raw in records.values() if isinstance(raw, str)) > 16 << 20:
         raise ValueError('oversized OpenSSL catalog')
+    return record_matches(records, target, ('5.0', '5.1'))
+
+
+def record_matches(records, target, supported_formats):
     matches = []
     for name, raw in sorted(records.items()):
         if not isinstance(raw, str) or not 0 < len(raw.encode()) <= 64 << 10:
@@ -100,7 +97,7 @@ def catalog(index, records, target):
         ident = name[:-5].upper()
         meta = record.get('cveMetadata', {})
         cna = record.get('containers', {}).get('cna', {})
-        if (record.get('dataType') != 'CVE_RECORD' or record.get('dataVersion') not in ('5.0', '5.1')
+        if (record.get('dataType') != 'CVE_RECORD' or record.get('dataVersion') not in supported_formats
                 or meta.get('cveId') != ident or meta.get('state') != 'PUBLISHED'
                 or cna.get('providerMetadata', {}).get('shortName') != 'openssl'):
             raise ValueError('unrecognized OpenSSL CNA record')
@@ -122,18 +119,24 @@ def catalog(index, records, target):
     return matches
 
 
+def complete_matches(index, records, extra, target):
+    # The vendor directory retains its own closed schema and exact census.
+    return sorted(catalog(index, records, target) + record_matches(extra, target, ('5.0', '5.1', '5.2')))
+
+
 def validate_report(report, inventory, scan_time):
     openssl_runtime.validate_component(inventory)
     if not isinstance(report, dict) or set(report) != {
             'index', 'records', 'indexSHA256', 'recordSHA256', 'checkedAt', 'scope',
-            'version', 'affectedControlVersion', 'affectedControl', 'advisories'}:
+            'version', 'affectedControlVersion', 'affectedControl', 'advisories', 'registryCoverage'}:
         raise ValueError('incomplete native OpenSSL advisory evidence')
     checked = dt.datetime.fromisoformat(report['checkedAt'])
     if checked.tzinfo is None or abs(checked - scan_time) > dt.timedelta(hours=1):
         raise ValueError('OpenSSL catalog outside qualification window')
     index, records = report['index'], report['records']
-    actual = catalog(index, records, openssl_runtime.VERSION)
-    control = catalog(index, records, '3.5.8')
+    extra = openssl_registry.published_records(index_names(index), report['registryCoverage'], scan_time)
+    actual = complete_matches(index, records, extra, openssl_runtime.VERSION)
+    control = complete_matches(index, records, extra, '3.5.8')
     if (report['scope'] != SCOPE or report['version'] != openssl_runtime.VERSION
             or report['affectedControlVersion'] != '3.5.8'
             or 'CVE-2026-84782' not in control or report['affectedControl'] != control
@@ -176,7 +179,9 @@ def qualify(run, inventory, now, report=None):
               'recordSHA256': {k: hashlib.sha256(v.encode()).hexdigest() for k, v in records.items()},
               'checkedAt': now().isoformat(), 'scope': SCOPE, 'version': openssl_runtime.VERSION,
               'affectedControlVersion': '3.5.8'})
-    report['affectedControl'] = catalog(index, records, '3.5.8')
-    report['advisories'] = catalog(index, records, openssl_runtime.VERSION)
+    report['registryCoverage'] = openssl_registry.fetch(run, index_names(index), now)
+    extra = openssl_registry.published_records(index_names(index), report['registryCoverage'], now())
+    report['affectedControl'] = complete_matches(index, records, extra, '3.5.8')
+    report['advisories'] = complete_matches(index, records, extra, openssl_runtime.VERSION)
     validate_report(report, inventory, now())
     return report

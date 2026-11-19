@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import openssl_advisory as advisory
 import openssl_runtime as runtime
+import openssl_registry as registry
 
 
 def component():
@@ -19,9 +20,18 @@ def component():
             'licenseSHA256': runtime.LICENSE_SHA256, 'originalJLLVersion': '3.5.8+0'}
 
 
+def census(now, records):
+    ids = ['CVE-2026-121482', *(name[:-5].upper() for name in list(records)[1:203])]
+    rows = [{'cve': {'id': ident, 'sourceIdentifier': registry.SOURCE, 'vulnStatus': 'Analyzed'}} for ident in ids]
+    page = json.dumps({'format': 'NVD_CVE', 'version': '2.0', 'startIndex': 0, 'timestamp': now.isoformat(),
+                       'resultsPerPage': len(rows), 'totalResults': len(rows), 'vulnerabilities': rows})
+    return {'sourcePage': page, 'sourcePageSHA256': hashlib.sha256(page.encode()).hexdigest(),
+            'records': {}, 'recordSHA256': {}}
+
+
 def fixture(now):
     records = {}
-    for number in [84782, *range(1000, 1296)]:
+    for number in [84782, *range(1000, 1295), 121482]:
         ident = 'CVE-2026-' + str(number)
         records[ident.lower() + '.json'] = json.dumps({
             'dataType': 'CVE_RECORD', 'dataVersion': '5.1',
@@ -35,7 +45,7 @@ def fixture(now):
               'recordSHA256': {k: hashlib.sha256(v.encode()).hexdigest() for k,v in records.items()},
               'checkedAt': now.isoformat(), 'scope': advisory.SCOPE, 'version': '3.5.9',
               'affectedControlVersion': '3.5.8', 'affectedControl': advisory.catalog(index, records, '3.5.8'),
-              'advisories': []}
+              'advisories': [], 'registryCoverage': census(now, records)}
     return result
 
 
@@ -135,6 +145,8 @@ class OpenSSLTests(unittest.TestCase):
                 return map(function, names)
         self_outer = self
         def run(args, limit):
+            if args[-1] == registry.DISCOVERY:
+                return good['registryCoverage']['sourcePage'].encode()
             name = args[-1].removeprefix(advisory.URL)
             raw = good['records'][name] if name else good['index']
             self.assertLessEqual(len(raw.encode()), limit)

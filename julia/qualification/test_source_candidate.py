@@ -16,6 +16,7 @@ class SourceCandidateTests(unittest.TestCase):
         self.now = dt.datetime.now(dt.timezone.utc)
         data = fixture(self.now)
         self.index, self.records = data['index'], data['records']
+        self.registry = data['registryCoverage']
         self.fix = 'a' * 40
         self.ident = 'CVE-2026-1000'
         self.name = self.ident.lower() + '.json'
@@ -35,7 +36,7 @@ class SourceCandidateTests(unittest.TestCase):
         patch.dict(candidate.PINS, record_set_sha256=pin).start()
 
     def check(self):
-        return candidate.source_catalog(self.index, self.records, self.producer, self.now, self.now)
+        return candidate.source_catalog(self.index, self.records, self.producer, self.now, self.now, self.registry)
 
     def test_current_source_evidence_preserves_release_refusal(self):
         result = self.check()
@@ -69,14 +70,14 @@ class SourceCandidateTests(unittest.TestCase):
                 bad = copy.deepcopy(self.producer)
                 bad['vendorFixes'][self.ident][key] = 'other'
                 with self.assertRaisesRegex(ValueError, 'ancestry binding'):
-                    candidate.source_catalog(self.index, self.records, bad, self.now, self.now)
+                    candidate.source_catalog(self.index, self.records, bad, self.now, self.now, self.registry)
 
     def test_stale_future_and_naive_catalog_times_refused(self):
         for delta in (dt.timedelta(hours=2), -dt.timedelta(seconds=1)):
             with self.assertRaisesRegex(ValueError, 'window'):
-                candidate.source_catalog(self.index, self.records, self.producer, self.now, self.now + delta)
+                candidate.source_catalog(self.index, self.records, self.producer, self.now, self.now + delta, self.registry)
         with self.assertRaisesRegex(ValueError, 'window'):
-            candidate.source_catalog(self.index, self.records, self.producer, self.now.replace(tzinfo=None), self.now)
+            candidate.source_catalog(self.index, self.records, self.producer, self.now.replace(tzinfo=None), self.now, self.registry)
 
     def test_other_producer_bytes_refused_before_zip_parsing(self):
         with tempfile.TemporaryDirectory() as temporary:
