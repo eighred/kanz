@@ -77,10 +77,18 @@ function serve(identity) {
 async function onboard(page, context, input) {
   // Record only recognized local routes and numeric status. Bodies, query
   // strings, headers and arbitrary browser exceptions can carry credentials.
+  const controlReads = []
+  let nodePosts = 0
+  page.on('request', request => {
+    if (request.url() === base + '/api/v1/control/nodes' && request.method() === 'POST') nodePosts++
+  })
   page.on('response', response => {
     const url = new URL(response.url())
     const label = url.origin === base && routes.get(url.pathname)
     if (label) statuses.set(label, response.status())
+    if (label === 'listRuns' && response.request().method() === 'GET' && controlReads.at(-1) !== response.status()) {
+      controlReads.push(response.status())
+    }
   })
   const cdp = await context.newCDPSession(page)
   await cdp.send('WebAuthn.enable')
@@ -112,7 +120,10 @@ async function onboard(page, context, input) {
   await page.getByText('Security key verified. Return to your action and submit it explicitly.', { exact: true }).waitFor()
   stage = 'node submission'
   await page.goto(base + '/provisions')
-  await page.getByRole('button', { name: 'Add node', exact: true }).click()
+  // Enrollment advances the identity session epoch. Allow two normal gateway
+  // revocation refreshes and the view's 30-second GET poll before submitting once.
+  await page.getByRole('button', { name: 'Add node', exact: true }).click({ timeout: 95000 })
+  if (controlReads.at(-1) !== 200 || controlReads.some(status => ![200, 503].includes(status))) throw new Error()
   await page.getByLabel('Hostname', { exact: true }).fill(input.hostname)
   await page.getByLabel('IP address').fill(input.ip)
   await page.getByLabel('SSH user').fill(input.sshUser)
@@ -125,7 +136,8 @@ async function onboard(page, context, input) {
   const id = await receipt.innerText()
   if (!id.startsWith('provision-' + input.hostname.slice(0, 20) + '-') ||
       !/^provision-[a-z0-9-]{1,20}-[a-z0-9]{5}$/.test(id)) throw new Error()
-  return id
+  if (nodePosts !== 1) throw new Error()
+  return { id, controlReads, nodePosts }
 }
 
 async function main() {
@@ -161,7 +173,7 @@ async function main() {
     page.setDefaultTimeout(20000)
     const receipt = await onboard(page, context, input)
     await context.close()
-    process.stdout.write(receipt + '\n')
+    process.stdout.write(JSON.stringify(receipt) + '\n')
   } finally {
     try {
       if (browser) await browser.close()

@@ -312,15 +312,20 @@ def main():
         print("Authenticating the browser and submitting the fresh SSH worker.", flush=True)
         with edge(control, control_ip):
             browser_env = {k: os.environ[k] for k in ("PATH", "HOME", "TEST_MFA_PLAYWRIGHT")}
-            receipt = estate.run(["node", str(ROOT / "tools/operator_onboarding/browser.cjs")],
-                                 environment=browser_env, public_error=browser_error,
-                                 data=json.dumps({"base": auth["origin"], "subject": auth["subject"],
-                                                  "invite": auth["invite"], "hostname": worker, "ip": worker_ip,
-                                                  "sshUser": "ubuntu", "sshHostKey": host_key,
-                                                  "sshPrivateKey": key}), timeout=180)
+            result = estate.run(["node", str(ROOT / "tools/operator_onboarding/browser.cjs")],
+                                environment=browser_env, public_error=browser_error,
+                                data=json.dumps({"base": auth["origin"], "subject": auth["subject"],
+                                                 "invite": auth["invite"], "hostname": worker, "ip": worker_ip,
+                                                 "sshUser": "ubuntu", "sshHostKey": host_key,
+                                                 "sshPrivateKey": key}), timeout=240)
         del key, auth
+        browser = json.loads(result)
+        receipt = browser["id"]
         if not re.fullmatch("[a-z0-9-]{1,63}", receipt):
             raise RuntimeError("browser returned no usable provisioning receipt")
+        if browser["controlReads"] not in ([200], [503, 200]) or browser["nodePosts"] != 1:
+            raise RuntimeError("browser did not confirm the authorized control read and single submission")
+        print(f"Browser control-list GET statuses {browser['controlReads']}; exactly one add-node POST.", flush=True)
         k("-n", OPERATOR, "wait", "--for=condition=complete", "job/" + receipt, "--timeout=360s")
         k("wait", "--for=condition=Ready", "node/" + worker, "--timeout=120s")
         estate.guest(worker, "rm", "/home/ubuntu/.ssh/authorized_keys")
