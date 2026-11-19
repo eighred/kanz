@@ -1,7 +1,6 @@
 package position
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -82,7 +81,7 @@ func TestTenantPositionReplayAfterProcessExit(t *testing.T) {
 		c := &cases[i]
 		var exit *exec.ExitError
 		if err := c.worker.wait(); !errors.As(err, &exit) || exit.ExitCode() != exitAfterFold {
-			t.Fatalf("%s first process did not exit at the committed pre-ACK boundary: %v %s", c.tenant, err, c.worker.output.String())
+			t.Fatalf("%s first process did not exit at the committed pre-ACK boundary: %v", c.tenant, err)
 		}
 	}
 	for i := range cases {
@@ -106,7 +105,7 @@ func TestTenantPositionReplayAfterProcessExit(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := c.worker.wait(); err != nil {
-			t.Fatalf("%s replacement: %v %s", c.tenant, err, c.worker.output.String())
+			t.Fatalf("%s replacement exit: %v", c.tenant, err)
 		}
 	}
 }
@@ -115,7 +114,7 @@ func (c *restartTenant) publishSimulatedFill(t *testing.T, ctx context.Context) 
 	t.Helper()
 	nc, err := nats.Connect(c.url)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("observer could not connect to fixture account %s", c.tenant)
 	}
 	t.Cleanup(nc.Close)
 	js, err := jetstream.New(nc)
@@ -132,7 +131,7 @@ func (c *restartTenant) publishSimulatedFill(t *testing.T, ctx context.Context) 
 	}
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: c.url, Name: "simulated-fill"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("producer could not connect to fixture account %s", c.tenant)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms", ProducerVersion: "test", Tenant: c.tenant})
@@ -234,8 +233,12 @@ func (c *restartTenant) verifyPosition(t *testing.T, ctx context.Context, facts 
 	if info.State.LastSeq != uint64(facts) || info.State.Msgs != 2 {
 		t.Fatalf("%s stream state: %+v", c.tenant, info.State)
 	}
-	for index, subj := range []string{subject.PositionFor(c.tenant, "fund", "ASSET"), subject.VenuePositionFor(c.tenant, "fund", "XBIN", "ASSET")} {
-		raw, err := c.position.GetLastMsgForSubject(ctx, subj)
+	announcements := []struct{ subject, eventType, venue string }{
+		{subject.PositionFor(c.tenant, "fund", "ASSET"), subject.PositionChanged, ""},
+		{subject.VenuePositionFor(c.tenant, "fund", "XBIN", "ASSET"), subject.VenuePositionChanged, "XBIN"},
+	}
+	for index, want := range announcements {
+		raw, err := c.position.GetLastMsgForSubject(ctx, want.subject)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,9 +253,10 @@ func (c *restartTenant) verifyPosition(t *testing.T, ctx context.Context, facts 
 		if err := proto.Unmarshal(payload, &state); err != nil {
 			t.Fatal(err)
 		}
-		if raw.Sequence != uint64(facts-1+index) || env.TenantId != c.tenant || env.CausationId != c.eventID || env.EventClass != envelopepb.EventClass_EVENT_CLASS_FACT ||
+		if raw.Sequence != uint64(facts-1+index) || env.EventType != want.eventType || state.Venue != want.venue ||
+			env.TenantId != c.tenant || env.CausationId != c.eventID || env.EventClass != envelopepb.EventClass_EVENT_CLASS_FACT ||
 			state.PortfolioId != "fund" || state.InstrumentId != "ASSET" || dec.FromProto(state.Quantity).Cmp(big.NewRat(c.qty, 1)) != 0 || dec.FromProto(state.AveragePrice).Cmp(big.NewRat(c.price, 1)) != 0 {
-			t.Fatalf("%s incorrect retained position sequence=%d tenant=%s cause=%s state=%v", subj, raw.Sequence, env.TenantId, env.CausationId, &state)
+			t.Fatalf("%s incorrect retained position sequence=%d tenant=%s cause=%s state=%v", want.subject, raw.Sequence, env.TenantId, env.CausationId, &state)
 		}
 	}
 }
@@ -298,7 +302,6 @@ func restartAccountEndpoints(t *testing.T, tenants []string) map[string]string {
 
 type positionProcess struct {
 	cmd    *exec.Cmd
-	output bytes.Buffer
 	stdin  io.WriteCloser
 	waited bool
 }
@@ -323,7 +326,6 @@ func startPositionProcess(t *testing.T, ctx context.Context, tenant, endpoint, p
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stdout, cmd.Stderr = &p.output, &p.output
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
