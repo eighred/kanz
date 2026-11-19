@@ -11,16 +11,23 @@ on:
       - 'kanz/go.sum'
       - 'schemas/buf*.yaml'
       - 'schemas/bootstrap-go-sdk.sh'
-      - 'kanz/cmd/kanz_migrate/Dockerfile'
-      - 'kanz/services/api_gateway/Dockerfile'
-      - 'kanz/services/risk_engine/Dockerfile'
+      - 'kanz/cmd/kanz_migrate/**'
+      - 'kanz/cmd/kanz_devtoken/**'
+      - 'kanz/services/api_gateway/**'
+      - 'kanz/services/risk_engine/**'
+      - 'kanz/internal/risk/**'
+      - 'kanz/pkg/bus/**'
+      - 'kanz/test/load/seed/**'
+      - 'kanz/infra/nats/bootstrap-job.yaml'
+      - 'schemas/proto/**'
   push:
     branches: [main]
     paths: *dev_inputs
+  workflow_dispatch:
 permissions: {}
 jobs:
   fresh-compose:
-    if: github.repository == 'eighred/kanz' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.repository == 'eighred/kanz' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     permissions:

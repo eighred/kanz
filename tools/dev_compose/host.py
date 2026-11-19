@@ -26,7 +26,12 @@ DEV = ['env', '-i', 'HOME=/home/developer', 'USER=developer',
 
 
 def run(*args, timeout=180, quiet=False):
-    p = subprocess.run(args, capture_output=quiet, text=True, timeout=timeout, check=True)
+    try:
+        p = subprocess.run(args, capture_output=quiet, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f'{Path(args[0]).name} timed out') from None
+    if p.returncode:
+        raise RuntimeError(f'{Path(args[0]).name} exited {p.returncode}')
     return p.stdout.strip() if quiet else None
 
 
@@ -66,7 +71,7 @@ def main(inputs, buf):
             try:
                 guest('true', timeout=10, quiet=True)
                 break
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            except RuntimeError:
                 if time.monotonic() >= deadline:
                     raise RuntimeError('VM agent unavailable') from None
                 time.sleep(2)
@@ -93,6 +98,8 @@ def main(inputs, buf):
             test "$(/usr/local/bin/buf --version)" = 1.69.0
             /usr/local/go/bin/go version
         """)
+        guest('env', 'COMPOSE_PROJECT_NAME=' + project, 'python3', '-B',
+              '/work/repo/tools/dev_compose/lifecycle.py', '--observe-baseline')
         env = [*DEV, 'COMPOSE_PROJECT_NAME=' + project]
         guest('systemd-run', '--unit=kanz-dev-up', '--remain-after-exit', '--uid=developer',
               '--property=RuntimeMaxSec=45min', *env, 'make', '-C', '/work/repo/kanz', '-f', 'Makefile',
@@ -100,7 +107,7 @@ def main(inputs, buf):
         deadline = time.monotonic() + 600
         while guest('sh', '-c', 'test -f /home/developer/sdk-ready && echo yes || echo waiting', quiet=True) != 'yes':
             if time.monotonic() > deadline or unit(vm) == 'failed':
-                guest('journalctl', '-u', 'kanz-dev-up', '--no-pager', '-n', '30')
+                guest('systemctl', 'show', 'kanz-dev-up', '-p', 'ExecMainStatus', '-p', 'Result')
                 raise RuntimeError('canonical SDK generation did not reach the handoff')
             time.sleep(3)
         guest('runuser', '-u', 'developer', '--', *env, 'go', '-C', '/work/repo/kanz', 'mod', 'download', timeout=480)
@@ -127,10 +134,10 @@ def main(inputs, buf):
             if status == 'exited':
                 break
             if time.monotonic() > deadline or status in ('failed', 'dead'):
-                guest('journalctl', '-u', 'kanz-dev-up', '--no-pager', '-n', '40')
+                guest('systemctl', 'show', 'kanz-dev-up', '-p', 'ExecMainStatus', '-p', 'Result')
                 raise RuntimeError('normal make up failed on the disconnected VM')
             time.sleep(3)
-        guest('journalctl', '-u', 'kanz-dev-up', '--no-pager', '-n', '9')
+        print('The normal Make startup and authenticated smoke completed.', flush=True)
         guest('env', 'COMPOSE_PROJECT_NAME=' + project, 'python3', '-B',
               '/work/repo/tools/dev_compose/lifecycle.py', timeout=720)
     finally:
