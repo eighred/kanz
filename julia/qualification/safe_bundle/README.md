@@ -23,6 +23,7 @@ Use the pinned nonroot base and the local-only [application image recipe](https:
 tar --sort=name --mtime=@0 --owner=65532 --group=65532 --numeric-owner --format=gnu \
   -C "$OUTPUT/bundle" -cf "$CONTEXT/bundle.tar" .
 docker build --pull=false --network=none --platform=linux/amd64 \
+  --label "org.eighred.calibration.test-bundle-sha256=$(sha256sum "$CONTEXT/bundle.tar" | cut -d' ' -f1)" \
   --label "org.opencontainers.image.revision=$SOURCE" --iidfile "$RECEIPTS/image.id" "$CONTEXT"
 ```
 

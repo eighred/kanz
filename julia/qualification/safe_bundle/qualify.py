@@ -18,17 +18,23 @@ BASE = "gcr.io/distroless/base-nossl-debian12@sha256:be40c00dfabd86576d92666e87e
 ENTRY = "/opt/kanz/bin/curve-worker"
 
 
-def inspect_image(image, source):
+def inspect_image(image, source, bundle):
     info, = json.loads(required(["docker", "image", "inspect", image]))
     base, = json.loads(required(["docker", "image", "inspect", BASE]))
     config = info["Config"]
     layers = info["RootFS"]["Layers"]
-    if (info["Id"] != image or layers[:-1] != base["RootFS"]["Layers"]
+    base_layers = base["RootFS"]["Layers"]
+    added = layers[len(base_layers):]
+    # Some builders emit a tar containing only the end-of-archive blocks for WORKDIR.
+    empty_tar = "sha256:" + hashlib.sha256(bytes(1024)).hexdigest()
+    if (info["Id"] != image or layers[:len(base_layers)] != base_layers
+            or len(added) not in (1, 2) or added[0] == empty_tar or added[1:] not in ([], [empty_tar])
             or (info["Os"], info["Architecture"]) != ("linux", "amd64")
             or config["Entrypoint"] != [ENTRY] or config["User"] != "65532:65532"
-            or config["Labels"].get("org.opencontainers.image.revision") != source):
+            or config["Labels"].get("org.opencontainers.image.revision") != source
+            or config["Labels"].get("org.eighred.calibration.test-bundle-sha256") != bundle):
         raise ValueError("immutable application identity or base layers differ")
-    return layers[-1]
+    return added[0]
 
 
 @contextlib.contextmanager
@@ -67,7 +73,7 @@ def worker(image, source, supervisor=None):
 def qualify(image, source, inventory):
     if not re.fullmatch(r"sha256:[a-f0-9]{64}", image) or not re.fullmatch(r"[a-f0-9]{40}", source):
         raise ValueError("expected exact image and Git identities")
-    layer = inspect_image(image, source)
+    layer = inspect_image(image, source, inventory["bundleSHA256"])
     launcher = inventory["application"]["bin/curve-worker"]["sha256"]
     if not re.fullmatch(r"[a-f0-9]{64}", launcher):
         raise ValueError("invalid launcher digest")
