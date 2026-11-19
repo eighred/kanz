@@ -18,8 +18,7 @@ import (
 )
 
 // OKXSource is the live OKX v5 L2 depth feed — a DepthSource over the public
-// `books` channel, compiled only under -tags okx so the default binary links no
-// websocket.
+// `books` channel.
 //
 // OKX is simpler than Binance here: the channel carries an explicit sequence
 // chain (seqId / prevSeqId) and pushes its own initial snapshot on subscribe, so
@@ -43,10 +42,11 @@ type OKXSource struct {
 	wsURL        string
 	httpc        *http.Client
 
-	conn    *websocket.Conn
-	stopKA  context.CancelFunc
-	lastSeq int64 // last seqId folded
-	seeded  bool  // a snapshot has been folded; updates before it are dropped
+	conn        *websocket.Conn
+	stopKA      context.CancelFunc
+	lastSeq     int64 // last seqId folded
+	seeded      bool  // a snapshot has been folded; updates before it are dropped
+	lastEventMS int64 // Venue time of the last emitted book, retained across reconnects.
 }
 
 // OKXConfig configures an OKXSource.
@@ -122,26 +122,33 @@ func (s *OKXSource) Recv(ctx context.Context) (Update, error) {
 		}
 		d := msg.Data[0]
 
-		if msg.Action == "snapshot" {
-			s.lastSeq, s.seeded = d.SeqID, true
-			return Update{Snapshot: s.snapshotProto(d)}, nil
-		}
-		// action == "update"
-		switch {
-		case !s.seeded:
-			continue // an update before the snapshot — nothing to fold onto
-		case d.SeqID == s.lastSeq:
-			continue // OKX signals "no change in depth" by repeating the seqId
-		case d.PrevSeqID != s.lastSeq:
-			// A hole in the chain. Reconnect to force a fresh snapshot rather than
-			// fold out of order.
-			s.reset()
-			continue
+		if msg.Action == "update" {
+			switch {
+			case !s.seeded, d.SeqID == s.lastSeq:
+				continue // waiting for a snapshot, or the venue's no-change frame
+			case d.PrevSeqID != s.lastSeq:
+				s.reset() // a gap needs a fresh snapshot
+				continue
+			}
 		}
 
+		ms, err := strconv.ParseInt(d.TS, 10, 64)
+		ts := timestamppb.New(time.UnixMilli(ms))
+		if err != nil || ms <= 0 || !ts.IsValid() {
+			s.reset()
+			return Update{}, fmt.Errorf("okx depth: invalid venue event time at sequence %d", d.SeqID)
+		}
+		if ms < s.lastEventMS {
+			s.reset()
+			return Update{}, fmt.Errorf("okx depth: venue event time regressed from %d to %d at sequence %d", s.lastEventMS, ms, d.SeqID)
+		}
 		prev := s.lastSeq
-		s.lastSeq = d.SeqID
-		return Update{Delta: s.deltaProto(d, prev)}, nil
+		s.lastSeq, s.lastEventMS = d.SeqID, ms
+		if msg.Action == "snapshot" {
+			s.seeded = true
+			return Update{Snapshot: s.snapshotProto(d, ts)}, nil
+		}
+		return Update{Delta: s.deltaProto(d, prev, ts)}, nil
 	}
 }
 
@@ -238,24 +245,24 @@ func (s *OKXSource) readBook(ctx context.Context) (*okxBookMessage, error) {
 	return &msg, nil
 }
 
-func (s *OKXSource) snapshotProto(d okxBookLevels) *marketpb.OrderBookSnapshot {
+func (s *OKXSource) snapshotProto(d okxBookLevels, ts *timestamppb.Timestamp) *marketpb.OrderBookSnapshot {
 	return &marketpb.OrderBookSnapshot{
 		InstrumentId:       s.instrumentID,
 		Symbol:             s.instID,
 		Mic:                s.mic,
-		EventTime:          timestamppb.New(okxTime(d.TS)),
+		EventTime:          ts,
 		LastUpdateSequence: uint64(d.SeqID),
 		Bids:               okxLevels(d.Bids),
 		Asks:               okxLevels(d.Asks),
 	}
 }
 
-func (s *OKXSource) deltaProto(d okxBookLevels, prev int64) *marketpb.OrderBookDelta {
+func (s *OKXSource) deltaProto(d okxBookLevels, prev int64, ts *timestamppb.Timestamp) *marketpb.OrderBookDelta {
 	return &marketpb.OrderBookDelta{
 		InstrumentId:        s.instrumentID,
 		Symbol:              s.instID,
 		Mic:                 s.mic,
-		EventTime:           timestamppb.New(okxTime(d.TS)),
+		EventTime:           ts,
 		FirstUpdateSequence: uint64(d.SeqID), // OKX carries no range — one id per frame
 		LastUpdateSequence:  uint64(d.SeqID),
 		PrevUpdateSequence:  uint64(prev),
@@ -304,14 +311,4 @@ func okxLevels(raw [][]string) []*marketpb.PriceLevel {
 		out = append(out, &marketpb.PriceLevel{Price: priceD, Size: sizeD})
 	}
 	return out
-}
-
-// okxTime parses the venue's millisecond epoch string. An unparseable ts falls
-// back to now — the sequence chain, not the clock, is what orders the fold.
-func okxTime(ts string) time.Time {
-	ms, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil || ms <= 0 {
-		return time.Now().UTC()
-	}
-	return time.UnixMilli(ms).UTC()
 }
