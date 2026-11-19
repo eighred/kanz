@@ -22,6 +22,7 @@ if ($PSBoundParameters.ContainsKey('BackupReceipt')) {
         $receipt.backup_id -isnot [string] -or $receipt.backup_id -cnotmatch '\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\z' -or
         $receipt.key -isnot [string] -or $receipt.key -cne "testnet/data-plane/$($receipt.backup_id)/bundle.tar.gz" -or
         $receipt.version_id -isnot [string] -or [string]::IsNullOrEmpty($receipt.version_id) -or
+        [Text.Encoding]::UTF8.GetByteCount($receipt.version_id) -gt 1024 -or
         $receipt.version_id -ceq 'null' -or $receipt.version_id -match '\p{Cc}' -or
         $receipt.sha256 -isnot [string] -or $receipt.sha256 -cnotmatch '\A[0-9a-f]{64}\z') {
         throw 'Expected a verified backup receipt with its matching archive key, immutable version and SHA-256.'
