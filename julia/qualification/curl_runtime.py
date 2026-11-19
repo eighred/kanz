@@ -25,6 +25,10 @@ def overlay(base, path):
 
 
 def validate_component(inventory):
+    validate_backend(inventory, 'OpenSSL/3.5.9')
+
+
+def validate_backend(inventory, expected_backend):
     item = inventory.get('nativeLibCURL')
     if not isinstance(item, dict) or set(item) != {
             'version', 'versionAPI', 'versionNumber', 'sslBackend', 'features', 'protocols',
@@ -39,7 +43,7 @@ def validate_component(inventory):
     if type(features) is not int or not 0 <= features < 1 << 31 or features & ((1 << 2) | (1 << 16)) != ((1 << 2) | (1 << 16)):
         raise ValueError('libcurl TLS/HTTP2 feature proof missing')
     expected = {'version': VERSION, 'versionAPI': 'curl_version_info', 'versionNumber': 0x081700,
-                'sslBackend': 'OpenSSL/3.5.9', 'features': features, 'protocols': protocols,
+                'sslBackend': expected_backend, 'features': features, 'protocols': protocols,
                 'path': PATH, 'file': FILE, 'archiveSHA256': ARCHIVE_SHA256,
                 'licenseSHA256': LICENSE_SHA256, 'originalJLLVersion': '8.22.0+0'}
     native = inventory.get('nativeRuntime', {})

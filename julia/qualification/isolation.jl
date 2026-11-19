@@ -134,19 +134,21 @@ end
 seven = Dict("path"=>"libexec/julia/7z", "sha256"=>native_files["libexec/julia/7z"]["sha256"],
     "version"=>"26.03", "versionCommand"=>"i")
 println(stderr, "KANZ_OCI_STAGE=openssl-version")
+@test isempty(ARGS) || ARGS == ["--source-candidate"]
+candidate = isempty(ARGS) ? nothing : TOML.parsefile(joinpath(@__DIR__, "source_candidate.toml"))
 openssl_files = Dict{String,Any}()
 for (name, expected) in (("libcrypto.so.3", "09ac6b8640f13b13badf5d2430a8cd326d27ad77668868ad6c9a36de87c4857d"),
                          ("libssl.so.3", "044e0615a9f42e6e02298eec073325f528bee55c56901134788220fc5e96a098"))
     path = "/opt/julia/lib/julia/" * name
     @test realpath(path) == path && !islink(path)
-    @test native_files["lib/julia/" * name]["sha256"] == expected
+    @test native_files["lib/julia/" * name]["sha256"] == (isnothing(candidate) ? expected : candidate["files"][name]["sha256"])
     openssl_files["lib/julia/" * name] = native_files["lib/julia/" * name]
 end
 crypto = Libdl.dlopen("/opt/julia/lib/julia/libcrypto.so.3")
 ssl = Libdl.dlopen("/opt/julia/lib/julia/libssl.so.3")
 @test realpath(Libdl.dlpath(crypto)) == "/opt/julia/lib/julia/libcrypto.so.3"
 @test realpath(Libdl.dlpath(ssl)) == "/opt/julia/lib/julia/libssl.so.3"
-@test unsafe_string(ccall(Libdl.dlsym(crypto, :OpenSSL_version), Cstring, (Cint,), 0)) == "OpenSSL 3.5.9 29 Sep 2026"
+@test unsafe_string(ccall(Libdl.dlsym(crypto, :OpenSSL_version), Cstring, (Cint,), 0)) == (isnothing(candidate) ? "OpenSSL 3.5.9 29 Sep 2026" : candidate["runtime_identity"])
 # Exercise the linked ssl/crypto pair without creating a socket or TLS bypass.
 method = ccall(Libdl.dlsym(ssl, :TLS_method), Ptr{Cvoid}, ())
 ssl_context = ccall(Libdl.dlsym(ssl, :SSL_CTX_new), Ptr{Cvoid}, (Ptr{Cvoid},), method)
@@ -154,8 +156,8 @@ ssl_context = ccall(Libdl.dlsym(ssl, :SSL_CTX_new), Ptr{Cvoid}, (Ptr{Cvoid},), m
 ccall(Libdl.dlsym(ssl, :SSL_CTX_free), Cvoid, (Ptr{Cvoid},), ssl_context)
 openssl_license = bytes2hex(sha256(read("/opt/julia/share/licenses/kanz-openssl-runtime/LICENSE.txt")))
 @test openssl_license == "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
-openssl = Dict("version"=>"3.5.9", "versionAPI"=>"OpenSSL_version(0)",
-    "archiveSHA256"=>"8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063",
+openssl = Dict("version"=>(isnothing(candidate) ? "3.5.9" : candidate["version"]), "versionAPI"=>"OpenSSL_version(0)",
+    "archiveSHA256"=>(isnothing(candidate) ? "8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063" : candidate["archive_sha256"]),
     "files"=>openssl_files, "licenseSHA256"=>openssl_license, "originalJLLVersion"=>native_jll["OpenSSL_jll"]["version"])
 println(stderr, "KANZ_OCI_STAGE=libcurl-version")
 # Stable initial C layout from curl/curl.h; later fields are never dereferenced.
@@ -181,7 +183,7 @@ curl_info_ptr = ccall(Libdl.dlsym(curl, :curl_version_info), Ptr{CurlVersionPref
 @test curl_info_ptr != C_NULL
 curl_info = unsafe_load(curl_info_ptr)
 @test unsafe_string(curl_info.version) == "8.23.0" && curl_info.version_num == 0x081700
-@test unsafe_string(curl_info.ssl_version) == "OpenSSL/3.5.9"
+@test unsafe_string(curl_info.ssl_version) == (isnothing(candidate) ? "OpenSSL/3.5.9" : candidate["curl_backend"])
 @test curl_info.features & ((1 << 2) | (1 << 16)) == ((1 << 2) | (1 << 16))
 @test curl_info.protocols != C_NULL
 curl_protocols = String[]

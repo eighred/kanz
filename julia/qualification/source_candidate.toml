@@ -1,0 +1,17 @@
+# One reviewed unsigned source build. It has no release or deployment authority.
+source = "65e1164883045c787cf2c25b486f7424eef5aee7"
+version = "3.5.10-dev"
+runtime_identity = "OpenSSL 3.5.10-dev "
+curl_backend = "OpenSSL/3.5.10"
+version_base = "3.5.9"
+artifact_sha256 = "51c196628b1f76ef2e17f743ff5a10b1df72329ed418dbf62945c0b01f7edec7"
+archive_sha256 = "16b92b2dd61998e52b58cd436dab506c7902bc2d0c590acba899a1df4e891d95"
+record_set_sha256 = "3587f0148d30caceea48d830bba72cf9dc50666baf4c115fd679c0fa9a630373"
+
+[files."libcrypto.so.3"]
+size = 7189088
+sha256 = "59bfd21937a81de9aaacff649cfa96ab020af23e46a8fabf19aa31cc2a240812"
+
+[files."libssl.so.3"]
+size = 1262952
+sha256 = "c599c4ae616e54b8933f7d7eb2e643f633bf2382428b02d7546904239b4dbd52"

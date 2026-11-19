@@ -322,3 +322,19 @@ qualification executes the recipe on an independently archive-derived temporary
 tree and tests prewrite tamper/symlink refusal; those tests require the three
 verified archives in `RUNNER_TEMP`. Partial installer failure stops the build;
 this is not a live installation or transactional rollback mechanism.
+
+### Development-source candidate
+
+The separate candidate accepts the unsigned OpenSSL development commit `65e1164883045c787cf2c25b486f7424eef5aee7` for a disposable offline build. The production Dockerfile and its qualification still require the published 3.5.9 artifact. Run from a clean LF checkout with the usual independently generated Julia and Go schema bindings. Use a dedicated public-input directory with the verified Julia and libcurl archives named `julia.tar.gz` and `libcurl.tar.gz`. Its `packages/` directory holds the three pinned source archives, the committed `Manifest.toml` and `qualification/offline_packages.json`. The [producer artifact](https://github.com/eighred/kanz/actions/runs/44185887107/artifacts/14376625018) must be the original ZIP.
+
+```sh
+python3 -B julia/qualification/source_candidate.py stage "$PRODUCER_ZIP" "$PUBLIC_INPUTS/openssl.tar.gz"
+rev=$(git rev-parse HEAD)
+git archive --format=tar "$rev" julia schemas/proto | docker build --network=none --platform linux/amd64 \
+  --build-context "candidate_inputs=$PUBLIC_INPUTS" --build-arg "VERSION=$rev" \
+  --iidfile "$OUTPUT/image-id" -f julia/qualification/source_candidate.Dockerfile -
+python3 -B julia/qualification/source_candidate.py verify "$(cat "$OUTPUT/image-id")" \
+  "$PUBLIC_INPUTS" "$PRODUCER_ZIP" "$OUTPUT/source-candidate.json"
+```
+
+The checker verifies the full native inventory, original JLL metadata, local 7zip identity, installed source packages and generated contracts. It uses the ordinary no-network worker checks, numerical assertions, 13 Go corpus cases and timeout cleanup. The fresh vendor catalog must match the reviewed complete record set. Every advisory on the 3.5.9 baseline must carry the same upstream fix and recorded ancestry as the two independently reproduced outputs. A changed record, missing control, stale observation or changed installed byte refuses. The receipt always retains `releaseQualified=false` and `consumerAccepted=false`. Wider native advisory ownership, upstream 7zip mapping, signed release, rollout and rollback retain their separate acceptance gates.

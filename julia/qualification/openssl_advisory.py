@@ -143,9 +143,7 @@ def validate_report(report, inventory, scan_time):
         raise ValueError('native OpenSSL advisory/control/identity refusal')
 
 
-def qualify(run, inventory, now, report=None):
-    if report is None:
-        report = {}
+def fetch_catalog(run):
     deadline = time.monotonic() + 120
     def fetch(name):
         if time.monotonic() >= deadline:
@@ -166,6 +164,13 @@ def qualify(run, inventory, now, report=None):
                 if total > 16 << 20 or time.monotonic() >= deadline:
                     raise ValueError('OpenSSL catalog retrieval bound exceeded')
                 records[name] = raw
+    return index, records
+
+
+def qualify(run, inventory, now, report=None):
+    if report is None:
+        report = {}
+    index, records = fetch_catalog(run)
     report.update({'index': index, 'records': records,
               'indexSHA256': hashlib.sha256(index.encode()).hexdigest(),
               'recordSHA256': {k: hashlib.sha256(v.encode()).hexdigest() for k, v in records.items()},

@@ -1,0 +1,87 @@
+import copy
+import datetime as dt
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import openssl_advisory
+import source_candidate as candidate
+from test_openssl import fixture
+
+
+class SourceCandidateTests(unittest.TestCase):
+    def setUp(self):
+        self.now = dt.datetime.now(dt.timezone.utc)
+        data = fixture(self.now)
+        self.index, self.records = data['index'], data['records']
+        self.fix = 'a' * 40
+        self.ident = 'CVE-2026-1000'
+        self.name = self.ident.lower() + '.json'
+        document = json.loads(self.records[self.name])
+        container = document['containers']['cna']
+        container['affected'][0]['versions'][0]['lessThan'] = '3.5.10'
+        container['references'] = [{'name': '3.5.10 git commit', 'tags': ['patch'],
+                                    'url': 'https://github.com/openssl/openssl/commit/' + self.fix}]
+        self.records[self.name] = json.dumps(document)
+        evidence = {'fix': self.fix, 'cnaSHA256': candidate.digest(self.records[self.name].encode()),
+                    'compareURL': 'https://api.github.com/repos/openssl/openssl/compare/' + self.fix + '...' +
+                                  candidate.PINS['source'] + '?per_page=1&page=2', 'compareSHA256': 'b' * 64}
+        self.producer = {'vendorFixes': {self.ident: evidence}, 'pins': {'fixes': {self.ident: self.fix}}}
+        hashes = {key: candidate.digest(raw.encode()) for key, raw in self.records.items()}
+        pin = candidate.digest(json.dumps(hashes, sort_keys=True, separators=(',', ':')).encode())
+        self.addCleanup(patch.stopall)
+        patch.dict(candidate.PINS, record_set_sha256=pin).start()
+
+    def check(self):
+        return candidate.source_catalog(self.index, self.records, self.producer, self.now, self.now)
+
+    def test_current_source_evidence_preserves_release_refusal(self):
+        result = self.check()
+        self.assertEqual(set(result['sourceFixes']), {self.ident})
+        self.assertIn('CVE-2026-84782', result['officialAffectedControl'])
+        with self.assertRaises(ValueError):
+            openssl_advisory.version(candidate.PINS['version'])
+
+    def test_unreviewed_record_or_revised_unaffected_record_refused(self):
+        self.records[self.name] += ' '
+        with self.assertRaisesRegex(ValueError, 'changed CNA catalog'):
+            self.check()
+
+    def test_new_affected_record_without_matching_ancestor_refused(self):
+        old = 'cve-2026-1001.json'
+        self.records[old] = self.records[self.name].replace(self.ident, 'CVE-2026-1001')
+        with self.assertRaisesRegex(ValueError, 'complete release baseline'):
+            self.check()
+
+    def test_lost_positive_control_refused(self):
+        control = 'cve-2026-84782.json'
+        del self.records[control]
+        self.index = self.index.replace(control, 'cve-2026-3000.json')
+        self.records['cve-2026-3000.json'] = self.records['cve-2026-1002.json'].replace('CVE-2026-1002', 'CVE-2026-3000')
+        with self.assertRaisesRegex(ValueError, 'affected control'):
+            self.check()
+
+    def test_source_ancestry_cannot_be_substituted(self):
+        for key in ('fix', 'compareURL', 'compareSHA256', 'cnaSHA256'):
+            with self.subTest(key=key):
+                bad = copy.deepcopy(self.producer)
+                bad['vendorFixes'][self.ident][key] = 'other'
+                with self.assertRaisesRegex(ValueError, 'ancestry binding'):
+                    candidate.source_catalog(self.index, self.records, bad, self.now, self.now)
+
+    def test_stale_future_and_naive_catalog_times_refused(self):
+        for delta in (dt.timedelta(hours=2), -dt.timedelta(seconds=1)):
+            with self.assertRaisesRegex(ValueError, 'window'):
+                candidate.source_catalog(self.index, self.records, self.producer, self.now, self.now + delta)
+        with self.assertRaisesRegex(ValueError, 'window'):
+            candidate.source_catalog(self.index, self.records, self.producer, self.now.replace(tzinfo=None), self.now)
+
+    def test_other_producer_bytes_refused_before_zip_parsing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'changed.zip'
+            with path.open('wb') as stream:
+                stream.truncate(14035645)
+            with self.assertRaisesRegex(ValueError, 'artifact digest'):
+                candidate.read_producer(path)

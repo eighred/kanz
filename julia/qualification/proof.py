@@ -120,6 +120,10 @@ def validate_inventory(inventory, source, runtime_sha256, native_expected):
     native_mapping.validate_component(inventory, native_expected)
     openssl_runtime.validate_component(inventory)
     curl_runtime.validate_component(inventory)
+    validate_worker_inventory(inventory, source, runtime_sha256)
+
+
+def validate_worker_inventory(inventory, source, runtime_sha256, extra_sources=()):
     if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:
         raise ValueError('packaged development environment boundary differs')
     if inventory['sourceSHA'] != source or inventory['runtime'] != '1.13.3':
@@ -144,6 +148,8 @@ def validate_inventory(inventory, source, runtime_sha256, native_expected):
             if path.is_file():
                 sources[path.relative_to(ROOT / 'julia').as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     sources['qualification/isolation.jl'] = hashlib.sha256(Path(__file__).with_name('isolation.jl').read_bytes()).hexdigest()
+    for name in extra_sources:
+        sources['qualification/' + name] = hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
     if (inventory['sources'] != sources or not re.fullmatch('[0-9a-f]{64}', runtime_sha256)
             or inventory['runtimeExecutableSHA256'] != runtime_sha256):
         raise ValueError('image worker/source inventory differs')
@@ -178,6 +184,101 @@ def validate_report(report, source, runtime_sha256, native_expected):
         validate_inventory(report['inventory'], source, runtime_sha256, native_expected)
     except (KeyError, TypeError, AttributeError):
         raise ValueError('malformed image inventory') from None
+
+
+def cleanup_containers(names, source):
+    clean = True
+    for name in names:
+        try:
+            code, raw = command(['docker', 'inspect', name], timeout=15)
+            if code == 0:
+                items = json.loads(raw)
+                if len(items) != 1 or items[0]['Config']['Labels'].get('kanz.julia-proof') != source:
+                    clean = False
+                    continue
+                code, _ = command(['docker', 'rm', '--force', name], timeout=30)
+                clean &= code == 0
+            remaining = required(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}'], timeout=15)
+            clean &= not remaining.strip()
+        except Exception:
+            clean = False
+    return clean
+
+
+def exercise_image(image, source, scratch, names, report, inventory_check, isolation_args=()):
+    def run(data=b'', script=None, timeout_control=False):
+        name = 'kanz-julia-proof-' + uuid.uuid4().hex
+        names.append(name) # cleanup also covers a lost create response
+        args = ['docker', 'create', '--name', name, '--label', 'kanz.julia-proof=' + source,
+                '--platform', 'linux/amd64', '--network', 'none', '--read-only', '--user', '65532:65532',
+                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--cpus', '1',
+                '--memory', '1g', '--memory-swap', '1g', '--pids-limit', '64',
+                '--tmpfs', '/tmp:rw,noexec,nosuid,size=16777216,mode=1777', '-i']
+        if script or timeout_control:
+            args += ['--entrypoint', '/opt/julia/bin/julia']
+        args += [image]
+        if script:
+            args += FLAGS + [script]
+            if script == '/opt/kanz-jl/qualification/isolation.jl':
+                args += isolation_args
+        elif timeout_control:
+            args += FLAGS + ['-e', 'sleep(120)']
+        required(args)
+        info = json.loads(required(['docker', 'inspect', name]))[0]
+        container_boundary(info, image, source)
+        code, wire = command(['docker', 'start', '--attach', '--interactive', name], data=data,
+                             timeout=2 if timeout_control else 90,
+                             diagnostic=report.setdefault('isolationDiagnostic', {})
+                             if script == '/opt/kanz-jl/qualification/isolation.jl' else None)
+        info = json.loads(required(['docker', 'inspect', name]))[0]
+        container_boundary(info, image, source)
+        if info['State']['Running'] or info['State']['OOMKilled'] or info['State']['ExitCode'] != code:
+            raise ValueError('container execution did not complete consistently')
+        return code, wire
+
+    report['failureStage'] = 'isolation-and-installed-dependencies'
+    code, wire = run(script='/opt/kanz-jl/qualification/isolation.jl')
+    if code:
+        raise ValueError('actual isolation test refused')
+    inventory = tomllib.loads(wire.decode())
+    inventory_check(inventory)
+    report['inventory'] = inventory
+    report['isolationPassed'] = True
+    report['failureStage'] = 'existing-independent-goldens'
+    code, wire = run(script='/opt/kanz-jl/test/runtests.jl')
+    if code or b'Generated wire boundary' not in wire or b'Independent rational discount factors' not in wire:
+        raise ValueError('existing Julia goldens did not complete')
+    report['goldensPassed'] = True
+    report['failureStage'] = 'actual-timeout-cleanup'
+    try:
+        run(timeout_control=True)
+    except CommandTimeout:
+        name = names[-1]
+        info = json.loads(required(['docker', 'inspect', name]))[0]
+        container_boundary(info, image, source)
+        if not info['State']['Running']:
+            raise ValueError('timeout control never reached running container')
+        required(['docker', 'rm', '--force', name], timeout=30)
+        if required(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}']).strip():
+            raise ValueError('timed-out owned container survived cleanup')
+        report['timeoutCleanupPassed'] = True
+    else:
+        raise ValueError('timeout control did not time out')
+    report['failureStage'] = 'canonical-protobuf-entrypoint'
+    oracle(scratch, 'prepare')
+    cases = json.loads((scratch / 'cases.json').read_text())
+    if len(cases) != len(CASES) or {c['name'] for c in cases} != CASES:
+        raise ValueError('wire corpus differs')
+    for case in cases:
+        name = case['name']
+        code, wire = run(data=(scratch / (name + '.input')).read_bytes())
+        if (code == 0) is not case['exitZero'] or (code != 0 and wire):
+            raise ValueError('wire refusal/success contract differs')
+        (scratch / (name + '.output')).write_bytes(wire)
+        report['cases'].append(name)
+    oracle(scratch, 'verify')
+    report['passed'] = True
+    report.pop('failureStage')
 
 
 def main():
@@ -215,96 +316,15 @@ def main():
             if metadata['Config']['Labels'].get('org.opencontainers.image.revision') != source:
                 raise ValueError('image revision stamp differs')
 
-            def run(data=b'', script=None, timeout_control=False):
-                name = 'kanz-julia-proof-' + uuid.uuid4().hex
-                names.append(name) # cleanup also covers a lost create response
-                args = ['docker', 'create', '--name', name, '--label', 'kanz.julia-proof=' + source,
-                        '--platform', 'linux/amd64', '--network', 'none', '--read-only', '--user', '65532:65532',
-                        '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--cpus', '1',
-                        '--memory', '1g', '--memory-swap', '1g', '--pids-limit', '64',
-                        '--tmpfs', '/tmp:rw,noexec,nosuid,size=16777216,mode=1777', '-i']
-                if script or timeout_control:
-                    args += ['--entrypoint', '/opt/julia/bin/julia']
-                args += [image]
-                if script:
-                    args += FLAGS + [script]
-                elif timeout_control:
-                    args += FLAGS + ['-e', 'sleep(120)']
-                required(args)
-                info = json.loads(required(['docker', 'inspect', name]))[0]
-                container_boundary(info, image, source)
-                code, wire = command(['docker', 'start', '--attach', '--interactive', name], data=data,
-                                     timeout=2 if timeout_control else 90,
-                                     diagnostic=report.setdefault('isolationDiagnostic', {})
-                                     if script == '/opt/kanz-jl/qualification/isolation.jl' else None)
-                info = json.loads(required(['docker', 'inspect', name]))[0]
-                container_boundary(info, image, source)
-                if info['State']['Running'] or info['State']['OOMKilled'] or info['State']['ExitCode'] != code:
-                    raise ValueError('container execution did not complete consistently')
-                return code, wire
+            exercise_image(image, source, scratch, names, report, lambda inventory:
+                           validate_inventory(inventory, source, runtime_sha256, native_expected))
 
-            stage = 'isolation-and-installed-dependencies'
-            code, wire = run(script='/opt/kanz-jl/qualification/isolation.jl')
-            if code:
-                raise ValueError('actual isolation test refused')
-            inventory = tomllib.loads(wire.decode())
-            validate_inventory(inventory, source, runtime_sha256, native_expected)
-            report['inventory'] = inventory
-            report['isolationPassed'] = True
-            stage = 'existing-independent-goldens'
-            code, wire = run(script='/opt/kanz-jl/test/runtests.jl')
-            if code or b'Generated wire boundary' not in wire or b'Independent rational discount factors' not in wire:
-                raise ValueError('existing Julia goldens did not complete')
-            report['goldensPassed'] = True
-            stage = 'actual-timeout-cleanup'
-            try:
-                run(timeout_control=True)
-            except CommandTimeout:
-                name = names[-1]
-                info = json.loads(required(['docker', 'inspect', name]))[0]
-                container_boundary(info, image, source)
-                if not info['State']['Running']:
-                    raise ValueError('timeout control never reached running container')
-                required(['docker', 'rm', '--force', name], timeout=30)
-                if required(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}']).strip():
-                    raise ValueError('timed-out owned container survived cleanup')
-                report['timeoutCleanupPassed'] = True
-            else:
-                raise ValueError('timeout control did not time out')
-            stage = 'canonical-protobuf-entrypoint'
-            oracle(scratch, 'prepare')
-            cases = json.loads((scratch / 'cases.json').read_text())
-            if len(cases) != len(CASES) or {c['name'] for c in cases} != CASES:
-                raise ValueError('wire corpus differs')
-            for case in cases:
-                name = case['name']
-                code, wire = run(data=(scratch / (name + '.input')).read_bytes())
-                if (code == 0) is not case['exitZero'] or (code != 0 and wire):
-                    raise ValueError('wire refusal/success contract differs')
-                (scratch / (name + '.output')).write_bytes(wire)
-                report['cases'].append(name)
-            oracle(scratch, 'verify')
-            report['passed'] = True
     except Exception as error:
-        report['failureStage'] = stage
+        report.setdefault('failureStage', stage)
         report['errorType'] = type(error).__name__
         raise
     finally:
-        clean = True
-        for name in names:
-            try:
-                code, raw = command(['docker', 'inspect', name], timeout=15)
-                if code == 0:
-                    items = json.loads(raw)
-                    if len(items) != 1 or items[0]['Config']['Labels'].get('kanz.julia-proof') != source:
-                        clean = False
-                        continue
-                    code, _ = command(['docker', 'rm', '--force', name], timeout=30)
-                    clean &= code == 0
-                remaining = required(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}'], timeout=15)
-                clean &= not remaining.strip()
-            except Exception:
-                clean = False
+        clean = cleanup_containers(names, source)
         report['cleanupPassed'] = clean
         report['passed'] &= clean
         (output / 'julia-oci.json').write_text(json.dumps(report, indent=2) + '\n')
