@@ -21,17 +21,23 @@ def component():
 
 
 def census(now, records):
-    ids = ['CVE-2026-121482', *(name[:-5].upper() for name in list(records)[1:203])]
+    ids = sorted(registry.DISCOVERY_CONTROLS) + [name[:-5].upper() for name in list(records)[10:208]]
+    program = {}
+    for ident in ids:
+        doc = json.loads(records[ident.lower() + '.json'])
+        doc['cveMetadata'].update(assignerOrgId=registry.CNA, assignerShortName='openssl')
+        doc['containers']['cna']['providerMetadata']['orgId'] = registry.CNA
+        program[ident] = json.dumps(doc)
     rows = [{'cve': {'id': ident, 'sourceIdentifier': registry.SOURCE, 'vulnStatus': 'Analyzed'}} for ident in ids]
     page = json.dumps({'format': 'NVD_CVE', 'version': '2.0', 'startIndex': 0, 'timestamp': now.isoformat(),
                        'resultsPerPage': len(rows), 'totalResults': len(rows), 'vulnerabilities': rows})
     return {'sourcePage': page, 'sourcePageSHA256': hashlib.sha256(page.encode()).hexdigest(),
-            'records': {}, 'recordSHA256': {}}
+            'records': program, 'recordSHA256': {key: hashlib.sha256(raw.encode()).hexdigest() for key, raw in program.items()}}
 
 
 def fixture(now):
     records = {}
-    for number in [84782, *range(1000, 1295), 121482]:
+    for number in [84782, *range(1000, 1291), *sorted(int(ident.rsplit('-', 1)[1]) for ident in registry.DISCOVERY_CONTROLS)]:
         ident = 'CVE-2026-' + str(number)
         records[ident.lower() + '.json'] = json.dumps({
             'dataType': 'CVE_RECORD', 'dataVersion': '5.1',
@@ -147,6 +153,8 @@ class OpenSSLTests(unittest.TestCase):
         def run(args, limit):
             if args[-1] == registry.DISCOVERY:
                 return good['registryCoverage']['sourcePage'].encode()
+            if args[-1].startswith(registry.REGISTRY):
+                return good['registryCoverage']['records'][args[-1].removeprefix(registry.REGISTRY)].encode()
             name = args[-1].removeprefix(advisory.URL)
             raw = good['records'][name] if name else good['index']
             self.assertLessEqual(len(raw.encode()), limit)
@@ -168,6 +176,7 @@ class OpenSSLTests(unittest.TestCase):
         # Future affected findings remain available in the failed artifact.
         for name in good['records']:
             good['records'][name] = good['records'][name].replace('3.5.9', '3.5.10')
+        good['registryCoverage'] = census(now, good['records'])
         failed = {}
         with patch.object(advisory, 'ThreadPoolExecutor', Pool):
             with self.assertRaises(ValueError): advisory.qualify(run, self.inventory(), lambda: now, failed)

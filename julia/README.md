@@ -285,9 +285,19 @@ and every indexed record by hash, and evaluates all recognized affected ranges.
 The same check reconciles a complete, recent NVD source page for OpenSSL's CNA
 with this directory. The [CVE Program](https://www.cve.org/Downloads) supplies
 the assigning CNA, published/rejected state and affected ranges for every
-discovered ID absent from the vendor directory. The receipt retains the source
-page and additional records with their SHA-256 digests. A partial source page,
-conflicting publisher/state, unknown range or unavailable registry refuses.
+ID on that source page. Five known discovery controls must remain accounted
+for, including after an ID moves into the vendor directory. Confirmed
+rejections require agreement between the CVE Program and NVD and absence
+from the published vendor directory. Overlapping records must agree on their
+affected products and ranges. Forty-five historical CVE Program records from
+20162022 express OpenSSL 1.0, 1.1 or 3.0 releases in prose. For each, the
+[reviewed digest](qualification/openssl_historical_ranges.json) binds both
+authorities' exact affected projections to that CVE before evaluating the
+vendor's machine-readable ranges. A revision to either projection requires
+agreement or a new review. The receipt retains the source page and every
+discovered CVE Program record with SHA-256 digests. Incomplete discovery,
+conflicting publishers or states, unknown ranges and unavailable sources
+refuse qualification.
 Unknown shapes, missing records, any affected installed version, or failure to
 detect the 3.5.8/CVE-2026-84782 control refuse qualification. The control uses
 version-range inputs, not a vulnerable executable. The initial complete catalog

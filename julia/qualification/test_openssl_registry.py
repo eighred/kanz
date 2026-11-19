@@ -43,8 +43,7 @@ class OpenSSLRegistryTests(unittest.TestCase):
         self.registry.update(sourcePage=raw, sourcePageSHA256=hashlib.sha256(raw.encode()).hexdigest())
 
     def supplement(self):
-        return registry.published_records(advisory.index_names(self.report['index']), self.registry,
-                                          self.now)
+        return registry.published_records(self.report['records'], self.registry, self.now)
 
     def test_real_directory_gap_refuses_in_release_and_development_paths(self):
         extra = self.supplement()
@@ -65,7 +64,7 @@ class OpenSSLRegistryTests(unittest.TestCase):
                                             self.now, self.now, self.registry)
 
     def test_missing_wrong_publisher_and_conflicting_state_refuse(self):
-        self.registry['records'].clear()
+        del self.registry['records'][self.ident]
         with self.assertRaisesRegex(ValueError, 'incomplete'):
             self.supplement()
         self.record['cveMetadata']['state'] = 'REJECTED'
@@ -76,6 +75,64 @@ class OpenSSLRegistryTests(unittest.TestCase):
         self.record['containers']['cna']['providerMetadata']['orgId'] = 'different'
         self.write_record()
         with self.assertRaisesRegex(ValueError, 'state or identity'):
+            self.supplement()
+
+    def test_loss_of_another_discovery_control_with_unchanged_count_refuses(self):
+        page = json.loads(self.registry['sourcePage'])
+        other = next(row['cve'] for row in page['vulnerabilities'] if row['cve']['id'] == 'CVE-2026-107494')
+        other['id'] = 'CVE-2026-3000'
+        self.write_page(page)
+        with self.assertRaisesRegex(ValueError, 'discovery control absent'):
+            self.supplement()
+
+    def test_control_can_move_into_vendor_if_affected_ranges_agree(self):
+        name = self.ident.lower() + '.json'
+        self.report['records'][name] = json.dumps(self.record)
+        self.assertEqual(self.supplement(), {})
+        self.record['containers']['cna']['affected'][0]['versions'][0]['lessThan'] = '3.5.11'
+        self.write_record()
+        with self.assertRaisesRegex(ValueError, 'affected range disagreement'):
+            self.supplement()
+
+    def test_historical_projection_is_bound_to_both_authorities(self):
+        page = json.loads(self.registry['sourcePage'])
+        ident = 'CVE-2022-2274'
+        # This historical CVE Program record describes a single obsolete release in prose.
+        row = page['vulnerabilities'][-1]['cve']
+        former = row['id']
+        row['id'] = ident
+        self.write_page(page)
+        del self.registry['records'][former]
+        del self.registry['recordSHA256'][former]
+        self.ident = ident
+        self.record['cveMetadata']['cveId'] = ident
+        product = self.record['containers']['cna']['affected'][0]
+        product['versions'] = [{'version': '3.0.4', 'lessThan': '3.0.5', 'status': 'affected', 'versionType': 'semver'}]
+        name = ident.lower() + '.json'
+        self.report['records'][name] = json.dumps(self.record)
+        del product['defaultStatus']
+        product['versions'] = [{'status': 'affected', 'version': 'Affects OpenSSL 3.0.4'}]
+        self.write_record()
+        self.assertNotIn(name, self.supplement())
+        self.report['records'][name] = self.report['records'][name].replace('3.0.5', '3.5.10')
+        with self.assertRaisesRegex(ValueError, 'affected range disagreement'):
+            self.supplement()
+        self.report['records'][name] = self.report['records'][name].replace('3.5.10', '3.0.5')
+        product['versions'][0]['version'] += ' and later releases'
+        self.write_record()
+        with self.assertRaisesRegex(ValueError, 'affected range disagreement'):
+            self.supplement()
+
+    def test_rejected_control_requires_consistent_public_sources(self):
+        page = json.loads(self.registry['sourcePage'])
+        row = next(row['cve'] for row in page['vulnerabilities'] if row['cve']['id'] == self.ident)
+        row['vulnStatus'] = 'Rejected'
+        self.write_page(page)
+        self.record['cveMetadata']['state'] = 'REJECTED'
+        self.write_record()
+        self.assertEqual(self.supplement(), {})
+        self.report['records'][self.ident.lower() + '.json'] = self.registry['records'][self.ident]
+        with self.assertRaisesRegex(ValueError, 'states disagree'):
             self.supplement()
 
     def test_nvd_incomplete_stale_duplicate_and_wrong_source_refuse(self):
@@ -95,6 +152,9 @@ class OpenSSLRegistryTests(unittest.TestCase):
     def test_rejected_records_checked_against_publisher_and_excluded(self):
         other = 'CVE-2026-9999'
         page = json.loads(self.registry['sourcePage'])
+        former = page['vulnerabilities'][-1]['cve']['id']
+        del self.registry['records'][former]
+        del self.registry['recordSHA256'][former]
         page['vulnerabilities'][-1] = {'cve': {'id': other, 'sourceIdentifier': registry.SOURCE, 'vulnStatus': 'Rejected'}}
         self.write_page(page)
         doc = json.loads(self.registry['records'][self.ident])

@@ -84,7 +84,7 @@ def ancestry_evidence(producer, directory):
 def source_catalog(index, records, producer, acquired, now, registry):
     if (not acquired.tzinfo or not now.tzinfo or not dt.timedelta(0) <= now - acquired <= dt.timedelta(hours=1)):
         raise ValueError('source catalog outside qualification window')
-    extra = openssl_registry.published_records(openssl_advisory.index_names(index), registry, now)
+    extra = openssl_registry.published_records(records, registry, now)
     matches = openssl_advisory.complete_matches(index, records, extra, PINS['version_base'])
     control = openssl_advisory.complete_matches(index, records, extra, '3.5.8')
     records = {**records, **extra}
@@ -209,7 +209,7 @@ def verify(inputs, artifact, upstream, output):
             acquired = dt.datetime.now(dt.timezone.utc)
             index, records = openssl_advisory.fetch_catalog(proof.required)
             now = lambda: dt.datetime.now(dt.timezone.utc)
-            registry = openssl_registry.fetch(proof.required, openssl_advisory.index_names(index), now)
+            registry = openssl_registry.fetch(proof.required, now)
             snapshot = json.dumps({'index': index, 'records': records, 'registryCoverage': registry}).encode()
             (output / 'openssl-catalog.json').write_bytes(snapshot)
             report['catalogSHA256'] = digest(snapshot)

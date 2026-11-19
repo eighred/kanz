@@ -134,7 +134,7 @@ def validate_report(report, inventory, scan_time):
     if checked.tzinfo is None or abs(checked - scan_time) > dt.timedelta(hours=1):
         raise ValueError('OpenSSL catalog outside qualification window')
     index, records = report['index'], report['records']
-    extra = openssl_registry.published_records(index_names(index), report['registryCoverage'], scan_time)
+    extra = openssl_registry.published_records(records, report['registryCoverage'], scan_time)
     actual = complete_matches(index, records, extra, openssl_runtime.VERSION)
     control = complete_matches(index, records, extra, '3.5.8')
     if (report['scope'] != SCOPE or report['version'] != openssl_runtime.VERSION
@@ -179,8 +179,8 @@ def qualify(run, inventory, now, report=None):
               'recordSHA256': {k: hashlib.sha256(v.encode()).hexdigest() for k, v in records.items()},
               'checkedAt': now().isoformat(), 'scope': SCOPE, 'version': openssl_runtime.VERSION,
               'affectedControlVersion': '3.5.8'})
-    report['registryCoverage'] = openssl_registry.fetch(run, index_names(index), now)
-    extra = openssl_registry.published_records(index_names(index), report['registryCoverage'], now())
+    report['registryCoverage'] = openssl_registry.fetch(run, now)
+    extra = openssl_registry.published_records(records, report['registryCoverage'], now())
     report['affectedControl'] = complete_matches(index, records, extra, '3.5.8')
     report['advisories'] = complete_matches(index, records, extra, openssl_runtime.VERSION)
     validate_report(report, inventory, now())

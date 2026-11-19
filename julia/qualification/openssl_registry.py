@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import hashlib
 import json
+from pathlib import Path
 import re
 import time
 
@@ -12,6 +13,8 @@ DISCOVERY = 'https://services.nvd.nist.gov/rest/json/cves/2.0?sourceIdentifier=o
 REGISTRY = 'https://cveawg.mitre.org/api/cve/'
 DISCOVERY_LIMIT = 8 << 20
 RECORD_LIMIT = 128 << 10
+DISCOVERY_CONTROLS = frozenset({'CVE-2026-107494', 'CVE-2026-121481', 'CVE-2026-121482',
+                                'CVE-2026-84786', 'CVE-2026-95690'})
 
 
 def pairs(items):
@@ -23,7 +26,7 @@ def pairs(items):
     return result
 
 
-def missing_records(directory_names, raw, now):
+def source_states(raw, now):
     if not isinstance(raw, str) or not 0 < len(raw.encode()) <= DISCOVERY_LIMIT:
         raise ValueError('invalid OpenSSL source discovery size')
     page = json.loads(raw, object_pairs_hook=pairs)
@@ -47,15 +50,12 @@ def missing_records(directory_names, raw, now):
                                                       'Analyzed', 'Modified', 'Deferred', 'Rejected'}):
             raise ValueError('ambiguous OpenSSL NVD source record')
         states[ident] = 'REJECTED' if status == 'Rejected' else 'PUBLISHED'
-    if states.get('CVE-2026-121482') != 'PUBLISHED':
-        raise ValueError('known missing-directory discovery control absent')
-    listed = {name[:-5].upper() for name in directory_names}
-    if any(states[ident] != 'PUBLISHED' for ident in states.keys() & listed):
-        raise ValueError('vendor directory and CVE discovery states disagree')
-    return {ident: state for ident, state in states.items() if ident not in listed}
+    if not DISCOVERY_CONTROLS.issubset(states):
+        raise ValueError('known OpenSSL discovery control absent')
+    return states
 
 
-def fetch(run, names, now):
+def fetch(run, now):
     deadline = time.monotonic() + 120
     def read(url, limit):
         if time.monotonic() >= deadline:
@@ -63,12 +63,12 @@ def fetch(run, names, now):
         return run(['curl', '--disable', '--fail', '--silent', '--show-error', '--proto', '=https',
                     '--max-time', '35', url], limit=limit).decode()
     raw = read(DISCOVERY, DISCOVERY_LIMIT)
-    missing = sorted(missing_records(names, raw, now()))
+    ids = sorted(source_states(raw, now()))
     records = {}
     total = 0
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for offset in range(0, len(missing), 8):
-            batch = missing[offset:offset + 8]
+        for offset in range(0, len(ids), 8):
+            batch = ids[offset:offset + 8]
             for ident, text in zip(batch, pool.map(lambda key: read(REGISTRY + key, RECORD_LIMIT), batch)):
                 total += len(text.encode())
                 if total > 16 << 20 or time.monotonic() >= deadline:
@@ -78,14 +78,18 @@ def fetch(run, names, now):
             'records': records, 'recordSHA256': {key: hashlib.sha256(text.encode()).hexdigest() for key, text in records.items()}}
 
 
-def published_records(names, evidence, now):
+def published_records(vendor_records, evidence, now):
     if not isinstance(evidence, dict) or set(evidence) != {'sourcePage', 'sourcePageSHA256', 'records', 'recordSHA256'}:
         raise ValueError('OpenSSL cross-index evidence missing')
     raw, records = evidence['sourcePage'], evidence['records']
-    missing = missing_records(names, raw, now)
-    if (not isinstance(records, dict) or records.keys() != missing.keys()
+    states = source_states(raw, now)
+    if (not isinstance(records, dict) or records.keys() != states.keys()
             or hashlib.sha256(raw.encode()).hexdigest() != evidence['sourcePageSHA256']):
         raise ValueError('incomplete OpenSSL CVE registry coverage')
+    # Historical registry records use prose. Bind both original affected projections
+    # before using the vendor's machine-readable ranges for these exact pairs.
+    history = json.loads(Path(__file__).with_name('openssl_historical_ranges.json').read_bytes(),
+                         object_pairs_hook=pairs)
     parsed, hashes, total = {}, {}, 0
     for ident, text in records.items():
         if not isinstance(text, str) or not 0 < len(text.encode()) <= RECORD_LIMIT:
@@ -98,12 +102,24 @@ def published_records(names, evidence, now):
         meta = record.get('cveMetadata', {})
         owner = record.get('containers', {}).get('cna', {}).get('providerMetadata', {})
         if (record.get('dataType') != 'CVE_RECORD' or record.get('dataVersion') not in {'5.0', '5.1', '5.2'}
-                or meta.get('cveId') != ident or meta.get('state') != missing[ident]
+                or meta.get('cveId') != ident or meta.get('state') != states[ident]
                 or meta.get('assignerOrgId') != CNA or owner.get('orgId') != CNA
                 or owner.get('shortName') != 'openssl' or meta.get('assignerShortName') != 'openssl'):
             raise ValueError('CVE registry publisher, state or identity differs')
-        if meta['state'] == 'PUBLISHED':
-            parsed[ident.lower() + '.json'] = text
+        name = ident.lower() + '.json'
+        if name in vendor_records:
+            if meta['state'] != 'PUBLISHED':
+                raise ValueError('OpenSSL vendor and CVE registry states disagree')
+            vendor = json.loads(vendor_records[name], object_pairs_hook=pairs)
+            vendor_ranges = vendor['containers']['cna']['affected']
+            registry_ranges = record['containers']['cna']['affected']
+            if registry_ranges != vendor_ranges:
+                projections = json.dumps({'vendor': vendor_ranges, 'registry': registry_ranges},
+                                         sort_keys=True, separators=(',', ':')).encode()
+                if hashlib.sha256(projections).hexdigest() != history.get(ident):
+                    raise ValueError('unreviewed OpenSSL affected range disagreement')
+        elif meta['state'] == 'PUBLISHED':
+            parsed[name] = text
     if hashes != evidence['recordSHA256']:
         raise ValueError('OpenSSL CVE registry record digest differs')
     return parsed
