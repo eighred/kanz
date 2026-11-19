@@ -1,0 +1,59 @@
+{
+  "backports": {
+    "29e51a820d76c766ae417fcba912714337b0eb17": {
+      "parent": "ea3a617121455260ffff00a3b3744548ea45b6e1",
+      "path": "libstdc++-v3/include/ext/pb_ds/detail/binary_heap_/erase_fn_imps.hpp",
+      "postSHA256": "5cb293d1635272502063885030ff124452fa837c855c39b60a293e9aa08764c0"
+    },
+    "2ffbcde8634f69ae6086e2677bd90ecbad687f9f": {
+      "parent": "f0631b5f056c9c84dee2bf253056d3e920760243",
+      "path": "libstdc++-v3/include/std/bitset",
+      "postSHA256": "8a3d00f34c7e370417e1abbedad48e38a32c7ae88806abb2f21954f8acf791ee"
+    },
+    "638de129df3a22917ff2eda13bd0fd861ca9befc": {
+      "parent": "2bbed56462c1c5a5c852d24bc87871e3287e0f48",
+      "path": "libstdc++-v3/libsupc++/new_opa.cc",
+      "postSHA256": "8097fc64591b4efc496932b700f186ac6f1267a7108a8c9529d24ecb007842aa"
+    },
+    "68b1b9056c70acb31f2964963b51c480ff820602": {
+      "parent": "aef76b019d867551c55f2c13ec751d38ca57469f",
+      "path": "libstdc++-v3/include/bits/fstream.tcc",
+      "postSHA256": "e18d3c43b6927eb826fb431a96146d7e280c9f958c02a5a3caca66ec0ca0228d"
+    },
+    "816c1a39ca9b656ba2d001c7b6fa421ebe44b3a0": {
+      "parent": "c40fab10a94093c38b2bfc8659b015742bfa465a",
+      "path": "libstdc++-v3/src/c++17/floating_from_chars.cc",
+      "postSHA256": "0483d7476f5b34613374ca49e57ab26de9da2486cfd70d739188e747b2491b63"
+    },
+    "b346c341218a6a9a52c56e2bd1516b35b51c2bd2": {
+      "parent": "97d86fc60c2ae99985eb8b6882cdc3ecff298678",
+      "path": "libstdc++-v3/include/parallel/search.h",
+      "postSHA256": "4473e64ebeadc4a6c6e57b18d109722901deee27381d1a7f5fbadb32d90de9da"
+    },
+    "dfc15010eda603e814caf9681a76c726dea2bf64": {
+      "parent": "4f3f98191769cf52ff6a01a097e78db5a89b386d",
+      "path": "libstdc++-v3/include/bits/stl_bvector.h",
+      "postSHA256": "329f7e89e2f6dace8202b906ffd580d470a48b8dfbaf17ab660ebc580d91851c"
+    }
+  },
+  "shards": {
+    "gcc-gnu-bootstrap.tar.gz": {
+      "bytes": 1474917402,
+      "sha256": "4641a9b4233a99addda84f71961c09c8f8b5f907c3a55f02f927b41bed2bf472",
+      "tree": "a8a89fbf4e7dfa6a526b3ec18c060180c06bcc8e",
+      "url": "https://github.com/JuliaPackaging/Yggdrasil/releases/download/GCCBootstrap-v15.2.0/GCCBootstrap-x86_64-linux-gnu.v15.2.0.x86_64-linux-musl.unpacked.tar.gz"
+    },
+    "gcc-gnu-platform.tar.gz": {
+      "bytes": 1304861,
+      "sha256": "ff7d5e5396d2d62adaa4733b8453f7c40878f52952cdf8b6112b6be31d12bb64",
+      "tree": "0a4fcd057d87f56cd0a41a9e860a8a3ee80498a2",
+      "url": "https://github.com/JuliaPackaging/Yggdrasil/releases/download/PlatformSupport-v2025.8.13/PlatformSupport-x86_64-linux-gnu.v2025.8.13.x86_64-linux-musl.unpacked.tar.gz"
+    },
+    "gcc-musl-root.tar.gz": {
+      "bytes": 178874173,
+      "sha256": "fad7027c999302fe9cadb8a0808dbcbdb31af2ea5d1d2fe67f7ad5299984a3ae",
+      "tree": "7e143cec0b1ac13bf97f9af7d6b03d81ccdb48fe",
+      "url": "https://github.com/JuliaPackaging/Yggdrasil/releases/download/Rootfs-v2026.6.10/Rootfs.v2026.6.10.x86_64-linux-musl.unpacked.tar.gz"
+    }
+  }
+}

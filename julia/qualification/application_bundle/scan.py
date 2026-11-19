@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import advisory
 import compiler_owners
+import gcc_runtime
 import jll_advisory
 import linked_advisory
 import pcre2_advisory
@@ -47,6 +48,11 @@ def scan(image, receipt, runtime, tools, database, registry, publisher, output):
     for owner, filenames in JLL_LIBRARIES.items():
         row = receipt['wrapperMetadata'][owner]
         actual = {'lib/' + name: receipt['native']['lib/julia/' + name]['sha256'] for name in filenames}
+        if 'localRebuild' in row:
+            if (owner != 'CompilerSupportLibraries_jll' or row['localRebuild'] != gcc_runtime.rebuild_record()
+                    or actual['lib/' + gcc_runtime.LIB] != gcc_runtime.REPLACEMENT):
+                raise ValueError('unqualified native replacement')
+            actual['lib/' + gcc_runtime.LIB] = gcc_runtime.ORIGINAL
         if row['publisherFiles'] != actual:
             raise ValueError('readback publisher scope differs')
         owners[owner] = {k: row[k] for k in ('version', 'uuid')}

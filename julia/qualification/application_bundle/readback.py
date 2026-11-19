@@ -14,6 +14,7 @@ from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import jll_advisory
+import gcc_runtime
 import pcre2
 
 
@@ -271,7 +272,7 @@ def verify_owner_inputs(directory, owners, elfs):
                              publisherRecipe=record['recipe'], publisherFiles=found)
 
 
-def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_inputs):
+def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_inputs, rebuilt_gcc=None):
     if hash_file(base_index) != BASE_INDEX or hash_file(base_platform) != BASE_PLATFORM:
         raise ValueError('base image bytes differ from the pinned publisher')
     indexes = json.loads(base_index.read_bytes())['manifests']
@@ -286,8 +287,11 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
         raise ValueError('application PCRE2 ABI aliases differ')
     if hash_file(compiler) != JULIA:
         raise ValueError('compiler libraries must come from the pinned Julia distribution')
+    published = elfs
+    if rebuilt_gcc is not None:
+        published = gcc_runtime.publisher_view(elfs, rebuilt_gcc, owner_inputs / 'CompilerSupportLibraries.tar.gz')
     with tarfile.open(compiler, 'r|gz') as packed:
-        owners, certificates = source_libraries(packed, elfs)
+        owners, certificates = source_libraries(packed, published)
     if expected.get(CA_PATH, [])[2:] != [certificates['size'], certificates['sha256']]:
         raise ValueError('packaged CA bundle differs from the original Julia distribution')
     ca = owner_inputs / 'cacerts.tar.gz'
@@ -299,7 +303,9 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
                 or hashlib.file_digest(packed.extractfile(member), 'sha256').hexdigest() != CA_DATA):
             raise ValueError('packaged CA data differs from the Mozilla CA wrapper publisher')
     certificates.update(publisherArchiveSHA256=CA_ARCHIVE, publisherVersion='2026.10.20+0')
-    verify_owner_inputs(owner_inputs, owners, elfs)
+    verify_owner_inputs(owner_inputs, owners, published)
+    if rebuilt_gcc is not None:
+        owners['CompilerSupportLibraries_jll']['localRebuild'] = gcc_runtime.rebuild_record()
     with tarfile.open(image, 'r:') as archive:
         members = archive.getmembers()
         if len(members) > 256 or len({m.name for m in members}) != len(members):
@@ -362,7 +368,8 @@ if __name__ == '__main__':
     for key in ('image', 'base_index', 'base_platform', 'bundle', 'compiler', 'owner_inputs', 'output'):
         parser.add_argument(key, type=Path)
     parser.add_argument('image_id')
+    parser.add_argument('--rebuilt-gcc', type=Path)
     a = parser.parse_args()
-    receipt = verify(a.image, a.image_id, a.base_index, a.base_platform, a.bundle, a.compiler, a.owner_inputs)
+    receipt = verify(a.image, a.image_id, a.base_index, a.base_platform, a.bundle, a.compiler, a.owner_inputs, a.rebuilt_gcc)
     a.output.write_text(json.dumps(receipt, indent=2) + '\n')
     print('Verified native application entries:', len(receipt['native']))

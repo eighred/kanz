@@ -4,6 +4,8 @@ import hashlib
 import tarfile
 import tomllib
 
+import gcc_runtime
+
 
 WRAPPERS = 'https://github.com/JuliaBinaryWrappers/'
 RAW = 'https://raw.githubusercontent.com/'
@@ -40,6 +42,21 @@ def require_member(archive, path, expected):
         raise ValueError('LLVM_full parent member missing or ambiguous')
 
 
+def gcc_pending(wrapper, gcc):
+    rebuilt = wrapper.get('localRebuild')
+    valid_pair = ((GCC_RUNTIME, None), (gcc_runtime.REPLACEMENT, gcc_runtime.rebuild_record()))
+    if (wrapper['publisherArchiveSHA256'] != GCC_BUNDLE
+            or wrapper['publisherFiles']['lib/' + gcc_runtime.LIB] != GCC_RUNTIME
+            or (gcc, rebuilt) not in valid_pair):
+        raise ValueError('actual C++ runtime differs from publisher')
+    # The prebuilt Julia and LLVM consumers may have instantiated these headers.
+    headers = ['CVE-2026-102010', 'CVE-2026-114690', 'CVE-2026-114691', 'CVE-2026-115455', 'CVE-2026-125709']
+    if rebuilt:
+        # The GCC PR covers from_chars. The CNA does not identify its GCC 15 upstream change.
+        return {'libstdc++ header consumers': headers, 'libstdc++ advisory mapping': ['CVE-2026-115456']}
+    return {'libstdc++': sorted([*headers, 'CVE-2026-95619', 'CVE-2026-115456'])}
+
+
 def review(directory, receipt):
     for name, (_, size, sha) in INPUTS.items():
         file = directory / name
@@ -66,9 +83,8 @@ def review(directory, receipt):
             raise ValueError('producer log does not select this GCC toolchain')
     wrapper = receipt['wrapperMetadata']['CompilerSupportLibraries_jll']
     gcc = receipt['native']['lib/julia/libstdc++.so.6.0.34']['sha256']
-    if (wrapper['publisherArchiveSHA256'] != GCC_BUNDLE or gcc != GCC_RUNTIME
-            or wrapper['publisherFiles']['lib/libstdc++.so.6.0.34'] != gcc):
-        raise ValueError('actual C++ runtime differs from publisher')
+    rebuilt = wrapper.get('localRebuild')
+    gcc_review = gcc_pending(wrapper, gcc)
     return {'image': receipt['image'], 'config': receipt['config'], 'gccRuntime': gcc, 'llvmRuntime': llvm['sha256'],
             'gccShard': GCC_SHARD, 'llvmFork': LLVM_FORK,
             'gcc15ReviewHead': 'a311d911f75385702f25eb0df5f54d46e39ba8da',
@@ -85,10 +101,7 @@ def review(directory, receipt):
                 'f46b50adcf752de0e1e0e24e17f42a5075770f48',
             ],
             'llvmUpstreamFix': '7bb9626d5ab901e5c1a8e9acbbb1684c982401b4',
-            'pendingNativeReview': {'libstdc++': [
-                'CVE-2026-95619', 'CVE-2026-102010', 'CVE-2026-114690', 'CVE-2026-114691',
-                'CVE-2026-115455', 'CVE-2026-115456', 'CVE-2026-125709'],
-                'libLLVM': ['CVE-2026-13573', 'CVE-2026-13574']}}
+            'localRebuild': rebuilt, 'pendingNativeReview': {**gcc_review, 'libLLVM': ['CVE-2026-13573', 'CVE-2026-13574']}}
 
 
 def require_reviewed_compilers(report):

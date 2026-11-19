@@ -72,3 +72,30 @@ The current candidate fails this final check on two native owners. The GCC 15 re
 The published CNA entries for CVE-2026-13573 and CVE-2026-13574 enumerate LLVM 22.1.0 through 22.1.6. Their descriptions refer to earlier releases without defining the Julia fork's affected range. Both named IR symbols are exported with the JL_LLVM_20.1 symbol version in the actual shipped shared library. The first upstream report remains open. The second upstream fix merged into LLVM in July 2026. The Julia fork lacks that commit, and its two IR source blobs differ from both the fixed and pre-fix upstream blobs. The newer Julia 20.x branch tip `68f92238` contains one CFG debug-location change and retains all three IR source blobs from the packaged fork. A supported LLVM 20 assessment or reviewed equivalent backport remains necessary. The scoped refusal preserves the completed scanner results and cannot grant release authority. [LLVM #199187](https://github.com/llvm/llvm-project/issues/199187), [LLVM fix #208278](https://github.com/llvm/llvm-project/pull/208278), [CVE-2026-13574](https://www.cve.org/CVERecord?id=CVE-2026-13574)
 
 The production release sequence starts with approved native advisory coverage, an independently verified immutable source build and a reviewed base in the Eighred mirror. Its main-only publisher copies the upstream index and reads it back. A separate credential-limited consumer must establish access to the identical bytes before replacing the candidate's upstream base. The release owner then verifies signed application publication, immutable pull, bounded supervision and rollback; activation remains subject to the existing governance. [Mirror producer](../../../.github/workflows/base-image-mirror.yml) and [release issue](https://github.com/eighred/kanz/issues/1536)
+
+### Rebuild the C++ runtime for the application candidate
+
+The optional GCC 15.2.0 build uses the signed GNU release tag, seven producer changes and the three BinaryBuilder bootstrap shards in `gcc_runtime_inputs.json`. Six changes come from the GCC 15 series. The seventh uses the GCC 16 file-stream backport that preserves the original exported C++ signatures. The production-source preparer checks Git blob IDs, the release signer and all seven applied file hashes. Run it with Git, GnuPG, Python 3.11 or later and GNU binutils. Fetch the release and fix objects from [the official GCC mirror](https://github.com/gcc-mirror/gcc), the pinned release archive from its commit, and the [GNU keyring](https://ftp.gnu.org/gnu/gnu-keyring.gpg). Put the three pinned shards in a new bootstrap directory. Run the compiler in a private, network-disabled Linux/amd64 container.
+
+```sh
+q=julia/qualification/application_bundle
+python3 -B "$q/gcc_runtime.py" prepare "$inputs/gcc152-sources.tar.gz" \
+  "$inputs/gcc-release.git" "$inputs/gcc-fixes.git" "$inputs/gnu-release-keys.gpg" "$out/gcc-production.tar"
+python3 -B "$q/gcc_runtime.py" verify-shards "$inputs/bootstrap"
+docker build --platform linux/amd64 --network none --iidfile "$out/bootstrap.id" \
+  -f "$q/gcc_runtime.Dockerfile" "$inputs/bootstrap"
+docker run --rm --pull=never --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --user 65532:65532 --cpus 3 --memory 4g --memory-swap 4g --pids-limit 128 \
+  --tmpfs /work:rw,nosuid,exec,size=2200m,mode=1777 --tmpfs /source:rw,nosuid,exec,size=700m,mode=1777 \
+  --tmpfs /tmp:rw,nosuid,noexec,size=64m,mode=1777 \
+  --mount "type=bind,src=$out/gcc-production.tar,dst=/vendor-release.tar,readonly" \
+  --mount "type=bind,src=$PWD/$q/build_gcc_runtime.sh,dst=/qualification.sh,readonly" \
+  --mount "type=bind,src=$PWD/$q/gcc_runtime_controls.cc,dst=/cxx-surface.cc,readonly" \
+  --mount "type=bind,src=$out/runtime,dst=/out" "$(cat "$out/bootstrap.id")" /qualification.sh
+python3 -B "$q/gcc_runtime.py" stage-compiler "$scratch/pcre-compiler" \
+  "$out/runtime/libstdc++.so.6.0.34" "$scratch/rebuilt-compiler"
+```
+
+Use fresh, absolute input, scratch and output paths. Give UID 65532 write access to the empty runtime output directory. Select the staged compiler for the ordinary `build.jl` invocation above. Provide `--rebuilt-gcc "$out/runtime/libstdc++.so.6.0.34"` to readback. The receipt binds the actual OCI bytes and the original GCC JLL publisher bytes separately. All 6,097 versioned exports and their types, the SONAME, the dynamic dependencies and the glibc bounds are checked against the original. The other six shipped GCC libraries retain their publisher hashes. Run the benign standard-library controls from the build on the resulting immutable application image with the application's own library search path.
+
+Rebuilding the C++ shared library addresses the compiled aligned allocation path. Five header changes still require provenance for the prebuilt consumer binaries. The from_chars and file-stream changes correspond to GCC PR127666 and PR118099. A definitive CVE-to-fix mapping from the compiler or advisory owner remains outstanding for CVE-2026-115456 and CVE-2026-125709. The independent LLVM review and all release checks still apply.
