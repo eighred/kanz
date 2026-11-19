@@ -10,14 +10,31 @@ import release
 
 
 class ReleaseEvidence(unittest.TestCase):
+    def test_migration_links_cannot_escape_the_inventory(self):
+        for kind in (tarfile.LNKTYPE, tarfile.SYMTYPE):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as folder:
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode='w') as archive:
+                    member = tarfile.TarInfo('migrations/accounting/0022_extra.sql')
+                    member.type = kind
+                    member.linkname = '../../another.sql'
+                    archive.addfile(member)
+                stream.seek(0)
+                with tarfile.open(fileobj=stream) as archive, self.assertRaisesRegex(ValueError, 'file type'):
+                    release.rootfs(archive, 'kanz-migrate', Path(folder) / 'app')
+
     def test_attestation_must_bind_digest_and_predicate(self):
-        statement = {'subject': [{'name': 'ghcr.io/eighred/accounting', 'digest': {'sha256': release.IMAGES['accounting']}}],
+        statement = {'_type': 'https://in-toto.io/Statement/v0.1',
+                     'subject': [{'name': 'ghcr.io/eighred/accounting', 'digest': {'sha256': release.IMAGES['accounting']}}],
                      'predicateType': release.PREDICATES['spdxjson'],
                      'predicate': {'spdxVersion': 'SPDX-2.3', 'packages': [{'name': 'accounting'}]}}
         def encoded(value):
             return json.dumps({'payloadType': 'application/vnd.in-toto+json',
                                'payload': base64.b64encode(json.dumps(value).encode()).decode()})
         self.assertEqual(release.attestations(encoded(statement), 'accounting', 'spdxjson'), [1])
+        wrong_scan = {**statement, 'predicateType': release.PREDICATES['vuln'], 'predicate': {'scanner': {}}}
+        with self.assertRaisesRegex(ValueError, 'Trivy'):
+            release.attestations(encoded(wrong_scan), 'accounting', 'vuln')
         for changed in ({**statement, 'subject': []}, {**statement, 'predicateType': 'different'},
                         {**statement, 'subject': [{'digest': {'sha256': '0' * 64}}]}):
             with self.subTest(changed=changed), self.assertRaises(ValueError):

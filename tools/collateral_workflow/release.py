@@ -10,9 +10,6 @@ import tempfile
 import uuid
 
 
-TAG = 'v2026.4.0'
-ISSUER = 'https://token.actions.githubusercontent.com'
-IDENTITY = f'https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/{TAG}'
 IMAGES = {
     'accounting': '91c37620d2cdfc31ba78ecbf1725f0288eee923825841f5323cd12411be69173',
     'kanz-migrate': '147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24',
@@ -36,7 +33,8 @@ def attestations(lines, name, kind):
             raise ValueError('unexpected attestation envelope')
         statement = json.loads(base64.b64decode(envelope['payload'], validate=True))
         subjects = statement['subject']
-        if (len(subjects) != 1 or subjects[0].get('name') != 'ghcr.io/eighred/' + name
+        if (statement.get('_type') != 'https://in-toto.io/Statement/v0.1' or len(subjects) != 1
+                or subjects[0].get('name') != 'ghcr.io/eighred/' + name
                 or subjects[0]['digest'].get('sha256') != IMAGES[name]
                 or statement['predicateType'] != PREDICATES[kind]):
             raise ValueError('release subject or predicate differs')
@@ -46,23 +44,20 @@ def attestations(lines, name, kind):
             if not predicate['spdxVersion'].startswith('SPDX-') or not packages:
                 raise ValueError('empty signed software inventory')
             matches.append(len(packages))
-        elif predicate:
-            matches.append(1)
+        else:
+            scanner = predicate.get('scanner', {})
+            report = scanner.get('result', {})
+            version = scanner.get('version', '')
+            if (not isinstance(predicate.get('invocation'), dict) or version.lstrip('v') != '0.72.0'
+                    or scanner.get('uri') != 'pkg:github/aquasecurity/trivy@' + version
+                    or report.get('SchemaVersion') != 2 or report.get('ArtifactType') != 'container_image'
+                    or not isinstance(report.get('Results'), list)
+                    or not report['Results']):
+                raise ValueError('expected the released Trivy vulnerability scan')
+            matches.append(len(report['Results']))
     if not matches:
         raise ValueError('missing verified release attestation')
     return matches
-
-
-def acquire():
-    policy = ['--certificate-oidc-issuer', ISSUER, '--certificate-identity', IDENTITY]
-    for name in IMAGES:
-        ref = reference(name)
-        subprocess.run(['cosign', 'verify', *policy, ref], stdout=subprocess.DEVNULL, check=True)
-        for kind in PREDICATES:
-            result = subprocess.check_output(['cosign', 'verify-attestation', *policy, '--type', kind, ref])
-            counts = attestations(result, name, kind)
-            print(f'{name}: verified {kind} for {ref}; entries {counts}', flush=True)
-        subprocess.run(['docker', 'pull', '--platform=linux/amd64', ref], check=True)
 
 
 def rootfs(archive, name, program):
@@ -72,14 +67,19 @@ def rootfs(archive, name, program):
     binary_hash = None
     for member in archive:
         path = '/' + member.name.removeprefix('./')
+        migration = path.startswith('/migrations/accounting/')
+        if path.lower().endswith(('.jar', '.jmod', '.class', '.war', '.ear')):
+            raise ValueError('JVM artifact in released filesystem')
         if not member.isfile():
+            if path == executable or migration:
+                raise ValueError('unexpected file type in executable or Accounting migrations')
             continue
         if path in seen:
             raise ValueError('duplicate path in flattened image')
         seen.add(path)
         handle = archive.extractfile(member)
         header = handle.read(8)
-        if header.startswith(b'\xca\xfe\xba\xbe') or path.lower().endswith(('.jar', '.jmod', '.class', '.war', '.ear')):
+        if header.startswith(b'\xca\xfe\xba\xbe'):
             raise ValueError('JVM artifact in released filesystem')
         if header.startswith(b'\x7fELF'):
             if path != executable or header[:6] != b'\x7fELF\x02\x01' or not member.mode & 0o111:
@@ -92,7 +92,7 @@ def rootfs(archive, name, program):
                     digest.update(chunk)
                     output.write(chunk)
             binary_hash = digest.hexdigest()
-        elif path.startswith('/migrations/accounting/'):
+        elif migration:
             filename = path.removeprefix('/migrations/accounting/')
             if '/' in filename or not filename.endswith('.sql') or member.size > 1024 * 1024:
                 raise ValueError('unexpected bundled Accounting migration')
@@ -109,6 +109,10 @@ def rootfs(archive, name, program):
 def inspect(folder):
     for name in IMAGES:
         ref = reference(name)
+        for kind in PREDICATES:
+            path = folder / 'collateral-attestations' / f'{name}.{kind}.jsonl'
+            counts = attestations(path.read_bytes(), name, kind)
+            print(f'{ref}: signed {kind} entries {counts}', flush=True)
         info, = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref]))
         if (info['Os'] != 'linux' or info['Architecture'] != 'amd64' or info['Config']['User'] != 'nonroot:nonroot'
                 or info['Config']['Entrypoint'] != ['/' + name] or ref not in info['RepoDigests']):
@@ -144,10 +148,6 @@ def inspect(folder):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('acquire', 'inspect'))
     parser.add_argument('scratch', type=Path)
     arguments = parser.parse_args()
-    if arguments.mode == 'acquire':
-        acquire()
-    else:
-        inspect(arguments.scratch)
+    inspect(arguments.scratch)
