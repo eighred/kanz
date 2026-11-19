@@ -16,7 +16,8 @@ function source_digests(project)
     return Dict(path => file_digest(joinpath(project, path)) for path in files)
 end
 
-function build(project, destination)
+function build(project, destination, replay...)
+    length(replay) in (0, 2) || error("replay requires both an earlier output and its trusted receipt digest")
     VERSION == v"1.13.3" || error("Julia 1.13.3 required")
     Base.active_project() == joinpath(@__DIR__, "tools", "Project.toml") ||
         error("use the pinned safe_bundle/tools project")
@@ -35,30 +36,53 @@ function build(project, destination)
     codec = Dict(relpath(joinpath(directory, name), package) => file_digest(joinpath(directory, name))
                  for (directory, _, names) in walkdir(joinpath(package, "src"))
                  for name in names if endswith(name, ".jl"))
+    entrypoint = joinpath(@__DIR__, "entrypoint.jl")
+    inputs = Dict(
+        "juliaVersion" => string(VERSION), "juliaCTree" => tool.tree_hash,
+        "juliaExecutableSHA256" => file_digest(joinpath(Sys.BINDIR, "julia")),
+        "sysimageSHA256" => file_digest(joinpath(Sys.BINDIR, "../lib/julia/sys.so")),
+        "buildManifestSHA256" => file_digest(tools), "workerSources" => initial,
+        "protobufSources" => codec, "entrypointSHA256" => file_digest(entrypoint),
+    )
     mktempdir(dirname(destination)) do temporary
         archive = joinpath(temporary, "worker.o.a")
         image = ImageRecipe(
-            file=joinpath(@__DIR__, "entrypoint.jl"), project=project, cpu_target="generic",
+            file=entrypoint, project=project, cpu_target="generic",
             output_type="--output-exe", trim_mode="safe", img_path=archive, verbose=true,
         )
-        compile_products(image)
+        prior = nothing
+        if isempty(replay)
+            withenv("KANZ_JULIAC_WORKER_SOURCE" => joinpath(project, "src", "Worker.jl")) do
+                compile_products(image)
+            end
+        else
+            previous, expected = replay
+            receipt = joinpath(previous, "build.toml")
+            file_digest(receipt) == expected || error("untrusted compiler receipt")
+            prior = TOML.parsefile(receipt)
+            all(prior[key] == value for (key, value) in inputs) || error("compiler inputs differ")
+            cp(joinpath(previous, "worker.o.a"), archive)
+            file_digest(archive) == prior["compilerObjectSHA256"] || error("compiler output differs")
+            image.instantiated_project = project
+            # JuliaC adds this C shim after compiling the archive in compile_products.
+            push!(image.extra_objects, JuliaC._compile_jl_options_shim(image.jl_options))
+        end
         link = LinkRecipe(image_recipe=image, outname=joinpath(temporary, "curve-worker"), rpath="@bundle")
         link_products(link)
         output = mkdir(joinpath(temporary, "output"))
         bundle = joinpath(output, "bundle")
         bundle_products(BundleRecipe(link_recipe=link, output_dir=bundle))
         source_digests(project) == initial || error("worker source changed during build")
-        report = Dict(
-            "juliaVersion" => string(VERSION), "juliaCTree" => tool.tree_hash,
-            "buildManifestSHA256" => file_digest(tools), "workerSources" => initial,
-            "protobufSources" => codec, "entrypointSHA256" => file_digest(image.file),
+        report = merge(inputs, Dict(
             "compilerObjectSHA256" => file_digest(archive),
             "executableSHA256" => file_digest(joinpath(bundle, "bin", "curve-worker")),
-        )
+        ))
+        isnothing(prior) || report == prior || error("relinked output differs from compiler receipt")
+        mv(archive, joinpath(output, "worker.o.a"))
         open(io -> TOML.print(io, report; sorted=true), joinpath(output, "build.toml"), "w")
         mv(output, destination)
     end
 end
 
-length(ARGS) == 2 || error("usage: build.jl PREPARED_WORKER_PROJECT NEW_OUTPUT_DIRECTORY")
+length(ARGS) in (2, 4) || error("usage: build.jl PROJECT NEW_OUTPUT [VERIFIED_OUTPUT RECEIPT_SHA256]")
 build(ARGS...)

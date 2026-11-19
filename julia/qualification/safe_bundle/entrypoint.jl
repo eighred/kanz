@@ -1,5 +1,6 @@
-# JuliaC compiles in its copy of the prepared application project.
-include(joinpath(dirname(Base.active_project()), "src", "Worker.jl"))
+# JuliaC's temporary project selects dependencies. Use the prepared source at
+# its stable build mount so compiler metadata does not contain a random copy path.
+include(ENV["KANZ_JULIAC_WORKER_SOURCE"])
 
 function @main(::Vector{String})::Cint
     input = Base.fdio("stdin", 0, false)

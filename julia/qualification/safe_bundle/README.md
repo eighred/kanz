@@ -15,6 +15,13 @@ Supply a staged Julia 1.13.3 compiler, a prepared worker project with `src/`, ge
 
 `build.jl` uses JuliaC's upstream compile, link and bundle phases. The compiler must pass `--trim=safe` with the generic CPU target. The upstream bundler selects the shipped libraries. `$OUTPUT/build.toml` records the object archive, linked executable, tool manifest, generated contract and implementation hashes. Preserve this receipt beside the normalized archive of `$OUTPUT/bundle`.
 
+For independent relinking, supply the previous compiler output and the SHA-256 of its trusted build receipt. This mode rechecks the source inputs, retained `worker.o.a` and final executable digest. The fresh compile path uses a stable source mount. Two independent compilations of matching inputs can still emit different object bytes with this Julia release. [Upstream determinism investigation](https://github.com/JuliaLang/julia/issues/63149)
+
+```sh
+"$JULIA" --startup-file=no --history-file=no --project=julia/qualification/safe_bundle/tools \
+  julia/qualification/safe_bundle/build.jl "$PREPARED_WORKER_PROJECT" "$REPLAY" "$OUTPUT" "$TRUSTED_RECEIPT_SHA256"
+```
+
 ## Verify the packaged bytes
 
 Use the pinned nonroot base and the local-only [application image recipe](https://github.com/eighred/kanz/blob/0922f9dba4ba37a1a94016c11291803b5741cd83/julia/qualification/application_bundle/Dockerfile). Stage the bundle as `bundle.tar` with ownership 65532:65532, bind the build revision through the OCI revision label and retain the exact image ID. On Linux the archive command is:
