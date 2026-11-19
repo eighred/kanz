@@ -6,10 +6,13 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/liquidity"
 )
 
 // THE TAIL MEASURES HAD NO OBSERVABILITY OF ANY KIND (#527).
@@ -26,6 +29,40 @@ type noReturns struct{}
 
 func (noReturns) Returns(context.Context, string, time.Time, int) ([]float64, error) {
 	return nil, errors.New("no series")
+}
+
+type quotedLiquidity struct{}
+
+func (quotedLiquidity) Liquidity(context.Context, string, time.Time) (liquidity.LiquiditySpec, bool) {
+	return liquidity.LiquiditySpec{ADV: 1000, Spread: 0.01}, true
+}
+
+func TestTailOverflowPreservesMissingLegAndDerivedCoverage(t *testing.T) {
+	p := portfolio("USD",
+		domain.Position{InstrumentID: "A", MarketValue: money(300_000_000_000_000_000, "USD"), Quantity: &commonpb.Decimal{Coefficient: 1}},
+		domain.Position{InstrumentID: "NO_HISTORY", MarketValue: money(20, "USD")},
+	)
+	ctx := t.Context()
+	rp := oneKnownInstrument{id: "A", ret: []float64{-.5, -.5}}
+	r := compute.DefaultRegistry()
+	varmodel.Register(ctx, r, rp, varmodel.Config{})
+	compute.RegisterLiquidityRisk(ctx, r, quotedLiquidity{}, liquidity.DefaultModel(), nil)
+	result := compute.ComputeMeasures(p, r, []v1.MeasureName{compute.MeasureLVaR99})
+	lvar, ok := result.Lookup(compute.MeasureLVaR99)
+	if !ok {
+		t.Fatal("liquidity-adjusted VaR missing")
+	}
+	mc := varmodel.MonteCarlo(varmodel.Config{Draws: 100, Seed: 1})(ctx, p, rp)
+	for _, got := range []v1.Measure{lvar, mc} {
+		if got.Coverage.Contributed != 1 || got.Coverage.ExcludedCount != 2 || len(got.Coverage.Exclusions) != 2 ||
+			got.Coverage.Exclusions[0] != (v1.InputExclusion{InstrumentID: "NO_HISTORY", Reason: varmodel.SkipNoReturns}) ||
+			got.Coverage.Exclusions[1] != (v1.InputExclusion{Reason: compute.SkipInvalidPricing}) {
+			t.Errorf("%s coverage = %+v", got.Name, got.Coverage)
+		}
+	}
+	if mc.Value == nil || mc.Value.Coefficient != 0 || mc.Value.Exponent != -2 || mc.Provenance.InputDigest == "" {
+		t.Errorf("Monte Carlo refusal = %+v", mc)
+	}
 }
 
 // oneKnownInstrument serves a return series for exactly one id and fails for the

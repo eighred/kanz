@@ -70,9 +70,10 @@ func ExpectedShortfall(cfg Config) compute.ReturnsMeasure {
 		if es < 0 {
 			es = 0
 		}
+		amount := cov.RoundedValue(es, varExponent)
 		return v1.Measure{
 			Name:       compute.MeasureES99,
-			Value:      floatToDecimal(es, varExponent),
+			Value:      amount,
 			Coverage:   cov.Result(),
 			Provenance: evaluation,
 		}

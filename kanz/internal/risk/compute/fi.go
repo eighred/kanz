@@ -304,11 +304,8 @@ func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureF
 				value = weighted / weight
 			}
 		}
-		if !representablePricingAmount(value, exponent) {
-			cov.ExcludeWhole(SkipInvalidPricing)
-			value = 0
-		}
-		return v1.Measure{Name: name, Value: floatToDecimal(value, exponent), Coverage: cov.Result()}
+		amount := cov.RoundedValue(value, exponent)
+		return v1.Measure{Name: name, Value: amount, Coverage: cov.Result()}
 	}
 }
 

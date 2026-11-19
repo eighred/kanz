@@ -100,9 +100,10 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 		if loss < 0 {
 			loss = 0
 		}
+		amount := cov.RoundedValue(loss, varExponent)
 		return v1.Measure{
 			Name:       compute.MeasureVaR99,
-			Value:      floatToDecimal(loss, varExponent),
+			Value:      amount,
 			Coverage:   cov.Result(),
 			Provenance: evaluation,
 		}
@@ -262,9 +263,4 @@ func quantile(sorted []float64, q float64) float64 {
 
 func zeroMeasure(prov v1.MeasureProvenance, cov compute.Coverage) v1.Measure {
 	return zeroNamed(compute.MeasureVaR99, prov, cov)
-}
-
-func floatToDecimal(f float64, exp int32) *commonpb.Decimal {
-	scaled := f * math.Pow10(int(-exp))
-	return &commonpb.Decimal{Coefficient: int64(math.Round(scaled)), Exponent: exp}
 }
