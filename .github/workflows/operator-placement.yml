@@ -1,0 +1,58 @@
+name: operator-placement
+on:
+  pull_request:
+    paths: &placement_paths
+      - 'kanz/services/operator/**'
+      - 'kanz/cmd/kanz_provisioner/**'
+      - 'kanz/infra/deploy/operator-deploy.yaml'
+      - 'kanz/internal/testidentity/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'schemas/**'
+      - '.github/actions/setup_buf/**'
+      - 'tools/operator_placement.py'
+      - '.github/workflows/operator-placement.yml'
+  push:
+    branches: [main]
+    paths: *placement_paths
+permissions:
+  contents: read
+jobs:
+  probe-during-server-drain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: 1.69.0
+      - name: Generate the repository SDK
+        working-directory: schemas
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          buf generate
+          bash bootstrap-go-sdk.sh
+      - name: Prepare disposable cluster tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/placement-venv"
+          "$RUNNER_TEMP/placement-venv/bin/python" -m pip install PyYAML==6.0.3
+          curl --fail --location --silent --show-error \
+            https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 \
+            --output "$RUNNER_TEMP/k3d"
+          echo "06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0  $RUNNER_TEMP/k3d" | sha256sum --check
+          chmod 0755 "$RUNNER_TEMP/k3d"
+      - name: Verify credential confinement and worker placement during a real drain
+        run: |
+          cd kanz
+          go test -p 1 ./test/arch -run 'Test(ProvisioningJobsArePinnedToControlPlane|ProbeJobIsNotPinned)$' -count=1 -v
+          cd ..
+          K3D="$RUNNER_TEMP/k3d" "$RUNNER_TEMP/placement-venv/bin/python" -B tools/operator_placement.py
