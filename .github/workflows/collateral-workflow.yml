@@ -1,0 +1,62 @@
+name: Collateral workflow release qualification
+
+on:
+  pull_request:
+    paths: &qualification
+      - 'tools/collateral_workflow/**'
+      - '.github/workflows/collateral-workflow.yml'
+      - 'kanz/services/accounting/internal/collateralops/**'
+      - 'kanz/services/accounting/migrations/**'
+  push:
+    branches: [main]
+    paths: *qualification
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release-runtime:
+    if: github.repository == 'eighred/kanz' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.0.6
+      - name: Verify release identity, transparency log and both attestations before pulling
+        env:
+          PACKAGE_TOKEN: ${{ github.token }}
+          PACKAGE_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d /dev/shm/kanz-collateral-auth.XXXXXXXX)
+          trap 'rm -f "$DOCKER_CONFIG/config.json"; rmdir "$DOCKER_CONFIG"' EXIT
+          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$DOCKER_CONFIG/config.json"
+          printf '%s' "$PACKAGE_TOKEN" | docker login ghcr.io -u "$PACKAGE_ACTOR" --password-stdin
+          unset PACKAGE_TOKEN
+          policy=(--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+                  --certificate-identity 'https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v2026.4.0')
+          mkdir "$RUNNER_TEMP/collateral-attestations"
+          for ref in \
+            ghcr.io/eighred/accounting@sha256:91c37620d2cdfc31ba78ecbf1725f0288eee923825841f5323cd12411be69173 \
+            ghcr.io/eighred/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
+          do
+            name=${ref%%@*}
+            name=${name##*/}
+            cosign verify "${policy[@]}" "$ref" >/dev/null
+            for kind in spdxjson vuln; do
+              cosign verify-attestation "${policy[@]}" --type "$kind" "$ref" > "$RUNNER_TEMP/collateral-attestations/$name.$kind.jsonl"
+            done
+            docker pull --platform=linux/amd64 "$ref"
+          done
+      - run: python3 -B -m unittest discover -s tools/collateral_workflow
+      - name: Inventory the released Linux binaries and bundled Accounting migrations
+        run: python3 -B tools/collateral_workflow/release.py "$RUNNER_TEMP"
