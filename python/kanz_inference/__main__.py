@@ -44,7 +44,7 @@ from kanz_inference.interactive.servicer import serve
 from kanz_inference.observability import DEFAULT_METRICS_BIND, ObservabilityServer, metrics
 from kanz_inference.publish import Publisher
 from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, load_specs, require_primary
-from kanz_inference.streaming.worker import StreamingWorker
+from kanz_inference.streaming.worker import SUBJECT_FEATURE_COMPUTED, StreamingWorker
 
 logger = logging.getLogger("kanz_inference")
 
@@ -129,21 +129,33 @@ async def _watch_svid(ctx, cert_dir: str, stopping: asyncio.Event) -> None:
             fingerprint = updated
 
 
-async def _run_streaming(router, observability, stopping, nats_url):
+async def _run_streaming(router: RegistryRouter, observability: ObservabilityServer,
+                         stopping: asyncio.Event, nats_url: str) -> None:
     cert_dir = _env("KANZ_INFERENCE_NATS_CERT_DIR")
-    tls_ctx = mtls.client_context(cert_dir) if cert_dir else None
+    group = _env("KANZ_INFERENCE_CONSUMER_GROUP", DEFAULT_GROUP)
+    logger.info("starting streaming consumer subject=%s group=%s transport=%s",
+                SUBJECT_FEATURE_COMPUTED, group, "mTLS" if cert_dir else "plaintext")
+    try:
+        tls_ctx = mtls.client_context(cert_dir) if cert_dir else None
+    except mtls.MissingSVIDError:
+        names = [os.path.basename(path) for path in mtls.SVIDPaths.in_dir(cert_dir).missing()]
+        logger.error("streaming TLS setup failed; check workload identity files: %s", ", ".join(names))
+        raise
     if tls_ctx is None:
         logger.warning("streaming bus uses plaintext without a SPIFFE identity")
 
-    def bound():
-        if not stopping.is_set():
+    def subscription_state(active: bool) -> None:
+        if active and not stopping.is_set():
             observability.mark_ready()
+            logger.info("streaming consumer bound subject=%s group=%s", SUBJECT_FEATURE_COMPUTED, group)
+        else:
+            observability.mark_draining()
 
     async with NATSClient(
         url=nats_url,
         name=_env("KANZ_INFERENCE_SOURCE", "inference"),
         tls=tls_ctx,
-        on_subscribed=bound,
+        subscription_state=subscription_state,
     ) as client:
         rotation = None
         try:
@@ -157,7 +169,7 @@ async def _run_streaming(router, observability, stopping, nats_url):
                 ),
             )
             worker = StreamingWorker(Consumer(client), router, Publisher(producer))
-            await worker.run(_env("KANZ_INFERENCE_CONSUMER_GROUP", DEFAULT_GROUP))
+            await worker.run(group)
         finally:
             observability.mark_draining()
             if rotation is not None:
@@ -250,7 +262,9 @@ async def _run() -> int:
             # A subscription runs until shutdown. Neither a return nor a failed
             # task can leave this configured pod serving half its contract.
             error = None if worker.cancelled() else worker.exception()
-            logger.error("streaming worker stopped (%s)", type(error).__name__ if error else "no active consumer")
+            logger.error("streaming worker stopped (%s, broker_code=%s)",
+                         type(error).__name__ if error else "no active consumer",
+                         getattr(error, "err_code", None) or getattr(error, "code", None))
             return 1
         return 0
     finally:
@@ -258,9 +272,8 @@ async def _run() -> int:
         stopping.set()
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         try:
-            await server.stop(grace=10)
+            await asyncio.gather(server.stop(grace=10), asyncio.gather(*tasks, return_exceptions=True))
         finally:
             observability.stop()
 

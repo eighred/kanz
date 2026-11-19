@@ -10,8 +10,13 @@ from typing import Any
 import nats
 from nats.aio.client import Client as NATSConn
 from nats.js import JetStreamContext
+from nats.js.api import AckPolicy
 
 from kanz_bus.bus import NATS_PARTITION_KEY_HEADER, Handler, Message
+
+
+class ConsumerConfigurationError(ValueError):
+    """The existing durable cannot deliver and acknowledge the requested subject."""
 
 
 class NATSClient:
@@ -41,7 +46,7 @@ class NATSClient:
         publish_timeout: float = 5.0,
         tls: ssl.SSLContext | None = None,
         *,
-        on_subscribed: Callable[[], None] | None = None,
+        subscription_state: Callable[[bool], None] | None = None,
     ) -> None:
         if not url:
             raise ValueError("nats: url required")
@@ -52,7 +57,7 @@ class NATSClient:
         self._max_reconnect_attempts = max_reconnect_attempts
         self._publish_timeout = publish_timeout
         self._tls = tls
-        self._on_subscribed = on_subscribed
+        self._subscription_state = subscription_state
         self._nc: NATSConn | None = None
         self._js: JetStreamContext | None = None
 
@@ -116,8 +121,16 @@ class NATSClient:
             raise RuntimeError("nats: client not connected")
         psub = await self._js.pull_subscribe(subject, durable=group)
         try:
-            if self._on_subscribed is not None:
-                self._on_subscribed()
+            # pull_subscribe can reuse a named durable without checking its
+            # configuration. A successful bind alone says nothing about which
+            # messages this fetch loop would process or acknowledge.
+            config = (await psub.consumer_info()).config
+            filters = getattr(config, "filter_subjects", None) or [config.filter_subject]
+            if (filters != [subject] or config.deliver_subject or config.ack_policy != AckPolicy.EXPLICIT
+                    or (group and config.durable_name != group)):
+                raise ConsumerConfigurationError("nats: incompatible pull consumer configuration")
+            if self._subscription_state is not None:
+                self._subscription_state(True)
             while True:
                 try:
                     msgs = await psub.fetch(batch=1, timeout=10)
@@ -132,6 +145,8 @@ class NATSClient:
                         continue
                     await raw.ack()
         finally:
+            if self._subscription_state is not None:
+                self._subscription_state(False)
             try:
                 await psub.unsubscribe()
             except Exception:
