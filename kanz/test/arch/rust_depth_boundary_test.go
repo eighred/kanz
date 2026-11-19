@@ -47,6 +47,7 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
+jiff = { version = "=1.0.1", default-features = false }
 kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.6"
 prost-types = "=0.14.6"
@@ -300,6 +301,7 @@ func TestRustDepthBoundaryRejectsMutations(t *testing.T) {
 	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
 	for _, tc := range []struct{ name, path, text string }{
 		{"dependency", "services/binance_depth/Cargo.toml", "\n[dev-dependencies]\nreqwest=\"*\"\n"},
+		{"jiff-default-features", "crates/market_feed/Cargo.toml", "\n[features]\ndefault=[\"jiff/default\"]\n"},
 		{"alternatebuild", "crates/market_feed/build.rs", "\nfn other() {}\n"},
 		{"alternatepath", "services/okx_depth/src/source.rs", `#[path="/tmp/extra.rs"] mod extra;`},
 		{"alternateinclude", "services/okx_depth/src/source.rs", "\ninclude!(\"hidden.rs\");"},
