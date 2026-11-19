@@ -123,7 +123,7 @@ func receipt(ctx context.Context, route string, deliveries uint64) error {
 		env, payload, err := bus.Unframe(last.Data)
 		if err != nil || bus.Validate(env) != nil || env.GetTenantId() != tenant || env.GetEventType() != route || env.GetSource() != "accounting" ||
 			env.GetEventClass() != envelope.EventClass_EVENT_CLASS_FACT || env.GetPartitionKey() != workflow ||
-			env.GetPayloadSchemaRef() != "collateral.v1.WorkflowRecorded:1" {
+			env.GetDomain() != "accounting" || env.GetSchemaVersion() != 1 || env.GetPayloadSchemaRef() != "collateral.v1.WorkflowRecorded:1" {
 			return errors.New("recorded FACT envelope differs")
 		}
 		var state pb.WorkflowRecorded
@@ -234,17 +234,16 @@ func gateway(ctx context.Context, mode string) error {
 		return errors.New("invalid workflow response size")
 	}
 	var state pb.WorkflowRecorded
-	if err = protojson.Unmarshal(raw, &state); err != nil {
-		return errors.New("invalid workflow response")
+	if err := decodeGatewayState(raw, &state); err != nil {
+		return err
 	}
 	if state.WorkflowId != workflow || state.SnapshotId != "snapshot-1" || state.Maker != "maker" ||
 		state.Status != wantStatus || state.Revision != wantRevision || state.CurrencyCode != "USD" || len(state.Legs) != 1 {
 		return errors.New("workflow state, principal or revision differs")
 	}
 	leg := state.Legs[0]
-	quantity, ok := dec.FromProtoChecked(leg.GetQuantity())
 	if leg == nil || leg.AgreementId != "CSA1" || leg.LotId != "lot-1" || leg.AccountId != "account" || leg.CustodianId != "custodian" ||
-		leg.Quantity == nil || !ok || quantity.Cmp(big.NewRat(60, 1)) != 0 {
+		leg.Quantity == nil || dec.FromProto(leg.Quantity).Cmp(big.NewRat(60, 1)) != 0 {
 		return errors.New("workflow settlement leg differs")
 	}
 	if wantStatus == pb.WorkflowStatus_WORKFLOW_STATUS_INSTRUCTED && (state.Actor != "checker" || state.PostingRevision != 2) {
@@ -258,6 +257,16 @@ func gateway(ctx context.Context, mode string) error {
 		return errors.New("workflow state cannot be hashed")
 	}
 	fmt.Printf("%x", sha256.Sum256(stable))
+	return nil
+}
+
+func decodeGatewayState(raw []byte, state *pb.WorkflowRecorded) error {
+	if err := protojson.Unmarshal(raw, state); err != nil {
+		return errors.New("invalid workflow response")
+	}
+	if _, ok := dec.InDomainDeep(state); !ok {
+		return errors.New("workflow response decimal is outside the supported domain")
+	}
 	return nil
 }
 
