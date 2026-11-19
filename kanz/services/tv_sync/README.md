@@ -281,3 +281,19 @@ other services that consume the same canonical subject and can independently
 park the same FACT. The failed shared-broker run observed the exact target FACT
 on DLQ, but did not establish which consumer parked it; isolation must earn a
 fresh actual pass, not retrospectively label that observation harmless.
+
+## Broker account read contract
+
+The projection DTOs in `internal/projection/model.go` supply JSON names,
+optional fields and wire types for the browser account reader. Decimal amounts
+travel as fixed-point text. After changing a DTO, run the following commands
+from the `kanz` Go module.
+
+```sh
+go generate ./services/tv_sync/internal/projection
+go test -p 1 ./services/tv_sync/tools/broker_contract ./services/tv_sync/internal/brokerapi
+```
+
+The generator test checks the tracked TypeScript contract. The HTTP test and
+browser client test share the account response fixture under
+`internal/brokerapi/testdata`.
