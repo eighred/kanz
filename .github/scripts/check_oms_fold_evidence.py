@@ -134,6 +134,8 @@ REQUIRED = {
         "TestRustVenueIPv6RPC",
     },
     "services/oms/internal/position": {
+        "TestBrokerPositionFoldContentionProfile/1_keys",
+        "TestBrokerPositionFoldContentionProfile/4_keys",
         "TestPositionPrecisionAccumulatedSignedFills",
         "TestPositionPrecisionAccumulatedSignedFills/SIDE_BUY",
         "TestPositionPrecisionAccumulatedSignedFills/SIDE_SELL",
