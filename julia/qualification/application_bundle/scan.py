@@ -12,7 +12,7 @@ import advisory
 import jll_advisory
 import pcre2_advisory
 import pcre2_cve
-from readback import JLL_LIBRARIES
+from readback import CA_ARCHIVE, CA_DATA, JLL_LIBRARIES
 
 
 MANIFEST = 'opt/kanz/share/kanz/Manifest.toml'
@@ -45,6 +45,12 @@ def scan(image, receipt, tools, database, registry, publisher, output):
         if row['publisherFiles'] != actual:
             raise ValueError('readback publisher scope differs')
         owners[owner] = {k: row[k] for k in ('version', 'uuid')}
+    if set(receipt['dataOwners']) != {'MozillaCACerts_jll'}:
+        raise ValueError('CA bundle data owner missing')
+    ca = receipt['dataOwners']['MozillaCACerts_jll']
+    if ca['publisherArchiveSHA256'] != CA_ARCHIVE or ca['sha256'] != CA_DATA or ca['publisherVersion'] != '2026.10.20+0':
+        raise ValueError('CA publisher binding differs')
+    owners['MozillaCACerts_jll'] = {k: ca[k] for k in ('version', 'uuid')}
     pcre = receipt['wrapperMetadata']['PCRE2_jll']
     if pcre.get('upstreamVersion') != '10.49' or pcre.get('version') != '10.49.1+0':
         raise ValueError('PCRE2 vendor controls require the verified patched native runtime')
@@ -111,7 +117,7 @@ def scan(image, receipt, tools, database, registry, publisher, output):
     print('Debian findings:', dict(counts))
     if counts['CRITICAL'] or application.get('Vulnerabilities') or results['wrappers'].get('Vulnerabilities'):
         raise ValueError('application, native wrapper or critical OS advisory present')
-    print('Verified seven application packages, eleven native wrapper records and both positive controls.')
+    print('Verified seven application packages, eleven native wrapper records, the CA data owner and both positive controls.')
 
 
 if __name__ == '__main__':

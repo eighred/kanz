@@ -20,6 +20,11 @@ import pcre2
 BASE_INDEX = 'be40c00dfabd86576d92666e87e406714d5618342de1a0c213ad232de255172e'
 BASE_PLATFORM = '8e80c746dfbb1aa5891456d3414e5f7fafed1ecc62a6e1579f8ba4311b016d83'
 JULIA = '5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4'
+CA_PATH = 'share/julia/cert.pem'
+CA_ARCHIVE = 'fbbfa980bd86eae3dbc77ee5f07749b68d56aad0eb6497ea6d5435c141fec51c'
+CA_DATA = '796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe'
+CA_URL = ('https://github.com/JuliaBinaryWrappers/MozillaCACerts_jll.jl/releases/download/'
+          'MozillaCACerts-v2026.10.20%2B0/MozillaCACerts.v2026.10.20.any.tar.gz')
 GENERATED = {'bin/curve-worker', 'lib/julia/sys.so'}
 # PackageCompiler 2.4.5's Linux runtime floor for this exact Julia 1.13.3 build.
 JLL_LIBRARIES = {
@@ -175,9 +180,16 @@ def source_libraries(archive, elfs):
     if set(elfs) != DISTRIBUTION | PATCHED | GENERATED:
         raise ValueError('required application native member is missing or unexpected')
     required = DISTRIBUTION
-    found, projects = set(), {}
+    found, projects, certificates = set(), {}, {}
     for member in archive:
         name = member.name.removeprefix('./').removeprefix('julia-1.13.3/')
+        if name == CA_PATH:
+            if certificates or not member.isfile() or member.size != 200116:
+                raise ValueError('unexpected compiler CA data')
+            digest = hashlib.file_digest(archive.extractfile(member), 'sha256').hexdigest()
+            if digest != CA_DATA:
+                raise ValueError('compiler CA data differs')
+            certificates = {'path': CA_PATH, 'size': member.size, 'sha256': digest}
         project = re.fullmatch(r'share/julia/stdlib/v1\.13/(\w+_jll)/Project\.toml', name)
         if project:
             owner = project[1]
@@ -196,8 +208,12 @@ def source_libraries(archive, elfs):
     # Validate the original 23-owner compiler denominator before projecting
     # the independently verified shared libraries actually copied by the bundler.
     registry = jll_advisory.packages({'jll': projects})
-    return {name: {**registry[name], 'files': ['lib/julia/' + item for item in libs]}
-            for name, libs in JLL_LIBRARIES.items()}
+    if not certificates or registry['MozillaCACerts_jll'] != {'uuid': '14a3606d-f60d-562e-9121-12d972cd8159',
+                                                             'version': '2026.10.20'}:
+        raise ValueError('compiler CA bundle metadata differs')
+    certificates.update(registry['MozillaCACerts_jll'])
+    return ({name: {**registry[name], 'files': ['lib/julia/' + item for item in libs]}
+             for name, libs in JLL_LIBRARIES.items()}, certificates)
 
 
 def verify_owner_inputs(directory, owners, elfs):
@@ -271,7 +287,18 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
     if hash_file(compiler) != JULIA:
         raise ValueError('compiler libraries must come from the pinned Julia distribution')
     with tarfile.open(compiler, 'r|gz') as packed:
-        owners = source_libraries(packed, elfs)
+        owners, certificates = source_libraries(packed, elfs)
+    if expected.get(CA_PATH, [])[2:] != [certificates['size'], certificates['sha256']]:
+        raise ValueError('packaged CA bundle differs from the original Julia distribution')
+    ca = owner_inputs / 'cacerts.tar.gz'
+    if ca.stat().st_size != 121644 or hash_file(ca) != CA_ARCHIVE:
+        raise ValueError('independent Mozilla CA wrapper archive differs')
+    with tarfile.open(ca, 'r:gz') as packed:
+        member, = [m for m in packed if m.name == 'share/cacert.pem']
+        if (not member.isfile() or member.size != certificates['size']
+                or hashlib.file_digest(packed.extractfile(member), 'sha256').hexdigest() != CA_DATA):
+            raise ValueError('packaged CA data differs from the Mozilla CA wrapper publisher')
+    certificates.update(publisherArchiveSHA256=CA_ARCHIVE, publisherVersion='2026.10.20+0')
     verify_owner_inputs(owner_inputs, owners, elfs)
     with tarfile.open(image, 'r:') as archive:
         members = archive.getmembers()
@@ -324,7 +351,7 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
             raise ValueError('final application filesystem differs from the actual compiler output')
     return {'image': image_id, 'manifest': platform['digest'], 'config': manifest['config']['digest'],
             'baseLayers': len(base_layers), 'applicationLayer': app_layer['digest'], 'filesAndLinks': len(actual),
-            'native': elfs, 'baseNative': os_elfs, 'wrapperMetadata': owners, 'releaseQualified': False}
+            'native': elfs, 'baseNative': os_elfs, 'wrapperMetadata': owners, 'dataOwners': {'MozillaCACerts_jll': certificates}, 'releaseQualified': False}
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 import pcre2
 import pcre2_advisory
 import pcre2_cve
+from readback import CA_ARCHIVE, CA_URL
 
 
 JULIA = 'https://raw.githubusercontent.com/JuliaLang/julia/67ac47b9cd855e02134d41d5428ac9f2a73f2694/'
@@ -54,6 +55,7 @@ def acquire(directory):
         fetch(pin['url'], target, pin['archiveBytes'], 'sha512', checksums[0])
         if target.stat().st_size != pin['archiveBytes']:
             raise ValueError('publisher asset size differs')
+    fetch(CA_URL, directory / 'cacerts.tar.gz', 121644, 'sha256', CA_ARCHIVE)
     pcre = directory / 'PCRE2-10.49'
     pcre.mkdir()
     for name, url in PCRE_INPUTS.items():

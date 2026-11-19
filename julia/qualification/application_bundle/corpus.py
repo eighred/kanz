@@ -12,42 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from proof import CASES, CommandTimeout, command, container_boundary, oracle, required
 
 
-# Ask the kernel for the first byte beyond the tmpfs limit. Julia's buffered
-# write can return a short count and drop the underlying error.
-QUOTA = r"""
-@assert VERSION == v"1.13.3"
-@assert Set(pkg.name for pkg in Base._sysimage_modules) ==
-    Set(["Base", "Core", "Main", "KanzCurveCandidate", "ProtoBuf", "EnumX", "Unicode", "Dates", "Printf", "BufferedStreams", "TOML"])
-@assert ccall(:geteuid, Cuint, ()) == 65532
-@assert readdir("/sys/class/net") == ["lo"]
-@assert strip(read("/sys/fs/cgroup/memory.max", String)) == "1073741824"
-@assert strip(read("/sys/fs/cgroup/pids.max", String)) == "64"
-@assert split(read("/sys/fs/cgroup/cpu.max", String)) == ["100000", "100000"]
-status = read("/proc/self/status", String)
-@assert occursin(r"(?m)^CapEff:\s+0000000000000000$", status)
-@assert occursin(r"(?m)^NoNewPrivs:\s+1$", status)
-@assert ENV["JULIA_PKG_OFFLINE"] == "true"
-pcre_version = zeros(UInt8, 64)
-@assert ccall((:pcre2_config_8, "libpcre2-8"), Cint, (Cuint, Ptr{UInt8}), 11, pcre_version) > 0
-@assert startswith(unsafe_string(pointer(pcre_version)), "10.49 ")
-@assert occursin(r"^a[0-9]+$", "a49")
-buffer = zeros(UInt8, 1 << 20)
-open("/tmp/bounded", "w") do io
-    for _ in 1:16
-        n = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd(io), buffer, length(buffer))
-        @assert n == length(buffer)
-    end
-    n = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd(io), buffer, 1)
-    reason = Libc.errno()
-    @assert n == -1 && reason == Libc.ENOSPC
-end
-@assert filesize("/tmp/bounded") == 16 << 20
-println("ENOSPC at 16777216 bytes")
-"""
-
-
 @contextlib.contextmanager
-def worker(image, source, quota=False):
+def worker(image, source, check_runtime=False):
     name = 'kanz-julia-app-' + uuid.uuid4().hex
     label = 'kanz.julia-proof=' + source
     try:
@@ -57,9 +23,10 @@ def worker(image, source, quota=False):
                   '--memory', '1g', '--memory-swap', '1g', '--pids-limit', '64',
                   '--tmpfs', '/tmp:rw,noexec,nosuid,size=16777216,mode=1777', '-i']
         entrypoint = '/opt/kanz/bin/curve-worker'
-        if quota:
+        if check_runtime:
             entrypoint = '/opt/kanz/bin/julia'
-            args += ['--entrypoint', entrypoint, image, '--startup-file=no', '--history-file=no', '-e', QUOTA]
+            controls = Path(__file__).with_name('runtime_controls.jl').read_text()
+            args += ['--entrypoint', entrypoint, image, '--startup-file=no', '--history-file=no', '-e', controls]
         else:
             args += [image]
         required(args)
@@ -82,7 +49,7 @@ def worker(image, source, quota=False):
 
 
 def bounded_controls(image, source):
-    with worker(image, source, quota=True) as name:
+    with worker(image, source, check_runtime=True) as name:
         if required(['docker', 'start', '--attach', name]).strip() != b'ENOSPC at 16777216 bytes':
             raise ValueError('tmpfs upper bound differed')
     # Keep stdin open on the real entrypoint. The owning parent must be able to
