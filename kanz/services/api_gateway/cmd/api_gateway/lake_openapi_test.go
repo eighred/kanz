@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/eighred/kanz/internal/gatewaysig"
 	"github.com/eighred/kanz/internal/platform/halt"
 	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	"github.com/eighred/kanz/services/api_gateway/internal/config"
@@ -70,7 +71,11 @@ type lakeMedia struct {
 
 type lakeDocument struct {
 	Paths map[string]map[string]struct {
-		Capability  string `json:"x-kanz-capability"`
+		Capability string `json:"x-kanz-capability"`
+		Parameters []struct {
+			Name, In, Description string
+			Required              bool
+		}
 		RequestBody *lakeMedia
 		Responses   map[string]lakeMedia
 	}
@@ -89,15 +94,20 @@ type lakeDocument struct {
 
 func TestLakeSnapshotOpenAPIMatchesConfiguredGateway(t *testing.T) {
 	var publicDocument string
-	for _, enabled := range []bool{false, true} {
-		profile := "disabled"
-		if enabled {
-			profile = "enabled"
-		}
-		t.Run(profile, func(t *testing.T) {
+	for _, profile := range []struct {
+		name          string
+		lake, signing bool
+	}{
+		{"disabled", false, false}, {"disabled-signed", false, true}, {"enabled", true, false}, {"enabled-signed", true, true},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			enabled := profile.lake
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 			h := gateway.New(nil, nil, nil, "", logger)
 			cfg := config.Config{RequiredRole: "base", OperatorRole: "operator", TradeRole: "trader"}
+			if profile.signing {
+				cfg.SigningSecret = t.Name()
+			}
 			if enabled {
 				cfg.LakeSnapshot = &config.LakeSnapshot{Tenant: "fixture-tenant", CreateRole: "creator", ReadRole: "reader"}
 				if err := h.WithLakeSnapshots(lakeContractClient{t: t}, cfg.LakeSnapshot.Tenant); err != nil {
@@ -115,7 +125,7 @@ func TestLakeSnapshotOpenAPIMatchesConfiguredGateway(t *testing.T) {
 			if docResponse.Code != 200 || json.Unmarshal(docResponse.Body.Bytes(), &doc) != nil {
 				t.Fatal("gateway did not return the public OpenAPI document")
 			}
-			if !enabled {
+			if publicDocument == "" {
 				publicDocument = docResponse.Body.String()
 			} else if docResponse.Body.String() != publicDocument {
 				t.Fatal("public contract revealed snapshot configuration")
@@ -135,6 +145,25 @@ func TestLakeSnapshotOpenAPIMatchesConfiguredGateway(t *testing.T) {
 				op, documented := doc.Paths[tc.path][strings.ToLower(tc.method)]
 				req := httptest.NewRequest(tc.method, "/v1"+strings.ReplaceAll(tc.path, "{id}", "fixture"), strings.NewReader(tc.body))
 				req.Header.Set("Authorization", "Bearer fixture")
+				headerFound := false
+				for _, param := range op.Parameters {
+					if param.In == "header" && param.Name == gatewaysig.Header && !param.Required && strings.Contains(param.Description, "when gateway request signing is enabled") {
+						headerFound = true
+					}
+				}
+				if !headerFound {
+					t.Fatalf("%s: missing conditional signing header", tc.path)
+				}
+				if profile.signing {
+					unsigned := httptest.NewRequest(tc.method, req.URL.Path, strings.NewReader(tc.body))
+					unsigned.Header.Set("Authorization", "Bearer fixture")
+					refused := httptest.NewRecorder()
+					router.ServeHTTP(refused, unsigned)
+					if refused.Code != http.StatusUnauthorized || !strings.Contains(refused.Body.String(), "missing request signature") {
+						t.Fatalf("%s: missing signature did not produce the documented 401", tc.path)
+					}
+					gatewaysig.SignRequest(req, []byte(cfg.SigningSecret), []byte(tc.body))
+				}
 				result := httptest.NewRecorder()
 				router.ServeHTTP(result, req)
 				if !documented {
@@ -200,6 +229,7 @@ func TestLakeSnapshotOpenAPIMatchesConfiguredGateway(t *testing.T) {
 				req := httptest.NewRequest(http.MethodGet, "/v1/lake/snapshots/fixture", nil)
 				req.Header.Set("Authorization", "Bearer fixture")
 				refused := httptest.NewRecorder()
+				gatewaysig.SignRequest(req, []byte(cfg.SigningSecret), nil)
 				router.ServeHTTP(refused, req)
 				var body struct{ Error string }
 				if refused.Code != http.StatusForbidden || json.Unmarshal(refused.Body.Bytes(), &body) != nil || body.Error == "" {

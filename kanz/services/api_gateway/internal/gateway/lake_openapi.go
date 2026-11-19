@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/eighred/kanz/internal/gatewaysig"
 	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	"github.com/eighred/kanz/services/api_gateway/internal/authz"
 	"google.golang.org/protobuf/proto"
@@ -48,7 +49,7 @@ func buildLakeOpenAPI() []byte {
 			"responses": map[string]any{
 				"200":     map[string]any{"description": "OK", "content": lakeJSON(result)},
 				"400":     map[string]any{"description": "Invalid input or snapshot precondition", "content": lakeJSON(refusal)},
-				"401":     map[string]any{"description": "Authentication required", "content": lakeJSON(refusal)},
+				"401":     map[string]any{"description": "Missing or invalid bearer or required request signature", "content": lakeJSON(refusal)},
 				"403":     map[string]any{"description": "Insufficient authority or recent MFA required", "content": lakeJSON(refusal)},
 				"404":     map[string]any{"description": "Snapshot service unconfigured or snapshot unavailable to this caller", "content": notFound},
 				"502":     map[string]any{"description": "Snapshot response unavailable", "content": lakeJSON(refusal)},
@@ -57,15 +58,22 @@ func buildLakeOpenAPI() []byte {
 		}
 		if route.input != nil {
 			input := protoSchema(route.input.ProtoReflect().Descriptor(), schemas)
-			op["requestBody"] = map[string]any{"required": true, "content": lakeJSON(input)}
+			op["requestBody"] = map[string]any{"required": true, "description": "The gateway accepts at most 64 KiB of request body. The snapshot owner validates business input before execution.", "content": lakeJSON(input)}
 		}
+		parameters := []any{map[string]any{
+			"name": gatewaysig.Header, "in": "header", "required": false,
+			"description": "Required on every request, including GET, when gateway request signing is enabled. Use unpadded base64url HMAC-SHA-256 over the HTTP method, a newline, the gateway path without query, another newline and the exact request body. GET signs an empty body.",
+			"schema":      map[string]any{"type": "string", "pattern": `^[A-Za-z0-9_-]{43}$`},
+		}}
 		if strings.Contains(route.path, "{id}") {
-			op["parameters"] = []any{map[string]any{
+			parameters = append(parameters, map[string]any{
 				"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"},
-			}}
+			})
 		}
+		op["parameters"] = parameters
 		paths[route.path] = map[string]any{route.method: op}
 	}
+	describeLakeInputs(schemas)
 	body, err := json.Marshal(doc)
 	if err != nil {
 		panic(err)
