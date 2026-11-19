@@ -65,13 +65,23 @@ metadata: {name: nats-bootstrap}
 spec:
   suspend: true
   template:
+    metadata: {labels: {app: nats-bootstrap}}
     spec:
       schedulingGates: [{name: kanz.io/fixture}]
       restartPolicy: Never
       containers: [{name: bootstrap, image: registry.k8s.io/pause:3.10, imagePullPolicy: Never}]
 EOF
+# Job admission copies the template labels onto this Job, including the
+# generated selector that caused the controller to adopt the old runner.
+k -n "$MSG_NS" get job nats-bootstrap -o json | jq -e '
+  .metadata.labels.app=="nats-bootstrap" and
+  (.metadata.labels."batch.kubernetes.io/controller-uid"==.metadata.uid) and
+  (.spec.selector.matchLabels."batch.kubernetes.io/controller-uid"==.metadata.uid)' >/dev/null
 create_backup_runner
 first_uid=$RUNNER_UID
+k -n "$MSG_NS" get pod "$NATS_RUNNER" -o json | jq -e --arg uid "$first_uid" --arg owner "$RUNNER_NONCE" '
+  .metadata.uid==$uid and .metadata.annotations."kanz.io/recovery-owner"==$owner and
+  (.metadata.ownerReferences|length)==0 and .metadata.labels=={app:"nats-bootstrap"}' >/dev/null
 if (create_backup_runner); then echo 'Replaced an existing backup runner' >&2; exit 1; fi
 if (RUNNER_NONCE=foreign; cleanup_backup_runner); then echo 'Foreign cleanup succeeded' >&2; exit 1; fi
 [[ "$(k -n "$MSG_NS" get pod "$NATS_RUNNER" -o jsonpath='{.metadata.uid}')" == "$first_uid" ]]

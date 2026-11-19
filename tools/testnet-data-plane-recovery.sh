@@ -101,11 +101,13 @@ create_backup_runner() {
   RUNNER_NONCE=$(cat /proc/sys/kernel/random/uuid)
   created=$(printf '%s' "$job_json" | jq \
     --arg pod "$NATS_RUNNER" --arg container bootstrap --arg owner "$RUNNER_NONCE" '
-      .kind="Pod" | .apiVersion="v1" | .metadata.name=$pod |
-      del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,
-          .metadata.generation,.metadata.annotations,.metadata.ownerReferences,.status) |
-      .metadata.annotations={"kanz.io/recovery-owner":$owner} |
-      .spec=.spec.template.spec | del(.spec.template) |
+      # Job admission can copy its controller selector onto Job metadata.
+      # A standalone Pod carrying it can be adopted and deleted by that Job.
+      {apiVersion:"v1",kind:"Pod",metadata:{
+        namespace:.metadata.namespace,name:$pod,annotations:{"kanz.io/recovery-owner":$owner},
+        labels:((.metadata.labels // {}) | del(."batch.kubernetes.io/controller-uid",."batch.kubernetes.io/job-name",
+                                              ."controller-uid",."job-name"))
+      },spec:.spec.template.spec} |
       .spec.restartPolicy="Never" |
       (.spec.containers[] | select(.name==$container) | .command)=["sleep","1800"] |
       (.spec.containers[] | select(.name==$container) | .args)=[]' |
