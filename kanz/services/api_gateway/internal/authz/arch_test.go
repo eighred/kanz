@@ -12,6 +12,7 @@ package authz_test
 // A route with a capital effect that anyone but a trader can reach fails the build.
 
 import (
+	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"net/http"
@@ -98,7 +99,15 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// A NON-NIL ORDERS CLIENT, DELIBERATELY. gateway.Routes registers the order
 	// history only when one is configured, so passing nil here would let that
 	// route escape this table entirely — the guard would pass by not looking.
-	gateway.New(nil, stubOrders{}, stubInstruments{}, "kanz-compliance", nil).Routes(m)
+	gw := gateway.New(nil, stubOrders{}, stubInstruments{}, "kanz-compliance", nil)
+	// This guard observes registrations only. A non-nil client enables the
+	// three finite snapshot routes without dispatching an RPC.
+	if err := gw.WithLakeSnapshots(struct {
+		lakepb.LakeSnapshotServiceClient
+	}{}, "tenant-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	gw.Routes(m)
 	// A NON-EMPTY APPROVE ROLE ON THE ORDERS HANDLER TOO (#539): its approve route is
 	// registered only when the deployment names an approver, so "" here would hide the
 	// order-release surface from this table for the same reason "" hides funding below.
@@ -118,7 +127,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// surface that changes what governs a portfolio from the table this test's doc
 	// says covers every /v1 route.
 	proxy.New(nil, proxy.Roles{
-		Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer",
+		Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer", Audit: "kanz-audit",
 	}).Routes(m)
 	// THE CONTROL PLANE, AND ITS ABSENCE WAS THIS GUARD'S OWN BLIND SPOT (#573).
 	//
@@ -137,6 +146,18 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	control.New(nil, nil).Routes(m)
 
 	want := map[string]authz.Capability{
+		"GET /v1/audit/events":               authz.Audit,
+		"GET /v1/audit/events/{event_id}":    authz.Audit,
+		"GET /v1/audit/lineage/{event_id}":   authz.Audit,
+		"GET /v1/audit/reports/{template}":   authz.Audit,
+		"GET /v2/audit/reports/{template}":   authz.Audit,
+		"GET /v1/soc2/evidence":              authz.Audit,
+		"GET /v2/soc2/evidence":              authz.Audit,
+		"GET /v1/audit/verify":               authz.Audit,
+		"POST /v1/lake/snapshots":            authz.LakeSnapshotCreate,
+		"GET /v1/lake/snapshots/{id}":        authz.LakeSnapshotRead,
+		"POST /v1/lake/snapshots/{id}/query": authz.LakeSnapshotRead,
+
 		// Risk queries. A scenario is a POST, but it computes a what-if and moves no
 		// capital — the HTTP verb is not the authority on effect.
 		// The LIST is Read, and the guard's own prompt — "decide whether a read
