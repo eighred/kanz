@@ -104,12 +104,13 @@ const _ = uint(dedupClaimLease - maxTunedAckWait - 1)
 // the same logical dispatch; envelope and broker identities remain canonical.
 // Direct Deduper users still own the namespace of the keys they pass.
 //
-// Older Consumers used raw envelope keys. A rolling mixed-version deployment
-// cannot share those claims with dispatch:v1, so handlers must remain idempotent
-// across that transition. Old entries expire normally. Do not dual-claim raw
-// keys or fall back to them: that would let an unrelated required consumer ACK
-// an event without processing it. Qualify the updated dispatch contract before
-// selecting a new shared-backend mode; a dedup cache is never financial authority.
+// Older Consumers used raw envelope keys. A command key may itself look like
+// a dispatch:v1 key. Never run old and new Consumers against the same shared
+// backend generation. Quiesce the old Consumers and wait for all their claims
+// and committed keys to expire before reusing that generation, or isolate the
+// new Consumers in a separate backend generation. Handlers must remain
+// idempotent because a redelivery can cross the transition. A fallback to raw
+// keys could suppress an independently required dispatch.
 type Deduper interface {
 	// Claim atomically takes key for processing. It reports true when the caller
 	// now owns the key, and false when the key is already claimed (a concurrent
