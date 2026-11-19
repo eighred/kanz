@@ -5,7 +5,7 @@ USER 65532:65532
 ENV JULIA_DEPOT_PATH=/opt/julia-depot JULIA_LOAD_PATH=@:@stdlib JULIA_PKG_OFFLINE=true JULIA_PKG_SERVER="" JULIA_CPU_TARGET=generic JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 HOME=/tmp
 WORKDIR /opt/kanz-jl
 COPY --chown=65532:65532 julia/Project.toml julia/Manifest.toml julia/generate.jl ./
-COPY julia/qualification/offline_depot.py julia/qualification/source_candidate_install.sh /tmp/
+COPY julia/qualification/offline_packages.json julia/qualification/offline_depot.py julia/qualification/source_candidate_install.sh /tmp/
 COPY julia/qualification/source_candidate.toml julia/qualification/isolation.jl ./qualification/
 COPY schemas/proto/ /opt/schemas/proto/
 COPY julia/src/ ./src/

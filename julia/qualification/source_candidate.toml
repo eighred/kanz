@@ -6,6 +6,7 @@ curl_backend = "OpenSSL/3.5.10"
 version_base = "3.5.9"
 artifact_sha256 = "51c196628b1f76ef2e17f743ff5a10b1df72329ed418dbf62945c0b01f7edec7"
 archive_sha256 = "16b92b2dd61998e52b58cd436dab506c7902bc2d0c590acba899a1df4e891d95"
+head_response_sha256 = "fc893b686c0985fd1203878a825971ba680267c67dcbfc30356cb5011411a8af"
 record_set_sha256 = "3587f0148d30caceea48d830bba72cf9dc50666baf4c115fd679c0fa9a630373"
 
 [files."libcrypto.so.3"]

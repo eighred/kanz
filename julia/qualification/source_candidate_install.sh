@@ -29,6 +29,7 @@ tar -xOf /inputs/libcurl.tar.gz lib/libcurl.so.4.8.0 > lib/julia/libcurl.so.4.8.
 tar -xOf /inputs/libcurl.tar.gz share/licenses/LibCURL/COPYING > share/licenses/kanz-libcurl-runtime/COPYING
 cd /opt/kanz-jl
 cmp Manifest.toml /inputs/packages/Manifest.toml
+cmp /tmp/offline_packages.json /inputs/packages/offline_packages.json
 python3 -B /tmp/offline_depot.py --input /inputs/packages --depot /opt/julia-depot
 julia=(/opt/julia/bin/julia --startup-file=no --history-file=no --project=/opt/kanz-jl)
 "${julia[@]}" -e 'using ProtoBuf'

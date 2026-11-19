@@ -329,12 +329,8 @@ The separate candidate accepts the unsigned OpenSSL development commit `65e11648
 
 ```sh
 python3 -B julia/qualification/source_candidate.py stage "$PRODUCER_ZIP" "$PUBLIC_INPUTS/openssl.tar.gz"
-rev=$(git rev-parse HEAD)
-git archive --format=tar "$rev" julia schemas/proto | docker build --network=none --platform linux/amd64 \
-  --build-context "candidate_inputs=$PUBLIC_INPUTS" --build-arg "VERSION=$rev" \
-  --iidfile "$OUTPUT/image-id" -f julia/qualification/source_candidate.Dockerfile -
-python3 -B julia/qualification/source_candidate.py verify "$(cat "$OUTPUT/image-id")" \
-  "$PUBLIC_INPUTS" "$PRODUCER_ZIP" "$OUTPUT/source-candidate.json"
+python3 -B julia/qualification/source_candidate.py verify "$PUBLIC_INPUTS" "$PRODUCER_ZIP" \
+  "$UPSTREAM_EVIDENCE" "$NEW_EVIDENCE_DIRECTORY"
 ```
 
-The checker verifies the full native inventory, original JLL metadata, local 7zip identity, installed source packages and generated contracts. It uses the ordinary no-network worker checks, numerical assertions, 13 Go corpus cases and timeout cleanup. The fresh vendor catalog must match the reviewed complete record set. Every advisory on the 3.5.9 baseline must carry the same upstream fix and recorded ancestry as the two independently reproduced outputs. A changed record, missing control, stale observation or changed installed byte refuses. The receipt always retains `releaseQualified=false` and `consumerAccepted=false`. Wider native advisory ownership, upstream 7zip mapping, signed release, rollout and rollback retain their separate acceptance gates.
+Use the Docker containerd image store that exports an OCI index and returns its immutable descriptor ID. A classic config-ID-only Docker archive refuses. The upstream evidence directory contains the original GitHub git/commits response as `upstream.json` and the eight `CVE-*.compare.json` responses from the exact producer URLs. Preserve original bytes. The trusted parent builds the committed Git archive, saves its OCI, checks the manifest/config/layer digests and independently hashes the three ELF members in the compressed layers. The checker verifies the full native inventory, original JLL metadata, local 7zip identity, installed source packages and generated contracts. It uses the ordinary no-network worker checks, numerical assertions, 13 Go corpus cases and timeout cleanup. The fresh vendor catalog must match the reviewed complete record set. Every advisory on the 3.5.9 baseline must carry the same upstream fix and recorded ancestry as the two independently reproduced outputs. A changed record, missing control, stale observation or changed installed byte refuses. The receipt always retains `releaseQualified=false` and `consumerAccepted=false`. Wider native advisory ownership, upstream 7zip mapping, signed release, rollout and rollback retain their separate acceptance gates.

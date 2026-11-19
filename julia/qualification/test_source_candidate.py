@@ -85,3 +85,78 @@ class SourceCandidateTests(unittest.TestCase):
                 stream.truncate(14035645)
             with self.assertRaisesRegex(ValueError, 'artifact digest'):
                 candidate.read_producer(path)
+
+
+class TrustedInputs(unittest.TestCase):
+    def test_repacked_tree_and_self_rewritten_pins_refused(self):
+        import gzip
+        from test_offline_depot import archive, contract, MANIFEST
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            raw = archive()
+            # Content and Git tree are unchanged while the actual gzip header differs.
+            repacked = bytes([*raw[:4], *(int.from_bytes(raw[4:8], 'little') ^ 1).to_bytes(4, 'little')]) + raw[8:]
+            self.assertEqual(gzip.decompress(raw), gzip.decompress(repacked))
+            pins = json.dumps(contract(raw)).encode()
+            (directory / 'offline_packages.json').write_bytes(pins)
+            (directory / 'Manifest.toml').write_bytes(MANIFEST)
+            (directory / 'Demo.tar.gz').write_bytes(raw)
+            candidate.check_package_inputs(directory, MANIFEST, pins)
+            (directory / 'Demo.tar.gz').write_bytes(repacked)
+            with self.assertRaisesRegex(ValueError, 'repacked'):
+                candidate.check_package_inputs(directory, MANIFEST, pins)
+            (directory / 'offline_packages.json').write_bytes(json.dumps(contract(repacked)).encode())
+            with self.assertRaisesRegex(ValueError, 'committed'):
+                candidate.check_package_inputs(directory, MANIFEST, pins)
+
+    def test_raw_compare_requires_both_endpoints_and_merge_base(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            head, fix, tree = 'b' * 40, 'a' * 40, 'c' * 40
+            base = 'https://api.github.com/repos/openssl/openssl'
+            upstream = json.dumps({'sha': head, 'url': base + '/git/commits/' + head, 'tree': {'sha': tree}}).encode()
+            (directory / 'upstream.json').write_bytes(upstream)
+            item = {'url': base + '/compare/' + fix + '...' + head, 'base_commit': {'sha': fix},
+                    'merge_base_commit': {'sha': fix}, 'status': 'ahead', 'ahead_by': 2, 'behind_by': 0, 'total_commits': 2}
+            producer = {'pins': {'source': head, 'tree': tree}, 'upstreamCommit': {'sha256': candidate.digest(upstream)}}
+            def prepare(changes):
+                raw = json.dumps({**item, **changes}).encode()
+                (directory / 'CVE-2026-1000.compare.json').write_bytes(raw)
+                producer['vendorFixes'] = {'CVE-2026-1000': {'fix': fix, 'compareSHA256': candidate.digest(raw)}}
+            prepare({})
+            self.assertEqual(candidate.ancestry_evidence(producer, directory)['comparisons'], 1)
+            for changes in [{'url': base + '/compare/' + fix + '...' + fix}, {'merge_base_commit': {'sha': head}},
+                            {'base_commit': {'sha': head}}, {'behind_by': 1}, {'status': 'diverged'}]:
+                with self.subTest(changes=changes):
+                    prepare(changes)
+                    with self.assertRaisesRegex(ValueError, 'ancestry'):
+                        candidate.ancestry_evidence(producer, directory)
+
+    def test_oci_selected_file_must_be_pinned_regular_content(self):
+        import io
+        import tarfile
+        from source_candidate_oci import layer_files
+        name = 'opt/julia/lib/julia/libcrypto.so.3'
+        raw = b'\x7fELFfixture'
+        expected = {name: {'size': len(raw), 'sha256': candidate.digest(raw)}}
+        def check(member, contents):
+            packed = io.BytesIO()
+            with tarfile.open(fileobj=packed, mode='w') as archive:
+                archive.addfile(member, io.BytesIO(contents))
+            packed.seek(0)
+            found = {}
+            with tarfile.open(fileobj=packed) as archive:
+                layer_files(archive, expected, found)
+            return found
+        entry = tarfile.TarInfo(name)
+        entry.size = len(raw)
+        self.assertEqual(check(entry, raw), expected)
+        with self.assertRaisesRegex(ValueError, 'ELF bytes'):
+            check(entry, b'\x7fELFchanged')
+        entry.size = 0
+        entry.type = tarfile.SYMTYPE
+        entry.linkname = '/other'
+        with self.assertRaisesRegex(ValueError, 'ambiguous candidate'):
+            check(entry, b'')
+        with self.assertRaisesRegex(ValueError, 'whiteout'):
+            check(tarfile.TarInfo('opt/julia/lib/.wh.julia'), b'')

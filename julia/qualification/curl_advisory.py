@@ -78,7 +78,11 @@ def records(raw, target):
 
 
 def validate_report(report, inventory, scan_time):
-    curl_runtime.validate_component(inventory)
+    validate_backend(report, inventory, scan_time, 'OpenSSL/3.5.9')
+
+
+def validate_backend(report, inventory, scan_time, backend):
+    curl_runtime.validate_backend(inventory, backend)
     if not isinstance(report, dict) or set(report) != {
             'scope', 'checkedAt', 'version', 'controlVersion', 'rawByVersion', 'sha256ByVersion',
             'affectedControl', 'advisories'}:
@@ -104,6 +108,10 @@ def validate_report(report, inventory, scan_time):
 
 
 def qualify(run, inventory, now, report):
+    qualify_backend(run, inventory, now, report, 'OpenSSL/3.5.9')
+
+
+def qualify_backend(run, inventory, now, report, backend):
     raw = {}
     for value in (CONTROL, curl_runtime.VERSION):
         raw[value] = run(['curl', '--disable', '--fail', '--silent', '--show-error', '--proto', '=https',
@@ -113,4 +121,4 @@ def qualify(run, inventory, now, report):
                   sha256ByVersion={v: hashlib.sha256(text.encode()).hexdigest() for v,text in raw.items()})
     report['affectedControl'] = sorted(records(raw[CONTROL], CONTROL))
     report['advisories'] = sorted(records(raw[curl_runtime.VERSION], curl_runtime.VERSION))
-    validate_report(report, inventory, now())
+    validate_backend(report, inventory, now(), backend)
