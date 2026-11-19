@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -51,26 +51,46 @@ class AccountingTests(unittest.TestCase):
 
 
 class TimeoutTests(unittest.TestCase):
-    @unittest.skipUnless(os.name == 'posix', 'POSIX process-group fixture')
-    def test_timeout_stops_child_before_it_can_write(self):
+    def test_timeout_closes_only_after_parent_child_and_grandchild_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            marker = root / 'orphan-wrote'
-            ready = root / 'ready'
-            child = ('import pathlib,time; '
-                     f'pathlib.Path({str(ready)!r}).touch(); '
-                     'time.sleep(2); '
-                     f'pathlib.Path({str(marker)!r}).touch()')
-            parent = ('import subprocess,sys,time; '
-                      f'subprocess.Popen([sys.executable,"-c",{child!r}]); '
-                      'time.sleep(60)')
-            with open(os.devnull, 'w') as output:
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    check.run_tests([sys.executable, '-c', parent], cwd=root,
-                                    stdout=output, timeout=1)
-            self.assertTrue(ready.exists(), 'child must have started to exercise cleanup')
-            time.sleep(2)
-            self.assertFalse(marker.exists(), 'timed-out child survived the Go parent')
+            script = root / 'tree.py'
+            script.write_text(
+                'import os, pathlib, subprocess, sys, time\n'
+                'level = int(sys.argv[1])\n'
+                'print(level, os.getpid(), os.getppid(), flush=True)\n'
+                'if level < 2:\n'
+                '    subprocess.Popen([sys.executable, __file__, str(level + 1)], stdout=sys.stdout)\n'
+                'deadline = time.monotonic() + 30\n'
+                'while not pathlib.Path("release").exists() and time.monotonic() < deadline:\n'
+                '    time.sleep(0.05)\n',
+                encoding='utf-8')
+            read_fd, write_fd = os.pipe()
+            rows = []
+            # Each real process owns its stdout write handle. EOF is observable
+            # only after every writer has exited, including on Windows.
+            def drain():
+                with os.fdopen(read_fd, 'r', encoding='ascii') as pipe:
+                    rows.extend(pipe)
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            try:
+                with os.fdopen(write_fd, 'wb') as output:
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        check.run_tests([sys.executable, str(script), '0'], cwd=root,
+                                        stdout=output, timeout=4)
+                reader.join(timeout=3)
+                self.assertFalse(reader.is_alive(), 'a timed-out process still holds the output pipe')
+                lineage = sorted(tuple(map(int, row.split())) for row in rows)
+                self.assertEqual([level for level, _, _ in lineage], [0, 1, 2])
+                self.assertEqual(len({pid for _, pid, _ in lineage}), 3)
+                self.assertEqual([parent for _, _, parent in lineage],
+                                 [os.getpid(), lineage[0][1], lineage[1][1]])
+            finally:
+                # A regression releases only the fixture survivors, without
+                # killing a process by name or trusting a recycled PID.
+                (root / 'release').touch()
+                reader.join(timeout=5)
 
 
 class ReadinessTests(unittest.TestCase):
