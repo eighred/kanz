@@ -684,3 +684,67 @@ func TestOKXCorrectionFitsPersistedEffectiveTime(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogueRequiresExplicitData(t *testing.T) {
+	for _, body := range []string{`{"code":"0"}`, `{"code":"0","data":null}`} {
+		if _, err := ParseOKXInstruments([]byte(body), mapping(), Options{}); err == nil {
+			t.Errorf("accepted incomplete catalogue %s", body)
+		}
+	}
+	b, err := ParseOKXInstruments(okxCatalogue(), mapping(), Options{})
+	if err != nil || len(b.Mapped) != 0 || len(b.Refused) != 0 {
+		t.Fatalf("empty catalogue: %+v, %v", b, err)
+	}
+}
+
+func TestReferenceKeepsConfiguredInstrumentMapping(t *testing.T) {
+	body := okxCatalogue(okxOption("contract", "BTC-USD", "C", "100", expiry.UnixMilli(), listed.UnixMilli()))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	defer srv.Close()
+	m := mapping()
+	m.Contract = map[string]string{"contract": "configured-id"}
+	ref, err := NewOKXReference(srv.URL, m, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Underlying["BTC-USD"] = "different-underlying"
+	m.Contract["contract"] = "different-id"
+	b, err := ref.Chain(t.Context(), OptionInstruments, "BTC-USD")
+	if err != nil || len(b.Mapped) != 1 {
+		t.Fatalf("chain: %+v %v", b, err)
+	}
+	row := b.Mapped[0]
+	if row.InstrumentID != "configured-id" || row.UnderlyingID != "BTC-USDT" || row.Terms.GetOption().GetUnderlyingId() != "BTC-USDT" {
+		t.Fatalf("mapping changed after configuration: %+v", row)
+	}
+}
+
+func TestCatalogueHTTPBodyLimit(t *testing.T) {
+	prefix := okxCatalogue()
+	padding := strings.Repeat(" ", 8192)
+	for _, tc := range []struct {
+		name  string
+		extra string
+	}{{"at limit", ""}, {"over limit", "!"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(prefix)
+				for left := okxCatalogueLimit - len(prefix); left > 0; left -= len(padding) {
+					if _, err := fmt.Fprint(w, padding[:min(left, len(padding))]); err != nil {
+						return
+					}
+				}
+				_, _ = fmt.Fprint(w, tc.extra)
+			}))
+			defer srv.Close()
+			ref, err := NewOKXReference(srv.URL, mapping(), Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ref.Chain(t.Context(), OptionInstruments, "BTC-USD")
+			if (err != nil) != (tc.extra != "") {
+				t.Fatalf("body %s: err=%v", tc.name, err)
+			}
+		})
+	}
+}

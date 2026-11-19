@@ -9,6 +9,7 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/pricing"
 )
@@ -299,5 +300,51 @@ func TestRegisterGreeks_AnExpiredOptionIsReported(t *testing.T) {
 		if s != "OPT_A:"+SkipExpired {
 			t.Errorf("reported %q, want OPT_A:%s", s, SkipExpired)
 		}
+	}
+}
+
+func TestGreeksRequireReadablePositionScale(t *testing.T) {
+	asOf, terms, _ := greeksSkipFixture(t)
+	for _, tc := range []struct {
+		name, id   string
+		amount     *commonpb.Decimal
+		wantReason string
+	}{
+		{"option missing quantity", "OPT_A", nil, "no_quantity"},
+		{"option invalid quantity", "OPT_A", dec(1, 301), "no_quantity"},
+		{"option zero quantity", "OPT_A", dec(0, 0), ""},
+		{"linear missing mark", "EQUITY", nil, "no_market_value"},
+		{"linear invalid mark", "EQUITY", dec(1, 301), "no_market_value"},
+		{"linear zero mark", "EQUITY", dec(0, 0), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := domain.NewPortfolio("p", "USD")
+			pos := domain.Position{InstrumentID: domain.InstrumentID(tc.id), AsOf: asOf}
+			if tc.id == "OPT_A" {
+				pos.Quantity = tc.amount
+			} else {
+				pos.MarketValue = &commonpb.Money{Amount: tc.amount, CurrencyCode: "USD"}
+			}
+			p.SetPosition(pos)
+			r := NewRegistry()
+			RegisterGreeks(t.Context(), r, GreeksProviders{Terms: terms, Spot: staticSpot{"UND": 100}, Vol: constVol(0.2)})
+			measures := ComputeMeasures(p, r, nil)
+			for _, name := range []v1.MeasureName{MeasureDelta, MeasureGamma, MeasureVega, MeasureTheta, MeasureRho} {
+				m, _ := measures.Lookup(name)
+				if tc.id != "OPT_A" && name != MeasureDelta {
+					if m.Coverage.ExcludedCount != 0 {
+						t.Fatal("linear mark was required for a higher-order Greek", name)
+					}
+					continue
+				}
+				if tc.wantReason == "" {
+					if m.Value.GetCoefficient() != 0 || m.Coverage.Contributed != 1 || m.Coverage.ExcludedCount != 0 {
+						t.Fatalf("%s zero: %+v", name, m)
+					}
+				} else if m.Coverage.Contributed != 0 || m.Coverage.ExcludedCount != 1 || m.Coverage.Exclusions[0].Reason != tc.wantReason {
+					t.Errorf("%s: %+v", name, m.Coverage)
+				}
+			}
+		})
 	}
 }

@@ -304,3 +304,41 @@ func flatSurface(a float64) *SVISurface {
 		slices:   []SVIParams{{A: a}},
 	}
 }
+
+func TestSVIRequiresIndependentStrikesAtEveryExpiry(t *testing.T) {
+	const spot = 100.0
+	// Zero carry and unit maturity make ATM call and put quotes equal by parity.
+	base := []OptionQuote{{Type: pricing.Call, Strike: 90, Expiry: 1, Price: 16}, {Type: pricing.Call, Strike: 100, Expiry: 1, Price: 10}, {Type: pricing.Put, Strike: 110, Expiry: 1, Price: 16}}
+	cal := Calibrator{Store: NewStore(), Disc: pricing.FlatCurve(0), Source: staticVolQuotes{quotes: base, spot: spot}}
+	asOf := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	original, err := cal.Refresh(t.Context(), "U", asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, ok := original.Vol(100, 1)
+	if !ok {
+		t.Fatal("accepted surface has no ATM node")
+	}
+	call := OptionQuote{Type: pricing.Call, Strike: 100, Expiry: 2, Price: 18}
+	put := call
+	put.Type = pricing.Put
+	other := OptionQuote{Type: pricing.Call, Strike: 110, Expiry: 2, Price: 15}
+	for _, test := range []struct {
+		name   string
+		quotes []OptionQuote
+	}{
+		{"repeated single strike", []OptionQuote{call, call, call}},
+		{"both rights and two strikes", []OptionQuote{put, other, call}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cal.Source = staticVolQuotes{quotes: append(append([]OptionQuote{}, base...), test.quotes...), spot: spot}
+			later := asOf.Add(time.Hour)
+			if s, e := cal.Refresh(t.Context(), "U", later); s != nil || !errors.Is(e, ErrSVIFit) {
+				t.Errorf("under-covered smile returned surface=%v, err=%v", s != nil, e)
+			}
+			if v, ok := cal.Store.Vol(t.Context(), "U", 100, 1, later); !ok || v != want || len(cal.Store.byUnderlying["U"]) != 1 {
+				t.Fatal("failed calibration published a revision")
+			}
+		})
+	}
+}

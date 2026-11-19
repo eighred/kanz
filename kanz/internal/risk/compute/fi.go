@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"math"
 	"time"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -266,7 +267,7 @@ func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureF
 		var dollar, weighted, weight float64
 		var cov Coverage
 		for _, pos := range port.Positions() {
-			cr, qty, mv, reason := positionBondRisk(ctx, p, pos, asOf)
+			cr, reason := positionBondRisk(ctx, p, pos, asOf)
 			if reason != "" {
 				cov.Exclude(pos.InstrumentID, reason)
 				continue
@@ -274,10 +275,20 @@ func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureF
 			if !cr.priceable {
 				continue // a terms record says this is not a bond: correctly absent
 			}
+			input, missing := pos.MarketValue.GetAmount(), SkipNoMarketValue
+			if name == MeasureDV01 {
+				input, missing = pos.Quantity, SkipNoQuantity
+			}
+			scale, ok := decutil.Float64(input)
+			if !ok {
+				cov.Exclude(pos.InstrumentID, skipFI(p, pos, missing))
+				continue
+			}
 			cov.Contributed++
+			mv := math.Abs(scale)
 			switch name {
 			case MeasureDV01:
-				dollar += cr.risk.DV01 * qty
+				dollar += cr.risk.DV01 * scale
 			case MeasureConvexity:
 				weighted += mv * cr.risk.Convexity
 				weight += mv
@@ -286,14 +297,18 @@ func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureF
 				weight += mv
 			}
 		}
-		if name == MeasureDV01 {
-			return v1.Measure{Name: name, Value: floatToDecimal(dollar, fiDV01Exp), Coverage: cov.Result()}
+		value, exponent := dollar, int32(fiDV01Exp)
+		if name != MeasureDV01 {
+			value, exponent = 0, fiRatioExp
+			if weight != 0 {
+				value = weighted / weight
+			}
 		}
-		ratio := 0.0
-		if weight != 0 {
-			ratio = weighted / weight
+		if !representablePricingAmount(value, exponent) {
+			cov.ExcludeWhole(SkipInvalidPricing)
+			value = 0
 		}
-		return v1.Measure{Name: name, Value: floatToDecimal(ratio, fiRatioExp), Coverage: cov.Result()}
+		return v1.Measure{Name: name, Value: floatToDecimal(value, exponent), Coverage: cov.Result()}
 	}
 }
 
@@ -306,18 +321,18 @@ type bondRisk struct {
 }
 
 // positionBondRisk prices one bond position off the discount curve and returns
-// its curve risk, quantity, and |MarketValue| weight. The reason is "" when
+// its per-unit curve risk. The reason is "" when
 // nothing needs reporting — the position priced, or a terms record positively
 // identified it as something other than a bond — and one of the Skip* constants
 // when the position could not be assessed.
-func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, asOf time.Time) (bondRisk, float64, float64, string) {
+func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, asOf time.Time) (bondRisk, string) {
 	if p.Terms == nil || p.Curve == nil {
 		// A MISSING SEAM IS AN EXCLUSION, NOT A NON-BOND. Absorbed here rather
 		// than refused at registration (matching positionGreekContribution), but
 		// absorbed loudly: with no provider the engine has certified nothing, and
 		// reporting the whole book unassessed is what makes that visible on the
 		// first query instead of on a dashboard nobody opened.
-		return bondRisk{}, 0, 0, SkipUnknownInstrument
+		return bondRisk{}, SkipUnknownInstrument
 	}
 	spec, res := p.Terms.BondTerms(ctx, string(pos.InstrumentID), asOf)
 	switch res {
@@ -327,9 +342,9 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 		// and its absence from DV01 is an answer rather than a gap. Not reported
 		// to OnSkip and not recorded as an exclusion — counting every equity would
 		// make the signal the noise, and would flag every response on the estate.
-		return bondRisk{}, 0, 0, ""
+		return bondRisk{}, ""
 	case TermsUnusable:
-		return bondRisk{}, 0, 0, skipFI(p, pos, SkipNoTerms)
+		return bondRisk{}, skipFI(p, pos, SkipNoTerms)
 	case TermsResolved:
 		// fall through to pricing
 	default: // TermsUnknown
@@ -338,14 +353,14 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 		// produced #527: with no production writer for the contract-terms store,
 		// every position on every book takes this branch and the four FI measures
 		// were reporting an unqualified zero off it.
-		return bondRisk{}, 0, 0, SkipUnknownInstrument
+		return bondRisk{}, SkipUnknownInstrument
 	}
 	c, ok := p.Curve.Curve(ctx, spec.Currency, asOf)
 	if !ok || c == nil {
 		// REPORTED, because this one is unambiguous: the terms resolved, so this
 		// IS a bond, and it is about to leave the book's measured rate risk
 		// without appearing anywhere as a gap.
-		return bondRisk{}, 0, 0, skipFI(p, pos, SkipNoCurve)
+		return bondRisk{}, skipFI(p, pos, SkipNoCurve)
 	}
 	bond := pricing.Bond{
 		Face:       spec.Face,
@@ -363,12 +378,7 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 		}
 		p.OnBondRisk(BondRiskCapture{InstrumentID: string(pos.InstrumentID), AsOf: asOf, CapturedAt: time.Now().UTC(), Terms: canonical, Bond: bond, Curve: c, Result: cr})
 	}
-	qty := decutil.Float64Or(pos.Quantity, 0)
-	mv := decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
-	if mv < 0 {
-		mv = -mv
-	}
-	return bondRisk{risk: cr, priceable: true}, qty, mv, ""
+	return bondRisk{risk: cr, priceable: true}, ""
 }
 
 // skipFI reports an exclusion to the observer, if the caller asked to hear about

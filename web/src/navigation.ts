@@ -18,6 +18,7 @@ export const workspaces = [
     { to: '/screening', title: 'ESG screening', description: 'Screen a supplied snapshot against explicit exclusions.' },
     { to: '/copilot', title: 'Copilot investigation', description: 'Ask governed questions and review source citations and grounding.' },
     { to: '/portfolios', title: 'Portfolios', description: 'Open portfolio exposure, risk measures, scenarios, and orders.' },
+    { to: '/model-proposals', title: 'Model proposal review', description: 'Review a hypothetical portfolio and its mandate evaluation.' },
     { to: '/cash-receipts', title: 'Cash movement receipts', description: 'Look up acceptance and journal status for a portfolio cash movement.' },
     { to: '/broker-accounts', title: 'Broker accounts', description: 'Inspect account state, positions, orders, and executions.' },
     { to: '/custody-breaks', title: 'Custody breaks', description: 'Review outstanding book-to-custodian differences.' },

@@ -5,6 +5,9 @@ import (
 	"github.com/eighred/kanz/internal/risk/domain"
 )
 
+// SkipNoQuantity identifies a missing or unreadable position size.
+const SkipNoQuantity = "no_quantity"
+
 // Coverage accumulates one measure's v1.InputCoverage while the measure runs.
 //
 // # One accumulator for every measure family (#527)

@@ -9,6 +9,7 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/pricing"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
@@ -195,5 +196,55 @@ func TestRegisterFIRisk_ANonBondIsNotReportedAsSkipped(t *testing.T) {
 		t.Errorf("a share book reported %d FI skips: %v — a non-bond is correctly absent from a "+
 			"bond measure, and counting it would bury the bonds that really were dropped",
 			len(skipped), skipped)
+	}
+}
+
+func TestBondRiskRequiresOnlyTheMeasurePositionScale(t *testing.T) {
+	asOf := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
+	spec := BondSpec{Face: 100, CouponRate: 0.05, Frequency: 2, Issue: asOf, Maturity: asOf.AddDate(5, 0, 0), DayCount: pricing.Thirty360, Currency: "USD"}
+	providers := FIProviders{Terms: staticBondTerms{"B": spec}, Curve: staticCurve{fiTestCurve(t)}}
+	for _, tc := range []struct {
+		name          string
+		qty, mark     *commonpb.Decimal
+		qtyOK, markOK bool
+	}{
+		{"missing quantity", nil, dec(100, 0), false, true},
+		{"invalid mark", dec(1, 0), dec(1, 301), true, false},
+		{"zero", dec(0, 0), dec(0, 0), true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := domain.NewPortfolio("p", "USD")
+			p.SetPosition(domain.Position{InstrumentID: "B", AsOf: asOf, Quantity: tc.qty, MarketValue: &commonpb.Money{Amount: tc.mark, CurrencyCode: "USD"}})
+			r := NewRegistry()
+			RegisterFIRisk(t.Context(), r, providers)
+			ms := ComputeMeasures(p, r, nil)
+			for _, name := range []v1.MeasureName{MeasureDV01, MeasureDuration, MeasureSpreadDuration, MeasureConvexity} {
+				measure, _ := ms.Lookup(name)
+				wantOK, reason := tc.markOK, "no_market_value"
+				if name == MeasureDV01 {
+					wantOK, reason = tc.qtyOK, "no_quantity"
+				}
+				if wantOK {
+					if measure.Coverage.Contributed != 1 || measure.Coverage.ExcludedCount != 0 {
+						t.Errorf("usable %s: %+v", name, measure.Coverage)
+					}
+				} else if measure.Coverage.Contributed != 0 || measure.Coverage.ExcludedCount != 1 || measure.Coverage.Exclusions[0].Reason != reason {
+					t.Errorf("missing scale %s: %+v", name, measure.Coverage)
+				}
+			}
+		})
+	}
+}
+
+func TestPortfolioDV01RefusesUnrepresentableAggregate(t *testing.T) {
+	asOf := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
+	spec := BondSpec{Face: 100, CouponRate: 0.05, Frequency: 2, Issue: asOf, Maturity: asOf.AddDate(5, 0, 0), DayCount: pricing.Thirty360, Currency: "USD"}
+	p := domain.NewPortfolio("p", "USD")
+	p.SetPosition(domain.Position{InstrumentID: "B", AsOf: asOf, Quantity: dec(1, 20), MarketValue: dec0("USD")})
+	r := NewRegistry()
+	RegisterFIRisk(t.Context(), r, FIProviders{Terms: staticBondTerms{"B": spec}, Curve: staticCurve{fiTestCurve(t)}})
+	m, _ := ComputeMeasures(p, r, []v1.MeasureName{MeasureDV01}).Lookup(MeasureDV01)
+	if m.Value.GetCoefficient() != 0 || m.Coverage.ExcludedCount != 1 || m.Coverage.Exclusions[0].Reason != SkipInvalidPricing {
+		t.Fatalf("unrepresentable DV01 returned %+v", m)
 	}
 }

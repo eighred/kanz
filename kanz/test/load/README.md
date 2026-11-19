@@ -65,9 +65,14 @@ RATE=5000 DURATION=2m PORTFOLIOS=2000 go run ./test/load/ingest             # wr
 
 `PORTFOLIOS>1` makes `pickPortfolio()` (config.js) hit `PF1-0000..PF1-NNNN`, so
 no single aggregate is a hot key — this is what exercises the PARITY-05a shard
-fan-out and realistic state/cache spread. The write generator streams
-`PositionState` FACTs at `RATE`/sec; watch `kanz_bus_pending_messages` climb as
-the backpressure/scale signal. `capacity-model.md` turns both knees into the
+fan-out and realistic state/cache spread. The write generator schedules
+`PositionState` FACTs at `RATE`/sec from the start of the measurement window.
+Each report reconciles `offered = published + failed + unsent`. Published
+counts JetStream acknowledgements. Failed counts calls returning an error,
+including an unconfirmed acknowledgement. Unsent counts scheduled arrivals
+the serial publisher missed. It skips overdue arrivals to avoid a catch-up
+burst. Compare acknowledgements with consumer lag and engine recomputes to
+measure downstream processing. `capacity-model.md` turns both knees into the
 autoscaling thresholds.
 
 ## Reading the result

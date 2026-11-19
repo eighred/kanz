@@ -1,16 +1,87 @@
 package depth
 
 import (
+	"context"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
 	"github.com/eighred/kanz/internal/dec"
 )
+
+func TestBinanceSourceRefusesInvalidVenueClockAndReanchors(t *testing.T) {
+	for _, stamp := range []string{"", `"E":null,`, `"E":0,`, `"E":-1,`, `"E":253402300800000,`, `"E":"1",`, `"E":999,`} {
+		t.Run("field="+stamp, func(t *testing.T) {
+			frame := func(clock string, seq int) string {
+				return fmt.Sprintf(`{"e":"depthUpdate",%s"s":"BTCUSDT","U":%d,"u":%d,"b":[],"a":[]}`, clock, seq, seq)
+			}
+			f := newFakeBinanceDepth(t,
+				[]string{`{"lastUpdateId":100}`, `{"lastUpdateId":200}`, `{"lastUpdateId":300}`},
+				[]string{
+					frame(`"E":1000,`, 101), frame(stamp, 102),
+					frame(`"E":999,`, 201), frame(`"E":1000,`, 301),
+				})
+			s := binanceSourceOver(f)
+			defer func() { _ = s.Close() }()
+			requireAnchor := func(want uint64) {
+				t.Helper()
+				if got := recvOK(t, s).Snapshot.GetLastUpdateSequence(); got != want {
+					t.Fatalf("snapshot sequence = %d, want %d", got, want)
+				}
+			}
+			requireRefusal := func() {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				u, err := s.Recv(ctx)
+				if err == nil || u.Snapshot != nil || u.Delta != nil {
+					t.Fatalf("expected a clock refusal without an update: %+v, %v", u, err)
+				}
+			}
+			requireAnchor(100)
+			if d := recvOK(t, s).Delta; d.GetLastUpdateSequence() != 101 || d.GetEventTime().AsTime().UnixMilli() != 1000 {
+				t.Fatalf("first valid venue delta = %v", d)
+			}
+			requireRefusal()
+			requireAnchor(200)
+			requireRefusal() // A new REST anchor cannot replace the last venue clock.
+			requireAnchor(300)
+			if d := recvOK(t, s).Delta; d.GetPrevUpdateSequence() != 300 || d.GetEventTime().AsTime().UnixMilli() != 1000 {
+				t.Fatalf("same-millisecond delta after recovery = %v", d)
+			}
+		})
+	}
+}
+
+func TestBinanceSourcePreservesVenueClockAcrossReconnect(t *testing.T) {
+	f := newFakeBinanceDepth(t, []string{`{"lastUpdateId":100}`, `{"lastUpdateId":200}`},
+		[]string{
+			`{"e":"depthUpdate","s":"BTCUSDT","U":101,"u":101,"E":1000}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","U":201,"u":201,"E":999}`,
+		})
+	s := binanceSourceOver(f)
+	defer func() { _ = s.Close() }()
+	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 100 || recvOK(t, s).Delta.GetLastUpdateSequence() != 101 {
+		t.Fatal("first connection did not establish its venue clock")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 200 {
+		t.Fatal("reconnected stream did not re-anchor")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if update, err := s.Recv(ctx); err == nil || update.Delta != nil || update.Snapshot != nil {
+		t.Fatalf("expected post-reconnect clock regression refusal: %+v, %v", update, err)
+	}
+}
 
 // The Binance depth source is certified over the REAL coder/websocket transport
 // against an httptest server — hermetic, no network, no keys (depth is public).

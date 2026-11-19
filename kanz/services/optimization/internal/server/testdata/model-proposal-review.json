@@ -1,0 +1,35 @@
+{
+  "PortfolioID": "PF",
+  "Targets": {
+    "A": "1"
+  },
+  "Trades": [
+    {
+      "InstrumentID": "A",
+      "Side": 1,
+      "CurrentWeight": "0",
+      "TargetWeight": "1",
+      "Quantity": "9007199254740993000000000000",
+      "Notional": "9007199254740993"
+    }
+  ],
+  "Turnover": "0.5",
+  "AsOf": "2026-11-19T06:00:00Z",
+  "MandateStatus": "UNCHECKED",
+  "SchemaVersion": 2,
+  "ReadOnly": true,
+  "Currency": "USD",
+  "TargetWeightPolicy": "decimal-12-nearest-even; budget-residual-largest-absolute-weight; exact-post-check",
+  "Objective": {
+    "Type": 0,
+    "RiskAversion": 0,
+    "RiskFreeRate": 0
+  },
+  "ExpectedReturn": 0.1,
+  "ExpectedRisk": null,
+  "CovarianceQuality": "UNCHECKED",
+  "Violations": null,
+  "EvaluatedWeights": {
+    "A": "1"
+  }
+}

@@ -26,6 +26,7 @@ import MandateProposalView from '../views/MandateProposalView.vue'
 import InstrumentsView from '../views/InstrumentsView.vue'
 import PortfoliosView from '../views/PortfoliosView.vue'
 import CashReceiptsView from '../views/CashReceiptsView.vue'
+import ModelProposalView from '../views/ModelProposalView.vue'
 import ProvisionsView from '../views/ProvisionsView.vue'
 import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
@@ -90,6 +91,7 @@ export const router = createRouter({
     { path: '/mandate-changes', name: 'mandate-changes', component: MandateChangesView },
     { path: '/mandate-proposal', name: 'mandate-proposal', component: MandateProposalView },
     { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
+    { path: '/model-proposals', name: 'model-proposals', component: ModelProposalView },
     { path: '/cash-receipts', name: 'cash-receipts', component: CashReceiptsView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },

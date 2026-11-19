@@ -1,4 +1,5 @@
 import { api, ApiError } from './client'
+import { exactRatio } from './exact-ratio'
 
 export interface HouseholdDrift {
   evaluated: boolean
@@ -35,26 +36,8 @@ function text(value: unknown, limit = 256): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit) return invalid()
   return value
 }
-// Financial strings never pass through Number, parseFloat, or Intl rounding.
-// Ratios such as 1/3 retain their exact fraction instead of a made-up last digit.
-function rational(value: unknown): { text: string; numerator: bigint; denominator: bigint } {
-  const s = text(value, 400)
-  if (!/^-?[0-9]+(?:\.[0-9]+|\/[1-9][0-9]*)?$/.test(s)) return invalid()
-  let numerator: bigint, denominator: bigint
-  if (s.includes('/')) {
-    const parts = s.split('/')
-    numerator = BigInt(parts[0]!)
-    denominator = BigInt(parts[1]!)
-  } else {
-    const parts = s.split('.')
-    numerator = BigInt(parts.join(''))
-    denominator = 10n ** BigInt(parts[1]?.length ?? 0)
-  }
-  let a = numerator < 0n ? -numerator : numerator, b = denominator
-  while (b) { const remainder = a % b; a = b; b = remainder }
-  numerator /= a; denominator /= a
-  if ((numerator < 0n ? -numerator : numerator).toString(2).length > 512 || denominator.toString(2).length > 512) return invalid()
-  return { text: s, numerator, denominator }
+function rational(value: unknown) {
+  try { return exactRatio(value) } catch { return invalid() }
 }
 function amounts(value: unknown, emptyKey = false): Record<string, string> {
   const rows = record(value), entries = Object.entries(rows)
