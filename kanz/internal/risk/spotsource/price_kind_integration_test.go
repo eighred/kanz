@@ -1,15 +1,23 @@
-package marketdata
+package spotsource_test
 
 import (
 	"context"
 	"math/big"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/eighred/kanz/internal/marketdata"
+	"github.com/eighred/kanz/internal/marketdata/marketdatatest"
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/risk/spotsource"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Use one instrument with distinct simultaneous marks. A missing kind filter
@@ -21,34 +29,36 @@ func TestPITPriceKindsThroughIngestionAndRisk(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	st := store.NewPostgres(boundaryPool(t, ctx, dsn))
-	ingestor, err := NewIngestor(st)
+	st := store.NewPostgres(marketdatatest.NewPool(t, ctx, dsn, filepath.Join("..", "..", "..", "services", "market_data", "migrations")))
+	ingestor, err := marketdata.NewIngestor(st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := newPayloadTimeBroker(t, ctx)
+	broker := marketdatatest.NewBroker(t, ctx)
 	observed := time.Date(2026, 10, 19, 12, 30, 0, 0, time.UTC)
 	first := observed.Add(time.Second)
 	revised := first.Add(time.Minute)
-	instrument := broker.id
-	bar := barEvent("XBIN", observed.Add(-time.Minute), observed)
-	trade := timedMarketEvent("trade", observed)
-	quote := timedMarketEvent("quote", observed)
-	bar.InstrumentId, trade.InstrumentId, quote.InstrumentId = instrument, instrument, instrument
-	trade.GetTrade().Price = decv(9007199254740993, -2)
-	quote.GetQuote().BidPrice, quote.GetQuote().AskPrice = decv(2303, -2), decv(2305, -2)
-	original := []payloadTimeCase{
-		{"bar close", "market.crypto.bar", bar},
-		{"trade", "market.crypto.trade", trade},
-		{"quote", "market.crypto.quote", quote},
+	instrument := broker.ID
+	at := timestamppb.New(observed)
+	dec := func(c int64, e int32) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c, Exponent: e} }
+	bar := &marketpb.MarketDataEvent{InstrumentId: instrument, Mic: "XBIN", EventTime: at, Data: &marketpb.MarketDataEvent_Bar{Bar: &marketpb.Bar{
+		OpenTime: timestamppb.New(observed.Add(-time.Minute)), CloseTime: at,
+		Open: dec(100, 0), High: dec(110, 0), Low: dec(90, 0), Close: dec(105, 0), Volume: dec(15, -1), TradeCount: 42,
+	}}}
+	trade := &marketpb.MarketDataEvent{InstrumentId: instrument, Mic: "XBIN", EventTime: at,
+		Data: &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: dec(9007199254740993, -2)}}}
+	quote := &marketpb.MarketDataEvent{InstrumentId: instrument, Mic: "XBIN", EventTime: at,
+		Data: &marketpb.MarketDataEvent_Quote{Quote: &marketpb.Quote{BidPrice: dec(2303, -2), AskPrice: dec(2305, -2)}}}
+	original := []marketdatatest.Frame{
+		{EventType: "market.crypto.bar", Payload: bar},
+		{EventType: "market.crypto.trade", Payload: trade},
+		{EventType: "market.crypto.quote", Payload: quote},
 	}
-	broker.publish(t, ctx, original, first)
-	correction := timedMarketEvent("trade", observed)
-	correction.InstrumentId = instrument
-	correction.GetTrade().Price = decv(9007199254740995, -2)
-	updated := []payloadTimeCase{{"corrected trade", "market.crypto.trade", correction}}
-	broker.publish(t, ctx, updated, revised)
-	broker.consume(t, ctx, 0, ingestor.Handler, append(original, updated...), nil)
+	broker.Publish(t, ctx, original, first)
+	correction := proto.Clone(trade).(*marketpb.MarketDataEvent)
+	correction.GetTrade().Price = dec(9007199254740995, -2)
+	broker.Publish(t, ctx, []marketdatatest.Frame{{EventType: "market.crypto.trade", Payload: correction}}, revised)
+	broker.Consume(t, ctx, 0, ingestor.Handler, len(original)+1, nil)
 
 	for _, tc := range []struct {
 		kind           store.PriceKind
