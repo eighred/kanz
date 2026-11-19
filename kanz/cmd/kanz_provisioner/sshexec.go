@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -117,10 +118,17 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, cmd string) (
 		_ = client.Close()
 		// Cancellation is the selected result; join Run before reading its output.
 		<-done //nolint:errcheck // Cancellation already owns the terminal result.
-		return out.String(), fmt.Errorf("run %q: %w", cmd, ctx.Err())
+		return "", fmt.Errorf("remote install interrupted: %w", ctx.Err())
 	case err := <-done:
 		if err != nil {
-			return out.String(), fmt.Errorf("run %q: %w", cmd, err)
+			// The command contains the cluster admission token. Both the
+			// output and SSH exit-signal text are controlled by the remote
+			// installer. Only the numeric exit status is safe for Job logs.
+			var exit *ssh.ExitError
+			if errors.As(err, &exit) && exit.ExitStatus() >= 0 {
+				return "", fmt.Errorf("remote install exited with status %d", exit.ExitStatus())
+			}
+			return "", errors.New("remote install ended without a confirmed exit status")
 		}
 		return out.String(), nil
 	}

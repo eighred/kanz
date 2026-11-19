@@ -42,9 +42,9 @@ func k3sInstallCmd(k K3sJoin) string {
 }
 
 func (j *sshJoiner) Join(ctx context.Context, t Target, k K3sJoin) error {
-	out, err := j.run(ctx, t.Addr, t.User, t.Key, k3sInstallCmd(k))
+	_, err := j.run(ctx, t.Addr, t.User, t.Key, k3sInstallCmd(k))
 	if err != nil {
-		return fmt.Errorf("k3s agent install failed: %w (output: %s)", err, out)
+		return fmt.Errorf("k3s agent install failed: %w", err)
 	}
 	return nil
 }

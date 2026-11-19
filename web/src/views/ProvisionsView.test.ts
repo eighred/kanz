@@ -59,3 +59,81 @@ it('reports a current upstream failure and recovers on the next poll', async () 
   expect(w.get('tbody').text()).toContain('failed')
   w.unmount()
 })
+
+async function onboardingForm() {
+  const w = mount(ProvisionsView, options)
+  await flushPromises()
+  await w.get('button').trigger('click')
+  for (const [name, value] of Object.entries({
+    hostname: ' worker-1 ', ip: '192.0.2.7', user: 'fixture', hostKey: 'fixture-public-key',
+  })) await w.get(`[name="${name}"]`).setValue(value)
+  const files = new DataTransfer()
+  files.items.add(new File(['synthetic-private-value'], 'fixture.pem', { type: 'text/plain' }))
+  w.get<HTMLInputElement>('input[type=file]').element.files = files.files
+  return w
+}
+
+it('submits once through the authenticated browser client and displays the confirmed run', async () => {
+  let finish!: (response: Response) => void
+  const fetch = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(body('PROVISION_STATUS_PENDING'))
+    .mockReturnValueOnce(new Promise<Response>(resolve => { finish = resolve }))
+    .mockResolvedValueOnce(body('PROVISION_STATUS_JOINED'))
+  const w = await onboardingForm()
+  await w.get('form').trigger('submit')
+  await w.get('form').trigger('submit')
+  await flushPromises()
+  expect(fetch).toHaveBeenCalledTimes(2)
+  const [url, request] = fetch.mock.calls[1]!
+  expect(url).toBe('/api/v1/control/nodes')
+  expect(request).toMatchObject({ method: 'POST', credentials: 'same-origin' })
+  expect(JSON.parse(String(request?.body))).toEqual({
+    hostname: 'worker-1', ip: '192.0.2.7', sshUser: 'fixture', sshHostKey: 'fixture-public-key',
+    sshPrivateKey: btoa('synthetic-private-value'),
+  })
+  finish(Response.json({ provisionId: 'new-run' }))
+  await flushPromises()
+  expect(w.get('[role=status]').text()).toContain('new-run')
+  expect(w.html()).not.toContain('synthetic-private-value')
+  expect(w.find('form').exists()).toBe(false)
+  expect(w.get('tbody').text()).toContain('joined')
+  w.unmount()
+})
+
+it.each([
+  [Response.json({}, { status: 200 }), 'Check the runs'],
+  [Response.json({ error: 'synthetic-private-value' }, { status: 403 }), 'operator authority'],
+  [Response.json({ code: 'mfa_required' }, { status: 403 }), 'Verify your security key'],
+  [Response.json({ error: 'synthetic-private-value' }, { status: 503 }), 'Check the runs'],
+])('requires a receipt and drops the selected key after failure', async (response, message) => {
+  const fetch = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(body('PROVISION_STATUS_PENDING')).mockResolvedValueOnce(response)
+  const w = await onboardingForm()
+  await w.get('form').trigger('submit')
+  await flushPromises()
+  expect(w.get('[role=alert]').text()).toContain(message)
+  expect(w.find('[role=status]').exists()).toBe(false)
+  expect(w.get<HTMLInputElement>('input[type=file]').element.files?.length).toBe(0)
+  expect(w.html()).not.toContain('synthetic-private-value')
+  expect(fetch).toHaveBeenCalledTimes(2)
+  w.unmount()
+})
+
+it('drops a late submission response after leaving the session', async () => {
+  let finish!: (response: Response) => void
+  const forget = vi.fn()
+  setUnauthenticatedHandler(forget)
+  const fetch = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(body('PROVISION_STATUS_PENDING'))
+    .mockReturnValueOnce(new Promise<Response>(resolve => { finish = resolve }))
+  const w = await onboardingForm()
+  await w.get('form').trigger('submit')
+  await flushPromises()
+  const signal = fetch.mock.calls[1]![1]!.signal!
+  w.unmount()
+  expect(signal.aborted).toBe(true)
+  finish(new Response(null, { status: 401 }))
+  await flushPromises()
+  expect(forget).not.toHaveBeenCalled()
+  expect(fetch).toHaveBeenCalledTimes(2)
+})

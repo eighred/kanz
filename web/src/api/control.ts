@@ -116,6 +116,17 @@ export const control = {
   provisions: (signal?: AbortSignal) =>
     api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions', { signal }).then((r) => r.provisions ?? []),
 
+  async addNode(target: { hostname: string; ip: string; sshUser: string; sshHostKey: string }, key: File, signal: AbortSignal) {
+    const sshPrivateKey = btoa(await key.text())
+    signal.throwIfAborted()
+    const response = await api.post<{ provisionId?: string }>('/api/v1/control/nodes',
+      { ...target, sshPrivateKey }, 200, signal)
+    if (typeof response?.provisionId !== 'string' || !response.provisionId) {
+      throw new Error('The gateway returned no provisioning receipt.')
+    }
+    return response.provisionId
+  },
+
   /**
    * setVenueKeys writes trading credentials for one venue.
    *
@@ -171,6 +182,7 @@ export function describe(e: unknown): string {
   }
   switch (e.status) {
     case 403:
+      if (e.code === 'mfa_required') return 'Verify your security key on the Authentication page, then try again.'
       return 'Your account does not carry operator authority. Ask an operator to grant it.'
     case 404:
       return 'This gateway fronts no control plane, so there is nothing to list — the estate is not unreachable, it is not configured.'

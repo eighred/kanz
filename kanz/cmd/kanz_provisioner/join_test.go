@@ -38,10 +38,11 @@ func TestSSHJoinerRunsK3sInstall(t *testing.T) {
 }
 
 func TestSSHJoinerPropagatesFailure(t *testing.T) {
-	fr := &fakeRunner{err: errors.New("dial refused")}
+	fr := &fakeRunner{err: errors.New("dial refused"), out: "synthetic-private-output"}
 	j := &sshJoiner{run: fr.run}
-	if err := j.Join(context.Background(), Target{Addr: "x:22", User: "root", Key: []byte("k")}, K3sJoin{}); err == nil {
-		t.Fatal("expected the runner error to propagate")
+	err := j.Join(context.Background(), Target{Addr: "x:22", User: "root", Key: []byte("k")}, K3sJoin{})
+	if !errors.Is(err, fr.err) || strings.Contains(err.Error(), fr.out) {
+		t.Fatal("the install error must retain the local cause and omit remote output")
 	}
 }
 
