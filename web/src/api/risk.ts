@@ -1,5 +1,4 @@
 import { api, ApiError } from './client'
-import { isNonnegativeInt64 } from './int64'
 import { checkWireDecimal, checkWireMoney } from './financial-wire'
 import type { Decimal, Money } from './decimal'
 
@@ -105,25 +104,23 @@ export type OrderStatus =
   | 'ORDER_STATUS_CANCELLED'
   | 'ORDER_STATUS_REJECTED'
   | 'ORDER_STATUS_EXPIRED'
-  | 'ORDER_STATUS_WORKING_SCHEDULED'
 
 /** OrderSummary is order.v1.OrderState, as much of it as this screen reads. */
 export interface OrderSummary {
-  portfolio_id: string
   order_id: string
   instrument_id?: string
-  side?: string | number
-  status?: OrderStatus | number
-  ordered_quantity?: Decimal
+  side?: string
+  status?: OrderStatus
+  quantity?: Decimal
   filled_quantity?: Decimal
-  limit_price?: Decimal
-  average_fill_price?: Decimal
+  limit_price?: Money
+  average_fill_price?: Money
   venue?: string
   as_of?: string
 }
 
 export interface OrdersResponse {
-  orders: OrderSummary[]
+  orders?: OrderSummary[]
   /**
    * unindexed is how many of this tenant's orders CANNOT appear in any page.
    *
@@ -131,16 +128,8 @@ export interface OrdersResponse {
    * real one is inside a marshaled blob no index can see. It arrives as a
    * STRING: it is an int64, and 64 bits do not survive a JSON number.
    */
-  unindexed: string
+  unindexed?: string
 }
-
-// ProtoJSON keeps unrecognized enum values as signed 32-bit integers.
-function isWireEnum(value: unknown): boolean {
-  return value === undefined || typeof value === 'string' || (typeof value === 'number' &&
-    Number.isInteger(value) && value >= -2147483648 && value <= 2147483647)
-}
-
-export const orderHistoryLimit = 200
 
 export const risk = {
   /**
@@ -162,25 +151,17 @@ export const risk = {
    * a 404 here can also mean "this deployment serves no order history" — which
    * is not "this portfolio has never traded". describeOrders separates them.
    */
-  async orders(id: string, tenant: string, signal?: AbortSignal): Promise<OrdersResponse> {
-    if (!id || !tenant || id === '.' || id === '..') throw new Error('Order history requires a portfolio and tenant.')
-    const page = await api.get<OrdersResponse & { owner_tenant: string }>(
-      `/api/v1/portfolios/${encodeURIComponent(id)}/orders?limit=${orderHistoryLimit}`, { signal, expectedStatus: 200 },
+  async orders(id: string, limit?: number) {
+    const response = await api.get<OrdersResponse>(
+      `/api/v1/portfolios/${encodeURIComponent(id)}/orders` + (limit ? `?limit=${limit}` : ''),
     )
-    if (page?.owner_tenant !== tenant || !Array.isArray(page.orders) || page.orders.length > orderHistoryLimit ||
-        !isNonnegativeInt64(page.unindexed)) throw new Error('The order history could not be verified.')
-    const ids = new Set<string>()
-    for (const order of page.orders) {
-      if (!order || order.portfolio_id !== id || typeof order.order_id !== 'string' || !order.order_id.trim() ||
-          ids.has(order.order_id) || [order.instrument_id, order.venue].some(value => value !== undefined && typeof value !== 'string') ||
-          !isWireEnum(order.side) || !isWireEnum(order.status)) throw new Error('The order history could not be verified.')
-      ids.add(order.order_id)
-      checkWireDecimal(order.ordered_quantity)
+    for (const order of response.orders ?? []) {
+      checkWireDecimal(order.quantity)
       checkWireDecimal(order.filled_quantity)
-      checkWireDecimal(order.limit_price)
-      checkWireDecimal(order.average_fill_price)
+      checkWireMoney(order.limit_price)
+      checkWireMoney(order.average_fill_price)
     }
-    return page
+    return response
   },
 
   /** exposure reads one portfolio's decomposition. */

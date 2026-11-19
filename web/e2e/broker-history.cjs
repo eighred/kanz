@@ -103,29 +103,6 @@ async function main() {
     await page.getByRole('alert').filter({ hasText: 'could not confirm' }).waitFor()
     assert.equal(await page.getByText('fixture-funder').count(), 0)
     assert.deepEqual(cashRequests, [['GET', 'movement-1'], ['GET', 'restricted'], ['GET', 'unconfirmed']])
-    const orderPage = { owner_tenant: 'fixture-tenant', unindexed: '9007199254740993', orders: [{
-      order_id: 'history-1', portfolio_id: 'PF1', instrument_id: 'BTC-USD',
-      side: 'SIDE_BUY', status: 'ORDER_STATUS_PARTIALLY_FILLED',
-      ordered_quantity: { coefficient: '9007199254740993', exponent: -8 },
-      filled_quantity: { coefficient: '2', exponent: -8 },
-      limit_price: { coefficient: '40001999', exponent: -3 },
-      average_fill_price: { coefficient: '40001777', exponent: -3 },
-    }] }
-    let historyReads = 0
-    await page.route('**/api/v1/portfolios/PF1/orders?limit=200', route => {
-      assert.equal(route.request().method(), 'GET')
-      return route.fulfill({ json: ++historyReads === 1 ? orderPage : {} })
-    })
-    await page.goto(base + '/portfolios/PF1/orders')
-    const historyRow = page.getByRole('row').filter({ hasText: 'history-1' })
-    for (const value of ['90071992.54740993', '0.00000002', '40001.999', '40001.777']) {
-      await historyRow.getByRole('cell', { name: value, exact: true }).waitFor()
-    }
-    await page.getByRole('alert').filter({ hasText: '9007199254740993' }).waitFor()
-    await page.reload()
-    await page.getByRole('alert').filter({ hasText: 'order history could not be verified' }).waitFor()
-    assert.equal(await page.locator('main table').count(), 0)
-    assert.equal(historyReads, 2)
     await page.goto(base + '/broker-accounts/A')
     await page.getByRole('link', { name: 'Skip to main content' }).waitFor({ state: 'attached' })
     await page.keyboard.press('Tab')

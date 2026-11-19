@@ -6,23 +6,19 @@ import { formatDecimal } from './decimal'
 
 afterEach(() => vi.restoreAllMocks())
 
-function history(...orders: Record<string, unknown>[]) {
-  return { owner_tenant: 'tenant', unindexed: '0', orders: orders.map(order => ({ portfolio_id: 'portfolio', ...order })) }
-}
-
 describe('financial JSON at the browser read boundaries', () => {
   it.each([17, '17', [], { coefficient: 17 }, { coefficient: null }, { exponent: null }, { exponent: '2' }])(
     'refuses an invalid quantity before order history can render it', async invalid => {
-      vi.spyOn(api, 'get').mockResolvedValue(history({ order_id: 'one', ordered_quantity: invalid }))
-      await expect(risk.orders('portfolio', 'tenant')).rejects.toThrow('invalid decimal representation')
+      vi.spyOn(api, 'get').mockResolvedValue({ orders: [{ order_id: 'one', quantity: invalid }] })
+      await expect(risk.orders('portfolio')).rejects.toThrow('invalid decimal representation')
     },
   )
 
   it('checks filled quantities and both prices in an order history', async () => {
     const get = vi.spyOn(api, 'get')
     for (const field of ['filled_quantity', 'limit_price', 'average_fill_price']) {
-      get.mockResolvedValueOnce(history({ order_id: 'one', [field]: false }))
-      await expect(risk.orders('portfolio', 'tenant')).rejects.toThrow(/invalid (decimal|money) representation/)
+      get.mockResolvedValueOnce({ orders: [{ [field]: false }] })
+      await expect(risk.orders('portfolio')).rejects.toThrow(/invalid (decimal|money) representation/)
     }
   })
 
@@ -46,11 +42,11 @@ describe('financial JSON at the browser read boundaries', () => {
 
   it('preserves absent values, omitted scalar defaults and exact legacy text', async () => {
     const digits = '9'.repeat(129)
-    vi.spyOn(api, 'get').mockResolvedValue(history(
-      { order_id: 'missing' }, { order_id: 'zero', ordered_quantity: { exponent: -2 } },
-      { order_id: 'legacy', ordered_quantity: { coefficient: digits } },
-    ))
-    const result = await risk.orders('portfolio', 'tenant')
-    expect(result.orders?.map(order => formatDecimal(order.ordered_quantity))).toEqual([null, '0.00', digits])
+    vi.spyOn(api, 'get').mockResolvedValue({ orders: [
+      { order_id: 'missing' }, { order_id: 'zero', quantity: { exponent: -2 } },
+      { order_id: 'legacy', quantity: { coefficient: digits } },
+    ] })
+    const result = await risk.orders('portfolio')
+    expect(result.orders?.map(order => formatDecimal(order.quantity))).toEqual([null, '0.00', digits])
   })
 })

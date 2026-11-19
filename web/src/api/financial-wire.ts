@@ -7,7 +7,7 @@ function object(value: unknown): value is Record<string, unknown> {
 
 export function checkWireDecimal(value: unknown): void {
   if (value == null) return
-  if (!object(value) || 'amount' in value || 'currency_code' in value ||
+  if (!object(value) ||
       (value.coefficient !== undefined && typeof value.coefficient !== 'string') ||
       (value.exponent !== undefined && !Number.isInteger(value.exponent))) {
     throw new Error('The service returned an invalid decimal representation.')

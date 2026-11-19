@@ -1,6 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createPinia, setActivePinia } from 'pinia'
-import { useSession } from '../stores/session'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 import OrdersView from './OrdersView.vue'
@@ -41,26 +39,22 @@ async function open(resp: OrdersResponse | Error) {
 const filled: OrdersResponse = {
   orders: [
     {
-      order_id: 'o-1', portfolio_id: 'PF1',
+      order_id: 'o-1',
       instrument_id: 'BTC-USD',
       side: 'SIDE_BUY',
       status: 'ORDER_STATUS_FILLED',
       // 2^53 + 1 in the quantity: an exchange quantity in base units is exactly
       // where a JS number stops being exact.
-      ordered_quantity: { coefficient: '9007199254740993', exponent: -8 },
+      quantity: { coefficient: '9007199254740993', exponent: -8 },
       filled_quantity: { coefficient: '9007199254740993', exponent: -8 },
-      average_fill_price: { coefficient: '4212345', exponent: -2 },
+      average_fill_price: { amount: { coefficient: '4212345', exponent: -2 }, currency_code: 'USD' },
       venue: 'BINANCE',
     },
   ],
   unindexed: '0',
 }
 
-beforeEach(() => {
-  vi.restoreAllMocks()
-  setActivePinia(createPinia())
-  useSession().identity = { tenant: 'fixture-tenant', subject: 'reader', expires_at: '2099-01-01T00:00:00Z' }
-})
+beforeEach(() => vi.restoreAllMocks())
 
 describe('orders that cannot be shown are declared', () => {
   it('states the unindexed count as an alert, not a hint', async () => {
@@ -102,7 +96,7 @@ describe('figures never pass through a JS number', () => {
 
   it('renders an absent price as unrenderable, never as zero', async () => {
     const wrapper = await open({
-      orders: [{ portfolio_id: 'PF1', order_id: 'o-2', status: 'ORDER_STATUS_ROUTED' }],
+      orders: [{ order_id: 'o-2', status: 'ORDER_STATUS_ROUTED' }],
       unindexed: '0',
     })
     const cells = wrapper.findAll('td').map((c) => c.text())
@@ -126,43 +120,24 @@ it('reloads a reused portfolio route and ignores a late order response', async (
   let finish!: (value: OrdersResponse) => void
   vi.spyOn(api.risk, 'orders').mockImplementation((id) => id === 'A'
     ? new Promise(resolve => { finish = resolve })
-    : Promise.resolve({ orders: [{ portfolio_id: 'B', order_id: 'current-order' }], unindexed: '0' }))
+    : Promise.resolve({ orders: [{ order_id: 'current-order' }], unindexed: '0' }))
   const r = router()
   await r.push('/portfolios/A/orders')
   const wrapper = mount(OrdersView, { global: { plugins: [r] } })
   await r.push('/portfolios/B/orders')
   await flushPromises()
-  finish({ orders: [{ portfolio_id: 'A', order_id: 'previous-order' }], unindexed: '0' })
+  finish({ orders: [{ order_id: 'previous-order' }], unindexed: '0' })
   await flushPromises()
   expect(wrapper.text()).toContain('current-order')
   expect(wrapper.text()).not.toContain('previous-order')
 })
 
 it('discloses the bounded history independently of unindexed orders', async () => {
-  const orders = Array.from({ length: 200 }, (_, i) => ({ portfolio_id: 'PF1', order_id: String(i) }))
+  const orders = Array.from({ length: 200 }, (_, i) => ({ order_id: String(i) }))
   const wrapper = await open({ orders, unindexed: '3' })
-  expect(api.risk.orders).toHaveBeenCalledWith('PF1', 'fixture-tenant', expect.any(AbortSignal))
+  expect(api.risk.orders).toHaveBeenCalledWith('PF1', 200)
   expect(wrapper.find('[role=status]').text()).toContain('Earlier indexed orders may exist')
   expect(wrapper.find('[role=alert]').text()).toContain('3 order(s)')
   const shorter = await open({ orders: orders.slice(1), unindexed: '0' })
   expect(shorter.find('[role=status]').exists()).toBe(false)
-})
-
-it('clears the previous book when the reader changes on the same route', async () => {
-  const view = await open(filled)
-  const read = vi.mocked(api.risk.orders)
-  const oldRequest = read.mock.calls[0]![2]!
-  read.mockRejectedValueOnce(new ApiError(403, 'refused'))
-  useSession().identity!.tenant = 'other'
-  await flushPromises()
-  expect(oldRequest.aborted).toBe(true)
-  expect(read).toHaveBeenLastCalledWith('PF1', 'other', expect.any(AbortSignal))
-  expect(view.get('[role=alert]').text()).toMatch(/read authority/)
-  expect(view.find('table').exists()).toBe(false)
-})
-
-it('shows unrecognized enum codes with neutral status', async () => {
-  const view = await open({ orders: [{ portfolio_id: 'PF1', order_id: 'A', side: 99, status: 42 }], unindexed: '0' })
-  expect(view.get('.state-unset').text()).toBe('unknown (42)')
-  expect(view.text()).toContain('unknown (99)')
 })

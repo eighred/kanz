@@ -2,26 +2,26 @@ import { ref, shallowRef, watch } from 'vue'
 import type { Ref } from 'vue'
 import { describeRisk } from './api/risk'
 
-export function usePortfolioRead<Q, T>(query: Ref<Q>, fetchPortfolio: (query: Q, signal: AbortSignal) => Promise<T>) {
+export function usePortfolioRead<T>(id: Ref<string>, fetchPortfolio: (id: string) => Promise<T>) {
   const data = shallowRef<T | null>(null)
   const error = ref('')
   const loading = ref(true)
 
-  watch(query, async (selection, _, onCleanup) => {
-    const request = new AbortController()
-    onCleanup(() => request.abort())
+  watch(id, async (portfolio, _, onCleanup) => {
+    let current = true
+    onCleanup(() => { current = false })
     data.value = null
     error.value = ''
     loading.value = true
     try {
-      const result = await fetchPortfolio(selection, request.signal)
-      if (!request.signal.aborted) data.value = result
+      const result = await fetchPortfolio(portfolio)
+      if (current) data.value = result
     } catch (e) {
-      if (!request.signal.aborted) error.value = describeRisk(e)
+      if (current) error.value = describeRisk(e)
     } finally {
-      if (!request.signal.aborted) loading.value = false
+      if (current) loading.value = false
     }
-  }, { immediate: true, flush: 'sync' })
+  }, { immediate: true })
 
   return { data, error, loading }
 }
