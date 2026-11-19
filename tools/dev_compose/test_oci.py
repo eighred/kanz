@@ -5,10 +5,23 @@ import tarfile
 import tempfile
 import unittest
 
+from acquire import publisher
 from oci import pack, selected
 
 
 class RegistryInputs(unittest.TestCase):
+    def test_publisher_uses_only_the_reviewed_host_repository_and_tag(self):
+        self.assertEqual(publisher('docker.redpanda.com/redpandadata/redpanda:v26.2.6'),
+                         (('docker.redpanda.com', 'redpandadata/redpanda'), 'docker.io/redpandadata/redpanda', 'v26.2.6'))
+        self.assertEqual(publisher('ghcr.io/eighred/base/golang:1.27.4'),
+                         (('ghcr.io', 'eighred/base/golang'), 'ghcr.io/eighred/base/golang', '1.27.4'))
+        for reference in ('example.invalid/ghcr.io/eighred/base/golang:1.27.4',
+                          'ghcr.io.example.invalid/eighred/base/golang:1.27.4',
+                          'ghcr.io/eighred/base/golang-extra:1.27.4',
+                          'user@ghcr.io/eighred/base/golang:1', 'docker.io/library/nats:2@sha256:00'):
+            with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, 'unreviewed registry'):
+                publisher(reference)
+
     def test_ambiguous_platform_refused(self):
         row = {'platform': {'os': 'linux', 'architecture': 'amd64'}}
         for items in ([], [row, row]):
