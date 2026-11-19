@@ -1,6 +1,7 @@
 """Bounded #1348 comparison on a private loopback broker and the real inference entrypoint."""
 import asyncio
 import hashlib
+import http.client
 import importlib.metadata
 import json
 import math
@@ -86,6 +87,17 @@ def summary(samples):
         return {}
     ordered = sorted(samples)
     return {f"p{p}_ms": ordered[math.ceil(p * len(ordered) / 100) - 1] * 1000 for p in (95, 99)}
+
+
+def ready_status(port):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/readyz")
+        return connection.getresponse().status
+    except OSError:
+        return None
+    finally:
+        connection.close()
 
 
 async def phase(name, rpc_n, stream_n, stub, producer, scored, js):
@@ -216,6 +228,16 @@ async def measure(root, binary):
         nc = await nats.connect(url)
         try:
             js = nc.jetstream()
+            # A working NATS connection alone cannot serve streaming traffic.
+            # Start before provisioning, then recover using the same model and endpoints.
+            with process([sys.executable, "-B", "-m", "kanz_inference"], env=env) as unbound:
+                deadline = time.monotonic() + 10
+                while unbound.poll() is None and time.monotonic() < deadline:
+                    if await asyncio.to_thread(ready_status, metrics_port) == 200:
+                        raise AssertionError("reported ready without a feature stream")
+                    await asyncio.sleep(0.025)
+                if unbound.returncode != 1:
+                    raise AssertionError(f"expected a streaming failure, got {unbound.returncode}")
             await js.add_stream(StreamConfig(name="INFERENCE", subjects=["inference.>"], storage=StorageType.MEMORY))
             scored = await nc.subscribe(SUBJECT_PREDICTION_SCORED)
             await nc.flush()
@@ -225,7 +247,9 @@ async def measure(root, binary):
                         raise RuntimeError("inference process failed to start")
                     try:
                         await js.consumer_info("INFERENCE", GROUP)
-                        break
+                        if await asyncio.to_thread(ready_status, metrics_port) == 200:
+                            break
+                        await asyncio.sleep(0.05)
                     except NotFoundError:
                         await asyncio.sleep(0.05)
                 async with (grpc.aio.insecure_channel(f"127.0.0.1:{grpc_port}") as channel,
@@ -239,6 +263,22 @@ async def measure(root, binary):
                                               ("streaming_only", 0, COUNT), ("mixed", COUNT, COUNT),
                                               ("recovery", 8, 8)):
                         results.append(await phase(name, rpc, stream, stub, emitter, scored, js))
+                await js.delete_consumer("INFERENCE", GROUP)
+                if await asyncio.to_thread(service.wait, timeout=25) != 1:
+                    raise AssertionError("lost durable subscription without a process failure")
+            with process([sys.executable, "-B", "-m", "kanz_inference"],
+                         env={**env, "KANZ_INFERENCE_NATS_URL": ""}) as interactive:
+                while await asyncio.to_thread(ready_status, metrics_port) != 200:
+                    if interactive.poll() is not None:
+                        raise RuntimeError("interactive-only service failed to start")
+                    await asyncio.sleep(0.05)
+                async with grpc.aio.insecure_channel(f"127.0.0.1:{grpc_port}") as channel:
+                    fv = vector("interactive-only")
+                    check_prediction(await InferenceServiceStub(channel).Predict(fv, timeout=5), fv)
+                if os.name == "posix":
+                    interactive.terminate()
+                    if await asyncio.to_thread(interactive.wait, timeout=10) != 0:
+                        raise AssertionError("SIGTERM did not shut down the service cleanly")
         finally:
             await nc.close()
     return {"model": MODEL, "card_sha256": hashlib.sha256(card.read_bytes()).hexdigest(),

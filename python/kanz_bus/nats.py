@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from collections.abc import Callable
 from typing import Any
 
 import nats
@@ -39,6 +40,8 @@ class NATSClient:
         max_reconnect_attempts: int = -1,
         publish_timeout: float = 5.0,
         tls: ssl.SSLContext | None = None,
+        *,
+        on_subscribed: Callable[[], None] | None = None,
     ) -> None:
         if not url:
             raise ValueError("nats: url required")
@@ -49,6 +52,7 @@ class NATSClient:
         self._max_reconnect_attempts = max_reconnect_attempts
         self._publish_timeout = publish_timeout
         self._tls = tls
+        self._on_subscribed = on_subscribed
         self._nc: NATSConn | None = None
         self._js: JetStreamContext | None = None
 
@@ -112,6 +116,8 @@ class NATSClient:
             raise RuntimeError("nats: client not connected")
         psub = await self._js.pull_subscribe(subject, durable=group)
         try:
+            if self._on_subscribed is not None:
+                self._on_subscribed()
             while True:
                 try:
                     msgs = await psub.fetch(batch=1, timeout=10)
@@ -125,12 +131,11 @@ class NATSClient:
                         await raw.nak()
                         continue
                     await raw.ack()
-        except asyncio.CancelledError:
+        finally:
             try:
                 await psub.unsubscribe()
             except Exception:
                 pass
-            raise
 
 
 def _nats_to_message(raw: Any) -> Message:
