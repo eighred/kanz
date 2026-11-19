@@ -235,3 +235,16 @@ func TestBondRiskRequiresOnlyTheMeasurePositionScale(t *testing.T) {
 		})
 	}
 }
+
+func TestPortfolioDV01RefusesUnrepresentableAggregate(t *testing.T) {
+	asOf := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
+	spec := BondSpec{Face: 100, CouponRate: 0.05, Frequency: 2, Issue: asOf, Maturity: asOf.AddDate(5, 0, 0), DayCount: pricing.Thirty360, Currency: "USD"}
+	p := domain.NewPortfolio("p", "USD")
+	p.SetPosition(domain.Position{InstrumentID: "B", AsOf: asOf, Quantity: dec(1, 20), MarketValue: dec0("USD")})
+	r := NewRegistry()
+	RegisterFIRisk(t.Context(), r, FIProviders{Terms: staticBondTerms{"B": spec}, Curve: staticCurve{fiTestCurve(t)}})
+	m, _ := ComputeMeasures(p, r, []v1.MeasureName{MeasureDV01}).Lookup(MeasureDV01)
+	if m.Value.GetCoefficient() != 0 || m.Coverage.ExcludedCount != 1 || m.Coverage.Exclusions[0].Reason != SkipInvalidPricing {
+		t.Fatalf("unrepresentable DV01 returned %+v", m)
+	}
+}

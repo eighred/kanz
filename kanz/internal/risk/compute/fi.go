@@ -297,14 +297,18 @@ func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureF
 				weight += mv
 			}
 		}
-		if name == MeasureDV01 {
-			return v1.Measure{Name: name, Value: floatToDecimal(dollar, fiDV01Exp), Coverage: cov.Result()}
+		value, exponent := dollar, int32(fiDV01Exp)
+		if name != MeasureDV01 {
+			value, exponent = 0, fiRatioExp
+			if weight != 0 {
+				value = weighted / weight
+			}
 		}
-		ratio := 0.0
-		if weight != 0 {
-			ratio = weighted / weight
+		if !representablePricingAmount(value, exponent) {
+			cov.ExcludeWhole(SkipInvalidPricing)
+			value = 0
 		}
-		return v1.Measure{Name: name, Value: floatToDecimal(ratio, fiRatioExp), Coverage: cov.Result()}
+		return v1.Measure{Name: name, Value: floatToDecimal(value, exponent), Coverage: cov.Result()}
 	}
 }
 
