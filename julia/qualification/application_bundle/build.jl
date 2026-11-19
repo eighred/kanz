@@ -3,11 +3,18 @@
 using Pkg
 using TOML
 using PackageCompiler
+using Libdl
+using SHA
 
 length(ARGS) == 3 || error("expected repository, new source staging directory and bundle output")
 repo, work, output = abspath.(ARGS)
 VERSION == v"1.13.3" || error("unexpected Julia compiler")
 pkgversion(PackageCompiler) == v"2.4.5" || error("unexpected application bundler")
+active_pcre = realpath(Libdl.dlpath(Libdl.dlopen("libpcre2-8")))
+active_pcre == realpath(joinpath(Sys.BINDIR, "..", "lib", "julia", "libpcre2-8.so.0.16.1")) ||
+    error("unexpected active PCRE2 library")
+bytes2hex(open(sha256, active_pcre)) == "041e83a9aa6adee377ec80f12044036b6f53c6082297d8e639a210e3dbfaf262" ||
+    error("unexpected patched PCRE2 compiler bytes")
 get(ENV, "JULIA_PKG_OFFLINE", "") == "true" || error("offline package resolution required")
 ispath(work) && error("source staging directory must be new")
 ispath(output) && error("bundle output must be new")
