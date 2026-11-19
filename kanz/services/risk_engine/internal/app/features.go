@@ -63,18 +63,20 @@ var modelInputs = []v1.MeasureName{"GrossExposure", "VaR99"}
 
 // FeaturesFromMeasures turns one recomputed MeasureSet into a FeatureVector.
 //
-// It reports false when ANY model input is absent. A partial vector is not a smaller vector
-// — it is a HOLE presented as an input. The model refuses to score one (it degrades, and
-// says which feature it could not see), but the honest place to stop is here, before a
-// half-vector is published as a FACT that every downstream consumer will fold.
+// portfolio-risk:1 carries two portfolio-wide scalars. Currency exclusions affect
+// both inputs. Per-measure exclusions matter only for the inputs the model reads.
+// The total count covers both a whole-evaluation failure and missing positions,
+// including exclusions omitted from the bounded sample. Legacy scalars remain
+// eligible when their records carry no exclusion. Provenance identifies a method
+// and cannot establish which positions contributed.
 func FeaturesFromMeasures(ms *domain.MeasureSet) (prediction.FeatureVector, bool) {
-	if ms == nil {
+	if ms == nil || len(ms.CurrencyExclusions()) > 0 {
 		return prediction.FeatureVector{}, false
 	}
 	values := make(map[prediction.FeatureName]prediction.FeatureValue, len(modelInputs))
 	for _, name := range modelInputs {
 		m, ok := ms.Lookup(name)
-		if !ok || m.Value == nil {
+		if !ok || m.Value == nil || m.Coverage.ExcludedCount > 0 {
 			return prediction.FeatureVector{}, false
 		}
 		// Exact decimal → float64 at the model boundary, and ONLY here. The capital paths
@@ -108,7 +110,7 @@ func PublishFeaturesOn(pub FeaturePublisher, logger *slog.Logger) func(context.C
 	return func(ctx context.Context, ms *domain.MeasureSet) {
 		fv, ok := FeaturesFromMeasures(ms)
 		if !ok {
-			return // a measure the model needs was not computed; publish nothing
+			return
 		}
 		if err := pub.PublishFeatures(ctx, fv); err != nil {
 			logger.Warn("feature publish failed — the model will not score this recompute",
