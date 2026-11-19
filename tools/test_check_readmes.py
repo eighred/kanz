@@ -8,6 +8,18 @@ from check_readmes import check, check_document, source_files
 
 
 class ReadmeChecks(unittest.TestCase):
+    def test_forge_skill_links_survive_section_renames(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "README.md").write_text("# Project\n")
+            router = ".agents/plugins/kanz-forge/skills/commands/SKILL.md"
+            (root / router).parent.mkdir(parents=True)
+            (root / router).write_text(
+                "# Commands\nUse `[a-z][0-9]` to illustrate a pattern.\n"
+                "Open [the `repair` section](#repair).\n## Recover\n")
+            result = check(root, ["README.md", router])
+            self.assertEqual(result["issues"], [f"{router}:3: missing heading: #repair"])
+
     def test_move_links_anchors_and_fenced_examples(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

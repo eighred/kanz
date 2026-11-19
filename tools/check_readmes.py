@@ -1,4 +1,4 @@
-"""Check every effective-source README and root contributor guide, offline."""
+"""Check effective-source READMEs, contributor guides and Forge workflows offline."""
 import argparse
 import json
 import os
@@ -57,9 +57,15 @@ def check_document(root, relative, source_paths=None):
             definitions[definition.group(1).casefold()] = definition.group(2)
     targets = []
     for number, line in lines:
+        # A real link may include inline code in its label. Only ignore
+        # matches that start inside a code span.
+        spans = [m.span() for m in re.finditer(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", line)]
         targets.extend((number, match.group(1)) for match in
-                       re.finditer(r"!?\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\)", line))
+                       re.finditer(r"!?\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\)", line)
+                       if not any(start <= match.start() < end for start, end in spans))
         for match in re.finditer(r"!?\[([^\]]+)\]\[([^\]]*)\]", line):
+            if any(start <= match.start() < end for start, end in spans):
+                continue
             key = (match.group(2) or match.group(1)).casefold()
             if key in definitions:
                 targets.append((number, definitions[key]))
@@ -91,6 +97,9 @@ def check_document(root, relative, source_paths=None):
 def check(root, files):
     readmes = [p for p in files if Path(p).name == "README.md" and (root / p).is_file()]
     guides = [p for p in ("AGENTS.md", "CONTRIBUTING.md") if (root / p).is_file()]
+    guides.extend(p for p in files if p.endswith(".md") and Path(p).name != "README.md"
+                  and (p.startswith(".agents/plugins/kanz-forge/") or
+                       p == ".agents/skills/kanz-forge/SKILL.md") and (root / p).is_file())
     source_root = root.resolve()
     source_paths = {source_root}
     for relative in files:

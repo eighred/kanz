@@ -188,3 +188,46 @@ cannot make a closure candidate.
 Use `landed_scope_evidence` to show merged work awaiting acceptance even when
 verification is externally blocked. Use `independent_scope` for a reviewed
 remaining slice that can proceed alongside an active PR.
+
+## Select and deliver requested work
+
+For unscoped `/work`, select and complete the highest-priority feasible task
+from source, existing branches, PRs and Issues:
+
+1. Reconcile current main, source gaps, branch ownership, issue acceptance,
+   active PRs, and dependencies. Rank by repository priority and impact.
+   Within comparable priority, prefer
+   completing an existing change with a clear path to verified main.
+2. Name the selected task and its acceptance, then act. Fill in discoverable
+   gaps in scope, implementation, or evidence. Repair failures and continue
+   through exact-head checks, authorized merge, and verification on main.
+   A plan, local commit, open PR, or pending run is not completion.
+3. If progress depends on unavailable input, authority, infrastructure, or a
+   running check, identify the exact dependency and what it blocks. Record
+   the evidence, next action and changed-input re-entry condition in the owning
+   issue or PR. Recheck that condition before repeating a known failed run.
+   For unscoped work, move immediately to the next highest-priority feasible independent
+   task. Recheck a higher-priority task at a natural checkpoint if its blocker
+   clears. Keep explicit user scope and security holds intact.
+4. Report the completed outcome and its verification, or the specific reasons
+   no remaining candidate can proceed. Keep pending and partial work explicit.
+
+For a requested set of outcomes, freeze the initial issue identities and full
+acceptance after discovery. Follow
+[related-finding delivery](#finish-related-discoveries)
+to repair eligible discoveries in this session, while keeping original outcomes,
+additional repairs and evidenced deferrals separate. A new finding, PR or test
+cannot replace an unfinished initial target. Report unfilled slots when fewer
+feasible existing issues satisfy the request; do not manufacture replacement work.
+
+For `/work`, carry the selected issue from investigation and implementation
+through PR review, required checks, merge, merged-revision verification and
+issue closure. The invocation authorizes routine repository delivery for that
+issue and its scoped PRs, subject to explicit user limits, branch protections
+and any separate authorization required by policy. Use
+[pr-delivery](../../pr-delivery/SKILL.md) without requiring another command.
+Fix recoverable failures and wait for pending gates. If a PR covers only one
+part of the issue, continue with the remaining in-scope acceptance. Close the
+issue only when the evidence covers its full acceptance. For a genuine external
+blocker, complete independent in-scope work, record the missing prerequisite
+and leave the issue open. Preserve explicit instructions to keep an issue open.

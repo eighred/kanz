@@ -1,6 +1,6 @@
 ---
 name: kanz-forge
-description: Use the checkout-owned Kanz Forge workflows for Eighred engineering, repository organization, investigation, implementation, verification and delivery.
+description: Use for Kanz engineering requests in this checkout, including ordinary questions, fixes, verification and PR delivery. Choose workflows from the task even when no command is named.
 ---
 
 # Use this checkout's Kanz Forge

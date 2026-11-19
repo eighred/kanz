@@ -26,7 +26,7 @@
   "/ci": {
     "target": "required",
     "description": "Diagnose and repair a PR or workflow-run failure.",
-    "workflow": "Resolve the PR/run and exact SHA. Inspect full failed-job logs, distinguish infrastructure faults from regressions and assess financial impact. Reproduce the failure, make a permanent scoped repair, add discriminating regression coverage and rerun the affected gate and required CI. Do not use a retry as proof of repair or bypass reviews. Use pr-delivery. Report exactly three bullets: Root Cause, Permanent Fix, Verification, with actual merge/main status.",
+    "workflow": "Resolve the PR/run and exact SHA. Inspect the failed job and step, distinguish infrastructure faults from regressions, and establish the impact from evidence. For a diagnosis-only request, report the cause, evidence and unresolved questions. For /ci or an authorized repair, reproduce the failure where feasible, make a scoped repair with regression coverage that distinguishes the failure, and rerun the affected gate and required CI. Use pr-delivery when the parent task includes delivery. For the explicit /ci command report Root Cause, Permanent Fix and Verification in three bullets with the actual merge/main status. Identify pending checks and preserve required reviews.",
     "skills": [
       "kanz-verify",
       "pr-delivery"
@@ -224,8 +224,8 @@
   },
   "/branches": {
     "target": "optional",
-    "description": "Inspect branches and recover useful unfinished work with fix or an explicit target.",
-    "workflow": "Use references/repository-engine.md to inventory local/remote refs, worktrees and matching PR heads. Inspect actual remaining behavior against current main before classifying active, recoverable, blocked, superseded or unresolved work. Report ownership, evidence and the next action. With fix or an explicit branch, recover the best feasible in-scope change using the shared /work workflow. Preserve dirty/staged files and unique commits; no branch deletion, force push or automatic closing of competing work.",
+    "description": "Inspect all or named branches. Use fix or request recovery to resume unfinished work.",
+    "workflow": "Use references/repository-engine.md to inventory local/remote refs, worktrees and matching PR heads. Inspect actual remaining behavior against current main before classifying active, recoverable, blocked, superseded or unresolved work. Report ownership, evidence and the next action. A branch name narrows the inventory. With fix or a request to recover work, recover the best feasible in-scope change using the shared /work workflow. Preserve dirty/staged files and unique commits; no branch deletion, force push or automatic closing of competing work.",
     "skills": [
       "issue-archaeology",
       "stack-routing",

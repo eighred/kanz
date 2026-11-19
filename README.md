@@ -83,9 +83,9 @@ The local Compose stack is a smoke environment, not complete capital-path proof.
 ## Kanz Forge
 
 Forge helps Codex investigate, implement, review, verify, and deliver Kanz work.
-It selects specialist workflows from the task's actual changes and coordinates
-native workers under explicit parallel-work scope while CI runs. Start with `Kanz /work` or
-`Kanz /ship #<PR>` in Codex Chat.
+Describe the outcome in Codex Chat. Forge's routing guide helps Codex choose
+specialist workflows and run the checks the change needs. Use `Kanz /work` when
+you want Codex to select and deliver unfinished work.
 
 See the [Forge guide](.agents/plugins/kanz-forge/README.md) for installation,
 repository discovery, organization standards, parallel work and verification limits. Forge is development
