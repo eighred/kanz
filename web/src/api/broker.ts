@@ -1,5 +1,6 @@
 import { api, ApiError } from './client'
 import { brokerAccount, brokerExecution, brokerOrder, brokerPosition, brokerState } from './broker_contract'
+import { isTimestamp } from './timestamp'
 
 type OptionalField = 'text?' | 'decimal?' | 'timestamp?'
 type Fields = Record<string, 'text' | 'decimal' | 'timestamp' | 'count' | OptionalField>
@@ -36,7 +37,7 @@ function list<T>(value: unknown, parse: (row: unknown) => T): T[] {
 
 function time(value: unknown): string | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw new Error('Invalid broker response.')
+  if (!isTimestamp(value)) throw new Error('Invalid broker response.')
   return value
 }
 

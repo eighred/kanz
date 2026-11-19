@@ -9,20 +9,23 @@ const state = { id: 'PF1/account', currency: 'USD', balance: '100.00000001', equ
 
 describe('broker response boundary', () => {
   it('reads the authorized projection responses without changing financial text or adding absent fields', async () => {
-    const get = vi.spyOn(api, 'get')
-      .mockResolvedValueOnce(served.accounts)
-      .mockResolvedValueOnce(served.state).mockResolvedValueOnce(served.positions)
-      .mockResolvedValueOnce(served.orders).mockResolvedValueOnce(served.executions)
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    for (const body of [served.accounts, served.state, served.positions, served.orders, served.executions]) {
+      fetch.mockResolvedValueOnce(Response.json(body))
+    }
     expect(await broker.accounts()).toEqual(served.accounts.accounts)
     const account = await broker.account('fund-a')
     expect(account.state).toEqual(served.state)
     expect(account.positions).toEqual(served.positions.positions)
     expect(account.orders).toEqual(served.orders.orders)
     expect(account.executions).toEqual(served.executions.executions)
-    expect(get.mock.calls.map(call => call[0])).toEqual([
+    expect(fetch.mock.calls.map(call => call[0])).toEqual([
       '/api/v1/broker/accounts',
       ...['state', 'positions', 'orders', 'executions'].map(path => '/api/v1/broker/accounts/fund-a/' + path),
     ])
+    for (const [, options] of fetch.mock.calls) {
+      expect(options).toMatchObject({ method: 'GET', credentials: 'same-origin' })
+    }
   })
 
   it('preserves signed zero, trailing fractional digits and values beyond the JavaScript number range', async () => {
@@ -43,7 +46,8 @@ describe('broker response boundary', () => {
   it.each([
     ['state', 'balance', 'NaN'], ['state', 'equity', '1/3'], ['state', 'realizedPl', '--2'],
     ['state', 'unrealizedPl', ' 0'], ['positions', 'qty', '1e3'], ['positions', 'avgPrice', '1.2.5'],
-    ['positions', 'unrealizedPl', ''], ['orders', 'filledQty', '3 apples'], ['orders', 'leavesQty', '+'],
+    ['positions', 'unrealizedPl', ''], ['positions', 'realizedPl', 'A'], ['orders', 'qty', '3#'],
+    ['orders', 'filledQty', '3 apples'], ['orders', 'leavesQty', '+'],
     ['orders', 'avgFillPrice', 'Infinity'], ['orders', 'limitPrice', '0\n'],
     ['executions', 'qty', ''], ['executions', 'price', '-'], ['executions', 'fee', 'not available'],
   ])('refuses malformed %s.%s before returning the account detail', async (resource, key, value) => {
@@ -55,6 +59,38 @@ describe('broker response boundary', () => {
       get.mockResolvedValueOnce(name === 'state' ? changed : { [name]: [changed] })
     }
     await expect(broker.account('fund-a')).rejects.toThrow('Invalid broker response')
+  })
+
+  it.each([
+    ['order', '1'],
+    ['execution', '2024-02-29T12:00:00'],
+    ['orders window', '2025-02-29T00:00:00Z'],
+    ['executions window', '2024-02-30T12:00:00.123456789Z'],
+    ['execution', '2024-02-29T12:00:00.1234567890Z'],
+  ])('refuses an invalid %s timestamp in the account response', async (resource, invalid) => {
+    const valid = '2024-02-29T12:00:00.123456789Z'
+    vi.spyOn(api, 'get')
+      .mockResolvedValueOnce(served.state).mockResolvedValueOnce(served.positions)
+      .mockResolvedValueOnce({
+        orders: [{ ...served.orders.orders[0], updatedAt: resource === 'order' ? invalid : valid }],
+        retainedFrom: resource === 'orders window' ? invalid : valid,
+      })
+      .mockResolvedValueOnce({
+        executions: [{ ...served.executions.executions[0], time: resource === 'execution' ? invalid : valid }],
+        retainedFrom: resource === 'executions window' ? invalid : valid,
+      })
+    await expect(broker.account('fund-a')).rejects.toThrow('Invalid broker response')
+  })
+
+  it('preserves a leap-day retention horizon down to nanoseconds', async () => {
+    const retainedFrom = '2024-02-29T23:59:59.123456789Z'
+    vi.spyOn(api, 'get')
+      .mockResolvedValueOnce(served.state).mockResolvedValueOnce(served.positions)
+      .mockResolvedValueOnce({ ...served.orders, retainedFrom })
+      .mockResolvedValueOnce({ ...served.executions, retainedFrom })
+    const account = await broker.account('fund-a')
+    expect(account.ordersRetainedFrom).toBe(retainedFrom)
+    expect(account.executionsRetainedFrom).toBe(retainedFrom)
   })
 
   it('preserves decimal strings and marks retained list windows', async () => {
