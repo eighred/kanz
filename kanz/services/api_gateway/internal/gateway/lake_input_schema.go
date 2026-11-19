@@ -1,7 +1,11 @@
 package gateway
 
 import (
+	"fmt"
+	"math"
 	"slices"
+	"strconv"
+	"strings"
 
 	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -45,7 +49,7 @@ func describeLakeInputs(schemas map[string]any) {
 	// JSON numbers can also carry the cursor, but JavaScript callers need the
 	// decimal string form to retain the full uint64 range.
 	props["after_ordinal"] = map[string]any{"oneOf": []any{
-		props["after_ordinal"], map[string]any{"type": "integer", "minimum": 0, "maximum": ^uint64(0)},
+		lakeCursorString(), map[string]any{"type": "integer", "minimum": 0, "maximum": uint64(math.MaxUint64)},
 	}}
 	lakeInputNames(query, (&lakepb.SnapshotQuery{}).ProtoReflect().Descriptor(), "operation", "page_size")
 	query["allOf"] = append(query["allOf"].([]any), map[string]any{"not": map[string]any{
@@ -53,6 +57,22 @@ func describeLakeInputs(schemas map[string]any) {
 		"anyOf":      []any{map[string]any{"required": []string{"after_ordinal"}}, map[string]any{"required": []string{"afterOrdinal"}}},
 	}})
 	query["description"] = "Queries require a ready snapshot. The page size is 1 through 1000. The optional ordinal cursor is exclusive. Count-by-event-type forbids a cursor and refuses a result with more groups than the page size."
+}
+
+// JSON Schema numeric bounds do not constrain strings. For a full-width
+// decimal, the first digit differing from MaxUint64 determines overflow.
+func lakeCursorString() map[string]any {
+	maximum := strconv.FormatUint(math.MaxUint64, 10)
+	var overflow []string
+	for i, digit := range maximum {
+		if digit < '9' {
+			overflow = append(overflow, fmt.Sprintf("%s[%c-9][0-9]{%d}", maximum[:i], digit+1, len(maximum)-i-1))
+		}
+	}
+	return map[string]any{
+		"type": "string", "maxLength": len(maximum), "pattern": `^(0|[1-9][0-9]*)$`,
+		"not": map[string]any{"pattern": "^(" + strings.Join(overflow, "|") + ")$"},
+	}
 }
 
 func lakeInputNames(schema map[string]any, message protoreflect.MessageDescriptor, required ...string) {

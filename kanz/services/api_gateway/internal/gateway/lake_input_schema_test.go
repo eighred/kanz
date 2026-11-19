@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestLakeOpenAPIValidatesBusinessInputs(t *testing.T) {
@@ -81,6 +83,9 @@ func TestLakeOpenAPIValidatesBusinessInputs(t *testing.T) {
 		{"untrimmed event type", create, strings.Replace(createBody, "fixture.event", " fixture.event", 1), false},
 		{"empty event types", create, strings.Replace(createBody, `["fixture.event"]`, "[]", 1), false},
 		{"canonical list cursor", query, `{"operation":"SNAPSHOT_QUERY_OPERATION_LIST_EVENTS","page_size":1000,"after_ordinal":"18446744073709551615"}`, true},
+		{"cursor above uint64", query, `{"operation":1,"pageSize":1,"afterOrdinal":"18446744073709551616"}`, false},
+		{"cursor 19 nines", query, `{"operation":1,"pageSize":1,"afterOrdinal":"9999999999999999999"}`, true},
+		{"cursor 20 nines", query, `{"operation":1,"pageSize":1,"afterOrdinal":"99999999999999999999"}`, false},
 		{"CLI cursor zero", query, `{"operation":"SNAPSHOT_QUERY_OPERATION_DECODE_FAILURES","pageSize":1,"afterOrdinal":"0"}`, true},
 		{"numeric count", query, `{"operation":2,"pageSize":1}`, true},
 		{"quoted page size", query, `{"operation":1,"page_size":"1000"}`, true},
@@ -103,5 +108,20 @@ func TestLakeOpenAPIValidatesBusinessInputs(t *testing.T) {
 				t.Fatalf("want valid=%t, got %v", tc.valid, err)
 			}
 		})
+	}
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"18446744073709551615", true}, {"18446744073709551616", false},
+	} {
+		for _, token := range []string{tc.value, strconv.Quote(tc.value)} {
+			body := `{"operation":1,"page_size":1,"after_ordinal":` + token + `}`
+			var decoded lakepb.SnapshotQuery
+			err := protojson.Unmarshal([]byte(body), &decoded)
+			if (err == nil) != tc.valid || (tc.valid && (decoded.AfterOrdinal == nil || strconv.FormatUint(*decoded.AfterOrdinal, 10) != tc.value)) {
+				t.Fatalf("wire decoder disagrees at uint64 boundary for %s", token)
+			}
+		}
 	}
 }
