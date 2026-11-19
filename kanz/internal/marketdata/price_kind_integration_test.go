@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -57,7 +58,15 @@ func TestPITPriceKindsThroughIngestionAndRisk(t *testing.T) {
 		{store.PriceKindLast, big.NewRat(9007199254740993, 100), big.NewRat(9007199254740995, 100)},
 		{store.PriceKindMid, big.NewRat(2304, 100), big.NewRat(2304, 100)},
 	} {
-		provider, err := spotsource.FromStore(st, spotsource.WithPriceKind(tc.kind), spotsource.WithMaxAge(3*time.Minute))
+		type refusal struct {
+			instrument, reason string
+			age                time.Duration
+		}
+		var refusals []refusal
+		provider, err := spotsource.FromStore(st, spotsource.WithPriceKind(tc.kind), spotsource.WithMaxAge(3*time.Minute),
+			spotsource.WithUnresolvedObserver(func(id, reason string, age time.Duration) {
+				refusals = append(refusals, refusal{id, reason, age})
+			}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -69,12 +78,20 @@ func TestPITPriceKindsThroughIngestionAndRisk(t *testing.T) {
 			{first, tc.first},
 			{revised.Add(-time.Microsecond), tc.first},
 			{revised, tc.revised},
+			{observed.Add(3 * time.Minute), tc.revised},
 			{observed.Add(3*time.Minute + time.Microsecond), nil},
 		} {
 			got, ok := provider.Mark(ctx, instrument, read.at)
 			if ok != (read.want != nil) || ok && got.Cmp(read.want) != 0 {
 				t.Errorf("kind %v at %s: got (%v, %t), want %v", tc.kind, read.at, got, ok, read.want)
 			}
+		}
+		wantRefusals := []refusal{
+			{instrument, spotsource.ReasonNoObservation, 0},
+			{instrument, spotsource.ReasonStale, 3*time.Minute + time.Microsecond},
+		}
+		if !slices.Equal(refusals, wantRefusals) {
+			t.Errorf("kind %v: refusal history %v, want %v", tc.kind, refusals, wantRefusals)
 		}
 	}
 	for _, kind := range []store.PriceKind{
