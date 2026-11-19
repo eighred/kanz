@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import advisory
 import jll_advisory
+import linked_advisory
 import pcre2_advisory
 import pcre2_cve
 from readback import CA_ARCHIVE, CA_DATA, JLL_LIBRARIES
@@ -34,8 +35,11 @@ def spdx_packages(report, expected):
         raise ValueError('application SPDX manifest incomplete')
 
 
-def scan(image, receipt, tools, database, registry, publisher, output):
+def scan(image, receipt, runtime, tools, database, registry, publisher, output):
     output.mkdir()
+    linked_advisory.validate_image(receipt, runtime)
+    linked_advisory.validate_sources(publisher.parent.parent / 'linked', dt.datetime.now(dt.timezone.utc))
+    print('Verified seven fix commits, three published libuv CVEs, the utf8proc release fix and two runtime ELF owners.')
     if set(receipt['wrapperMetadata']) != set(JLL_LIBRARIES):
         raise ValueError('publisher evidence missing from OCI receipt')
     owners = {}
@@ -122,7 +126,7 @@ def scan(image, receipt, tools, database, registry, publisher, output):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ('image', 'readback', 'tools', 'database', 'registry', 'pcre2_publisher', 'output'):
+    for key in ('image', 'readback', 'runtime', 'tools', 'database', 'registry', 'pcre2_publisher', 'output'):
         parser.add_argument(key, type=lambda x: Path(x).resolve())
     a = parser.parse_args()
-    scan(a.image, json.loads(a.readback.read_bytes()), a.tools, a.database, a.registry, a.pcre2_publisher, a.output)
+    scan(a.image, json.loads(a.readback.read_bytes()), json.loads(a.runtime.read_bytes()), a.tools, a.database, a.registry, a.pcre2_publisher, a.output)

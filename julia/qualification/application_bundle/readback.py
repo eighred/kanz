@@ -328,6 +328,9 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
         cfg = document(manifest['config'])
         if (cfg['os'], cfg['architecture'], cfg['config']['Entrypoint']) != ('linux', 'amd64', ['/opt/kanz/bin/curve-worker']):
             raise ValueError('application image configuration differs')
+        source = cfg['config']['Labels']['org.opencontainers.image.revision']
+        if not re.fullmatch('[0-9a-f]{40}', source):
+            raise ValueError('source revision missing from image config')
         layers = manifest['layers']
         # The Dockerfile WORKDIR emits the canonical empty tar after ADD.
         # Accept it only when the referenced bytes actually contain no members.
@@ -349,7 +352,7 @@ def verify(image, image_id, base_index, base_platform, bundle, compiler, owner_i
             actual, _ = contents(packed, 'opt/kanz/')
         if actual != expected:
             raise ValueError('final application filesystem differs from the actual compiler output')
-    return {'image': image_id, 'manifest': platform['digest'], 'config': manifest['config']['digest'],
+    return {'image': image_id, 'source': source, 'manifest': platform['digest'], 'config': manifest['config']['digest'],
             'baseLayers': len(base_layers), 'applicationLayer': app_layer['digest'], 'filesAndLinks': len(actual),
             'native': elfs, 'baseNative': os_elfs, 'wrapperMetadata': owners, 'dataOwners': {'MozillaCACerts_jll': certificates}, 'releaseQualified': False}
 

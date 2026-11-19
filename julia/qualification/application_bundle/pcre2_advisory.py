@@ -28,7 +28,7 @@ RANGES = {
 
 def fresh(date, now):
     if not dt.timedelta(0) <= now - dt.datetime.fromisoformat(date) <= dt.timedelta(hours=24):
-        raise ValueError('PCRE2 publisher response stale or future-dated')
+        raise ValueError('publisher response stale or future-dated')
 
 
 def affected(row, version):

@@ -25,7 +25,9 @@ function native_version(file, symbol)
     owner = Ref(ntuple(_ -> Ptr{Cvoid}(0), 4))
     @assert ccall(:dladdr, Cint, (Ptr{Cvoid}, Ref{NTuple{4,Ptr{Cvoid}}}), function_pointer, owner) != 0
     @assert realpath(unsafe_string(Ptr{UInt8}(owner[][1]))) == path
-    return unsafe_string(ccall(function_pointer, Cstring, ()))
+    version = unsafe_string(ccall(function_pointer, Cstring, ()))
+    println("KANZ_NATIVE ", relpath(path, "/opt/kanz"), " ", symbol, " ", version)
+    return version
 end
 
 core = "libjulia-internal.so.1.13.3"

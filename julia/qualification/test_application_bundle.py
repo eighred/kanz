@@ -1,3 +1,4 @@
+import base64
 import datetime as dt
 import hashlib
 import io
@@ -5,10 +6,13 @@ import json
 from pathlib import Path
 import sys
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'application_bundle'))
+import linked_advisory
+import linked_ancestry
 import pcre2_advisory
 import pcre2_cve
 import readback
@@ -63,6 +67,56 @@ class ApplicationReadbackTests(unittest.TestCase):
         for change in ({'sourceInfo': 'package found in: other/Manifest.toml'}, {'versionInfo': '1.1.0'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 scan.spdx_packages({'packages': [{**package, **change}]}, expected)
+
+    def test_linked_native_commit_objects_and_pre_fix_controls(self):
+        objects = {}
+        def commit(parents, description):
+            lines = ['tree ' + 'a' * 40, *['parent ' + h for h in parents], '', description]
+            raw = '\n'.join(lines).encode()
+            name = hashlib.sha1(b'commit ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+            objects[name] = base64.b64encode(raw).decode('ascii')
+            return name
+        old = commit([], 'previous release')
+        fix = commit([old], 'publisher fix')
+        head = commit([fix], 'selected source')
+        unrelated = commit([], 'different root')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'history.json'
+            path.write_text(json.dumps(objects))
+            linked_ancestry.verify(path, head, {fix: old})
+            for selected, controls in [(old, {fix: head}), (head, {fix: unrelated}), (head, {fix: fix})]:
+                with self.subTest(selected=selected, controls=controls), self.assertRaises(ValueError):
+                    linked_ancestry.verify(path, selected, controls)
+            path.write_text(json.dumps({**objects, fix: objects[head]}))
+            with self.assertRaisesRegex(ValueError, 'commit content differs'):
+                linked_ancestry.verify(path, head, {fix: old})
+            del objects[fix]
+            path.write_text(json.dumps(objects))
+            with self.assertRaisesRegex(ValueError, 'control absent'):
+                linked_ancestry.verify(path, head, {fix: old})
+
+    def test_observed_symbols_and_exact_files_belong_to_the_same_image(self):
+        native = {path: {'sha256': sha, 'size': size} for path, (sha, size) in linked_advisory.FILES.items()}
+        receipt = {'image': 'selected', 'source': 'producer', 'native': native}
+        runtime = {**receipt, 'symbols': linked_advisory.SYMBOLS}
+        linked_advisory.validate_image(receipt, runtime)
+        for change in ({'image': 'old'}, {'source': 'other'}, {'symbols': {}}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'runtime symbol proof'):
+                linked_advisory.validate_image(receipt, {**runtime, **change})
+        for path in native:
+            modified = {**native, path: {'sha256': 'other', 'size': native[path]['size']}}
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'actual linked native ELF'):
+                linked_advisory.validate_image({**receipt, 'native': modified}, runtime)
+
+    def test_linked_nvd_applicability_includes_platform_and_range(self):
+        configs = [{'operator': 'AND', 'nodes': [{'criteria': 'fixture', 'versionEndExcluding': '1.48.0'}]}]
+        number = 'CVE-2024-24806'
+        expected = hashlib.sha256(json.dumps(configs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        with patch.dict(linked_advisory.NVD_CONFIGS, {number: expected}):
+            linked_advisory.validate_nvd(number, configs)
+            for change in ([{**configs[0], 'operator': 'OR'}], [{'operator': 'AND', 'nodes': []}]):
+                with self.assertRaisesRegex(ValueError, 'applicability changed'):
+                    linked_advisory.validate_nvd(number, change)
 
     def test_pcre2_vendor_controls_and_drift(self):
         now = dt.datetime(2026, 11, 19, tzinfo=dt.timezone.utc)

@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 import pcre2
+import linked_advisory
 import pcre2_advisory
 import pcre2_cve
 from readback import CA_ARCHIVE, CA_URL
@@ -63,6 +64,7 @@ def acquire(directory):
     pcre2.publisher(pcre)
     pcre2_advisory.collect(pcre / 'publisher.json')
     pcre2_cve.collect(pcre / 'cve')
+    linked_advisory.collect(directory / 'linked')
 
 
 if __name__ == '__main__':
