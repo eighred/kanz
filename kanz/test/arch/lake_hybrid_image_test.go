@@ -97,7 +97,7 @@ func lakeHybridCI(raw string) error {
 	builderIndex := -1
 	for i, step := range workflow.Jobs["finite-snapshot-owner"].Steps {
 		if step.Uses == "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069" {
-			if builderIndex != -1 || step.ID != "lake-builder" || step.If != nil || step.Continue != nil || step.With["version"] != "v0.37.1" {
+			if builderIndex != -1 || step.ID != "lake-builder" || step.If != nil || step.Continue != nil || step.With["version"] != "v0.38.2" {
 				return fmt.Errorf("hybrid builder identity differs")
 			}
 			builderIndex = i

@@ -12,7 +12,7 @@ import (
 // Pin the tool as well as the setup action: an unpinned runner supplied the
 // v0.37.0 readiness-deadline regression even though the action was pinned.
 func TestBuildxReadinessFixIsPinned(t *testing.T) {
-	for _, name := range []string{"build.yml", "release.yml"} {
+	for _, name := range []string{"build.yml", "release.yml", "architecture-migration.yml", "base-image-mirror.yml"} {
 		data, err := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), ".github", "workflows", name))
 		if err != nil {
 			t.Fatal(err)
@@ -33,8 +33,8 @@ func TestBuildxReadinessFixIsPinned(t *testing.T) {
 			for _, step := range job.Steps {
 				if strings.HasPrefix(step.Uses, "docker/setup-buildx-action@") {
 					found = true
-					if step.With["version"] != "v0.37.1" {
-						t.Errorf("%s: Buildx must pin the reviewed readiness fix, got %q", name, step.With["version"])
+					if step.With["version"] != "v0.38.2" {
+						t.Errorf("%s: Buildx must pin the reviewed readiness and registry token retry fixes, got %q", name, step.With["version"])
 					}
 				}
 			}
