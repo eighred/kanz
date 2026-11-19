@@ -16,6 +16,7 @@ or print them while diagnosing configuration.
 | Disposable messaging/workload identity | [Feed identity](feed_identity/README.md), [Redpanda identity](redpanda_identity/README.md), [NATS GitOps](nats_gitops_proof/README.md). |
 | Browser/network and observability qualification | [Gateway policy](gateway_policy_proof/README.md), [Grafana](grafana_proof/README.md), [Tokyo messaging policy](tokyo_messaging_proof/README.md). |
 | Image and release evidence | [Rust audit tooling](rust_audit_tools/README.md), [signed promotion](signed_promotion/README.md). |
+| Temporal compatibility | [Jiff time zone and duration checks](jiff_qualification/README.md). |
 | Retained ephemeral-state transition | [Valkey migration](valkey_migration/README.md). |
 
 Qualification fixtures create their own environments where documented. An

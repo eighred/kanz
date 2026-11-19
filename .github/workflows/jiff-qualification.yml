@@ -1,0 +1,44 @@
+name: jiff-qualification
+
+on:
+  pull_request:
+    paths:
+      - 'tools/jiff_qualification/**'
+      - '.github/workflows/jiff-qualification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/jiff_qualification/**'
+      - '.github/workflows/jiff-qualification.yml'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  temporal-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.4'
+      - name: Pull the pinned Linux compiler
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG="$(mktemp -d "$RUNNER_TEMP/jiff-ghcr.XXXXXXXX")"
+          trap 'rm -f -- "$DOCKER_CONFIG/config.json" && rmdir -- "$DOCKER_CONFIG"' EXIT
+          # A nonempty auths map prevents Docker from selecting a native credential store.
+          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$DOCKER_CONFIG/config.json"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+          docker pull --platform linux/amd64 ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f
+      - name: Compare Jiff timestamps and durations
+        run: python -B tools/jiff_qualification/run.py
