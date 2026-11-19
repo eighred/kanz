@@ -7,6 +7,14 @@ from runtime import Estate, docker, nats_configuration
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_broker_requires_an_authenticated_jetstream_response(self):
+        estate = Estate('.', '.')
+        for raw, ready in [('{}', False), ('', False),
+                           ('{"type":"io.nats.jetstream.api.v1.account_info_response","error":{"code":503}}', False),
+                           ('{"type":"io.nats.jetstream.api.v1.account_info_response","streams":0}', True)]:
+            with self.subTest(raw=raw), patch.object(estate, 'invoke', return_value=raw):
+                self.assertEqual(estate.broker_ready({}), ready)
+
     def test_reservation_evidence_requires_the_exact_amount(self):
         estate = Estate('.', '.')
         changed = json.dumps(['rehearsal', 'release-workflow', 'CSA1', 'lot-1', '59'])

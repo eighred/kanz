@@ -43,6 +43,12 @@ def docker(stage, *args, env=None, data=None, timeout=90):
         raise RuntimeError(stage + ' timed out') from None
     if result.returncode:
         detail = result.stderr.strip()
+        if stage == 'canonical development stream bootstrap':
+            streams = re.findall(r'^stream ([A-Z_]{1,40}) — (?:creating|updating)$', result.stdout, re.MULTILINE)
+            causes = ('no servers available', 'no responders available', 'authorization violation',
+                      'timeout', 'insufficient storage', 'insufficient resources', 'permission denied')
+            known = [cause for cause in causes if cause in detail.lower()]
+            raise RuntimeError(f'{stage} exited {result.returncode}, last stream {streams[-1:]}, signals {known}')
         if detail.splitlines() and detail.splitlines()[-1] in PROBE_FAILURES:
             raise RuntimeError(stage + ': ' + detail.splitlines()[-1])
         if re.fullmatch(r'gateway (?:propose|self-approve|approve|instructed|settled) returned [1-5][0-9]{2}, expected [1-5][0-9]{2}', detail):
@@ -160,6 +166,16 @@ class Estate:
     def broker(self, role):
         return f"nats://{role}:{self.secrets[role]}@nats:4222"
 
+    def broker_ready(self, admin):
+        raw = self.invoke('JetStream readiness', 'data', public(BOX),
+                          ['request', '--raw', '--reply-timeout=2s', '$JS.API.INFO', '{}'],
+                          extra=['--entrypoint', 'nats'], env=admin)
+        try:
+            reply = json.loads(raw)
+        except ValueError:
+            return False
+        return isinstance(reply, dict) and reply.get('type') == 'io.nats.jetstream.api.v1.account_info_response' and not reply.get('error')
+
     def probe(self, operation, *arguments, role=None, event_time=None):
         net = 'client'
         env = {}
@@ -205,11 +221,12 @@ class Estate:
                     extra=['--mount', f'type=bind,src={conf},dst=/fixture.conf,readonly',
                            '--mount', 'type=volume,src=' + self.name('natsdata') + ',dst=/data'],
                     env={k.upper() + '_KEY':self.secrets[k] for k in ('admin','accounting','feed','custody','observer')})
+        admin = {'NATS_URL': 'nats://nats:4222', 'NATS_USER': 'admin', 'NATS_PASSWORD': self.secrets['admin']}
+        wait_for('authenticated JetStream readiness', lambda: self.broker_ready(admin))
         bootstrap = (ROOT / 'kanz/infra/nats/bootstrap-job.yaml').read_text().split('  bootstrap.sh: |\n', 1)[1].split('\n---', 1)[0]
         script = '\n'.join(row[4:] for row in bootstrap.splitlines()) + '\n'
         self.invoke('canonical development stream bootstrap', 'data', public(BOX), ['-se'], extra=['--entrypoint', '/bin/sh'],
-                    env={'NATS_URL': 'nats://nats:4222', 'NATS_USER': 'admin',
-                         'NATS_PASSWORD': self.secrets['admin'], 'NATS_REPLICAS': '1'}, data=script)
+                    env={**admin, 'NATS_REPLICAS': '1'}, data=script)
         self.migrate()
         self.accounting()
         self.create('gateway', reference('accounting'), 'client', connections=[('control','gateway-control')],
@@ -350,12 +367,15 @@ class Estate:
                       'metrics server failed', 'permission denied', 'Permissions Violation',
                       'no such host', 'cannot assign requested address', 'connection refused',
                       'context deadline exceeded', 'no responders available', 'consumer name already in use')
-        for name in ('accounting', 'gateway', 'nats', 'postgres'):
+        for name in ('nats', 'postgres', 'accounting', 'gateway'):
+            try:
+                state = docker('read service state', 'inspect', '-f', '{{.State.Status}} {{.State.ExitCode}}', self.name(name))
+            except RuntimeError:
+                continue
             proc = subprocess.run(['docker', 'logs', '--tail', '150', self.name(name)], capture_output=True,
                                   timeout=10, text=True, errors='replace')
             messages = proc.stdout + proc.stderr
             seen = [category for category in categories if category in messages]
-            state = docker('read service state', 'inspect', '-f', '{{.State.Status}} {{.State.ExitCode}}', self.name(name))
             if re.fullmatch(r'(running|exited|created|dead|restarting) [0-9]+', state):
                 print(name, state, seen, flush=True)
         counts = json.loads(self.receipt())
