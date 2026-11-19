@@ -11,6 +11,7 @@ readonly RECOVERY_KMS_KEY_ARN=${3:-}
 readonly RELEASE_COMMIT=${4:-unknown}
 readonly TV_MODE=${5:-off}
 readonly TV_PAIR_BASE64=${6:-}
+readonly BACKUP_SELECTION=${7:-}
 readonly RECOVERY_REGION=ap-northeast-3
 readonly DATA_NS=kanz-data
 readonly MSG_NS=kanz-messaging
@@ -35,6 +36,10 @@ TV_SOURCE=''
 
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
+
+if (( $# > 7 )) || { (( $# == 7 )) && [[ "$OPERATION" != restore || -z "$BACKUP_SELECTION" ]]; }; then
+  die 'a nonempty backup selection is valid only for a restore'
+fi
 
 if [[ "$OPERATION" == restore || "$TV_MODE" == qualify ]]; then
   source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
@@ -404,6 +409,27 @@ redis_backup_checkpoint() {
   '
 }
 
+download_restore_archive() {
+  local destination=$1 selection=${2:-} key version expected_sha='' evidence
+  if [[ -n "$selection" ]]; then
+    selection=$(printf '%s' "$selection" | base64 -d | jq -cse '
+      select(length==1) | .[0] |
+      select((.key | strings | test("^testnet/data-plane/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}/bundle\\.tar\\.gz\\z")) and
+             (.version_id | strings | length>0) and .version_id!="null" and (.version_id | test("[[:cntrl:]]") | not) and
+             (.sha256 | strings | test("^[0-9a-f]{64}\\z")))') || die 'invalid backup selection'
+    key=$(jq -er .key <<<"$selection")
+    version=$(jq -er .version_id <<<"$selection")
+    expected_sha=$(jq -er .sha256 <<<"$selection")
+  else
+    key=$(aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text) || die 'could not list recovery artifacts'
+    [[ "$key" == testnet/data-plane/*/bundle.tar.gz ]] || die 'no bounded data-plane recovery artifact exists'
+    version=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
+      --output json | object_version) || die 'selected recovery key has no immutable version'
+  fi
+  evidence=$(read_recovery_archive "$key" "$version" "$destination" "$expected_sha") || die 'restore object verification failed'
+  jq -c --arg key "$key" '. + {key:$key}' <<<"$evidence"
+}
+
 restore() {
   require_boundary
   local started work key archive archive_sha version object_evidence
@@ -420,11 +446,9 @@ restore() {
   }
   trap cleanup_restore EXIT
 
-  key=$(aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
-  [[ "$key" == testnet/data-plane/*/bundle.tar.gz ]] || die 'no bounded data-plane recovery artifact exists'
-  version=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" \
-    --output json | object_version) || die 'selected recovery key has no immutable version'
-  object_evidence=$(read_recovery_archive "$key" "$version" "$archive") || die 'restore object verification failed'
+  object_evidence=$(download_restore_archive "$archive" "$BACKUP_SELECTION") || die 'could not select and verify recovery artifact'
+  key=$(jq -er .key <<<"$object_evidence")
+  version=$(jq -er .version_id <<<"$object_evidence")
   archive_sha=$(jq -er .sha256 <<<"$object_evidence")
   tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))' && die 'artifact contains an unsafe path'
   mkdir "$work/extracted"
