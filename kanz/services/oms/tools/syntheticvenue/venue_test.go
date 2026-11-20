@@ -2,6 +2,7 @@ package syntheticvenue
 
 import (
 	"context"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -80,6 +81,23 @@ func TestAcceptedRejectsUntrustedScopeBeforeClaim(t *testing.T) {
 	}
 }
 
+func TestExactPartialLotAdmittedBeforePlacement(t *testing.T) {
+	for _, tc := range []struct{ q, half *commonpb.Decimal }{
+		{&commonpb.Decimal{Coefficient: 3, Exponent: -9}, &commonpb.Decimal{Coefficient: 15, Exponent: -10}},
+		{&commonpb.Decimal{Coefficient: 2, Exponent: -64}, &commonpb.Decimal{Coefficient: 1, Exponent: -64}},
+		{&commonpb.Decimal{Coefficient: 1, Exponent: -64}, nil},
+		{&commonpb.Decimal{Coefficient: math.MaxInt64}, nil},
+	} {
+		st := fixtureOrder()
+		st.OrderedQuantity = tc.q
+		got, ok := partialQuantity(tc.q)
+		_, err := terms(st)
+		if ok != (tc.half != nil) || (err == nil) != ok || (ok && !proto.Equal(got, tc.half)) {
+			t.Fatalf("quantity %v: half=%v, ok=%t, terms error=%v", tc.q, got, ok, err)
+		}
+	}
+}
+
 func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 	dsn, url := os.Getenv("TEST_SYNTHETIC_VENUE_POSTGRES_URL"), os.Getenv("TEST_SYNTHETIC_VENUE_NATS_URL")
 	if dsn == "" || url == "" {
@@ -121,7 +139,9 @@ func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal("connect disposable broker")
 	}
-	defer nc.Close()
+	// EnsureSubjects registers stream removal in Cleanup. Keep its connection
+	// open until removal completes, including for consecutive fixture runs.
+	t.Cleanup(nc.Close)
 	js, err := jetstream.New(nc)
 	if err != nil {
 		t.Fatal(err)
@@ -203,12 +223,10 @@ func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
 	if len(commands) != 4 || commands[0].Op != "dispatch" || commands[1].Op != "timeout" || commands[2].Op != "dispatch" || commands[3].Op != "ack" ||
 		commands[0].EventID != commands[2].EventID || commands[3].VenueOrderID != st.OrderId {
 		t.Fatalf("unexpected loss/redelivery commands: %v", commands)
 	}
-	mu.Unlock()
 	if dispatchRPC.executes.Load() != 1 || dispatchRPC.queries.Load() != 1 {
 		t.Fatal("lost acknowledgement resent or skipped reconciliation")
 	}
@@ -237,8 +255,6 @@ func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mu.Lock()
-	defer mu.Unlock()
 	if cancelRPC.cancels.Load() != 1 || cancelRPC.queries.Load() != 2 {
 		t.Fatal("cancel replay resent or skipped reconciliation")
 	}
