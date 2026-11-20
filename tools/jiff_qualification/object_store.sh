@@ -28,11 +28,18 @@ test)
     sha256sum /work/source/Cargo.lock "$owner/Cargo.lock"
     cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features http --lib config::tests:: \
         > /work/duration.txt
+    cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features "aws,azure,gcp,http" --lib \
+        > /work/store.txt
+    cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features "aws,azure,gcp,http" --lib \
+        local::tests::bubble_up_io_errors -- --ignored --exact > /work/permission.txt
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test worker \
         --message-format=json-render-diagnostics > /work/worker.jsonl
     cp /inputs/named_zone.rs "$owner/services/lake_snapshot/tests/named_zone.rs"
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test named_zone \
         > /work/named_zone.txt
+    cp /inputs/object_metadata.rs "$owner/services/lake_snapshot/tests/object_metadata.rs"
+    cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test object_metadata \
+        > /work/metadata.txt
     PYTHONPATH=/inputs python3 -B - <<'PY'
 from lake_sources import verify
 from pathlib import Path
@@ -43,6 +50,29 @@ def check_summary(lines):
 
 duration = Path("/work/duration.txt").read_text().splitlines()
 check_summary(duration)
+store = Path("/work/store.txt").read_text().splitlines()
+expected_store = {
+    "local::checked_modified_tests::file_mtime_preserves_nanoseconds_or_returns_an_error",
+    "aws::credential::tests::test_sign_with_signed_payload",
+    "azure::client::tests::test_delegated_key_response",
+    "gcp::credential::tests::test_canonicalize_headers",
+}
+for case in expected_store:
+    if f"test {case} ... ok" not in store:
+        raise ValueError(f"missing object_store test: {case}")
+permission = Path("/work/permission.txt").read_text().splitlines()
+check_summary(permission)
+if "test local::tests::bubble_up_io_errors ... ok" not in permission:
+    raise ValueError("the non-root directory permission case did not run")
+print(next(line for line in store if line.startswith("test result: ok.")))
+for line in store:
+    if line.startswith("test ") and " ... ignored" in line:
+        print(line)
+print("The non-root permission test also passed when selected explicitly.")
+metadata = Path("/work/metadata.txt").read_text().splitlines()
+check_summary(metadata)
+if "test partitioned_file_metadata_uses_signed_instants ... ok" not in metadata:
+    raise ValueError("the DataFusion metadata case did not run")
 expected_duration = {"test_parse_duration", "test_parse_duration_formats", "test_fmt_duration_roundtrip"}
 passed_duration = {line.split("::")[-1].split()[0] for line in duration if line.startswith("test config::tests::") and line.endswith(" ... ok")}
 if not expected_duration.issubset(passed_duration):
