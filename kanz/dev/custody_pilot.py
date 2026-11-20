@@ -101,16 +101,25 @@ def qualify(docker, container, binaries, node, env):
         raise RuntimeError("Disposable PostgreSQL did not become ready.")
 
     sql("postgres", (
+        "CREATE ROLE pilot_migrator NOLOGIN NOSUPERUSER NOBYPASSRLS;\n"
         f"CREATE ROLE pilot_check LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{owner_password}';\n"
-        f"CREATE DATABASE {DATABASE} OWNER pilot_check;\n"
+        f"CREATE DATABASE {DATABASE} OWNER pilot_migrator;\n"
     ).encode())
     for migration in sorted((CMD.parents[1] / "migrations").glob("*.sql")):
         try:
-            sql(DATABASE, b"SET ROLE pilot_check;\n" + migration.read_bytes())
+            sql(DATABASE, b"SET ROLE pilot_migrator;\n" + migration.read_bytes())
         except subprocess.CalledProcessError:
             raise RuntimeError(f"Accounting migration failed at {migration.name}.") from None
     authority = json.loads((CMD / "testdata/authority.json").read_bytes())
     sql(DATABASE, (CMD / "pilot_grants.sql").read_bytes(), "-v", "public_key=" + authority["public_key"])
+    sql(DATABASE, b"""
+        GRANT USAGE ON SCHEMA public TO pilot_check;
+        GRANT SELECT ON custody_batch_receipts, ledger_snapshots TO pilot_check;
+        GRANT SELECT, INSERT ON ledger_entries, ledger_append_positions, custody_runs, custody_actions TO pilot_check;
+        GRANT SELECT, INSERT, UPDATE ON ledger_heads, custody_statements, custody_breaks, outbox TO pilot_check;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON custody_break_detections TO pilot_check;
+        GRANT USAGE ON SEQUENCE outbox_id_seq TO pilot_check;
+    """)
     sql("postgres", (
         "CREATE ROLE pilot_source LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE kanz_custody_batch_pilot "
         f"PASSWORD '{source_password}';"
