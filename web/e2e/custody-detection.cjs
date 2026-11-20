@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict')
 const { chromium } = require(process.env.TEST_MFA_PLAYWRIGHT)
 
+let stage = 'input'
 async function main() {
   let raw = ''
   for await (const chunk of process.stdin) {
@@ -21,6 +22,7 @@ async function main() {
   assert.match(expected.detection.statement_id, /^custody-batch\.v1\.synthetic-source\.r1\.[0-9a-f]{64}$/)
   assert(expected.detection.run_id)
   const endpoint = base + '/api/v1/custody/breaks'
+  stage = 'launch'
   const browser = await chromium.launch({ headless: true, timeout: 10_000 })
   try {
     for (const [name, status] of Object.entries({ authorized: 200, foreign: 404, excluded: 200, unfunded: 403 })) {
@@ -31,11 +33,13 @@ async function main() {
         const page = await context.newPage()
         page.setDefaultTimeout(5_000)
         for (const navigation of ['open', 'reload']) {
+          stage = name + '-' + navigation + '-response'
           const response = page.waitForResponse(r => r.url() === endpoint && r.request().method() === 'GET')
           if (navigation === 'open') await page.goto(base + '/custody-breaks')
           else await page.reload()
           const received = await response
           assert.equal(received.status(), status)
+          stage = name + '-' + navigation + '-payload'
           const data = await received.json()
           if (name !== 'authorized') {
             if (name === 'excluded') {
@@ -59,6 +63,7 @@ async function main() {
           for (const field of ['portfolio_id', 'custodian_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(record[field], expected[field])
           assert.deepEqual(record.detection, expected.detection)
           assert.equal(record.values_state, 'exact')
+          stage = name + '-' + navigation + '-row'
           const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: expected.break_id, exact: true }) })
           await row.waitFor()
           assert.equal(await row.getByRole('button', { name: /^(Claim|Explain)$/ }).count(), 0)
@@ -68,6 +73,7 @@ async function main() {
           for (const [heading, value] of [['IBOR', expected.ibor], ['Custodian', expected.custodian], ['Difference', expected.difference]]) {
             assert.equal((await cells.nth(headers.indexOf(heading)).innerText()).trim(), value)
           }
+          stage = name + '-' + navigation + '-details'
           await row.getByText('View detection evidence', { exact: true }).click()
           const labels = ['Portfolio', 'Custodian ID', 'Business date', 'Reconciliation run', 'Statement', 'Journal position', 'Account scope']
           const values = [expected.portfolio_id, expected.custodian_id, expected.detection.business_date,
@@ -81,4 +87,4 @@ async function main() {
   } finally { await browser.close() }
 }
 
-main().catch(() => { process.exitCode = 1 })
+main().catch(() => { process.stderr.write('custody-browser-stage=' + stage + '\n'); process.exitCode = 1 })

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -99,7 +100,7 @@ func TestSignedCustodyOperatorBrowser(t *testing.T) {
 	}
 	cmd := exec.CommandContext(ctx, os.Getenv("CUSTODY_PILOT_BFF_PROBE"), "-test.run=^TestCustodyPilotBFFBrowser$", "-test.count=1", "-test.v")
 	cmd.Env = []string{"CUSTODY_PILOT_BFF_CHILD=1"}
-	for _, key := range []string{"TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR", "CUSTODY_PILOT_BROWSER_SCRIPT", "PATH", "SystemRoot", "LOCALAPPDATA", "TEMP", "TMP", "HOME", "PLAYWRIGHT_BROWSERS_PATH"} {
+	for _, key := range []string{"TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR", "CUSTODY_PILOT_BROWSER_SCRIPT", "PATH", "SystemRoot", "USERPROFILE", "LOCALAPPDATA", "TEMP", "TMP", "HOME", "PLAYWRIGHT_BROWSERS_PATH"} {
 		if value, ok := os.LookupEnv(key); ok {
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}
@@ -107,6 +108,15 @@ func TestSignedCustodyOperatorBrowser(t *testing.T) {
 	cmd.Stdin = bytes.NewReader(b)
 	output, err := cmd.Output()
 	if err != nil || !bytes.Contains(output, []byte("custody operator browser passed")) {
-		t.Fatal("authorized or denied browser path failed")
+		// Emit only bounded stage labels; never forward a child's raw logs or credentials.
+		if marker := regexp.MustCompile("custody-browser-stage=(?:input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))").Find(output); marker != nil {
+			t.Fatal(string(marker))
+		}
+		for _, stage := range []string{"invalid fixture input", "loopback fixture required", "Vue distribution and actual BFF required", "fixture identity refused", "fixture identity scope refused", "fixture identity signature refused", "fixture identity claims refused", "synthetic BFF session failed", "cannot encode synthetic browser input", "Chromium probe could not start"} {
+			if bytes.Contains(output, []byte(stage)) {
+				t.Fatal(stage)
+			}
+		}
+		t.Fatal("BFF child failed before browser verification")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"testing"
 	"time"
@@ -63,8 +64,16 @@ func TestCustodyPilotBFFBrowser(t *testing.T) {
 			t.Fatal("fixture identity refused")
 		}
 		var standard jwt.Claims
-		var scope struct{ Tenant string }
-		if signed.Claims(input.Key.Key, &standard, &scope) != nil || standard.Validate(jwt.Expected{Issuer: input.Issuer, Subject: "custody-pilot-reader", AnyAudience: jwt.Audience{"kanz-api"}, Time: time.Now()}) != nil || standard.Expiry == nil || scope.Tenant != tenant {
+		var scope struct {
+			Tenant string `json:"tenant"`
+		}
+		if signed.Claims(input.Key.Key, &standard, &scope) != nil {
+			t.Fatal("fixture identity signature refused")
+		}
+		if standard.Validate(jwt.Expected{Issuer: input.Issuer, Subject: "custody-pilot-reader", AnyAudience: jwt.Audience{"kanz-api"}, Time: time.Now()}) != nil || standard.Expiry == nil {
+			t.Fatal("fixture identity claims refused")
+		}
+		if scope.Tenant != tenant {
 			t.Fatal("fixture identity scope refused")
 		}
 		cookies[name], err = app.sessions.Create(t.Context(), session.Session{Subject: standard.Subject, Tenant: tenant, AccessToken: token, Expiry: time.Now().Add(2 * time.Minute)})
@@ -80,8 +89,12 @@ func TestCustodyPilotBFFBrowser(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Getenv("TEST_MFA_NODE"), os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"))
 	cmd.Stdin = bytes.NewReader(wire)
-	if cmd.Run() != nil {
-		t.Fatal("custody source comparison or scope refusal failed in Chromium")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if marker := regexp.MustCompile("custody-browser-stage=(?:input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))").Find(output); marker != nil {
+			t.Fatal(string(marker))
+		}
+		t.Fatal("Chromium probe could not start")
 	}
 	t.Log("custody operator browser passed")
 }
