@@ -107,17 +107,19 @@ async function main() {
         for (const [date, run, source] of [[e.business_date, e.original_run, e.original_statement], [e.following_date, e.following_run, e.following_statement]]) {
           const ordinary = await read(date, run)
           assert.equal(ordinary.state, 'recorded')
-          assert(['clean', 'breaks'].includes(ordinary.outcome))
+          assert.equal(ordinary.outcome, run === e.original_run ? 'breaks' : 'clean')
           assert.equal(ordinary.run_id, run)
           assert.equal(ordinary.statement_id, source)
           assert.equal(ordinary.signed_statement_sha256, source.slice(-64))
           assert.equal(ordinary.account_assignment_verified, true)
           assert.equal(ordinary.historical_quantity_resolutions, undefined)
-          assert(Array.isArray(ordinary.breaks))
+          assert.equal(ordinary.breaks.length, run === e.original_run ? 1 : 0)
           if (run === e.original_run) {
             const detection = ordinary.execution_quantities.differences.find(row => row.external_ref === e.external_ref && row.instrument_id === e.instrument_id)
             assert(detection)
-            assert.notDeepEqual(detection.ibor, detection.custodian)
+            assert.deepEqual(detection.ibor, { coefficient: '105', exponent: -1 })
+            assert.deepEqual(detection.custodian, { coefficient: '95', exponent: -1 })
+            assert.deepEqual(detection.difference, { coefficient: '1', exponent: 0 })
           }
           await comparisonDownload(page, region, ordinary)
           assert.equal(await table.count(), 0)
@@ -125,6 +127,7 @@ async function main() {
         const latest = await read(e.following_date)
         assert.equal(latest.state, 'recorded')
         assert.equal(latest.run_id, e.following_run)
+        assert.equal(latest.outcome, 'clean')
         assert.equal(latest.statement_id, e.following_statement)
         assert.equal(latest.historical_quantity_correction_run_id, undefined)
       } finally { await context.close() }
