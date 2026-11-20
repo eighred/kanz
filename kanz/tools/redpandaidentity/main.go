@@ -24,6 +24,7 @@ import (
 	"github.com/eighred/kanz/tools/natsrebuild"
 	"github.com/eighred/kanz/tools/replay"
 
+	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
@@ -66,61 +67,80 @@ func subject(cert *x509.Certificate, id string) (string, error) {
 	return fmt.Sprintf("CN=%s,O=SPIRE,C=US,2.5.4.45=#%s", cert.Subject.CommonName, hex.EncodeToString(der)), nil
 }
 
-func produce(ctx context.Context, c *kafka.Client, topic, value string) error {
+type frameReceipt struct {
+	Offset int64  `json:"offset"`
+	SHA256 string `json:"frameSHA256"`
+}
+
+func receipt(offset int64, wire []byte) frameReceipt {
+	return frameReceipt{Offset: offset, SHA256: fmt.Sprintf("%x", sha256.Sum256(wire))}
+}
+
+func produce(ctx context.Context, c *kafka.Client, topic, value string) (frameReceipt, error) {
 	// Synthetic transport frames, not financial or admission fixtures.
-	wire, err := proto.Marshal(&envelopepb.EventFrame{Envelope: &envelopepb.Envelope{EventId: value}, Payload: []byte(value)})
+	// Distinct source frames prevent a prior run's same-label, same-offset
+	// backup from satisfying the current producers' acknowledgements.
+	wire, err := proto.Marshal(&envelopepb.EventFrame{Envelope: &envelopepb.Envelope{EventId: value, CorrelationId: uuid.NewString()}, Payload: []byte(value)})
 	if err != nil {
-		return err
+		return frameReceipt{}, err
 	}
 	r, err := c.Produce(ctx, &kafka.ProduceRequest{Topic: topic, RequiredAcks: kafka.RequireAll,
 		Records: kafka.NewRecordReader(kafka.Record{Key: kafka.NewBytes([]byte(topic)), Value: kafka.NewBytes(wire)})})
 	if err != nil {
-		return err
+		return frameReceipt{}, err
 	}
-	return r.Error
-}
-
-func fetch(ctx context.Context, c *kafka.Client, topic string) ([]string, error) {
-	r, err := c.Fetch(ctx, &kafka.FetchRequest{Topic: topic, Offset: 0, MinBytes: 1, MaxBytes: 4096, MaxWait: time.Second})
-	if err != nil {
-		return nil, err
+	if r == nil {
+		return frameReceipt{}, errors.New("fixture produce was not acknowledged")
 	}
 	if r.Error != nil {
-		return nil, r.Error
+		return frameReceipt{}, r.Error
+	}
+	return receipt(r.BaseOffset, wire), nil
+}
+
+func fetch(ctx context.Context, c *kafka.Client, topic string) ([]string, []frameReceipt, error) {
+	r, err := c.Fetch(ctx, &kafka.FetchRequest{Topic: topic, Offset: 0, MinBytes: 1, MaxBytes: 4096, MaxWait: time.Second})
+	if err != nil {
+		return nil, nil, err
+	}
+	if r.Error != nil {
+		return nil, nil, r.Error
 	}
 	if closer, ok := r.Records.(io.Closer); ok {
 		defer closer.Close()
 	}
 	var values []string
+	var frames []frameReceipt
 	for {
 		record, err := r.Records.ReadRecord()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(values) >= 8 {
-			return nil, errors.New("unexpected record count")
+			return nil, nil, errors.New("unexpected record count")
 		}
 		key, err := kafka.ReadAll(record.Key)
 		if err != nil || string(key) != topic || record.Offset != int64(len(values)) {
-			return nil, errors.New("unexpected fixture key or partition offset")
+			return nil, nil, errors.New("unexpected fixture key or partition offset")
 		}
 		value, err := kafka.ReadAll(record.Value)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		env, payload, err := bus.Unframe(value)
 		if err != nil || env.GetEventId() != string(payload) {
-			return nil, errors.New("fixture frame mismatch")
+			return nil, nil, errors.New("fixture frame mismatch")
 		}
 		values = append(values, string(payload))
+		frames = append(frames, receipt(record.Offset, value))
 	}
 	if r.HighWatermark != int64(len(values)) {
-		return nil, errors.New("fixture records do not cover the acknowledged range")
+		return nil, nil, errors.New("fixture records do not cover the acknowledged range")
 	}
-	return values, nil
+	return values, frames, nil
 }
 
 // directTopic sends the actual operation to the single fixture broker. The
@@ -227,6 +247,23 @@ func checkGroupMessage(mode string, message kafka.Message) error {
 	return nil
 }
 
+func committedNext(ctx context.Context, c *kafka.Client) (int64, error) {
+	offsets, err := c.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
+		GroupID: checkpointGroup, Topics: map[string][]int{"proof-a": {0}},
+	})
+	if err != nil {
+		return 0, err
+	}
+	if offsets == nil || offsets.Error != nil || len(offsets.Topics) != 1 {
+		return 0, errors.New("group position unavailable")
+	}
+	partitions := offsets.Topics["proof-a"]
+	if len(partitions) != 1 || partitions[0].Error != nil || partitions[0].Partition != 0 || partitions[0].CommittedOffset < 0 {
+		return 0, errors.New("expected a committed group position on proof-a partition zero")
+	}
+	return partitions[0].CommittedOffset, nil
+}
+
 var errUnexpectedAcceptance = errors.New("forbidden operation accepted")
 
 func requireTopicDenial(err error) error {
@@ -295,6 +332,7 @@ func run() error {
 	acls = append(acls, kafka.ACLEntry{ResourceType: kafka.ResourceTypeGroup, ResourceName: checkpointGroup,
 		ResourcePatternType: kafka.PatternTypeLiteral, Principal: "User:proof-a", Host: "*",
 		Operation: kafka.ACLOperationTypeRead, PermissionType: kafka.ACLPermissionTypeAllow})
+	result := map[string]any{"passed": true, "mode": mode, "identity": id, "subjectDN": dn, "renewed": mode == "publish", "boundedReplay": mode == "publish", "sourceVersion": version.String()}
 	switch mode {
 	case "bootstrap", "reprovision":
 		stage = "bootstrap-topics"
@@ -354,10 +392,11 @@ func run() error {
 		if sa != "proof-a" && sa != "proof-b" {
 			return errors.New("client identity required")
 		}
-		if err := produce(ctx, c, sa, "before-renewal"); err != nil {
+		first, err := produce(ctx, c, sa, "before-renewal")
+		if err != nil {
 			return err
 		}
-		values, err := fetch(ctx, c, sa)
+		values, _, err := fetch(ctx, c, sa)
 		if err != nil || len(values) != 1 || values[0] != "before-renewal" {
 			return errors.New("own-topic readback failed")
 		}
@@ -446,9 +485,11 @@ func run() error {
 		renewedTransport := &kafka.Transport{TLS: tlsconfig.MTLSClientConfig(src, src, tlsconfig.AuthorizeID(spiffeid.RequireFromString("spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda")))}
 		defer renewedTransport.CloseIdleConnections()
 		c = &kafka.Client{Addr: c.Addr, Transport: renewedTransport, Timeout: 10 * time.Second}
-		if err := produce(ctx, c, sa, "after-renewal"); err != nil {
+		second, err := produce(ctx, c, sa, "after-renewal")
+		if err != nil {
 			return err
 		}
+		result["frames"] = map[string][]frameReceipt{sa: {first, second}}
 		stage = "renewed-bounded-replay"
 		if err := boundedReplay(ctx, renewedTransport.TLS, sa, []string{"before-renewal", "after-renewal"}); err != nil {
 			return err
@@ -474,47 +515,45 @@ func run() error {
 				return err
 			}
 		}
-	case "checkpoint", "resume":
+	case "checkpoint", "resume", "restored-offset":
 		stage = "consumer-" + mode
 		if sa != "proof-a" {
 			return errors.New("consumer identity required")
 		}
-		if err := consumeCheckpoint(ctx, transport.TLS, mode); err != nil {
-			return err
+		if mode != "restored-offset" {
+			if err := consumeCheckpoint(ctx, transport.TLS, mode); err != nil {
+				return err
+			}
+			if mode == "checkpoint" {
+				break
+			}
 		}
-	case "restored-offset":
-		if sa != "proof-a" {
-			return errors.New("consumer identity required")
-		}
-		offsets, err := c.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
-			GroupID: checkpointGroup, Topics: map[string][]int{"proof-a": {0}},
-		})
+		next, err := committedNext(ctx, c)
 		if err != nil {
 			return err
 		}
-		if offsets == nil || offsets.Error != nil || len(offsets.Topics) != 1 {
-			return errors.New("restored group position unavailable")
+		if next != 2 {
+			return errors.New("group does not retain both committed frames")
 		}
-		partitions := offsets.Topics["proof-a"]
-		if len(partitions) != 1 || partitions[0].Error != nil || partitions[0].Partition != 0 ||
-			partitions[0].CommittedOffset != 2 {
-			return errors.New("restored group does not retain both committed frames")
-		}
+		result["groupNextOffset"] = next
 	case "verify":
 		stage = "exact-records"
 		if sa != "proof-bootstrap" {
 			return errors.New("verification identity required")
 		}
+		records := make(map[string][]frameReceipt)
 		for _, topic := range []string{"proof-a", "proof-b"} {
-			values, err := fetch(ctx, c, topic)
+			values, frames, err := fetch(ctx, c, topic)
 			if err != nil || len(values) != 2 || values[0] != "before-renewal" || values[1] != "after-renewal" {
 				return errors.New("unexpected accepted records")
 			}
+			records[topic] = frames
 		}
+		result["frames"] = records
 	default:
 		return errors.New("unknown fixture mode")
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"passed": true, "mode": mode, "identity": id, "subjectDN": dn, "renewed": mode == "publish", "boundedReplay": mode == "publish", "sourceVersion": version.String()})
+	return json.NewEncoder(os.Stdout).Encode(result)
 }
 
 // failureClass emits only fixed categories or the protocol's numeric error code.
