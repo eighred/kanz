@@ -259,10 +259,18 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
-	if run.RequestID != "" && (verifying(run) || run.observedMissing) {
-		if err := confirmManualIntake(ctx, tx, run); err != nil {
-			return Run{}, err
-		}
+	var signedDigest []byte
+	switch {
+	case run.RequestID != "" && (verifying(run) || run.observedMissing):
+		signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
+	case verifying(run) && run.compared != nil && isBatchStatement(run.StatementID) && run.Basis != nil && run.Basis.Mode == BasisDeclared:
+		// A scheduled comparison of an authorized signed account receives the
+		// same durable attestation as a manual one. Ordinary source modes
+		// retain their original comparison outcome and carry no signed proof.
+		signedDigest, err = signedStatementDigest(ctx, tx, tenant, run)
+	}
+	if err != nil {
+		return Run{}, err
 	}
 	if run.observedMissing {
 		_, err := staged.LatestStatement(ctx, run.Subject)
@@ -324,7 +332,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		run.Breaks = breaksForSubject(stored, run.Subject)
 	}
-	if err := staged.SaveRun(ctx, run); err != nil {
+	if err := staged.saveRun(ctx, run, signedDigest); err != nil {
 		return Run{}, err
 	}
 	record, err := runRecord(ctx, tenant, run)

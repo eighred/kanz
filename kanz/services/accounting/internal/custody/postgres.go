@@ -185,14 +185,18 @@ LIMIT 1`
 // written here — they live in custody_breaks under their own cross-run identity,
 // and UpsertBreaks owns them.
 func (p *Postgres) SaveRun(ctx context.Context, r Run) error {
+	return p.saveRun(ctx, r, nil)
+}
+
+func (p *Postgres) saveRun(ctx context.Context, r Run, signedDigest []byte) error {
 	tolerance, err := exactStored(orZeroRat(r.Tolerance))
 	if err != nil {
 		return err
 	}
 	const q = `
 INSERT INTO custody_runs
-    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10)
+    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis,signed_statement_sha256)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10,$11)
 ON CONFLICT (tenant_id, run_id) DO NOTHING`
 	tx, err := p.exactTransaction(ctx)
 	if err != nil {
@@ -201,7 +205,7 @@ ON CONFLICT (tenant_id, run_id) DO NOTHING`
 	defer func() { _ = tx.Rollback(ctx) }()
 	_, err = tx.Exec(ctx, q,
 		r.RunID, r.Subject.PortfolioID, r.Subject.CustodianID, BusinessDay(r.Subject.BusinessDate),
-		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason, r.Basis)
+		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason, r.Basis, signedDigest)
 	if err != nil {
 		return fmt.Errorf("custody: save run %s: %w", r.RunID, err)
 	}
