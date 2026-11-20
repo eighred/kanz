@@ -642,11 +642,34 @@ mod tests {
     }
     #[test]
     fn future_field_and_nested_unknown_survive_clone_transitions() {
+        use crate::proto::order::v1::{CancelOrder, OrderCancellationRequest};
+        const FUTURE_FIELD: u32 = 50_000;
+        // Field 100, varint 1 in a valid, non-minimal encoding.
+        const UNKNOWN_VARINT: &[u8] = &[0xa0, 6, 0x81, 0];
+        let desc = OrderState::descriptor().unwrap();
+        assert!(desc.get_field(FUTURE_FIELD).is_none() && desc.get_field(100).is_none());
+        let request_field = desc.get_field_by_name("cancellation_request").unwrap();
+        let kind = request_field.kind();
+        assert!(kind.as_message().unwrap().get_field(100).is_none());
+
+        let request = OrderCancellationRequest {
+            command: Some(CancelOrder {
+                order_id: "o".into(),
+                ..Default::default()
+            }),
+            requested_at: Some(now()),
+            correlation_id: "root".into(),
+            causation_id: "cancel".into(),
+        };
+        let mut nested = request.encode_to_vec();
+        nested.extend_from_slice(UNKNOWN_VARINT);
+        let mut retained = Vec::new();
+        kanz_proto_wire::put_message(request_field.number(), &nested, &mut retained);
+        kanz_proto_wire::put_message(FUTURE_FIELD, b"future", &mut retained);
+        retained.extend_from_slice(UNKNOWN_VARINT);
+
         let mut raw = state().encode_to_vec();
-        let mut future = vec![10, 3, b'c', b'm', b'd'];
-        future.extend([0xa0, 6, 0x81, 0]);
-        kanz_proto_wire::put_message(33, &future, &mut raw);
-        raw.extend([0xa0, 6, 0x81, 0]);
+        raw.extend_from_slice(&retained);
         let original = Canonical::<OrderState>::decode(&raw).unwrap();
         for candidate in [
             route(&original, now()),
@@ -655,6 +678,15 @@ mod tests {
             expire(&original, now()),
         ] {
             let candidate = candidate.unwrap();
+            assert_eq!(
+                candidate.value().cancellation_request.as_ref(),
+                Some(&request)
+            );
+            let preserved = fields(candidate.wire(), |n, _| {
+                n == request_field.number() || n == FUTURE_FIELD || n == 100
+            })
+            .unwrap();
+            assert_eq!(preserved, retained);
             let unchanged = fields(candidate.wire(), |n, _| {
                 n != number::<OrderState>("status").unwrap()
                     && n != number::<OrderState>("as_of").unwrap()
