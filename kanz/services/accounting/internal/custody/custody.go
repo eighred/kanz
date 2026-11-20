@@ -384,19 +384,20 @@ func (s Statement) Subject() Subject {
 type Run struct {
 	// compared holds the statement read before loading the book. CommitRun
 	// validates it under the pair lock and drops it before retaining the run.
-	compared        *Statement
-	observedMissing bool
-	RunID           string
-	RequestID       string
-	Actor           string
-	Subject         Subject
-	Outcome         Outcome
-	StatementID     string
-	Basis           *RunBasis
-	Breaks          []Break
-	Tolerance       *big.Rat
-	CompletedAt     time.Time
-	FailureReason   string
+	compared            *Statement
+	observedMissing     bool
+	ExecutionQuantities *accountingpb.ExecutionQuantityComparison
+	RunID               string
+	RequestID           string
+	Actor               string
+	Subject             Subject
+	Outcome             Outcome
+	StatementID         string
+	Basis               *RunBasis
+	Breaks              []Break
+	Tolerance           *big.Rat
+	CompletedAt         time.Time
+	FailureReason       string
 }
 
 // Detection identifies the comparison that last wrote a break's financial figures.

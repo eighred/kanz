@@ -208,12 +208,13 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			return Statement{}, fmt.Errorf("custody: statement %s: transaction %s carries a figure that is not a valid Decimal", stmt.StatementID, ref)
 		}
 		out := recon.Transaction{
-			ExternalRef:  ref,
-			InstrumentID: tx.GetInstrumentId(),
-			Quantity:     qty,
-			Price:        price,
-			Cash:         cash,
-			CurrencyCode: tx.GetCurrencyCode(),
+			ExternalRef:               ref,
+			QuantityInInstrumentUnits: tx.GetQuantityInInstrumentUnits(),
+			InstrumentID:              tx.GetInstrumentId(),
+			Quantity:                  qty,
+			Price:                     price,
+			Cash:                      cash,
+			CurrencyCode:              tx.GetCurrencyCode(),
 		}
 		if td := tx.GetTradeDate(); td != nil {
 			if err := td.CheckValid(); err != nil {

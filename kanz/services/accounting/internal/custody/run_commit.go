@@ -84,7 +84,7 @@ func equalFigure(a, b *big.Rat) bool {
 }
 
 func equalTransaction(a, b recon.Transaction) bool {
-	return a.ExternalRef == b.ExternalRef && a.InstrumentID == b.InstrumentID &&
+	return a.ExternalRef == b.ExternalRef && a.InstrumentID == b.InstrumentID && a.QuantityInInstrumentUnits == b.QuantityInInstrumentUnits &&
 		a.CurrencyCode == b.CurrencyCode && a.TradeDate.Equal(b.TradeDate) &&
 		a.SettlementDate.Equal(b.SettlementDate) && equalFigure(a.Quantity, b.Quantity) &&
 		equalFigure(a.Price, b.Price) && equalFigure(a.Cash, b.Cash)
@@ -105,6 +105,7 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 func cloneRun(run Run) Run {
 	run.Tolerance = cloneRat(run.Tolerance)
 	run.Basis = run.Basis.clone()
+	run.ExecutionQuantities = proto.CloneOf(run.ExecutionQuantities)
 	run.Breaks = append([]Break(nil), run.Breaks...)
 	for i := range run.Breaks {
 		b := &run.Breaks[i]
@@ -143,6 +144,9 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	}
 	run = cloneRun(run)
 	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
+	if run.ExecutionQuantities != nil {
+		return Run{}, errBatchReceipt
+	}
 	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
 		return Run{}, ErrHistoricalLifecycle
 	}
@@ -276,6 +280,9 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if err != nil {
 		return Run{}, err
 	}
+	if run.ExecutionQuantities != nil && len(signedDigest) == 0 {
+		return Run{}, errBatchReceipt
+	}
 	if run.observedMissing {
 		_, err := staged.LatestStatement(ctx, run.Subject)
 		if err == nil {
@@ -340,6 +347,9 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if err != nil {
 		return Run{}, err
 	}
+	if run.ExecutionQuantities != nil && len(record.Payload) > BatchLimit {
+		return Run{}, ErrUnverifiedPrecision
+	}
 	if err := staged.saveRun(ctx, run, signedDigest, record.Payload); err != nil {
 		return Run{}, err
 	}
@@ -356,7 +366,7 @@ func runFromRecord(payload []byte) (Run, error) {
 	if err := proto.Unmarshal(payload, &msg); err != nil {
 		return Run{}, err
 	}
-	run := Run{RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
+	run := Run{ExecutionQuantities: msg.GetExecutionQuantities(), RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
 		Outcome: parseOutcome(strings.ToLower(strings.TrimPrefix(msg.GetOutcome().String(), "RECONCILIATION_OUTCOME_"))), StatementID: msg.GetStatementId(), CompletedAt: msg.GetCompletedAt().AsTime(), FailureReason: msg.GetFailureReason()}
 	var ok bool
 	if run.Tolerance, ok = dec.FromProtoChecked(msg.GetTolerance()); !ok {

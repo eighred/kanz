@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"google.golang.org/protobuf/encoding/protojson"
 	"net/http"
 	"net/url"
 	"slices"
@@ -94,6 +96,15 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 				}
 			}
 			if historical {
+				if q := result.Run.ExecutionQuantities; q != nil {
+					// Protobuf JSON preserves the signed 64-bit coefficients as decimal strings.
+					figures, err := (protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}).Marshal(q)
+					if err != nil {
+						writeJSON(w, 503, map[string]string{"error": "dated comparison unavailable"})
+						return
+					}
+					response["execution_quantities"] = json.RawMessage(figures)
+				}
 				response["signed_statement_sha256"] = result.SignedStatementSHA256
 				rows := make([]map[string]string, 0, len(result.Run.Breaks))
 				for _, b := range result.Run.Breaks {
