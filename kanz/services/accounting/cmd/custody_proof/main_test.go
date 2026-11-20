@@ -70,3 +70,35 @@ func TestAccountEvidenceRefusesAmbiguousInput(t *testing.T) {
 		}
 	}
 }
+
+func TestAssignmentWithdrawalRequiresItsOwnSignature(t *testing.T) {
+	var issuers []struct {
+		Kind string
+		Key  []byte `json:"public_key"`
+	}
+	if err := json.Unmarshal(fixture(t, "issuers.json"), &issuers); err != nil {
+		t.Fatal(err)
+	}
+	var key []byte
+	for _, i := range issuers {
+		if i.Kind == "custody_assignment" {
+			key = i.Key
+		}
+	}
+	for _, f := range []struct {
+		name      string
+		rev       int64
+		withdrawn bool
+	}{{"custody_assignment", 1, false}, {"custody_assignment_withdrawn", 2, true}, {"custody_assignment_reinstated", 3, false}} {
+		raw := fixture(t, f.name+".json")
+		sig := fixture(t, f.name+".sig")
+		e, err := custody.ParseAccountEvidence(raw)
+		if err != nil || e.Revision != f.rev || e.Withdrawn != f.withdrawn || !custody.VerifyAccountEvidence(e, raw, sig, key) {
+			t.Fatal("incorrect signed governance revision", f.name)
+		}
+		e.Withdrawn = !e.Withdrawn
+		if custody.VerifyAccountEvidence(e, raw, sig, key) {
+			t.Fatal("altered withdrawal admitted", f.name)
+		}
+	}
+}

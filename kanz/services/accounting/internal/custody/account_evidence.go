@@ -22,6 +22,7 @@ type AccountEvidence struct {
 	ProofID           string `json:"proof_id"`
 	Version           string `json:"version,omitempty"`
 	Revision          int64  `json:"revision,omitempty"`
+	Withdrawn         bool   `json:"withdrawn,omitempty"`
 	PortfolioID       string `json:"portfolio_id,omitempty"`
 	CustodianID       string `json:"custodian_id,omitempty"`
 	EffectiveFrom     string `json:"effective_from"`
@@ -53,6 +54,14 @@ func ParseAccountEvidence(payload []byte) (AccountEvidence, error) {
 			return AccountEvidence{}, errAccountEvidence
 		}
 		seen[name] = true
+		if name == "withdrawn" {
+			var v *bool
+			if d.Decode(&v) != nil || v == nil {
+				return AccountEvidence{}, errAccountEvidence
+			}
+			e.Withdrawn = *v
+			continue
+		}
 		if name == "revision" {
 			if d.Decode(&e.Revision) != nil || e.Revision < 1 {
 				return AccountEvidence{}, errAccountEvidence
@@ -73,6 +82,9 @@ func ParseAccountEvidence(payload []byte) (AccountEvidence, error) {
 		required = append(required, "venue", "exchange_account_id")
 	case "custody_assignment":
 		required = append(required, "portfolio_id", "custodian_id", "version", "revision")
+		if seen["withdrawn"] {
+			required = append(required, "withdrawn")
+		}
 	default:
 		return AccountEvidence{}, errAccountEvidence
 	}
