@@ -3,6 +3,7 @@ using JuliaC
 using Pkg
 using SHA
 using TOML
+include(joinpath(@__DIR__, "protobuf", "verified_source.jl"))
 
 file_digest(path) = bytes2hex(open(sha256, path))
 
@@ -33,6 +34,7 @@ function build(project, destination, replay...)
     # Record the path dependency actually selected by the prepared candidate.
     protobuf = only(TOML.parsefile(joinpath(project, "Manifest.toml"))["deps"]["ProtoBuf"])
     package = realpath(joinpath(project, protobuf["path"]))
+    tree = VerifiedProtoBuf.verify(package)
     codec = Dict(relpath(joinpath(directory, name), package) => file_digest(joinpath(directory, name))
                  for (directory, _, names) in walkdir(joinpath(package, "src"))
                  for name in names if endswith(name, ".jl"))
@@ -42,7 +44,7 @@ function build(project, destination, replay...)
         "juliaExecutableSHA256" => file_digest(joinpath(Sys.BINDIR, "julia")),
         "sysimageSHA256" => file_digest(joinpath(Sys.BINDIR, "../lib/julia/sys.so")),
         "buildManifestSHA256" => file_digest(tools), "workerSources" => initial,
-        "protobufSources" => codec, "entrypointSHA256" => file_digest(entrypoint),
+        "protobufTree" => tree, "protobufSources" => codec, "entrypointSHA256" => file_digest(entrypoint),
     )
     mktempdir(dirname(destination)) do temporary
         archive = joinpath(temporary, "worker.o.a")
@@ -73,6 +75,7 @@ function build(project, destination, replay...)
         bundle = joinpath(output, "bundle")
         bundle_products(BundleRecipe(link_recipe=link, output_dir=bundle))
         source_digests(project) == initial || error("worker source changed during build")
+        VerifiedProtoBuf.verify(package) == tree || error("ProtoBuf source changed during build")
         report = merge(inputs, Dict(
             "compilerObjectSHA256" => file_digest(archive),
             "executableSHA256" => file_digest(joinpath(bundle, "bin", "curve-worker")),

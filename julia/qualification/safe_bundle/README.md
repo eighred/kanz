@@ -4,6 +4,8 @@ This local candidate runs the existing CurveKernel and Worker through a single b
 
 ## Compile
 
+Prepare the [worker-specific ProtoBuf project](protobuf/README.md) in a disposable checkout first. The build checks the complete package tree before and after native compilation or replay and includes its identity in the compiler receipt.
+
 The build-only JuliaC environment is independent of the application environment. Instantiate `tools/Project.toml` using its checked-in manifest. JuliaC 0.3.12 is pinned to registered Git tree `49a147f54e5f9ad46104834de93648dd9ef012f0` from commit `98e82861ff28c05d4eeabbf9de67c08f0bd97e80`. Its build-only ObjectFile 0.5.1, StructIO 0.3.1 and LIEF_Patchelf_jll 1.0.0+1 trees are recorded in that manifest. [Upstream bundling implementation](https://github.com/JuliaLang/JuliaC.jl/blob/98e82861ff28c05d4eeabbf9de67c08f0bd97e80/src/bundling.jl)
 
 Supply a staged Julia 1.13.3 compiler, a prepared worker project with `src/`, generated `gen/` and the selected ProtoBuf path in its manifest, and an unused output directory. The worker project and tool project must both be available to the build machine. The compiler staging owner supplies the reviewed PCRE2 and libstdc++ bytes. Set `JULIA_PKG_OFFLINE=true` and isolate the build after acquiring the pinned build dependencies. From the repository root run:
