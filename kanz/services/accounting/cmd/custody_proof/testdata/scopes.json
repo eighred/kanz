@@ -1,0 +1,20 @@
+[
+  {
+    "login_role": "pilot_venue_proof",
+    "tenant_id": "synthetic-custody-pilot",
+    "venue": "XSIM",
+    "account_id": "sandbox-account",
+    "portfolio_id": "",
+    "custodian_id": "",
+    "exchange_account_id": "xs-account-1"
+  },
+  {
+    "login_role": "pilot_custody_assignment",
+    "tenant_id": "synthetic-custody-pilot",
+    "venue": "",
+    "account_id": "sandbox-account",
+    "portfolio_id": "PF1",
+    "custodian_id": "CUST-A",
+    "exchange_account_id": ""
+  }
+]
