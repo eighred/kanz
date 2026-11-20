@@ -49,7 +49,7 @@ func checkSyntheticOMS(root string) error {
 			return nil
 		}
 		switch rel {
-		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql", "cancellation.sql":
+		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql", "cancellation.sql", "settlement.sql":
 		default:
 			return fmt.Errorf("unexpected synthetic OMS input %s", rel)
 		}
@@ -63,7 +63,7 @@ func checkSyntheticOMS(root string) error {
 	if err != nil {
 		return err
 	}
-	if len(files) != 6 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
+	if len(files) != 7 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
 		return fmt.Errorf("synthetic OMS workspace recipe changed")
 	}
 	source, err := rustMigrationWithoutComments(files["src/main.rs"])
@@ -143,6 +143,26 @@ func checkSyntheticOMS(root string) error {
 			return fmt.Errorf("synthetic OMS cancellation boundary changed %s", marker)
 		}
 	}
+	settlement := rustMigrationCompact(files["settlement.sql"])
+	for _, marker := range []string{
+		"CREATEROLEkanz_synthetic_settlement_guardNOLOGINNOINHERITNOSUPERUSERNOBYPASSRLS",
+		"ALTERTABLEpublic.synthetic_oms_settlement_authorizationsFORCEROWLEVELSECURITY",
+		"GRANTINSERTONpublic.synthetic_oms_settlement_authorizationsTOkanz_synthetic_oms_control",
+		"epoch:=public.synthetic_oms_assert_writer()",
+		"EXECUTEFUNCTIONpublic.synthetic_oms_require_execution_fact_owner()",
+		"NEW.envelope_tenant_idISDISTINCTFROMNEW.tenant_id",
+		"b.coverage_completeANDNOTb.conflictedANDb.gap_revision<=b.revisionFORSHARE",
+		"auth.next_state_sha256ISDISTINCTFROMsha256(p_state)",
+		"auth.fact_payload_sha256ISDISTINCTFROMsha256(p_fact)",
+		"live_sourcesISDISTINCTFROMoriginal_sourcesORcardinality(live_sources)<>5",
+		"sha256(j.fill)=auth.venue_execution_sha256",
+		"public.capital_settle_direct(p_portfolio,p_order,funding.currencies,funding.amounts,auth.executed_debits,p_op='cancelled')",
+		"REVOKEALLONFUNCTIONpublic.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)FROMPUBLIC",
+	} {
+		if !strings.Contains(settlement, marker) {
+			return fmt.Errorf("synthetic OMS settlement boundary changed %s", marker)
+		}
+	}
 	return nil
 }
 
@@ -161,6 +181,13 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"cancellation.sql", "outcome := public.capital_release_unexecuted(", "outcome := public.other_release("},
 		{"cancellation.sql", "AND fact_row_id IS NULL", "AND TRUE"},
 		{"cancellation.sql", "DEFERRABLE INITIALLY DEFERRED", "NOT DEFERRABLE"},
+		{"settlement.sql", "b.coverage_complete AND NOT b.conflicted", "TRUE"},
+		{"settlement.sql", "NEW.envelope_tenant_id IS DISTINCT FROM NEW.tenant_id", "FALSE"},
+		{"settlement.sql", "NOLOGIN NOINHERIT", "LOGIN NOINHERIT"},
+		{"settlement.sql", "TO kanz_synthetic_oms_control;", "TO kanz_synthetic_oms_runtime;"},
+		{"settlement.sql", "auth.next_state_sha256 IS DISTINCT FROM sha256(p_state)", "FALSE"},
+		{"settlement.sql", "sha256(j.fill)=auth.venue_execution_sha256", "TRUE"},
+		{"settlement.sql", "auth.executed_debits,p_op='cancelled'", "auth.executed_debits,TRUE"},
 		{"Cargo.toml", `["synthetic-command"]`, `["qualification-diagnostics"]`},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
@@ -169,7 +196,7 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "src"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql", "cancellation.sql"} {
+			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql", "cancellation.sql", "settlement.sql"} {
 				raw, err := os.ReadFile(filepath.Join(root, syntheticOMSPath, name))
 				if err != nil {
 					t.Fatal(err)

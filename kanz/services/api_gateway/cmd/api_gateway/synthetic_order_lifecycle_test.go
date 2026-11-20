@@ -88,7 +88,7 @@ func isolatedOrderDSN(raw, role string) bool {
 func syntheticPool(t *testing.T, ctx context.Context, role, tenant string) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("SYNTHETIC_OMS_" + role + "_URL")
-	expected := map[string]string{"SWITCH": "kanz_synthetic_handoff_probe", "RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "VENUE": "kanz_synthetic_venue", "FUNDING": "kanz_synthetic_oms_funding", "PROOF": "kanz_synthetic_oms_proof"}[role]
+	expected := map[string]string{"SWITCH": "kanz_synthetic_handoff_probe", "RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "ADAPTER": "kanz_synthetic_oms_adapter", "VENUE": "kanz_synthetic_venue", "FUNDING": "kanz_synthetic_oms_funding", "PROOF": "kanz_synthetic_oms_proof", "CASH": "kanz_synthetic_oms_cash"}[role]
 	if expected == "" || !(isolatedOrderDSN(dsn, expected) || (role == "RUNTIME" && isolatedOrderDSN(dsn, expected+"_g2"))) {
 		t.Fatal("refused a database outside the synthetic role and loopback scope")
 	}
@@ -162,6 +162,44 @@ func exerciseStoreRefusal(t *testing.T, tenant, code, reason, constraint string)
 	})
 }
 
+func syntheticVenueClient(t *testing.T, ctx context.Context, cfg syntheticvenue.Config) venuepb.VenueAdapterServiceClient {
+	t.Helper()
+	now := time.Now().UTC()
+	venue, err := syntheticvenue.New(ctx, cfg, syntheticPool(t, ctx, "VENUE", cfg.Tenant))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := testidentity.NewAuthority(spiffeid.RequireTrustDomainFromString("kanz.internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := func(id string) *testidentity.Source {
+		t.Helper()
+		s, err := ca.Issue(spiffeid.RequireFromString(id), now.Add(-time.Minute), now.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	protocol := issue(syntheticvenue.VenueIdentity)
+	actor := issue(syntheticvenue.OMSIdentity)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsconfig.MTLSServerConfig(protocol, protocol, tlsconfig.AuthorizeID(spiffeid.RequireFromString(syntheticvenue.OMSIdentity))))))
+	venuepb.RegisterVenueAdapterServiceServer(srv, venue)
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(listener) }()
+	t.Cleanup(func() { srv.Stop(); <-served })
+	conn, err := grpc.NewClient("passthrough:///"+listener.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(tlsconfig.MTLSClientConfig(actor, actor, tlsconfig.AuthorizeID(spiffeid.RequireFromString(syntheticvenue.VenueIdentity))))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return venuepb.NewVenueAdapterServiceClient(conn)
+}
+
 func TestSyntheticLegacyFundingRefusal(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_OMS_BIN") == "" {
 		t.Skip("requires the pre-diagnostic synthetic OMS fixture")
@@ -184,7 +222,6 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 		env := s.frame.GetEnvelope()
 		cmd, request := prepareSyntheticOrder(t, ctx, s, "synthetic-tenant")
 		tenant, portfolio, orderID := request.Tenant, request.Portfolio, cmd.GetOrderId()
-		now := time.Now().UTC()
 		var err error
 		requireNativeReceipt(t, ctx, request, "COMMIT_UNCONFIRMED")
 		runtimePool := syntheticPool(t, ctx, "RUNTIME", tenant)
@@ -226,39 +263,7 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		venue, err := syntheticvenue.New(ctx, syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: time.Now().UTC(), LoseExecuteAck: true}, syntheticPool(t, ctx, "VENUE", tenant))
-		if err != nil {
-			t.Fatal(err)
-		}
-		ca, err := testidentity.NewAuthority(spiffeid.RequireTrustDomainFromString("kanz.internal"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		issue := func(id string) *testidentity.Source {
-			t.Helper()
-			s, err := ca.Issue(spiffeid.RequireFromString(id), now.Add(-time.Minute), now.Add(time.Hour))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return s
-		}
-		protocol := issue(syntheticvenue.VenueIdentity)
-		actor := issue(syntheticvenue.OMSIdentity)
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsconfig.MTLSServerConfig(protocol, protocol, tlsconfig.AuthorizeID(spiffeid.RequireFromString(syntheticvenue.OMSIdentity))))))
-		venuepb.RegisterVenueAdapterServiceServer(srv, venue)
-		served := make(chan error, 1)
-		go func() { served <- srv.Serve(listener) }()
-		t.Cleanup(func() { srv.Stop(); <-served })
-		conn, err := grpc.NewClient("passthrough:///"+listener.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(tlsconfig.MTLSClientConfig(actor, actor, tlsconfig.AuthorizeID(spiffeid.RequireFromString(syntheticvenue.VenueIdentity))))))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer conn.Close()
-		venueClient := venuepb.NewVenueAdapterServiceClient(conn)
+		venueClient := syntheticVenueClient(t, ctx, syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: time.Now().UTC(), LoseExecuteAck: true})
 		ingress, err := syntheticvenue.NewIngress(tenant, portfolio, venueClient, func(ctx context.Context, cmd syntheticvenue.Command) (syntheticvenue.Receipt, error) {
 			return callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_ADAPTER_URL"), struct {
 				Version int `json:"version"`

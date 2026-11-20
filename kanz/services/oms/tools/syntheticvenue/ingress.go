@@ -41,6 +41,19 @@ type Ingress struct {
 	tenant, portfolio string
 	venue             venuepb.VenueAdapterServiceClient
 	owner             Owner
+	workingPartial    bool
+}
+
+// NewWorkingPartialIngress models XSIM's independently confirmed execution
+// before withdrawal. Its terminal state carries the signed withdrawal's
+// effective time, distinct from the earlier fill's venue timestamp.
+func NewWorkingPartialIngress(tenant, portfolio string, venue venuepb.VenueAdapterServiceClient, owner Owner) (*Ingress, error) {
+	i, err := NewIngress(tenant, portfolio, venue, owner)
+	if err != nil {
+		return nil, err
+	}
+	i.workingPartial = true
+	return i, nil
 }
 
 const AcceptedSubject = "order.order.accepted"
@@ -102,7 +115,9 @@ func (i *Ingress) route(ctx context.Context, c Command) error {
 		if reply == nil || len(reply.Fills) != 0 {
 			return errors.New("unexpected synthetic execution response")
 		}
-		return i.observeAck(ctx, c)
+		if !i.workingPartial {
+			return i.observeAck(ctx, c)
+		}
 	case claim.Code == "CANCEL_ONCE" && c.Op == "cancel_pending":
 		_, err := i.venue.CancelOrder(ctx, &venuepb.CancelOrderRequest{TenantId: i.tenant, State: &st})
 		if err != nil {
@@ -127,7 +142,11 @@ func (i *Ingress) route(ctx context.Context, c Command) error {
 			return errors.New("synthetic venue outcome remains unresolved")
 		}
 		return i.observeAck(ctx, c)
-	case venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED:
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED, venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED:
+		partial := view.State == venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED
+		if partial && (!i.workingPartial || c.Op != "dispatch") {
+			return i.uncertain(ctx, c)
+		}
 		if view.ExecutedQuantity == nil || !dec.InDomain(view.ExecutedQuantity) || !dec.IsPositive(view.ExecutedQuantity) || len(view.Fills) != 1 {
 			return errors.New("synthetic cancellation lacks complete venue history")
 		}
@@ -141,19 +160,34 @@ func (i *Ingress) route(ctx context.Context, c Command) error {
 		if err != nil {
 			return err
 		}
+		if partial {
+			if err := i.observeAck(ctx, c); err != nil {
+				return err
+			}
+		}
 		obs := i.command("fill", st.OrderId, fill.FillId, fill.ExecutedAt.AsTime())
 		obs.Fill = wire
 		if err := i.observe(ctx, obs); err != nil {
 			return err
 		}
+		if partial {
+			return nil
+		}
 		qty, err := proto.Marshal(view.ExecutedQuantity)
 		if err != nil {
 			return err
 		}
-		// XSIM commits the partial fill and cancellation in one remote
-		// transaction. Querying it again must reproduce the same two facts,
-		// including when the replay originated from an older dispatch claim.
-		cancelled := i.command("cancelled", st.OrderId, fill.FillId+"/cancelled", fill.ExecutedAt.AsTime())
+		effective := fill.ExecutedAt.AsTime()
+		if i.workingPartial {
+			if st.Status == orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
+				effective = st.GetAsOf().AsTime()
+			} else if c.Op == "cancel_pending" {
+				effective = time.Unix(c.EffectiveSeconds, int64(c.EffectiveNanos))
+			} else {
+				return errors.New("confirmed funded withdrawal requires its signed cancel delivery")
+			}
+		}
+		cancelled := i.command("cancelled", st.OrderId, fill.FillId+"/cancelled", effective)
 		cancelled.ExecutedQuantity = qty
 		return i.observe(ctx, cancelled)
 	default:

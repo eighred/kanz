@@ -3,6 +3,7 @@
 package syntheticvenue
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -37,6 +38,10 @@ type Config struct {
 	// The fixture supplies a venue clock independently from OMS observation time.
 	FillTime       time.Time
 	LoseExecuteAck bool
+	// When enabled, Execute persists a partial fill while the order is still open.
+	FillOnExecute bool
+	// The venue reports its actual commission in its execution receipt.
+	ExecutionFee *commonpb.Money
 }
 
 type Venue struct {
@@ -56,6 +61,12 @@ func sourceID(kind string, coordinates ...string) string {
 func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Venue, error) {
 	if cfg.Tenant == "" || cfg.Portfolio == "" || cfg.FillTime.IsZero() || timestamppb.New(cfg.FillTime).CheckValid() != nil || pool == nil {
 		return nil, errors.New("synthetic venue requires a tenant, portfolio, valid fill time and isolated receipt database")
+	}
+	if fee := cfg.ExecutionFee; fee != nil {
+		if fee.CurrencyCode != "USD" || !dec.InDomain(fee.Amount) || !dec.IsPositive(fee.Amount) {
+			return nil, errors.New("synthetic XSIM execution fee must be positive USD")
+		}
+		cfg.ExecutionFee = proto.Clone(fee).(*commonpb.Money)
 	}
 	conn := pool.Config().ConnConfig
 	if !net.ParseIP(conn.Host).IsLoopback() {
@@ -151,8 +162,15 @@ func (v *Venue) Execute(ctx context.Context, r *venuepb.ExecuteRequest) (*venuep
 		return nil, err
 	}
 	var created bool
+	var execution []byte
+	if v.cfg.FillOnExecute {
+		execution, err = v.halfFill(st)
+		if err != nil {
+			return nil, err
+		}
+	}
 	err = v.transaction(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO synthetic_venue.receipts(tenant_id,portfolio_id,order_id,terms) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId, wire)
+		tag, err := tx.Exec(ctx, `INSERT INTO synthetic_venue.receipts(tenant_id,portfolio_id,order_id,terms,execution,working_partial) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId, wire, execution, v.cfg.FillOnExecute)
 		if err != nil {
 			return err
 		}
@@ -176,6 +194,15 @@ func (v *Venue) Execute(ctx context.Context, r *venuepb.ExecuteRequest) (*venuep
 	}
 	return &venuepb.ExecuteResponse{}, nil
 }
+func (v *Venue) halfFill(original *orderpb.OrderState) ([]byte, error) {
+	half, ok := partialQuantity(original.GetOrderedQuantity())
+	if !ok {
+		return nil, status.Error(codes.FailedPrecondition, "half the submitted quantity cannot be represented")
+	}
+	id := sourceID("xsim-partial", v.cfg.Tenant, v.cfg.Portfolio, original.OrderId)
+	return proto.Marshal(&orderpb.Fill{FillId: id, VenueExecutionId: id, OrderId: original.OrderId, InstrumentId: Instrument, Side: original.Side, Venue: MIC, VenueAccountId: Account,
+		Quantity: half, Price: original.LimitPrice, Fee: v.cfg.ExecutionFee, ExecutedAt: timestamppb.New(v.cfg.FillTime)})
+}
 func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) (*venuepb.CancelOrderResponse, error) {
 	st := r.GetState()
 	if err := v.check(r.GetTenantId(), st); err != nil {
@@ -183,24 +210,23 @@ func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) 
 	}
 	err := v.transaction(ctx, func(tx pgx.Tx) error {
 		var wire, prior []byte
-		err := tx.QueryRow(ctx, `SELECT terms,execution FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3 FOR UPDATE`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &prior)
+		var workingPartial bool
+		err := tx.QueryRow(ctx, `SELECT terms,execution,working_partial FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3 FOR UPDATE`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &prior, &workingPartial)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return status.Error(codes.NotFound, "unknown synthetic order")
 		}
-		if err != nil || prior != nil {
+		if err != nil || prior != nil && !workingPartial {
+			return err
+		}
+		if workingPartial {
+			_, err = tx.Exec(ctx, `UPDATE synthetic_venue.receipts SET working_partial=false WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId)
 			return err
 		}
 		var original orderpb.OrderState
 		if err := proto.Unmarshal(wire, &original); err != nil {
 			return err
 		}
-		half, ok := partialQuantity(original.GetOrderedQuantity())
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "half the submitted quantity cannot be represented")
-		}
-		id := sourceID("xsim-partial", v.cfg.Tenant, v.cfg.Portfolio, original.OrderId)
-		fill := &orderpb.Fill{FillId: id, VenueExecutionId: id, OrderId: original.OrderId, InstrumentId: Instrument, Side: original.Side, Venue: MIC, VenueAccountId: Account, Quantity: half, Price: original.LimitPrice, ExecutedAt: timestamppb.New(v.cfg.FillTime)}
-		wire, err = proto.Marshal(fill)
+		wire, err = v.halfFill(&original)
 		if err != nil {
 			return err
 		}
@@ -219,14 +245,23 @@ func (v *Venue) QueryOrder(ctx context.Context, r *venuepb.QueryOrderRequest) (*
 	}
 	reply := &venuepb.QueryOrderResponse{}
 	err := v.transaction(ctx, func(tx pgx.Tx) error {
-		var wire []byte
-		err := tx.QueryRow(ctx, `SELECT execution FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire)
+		var wire, storedTerms []byte
+		var partial bool
+		err := tx.QueryRow(ctx, `SELECT execution,terms,working_partial FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &storedTerms, &partial)
 		if errors.Is(err, pgx.ErrNoRows) {
 			reply.State = venuepb.OrderViewState_ORDER_VIEW_STATE_UNKNOWN
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		// Coordinate-only recovery can still query by identity. The funded
+		// control sends full trusted terms, which XSIM binds to its own receipt.
+		if st.OrderedQuantity != nil && st.LimitPrice != nil {
+			supplied, err := terms(st)
+			if err != nil || !bytes.Equal(supplied, storedTerms) {
+				return status.Error(codes.FailedPrecondition, "queried synthetic terms differ from remote order")
+			}
 		}
 		if wire == nil {
 			reply.State = venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING
@@ -238,6 +273,9 @@ func (v *Venue) QueryOrder(ctx context.Context, r *venuepb.QueryOrderRequest) (*
 			return err
 		}
 		reply.State = venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED
+		if partial {
+			reply.State = venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED
+		}
 		reply.Fills = []*orderpb.Fill{&fill}
 		reply.ExecutedQuantity = fill.Quantity
 		return nil

@@ -47,7 +47,7 @@ The fixture arms capital admission for a fresh tenant and submits a signed XSIM 
 | Compete for 150 USD | Hold the USD row until two distinct native writers are waiting. Exactly one of two orders requiring 100 USD and 1 BNB commits. |
 | Fail during the accepted outbox write | The database witnesses both memberships, both commitments, order and claim before the failure. A separate reader sees zero reservations and zero orders, claims or facts. Retrying commits once. |
 | Reuse an order ID across tenants | Each tenant can reserve its own cash. RLS hides the first tenant's reservation from the second. An expired or wrong-principal approval is refused. |
-| Dispatch a funded acceptance | Return `FUNDED_LIFECYCLE_HELD`. Both reservations remain held and no adapter observation is recorded. |
+| Dispatch a funded acceptance without a separate settlement authorization | Return `FUNDED_LIFECYCLE_HELD`. Both reservations remain held and no adapter observation is recorded. |
 
 ### Cancel before dispatch
 
@@ -60,7 +60,24 @@ Use the signed gateway cancellation for an accepted funded order. The synthetic 
 | Send two cancellations while the USD balance is locked | The same user sends identical command bytes with two gateway event IDs. Observe both native writers waiting in PostgreSQL. Releasing the lock permits one terminal transition. The other writer returns the existing terminal state. |
 | Fail while inserting the terminal fact | The reader still sees the pending order and both full reservations. Retrying the signed command commits the cancellation and releases both currencies. |
 
-Funded venue dispatch, partial-fill settlement and terminal release following a venue execution require separate acceptance. Go retains production write authority. [Funded OMS scope](https://github.com/eighred/kanz/issues/1532) · [Pending cash scope](https://github.com/eighred/kanz/issues/1316) · [Multi-currency terminal locking](https://github.com/eighred/kanz/issues/1360)
+### Dispatch to XSIM and cancel after a partial fill
+
+The funded fixture runs an isolated mTLS XSIM adapter, the Rust OMS writer, the Go accounting folder against its own PostgreSQL database, and file-backed JetStream. Before dispatch the writer checks all five original control decisions, both reserved currencies and the separate control authorization for this operation. The adapter's lost placement acknowledgement leaves the outcome unknown. A typed query recovers the same XSIM order and its execution while the unfilled quantity is still working. The gateway signs the cancellation only after the OMS has recorded the partial execution. [Settlement authorization](../../rust/services/synthetic_oms/settlement.sql) · [Cash settlement function](../services/oms/migrations/0029_capital_settle_direct.sql)
+
+| Observation for the 1.25 SYN buy | USD reserved | BNB reserved | Accounting outcome |
+| --- | ---: | ---: | --- |
+| Admission and uncertain placement | 252 | 1 | Opening cash is 1000 USD and 8 BNB. |
+| XSIM reports 0.625 SYN at 200 USD and a 1 USD fee | 252 | 1 | OMS records 126 USD executed. The remaining 0.625 SYN is working. |
+| Signed cancellation, confirmation still outstanding at OMS | 252 | 1 | The executed amount and original reservations stay in place. |
+| OMS records XSIM confirmation that the remainder was cancelled | 126 | 0 | The unused 126 USD and 1 BNB are released. The executed 126 USD awaits the journal. |
+| Accounting books the fill and OMS consumes its cash fact | 0 | 0 | One trade reduces USD cash to 874. The BNB balance stays at 8. |
+| JetStream redelivers the fill to a fresh accounting process | 0 | 0 | One trade remains. The next cash revision contains no additional order debit. |
+
+The primary XSIM clock reports whole microseconds. A second order in a fresh tenant uses a venue clock 321 nanoseconds past a whole microsecond. Both the venue receipt and the OMS fill journal preserve that exact time. Accounting stores the original fill bytes beside microsecond-resolution PostgreSQL timestamps. Its current attribution check compares those timestamps with the original fill. For the second order it reports an unattributed trade, books 874 USD cash and supplies no order debit. OMS keeps 126 USD reserved through redelivery. [Execution attribution](../services/accounting/internal/ledger/execution_evidence.go) · [Cash commit coverage](../services/accounting/internal/ledger/cash_commit.go)
+
+The two order runs use a microsecond-resolution accounting announcement clock. A separate cash-source test sets the announcement clock 321 nanoseconds beyond a whole microsecond. The outbox stores the envelope time at microsecond precision while the cash payload retains nanoseconds. OMS quarantines the source when the two cutoffs differ.
+
+The terminal fact carries the signed cancellation as its cause and the independently observed confirmation time. A separate cash revision acknowledges the amount attributable to this order. The USD announcement excludes BNB, so new admission that requires complete portfolio coverage still refuses with unknown funding. Go retains production write authority. [Funded OMS](https://github.com/eighred/kanz/issues/1532) · [Cash reservations](https://github.com/eighred/kanz/issues/1316) · [Writer replay](https://github.com/eighred/kanz/issues/1533) · [Accounting](https://github.com/eighred/kanz/issues/1535)
 
 ## Read the same order in Chromium
 

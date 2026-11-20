@@ -6,6 +6,7 @@ CREATE TABLE synthetic_venue.receipts (
     order_id text NOT NULL,
     terms bytea NOT NULL,
     execution bytea,
+    working_partial boolean NOT NULL DEFAULT false CHECK (NOT working_partial OR execution IS NOT NULL),
     PRIMARY KEY (tenant_id, portfolio_id, order_id)
 );
 ALTER TABLE synthetic_venue.receipts ENABLE ROW LEVEL SECURITY;

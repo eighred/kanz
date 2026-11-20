@@ -98,6 +98,47 @@ func TestExactPartialLotAdmittedBeforePlacement(t *testing.T) {
 	}
 }
 
+func TestFundingProjectsOnlyAttestedPartialExecution(t *testing.T) {
+	state := fixtureOrder()
+	state.Status = orderpb.OrderStatus_ORDER_STATUS_ROUTED
+	state.OrderedQuantity = &commonpb.Decimal{Coefficient: 125, Exponent: -2}
+	state.LeavesQuantity = state.OrderedQuantity
+	state.FilledQuantity = &commonpb.Decimal{}
+	state.LimitPrice = &commonpb.Decimal{Coefficient: 200}
+	when := timestamppb.Now()
+	base := &orderpb.Fill{FillId: "venue-half", VenueExecutionId: "venue-half", OrderId: state.OrderId, Venue: MIC, VenueAccountId: Account, InstrumentId: Instrument, Side: state.Side,
+		Quantity: &commonpb.Decimal{Coefficient: 625, Exponent: -3}, Price: state.LimitPrice, ExecutedAt: when, Fee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
+	for _, tc := range []struct {
+		name     string
+		change   func(*orderpb.Fill)
+		accepted bool
+	}{
+		{"reported", func(*orderpb.Fill) {}, true},
+		{"missing_fee", func(f *orderpb.Fill) { f.Fee = nil }, false},
+		{"fee_currency", func(f *orderpb.Fill) { f.Fee.CurrencyCode = "EUR" }, false},
+		{"above_limit", func(f *orderpb.Fill) { f.Price = &commonpb.Decimal{Coefficient: 201} }, false},
+		{"foreign_account", func(f *orderpb.Fill) { f.VenueAccountId = "other" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fill := proto.Clone(base).(*orderpb.Fill)
+			tc.change(fill)
+			wire, err := proto.Marshal(fill)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := Command{Op: "fill", Principal: OMSIdentity, Portfolio: state.PortfolioId, OrderID: state.OrderId, EventID: fill.FillId, EffectiveSeconds: when.Seconds, EffectiveNanos: when.Nanos, Fill: wire}
+			view := &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED, ExecutedQuantity: fill.Quantity, Fills: []*orderpb.Fill{fill}}
+			projection, err := ProjectSettlement(state, c, view, []string{"BNB", "USD"})
+			if (err == nil) != tc.accepted {
+				t.Fatalf("unexpected projection decision: %v", err)
+			}
+			if tc.accepted && (len(projection.ExecutedDebits) != 2 || projection.ExecutedDebits[0] != "0" || projection.ExecutedDebits[1] != "126") {
+				t.Fatal("incorrect confirmed per-currency execution debit")
+			}
+		})
+	}
+}
+
 func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 	dsn, url := os.Getenv("TEST_SYNTHETIC_VENUE_POSTGRES_URL"), os.Getenv("TEST_SYNTHETIC_VENUE_NATS_URL")
 	if dsn == "" || url == "" {

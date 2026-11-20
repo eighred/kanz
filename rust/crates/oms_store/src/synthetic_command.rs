@@ -72,6 +72,18 @@ impl From<tokio_postgres::Error> for Refusal {
         if let Some(db) = e.as_db_error() {
             if db.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
                 && db.schema() == Some("public")
+                && db.table() == Some("synthetic_oms_settlement_authorizations")
+            {
+                match db.constraint() {
+                    Some("settlement_evidence_expired") => {
+                        return Self::Controls("FUNDED_LIFECYCLE_HELD")
+                    }
+                    Some("settlement_cash_expired") => return Self::Controls("FUNDING_UNKNOWN"),
+                    _ => {}
+                }
+            }
+            if db.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                && db.schema() == Some("public")
                 && db.table() == Some("synthetic_oms_funded_withdrawals")
             {
                 match db.constraint() {
@@ -608,6 +620,7 @@ struct Reduction {
     phase: String,
     state: Option<OrderState>,
     record: Option<Record>,
+    fill: Option<Fill>,
 }
 impl Reduction {
     fn new(code: &'static str, phase: &str) -> Self {
@@ -616,6 +629,7 @@ impl Reduction {
             phase: phase.into(),
             state: None,
             record: None,
+            fill: None,
         }
     }
 }
@@ -712,11 +726,8 @@ async fn fill(
             .encode_to_vec(),
         )?
     };
-    if claim(tx, id, &execution_key(f), &f.fill_id).await? != 1 {
-        return Err(Refusal::Conflict);
-    }
-    journal(tx, id, &f.fill_id, f, event.body).await?;
     let mut result = Reduction::new("APPLIED", if complete { "filled" } else { phase });
+    result.fill = Some(f.clone());
     result.state = Some(next);
     result.record = Some(record);
     Ok(result)
@@ -734,7 +745,31 @@ pub async fn observe(
         return Err(Refusal::Invalid);
     }
     let tx = begin_write(client, s, ADAPTER).await?;
-    let row=tx.query_opt("SELECT phase,principal_id,command_sha256,command FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 FOR UPDATE",&[&id,&s.portfolio]).await?.ok_or(Refusal::NotFound)?;
+    // The same binary can replay an estate before its synthetic settlement
+    // upgrade. Funded orders serialize before cash locks; the ordinary route
+    // keeps its existing command-row lock.
+    let installed: bool = tx.query_one(
+        "SELECT to_regprocedure('public.synthetic_oms_settlement_scope(text,text)') IS NOT NULL",&[]
+    ).await?.get(0);
+    let funded = if installed {
+        tx.query_one(
+            "SELECT public.synthetic_oms_settlement_scope($1,$2)",
+            &[&id, &s.portfolio],
+        )
+        .await?
+        .get(0)
+    } else {
+        false
+    };
+    let query = if funded {
+        "SELECT phase,principal_id,command_sha256,command FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2"
+    } else {
+        "SELECT phase,principal_id,command_sha256,command FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 FOR UPDATE"
+    };
+    let row = tx
+        .query_opt(query, &[&id, &s.portfolio])
+        .await?
+        .ok_or(Refusal::NotFound)?;
     let phase: String = row.get(0);
     let lineage = Lineage::load(&tx, id).await?;
     let order = load_in(&tx, id).await?;
@@ -742,7 +777,7 @@ pub async fn observe(
     let recorded=tx.query_opt("SELECT operation,digest FROM synthetic_oms_observations WHERE order_id=$1 AND event_id=$2",&[&id,&event.id]).await?;
     if let Some(prior) = recorded {
         if prior.get::<_, String>(0) != event.operation
-            || (!event.is_claim() && prior.get::<_, Vec<u8>>(1) != digest)
+            || ((funded || !event.is_claim()) && prior.get::<_, Vec<u8>>(1) != digest)
         {
             return Err(Refusal::Conflict);
         }
@@ -761,6 +796,7 @@ pub async fn observe(
     if recovery::time(&at)? > recovery::time(&now)? {
         return Err(Refusal::Invalid);
     }
+    let state_time = if funded { at } else { now };
     let st = Canonical::<OrderState>::decode(&order.state).map_err(|_| Refusal::Invalid)?;
     if st.value().portfolio_id != s.portfolio
         || st.value().venue != VENUE
@@ -796,7 +832,7 @@ pub async fn observe(
             if event.body == id.as_bytes()
                 && matches!(phase.as_str(), "dispatch_claimed" | "unknown_execute") =>
         {
-            let mut state = aggregate::route(&st, now)
+            let mut state = aggregate::route(&st, state_time)
                 .map_err(|_| Refusal::State)?
                 .value()
                 .clone();
@@ -848,7 +884,7 @@ pub async fn observe(
             }
             result
         }
-        "fill" => fill(&lineage, &tx, s, &st, &phase, event, now).await?,
+        "fill" => fill(&lineage, &tx, s, &st, &phase, event, state_time).await?,
         "cancelled"
             if matches!(
                 phase.as_str(),
@@ -866,7 +902,7 @@ pub async fn observe(
             if phase == "cancelled" {
                 Reduction::new("DUPLICATE", &phase)
             } else {
-                let mut state = aggregate::cancel(&st, now)
+                let mut state = aggregate::cancel(&st, state_time)
                     .map_err(|_| Refusal::State)?
                     .value()
                     .clone();
@@ -891,6 +927,47 @@ pub async fn observe(
         }
         _ => return Err(Refusal::State),
     };
+    if funded {
+        let state = result.state.as_ref().map(Message::encode_to_vec);
+        let payload = result.record.as_ref().map(|r| r.payload.as_slice());
+        let outcome: String = tx
+            .query_one(
+                "SELECT public.synthetic_oms_apply_settlement($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                &[
+                    &id,
+                    &s.portfolio,
+                    &event.id,
+                    &event.operation,
+                    &event.seconds,
+                    &event.nanos,
+                    &event.body,
+                    &state,
+                    &payload,
+                ],
+            )
+            .await?
+            .get(0);
+        match outcome.as_str() {
+            "APPLIED" => {}
+            "HELD" => return Err(Refusal::Controls("FUNDED_LIFECYCLE_HELD")),
+            "UNKNOWN" => return Err(Refusal::Controls("FUNDING_UNKNOWN")),
+            "STATE" => return Err(Refusal::State),
+            _ => return Err(Refusal::Store(Error::Database)),
+        }
+        let order = load_in(&tx, id).await?;
+        commit(tx).await?;
+        return Ok(Receipt {
+            code: result.code,
+            lineage,
+            order,
+        });
+    }
+    if let Some(f) = result.fill.as_ref() {
+        if claim(&tx, id, &execution_key(f), &f.fill_id).await? != 1 {
+            return Err(Refusal::Conflict);
+        }
+        journal(&tx, id, &f.fill_id, f, event.body).await?;
+    }
     if result.phase != phase {
         tx.execute(
             "UPDATE synthetic_oms_commands SET phase=$2 WHERE order_id=$1",

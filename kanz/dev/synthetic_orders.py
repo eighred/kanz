@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 PG = "postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9"
 RUNTIME = "ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 DB = "kanz_synthetic_oms"
+BOOK_DB = "kanz_synthetic_accounting"
+BOOK_ROLE = "kanz_synthetic_accounting"
 FUNDING_DIAGNOSTIC = "0026_funded_order_refusal.sql"
 OWNERS = {
     "services/api_gateway/cmd/api_gateway": [
@@ -72,6 +74,7 @@ def require_cases(log, root, names):
 ROLES = {
     "CONTROL": "kanz_synthetic_oms_control",
     "FUNDING": "kanz_synthetic_oms_funding",
+    "CASH": "kanz_synthetic_oms_cash",
     "PROOF": "kanz_synthetic_oms_proof",
     "SWITCH": "kanz_synthetic_handoff_probe",
     "NEXT_RUNTIME": "kanz_synthetic_oms_runtime_g2",
@@ -84,6 +87,27 @@ ROLES = {
     "READ": "kanz_synthetic_oms_read",
     "RELAY": "kanz_synthetic_oms_relay",
 }
+
+
+def provision_accounting(container, env):
+    password = secrets.token_hex(24)
+    sql(container, f"CREATE ROLE {BOOK_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{password}';\n"
+                   f"CREATE DATABASE {BOOK_DB};")
+    for migration in sorted((ROOT / "kanz/services/accounting/migrations").glob("*.sql")):
+        sql(container, migration.read_text(encoding="utf-8"), BOOK_DB)
+    sql(container, f"""
+        GRANT SELECT ON ledger_entries,ledger_snapshots,ledger_heads,ledger_append_positions,cash_commands,
+            execution_fee_revisions,cash_commit_heads,cash_commit_debits,cash_commit_history,outbox TO {BOOK_ROLE};
+        GRANT INSERT ON ledger_entries,ledger_heads,ledger_append_positions,cash_commit_heads,cash_commit_debits,
+            cash_commit_history,outbox TO {BOOK_ROLE};
+        GRANT UPDATE(position) ON ledger_heads TO {BOOK_ROLE};
+        GRANT UPDATE(revision,observed_at_ns) ON cash_commit_heads TO {BOOK_ROLE};
+        GRANT UPDATE(debit) ON cash_commit_debits TO {BOOK_ROLE};
+        GRANT UPDATE(published_at,attempts,last_error) ON outbox TO {BOOK_ROLE};
+        GRANT USAGE ON SEQUENCE outbox_id_seq TO {BOOK_ROLE};
+    """, BOOK_DB)
+    env["SYNTHETIC_BOOK_URL"] = f"postgres://{BOOK_ROLE}:{password}@127.0.0.1:5432/{BOOK_DB}?sslmode=disable"
+    env["SYNTHETIC_BOOK_BIN"] = "/fixture/consume"
 
 
 def provision_native(container, fixture_env):
@@ -239,12 +263,16 @@ def run(stage, native):
         (stage / "native").chmod(0o755)
         with native.open("rb") as binary:
             print("Rust owner SHA-256", hashlib.file_digest(binary, "sha256").hexdigest(), flush=True)
-    build(stage, packages)
+    targets = list(packages)
+    if native:
+        targets.append("services/accounting/internal/consume")
+    build(stage, targets)
     # Local peer auth is for migration setup only. All other local users and
     # all remote administrators are refused. Only the test user gets a SCRAM DSN.
     hba = stage / "pg_hba.conf"
     hba.write_text("local all postgres peer\nlocal all all reject\n"
                    f"host {DB} {','.join(['kanz_synthetic_test', *ROLES.values()])} 127.0.0.1/32 scram-sha-256\n"
+                   f"host {BOOK_DB} {BOOK_ROLE} 127.0.0.1/32 scram-sha-256\n"
                    "host all all 0.0.0.0/0 reject\nhost all all ::/0 reject\n", encoding="ascii")
     with_env = dict(os.environ, POSTGRES_PASSWORD=secrets.token_hex(32))
     container = output("docker", "run", "-d", "--rm", "--network", "none",
@@ -273,6 +301,7 @@ def run(stage, native):
         fixture_env = {"TEST_POSTGRES_URL": dsn}
         if native:
             pending_migrations = provision_native(container, fixture_env)
+            provision_accounting(container, fixture_env)
             fixture_env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
         for package, names in packages.items():
             base = package.rsplit("/", 1)[-1]
@@ -337,6 +366,35 @@ def run(stage, native):
                 terminal_cases = ("ok", "race", "rollback", "scope")
                 require_cases(terminal_log, terminal, terminal_cases)
                 print(f"{package}: funded cancellation passed ({', '.join(terminal_cases)}) without skips", flush=True)
+                settlement = ROOT / "rust/services/synthetic_oms/settlement.sql"
+                sql(container, settlement.read_text(encoding="utf-8"), DB)
+                for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos"):
+                    sql(container, f"""
+                        BEGIN;
+                        SET LOCAL app.tenant_id='{tenant}';
+                        INSERT INTO capital_activation(enabled,activated_at) VALUES(true,clock_timestamp());
+                        INSERT INTO capital_source_health DEFAULT VALUES;
+                        INSERT INTO capital_balances(portfolio_id,currency,revision,coverage_complete,total,observed_at_ns)
+                            SELECT 'synthetic-portfolio',currency,1,true,opening,(extract(epoch FROM clock_timestamp())*1000000000)::bigint
+                            FROM (VALUES ('USD','1000'),('BNB','8')) AS cash(currency,opening);
+                        COMMIT;
+                    """, DB)
+                sql(container, """
+                    BEGIN;
+                    GRANT SELECT,INSERT,UPDATE(fault_digest) ON capital_source_health TO kanz_synthetic_oms_cash;
+                    GRANT SELECT,INSERT(portfolio_id,currency),UPDATE(reserved,revision,total,observed_at_ns,coverage_complete,conflicted,gap_revision)
+                        ON capital_balances TO kanz_synthetic_oms_cash;
+                    GRANT SELECT,INSERT(portfolio_id,currency,revision,digest) ON capital_cash_events TO kanz_synthetic_oms_cash;
+                    GRANT SELECT,UPDATE(booked_debit) ON capital_commitments,capital_members TO kanz_synthetic_oms_cash;
+                    COMMIT;
+                """, DB)
+                venue = "TestSyntheticFundedVenueLifecycle"
+                venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
+                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt"))
+                for line in venue_log.splitlines():
+                    if "XSIM cash result tenant=" in line or "XSIM accounting cutoff difference=" in line:
+                        print(line[line.index("XSIM "):], flush=True)
+                print(f"{package}: funded XSIM partial fill, cancellation, journal and cash replay passed without skips", flush=True)
             log = run_fixture_tests(cmd, names, selected_env, password)
             if native and base == "api_gateway":
                 require_cases(log, "TestSyntheticOrderCommandLifecycle",

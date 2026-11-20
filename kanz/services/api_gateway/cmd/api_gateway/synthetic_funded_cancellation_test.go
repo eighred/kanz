@@ -49,7 +49,6 @@ func authorizeCancellationUntil(t *testing.T, ctx context.Context, frame *envelo
 	t.Helper()
 	req := cancellationRequest(t, frame, portfolio)
 	env := frame.GetEnvelope()
-	digest := sha256.Sum256(req.Command)
 	lookup := nativeSubmit{Version: 1, Op: "get", Tenant: req.Tenant, Principal: req.Principal, Portfolio: portfolio, OrderID: env.PartitionKey}
 	retained, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_RUNTIME_URL"), lookup)
 	if err != nil {
@@ -82,15 +81,21 @@ func authorizeCancellationUntil(t *testing.T, ctx context.Context, frame *envelo
 	default:
 		t.Fatalf("scoped cancellation lookup returned %q/%q", retained.Code, retained.Reason)
 	}
+	recordCancellationAuthority(t, ctx, req, env, expires, stateHash, factHash)
+	return req
+}
+
+func recordCancellationAuthority(t *testing.T, ctx context.Context, req fundedCancellation, env *envelopepb.Envelope, expires time.Time, stateHash, factHash []byte) {
+	t.Helper()
+	digest := sha256.Sum256(req.Command)
 	issuer := syntheticPool(t, ctx, "CONTROL", req.Tenant)
-	_, err = issuer.Exec(ctx, `INSERT INTO synthetic_oms_cancellation_authorizations
+	_, err := issuer.Exec(ctx, `INSERT INTO synthetic_oms_cancellation_authorizations
         (tenant_id,principal_id,portfolio_id,order_id,command_sha256,event_id,trace_context,effective_at,observed_at,expires_at,terminal_state_sha256,fact_payload_sha256)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),$9,$10,$11)`,
 		req.Tenant, req.Principal, req.Portfolio, env.PartitionKey, digest[:], req.EventID, env.TraceContext, env.EventTime.AsTime(), expires, stateHash, factHash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return req
 }
 
 func cancelReceipt(t *testing.T, ctx context.Context, req fundedCancellation, code string) syntheticvenue.Receipt {
