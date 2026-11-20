@@ -27,7 +27,7 @@ async function main() {
         await page.goto(base + '/portfolios/' + portfolio + '/exposure')
         const section = page.getByRole('region', { name: 'Daily return' })
         const check = async (edition, code) => {
-          await section.getByLabel('UTC close date').fill(expected.date)
+          await section.getByLabel('UTC close date').fill(edition.date || expected.date)
           await section.getByLabel('Reporting currency').fill('USD')
           await section.getByLabel('Knowledge time (UTC)').fill(edition.as_of)
           const pending = page.waitForResponse(response => new URL(response.url()).pathname === endpoint)
@@ -37,18 +37,31 @@ async function main() {
           return response.json()
         }
         if (role !== 'authorized') {
-          const body = await check(expected.editions[0], status)
-          assert(!JSON.stringify(body).includes(expected.editions[0].digest))
+          for (const edition of [expected.editions[0], expected.editions[3]]) {
+            const body = await check(edition, status)
+            assert(!JSON.stringify(body).includes(edition.digest))
+          }
           continue
         }
-        const [original, corrected, unknown] = expected.editions
-        async function measured(edition, value, text) {
+        const [original, corrected, unknown, splitOriginal, splitCorrected, splitUnknown] = expected.editions
+        async function measured(edition, value, text, flowCount = '0') {
           const body = await check(edition, 200)
           assert.equal(body.source_digest, edition.digest)
           assert.equal(body.measured.return_value, value)
-          assert.equal(body.external_flow_count, '0')
+          assert.equal(body.external_flow_count, flowCount)
           assert.equal(body.unassessed_reason, undefined)
           await section.getByText(text, { exact: true }).waitFor()
+          if (flowCount === '1') {
+            const flow = body.intraday_flow
+            assert.equal(flow.movement_id, edition.movement_id)
+            assert.equal(flow.command_digest, edition.command_digest)
+            assert.equal(flow.effective_time, '2020-02-04T12:00:00Z')
+            assert.equal(flow.pre_flow_nav_reference, 'nav-pre-flow')
+            assert.equal(flow.post_flow_nav_reference, 'nav-post-flow')
+            const { coefficient, exponent = 0 } = flow.signed_amount
+            assert.equal(Number(coefficient) * 10 ** exponent, 40)
+            await section.getByText('Two linked subperiods · 40 USD external flow at 2020-02-04T12:00:00Z').waitFor()
+          }
           return body
         }
         stage = 'authorized-open-payload'
@@ -61,10 +74,22 @@ async function main() {
         assert.equal(unassessed.external_flow_count, undefined)
         assert.equal(unassessed.unassessed_reason, 'flow_coverage_unknown')
         await section.getByText('Unassessed. External flow coverage is unavailable.', { exact: false }).waitFor()
+        stage = 'authorized-intraday-payload'
+        const splitBody = await measured(splitOriginal, 0.21, '21%', '1')
+        const splitUpdated = await measured(splitCorrected, -0.032, '-3.2%', '1')
+        assert.equal(splitUpdated.previous_source_digest, splitOriginal.digest)
+        const splitUnassessed = await check(splitUnknown, 200)
+        assert.equal(splitUnassessed.source_digest, splitUnknown.digest)
+        assert.equal(splitUnassessed.previous_source_digest, splitCorrected.digest)
+        assert.equal(splitUnassessed.measured, undefined)
+        assert.equal(splitUnassessed.unassessed_reason, 'nav_at_flow_missing')
+        await section.getByText('Unassessed. A valuation at the cash flow is unavailable.', { exact: false }).waitFor()
         stage = 'authorized-reload-details'
         await page.reload()
         assert.deepEqual(await measured(original, 0.02, '2%'), originalBody)
         await check({ as_of: '2020-02-04T06:00:00Z' }, 404)
+        assert.deepEqual(await measured(splitOriginal, 0.21, '21%', '1'), splitBody)
+        await check({ date: splitOriginal.date, as_of: '2020-02-05T06:00:00Z' }, 404)
       } finally {
         await context.close()
       }

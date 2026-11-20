@@ -22,6 +22,7 @@ syntax = "proto3";
 // (PERF-01b/f, the MODEL-01i no-future-leakage contract).
 package performance.v1;
 
+import "common/v1/decimal.proto";
 import "google/protobuf/timestamp.proto";
 
 // ReturnMethod is how a period return was computed.
@@ -188,4 +189,16 @@ message DailyReturnAssessment {
     ReturnPeriod measured = 13;
     string unassessed_reason = 14;
   }
+  IntradayReturnFlow intraday_flow = 15;
+}
+
+// IntradayReturnFlow identifies the verified same-time cash/NAV bridge used to
+// link the two subperiods. Money remains an exact Decimal.
+message IntradayReturnFlow {
+  string movement_id = 1;
+  string command_digest = 2;
+  google.protobuf.Timestamp effective_time = 3;
+  common.v1.Decimal signed_amount = 4;
+  string pre_flow_nav_reference = 5;
+  string post_flow_nav_reference = 6;
 }

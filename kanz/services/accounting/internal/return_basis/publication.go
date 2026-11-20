@@ -8,10 +8,12 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/outbox"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	performancepb "github.com/eighred/kanz/kanz-schemas-go/performance/v1"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal/cashmove"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -37,6 +39,20 @@ func assessment(r Receipt) *performancepb.DailyReturnAssessment {
 		out.FlowScope = e.Flows.Scope
 		out.FlowCompletionReference = e.Flows.Reference
 		out.ExternalFlowCount = e.Flows.EventCount
+		if split := e.Flows.Split; split != nil {
+			amount, _ := split.SignedAmount.Rat()
+			exact, _ := dec.ToProtoExact(amount)
+			out.IntradayFlow = &performancepb.IntradayReturnFlow{
+				MovementId: split.MovementID, CommandDigest: split.CommandDigest,
+				EffectiveTime: timestamppb.New(split.Effective), SignedAmount: exact,
+			}
+			if split.Before != nil {
+				out.IntradayFlow.PreFlowNavReference = split.Before.Reference
+			}
+			if split.After != nil {
+				out.IntradayFlow.PostFlowNavReference = split.After.Reference
+			}
+		}
 	}
 	fraction, reason := measure(e)
 	if reason != "" {
@@ -56,7 +72,7 @@ func measure(e Evidence) (float64, string) {
 		return 0, "nav_missing"
 	case e.Flows == nil || e.Flows.EventCount == nil:
 		return 0, "flow_coverage_unknown"
-	case *e.Flows.EventCount != 0:
+	case *e.Flows.EventCount != 0 && e.Flows.Split == nil:
 		return 0, "external_flows_present"
 	}
 	opening, err := e.Opening.Total.Rat()
@@ -67,11 +83,51 @@ func measure(e Evidence) (float64, string) {
 	if err != nil {
 		return 0, "nav_missing"
 	}
-	fraction, _ := new(big.Rat).Quo(new(big.Rat).Sub(closing, opening), opening).Float64()
+	var growth *big.Rat
+	if split := e.Flows.Split; split != nil {
+		if split.Before == nil || split.After == nil {
+			return 0, "nav_at_flow_missing"
+		}
+		before, beforeErr := split.Before.Total.Rat()
+		after, afterErr := split.After.Total.Rat()
+		if beforeErr != nil || afterErr != nil {
+			return 0, "nav_at_flow_missing"
+		}
+		if after.Sign() <= 0 {
+			return 0, "post_flow_nav_nonpositive"
+		}
+		// Link the two invested periods around the same-time cash movement.
+		// Convert only the completed statistical fraction to binary64.
+		growth = new(big.Rat).Mul(new(big.Rat).Quo(before, opening), new(big.Rat).Quo(closing, after))
+	} else {
+		growth = new(big.Rat).Quo(closing, opening)
+	}
+	fraction, _ := growth.Sub(growth, big.NewRat(1, 1)).Float64()
 	if math.IsNaN(fraction) || math.IsInf(fraction, 0) {
 		return 0, "return_out_of_range"
 	}
 	return fraction, ""
+}
+
+func verifyBookedFlow(ctx context.Context, tx pgx.Tx, e Evidence) error {
+	if e.Flows == nil || e.Flows.Split == nil {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext(app_current_tenant()),hashtext($1))`, e.Portfolio); err != nil {
+		return err
+	}
+	split := e.Flows.Split
+	end, _ := time.Parse(time.DateOnly, e.CloseDate)
+	amount, _ := split.SignedAmount.Rat()
+	matches, err := cashmove.RecordedExternalFlow(ctx, tx, e.Tenant, e.Portfolio, e.Currency, split.MovementID,
+		split.CommandDigest, end.AddDate(0, 0, -1), end, e.AsOf, split.Effective, amount)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		return ErrEvidence
+	}
+	return nil
 }
 
 func enqueue(ctx context.Context, tx pgx.Tx, receipt Receipt) error {
@@ -133,6 +189,9 @@ func (s *Store) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 			return ErrEvidence
 		}
 		return tx.Commit(ctx)
+	}
+	if err = verifyBookedFlow(ctx, tx, r.Evidence); err != nil {
+		return err
 	}
 	if !proto.Equal(&incoming, assessment(r)) {
 		return ErrEvidence

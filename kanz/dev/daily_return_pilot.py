@@ -84,7 +84,14 @@ def qualify(env):
             GRANT INSERT (portfolio_id,currency,close_date,as_of) ON return_basis_publications TO basis_source;
             GRANT SELECT,INSERT ON outbox TO basis_source;
             GRANT USAGE ON SEQUENCE outbox_id_seq TO basis_source;
-            GRANT SELECT,UPDATE ON outbox TO basis_runtime;
+            GRANT SELECT,INSERT,UPDATE ON outbox TO basis_runtime;
+            GRANT USAGE ON SEQUENCE outbox_id_seq TO basis_runtime;
+            GRANT SELECT (tenant_id,portfolio_id,entry_id,venue_account_id,entry_type,cash_currency,
+                cash,effective_time,knowledge_time,source_ref,created_at) ON ledger_entries TO basis_source;
+            GRANT SELECT (tenant_id,portfolio_id,movement_id,digest,payload) ON cash_commands TO basis_source;
+            GRANT SELECT,INSERT ON cash_commands TO basis_runtime;
+            GRANT INSERT ON ledger_entries,ledger_append_positions,ledger_heads TO basis_runtime;
+            GRANT UPDATE ON ledger_heads TO basis_runtime;
             GRANT UPDATE (observed_payload) ON return_basis_publications TO basis_runtime;
             GRANT SELECT ON ledger_entries,ledger_heads,ledger_snapshots,ledger_append_positions,
                 custody_runs,custody_breaks,custody_statements TO basis_runtime;
@@ -103,7 +110,7 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 3 FACTs" not in proof.stdout
+                or b"real JetStream replay and signed browser read passed with 6 FACTs" not in proof.stdout
                 or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
             location = re.search(rb"\b(?:main_test|operator_test)\.go:\d+: [^\n]{1,160}", proof.stdout)
             # Only print the source location. Runtime errors may carry a DSN.
@@ -133,7 +140,7 @@ def main():
         receipt = qualify(env)
     if args.receipt:
         args.receipt.write_bytes(receipt)
-    print("PASS: Signed daily return +2%, measured zero, incomplete coverage, scoped browser and retained replay.")
+    print("PASS: Signed zero-flow and intraday-linked returns, booked cash, scoped browser and retained replay.")
 
 
 if __name__ == "__main__":

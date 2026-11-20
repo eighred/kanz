@@ -17,6 +17,22 @@ fund flow inventory. A missing NAV or missing completion is an explicit JSON
 null. A signed zero event count records zero external flows. Offsetting
 contributions and withdrawals still have a nonzero count.
 
+An edition with exactly one off-venue subscription or redemption in the reporting
+currency may include a signed `split` after `event_count`. Its fields in order
+are `movement_id`, `command_digest`, `effective`, `signed_amount`, `before`
+and `after`. The cash instant must be strictly inside the day. Both NAV records
+refer to the same instant on either side of the booking. Their references must
+be distinct, and the exact NAV change must equal the signed cash amount.
+Explicit null in either NAV leaves the return unassessed. Multiple cash movements,
+or a positive count with no split, cannot produce a measured return.
+
+Accounting matches the accepted cash command to its immutable journal entry and
+counts cash entries across all currencies and accounts under the signed knowledge
+horizon. This includes the ledger's knowledge time and recorded booking timestamp.
+The source login needs read access to the referenced columns in `cash_commands`
+and `ledger_entries` under tenant RLS. It cannot write either table. The signed
+issuer supplies the retained NAV versions and attests the full flow inventory.
+
 Submit compact canonical JSON in the order shown by the Go Evidence type, with
 a separate raw 64-byte Ed25519 signature. The `as_of` timestamp uses RFC 3339
 UTC with at most microsecond precision. The first edition has
@@ -43,8 +59,9 @@ signed source before saving it. Replays preserve the exact first payload.
 
 Open **Daily return** on the portfolio's Exposure page. Enter the UTC close
 date, reporting currency and exact knowledge time. The panel distinguishes
-a measured zero from an unassessed period. Enter the earlier knowledge time
-to reopen the original published result after a correction.
+a measured zero from an unassessed period. For a measured split it shows the cash
+amount and effective time along with the linked result. Enter the earlier knowledge
+time to reopen the original published result after a correction.
 
 For the isolated acceptance, generate the Go schema SDK and install the
 locked Web dependencies and Chromium. From the repository root run
@@ -52,6 +69,16 @@ locked Web dependencies and Chromium. From the repository root run
 migrations to a disposable PostgreSQL container, builds the normal importer
 and Accounting service and exercises a real JetStream consumer and authenticated
 gateway/BFF in Chromium.
+
+The fixture books a USD 40 subscription and values the PostgreSQL book through
+Accounting using synthetic prices. With opening NAV 100, pre-flow NAV 110,
+post-flow NAV 150 and close NAV 165, the linked return is
+`(110/100) × (165/150) − 1 = 21%`. The close-to-close NAV change is 65%.
+A later close of 132 gives −3.2%, with the original 21% still available at its
+original horizon. The fixture also checks a missing pre-flow NAV, a cash amount
+that differs from the booking, an unreconciled NAV split, a horizon before
+booking, a second cash movement recorded in another currency, tenant and fund
+denial, and byte-identical JetStream redelivery.
 
 The first estate needs a governed issuer and complete source scope before
 enrolling real keys. The synthetic fixture owns its signing key for one run.

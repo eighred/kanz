@@ -54,6 +54,9 @@ func run(ctx context.Context, bodyPath, signaturePath string) (string, error) {
 	err = pool.QueryRow(ctx, `SELECT NOT rolsuper AND NOT rolbypassrls
 		AND NOT has_table_privilege(current_user,'return_basis_authorities','INSERT, UPDATE, DELETE, TRUNCATE')
 		AND NOT has_table_privilege(current_user,'ledger_entries','INSERT, UPDATE, DELETE, TRUNCATE')
+		AND NOT has_any_column_privilege(current_user,'ledger_entries','INSERT, UPDATE')
+		AND NOT has_table_privilege(current_user,'cash_commands','DELETE, TRUNCATE')
+		AND NOT has_any_column_privilege(current_user,'cash_commands','INSERT, UPDATE')
 		AND NOT has_column_privilege(current_user,'return_basis_publications','observed_payload','INSERT, UPDATE')
 		FROM pg_roles WHERE rolname=current_user`).Scan(&limited)
 	if err != nil || !limited {

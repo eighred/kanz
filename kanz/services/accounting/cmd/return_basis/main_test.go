@@ -156,7 +156,7 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		t.Fatal("foreign portfolio appeared")
 	}
 	if os.Getenv("RETURN_PILOT_VERIFY") == "1" {
-		proveDailyReturn(t, scope, read, []returnbasis.Evidence{original, correction, incomplete}, []string{oldDigest, newDigest, unknownDigest})
+		proveDailyReturn(t, scope, read, []returnbasis.Evidence{original, correction, incomplete}, []string{oldDigest, newDigest, unknownDigest}, func(e returnbasis.Evidence) (string, error) { return put(e, priv) })
 	}
 
 }

@@ -60,6 +60,30 @@ pub fn daily_return_without_external_flows(
     Ok(Some(relative))
 }
 
+/// Exact linked return for one verified external flow. The caller binds the
+/// reporting currency, NAV observations and booked cash to the same horizon.
+pub fn daily_return_with_one_external_flow(
+    opening: &Rat,
+    before: &Rat,
+    after: &Rat,
+    closing: &Rat,
+    signed_flow: &Rat,
+) -> Result<Option<Rat>, Error> {
+    for value in [opening, before, after, closing, signed_flow] {
+        bound(value)?;
+    }
+    if !opening.is_positive()
+        || !after.is_positive()
+        || signed_flow.is_zero()
+        || after - before != *signed_flow
+    {
+        return Ok(None);
+    }
+    let relative = (before / opening) * (closing / after) - Rat::one();
+    bound(&relative)?;
+    Ok(Some(relative))
+}
+
 struct Converter<'a> {
     reporting: &'a str,
     rates: &'a Quotes,

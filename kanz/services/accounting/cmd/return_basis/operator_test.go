@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -17,11 +18,17 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal"
+	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/consume"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/return_basis"
 )
 
-func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, editions []returnbasis.Evidence, digests []string) {
+func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
 	t.Helper()
 	runtimeDSN := os.Getenv("TEST_RETURN_BASIS_RUNTIME")
 	if runtimeDSN == "" || os.Getenv("RETURN_PILOT_ACCOUNTING_BIN") == "" || os.Getenv("RETURN_PILOT_GATEWAY_PROBE") == "" {
@@ -48,8 +55,12 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 		t.Fatal(err)
 	}
 	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ACCOUNTING_RETURN_FIXTURE",
-		Subjects: []string{"accounting.>", "order.>", "market.>", "settlement.>", "dlq.>"}})
+		Subjects: []string{returnbasis.Subject}})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ACCOUNTING_OTHER_FIXTURE",
+		Subjects: []string{consume.SubjectPortfolioCash, "accounting.cash.>", "accounting.custody.>", "accounting.collateral.>", "order.>", "market.>", "settlement.>", "dlq.>"}}); err != nil {
 		t.Fatal(err)
 	}
 	start := func(group string) (string, func()) {
@@ -103,6 +114,143 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 	_, stop := start("return-initial")
 	func() {
 		defer stop()
+		// Use the real reviewed Accounting command, outbox and journal consumer.
+		runtime, err := pg.NewTenantPool(ctx, runtimeDSN, first.Tenant)
+		if err != nil {
+			t.Fatal("cash command fixture could not connect")
+		}
+		defer runtime.Close()
+		movement := cashmove.CashMovement{MovementID: "intraday-subscription", PortfolioID: first.Portfolio, Kind: cashmove.Subscription,
+			Amount: big.NewRat(40, 1), Currency: first.Currency, Effective: time.Date(2020, 2, 4, 12, 0, 0, 0, time.UTC),
+			SourceRef: "synthetic-transfer-r1"}
+		journal := ledger.NewPostgres(runtime)
+		start := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
+		end := start.AddDate(0, 0, 1)
+		seedTime := start.AddDate(0, 0, -2)
+		for _, entry := range []*ledger.Event{
+			{EntryID: "fixture-opening-funding", PortfolioID: first.Portfolio, Type: ledger.EntryCash,
+				Cash: big.NewRat(100, 1), CashCurrency: first.Currency, Effective: seedTime, Knowledge: seedTime},
+			{EntryID: "fixture-opening-trade", PortfolioID: first.Portfolio, Type: ledger.EntryTrade, InstrumentID: "SYNTH",
+				Quantity: big.NewRat(10, 1), Price: big.NewRat(10, 1), Cash: big.NewRat(-100, 1),
+				CashCurrency: first.Currency, Effective: seedTime.Add(time.Hour), Knowledge: seedTime.Add(time.Hour)},
+		} {
+			if err := journal.Append(ctx, entry, nil); err != nil {
+				t.Fatal("seed opening book", err)
+			}
+		}
+		command := cashmove.Command{Tenant: first.Tenant, Actor: "synthetic-accountant", Reason: "midday contribution fixture", Movement: movement}
+		commandDigest, err := cashmove.ReviewDigest(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commands := cashmove.NewCommands(runtime)
+		if _, err := commands.Accept(ctx, command, commandDigest); err != nil {
+			t.Fatal("cash command acceptance failed", err)
+		}
+		wait("Accounting did not book the real cash movement", func(check context.Context) bool {
+			r, err := commands.Status(check, first.Tenant, first.Portfolio, movement.MovementID)
+			return err == nil && r.Status == "journal_recorded"
+		})
+		events, err := journal.Journal(ctx, first.Portfolio)
+		if err != nil {
+			t.Fatal("read booked valuation inputs", err)
+		}
+		captureNAV := func(ref, quote, want string, at, effectiveCut, known time.Time) *returnbasis.Close {
+			t.Helper()
+			book := ledger.ReplayAsOf(first.Portfolio, events, effectiveCut, known)
+			value, err := accounting.ComputeNAV(book, first.Currency, at, map[string]*big.Rat{"SYNTH": dec.Rat(quote)})
+			if err != nil || value.Total.Cmp(dec.Rat(want)) != 0 {
+				t.Fatal("book and price did not produce the expected signed NAV", ref, err)
+			}
+			return &returnbasis.Close{Reference: ref, Total: dec.Exact(value.Total.RatString())}
+		}
+		appendEdition := func(e returnbasis.Evidence) string {
+			t.Helper()
+			got, err := admit(e)
+			if err != nil {
+				t.Fatal("signed split edition refused", err)
+			}
+			editions = append(editions, e)
+			digests = append(digests, got)
+			wait("Accounting did not observe the split edition", func(check context.Context) bool {
+				_, err := store.ReadObserved(check, e.Portfolio, e.Currency, e.CloseDate, e.AsOf)
+				return err == nil
+			})
+			return got
+		}
+		count := uint64(1)
+		intraday := first
+		intraday.CloseDate = end.Format(time.DateOnly)
+		intraday.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		intraday.Opening = captureNAV("nav-intraday-open", "10", "100", start, start, intraday.AsOf)
+		intraday.Closing = captureNAV("nav-intraday-close", "12.5", "165", end, end, intraday.AsOf)
+		split := returnbasis.FlowSplit{MovementID: movement.MovementID, CommandDigest: commandDigest, Effective: movement.Effective,
+			SignedAmount: "40",
+			Before:       captureNAV("nav-pre-flow", "11", "110", movement.Effective, movement.Effective.Add(-time.Microsecond), intraday.AsOf),
+			After:        captureNAV("nav-post-flow", "11", "150", movement.Effective, movement.Effective, intraday.AsOf)}
+		intraday.Flows = &returnbasis.FlowCompletion{Scope: first.Flows.Scope, Reference: "fund-flows-split", EventCount: &count, Split: &split}
+		badSplit := split
+		badSplit.SignedAmount = "41"
+		badSplit.After = &returnbasis.Close{Reference: "wrong-post-flow-nav", Total: "151"}
+		wrong := intraday
+		badFlows := *wrong.Flows
+		badFlows.Split = &badSplit
+		wrong.Flows = &badFlows
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("signed NAV bridge with a different booked movement amount was accepted")
+		}
+		badSplit.SignedAmount = "40"
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("signed NAV bridge that did not reconcile to the cash amount was accepted")
+		}
+		wrong = intraday
+		wrong.AsOf = time.Date(2020, 2, 5, 1, 0, 0, 0, time.UTC)
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("knowledge cut before booking accepted a future cash movement")
+		}
+		splitDigest := appendEdition(intraday)
+		corrected := intraday
+		corrected.PreviousDigest = splitDigest
+		corrected.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		corrected.Closing = captureNAV("nav-intraday-restated", "9.2", "132", end, end, corrected.AsOf)
+		correctedDigest := appendEdition(corrected)
+		missing := corrected
+		missing.PreviousDigest = correctedDigest
+		missing.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		partial := split
+		partial.Before = nil
+		partialFlows := *missing.Flows
+		partialFlows.Split = &partial
+		missing.Flows = &partialFlows
+		lastDigest := appendEdition(missing)
+
+		// A second booking learned after these editions must count even when it
+		// is denominated in another currency. Earlier reports remain immutable.
+		additional := command
+		additional.Movement.MovementID = "intraday-late-subscription"
+		additional.Movement.Currency = "EUR"
+		additional.Movement.Effective = movement.Effective.Add(time.Hour)
+		additionalDigest, err := cashmove.ReviewDigest(additional)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = commands.Accept(ctx, additional, additionalDigest); err != nil {
+			t.Fatal("late cash command acceptance failed", err)
+		}
+		wait("Accounting did not book the second movement", func(check context.Context) bool {
+			r, err := commands.Status(check, first.Tenant, first.Portfolio, additional.Movement.MovementID)
+			return err == nil && r.Status == "journal_recorded"
+		})
+		wrong = corrected
+		wrong.PreviousDigest = lastDigest
+		wrong.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("single-flow edition accepted after a second cash movement in another currency")
+		}
+		if replay, err := admit(intraday); err != nil || replay != splitDigest {
+			t.Fatal("original signed intraday close changed after restatement", err)
+		}
+		t.Logf("booked external flow %s command=%s effective=%s", movement.MovementID, commandDigest, movement.Effective.Format(time.RFC3339Nano))
 		wait("Accounting did not observe each report", func(check context.Context) bool {
 			for _, version := range editions {
 				if _, err := store.ReadObserved(check, version.Portfolio, version.Currency, version.CloseDate, version.AsOf); err != nil {
@@ -161,7 +309,11 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 	assertRetained()
 	values := make([]map[string]string, len(editions))
 	for i, e := range editions {
-		values[i] = map[string]string{"as_of": e.AsOf.Format(time.RFC3339Nano), "digest": digests[i]}
+		values[i] = map[string]string{"as_of": e.AsOf.Format(time.RFC3339Nano), "digest": digests[i], "date": e.CloseDate}
+		if e.Flows != nil && e.Flows.Split != nil {
+			values[i]["movement_id"] = e.Flows.Split.MovementID
+			values[i]["command_digest"] = e.Flows.Split.CommandDigest
+		}
 	}
 	wire, err := json.Marshal(map[string]any{"date": first.CloseDate, "editions": values})
 	if err != nil {
@@ -186,6 +338,6 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 	t.Logf("real JetStream replay and signed browser read passed with %d FACTs", after.State.Msgs)
 	t.Log("observed PostgreSQL bytes matched each original FACT before and after replay")
 	for i, e := range editions {
-		t.Logf("edition horizon=%s source_sha256=%s", e.AsOf.Format(time.RFC3339Nano), digests[i])
+		t.Logf("edition close=%s horizon=%s source_sha256=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i])
 	}
 }

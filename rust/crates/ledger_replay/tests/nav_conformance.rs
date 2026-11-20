@@ -364,3 +364,24 @@ fn daily_return_refuses_invalid_rational_inputs() {
         Err(Error::Numeric(kanz_ledger_replay::Error::InvalidRational))
     );
 }
+
+#[test]
+fn daily_return_links_nav_at_one_external_flow() {
+    let linked = |closing, flow| {
+        valuation::daily_return_with_one_external_flow(
+            &n("100"),
+            &n("110"),
+            &n("150"),
+            &n(closing),
+            &n(flow),
+        )
+    };
+    for (closing, expected, close_only) in
+        [("165", "21/100", "65/100"), ("132", "-4/125", "32/100")]
+    {
+        assert_eq!(linked(closing, "40"), Ok(Some(n(expected))));
+        assert_eq!((n(closing) - n("100")) / n("100"), n(close_only));
+        assert_ne!(n(expected), n(close_only));
+    }
+    assert_eq!(linked("165", "41"), Ok(None));
+}

@@ -57,3 +57,20 @@ func TestDailyNoFlowReference(t *testing.T) {
 		t.Fatalf("compared %d measured cases", matched)
 	}
 }
+
+func TestDailyIntradayFlowReference(t *testing.T) {
+	for _, tc := range []struct {
+		close, linked, closeOnly float64
+	}{
+		{165, 21.0 / 100, 65.0 / 100},
+		{132, -4.0 / 125, 32.0 / 100},
+	} {
+		before := SubPeriod{BeginValue: 100, EndValue: 110}
+		after := SubPeriod{BeginValue: 110, Flow: 40, EndValue: tc.close}
+		twr := TimeWeightedReturn([]SubPeriod{before, after})
+		change := (tc.close - before.BeginValue) / before.BeginValue
+		if !(math.Abs(twr-tc.linked) <= 1e-12 && math.Abs(change-tc.closeOnly) <= 1e-12) {
+			t.Fatalf("closing NAV %.0f: linked return %g, close change %g", tc.close, twr, change)
+		}
+	}
+}
