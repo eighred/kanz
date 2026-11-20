@@ -43,7 +43,8 @@ WORKDIR /src/rust
 ENV CARGO_BUILD_JOBS=3
 
 FROM rust-tools AS rust-sources
-COPY rust/temporal_sources/ ./temporal_sources/
+COPY rust/temporal_sources/manifest.json rust/temporal_sources/prepare.py ./temporal_sources/
+COPY rust/temporal_sources/patches/ ./temporal_sources/patches/
 COPY tools/jiff_qualification/chrono_advisories.py /opt/kanz/chrono_advisories.py
 RUN python3 -B temporal_sources/prepare.py
 RUN mkdir /kanz-source-evidence && python3 -B /opt/kanz/chrono_advisories.py --output /kanz-source-evidence/chrono-advisories.json
@@ -64,7 +65,7 @@ COPY schemas/proto/ /src/schemas/proto/
 RUN python3 -B temporal_sources/prepare.py --check
 ENV CARGO_TARGET_DIR=/src/rust/target-provenance
 ARG VERSION
-RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl && python3 -B temporal_sources/produce.py "$VERSION"
+RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl && python3 -B temporal_sources/produce.py "$VERSION"
 
 FROM scratch AS rust-source-evidence
 COPY --from=rust-build /kanz-source-evidence/ /
