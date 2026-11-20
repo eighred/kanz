@@ -64,7 +64,7 @@ function parseBreak(value: unknown): CustodyBreak {
 export interface CustodyRerunRequest { portfolio_id: string; custodian_id: string; business_date: string; request_id: string }
 export interface CustodyRerunReceipt extends CustodyRerunRequest {
   actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'no_statement' | 'failed'
-  statement_id?: string; scope_mode?: string; journal_position?: string
+  statement_id?: string; scope_mode?: string; journal_position?: string; failure_code?: string
 }
 
 export const custody = {
@@ -94,6 +94,7 @@ export const custody = {
         receipt.custodian_id !== request.custodian_id || receipt.business_date !== request.business_date || receipt.actor !== actor ||
         !nonempty(receipt.run_id) || !Number.isFinite(Date.parse(receipt.completed_at)) ||
         !['clean', 'breaks', 'no_statement', 'failed'].includes(receipt.outcome) ||
+        (receipt.failure_code !== undefined && (receipt.outcome !== 'failed' || !['historical_lifecycle', 'comparison_failed'].includes(receipt.failure_code))) ||
         (['clean', 'breaks'].includes(receipt.outcome) && !nonempty(receipt.statement_id)) ||
         (receipt.outcome === 'no_statement' && receipt.statement_id !== undefined) ||
         (receipt.scope_mode !== undefined && !nonempty(receipt.scope_mode)) ||

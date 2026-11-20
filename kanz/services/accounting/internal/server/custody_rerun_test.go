@@ -24,10 +24,14 @@ func TestCustodyRerunAuthorityAndReceipt(t *testing.T) {
 	const body = `{"request_id":"b41e53d7-b3b2-4ee4-9b8e-45b8cab29289","business_date":"2020-02-04","custodian_id":"CUST-A"}`
 	calls := 0
 	var fail error
+	var historical bool
 	compare := func(ctx context.Context, s custody.Subject, id, actor string) (custody.Run, error) {
 		calls++
 		if bus.TenantIDFromContext(ctx) != "fixture" || s != subject || id != requestID || actor != "operator" {
 			t.Fatal("wrong authenticated comparison binding")
+		}
+		if historical {
+			return custody.Run{RequestID: id, Actor: actor, RunID: "failed-run", Subject: s, Outcome: custody.OutcomeFailed, CompletedAt: time.Now().UTC()}, custody.ErrHistoricalLifecycle
 		}
 		if fail != nil {
 			return custody.Run{}, fail
@@ -81,4 +85,10 @@ func TestCustodyRerunAuthorityAndReceipt(t *testing.T) {
 			t.Fatalf("unexpected refusal: %s", got.Body.String())
 		}
 	}
+	historical = true
+	got = post(srv, "fixture", "rerunner", "PF1", body)
+	if got.Code != 200 || json.Unmarshal(got.Body.Bytes(), &receipt) != nil || receipt.RunID != "failed-run" || receipt.Outcome != "failed" || receipt.FailureCode != "historical_lifecycle" {
+		t.Fatal("committed historical failure receipt lost")
+	}
+
 }

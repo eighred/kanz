@@ -21,6 +21,7 @@ func WithCustodyReruns(role string, compare ManualCustodyRerun) Option {
 }
 
 type rerunReceipt struct {
+	FailureCode     string    `json:"failure_code,omitempty"`
 	RequestID       string    `json:"request_id"`
 	Actor           string    `json:"actor"`
 	RunID           string    `json:"run_id"`
@@ -67,7 +68,15 @@ func (s *Server) handleCustodyRerun(w http.ResponseWriter, r *http.Request) {
 	}
 	subject := custody.Subject{PortfolioID: portfolio, CustodianID: request.CustodianID, BusinessDate: day}
 	run, err := s.rerun(bus.WithTenantID(r.Context(), principal.Tenant), subject, request.RequestID, principal.Subject)
-	if err != nil {
+	// A terminal failure with a committed receipt is an observed outcome.
+	// Pending publication or an uncommitted comparison remains retryable.
+	failureCode := ""
+	if err != nil && run.RunID != "" && run.Outcome == custody.OutcomeFailed && !errors.Is(err, custody.ErrPublicationPending) {
+		failureCode = "comparison_failed"
+		if errors.Is(err, custody.ErrHistoricalLifecycle) {
+			failureCode = "historical_lifecycle"
+		}
+	} else if err != nil {
 		switch {
 		case errors.Is(err, custody.ErrInvalidManualRequest):
 			writeJSON(w, 400, map[string]string{"error": "invalid custody request identity or scope"})
@@ -86,7 +95,7 @@ func (s *Server) handleCustodyRerun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "committed comparison receipt unavailable"})
 		return
 	}
-	response := rerunReceipt{RequestID: run.RequestID, Actor: run.Actor, RunID: run.RunID, PortfolioID: run.Subject.PortfolioID, CustodianID: run.Subject.CustodianID, BusinessDate: day.Format(time.DateOnly), Outcome: run.Outcome.String(), StatementID: run.StatementID, CompletedAt: run.CompletedAt.UTC()}
+	response := rerunReceipt{FailureCode: failureCode, RequestID: run.RequestID, Actor: run.Actor, RunID: run.RunID, PortfolioID: run.Subject.PortfolioID, CustodianID: run.Subject.CustodianID, BusinessDate: day.Format(time.DateOnly), Outcome: run.Outcome.String(), StatementID: run.StatementID, CompletedAt: run.CompletedAt.UTC()}
 	if run.Basis != nil {
 		response.ScopeMode = run.Basis.Mode
 		response.JournalPosition = strconv.FormatInt(run.Basis.JournalPosition, 10)
