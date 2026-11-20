@@ -1,0 +1,134 @@
+package arch
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// The synthetic owner is an opt-in workspace executable. Its only transport
+// is a local PostgreSQL session; every economic fold remains inside OMS.
+const syntheticOMSPath = "services/synthetic_oms"
+const syntheticOMSCargo = `[package]
+name = "kanz-synthetic-oms"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-oms-store = { path = "../../crates/oms_store", features = ["synthetic-command"] }
+base64 = "=0.22.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["rt", "time", "net"] }
+tokio-postgres = "=0.7.18"`
+
+func checkSyntheticOMS(root string) error {
+	dir := filepath.Join(root, filepath.FromSlash(syntheticOMSPath))
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("synthetic OMS contains symlink")
+		}
+		rel, e := filepath.Rel(dir, path)
+		if e != nil {
+			return e
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if rel != "." && rel != "src" {
+				return fmt.Errorf("unexpected synthetic OMS directory %s", rel)
+			}
+			return nil
+		}
+		switch rel {
+		case "Cargo.toml", "src/main.rs", "schema.sql":
+		default:
+			return fmt.Errorf("unexpected synthetic OMS input %s", rel)
+		}
+		data, e := os.ReadFile(path)
+		if e != nil {
+			return e
+		}
+		files[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(files) != 3 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
+		return fmt.Errorf("synthetic OMS workspace recipe changed")
+	}
+	source, err := rustMigrationWithoutComments(files["src/main.rs"])
+	if err != nil {
+		return err
+	}
+	src := rustMigrationCompact(source)
+	for _, marker := range []string{`#![forbid(unsafe_code)]`, `#[serde(deny_unknown_fields)]`, `config.get_dbname()!=Some("kanz_synthetic_oms")`, `config.get_hosts().len()!=1`, `!config.get_hostaddrs().is_empty()`, `Host::Tcp(host)ifhost=="127.0.0.1"||host=="::1"`, `owner::submit(`, `owner::observe(`, `owner::get(`} {
+		if !strings.Contains(src, marker) {
+			return fmt.Errorf("synthetic OMS local ingress changed %s", marker)
+		}
+	}
+	for _, token := range []string{"TcpListener", "TcpStream", "tokio::net", "std::net", "include!", "include_str!", "#[path=", "std::process", "tonic::", "reqwest::", "async_nats", "https://"} {
+		if strings.Contains(src, token) {
+			return fmt.Errorf("synthetic OMS external ingress/egress %s", token)
+		}
+	}
+	sql := rustMigrationCompact(files["schema.sql"])
+	for _, marker := range []string{`current_database()<>'kanz_synthetic_oms'`, `ALTERTABLE%IFORCEROWLEVELSECURITY`, `GRANTINSERTONsynthetic_oms_evidenceTOkanz_synthetic_oms_control`, `UNIQUE(tenant_id,idempotency_key)`, `PRIMARYKEY(tenant_id,order_id,event_id)`, `effective_secondsbigintNOTNULL`, `recorded_attimestamptzNOTNULLDEFAULTtransaction_timestamp()`} {
+		if !strings.Contains(sql, marker) {
+			return fmt.Errorf("synthetic OMS evidence/persistence changed %s", marker)
+		}
+	}
+	return nil
+}
+
+func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "rust")
+	for _, tc := range []struct{ file, old, new string }{
+		{"src/main.rs", `host == "127.0.0.1"`, `host != "127.0.0.1"`},
+		{"schema.sql", "FORCE ROW LEVEL SECURITY", "NO FORCE ROW LEVEL SECURITY"},
+		{"Cargo.toml", `["synthetic-command"]`, `["qualification-diagnostics"]`},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			dst := t.TempDir()
+			dir := filepath.Join(dst, syntheticOMSPath)
+			if err := os.MkdirAll(filepath.Join(dir, "src"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql"} {
+				raw, err := os.ReadFile(filepath.Join(root, syntheticOMSPath, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := checkSyntheticOMS(dst); err != nil {
+				t.Fatal(err)
+			}
+			name := filepath.Join(dir, tc.file)
+			raw, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), tc.old) {
+				t.Fatal("mutation input missing")
+			}
+			if err = os.WriteFile(name, []byte(strings.Replace(string(raw), tc.old, tc.new, 1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err = checkSyntheticOMS(dst); err == nil {
+				t.Fatal("unsafe mutation accepted")
+			}
+		})
+	}
+}
