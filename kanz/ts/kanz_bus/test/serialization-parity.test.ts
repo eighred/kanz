@@ -21,12 +21,10 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-// EventClass lives in its OWN generated module, not envelope_pb: it is declared in
-// envelope/v1/event_class.proto, and protobuf-es emits one module per .proto file.
-// Importing it from envelope_pb threw at load time ("does not provide an export named
-// 'EventClass'") — which every other file in this package already got right.
-import { EventClass } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
-import { QualityFlag } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+// Go records the protobuf enum value names. The descriptors preserve those names
+// even when Protobuf-ES removes a shared prefix from TypeScript enum members.
+import { EventClassSchema } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
+import { QualityFlagSchema } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
 
 import { unframe, validate } from "../src/index.js";
 
@@ -98,8 +96,9 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 const manifest = loadManifest();
+const skipMissingFixtures = manifest.length === 0 && process.env.KANZ_REQUIRE_SERIALIZATION_FIXTURES !== "1";
 
-test("fixtures directory present", { skip: manifest.length === 0 ? "fixtures absent — run: go run ./test/contract/serialization/cmd/genfixtures -out ./test/contract/serialization/fixtures" : false }, () => {
+test("fixtures directory present", { skip: skipMissingFixtures ? "fixtures absent — run: go run ./test/contract/serialization/cmd/genfixtures -out ./test/contract/serialization/fixtures" : false }, () => {
   assert.ok(manifest.length > 0, "manifest must list at least one fixture");
 });
 
@@ -121,10 +120,7 @@ for (const entry of manifest) {
     assert.equal(envelope.eventType, want.event_type);
     assert.equal(envelope.schemaVersion, want.schema_version);
     assert.equal(envelope.envelopeVersion, want.envelope_version);
-    assert.equal(
-      envelope.eventClass,
-      EventClass[want.event_class as keyof typeof EventClass],
-    );
+    assert.equal(EventClassSchema.value[envelope.eventClass]?.name, want.event_class);
     assert.equal(envelope.domain, want.domain);
     assertTs(envelope.eventTime, want.event_time);
     assertTs(envelope.ingestionTime, want.ingestion_time);
@@ -141,7 +137,7 @@ for (const entry of manifest) {
     assert.equal(envelope.idempotencyKey, want.idempotency_key);
     assert.equal(envelope.payloadSchemaRef, want.payload_schema_ref);
 
-    const gotFlags = envelope.qualityFlags.map((f) => QualityFlag[f]);
+    const gotFlags = envelope.qualityFlags.map((f) => QualityFlagSchema.value[f]?.name);
     assert.deepEqual(gotFlags, want.quality_flags);
   });
 }

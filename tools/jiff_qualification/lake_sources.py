@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tomllib
 
 
@@ -85,30 +86,58 @@ def prepare_datafusion(row, pins):
                 return Err(err("failed to parse timezone"));
             }
             let tz = timezone_name.parse::<Tz>().map_err(|_| err("failed to parse timezone"))?;""")
+    if name in {"datafusion-datasource", "datafusion-common"}:
+        dependency = {"version": "=1.0.1", "default-features": False}
+        expected["dependencies"]["jiff"] = dependency
+        with manifest.open("a") as out:
+            out.write('\n[dependencies.jiff]\nversion = "=1.0.1"\ndefault-features = false\n')
+    if name == "datafusion":
+        replace(folder / "src/test/object_store.rs", "metadata.modified().map(chrono::DateTime::from).unwrap()",
+                'metadata.modified().unwrap().try_into().expect("fixture mtime fits Jiff")')
+    if name == "datafusion-datasource":
+        module = folder / "src/mod.rs"
+        replace(module, "use chrono::TimeZone;\n", "")
+        for constructor in ("Path::from(path.into())", "Path::from(path)"):
+            replace(module, f"location: {constructor},\n                last_modified: chrono::Utc.timestamp_nanos(0)",
+                    f"location: {constructor},\n                last_modified: jiff::Timestamp::UNIX_EPOCH")
+        replace(module, "last_modified: chrono::Utc::now()", "last_modified: jiff::Timestamp::now()")
+    if name == "datafusion-common":
+        heap = folder / "src/heap_size.rs"
+        replace(heap, "impl DFHeapSize for DateTime<Utc> {", """impl DFHeapSize for jiff::Timestamp {
+    fn heap_size(&self, _: &mut DFHeapSizeCtx) -> usize {
+        0 // The timestamp stores the signed instant inline.
+    }
+}
+
+impl DFHeapSize for DateTime<Utc> {""")
     if tomllib.loads(manifest.read_text()) != expected:
         raise ValueError(f"unrelated TOML change in {name}")
     return folder
 
 
-def prepare():
+def prepare(mode):
     pins = {(p["name"], p["version"]): p["checksum"] for p in packages(WORK / "kanz.lock") if "checksum" in p}
     patches = {}
     for row in packages(OWNER / "Cargo.lock"):
         name, version = row["name"], row["version"]
         if (name, version) == ("arrow-array", "59.3.2"):
-            archive(row, pins)  # The writer must stay on the registry release.
+            archive(row, pins)  # Both modes start from the pinned writer release.
         elif name in {"arrow", "arrow-array"} and version == "58.4.1":
             patches[name] = prepare_arrow(row, pins)
         elif (name == "datafusion" or name.startswith("datafusion-")) and version == "54.1.0":
             folder = prepare_datafusion(row, pins)
             if folder:
                 patches[name] = folder
+    if mode == "published":
+        import published_bridge
+        published_bridge.prepare(WORK, OWNER, patches, pins, unpack)
     with (OWNER / "Cargo.toml").open("a") as out:
         for name, folder in sorted(patches.items()):
-            out.write(f'{name} = {{ path = "{folder}" }}\n')
+            package = tomllib.loads((folder / "Cargo.toml").read_text())["package"]["name"]
+            out.write(f'{name} = {{ package = "{package}", path = "{folder}" }}\n')
 
 
-def verify(lines):
+def verify(lines, mode):
     artifacts = [r for line in lines if line.startswith("{") and (r := json.loads(line))["reason"] == "compiler-artifact"]
     lock = packages(OWNER / "Cargo.lock")
     names = {p["name"] for p in lock}
@@ -116,19 +145,26 @@ def verify(lines):
     if names & {"humantime", "chrono-tz"} or targets & {"humantime", "chrono_tz"}:
         raise ValueError("the selected worker still depends on humantime or chrono-tz")
     registry = "registry+https://github.com/rust-lang/crates.io-index#"
-    for name, ids in {
-        "arrow_array": {"path+file:///work/arrow-array-58.4.1#arrow-array@58.4.1", registry + "arrow-array@59.3.2"},
+    writer = registry + "arrow-array@59.3.2"
+    if mode == "published":
+        import published_bridge
+        published_bridge.verify(lock, artifacts)
+        writer = "path+file:///work/arrow-array-59.3.2#arrow-array@59.3.2"
+    expected = {
+        "arrow_array": {"path+file:///work/arrow-array-58.4.1#arrow-array@58.4.1", writer},
         "datafusion": {"path+file:///work/datafusion-54.1.0#datafusion@54.1.0"},
         "datafusion_functions": {"path+file:///work/datafusion-functions-54.1.0#datafusion-functions@54.1.0"},
         "object_store": {"path+file:///work/source#object_store@0.13.2"},
         "jiff": {registry + "jiff@1.0.1"}, "jiff_tzdb": {registry + "jiff-tzdb@1.0.0"},
-        "chrono": {registry + "chrono@0.4.45"},
-    }.items():
+    }
+    if mode == "upstream":
+        expected["chrono"] = {registry + "chrono@0.4.45"}
+    for name, ids in expected.items():
         selected = {r["package_id"] for r in artifacts if r["target"]["name"] == name}
         if selected != ids:
             raise ValueError(f"unexpected {name} compiler sources: {selected}")
-    print(f"Verified combined worker sources in {len(artifacts)} compiler artifacts; chrono 0.4.45 remains.")
+    print(f"Verified combined worker sources in {len(artifacts)} compiler artifacts ({mode}).")
 
 
 if __name__ == "__main__":
-    prepare()
+    prepare(sys.argv[1])

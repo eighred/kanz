@@ -3,6 +3,8 @@ set -eu
 umask 077
 export HOME=/work/home CARGO_HOME=/work/cargo CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 CARGO_PROFILE_TEST_DEBUG=0
 owner=/work/kanz/rust
+mode=$2
+case "$mode" in upstream|published) ;; *) exit 2 ;; esac
 case "$1" in
 fetch)
     mkdir -p "$HOME" "$CARGO_HOME" /work/source "$owner"
@@ -19,7 +21,7 @@ EOF
     # Seed the consumer from its real lock. Cargo records the new source in this disposable copy.
     cp "$owner/Cargo.lock" /work/kanz.lock
     cargo fetch --manifest-path "$owner/Cargo.toml"
-    python3 -B /inputs/lake_sources.py
+    python3 -B /inputs/lake_sources.py "$mode"
     cargo fetch --manifest-path "$owner/Cargo.toml"
     cargo fetch --manifest-path /work/source/Cargo.toml
     ;;
@@ -28,12 +30,25 @@ test)
     sha256sum /work/source/Cargo.lock "$owner/Cargo.lock"
     cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features http --lib config::tests:: \
         > /work/duration.txt
+    cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features "aws,azure,gcp,http" --lib \
+        > /work/store.txt
+    cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features "aws,azure,gcp,http" --lib \
+        local::tests::bubble_up_io_errors -- --ignored --exact > /work/permission.txt
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test worker \
         --message-format=json-render-diagnostics > /work/worker.jsonl
     cp /inputs/named_zone.rs "$owner/services/lake_snapshot/tests/named_zone.rs"
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test named_zone \
         > /work/named_zone.txt
-    PYTHONPATH=/inputs python3 -B - <<'PY'
+    cp /inputs/object_metadata.rs "$owner/services/lake_snapshot/tests/object_metadata.rs"
+    cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test object_metadata \
+        > /work/metadata.txt
+    if test "$mode" = published; then
+        cp /inputs/shared_arrow.rs "$owner/services/lake_snapshot/tests/shared_arrow.rs"
+        cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test shared_arrow \
+            > /work/shared-arrow.txt
+    fi
+    PYTHONPATH=/inputs python3 -B - "$mode" <<'PY'
+import sys
 from lake_sources import verify
 from pathlib import Path
 
@@ -43,6 +58,30 @@ def check_summary(lines):
 
 duration = Path("/work/duration.txt").read_text().splitlines()
 check_summary(duration)
+store = Path("/work/store.txt").read_text().splitlines()
+expected_store = {
+    "local::checked_modified_tests::file_mtime_preserves_nanoseconds_or_returns_an_error",
+    "aws::credential::tests::test_sign_with_signed_payload",
+    "azure::client::tests::test_delegated_key_response",
+    "azure::credential::az_cli_date_format::tests::local_expiry_requires_one_known_instant",
+    "gcp::credential::tests::test_canonicalize_headers",
+}
+for case in expected_store:
+    if f"test {case} ... ok" not in store:
+        raise ValueError(f"missing object_store test: {case}")
+permission = Path("/work/permission.txt").read_text().splitlines()
+check_summary(permission)
+if "test local::tests::bubble_up_io_errors ... ok" not in permission:
+    raise ValueError("the non-root directory permission case did not run")
+print(next(line for line in store if line.startswith("test result: ok.")))
+for line in store:
+    if line.startswith("test ") and " ... ignored" in line:
+        print(line)
+print("The non-root permission test also passed when selected explicitly.")
+metadata = Path("/work/metadata.txt").read_text().splitlines()
+check_summary(metadata)
+if "test partitioned_file_metadata_uses_signed_instants ... ok" not in metadata:
+    raise ValueError("the DataFusion metadata case did not run")
 expected_duration = {"test_parse_duration", "test_parse_duration_formats", "test_fmt_duration_roundtrip"}
 passed_duration = {line.split("::")[-1].split()[0] for line in duration if line.startswith("test config::tests::") and line.endswith(" ... ok")}
 if not expected_duration.issubset(passed_duration):
@@ -50,7 +89,13 @@ if not expected_duration.issubset(passed_duration):
 
 lines = Path("/work/worker.jsonl").read_text().splitlines()
 check_summary(lines)
-verify(lines)
+mode = sys.argv[1]
+verify(lines, mode)
+if mode == "published":
+    bridge = Path("/work/shared-arrow.txt").read_text().splitlines()
+    check_summary(bridge)
+    if "test both_arrow_versions_share_the_published_temporal_type ... ok" not in bridge:
+        raise ValueError("the cross-version published type test did not run")
 zone = Path("/work/named_zone.txt").read_text().splitlines()
 check_summary(zone)
 if "test named_zone_timestamps ... ok" not in zone:

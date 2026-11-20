@@ -146,6 +146,8 @@ def assess_session(session, validation, graph=None, current_main=None, snapshot=
     }
     if outcome == "issue_closure":
         closed = sorted(tracker_completed.intersection(verified_targets))
+        result["tracker_closed_as_completed"] = sorted(tracker_completed)
+        result["tracker_closed_pending_main_acceptance"] = sorted(tracker_completed - accepted)
         result["initial_closed_as_completed"] = closed
         result["closures_remaining"] = count - len(closed)
         result["complete"] = result["complete"] and len(closed) == count
