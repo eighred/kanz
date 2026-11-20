@@ -135,8 +135,7 @@ impl Lineage {
         &self,
         scope: &Scope<'_>,
         id: &str,
-        event: &str,
-        name: &str,
+        (event, name): (&str, &str),
         at: &Timestamp,
         cause: &str,
         payload: Vec<u8>,
@@ -320,8 +319,7 @@ pub async fn submit(client: &mut Client, s: &Scope<'_>, key: &str, wire: &[u8]) 
     let record = lineage.fact(
         s,
         id,
-        "accepted",
-        "OrderAccepted",
+        ("accepted", "OrderAccepted"),
         &now,
         &lineage.event_id,
         OrderAccepted {
@@ -361,6 +359,13 @@ pub struct Observation<'a> {
     pub body: &'a [u8],
 }
 impl Observation<'_> {
+    fn effective_time(&self) -> Timestamp {
+        Timestamp {
+            seconds: self.seconds,
+            nanos: self.nanos,
+        }
+    }
+
     fn digest(&self) -> Vec<u8> {
         let mut hash = Sha256::new();
         for p in [
@@ -401,9 +406,9 @@ async fn fill(
     st: &Canonical<OrderState>,
     phase: &str,
     event: &Observation<'_>,
-    at: Timestamp,
     now: Timestamp,
 ) -> Result<Reduction> {
+    let at = event.effective_time();
     let fill = Canonical::<Fill>::decode(event.body).map_err(|_| Refusal::Invalid)?;
     let f = fill.value();
     let order = st.value();
@@ -462,8 +467,7 @@ async fn fill(
         lineage.fact(
             s,
             id,
-            "filled",
-            "OrderFilled",
+            ("filled", "OrderFilled"),
             &at,
             event.id,
             OrderFilled {
@@ -477,8 +481,7 @@ async fn fill(
         lineage.fact(
             s,
             id,
-            "partially_filled",
-            "OrderPartiallyFilled",
+            ("partially_filled", "OrderPartiallyFilled"),
             &at,
             event.id,
             OrderPartiallyFilled {
@@ -534,10 +537,7 @@ pub async fn observe(
         });
     }
     let now = observed_now(&tx).await?;
-    let at = Timestamp {
-        seconds: event.seconds,
-        nanos: event.nanos,
-    };
+    let at = event.effective_time();
     if recovery::time(&at)? > recovery::time(&now)? {
         return Err(Refusal::Invalid);
     }
@@ -585,8 +585,7 @@ pub async fn observe(
             let record = lineage.fact(
                 s,
                 id,
-                "routed",
-                "OrderRouted",
+                ("routed", "OrderRouted"),
                 &at,
                 event.id,
                 OrderRouted {
@@ -629,7 +628,7 @@ pub async fn observe(
             }
             result
         }
-        "fill" => fill(&lineage, &tx, s, &st, &phase, event, at, now).await?,
+        "fill" => fill(&lineage, &tx, s, &st, &phase, event, now).await?,
         "cancelled"
             if matches!(
                 phase.as_str(),
@@ -655,8 +654,7 @@ pub async fn observe(
                 let record = lineage.fact(
                     s,
                     id,
-                    "cancelled",
-                    "OrderCancelled",
+                    ("cancelled", "OrderCancelled"),
                     &at,
                     event.id,
                     OrderCancelled {
