@@ -79,6 +79,18 @@ PY
   go run -mod=readonly ./test/contract/serialization/cmd/genfixtures -out "$fixtures"
   if "$published"; then
     go build -mod=readonly -o "$scratch/bin/" ./services/accounting/cmd/accounting ./services/api_gateway/cmd/api_gateway ./services/web_bff/cmd/web_bff
+    python3 - "$assets/sdk-manifest.json" "$scratch/bin" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+
+sdk = json.loads(Path(sys.argv[1]).read_bytes())["go_module"]
+for app in ("accounting", "api_gateway"):
+    info = json.loads(subprocess.check_output(["go", "version", "-m", "-json", Path(sys.argv[2]) / app]))
+    deps = [dep for dep in info["Deps"] if dep["Path"] == sdk["Path"]]
+    if len(deps) != 1 or deps[0].get("Replace") or (deps[0]["Version"], deps[0]["Sum"]) != (sdk["Version"], sdk["Sum"]):
+        raise SystemExit(f"{app} did not link the published SDK")
+    print(f"{app} linked {sdk['Path']} {sdk['Version']} {sdk['Sum']}")
+PY
     go test -mod=readonly -p 1 -count=1 ./services/accounting/internal/server -run '^TestBreakQueue(IsServedWithAges|RefusesAnotherTenant)$' -v
   fi
   go mod verify
