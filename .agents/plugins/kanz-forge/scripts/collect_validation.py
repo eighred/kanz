@@ -73,12 +73,17 @@ def reconcile_inventory(issues, prs, total):
             raise ValueError("ordinary issue conflicts with pull-request identity")
         else:
             ordinary[number] = issue
-    for pr in prs.values():
+    for number, pr in prs.items():
         for revision in ("head", "base"):
             ref = pr.get(revision)
             sha = ref.get("sha") if isinstance(ref, dict) else None
             if not isinstance(sha, str) or not SHA.fullmatch(sha):
                 raise ValueError("invalid pull-request revision")
+        base_ref = pr["base"].get("ref")
+        if not isinstance(base_ref, str) or not base_ref.strip() or not isinstance(pr.get("draft"), bool):
+            raise ValueError("missing or invalid pull-request target or draft status")
+        prs[number] = {"number": number, "head": pr["head"]["sha"], "base": pr["base"]["sha"],
+                       "base_ref": base_ref, "draft": pr["draft"], "url": pr["html_url"]}
     # /issues may contain PR records or ordinary issues only. Count repository
     # identities across both endpoints, without hiding duplicate or missing rows.
     if len(issues.keys() | prs.keys()) != total:
@@ -112,7 +117,7 @@ def collect(repo, api=github, contract=None):
     ordinary, pr_index = reconcile_inventory(issues, prs, metadata["open_issues_count"])
     observations = {}
     failures = []
-    for key, sha in [("main", main)] + [("pr:" + str(pr["number"]), pr["head"]["sha"]) for pr in prs]:
+    for key, sha in [("main", main)] + [("pr:" + str(pr["number"]), pr["head"]) for pr in pr_index.values()]:
         try:
             checks = collection(api, base + "/commits/" + sha + "/check-runs?filter=latest&per_page=100", "check_runs")
             rows = check_rows(checks, sha)
@@ -132,15 +137,13 @@ def collect(repo, api=github, contract=None):
         raise ValueError("default branch changed during collection")
     if latest_ordinary.keys() != ordinary.keys():
         raise ValueError("issue inventory changed during collection")
-    if ({number: (pr["head"]["sha"], pr["base"]["sha"]) for number, pr in latest_pr_index.items()}
-            != {number: (pr["head"]["sha"], pr["base"]["sha"]) for number, pr in pr_index.items()}):
-        raise ValueError("PR inventory or revisions changed during collection")
+    if latest_pr_index != pr_index:
+        raise ValueError("PR inventory, revisions, target or draft status changed during collection")
     result = {"repository": repo, "main": main,
               "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "issues": [{"number": i["number"], "title": i["title"], "url": i["html_url"],
                           "labels": [label["name"] for label in i["labels"]]} for i in ordinary.values()],
-              "prs": [{"number": p["number"], "head": p["head"]["sha"], "base": p["base"]["sha"],
-                       "draft": p["draft"], "url": p["html_url"]} for p in prs],
+              "default_branch": metadata["default_branch"], "prs": list(pr_index.values()),
               "observations": observations, "unresolved_checks": failures,
               "limitation": "check observations do not establish applicability, root cause, review or merge authority"}
     if contract:
@@ -162,6 +165,16 @@ def collect(repo, api=github, contract=None):
                 if node.get("revision") != observed["sha"]:
                     raise ValueError("dependency contract revision is stale; review it again")
                 node.setdefault("validation", {}).update(sha=observed["sha"], observed=observed["observed"])
+            if node.get("kind") == "pr":
+                pr = pr_index[int(subject[3:])]
+                node["live_pr_holds"] = []
+                if pr["draft"]:
+                    node["live_pr_holds"].append({"reason": "pull request is a draft", "evidence": pr["url"]})
+                if pr["base_ref"] != metadata["default_branch"] or pr["base"] != main:
+                    node["live_pr_holds"].append({
+                        "reason": f"pull request target {pr['base_ref']} at {pr['base']} differs from "
+                                  f"{metadata['default_branch']} at {main}",
+                        "evidence": pr["url"]})
         result["validation_graph"] = graph
         result["assessment"] = assess_graph(graph)
     return result

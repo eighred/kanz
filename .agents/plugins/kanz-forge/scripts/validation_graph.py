@@ -94,7 +94,7 @@ def customer_workflow_report(workflow, nodes, results, edges):
                     and results[edge["to"]]["state"] != "DELIVERABLE"]
     blockers = {key: {"state": results[key]["state"], "reasons": results[key]["reasons"],
                       "holds": [{"reason": item["reason"], "evidence": item["evidence"]}
-                                for item in nodes[key].get("holds", [])]}
+                                for item in nodes[key].get("holds", []) + nodes[key].get("live_pr_holds", [])]}
                 for key in sorted(roots)}
     return {**report, "validated_steps": validated, "remaining_steps": remaining,
             "unmet_dependencies": dependencies, "blockers": blockers}
@@ -161,6 +161,8 @@ def assess_graph(graph):
     if len(order) != len(nodes):
         raise ValueError("cyclic validation dependency; readiness cannot be established")
     results = {}
+    failures = {}
+    delivery_only_roots = set()
     for key in order:
         node = nodes[key]
         state, reasons, rows = validation(node)
@@ -215,15 +217,8 @@ def assess_graph(graph):
             state = "BLOCKED"
             reasons.append("task scope/dependency review is missing")
             causes.add(key)
-        results[key] = {"state": state, "reasons": reasons, "checks": rows,
-                        "execution_ready": execution_ready,
-                        "root_blockers": sorted(causes), "requires": sorted(required[key])}
-    failures = {}
-    for key, row in results.items():
-        if row["state"] not in {"VALIDATION_FAILED", "BLOCKED"}:
-            continue
-        cause = nodes[key].get("failure")
-        if cause:
+        cause = node.get("failure")
+        if cause and state in {"VALIDATION_FAILED", "BLOCKED"} and causes - delivery_only_roots:
             if (not proof(cause.get("id")) or not proof(cause.get("evidence"))
                     or cause.get("kind") not in {"code", "infrastructure", "security", "dependency", "permissions", "external", "unknown"}):
                 raise ValueError("root failure needs classification and reviewed evidence")
@@ -232,6 +227,23 @@ def assess_graph(graph):
                 raise ValueError("one root cause cannot have conflicting classifications")
             group["nodes"].append(key)
             group["evidence"].append(cause["evidence"])
+        # Draft and target are delivery facts. They cannot turn a green check
+        # into a failed validation or revive an old failure classification.
+        live_holds = node.get("live_pr_holds", [])
+        if live_holds:
+            if node["kind"] != "pr" or any(not proof(item.get("reason")) or not proof(item.get("evidence"))
+                                           for item in live_holds):
+                raise ValueError("a live PR hold needs a PR, reason and evidence")
+            if not causes - delivery_only_roots:
+                delivery_only_roots.add(key)
+            if state != "VALIDATION_FAILED":
+                state = "BLOCKED"
+            reasons.extend(item["reason"] for item in live_holds)
+            causes.add(key)
+            execution_ready = False
+        results[key] = {"state": state, "reasons": reasons, "checks": rows,
+                        "execution_ready": execution_ready,
+                        "root_blockers": sorted(causes), "requires": sorted(required[key])}
     candidates = []
     execution_only = []
     for key, node in nodes.items():
