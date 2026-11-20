@@ -80,7 +80,7 @@ func (p *Postgres) HistoricalReceipt(ctx context.Context, subject Subject, accou
 	if err != nil {
 		return DatedResult{}, err
 	}
-	if !bytes.Equal(digest, binding) || (basis.Transactions != nil && !basis.Transactions.matches(source, run.Outcome, basis.JournalPosition)) || !receiptFiguresMatch(run, source) {
+	if !bytes.Equal(digest, binding) || (basis.Transactions != nil && !basis.Transactions.matches(source, run.Outcome, basis.JournalPosition)) || !receiptFiguresMatch(run, source) || !quantityEvidenceMatches(run, source, basis.Transactions) {
 		return unknown, nil
 	}
 	run.Basis = basis

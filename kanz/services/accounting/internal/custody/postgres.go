@@ -521,14 +521,15 @@ func ratsToJSON(in map[string]*big.Rat) ([]byte, error) {
 // against. Dates are RFC3339 for the same reason a text decimal is text — a
 // stable, exact, human-readable round trip.
 type storedTransaction struct {
-	ExternalRef    string `json:"external_ref"`
-	TradeDate      string `json:"trade_date,omitempty"`
-	SettlementDate string `json:"settlement_date,omitempty"`
-	InstrumentID   string `json:"instrument_id,omitempty"`
-	Quantity       string `json:"quantity,omitempty"`
-	Price          string `json:"price,omitempty"`
-	Cash           string `json:"cash,omitempty"`
-	CurrencyCode   string `json:"currency_code,omitempty"`
+	ExternalRef               string `json:"external_ref"`
+	TradeDate                 string `json:"trade_date,omitempty"`
+	SettlementDate            string `json:"settlement_date,omitempty"`
+	InstrumentID              string `json:"instrument_id,omitempty"`
+	QuantityInInstrumentUnits bool   `json:"quantity_in_instrument_units,omitempty"`
+	Quantity                  string `json:"quantity,omitempty"`
+	Price                     string `json:"price,omitempty"`
+	Cash                      string `json:"cash,omitempty"`
+	CurrencyCode              string `json:"currency_code,omitempty"`
 }
 
 func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
@@ -543,14 +544,15 @@ func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
 			return nil, fmt.Errorf("transaction with no external_ref")
 		}
 		out = append(out, storedTransaction{
-			ExternalRef:    tx.ExternalRef,
-			TradeDate:      formatTime(tx.TradeDate),
-			SettlementDate: formatTime(tx.SettlementDate),
-			InstrumentID:   tx.InstrumentID,
-			Quantity:       ratText(tx.Quantity),
-			Price:          ratText(tx.Price),
-			Cash:           ratText(tx.Cash),
-			CurrencyCode:   tx.CurrencyCode,
+			ExternalRef:               tx.ExternalRef,
+			TradeDate:                 formatTime(tx.TradeDate),
+			SettlementDate:            formatTime(tx.SettlementDate),
+			InstrumentID:              tx.InstrumentID,
+			QuantityInInstrumentUnits: tx.QuantityInInstrumentUnits,
+			Quantity:                  ratText(tx.Quantity),
+			Price:                     ratText(tx.Price),
+			Cash:                      ratText(tx.Cash),
+			CurrencyCode:              tx.CurrencyCode,
 		})
 	}
 	return json.Marshal(out)
@@ -570,9 +572,10 @@ func jsonToTransactions(raw []byte) ([]recon.Transaction, error) {
 	out := make([]recon.Transaction, 0, len(stored))
 	for _, st := range stored {
 		tx := recon.Transaction{
-			ExternalRef:  st.ExternalRef,
-			InstrumentID: st.InstrumentID,
-			CurrencyCode: st.CurrencyCode,
+			ExternalRef:               st.ExternalRef,
+			QuantityInInstrumentUnits: st.QuantityInInstrumentUnits,
+			InstrumentID:              st.InstrumentID,
+			CurrencyCode:              st.CurrencyCode,
 		}
 		var err error
 		// A FIGURE THAT WILL NOT PARSE REFUSES THE WHOLE STATEMENT rather than

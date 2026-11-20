@@ -571,11 +571,10 @@ enum StatementGrain {
 //
 // # It is matched on external_ref, and it does not re-price
 //
-// The transaction pass answers IDENTITY -- did both sides see this execution --
-// and leaves quantity and price agreement to the netted pass, which already
-// covers it at the grain an operator books against. The figures below are carried
-// so a break names an amount somebody can act on, not so a second tolerance
-// regime can be invented beside the first.
+// The transaction pass establishes whether both sides saw the execution. A
+// signed line may separately attest its instrument quantity unit for exact
+// matched-reference quantity diagnostics. Price and cash are not assessed
+// per execution by either comparison.
 message StatementTransaction {
   // external_ref is the custodian's identity for the execution, in the SAME
   // reference space the book stamps on the journal entry (ledger.Event.SourceRef,
@@ -616,6 +615,9 @@ message StatementTransaction {
   // between.
   common.v1.Decimal cash = 7;
   string currency_code = 8;
+  // The source attests that quantity is expressed in the canonical instrument's
+  // natural units as booked by the ledger. False or absent offers no unit proof.
+  bool quantity_in_instrument_units = 9;
 }
 
 // ReconciliationOutcome is what a run concluded.
@@ -827,6 +829,27 @@ message ReconciliationRun {
   // fields are absent on scheduled runs and records predating manual reruns.
   string request_id = 11;
   string actor = 12;
+
+  // Optional diagnostic on the immutable completion. The existing outcome and
+  // mutable break queue retain their balances and reference-membership meaning.
+  // Absent on historical completions and sources without unit attestations.
+  ExecutionQuantityComparison execution_quantities = 13;
+}
+
+message ExecutionQuantityComparison {
+  // Counts only independently matched references on this business date.
+  uint32 compared = 1;
+  uint32 unassessed = 2;
+  repeated ExecutionQuantityDifference differences = 3;
+}
+
+message ExecutionQuantityDifference {
+  string external_ref = 1;
+  // Each exact value below is in this canonical instrument's natural units.
+  string instrument_id = 2;
+  common.v1.Decimal ibor = 3;
+  common.v1.Decimal custodian = 4;
+  common.v1.Decimal difference = 5;
 }
 
 // CustodyActionState is the lifecycle evidence at one revision. A revision

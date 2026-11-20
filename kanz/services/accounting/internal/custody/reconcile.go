@@ -329,16 +329,27 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 		return r.recordFailure(ctx, run, fmt.Errorf("materialize book: %w", err))
 	}
 
-	detected, leg, err := recon.Reconcile(book, executions, recon.Statement{
+	comparison := recon.Statement{
 		PortfolioID:  subject.PortfolioID,
 		Positions:    stmt.Positions,
 		Cash:         stmt.Cash,
 		BusinessDate: subject.BusinessDate,
 		Transactions: stmt.Transactions,
 		Grain:        stmt.Grain,
-	}, r.tolerance)
+	}
+	detected, leg, err := recon.Reconcile(book, executions, comparison, r.tolerance)
 	if err != nil {
 		return r.recordFailure(ctx, run, fmt.Errorf("compare executions: %w", err))
+	}
+	if isBatchStatement(stmt.StatementID) && basis != nil && basis.Mode == BasisDeclared {
+		observed, err := recon.AssessExecutionQuantities(executions, comparison)
+		if err != nil {
+			return r.recordFailure(ctx, run, err)
+		}
+		run.ExecutionQuantities, err = quantityEvidence(observed)
+		if err != nil {
+			return r.recordFailure(ctx, run, err)
+		}
 	}
 	r.stateLeg(subject, stmt, leg, len(executions))
 	if basis != nil {
@@ -412,6 +423,7 @@ func (r *Reconciler) stateLeg(subject Subject, stmt Statement, leg recon.LegStat
 // The estate must be able to tell "the book would not materialize for three days"
 // from "nothing was scheduled".
 func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (Run, error) {
+	run.ExecutionQuantities = nil
 	run.compared, run.Breaks, run.Outcome, run.FailureReason = nil, nil, OutcomeFailed, reason.Error()
 	if run.RequestID == "" {
 		run.StatementID, run.Basis = "", nil
@@ -481,17 +493,18 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 		return nil, fmt.Errorf("custody: run %s: tolerance is not representable as a Decimal", run.RunID)
 	}
 	out := &accountingpb.ReconciliationRun{
-		RunId:         run.RunID,
-		RequestId:     run.RequestID,
-		Actor:         run.Actor,
-		PortfolioId:   run.Subject.PortfolioID,
-		CustodianId:   run.Subject.CustodianID,
-		BusinessDate:  timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
-		Outcome:       wireOutcome(run.Outcome),
-		StatementId:   run.StatementID,
-		Tolerance:     tolerance,
-		CompletedAt:   timestamppb.New(run.CompletedAt),
-		FailureReason: run.FailureReason,
+		ExecutionQuantities: run.ExecutionQuantities,
+		RunId:               run.RunID,
+		RequestId:           run.RequestID,
+		Actor:               run.Actor,
+		PortfolioId:         run.Subject.PortfolioID,
+		CustodianId:         run.Subject.CustodianID,
+		BusinessDate:        timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
+		Outcome:             wireOutcome(run.Outcome),
+		StatementId:         run.StatementID,
+		Tolerance:           tolerance,
+		CompletedAt:         timestamppb.New(run.CompletedAt),
+		FailureReason:       run.FailureReason,
 	}
 	for _, b := range run.Breaks {
 		kind, ok := wireKind(b.Kind)
