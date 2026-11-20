@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
@@ -31,6 +30,11 @@ func confirmManualIntake(ctx context.Context, tx pgx.Tx, run Run) error {
 	if !locked {
 		return ErrRunBusy
 	}
+	if verifying(run) {
+		if err := confirmManualStatement(ctx, tx, run); err != nil {
+			return err
+		}
+	}
 	var newest string
 	err := tx.QueryRow(ctx, `SELECT statement_id FROM custody_batch_receipts
         WHERE tenant_id=app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3
@@ -41,7 +45,7 @@ func confirmManualIntake(ctx context.Context, tx pgx.Tx, run Run) error {
 	if err != nil {
 		return err
 	}
-	if run.observedMissing || isBatchStatement(run.StatementID) && run.StatementID != newest {
+	if run.observedMissing || run.StatementID != newest {
 		return ErrStatementChanged
 	}
 	return nil
@@ -75,7 +79,7 @@ func confirmManualStatement(ctx context.Context, tx pgx.Tx, run Run) error {
 		return err
 	}
 	digest := sha256.Sum256(raw)
-	expectedID := fmt.Sprintf("%s%s.r%d.%s", batchStatementPrefix, source, revision, hex.EncodeToString(digest[:]))
+	expectedID := batchStatementID(source, revision, hex.EncodeToString(digest[:]))
 	if s.StatementID != expectedID || len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, raw, signature) {
 		return errBatchReceipt
 	}
