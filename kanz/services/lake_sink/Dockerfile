@@ -60,10 +60,13 @@ FROM rust-sources AS rust-build
 COPY --from=rust-planner /recipe.json /recipe.json
 RUN cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot
 COPY --from=rust-sources /src/rust/temporal_sources/generated/ /src/rust/temporal_sources/generated/
-COPY rust/ ./
+COPY --exclude=services/lake_snapshot/src/main.rs rust/ ./
 COPY schemas/proto/ /src/schemas/proto/
 RUN python3 -B temporal_sources/prepare.py --check
 ENV CARGO_TARGET_DIR=/src/rust/target-provenance
+RUN cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --lib --message-format=json-render-diagnostics > /kanz-source-evidence/library-compiler.jsonl
+RUN python3 -B temporal_sources/produce.py --seal-libraries
+COPY rust/services/lake_snapshot/src/main.rs services/lake_snapshot/src/main.rs
 ARG VERSION
 RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl
 ARG SOURCE_REVISION=$VERSION
