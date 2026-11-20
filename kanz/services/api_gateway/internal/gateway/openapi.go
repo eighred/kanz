@@ -5,14 +5,13 @@ import (
 )
 
 // OpenAPIHandler serves the gateway's OpenAPI 3.0 description at /openapi.json
-// (API-01c "OpenAPI emit"). The doc is a static, hand-maintained contract for
-// risk read endpoints. Payload schemas come from the same protobuf descriptors
-// used by the REST transcoder; adding a field cannot leave an opaque DTO behind.
+// for risk queries and tenant-scoped broker accounts. Response schemas come
+// from the descriptors or registered DTOs used by their owning encoders.
 func OpenAPIHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(riskOpenAPIDoc)
+		_, _ = w.Write(gatewayOpenAPIDoc)
 	}
 }
 

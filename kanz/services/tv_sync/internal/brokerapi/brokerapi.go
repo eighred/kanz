@@ -39,11 +39,9 @@ func New(proj *projection.Projection) *Handler { return &Handler{proj: proj} }
 // Routes registers the Broker-API endpoints on a mux.
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /broker/config", h.config)
-	mux.HandleFunc("GET /broker/accounts", h.accounts)
-	mux.HandleFunc("GET /broker/accounts/{id}/state", h.state)
-	mux.HandleFunc("GET /broker/accounts/{id}/positions", h.positions)
-	mux.HandleFunc("GET /broker/accounts/{id}/orders", h.orders)
-	mux.HandleFunc("GET /broker/accounts/{id}/executions", h.executions)
+	for _, route := range AccountReads() {
+		mux.HandleFunc("GET "+route.Path, func(w http.ResponseWriter, r *http.Request) { route.serve(h, w, r) })
+	}
 	mux.HandleFunc("GET /broker/accounts/{id}/stream", h.stream)
 }
 
@@ -66,7 +64,7 @@ func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": h.proj.Accounts(tenant)})
+	writeJSON(w, http.StatusOK, AccountsResponse{Accounts: h.proj.Accounts(tenant)})
 }
 
 func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +95,7 @@ func (h *Handler) positions(w http.ResponseWriter, r *http.Request) {
 	// on its way out, so these numbers are identical with retention on and off
 	// (#809). The two list endpoints below are windows and say so; conflating the
 	// two would teach a reader to distrust a figure that is exact.
-	writeJSON(w, http.StatusOK, map[string]any{"positions": pos})
+	writeJSON(w, http.StatusOK, PositionsResponse{Positions: pos})
 }
 
 func (h *Handler) orders(w http.ResponseWriter, r *http.Request) {
@@ -106,12 +104,12 @@ func (h *Handler) orders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := r.PathValue("id")
-	ords, err := h.proj.Orders(tenant, accountID, asOf)
+	ords, from, err := h.proj.OrderWindow(tenant, accountID, asOf)
 	if err != nil {
 		writeReadErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, h.windowed(tenant, accountID, "orders", ords))
+	writeJSON(w, http.StatusOK, OrdersResponse{Orders: ords, RetainedFrom: retentionTimestamp(from)})
 }
 
 func (h *Handler) executions(w http.ResponseWriter, r *http.Request) {
@@ -120,39 +118,21 @@ func (h *Handler) executions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := r.PathValue("id")
-	execs, err := h.proj.Executions(tenant, accountID, r.URL.Query().Get("instrument"), asOf)
+	execs, from, err := h.proj.ExecutionWindow(tenant, accountID, r.URL.Query().Get(instrumentQuery), asOf)
 	if err != nil {
 		writeReadErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, h.windowed(tenant, accountID, "executions", execs))
+	writeJSON(w, http.StatusOK, ExecutionsResponse{Executions: execs, RetainedFrom: retentionTimestamp(from)})
 }
 
-// windowed wraps a list read with the instant the resident history begins at.
-//
-// A SHORT LIST READ AS A COMPLETE ONE IS A WRONG ANSWER, not a truncated one.
-// Retention drops terminal orders and executions older than the window from
-// memory (#809), so without this field a client counting rows would report "this
-// fund placed four orders" for a fund that placed four thousand. The key is
-// omitted entirely while nothing has been dropped, so a deployment whose history
-// is shorter than its retention window sends exactly the bytes it sent before.
-//
-// The facts themselves are NOT gone — tv_facts keeps every one of them, and a pod
-// restarted with a longer window rebuilds the longer list. This says what THIS
-// PROCESS can currently serve, which is the only thing an HTTP response can
-// honestly claim.
-// THE HORIZON IS READ AFTER THE LIST, and the order is the safe one rather than
-// the tidy one. A retention pass between the two calls can only move the horizon
-// FORWARD, so reading it second can declare a window slightly narrower than the
-// rows returned — the client under-trusts a complete list. Reading it first would
-// declare a window wider than the data and let a client read a truncated list as
-// covering everything back to the horizon, which is the direction that lies.
-func (h *Handler) windowed(tenant, accountID, key string, list any) map[string]any {
-	out := map[string]any{key: list}
-	if from, ok := h.proj.RetainedFrom(tenant, accountID); ok && !from.IsZero() {
-		out["retainedFrom"] = from.UTC().Format(time.RFC3339Nano)
+// A zero cutoff means the projection has retained its complete history. Preserve
+// the original wire shape until the first eviction.
+func retentionTimestamp(from time.Time) string {
+	if from.IsZero() {
+		return ""
 	}
-	return out
+	return from.UTC().Format(time.RFC3339Nano)
 }
 
 // stream is the Server-Sent-Events channel: the Trading Terminal subscribes and
@@ -309,8 +289,14 @@ func tenantAndAsOf(w http.ResponseWriter, r *http.Request) (string, time.Time, b
 		return "", time.Time{}, false
 	}
 	var asOf time.Time
-	if v := r.URL.Query().Get("as_of"); v != "" {
+	if v := r.URL.Query().Get(asOfQuery); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
+		// The projection uses zero time to select the current fold. An explicit
+		// historical query must never receive the current balance by accident.
+		if err == nil && t.IsZero() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of: zero time is reserved for the current projection"})
+			return "", time.Time{}, false
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of: want RFC3339"})
 			return "", time.Time{}, false

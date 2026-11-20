@@ -1,4 +1,4 @@
-// Code generated from tv_sync projection DTOs by go generate. DO NOT EDIT.
+// Code generated from tv_sync account reads by go generate. DO NOT EDIT.
 
 export const brokerAccount = {
   "id": 'text',
@@ -51,4 +51,12 @@ export const brokerExecution = {
   "price": 'decimal',
   "fee": 'decimal?',
   "time": 'timestamp',
+} as const
+
+export const brokerReads = {
+  accounts: { path: "/broker/accounts", fields: brokerAccount, list: "accounts" },
+  state: { path: "/broker/accounts/{id}/state", fields: brokerState, query: ["as_of"] },
+  positions: { path: "/broker/accounts/{id}/positions", fields: brokerPosition, query: ["as_of"], list: "positions" },
+  orders: { path: "/broker/accounts/{id}/orders", fields: brokerOrder, query: ["as_of"], list: "orders", horizon: "retainedFrom" },
+  executions: { path: "/broker/accounts/{id}/executions", fields: brokerExecution, query: ["as_of","instrument"], list: "executions", horizon: "retainedFrom" },
 } as const

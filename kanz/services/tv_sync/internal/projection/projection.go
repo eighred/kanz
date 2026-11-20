@@ -463,11 +463,17 @@ func (p *Projection) State(tenant, accountID string, asOf time.Time) (*StateDTO,
 // — a short list read as a complete one is a wrong answer about how a fund
 // traded, not a truncated one.
 func (p *Projection) Orders(tenant, accountID string, asOf time.Time) ([]OrderDTO, error) {
+	rows, _, err := p.OrderWindow(tenant, accountID, asOf)
+	return rows, err
+}
+
+// OrderWindow reads the rows and retention cutoff under one projection read lock.
+func (p *Projection) OrderWindow(tenant, accountID string, asOf time.Time) ([]OrderDTO, time.Time, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	a, err := p.readableAcct(tenant, accountID, asOf)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	var out []OrderDTO
 	for _, revs := range a.orders {
@@ -476,17 +482,23 @@ func (p *Projection) Orders(tenant, accountID string, asOf time.Time) ([]OrderDT
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].OrderID < out[j].OrderID })
-	return out, nil
+	return out, a.retainedFrom, nil
 }
 
 // Executions returns the execution log as known at asOf, optionally filtered to
 // one instrument. Windowed by retention on the same terms as Orders.
 func (p *Projection) Executions(tenant, accountID, instrument string, asOf time.Time) ([]ExecutionDTO, error) {
+	rows, _, err := p.ExecutionWindow(tenant, accountID, instrument, asOf)
+	return rows, err
+}
+
+// ExecutionWindow reads the rows and retention cutoff under one projection read lock.
+func (p *Projection) ExecutionWindow(tenant, accountID, instrument string, asOf time.Time) ([]ExecutionDTO, time.Time, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	a, err := p.readableAcct(tenant, accountID, asOf)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	var out []ExecutionDTO
 	for _, e := range visibleExecs(a.execs, asOf) {
@@ -495,7 +507,7 @@ func (p *Projection) Executions(tenant, accountID, instrument string, asOf time.
 		}
 		out = append(out, executionDTO(e))
 	}
-	return out, nil
+	return out, a.retainedFrom, nil
 }
 
 func (p *Projection) readAcct(tenant, accountID string) *account {

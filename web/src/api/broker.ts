@@ -1,5 +1,5 @@
 import { api, ApiError } from './client'
-import { brokerAccount, brokerExecution, brokerOrder, brokerPosition, brokerState } from './broker_contract'
+import { brokerAccount, brokerExecution, brokerOrder, brokerPosition, brokerState, brokerReads } from './broker_contract'
 import { isTimestamp } from './timestamp'
 
 type OptionalField = 'text?' | 'decimal?' | 'timestamp?'
@@ -62,29 +62,46 @@ function readRow<S extends Fields>(value: unknown, fields: S): BrokerRow<S> {
   return result as BrokerRow<S>
 }
 
-function window<T>(value: unknown, key: string, parse: (row: unknown) => T): { rows: T[]; retainedFrom?: string } {
-  const body = object(value, key)
-  return { rows: list(body[key], parse), retainedFrom: time(body.retainedFrom) }
+type DetailRoute = (typeof brokerReads)[Exclude<keyof typeof brokerReads, 'accounts'>]
+type AccountQuery = Partial<Record<DetailRoute['query'][number], string>>
+
+function accountPath(route: DetailRoute, id: string, query: AccountQuery): string {
+  const path = '/api/v1' + route.path.replace('{id}', () => encodeURIComponent(id))
+  const params = new URLSearchParams()
+  for (const key of route.query) {
+    const value = query[key]
+    if (value !== undefined) params.set(key, value)
+  }
+  return params.size ? path + '?' + params.toString() : path
+}
+
+function readList<S extends Fields>(body: Record<string, unknown>, route: { list: string; fields: S }): BrokerRow<S>[] {
+  return list(body[route.list], row => readRow(row, route.fields))
+}
+
+function window<S extends Fields>(value: unknown, route: { list: string; fields: S; horizon: string }) {
+  const body = object(value, route.list)
+  return { rows: readList(body, route), retainedFrom: time(body[route.horizon]) }
 }
 
 export const broker = {
   async accounts(): Promise<BrokerAccount[]> {
-    const body = object(await api.get<unknown>('/api/v1/broker/accounts'), 'broker accounts')
-    return list(body.accounts, row => readRow(row, brokerAccount))
+    const route = brokerReads.accounts
+    return readList(object(await api.get<unknown>('/api/v1' + route.path), route.list), route)
   },
-  async account(id: string, signal?: AbortSignal): Promise<BrokerAccountDetail> {
-    const base = `/api/v1/broker/accounts/${encodeURIComponent(id)}`
+  async account(id: string, signal?: AbortSignal, query: AccountQuery = {}): Promise<BrokerAccountDetail> {
+    if (query.as_of !== undefined && !isTimestamp(query.as_of)) throw new Error('Invalid broker knowledge time.')
+    const read = (route: DetailRoute) => api.get<unknown>(accountPath(route, id, query), { signal })
     const [state, positionsBody, ordersBody, executionsBody] = await Promise.all([
-      api.get<unknown>(`${base}/state`, { signal }), api.get<unknown>(`${base}/positions`, { signal }),
-      api.get<unknown>(`${base}/orders`, { signal }), api.get<unknown>(`${base}/executions`, { signal }),
+      read(brokerReads.state), read(brokerReads.positions), read(brokerReads.orders), read(brokerReads.executions),
     ])
-    const positions = object(positionsBody, 'positions')
-    const orders = window(ordersBody, 'orders', row => readRow(row, brokerOrder))
-    const executions = window(executionsBody, 'executions', row => readRow(row, brokerExecution))
-    const parsedState = readRow(state, brokerState)
+    const positions = readList(object(positionsBody, brokerReads.positions.list), brokerReads.positions)
+    const orders = window(ordersBody, brokerReads.orders)
+    const executions = window(executionsBody, brokerReads.executions)
+    const parsedState = readRow(state, brokerReads.state.fields)
     if (parsedState.id !== id) throw new Error('Broker account identity differs.')
     return {
-      state: parsedState, positions: list(positions.positions, row => readRow(row, brokerPosition)),
+      state: parsedState, positions,
       orders: orders.rows, executions: executions.rows,
       ordersRetainedFrom: orders.retainedFrom, executionsRetainedFrom: executions.retainedFrom,
     }

@@ -24,6 +24,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -373,5 +375,76 @@ func TestAZeroWindowKeepsEverything(t *testing.T) {
 	if from, _ := p.RetainedFrom(tenant, acct); !from.IsZero() {
 		t.Fatalf("RetainedFrom = %s on a projection that has forgotten nothing; a non-zero horizon "+
 			"makes the Broker API declare a window that does not exist", from)
+	}
+}
+
+// An hourly terminal fill creates one order row and one execution row. Evicting
+// through hour i removes precisely i+1 rows from each list. A list and a cutoff
+// read on opposite sides of a retention pass cannot both satisfy this identity.
+func TestHistoryRowsAndCutoffShareTheSameSnapshot(t *testing.T) {
+	const total = 96
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	clock := &fakeClock{t: start}
+	p := New(clock.now, nil, WithRetention(time.Hour))
+	foldHistory(t, p, clock, "acme", "fund", total)
+	check := func() {
+		t.Helper()
+		orders, orderFrom, err := p.OrderWindow("acme", "fund", time.Time{})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		execs, execFrom, err := p.ExecutionWindow("acme", "fund", "BTC", time.Time{})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, obs := range []struct {
+			kind  string
+			count int
+			from  time.Time
+		}{
+			{"orders", len(orders), orderFrom}, {"executions", len(execs), execFrom},
+		} {
+			want := total
+			if !obs.from.IsZero() {
+				want -= int(obs.from.Sub(start)/time.Hour) + 1
+			}
+			if obs.count != want {
+				t.Errorf("%s cutoff %s covers %d terminal fills; returned %d", obs.kind, obs.from, want, obs.count)
+			}
+		}
+	}
+	check()
+	var started, readers sync.WaitGroup
+	done := make(chan struct{})
+	for range 4 {
+		started.Add(1)
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			check()
+			started.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					check()
+				}
+			}
+		}()
+	}
+	started.Wait()
+	for i := 1; i <= total; i++ {
+		p.Evict(start.Add(time.Duration(i) * time.Hour))
+		runtime.Gosched()
+	}
+	close(done)
+	readers.Wait()
+	check()
+	orders, from, err := p.OrderWindow("acme", "fund", time.Time{})
+	if err != nil || len(orders) != 0 || !from.Equal(start.Add((total-1)*time.Hour)) {
+		t.Fatalf("final window: %d orders, cutoff %s, error %v", len(orders), from, err)
 	}
 }
