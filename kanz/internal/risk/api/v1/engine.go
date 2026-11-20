@@ -513,8 +513,7 @@ type CurrencyExclusion struct {
 	// InstrumentID is the excluded holding.
 	InstrumentID InstrumentID
 	// Currency is the currency its MarketValue was denominated in, or
-	// "" when the position had no MarketValue to read (unmarked — the
-	// engine cannot express its exposure until a mark arrives).
+	// "" when the mark or its denomination was absent.
 	Currency string
 }
 

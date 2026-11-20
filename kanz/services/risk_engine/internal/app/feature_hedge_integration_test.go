@@ -82,14 +82,18 @@ func TestRecomputedHedgeFeatureOnJetStream(t *testing.T) {
 		}
 	}))
 	defer worker.Close()
-	// A final measured zero acts as an ordered marker after the missing mark.
-	for i, mark := range []*commonpb.Decimal{{Coefficient: 2, Exponent: -2}, nil, {}} {
+	// A final measured zero marks the end of the two unpublished snapshots.
+	cent := &commonpb.Decimal{Coefficient: 2, Exponent: -2}
+	for i, input := range []struct {
+		currency string
+		mark     *commonpb.Decimal
+	}{{"USD", cent}, {"USD", nil}, {"", cent}, {"USD", &commonpb.Decimal{}}} {
 		ts := timestamppb.New(at.Add(time.Duration(i) * time.Second))
-		snapshot := &domainpb.PortfolioSnapshot{Portfolio: &domainpb.PortfolioState{PortfolioId: id, BaseCurrency: "USD", AsOf: ts}}
+		snapshot := &domainpb.PortfolioSnapshot{Portfolio: &domainpb.PortfolioState{PortfolioId: id, BaseCurrency: input.currency, AsOf: ts}}
 		for _, pos := range book.Positions() {
-			value := pos.MarketValue
+			value := &commonpb.Money{CurrencyCode: input.currency, Amount: pos.MarketValue.Amount}
 			if pos.InstrumentID == "B" {
-				value = &commonpb.Money{CurrencyCode: "USD", Amount: mark}
+				value.Amount = input.mark
 			}
 			snapshot.Positions = append(snapshot.Positions, &domainpb.PositionState{PortfolioId: id, InstrumentId: string(pos.InstrumentID), MarketValue: value, AsOf: ts})
 		}
@@ -106,7 +110,7 @@ func TestRecomputedHedgeFeatureOnJetStream(t *testing.T) {
 	for _, expected := range []struct {
 		offset time.Duration
 		loss   float64
-	}{{0, .01}, {2 * time.Second, 0}} {
+	}{{0, .01}, {3 * time.Second, 0}} {
 		for {
 			msg, err := sub.Next(jetstream.FetchContext(ctx))
 			if err != nil {

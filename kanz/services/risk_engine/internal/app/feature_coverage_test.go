@@ -14,6 +14,7 @@ import (
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/factormodel"
+	"github.com/eighred/kanz/internal/risk/ingest"
 	"github.com/eighred/kanz/internal/risk/state"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
@@ -291,6 +292,69 @@ func TestFeaturePublicationForUnvaluedBaseCurrencyPositions(t *testing.T) {
 			}
 			if !proto.Equal(got, want) {
 				t.Fatalf("complete feature %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestFeaturePublicationRequiresKnownDenomination(t *testing.T) {
+	at := timestamppb.New(time.Unix(100, 0))
+	for _, tc := range []struct {
+		name, base, mark string
+		amount           int64
+		publish          bool
+	}{
+		{"both missing", "", "", 250, false},
+		{"unpriced denomination on numeric zero", "", "", 0, false},
+		{"missing portfolio denomination", "", "USD", 250, false},
+		{"missing mark denomination", "USD", "", 250, false},
+		{"different denominations", "USD", "EUR", 250, false},
+		{"measured short exposure", "EUR", "EUR", -250, true},
+		{"measured zero", "EUR", "EUR", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := state.NewStore()
+			input, err := ingest.NewIngestor(st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := proto.Marshal(&domainpb.PortfolioSnapshot{
+				Portfolio: &domainpb.PortfolioState{PortfolioId: "fund", BaseCurrency: tc.base, AsOf: at},
+				Positions: []*domainpb.PositionState{{PortfolioId: "fund", InstrumentId: "A", MarketValue: money(tc.amount, tc.mark), AsOf: at}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := &envelopepb.Envelope{TenantId: "acme", EventType: ingest.EventTypePortfolioSnapshot, IdempotencyKey: "snapshot"}
+			if err := input.Handler(t.Context(), env, raw); err != nil {
+				t.Fatal(err)
+			}
+			book, ok := st.Snapshot("fund")
+			if !ok {
+				t.Fatal("portfolio missing after snapshot")
+			}
+			ms := compute.ComputeMeasuresContext(t.Context(), book, compute.DefaultRegistry(), []v1.MeasureName{compute.MeasureGrossExposure, compute.MeasureVaR99})
+			got := publishedPortfolioRisk(t, ms)
+			if !tc.publish {
+				if got != nil {
+					t.Fatalf("incomplete denominations published a vector: %v", got)
+				}
+				want := []v1.CurrencyExclusion{{InstrumentID: "A", Currency: tc.mark}}
+				if !slices.Equal(ms.CurrencyExclusions(), want) {
+					t.Fatalf("currency exclusions %v, want %v", ms.CurrencyExclusions(), want)
+				}
+				return
+			}
+			gross, tail := 250.0, 2.5 // Absolute EUR 250 and the default method's 1% of gross.
+			if tc.amount == 0 {
+				gross, tail = 0, 0
+			}
+			want := &inferencepb.FeatureVector{SubjectId: "fund", FeatureSetRef: "portfolio-risk:1", AsOf: at, Values: map[string]*inferencepb.FeatureValue{
+				"GrossExposure": {Value: &inferencepb.FeatureValue_Scalar{Scalar: gross}},
+				"VaR99":         {Value: &inferencepb.FeatureValue_Scalar{Scalar: tail}},
+			}}
+			if len(ms.CurrencyExclusions()) != 0 || !proto.Equal(got, want) {
+				t.Fatalf("coverage %v, feature %v, want %v", ms.CurrencyExclusions(), got, want)
 			}
 		})
 	}

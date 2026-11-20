@@ -350,7 +350,9 @@ type Position struct {
 // single source of truth for "counts as base currency"; a future change
 // (accepting USD-cents as USD, say) edits this one function.
 func moneyInBase(m *commonpb.Money, base CurrencyCode) bool {
-	return m != nil && m.GetCurrencyCode() == string(base)
+	// Before a reporting currency arrives, an equally undenominated mark
+	// cannot establish that the holding belongs in a monetary aggregate.
+	return base != "" && m != nil && m.GetCurrencyCode() == string(base)
 }
 
 // InBaseCurrency reports whether the position's MarketValue can be folded
