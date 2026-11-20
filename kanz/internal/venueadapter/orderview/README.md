@@ -33,3 +33,19 @@ already lost by the previous in-memory implementation: outstanding cancellations
 must be checked against exchange/audit records during that upgrade. Database
 placement verification remains the onboarding gap tracked by ONBOARD-M6; the new
 tables are explicitly included in the onboarding script's unverified inventory.
+
+### Binance placement acknowledgement
+
+Apply Binance migration `0004_placement_ack.sql` before starting the new
+connector. It checks the runtime role's read and update access at startup.
+Quiesce older Binance adapter replicas during rollout so every writer and
+reconciler enforces the exchange-order binding. A rollback requires holding
+placement and reconciliation before starting an older binary. Keep the columns
+and index for recovery.
+
+The first verified placement response, recovery lookup during dispatch, or
+private trade report records the exchange account UID, symbol, numeric order
+ID, observation source and database receipt time on the tenant's dispatch row.
+A missing acknowledgement leaves an uncertain dispatch. A later signed venue
+miss cannot authorize a second placement. Complete signed match history is
+still required to book fills.

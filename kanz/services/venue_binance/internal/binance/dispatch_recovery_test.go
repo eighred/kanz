@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -203,6 +205,17 @@ func TestPendingBinanceTradeHistoryAcrossAdapterRestart(t *testing.T) {
 			t.Fatalf("incomplete signed history: %+v %v", view, err)
 		}
 	}
+	// A signed positive answer carrying a valid client ID proves no local
+	// admission when this tenant never recorded that order.
+	stray := omsRedispatch("unrecorded")
+	f.queryBody = strings.ReplaceAll(partial, "pending-history", "unrecorded")
+	f.queryBody = strings.Replace(f.queryBody, `"orderId":7`, `"orderId":9`, 1)
+	historyBefore := f.myTradesCalls
+	got, err = restarted.QueryOrder(t.Context(), stray)
+	if err != nil || got.State != execution.OrderViewIndeterminate || len(got.Fills) != 0 || f.myTradesCalls != historyBefore {
+		t.Fatalf("unrecorded dispatch acquired executions: %+v %v", got, err)
+	}
+	f.queryBody = partial
 	// The exchange now serves the entire match. Its own per-match time
 	// travels over the typed RPC, independent of either adapter's clock.
 	f.myTradesBody = `[{"symbol":"BTCUSDT","id":10,"orderId":7,"qty":"0.6","price":"50000","commission":"0.01","commissionAsset":"USD","isBuyer":true,"time":1750000000100}]`
@@ -292,5 +305,26 @@ func TestAcknowledgementConflictStopsBeforeTradeHistory(t *testing.T) {
 	}
 	if _, err = rpc.Execute(t.Context(), other); status.Code(err) != codes.FailedPrecondition || f.posts != 2 {
 		t.Fatalf("refused acknowledgement authorized another placement: %v", err)
+	}
+}
+
+func TestBinanceStartupRequiresAcknowledgementMigration(t *testing.T) {
+	old := t.TempDir()
+	for _, migration := range []string{"0001_venue_orders.sql", "0002_tenant_scope_required.sql", "0003_pending_closes.sql"} {
+		b, err := os.ReadFile(filepath.Join("../../migrations", migration))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(old, migration), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view := backing.VenueStore(t, old)()
+	f := newFakeBinance(t)
+	f.accountBody = `{"uid":12345678}`
+	conn := NewBinanceConnector(VenueSettings{MIC: "BINANCE", Account: "fixture-account", BaseURL: f.srv.URL, APIKey: "fixture-key", APISecret: "fixture-secret", Symbols: map[string]string{"BTC-USD": "BTCUSDT"}}, "", view)
+	proof, err := conn.Start(t.Context(), "12345678", WorkerDeps{})
+	if err == nil || proof.Verified || conn.venue.provenAccount() != "" || f.posts != 0 {
+		t.Fatalf("old schema admitted the connector: proof=%t placements=%d err=%v", proof.Verified, f.posts, err)
 	}
 }

@@ -81,6 +81,11 @@ func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps W
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	if c.venue.durableOrders != nil {
+		if err := c.venue.durableOrders.VerifyPlacementStorage(ctx); err != nil {
+			return execution.AccountProof{}, err
+		}
+	}
 	proof, err := c.venue.verifyAccount(ctx, expectedUID, deps.Logger)
 	if err != nil {
 		return execution.AccountProof{}, err

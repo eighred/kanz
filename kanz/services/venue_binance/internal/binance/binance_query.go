@@ -80,11 +80,13 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 	if err := checkOrderAccount(st, v.mic, v.provenAccount()); err != nil {
 		return OrderView{}, err
 	}
+	hadDispatch := false
 	if v.durableOrders != nil {
 		current, _, found, err := v.durableOrders.Get(ctx, st.GetOrderId())
 		if err != nil {
 			return OrderView{}, err
 		}
+		hadDispatch = found
 		if found && !orderview.SamePlacementScope(current, st) {
 			return OrderView{State: OrderViewIndeterminate, Reason: "Binance query conflicts with durable dispatch scope"}, nil
 		}
@@ -122,6 +124,9 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		return OrderView{}, err
 	}
 
+	if v.durableOrders != nil && !hadDispatch {
+		return OrderView{State: OrderViewIndeterminate, Reason: "Binance reports an order without a matching durable local dispatch"}, nil
+	}
 	return v.observedOrder(ctx, st, symbol, resp)
 }
 

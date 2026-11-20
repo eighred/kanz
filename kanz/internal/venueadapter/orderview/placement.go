@@ -34,6 +34,23 @@ type PlacementReceipt struct {
 
 var ErrPlacementConflict = errors.New("orderview: conflicting placement identity")
 
+// VerifyPlacementStorage checks the deployed migration and the runtime role
+// before the connector can dispatch an order that it may have to acknowledge.
+func (p *Postgres) VerifyPlacementStorage(ctx context.Context) error {
+	var ready bool
+	err := p.pool.QueryRow(ctx, `SELECT bool_and(has_column_privilege('venue_orders', col, 'SELECT')
+    AND has_column_privilege('venue_orders', col, 'UPDATE'))
+    FROM unnest(ARRAY['placement_account_uid','placement_symbol','placement_order_id',
+        'placement_source','placement_ack_at']) AS cols(col)`).Scan(&ready)
+	if err != nil {
+		return fmt.Errorf("verify placement storage: %w", err)
+	}
+	if !ready {
+		return errors.New("orderview: runtime role cannot retain placement acknowledgements")
+	}
+	return nil
+}
+
 // PlacementFor returns only positively recorded acknowledgements. The legacy
 // dispatch claim, including one left by a lost POST, does not populate these columns.
 func (p *Postgres) PlacementFor(ctx context.Context, clientID string) (PlacementReceipt, bool, error) {
