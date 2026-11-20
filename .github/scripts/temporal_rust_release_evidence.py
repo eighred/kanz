@@ -31,7 +31,7 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def compiler_artifacts(raw, expected):
+def compiler_artifacts(raw, expected, *, library_build):
     artifacts = {}
     coordinates = {i.rsplit("#", 1)[1] for i in expected}
     finished = False
@@ -53,18 +53,21 @@ def compiler_artifacts(raw, expected):
                 or coordinate.startswith("path+file:///src/rust/temporal_sources/generated/")) and coordinate not in expected:
             raise ValueError("unreviewed compiler package source")
         if coordinate in expected and kinds == ["lib"]:
-            if coordinate in artifacts or event["fresh"] is not False or event["profile"]["test"] is not False:
+            if (coordinate in artifacts or event["fresh"] is not (not library_build)
+                    or event["profile"]["test"] is not False or event["profile"]["opt_level"] != "3"):
                 raise ValueError("ambiguous, cached or test-only selected compilation")
             artifacts[coordinate] = event
         if event["target"]["name"] == WORKER and kinds == ["bin"] and not event["profile"]["test"]:
             worker.append(event)
-    if not finished or len(worker) != 1 or set(artifacts) != set(expected):
+    if not finished or set(artifacts) != set(expected) or len(worker) != (0 if library_build else 1):
         raise ValueError("incomplete release compiler records")
+    if library_build:
+        return artifacts
     binary = worker[0]
     manifest = f"{RUST_ROOT}/services/lake_snapshot/Cargo.toml"
     executable = f"{RUST_ROOT}/target-provenance/release/{WORKER}"
     if (binary["manifest_path"] != manifest or binary["fresh"] is not False
-            or binary["executable"] != executable or binary["executable"] not in binary["filenames"]
+            or binary["profile"]["opt_level"] != "3" or binary["executable"] != executable or binary["executable"] not in binary["filenames"]
             or not re.fullmatch(r"path\+file:///src/rust/services/lake_snapshot#kanz-lake-snapshot@[0-9.]+",
                                 binary["package_id"])):
         raise ValueError("release worker compiler output differs")
@@ -84,13 +87,16 @@ def spdx_identity(sbom, name, version):
         raise ValueError("ambiguous or missing SPDX Cargo package")
 
 
-def verify_compilation(packages, lock, embedded, sbom, raw):
+def verify_compilation(packages, lock, embedded, sbom, raw, libraries, archives):
     if {"chrono", "chrono-tz", "humantime"} & {p["name"] for p in lock["package"]}:
         raise ValueError("superseded temporal package remains in the changed workspace")
     ids = [row["packageID"] for row in packages]
     if not ids or ids != sorted(set(ids)):
         raise ValueError("reviewed Cargo identities must be unique and ordered")
-    compiled = compiler_artifacts(raw, ids)
+    prepared = compiler_artifacts(libraries, ids, library_build=True)
+    compiled = compiler_artifacts(raw, ids, library_build=False)
+    if set(archives) != set(ids):
+        raise ValueError("sealed release archives differ from the reviewed Cargo identities")
     selected = set()
     for row in packages:
         name, version = row["name"], row["version"]
@@ -103,7 +109,17 @@ def verify_compilation(packages, lock, embedded, sbom, raw):
         if len(lock_rows) != 1 or len(binary_rows) != 1 or binary_rows[0].get("kind", "runtime") != "runtime":
             raise ValueError("reviewed dependency absent or ambiguous in lock or runtime ELF")
         locked, actual = lock_rows[0], compiled[row["packageID"]]
-        if actual["target"]["name"] != name.replace("-", "_"):
+        identity = row["packageID"]
+        if actual != (prepared[identity] | {"fresh": True}):
+            raise ValueError("release library inputs or outputs changed before the final build")
+        archive = archives[identity]
+        target = name.replace("-", "_")
+        rlibs = [f for f in actual["filenames"] if f.endswith(".rlib")]
+        if (set(archive) != {"path", "sha256"} or rlibs != [archive["path"]]
+                or not re.fullmatch(rf"{RUST_ROOT}/target-provenance/release/deps/lib{re.escape(target)}-[0-9a-f]+\.rlib", archive["path"])
+                or not re.fullmatch("[0-9a-f]{64}", archive["sha256"])):
+            raise ValueError("release archive identity differs from the actual Cargo target")
+        if actual["target"]["name"] != target:
             raise ValueError("compiled crate target differs from reviewed package")
         if name == TEMPORAL:
             if (row["packageID"] != f"{REGISTRY}#{name}@{version}" or locked.get("source") != REGISTRY
@@ -155,11 +171,14 @@ def verify(directory, manifest_bytes, source, lock_sha, binary_sha, lock, embedd
     receipt_bytes = read_input(directory / "provenance.json", 1024 * 1024)
     receipt = json.loads(receipt_bytes, object_pairs_hook=unique)
     raw = read_input(directory / "compiler.jsonl", MAX_COMPILER_LOG)
+    libraries = read_input(directory / "library-compiler.jsonl", MAX_COMPILER_LOG)
+    archive_bytes = read_input(directory / "library-archives.json", 1024 * 1024)
+    archives = json.loads(archive_bytes, object_pairs_hook=unique)
     advisory = read_input(directory / "chrono-advisories.json", 4 * 1024 * 1024)
     target = "x86_64-unknown-linux-gnu"
     expected = {"schema": SCHEMA, "service": "lake-sink", "target": target, "sourceRevision": source,
                 "binarySHA256": binary_sha, "lockSHA256": lock_sha, "patchSetSHA256": sha256(manifest_bytes),
-                "advisorySnapshotSHA256": sha256(advisory)}
+                "advisorySnapshotSHA256": sha256(advisory), "libraryCompilerSHA256": sha256(libraries)}
     if any(receipt.get(k) != v for k, v in expected.items()):
         raise ValueError("build provenance does not match this source, binary, lock or snapshot")
     snapshot = json.loads(advisory, object_pairs_hook=unique)
@@ -167,13 +186,15 @@ def verify(directory, manifest_bytes, source, lock_sha, binary_sha, lock, embedd
     evaluate_advisories(snapshot, registry["version"], registry["checksum"])
     if receipt["packages"] != reviewed_packages(recipe, lock):
         raise ValueError("compiled sources differ from reviewed source manifest")
-    count = verify_compilation(receipt["packages"], lock, embedded, sbom, raw)
+    if receipt.get("libraryArchives") != archives:
+        raise ValueError("release link reused different archive bytes")
+    count = verify_compilation(receipt["packages"], lock, embedded, sbom, raw, libraries, archives)
     # Image build receipts can be cached. This independent current observation can
     # refuse an old image for a newly published finding under either package identity.
     current = collect_advisories()
     evaluate_advisories(current, registry["version"], registry["checksum"])
     current_bytes = json.dumps(current, sort_keys=True, separators=(",", ":")).encode()
     return ({**expected, "reviewedPackages": count, "compilerSHA256": sha256(raw),
-             "receiptSHA256": sha256(receipt_bytes), "buildAdvisoryDBCommit": snapshot["rustsec_commit"],
+             "receiptSHA256": sha256(receipt_bytes), "libraryArchivesSHA256": sha256(archive_bytes), "buildAdvisoryDBCommit": snapshot["rustsec_commit"],
              "releaseAdvisoryDBCommit": current["rustsec_commit"], "releaseAdvisorySnapshotSHA256": sha256(current_bytes)},
             current_bytes)

@@ -74,6 +74,7 @@ RUN python3 -B temporal_sources/produce.py "$SOURCE_REVISION"
 
 FROM scratch AS rust-source-evidence
 COPY --from=rust-build /kanz-source-evidence/ /kanz-source-evidence/
+COPY --from=rust-build /src/rust/target-provenance/library-artifacts.json /kanz-source-evidence/library-archives.json
 
 # GNU worker needs the pinned C/C++ runtime; the Go owner remains fully static.
 # Root-owned, nonwritable worker bytes are required by the verified-FD launcher.

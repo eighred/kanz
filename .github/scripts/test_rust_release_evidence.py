@@ -54,29 +54,44 @@ class TemporalSourceTests(unittest.TestCase):
                                      "sha256": fork_hash}}]
         def artifact(identifier, manifest, lib, label, exe=None):
             return {"reason": "compiler-artifact", "package_id": identifier, "manifest_path": manifest,
-                    "target": {"name": label, "kind": ["lib" if lib else "bin"]}, "profile": {"test": False},
-                    "fresh": False, "executable": exe, "filenames": [exe] if exe else []}
+                    "target": {"name": label, "kind": ["lib" if lib else "bin"]}, "profile": {"test": False, "opt_level": "3"},
+                    "fresh": False, "executable": exe, "filenames": [exe] if exe else [f"/src/rust/target-provenance/release/deps/lib{label}-abc123.rlib"]}
         compiler = [artifact(api_id, "/src/" + relative, True, "arrow_array"),
                     artifact(fork_id, "/cargo/registry/src/index/sad-chrono-0.5.1/Cargo.toml", True, "sad_chrono"),
                     artifact("path+file:///src/rust/services/lake_snapshot#kanz-lake-snapshot@0.1.0",
                              "/src/rust/services/lake_snapshot/Cargo.toml", False, worker, worker_path),
                     {"reason": "build-finished", "success": True}]
+        library_build = copy.deepcopy([compiler[0], compiler[1], compiler[-1]])
+        archives = {row["package_id"]: {"path": row["filenames"][0], "sha256": "1" * 64}
+                    for row in library_build if row["reason"] == "compiler-artifact"}
+        compiler[0]["fresh"] = True
+        compiler[1]["fresh"] = True
         snapshot = {"rustsec_commit": db_sha}
         advisory = json.dumps(snapshot).encode()
         receipt = {"schema": source.SCHEMA, "service": "lake-sink", "target": "x86_64-unknown-linux-gnu",
                    "sourceRevision": source_sha, "binarySHA256": "c" * 64, "lockSHA256": "d" * 64,
                    "patchSetSHA256": source.sha256(policy), "advisorySnapshotSHA256": source.sha256(advisory),
-                   "packages": package_rows}
+                   "packages": package_rows, "libraryArchives": archives}
         with tempfile.TemporaryDirectory() as temp:
             export = Path(temp)
             folder = export / "kanz-source-evidence"
             folder.mkdir()
             (export / "provenance.json").write_text(json.dumps({"_type": "https://in-toto.io/Statement/v1"}))
-            for change in ("valid", "root-only", "source", "binary", "lock", "patch-set", "tree", "missing-compiler", "registry-copy",
+            for change in ("valid", "root-only", "rebuilt-dependency", "cached-worker", "changed-library",
+                           "changed-archive", "wrong-profile", "unsealed-source", "missing-library", "source", "binary", "lock", "patch-set", "tree", "missing-compiler", "registry-copy",
                            "cached-library", "debug-worker", "spdx-source", "elf-source", "new-disclosure", "unreviewed",
                            "extra-compiler-origin", "incomplete", "duplicate-lock", "legacy-package", "target-name", "encoded-spdx-alias"):
                 with self.subTest(change=change):
                     data, build, elf, spdx, rows = map(copy.deepcopy, (receipt, compiler, embedded, sbom, lock))
+                    first = copy.deepcopy(library_build)
+                    sealed = copy.deepcopy(archives)
+                    if change == "rebuilt-dependency": build[0]["fresh"] = False
+                    if change == "cached-worker": build[2]["fresh"] = True
+                    if change == "changed-library": build[0]["features"] = ["other"]
+                    if change == "changed-archive": sealed[api_id]["sha256"] = "2" * 64
+                    if change == "wrong-profile": first[0]["profile"]["opt_level"] = "0"
+                    if change == "unsealed-source": first[0]["manifest_path"] = "/tmp/alternate/Cargo.toml"
+                    if change == "missing-library": first.pop(0)
                     if change == "source": data["sourceRevision"] = "e" * 40
                     if change == "binary": data["binarySHA256"] = "e" * 64
                     if change == "lock": data["lockSHA256"] = "e" * 64
@@ -84,7 +99,7 @@ class TemporalSourceTests(unittest.TestCase):
                     if change == "tree": data["packages"][0]["treeSHA256"] = "e" * 64
                     if change == "missing-compiler": build.pop(0)
                     if change == "registry-copy": build[0]["package_id"] = source.REGISTRY + "#arrow-array@59.3.2"
-                    if change == "cached-library": build[0]["fresh"] = True
+                    if change == "cached-library": first[0]["fresh"] = True
                     if change == "debug-worker": build[2]["executable"] = worker_path.replace("/release/", "/debug/")
                     if change == "spdx-source": spdx["packages"][0]["externalRefs"][0]["referenceLocator"] += "?source=elsewhere"
                     if change == "elf-source": elf["packages"][0]["source"] = "crates.io"
@@ -97,6 +112,10 @@ class TemporalSourceTests(unittest.TestCase):
                     if change == "encoded-spdx-alias":
                         spdx["packages"].append({"name": "other", "versionInfo": version, "externalRefs": [
                             {"referenceType": "purl", "referenceLocator": "pkg:cargo/%61rrow-array@59.3.2"}]})
+                    library_raw = "\n".join(map(json.dumps, first)).encode()
+                    (folder / "library-compiler.jsonl").write_bytes(library_raw)
+                    data["libraryCompilerSHA256"] = source.sha256(library_raw)
+                    (folder / "library-archives.json").write_text(json.dumps(sealed))
                     (folder / "compiler.jsonl").write_text("\n".join(map(json.dumps, build)))
                     receipt_path = folder / "provenance.json"
                     receipt_path.write_text(json.dumps(data))

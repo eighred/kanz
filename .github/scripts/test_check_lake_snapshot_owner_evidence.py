@@ -101,6 +101,7 @@ class EvidenceTests(unittest.TestCase):
         bodies['run.txt']=b'1\n2\n'
         version=cache.digest(("kanz-lake-joint-cache-probe:"+"b"*40).encode())[:40]
         vertices=[{'digest':'sha256:'+'1'*64,'name':'[rust-build 2/6] RUN '+cache.COOK,'started':'start','completed':'done','cached':True},
+                  {'digest':'sha256:'+'3'*64,'name':'[rust-build 4/6] RUN '+cache.LIBRARIES,'started':'start','completed':'done','cached':True},
                   {'digest':'sha256:'+'2'*64,'name':'[rust-build 6/6] RUN '+cache.BUILD.replace('$VERSION',version),'started':'start','completed':'done'}]
         bodies['cache-probe-progress.jsonl']=(json.dumps({'vertexes':vertices})+'\n').encode()
         probe={'schema':1,'source':'b'*40,'tree':'f'*40,'run':'1','attempt':'2','image':image,'builder':'synthetic',

@@ -17,7 +17,9 @@ def events():
         {"digest":"sha256:"+"1"*64,"name":"[rust-build 2/6] RUN "+gate.COOK,
          "started":"2026-11-07T00:00:00Z","completed":"2026-11-07T00:00:01Z","cached":True},
         {"digest":"sha256:"+"2"*64,"name":"[rust-build 6/6] RUN "+gate.BUILD.replace("$VERSION",version),
-         "started":"2026-11-07T00:00:01Z","completed":"2026-11-07T00:00:02Z"}]}]
+         "started":"2026-11-07T00:00:01Z","completed":"2026-11-07T00:00:02Z"},
+        {"digest":"sha256:"+"a"*64,"name":"[rust-build 4/6] RUN "+gate.LIBRARIES,
+         "started":"2026-11-07T00:00:00Z","completed":"2026-11-07T00:00:01Z","cached":True}]}]
 
 
 def wire(value):
@@ -60,10 +62,12 @@ class CacheProbeTests(unittest.TestCase):
             with self.assertRaises((OSError,ValueError,subprocess.CalledProcessError)):gate.copy_context(root,bad)
 
     def test_actual_schema_controls_require_cache_and_execution(self):
-        expected = {"cook":"sha256:"+"1"*64,"build":"sha256:"+"2"*64}
+        expected = {"cook":"sha256:"+"1"*64,"libraries":"sha256:"+"a"*64,"build":"sha256:"+"2"*64}
         self.assertEqual(gate.progress(wire(events()), SOURCE), expected)
-        for mutation in ("missing", "uncached", "bool", "final-cached", "unfinished", "wrong-command", "wrong-version", "duplicate", "error", "unknown"):
+        for mutation in ("missing", "uncached", "library-uncached", "library-missing", "bool", "final-cached", "unfinished", "wrong-command", "wrong-version", "duplicate", "error", "unknown"):
             data = events(); vertices = data[0]["vertexes"]
+            if mutation == "library-uncached": vertices[2].pop("cached")
+            if mutation == "library-missing": vertices.pop(2)
             if mutation == "missing": vertices.pop(0)
             if mutation == "uncached": vertices[0].pop("cached")
             if mutation == "bool": vertices[0]["cached"] = 1
@@ -71,7 +75,7 @@ class CacheProbeTests(unittest.TestCase):
             if mutation == "unfinished": vertices[1].pop("completed")
             if mutation == "wrong-command": vertices[0]["name"] += " --offline"
             if mutation == "wrong-version": vertices[1]["name"] = vertices[1]["name"].replace(gate.digest(("kanz-lake-joint-cache-probe:"+SOURCE).encode())[:40], SOURCE)
-            if mutation == "duplicate": vertices.append({**vertices[0],"digest":"sha256:"+"3"*64})
+            if mutation == "duplicate": vertices.append({**vertices[0],"digest":"sha256:"+"a"*64})
             if mutation == "error": vertices[1]["error"] = "closed synthetic failure"
             if mutation == "unknown": data[0]["other"] = []
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): gate.progress(wire(data), SOURCE)

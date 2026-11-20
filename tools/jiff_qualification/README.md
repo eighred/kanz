@@ -32,6 +32,13 @@ The six elapsed-duration tests use Jiff's signed/unsigned parsers and formatter.
 
 ## DataFusion 54 lake worker
 
+The production builder restores and verifies each reviewed Apache tree before
+compiling the lake library into a clean release target. It seals the paths and
+SHA-256 hashes of the reviewed Cargo archives. The final worker build reuses
+those exact archives and recompiles the executable with its version. The
+exported library and binary compiler logs bind each package identity, feature
+set, release profile and artifact path across the two steps.
+
 ```sh
 python -B -m unittest discover -s tools/jiff_qualification -p test_chrono_advisories.py
 python -B tools/jiff_qualification/object_store.py --advisories chrono-advisories.json
