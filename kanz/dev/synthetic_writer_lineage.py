@@ -21,17 +21,21 @@ TEST = "TestSyntheticGoWriterLineageHandoff"
 ROLES = ("RUNTIME", "NEXT_RUNTIME", "SWITCH", "RELAY")
 
 
-def run(stage, native, forward=False):
+def run(stage, native, mode):
     targets = ["services/api_gateway/cmd/api_gateway"]
-    if not forward:
+    if mode == "lineage":
         targets.append("services/oms/internal/order")
+    elif mode == "roundtrip":
+        targets.append("services/oms/cmd/oms")
     fixture.build(stage, targets)
     roles = ROLES
-    if forward:
+    if mode != "lineage":
         roles += ("CONTROL", "NEXT_ADAPTER")
         subprocess.run(["go", "build", "-mod=readonly", "-p", "1", "-tags", "synthetic_handoff", "-o", stage / "go-admit",
                         "./services/oms/tools/syntheticadmission"], cwd=fixture.ROOT / "kanz", check=True,
                        env=dict(os.environ, GOOS="linux", GOARCH="amd64", CGO_ENABLED="0", GOWORK="off"))
+    if mode == "roundtrip":
+        roles += ("RECOVERY_RUNTIME", "VENUE")
     staged_native = stage / "native"
     shutil.copyfile(native, staged_native)
     staged_native.chmod(0o755)
@@ -67,9 +71,22 @@ def run(stage, native, forward=False):
         env = {name: env[name] for name in names}
         env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
         test = TEST
-        if forward:
+        if mode != "lineage":
             for migration in ("funding.sql", "go_admission.sql"):
                 fixture.sql(container, (fixture.ROOT / "rust/services/synthetic_oms" / migration).read_text(encoding="utf-8"), fixture.DB)
+        if mode == "roundtrip":
+            gate = fixture.ROOT / "rust/services/synthetic_oms/go_writer.sql"
+            fixture.sql(container, gate.read_text(encoding="utf-8"), fixture.DB)
+            fixture.sql(container, """
+                GRANT kanz_synthetic_oms_go_runtime TO kanz_synthetic_oms_runtime_g3;
+                GRANT SELECT, UPDATE(published_at,attempts,last_error) ON outbox TO kanz_synthetic_oms_runtime_g3;
+                BEGIN; SET LOCAL app.tenant_id='synthetic-go-roundtrip';
+                INSERT INTO capital_activation(enabled,activated_at) VALUES(false,NULL);
+                COMMIT;
+            """, fixture.DB)
+            env["KANZ_SYNTHETIC_GO_ROUNDTRIP"] = "1"
+            test = "TestSyntheticGoRustGoRoundTrip"
+        elif mode == "forward":
             for tenant, active in (("synthetic-go-armed", "true"), ("synthetic-go-legacy-evidence", "false"),
                                    ("synthetic-go-expired", "false"), ("synthetic-go-forward", "false")):
                 fixture.sql(container, f"BEGIN; SET LOCAL app.tenant_id='{tenant}'; INSERT INTO capital_activation(enabled,activated_at) "
@@ -85,7 +102,7 @@ def run(stage, native, forward=False):
                "--entrypoint", "/fixture/api_gateway", fixture.RUNTIME,
                "-test.v", "-test.count=1", "-test.parallel=1", "-test.timeout=1m"]
         log = fixture.run_fixture_tests(cmd, [test], env, password)
-        if forward:
+        if mode == "forward":
             fixture.require_cases(log, test, ("synthetic-go-armed", "synthetic-go-legacy-evidence", "synthetic-go-missing-posture", "synthetic-go-expired", "synthetic-go-forward"))
         print(log, end="", flush=True)
     finally:
@@ -95,9 +112,14 @@ def run(stage, native, forward=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", type=Path, required=True, help="Linux amd64 kanz-synthetic-oms executable")
-    parser.add_argument("--forward", action="store_true", help="qualify authenticated unfunded Go admission and transfer to Rust")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--forward", action="store_const", dest="mode", const="forward",
+                       help="qualify authenticated unfunded Go admission and transfer to Rust")
+    group.add_argument("--roundtrip", action="store_const", dest="mode", const="roundtrip",
+                       help="admit one unfunded order through Go and recover it through Rust and Go")
+    parser.set_defaults(mode="lineage")
     args = parser.parse_args()
     if not args.native.is_file():
         parser.error("--native requires a built Linux executable")
     with tempfile.TemporaryDirectory(prefix="kanz-go-writer-lineage-") as directory:
-        run(Path(directory), args.native, args.forward)
+        run(Path(directory), args.native, args.mode)

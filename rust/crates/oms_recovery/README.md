@@ -181,3 +181,11 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 The dedicated database first permits a generation change in a rolled-back rehearsal. The Go store then admits one unfunded order and queues its acceptance. Two attempted transfers must refuse the retained order's missing command lineage, preserve the original state and pending fact, and fence a successor submission. This fixture leaves the unmatched order intact until its disposable database shuts down.
 
 For a forward transfer with verified source provenance, add `--forward`. This uses a separate funded/disabled-posture fixture and builds the tagged, loopback-only `syntheticadmission` Go executable. A trader authenticated by the gateway submits one direct unfunded XSIM spot buy. The independent control writer binds the exact broker frame to its entitlement and records risk, compliance, mandate and market evidence. The Go order store commits the original frame, command, five source IDs, canonical order and pending acceptance together. Generation two reads the same bytes, confirms a duplicate submit and records one dispatch claim from the recovered JetStream acceptance. A second claim requires reconciliation. The drill stops before any venue send. Armed or missing funding posture, unsupported orders, expired decisions and legacy evidence without a frame binding refuse admission.
+
+For the same order across three writer generations, run:
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --roundtrip
+```
+
+Go generation one commits the signed admission before acknowledging the delivery. Rust generation two recovers the original bytes, publishes the retained acceptance and sends one order to the synthetic venue. The database refuses a Go handback while the dispatch result is unknown. After a typed venue query establishes a working order, Go generation three drains the routed fact and runs the ordinary startup sweep. The same order version and both outbox rows survive. The synthetic venue reports one placement, two queries and zero fills. Funded orders and other retained venue states have separate acceptance requirements.
