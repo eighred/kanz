@@ -147,9 +147,19 @@ func (c *binanceREST) ExchangeAccountID(ctx context.Context) (string, error) {
 		APISecret: string(c.apiSecret),
 	}, exchangeauth.Options{
 		BaseURL:    c.baseURL,
-		HTTPClient: c.httpc,
+		HTTPClient: c.privateAccountHTTPClient(),
 		Now:        c.now,
 	})
+}
+
+// Both account proof and the private WebSocket subscription must authenticate
+// at their configured origins. A redirect has no authority to receive either.
+func (c *binanceREST) privateAccountHTTPClient() *http.Client {
+	return &http.Client{
+		Transport:     c.httpc.Transport,
+		Timeout:       c.httpc.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // signedGet performs a signed GET and returns the raw body (weight already

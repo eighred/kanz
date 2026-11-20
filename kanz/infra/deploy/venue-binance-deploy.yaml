@@ -146,18 +146,11 @@ spec:
             # has ever tested, and a wrong one posts fills to another fund's ledger rows
             # while the exchange debits the right account.
             #
-            # EMPTY, as shipped: nobody has bound the uid yet, so the adapter cannot prove
-            # itself — and it would refuse to start, which is why the escape hatch below is
-            # set. Fill this in with the uid of the account the mounted key belongs to,
-            # then DELETE the escape hatch and set OMS_REQUIRE_VERIFIED_ACCOUNT on the OMS.
+            # Bind the independently approved UID in the deployment overlay or its
+            # CSI file mount. An unbound base refuses both the private stream and
+            # order service. Keep the explicit false for older release readers.
             - { name: BINANCE_VENUE_ACCOUNT_UID, value: "" }
-            # The explicit admission that this adapter's account is UNPROVEN. It is not a
-            # default and it is not an absence: without it the adapter refuses to start,
-            # because absence of configuration must never quietly become trust. It does NOT
-            # forgive a WRONG account — if Binance says the key belongs elsewhere, the
-            # adapter refuses regardless. The OMS counts every adapter in this state
-            # (kanz_oms_unverified_venue_account_total).
-            - { name: BINANCE_ALLOW_UNVERIFIED_ACCOUNT, value: "true" }
+            - { name: BINANCE_ALLOW_UNVERIFIED_ACCOUNT, value: "false" }
             # Testnet by default. Pointing this at the live exchange is a
             # deliberate, reviewable edit — not a default.
             - { name: BINANCE_BASE_URL, value: "https://testnet.binance.vision" }

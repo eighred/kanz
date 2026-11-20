@@ -2,9 +2,12 @@ package binance
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venuemargin"
 )
@@ -49,21 +52,26 @@ func NewBinanceConnector(settings VenueSettings, wsBase string) *BinanceConnecto
 // Venue returns the execution venue for the router.
 func (c *BinanceConnector) Venue() Venue { return c.venue }
 
-// Exchange is the seam that asks Binance which account this adapter's API credential
-// actually belongs to (SOV-02a) — accountproof.Exchange, satisfied by the same signed
-// REST client the reconciler already uses. The composition root calls it ONCE, at
-// startup, and refuses to serve orders if the exchange names a different account than
-// this deployment claims to be.
-func (c *BinanceConnector) Exchange() accountproof.Exchange { return c.rest }
-
-// Start launches the reconciler, the user-data ingester (with reconnect), and
-// the ticker feed as background goroutines until ctx is cancelled.
-func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) error {
+// Start verifies the account before launching workers. The same proof is
+// returned to the composition root for the typed venue service.
+func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps WorkerDeps) (execution.AccountProof, error) {
 	if deps.Orders != nil && c.streamConfigErr != nil {
-		return c.streamConfigErr
+		return execution.AccountProof{}, c.streamConfigErr
 	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
+	}
+	if expectedUID == "" {
+		return execution.AccountProof{}, fmt.Errorf("%w: bound BINANCE_VENUE_ACCOUNT_UID or its file mount is required", accountproof.ErrUnverifiable)
+	}
+	proof, err := accountproof.Resolve(ctx, c.rest, accountproof.Want{Account: c.settings.Account, ExchangeUID: expectedUID}, deps.Logger)
+	if err != nil {
+		if errors.Is(err, accountproof.ErrWrongAccount) {
+			return execution.AccountProof{}, accountproof.ErrWrongAccount
+		}
+		// Exchange error text may echo credentials. The operator can distinguish
+		// an unavailable proof from a confirmed account mismatch.
+		return execution.AccountProof{}, accountproof.ErrUnverifiable
 	}
 	// Reconciliation loop (secondary audit; emits correcting FACTs) + the
 	// In-Flight Certainty healing watchdog, which runs on its own fast tick.
@@ -132,7 +140,7 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) error {
 	}
 	// Ticker feed → market price FACTs → tv-sync MarkSource.
 	go c.runTicker(ctx, deps)
-	return nil
+	return proof, nil
 }
 
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {

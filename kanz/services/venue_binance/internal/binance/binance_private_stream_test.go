@@ -34,7 +34,11 @@ func privateStreamFixture(t *testing.T, serve func(context.Context, *websocket.C
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-MBX-APIKEY") != "fixture" {
+		mac := hmac.New(sha256.New, []byte("fixture-secret"))
+		fmt.Fprint(mac, "recvWindow=5000&timestamp=1700000000000")
+		query := r.URL.Query()
+		if r.Header.Get("X-MBX-APIKEY") != "fixture" || query.Get("timestamp") != "1700000000000" ||
+			query.Get("recvWindow") != "5000" || query.Get("signature") != hex.EncodeToString(mac.Sum(nil)) {
 			w.WriteHeader(401)
 			return
 		}
@@ -79,6 +83,77 @@ func privateStreamFixture(t *testing.T, serve func(context.Context, *websocket.C
 		t.Fatal(err)
 	}
 	return rest, endpoint
+}
+
+func TestPrivateStreamRequiresAccountProofBeforeStart(t *testing.T) {
+	started := make(chan struct{}, 1)
+	rest, _ := privateStreamFixture(t, func(ctx context.Context, conn *websocket.Conn) {
+		_ = conn.Write(ctx, websocket.MessageText, []byte(confirmed))
+		started <- struct{}{}
+		_, _, _ = conn.Read(ctx)
+	})
+	wsBase := "wss" + strings.TrimPrefix(rest.baseURL, "https")
+	connector := NewBinanceConnector(VenueSettings{BaseURL: rest.baseURL, Account: "fixture-account", APIKey: rest.apiKey, APISecret: string(rest.apiSecret)}, wsBase)
+	connector.rest.httpc, connector.rest.now = rest.httpc, rest.now
+	deps := WorkerDeps{Orders: newFakeOrders(), TickerInterval: time.Hour}
+	for _, tc := range []struct {
+		uid  string
+		want error
+	}{
+		{"", accountproof.ErrUnverifiable}, {"321", accountproof.ErrWrongAccount},
+	} {
+		proof, err := connector.Start(t.Context(), tc.uid, deps)
+		if !errors.Is(err, tc.want) || proof.Verified {
+			t.Fatal("unproven account was accepted", err)
+		}
+	}
+	connector.rest.apiKey = "unknown-fixture"
+	if _, err := connector.Start(t.Context(), "123", deps); !errors.Is(err, accountproof.ErrUnverifiable) {
+		t.Fatal("refused account lookup was accepted")
+	}
+	select {
+	case <-started:
+		t.Fatal("subscriber started before the bound account was proven")
+	default:
+	}
+	connector.rest.apiKey = rest.apiKey
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	proof, err := connector.Start(ctx, "123", deps)
+	if err != nil || !proof.Verified || proof.ExchangeAccountID != "123" {
+		t.Fatal("correctly bound account refused", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("verified connector did not subscribe")
+	}
+}
+
+func TestPrivateStreamChargesConnectionAndSubscriptionWeight(t *testing.T) {
+	calls := make(chan struct{}, 1)
+	rest, uri := privateStreamFixture(t, func(ctx context.Context, conn *websocket.Conn) {
+		calls <- struct{}{}
+		_ = conn.Write(ctx, websocket.MessageText, []byte(confirmed))
+	})
+	rest.bucket = newWeightBucket(3, time.Minute, nil)
+	if _, _, err := rest.subscribeUserData(t.Context(), uri); !errors.Is(err, ErrRateLimited) {
+		t.Fatal("insufficient budget reached the private stream")
+	}
+	select {
+	case <-calls:
+		t.Fatal("request sent without full connection and subscription budget")
+	default:
+	}
+	rest.bucket = newWeightBucket(4, time.Minute, rest.now)
+	_, stop, err := rest.subscribeUserData(t.Context(), uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	if rest.bucket.Allow(1) {
+		t.Fatal("private stream did not charge full request weight")
+	}
 }
 
 func TestPrivateStreamConfirmation(t *testing.T) {
@@ -156,6 +231,60 @@ func TestPrivateStreamEvents(t *testing.T) {
 	}
 }
 
+func TestPrivateStreamCancellationAndMalformedExecution(t *testing.T) {
+	for _, cancelRead := range []bool{true, false} {
+		t.Run(fmt.Sprintf("cancel=%t", cancelRead), func(t *testing.T) {
+			closed := make(chan error, 1)
+			rest, uri := privateStreamFixture(t, func(ctx context.Context, conn *websocket.Conn) {
+				reply := strings.Replace(confirmed, `"subscriptionId":0`, `"subscriptionId":7`, 1)
+				if err := conn.Write(ctx, websocket.MessageText, []byte(reply)); err != nil {
+					t.Error(err)
+					return
+				}
+				if !cancelRead {
+					frame := `{"subscriptionId":7,"event":{"e":"executionReport","x":"TRADE","t":"fixture-secret"}}`
+					if err := conn.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+				_, _, err := conn.Read(ctx)
+				if ctx.Err() != nil {
+					err = ctx.Err()
+				}
+				closed <- err
+			})
+			stream, stop, err := rest.subscribeUserData(t.Context(), uri)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if cancelRead {
+				cancel()
+				_, err = stream.Recv(ctx)
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal("private read did not honor cancellation")
+				}
+			} else {
+				ing := newUserDataIngester(UserDataConfig{Stream: stream})
+				if err := ing.Run(ctx); err == nil || err.Error() != "binance: malformed private execution report" {
+					t.Fatal("malformed execution must end the session with a redacted error")
+				}
+			}
+			stop()
+			select {
+			case err := <-closed:
+				if err == nil || errors.Is(err, context.DeadlineExceeded) {
+					t.Fatal("peer did not observe session teardown")
+				}
+			case <-time.After(6 * time.Second):
+				t.Fatal("socket remained open")
+			}
+		})
+	}
+}
+
 func TestPrivateStreamOriginAndRedirect(t *testing.T) {
 	const testREST = "https://testnet.binance.vision"
 	for _, ws := range []string{"wss://ws-api.binance.com", "ws://ws-api.testnet.binance.vision", "wss://ws-api.testnet.binance.vision/wrong", "wss://example.test", "wss://user@ws-api.testnet.binance.vision", "wss://ws-api.testnet.binance.vision?key=x"} {
@@ -168,6 +297,10 @@ func TestPrivateStreamOriginAndRedirect(t *testing.T) {
 	}
 	if _, err := privateStreamEndpoint("https://api.binance.com:443", "wss://ws-api.binance.com:443"); err != nil {
 		t.Fatal("explicit default port refused")
+	}
+	connector := NewBinanceConnector(VenueSettings{BaseURL: testREST}, "wss://ws-api.binance.com")
+	if _, err := connector.Start(t.Context(), "123", WorkerDeps{Orders: newFakeOrders()}); err == nil {
+		t.Fatal("connector started with a private stream in a different environment")
 	}
 	redirected := make(chan bool, 1)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

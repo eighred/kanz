@@ -158,7 +158,16 @@ func (i *UserDataIngester) Run(ctx context.Context) error {
 
 func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	var rep executionReport
-	if !validPrivateJSON(raw, &rep) || rep.Event != "executionReport" || rep.ExecType != "TRADE" {
+	if !validPrivateJSON(raw, &rep) {
+		var header struct {
+			Type string `json:"e"`
+		}
+		if validPrivateJSON(raw, &header) && header.Type == "executionReport" {
+			return errors.New("binance: malformed private execution report")
+		}
+		return nil // an unrelated account event can have a different field schema
+	}
+	if rep.Event != "executionReport" || rep.ExecType != "TRADE" {
 		return nil // not a fill — ignore
 	}
 	st, ok, lerr := i.orders.Lookup(rep.ClientOrderID)
@@ -434,7 +443,9 @@ func (c *binanceREST) subscribeUserData(ctx context.Context, endpoint string) (U
 	if c.apiKey == "" || len(c.apiSecret) == 0 {
 		return nil, nil, errors.New("binance: private subscription credentials missing")
 	}
-	if !c.bucket.Allow(2) {
+	// Reserve the two units for opening a WebSocket API connection and two
+	// for the signed subscription before dialing, including failed attempts.
+	if !c.bucket.Allow(4) {
 		c.onThrottle()
 		return nil, nil, ErrRateLimited
 	}
@@ -442,10 +453,7 @@ func (c *binanceREST) subscribeUserData(ctx context.Context, endpoint string) (U
 	// no HTTP client timeout. The venue cannot redirect a signed subscription.
 	setup, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	client := &http.Client{Transport: c.httpc.Transport, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	conn, _, err := websocket.Dial(setup, endpoint, &websocket.DialOptions{HTTPClient: client})
+	conn, _, err := websocket.Dial(setup, endpoint, &websocket.DialOptions{HTTPClient: c.privateAccountHTTPClient()})
 	if err != nil {
 		return nil, nil, errors.New("binance: private WebSocket API handshake failed")
 	}
