@@ -12,6 +12,10 @@ import (
 const preflightFormat = "kanz-oms-preflight-v1"
 const maxPreflightBytes = 1 << 20
 
+//go:generate go test -p 1 -run ^TestPreflightBrowserContract$ -count=1 -update-preflight-contract
+
+var requiredPreflightWorkloads = []string{"oms", "api_gateway", "venue_binance", "venue_okx"}
+
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 var requiredPreflightChecks = []string{
@@ -170,7 +174,7 @@ func validatePreflightArtifact(a preflightArtifact) error {
 	if a.Verdict != derived {
 		return fmt.Errorf("preflight evidence verdict disagrees with its controls")
 	}
-	for _, name := range []string{"oms", "api_gateway", "venue_binance", "venue_okx"} {
+	for _, name := range requiredPreflightWorkloads {
 		if a.WorkloadImages[name] == "" {
 			return fmt.Errorf("preflight evidence deployed versions are incomplete")
 		}
