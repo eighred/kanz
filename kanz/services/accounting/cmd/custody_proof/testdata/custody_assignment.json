@@ -1,0 +1,13 @@
+{
+  "kind": "custody_assignment",
+  "authority": "synthetic-custody-assignment-authority",
+  "tenant_id": "synthetic-custody-pilot",
+  "account_id": "sandbox-account",
+  "proof_id": "synthetic-venue-confirmation-v1",
+  "effective_from": "2020-02-04",
+  "effective_until": "2030-01-01",
+  "version": "synthetic-custody-assignment-v1",
+  "revision": 1,
+  "portfolio_id": "PF1",
+  "custodian_id": "CUST-A"
+}

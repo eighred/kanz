@@ -62,6 +62,7 @@ type BookScope struct {
 // It describes the comparison, without certifying that a declared account exists.
 // The run's subject supplies the portfolio and inclusive UTC business-day close.
 type RunBasis struct {
+	Assignments     []AccountAssignment    `json:"assignments,omitempty"`
 	Mode            string                 `json:"mode"`
 	Accounts        map[string][]string    `json:"accounts"`
 	JournalPosition int64                  `json:"journal_position"`
@@ -95,6 +96,7 @@ func (b *RunBasis) clone() *RunBasis {
 		return nil
 	}
 	out := *b
+	out.Assignments = slices.Clone(b.Assignments)
 	if b.Transactions != nil {
 		tx := *b.Transactions
 		if tx.StatementReferences != nil {
@@ -120,7 +122,7 @@ func (b *RunBasis) sameScope(other *RunBasis, custodian string) bool {
 	if b == nil || other == nil {
 		return b == other
 	}
-	return b.Mode == other.Mode && slices.Equal(b.Accounts[custodian], other.Accounts[custodian])
+	return b.Mode == other.Mode && slices.Equal(b.Accounts[custodian], other.Accounts[custodian]) && slices.Equal(assignmentsForCustodian(b.Assignments, custodian), assignmentsForCustodian(other.Assignments, custodian))
 }
 
 // CashAccountAllowed requires an explicit, unambiguous portfolio assignment.
