@@ -75,19 +75,33 @@ def operator_source():
             or application["spec"]["syncPolicy"].get("automated") != {"prune": True, "selfHeal": True}):
         raise ValueError("operator automatic reconciliation boundary differs")
     files, resources, invocation = {}, {}, 0
-    for path in sorted((ROOT / SOURCE_PATH).rglob("*.yaml")):
+    for path in sorted((ROOT / SOURCE_PATH).rglob("*")):
+        if path.is_dir():
+            continue
+        if path.suffix == ".jsonnet":
+            raise ValueError("Jsonnet cannot establish the static operator identity inventory")
+        if path.suffix not in (".yaml", ".yml", ".json"):
+            continue
         relative = path.relative_to(ROOT / SOURCE_PATH).as_posix()
         if path.is_symlink():
             raise ValueError("operator source symlink refused")
-        objects = source_documents(path.relative_to(ROOT))
+        canonical = path.read_bytes()
+        if path.suffix == ".json":
+            objects = [json.loads(canonical)]
+        else:
+            objects = [item for item in yaml.safe_load_all(canonical) if item]
+        revised = canonical
         if relative == "halt-job.yaml":
             if len(objects) != 1 or identity_key(objects[0]) != ("Job", NAMESPACE, "kanz-halt"):
                 raise ValueError("manual invocation contains identity resources")
             # Even an exclusion regression can never execute the real brake in
             # this fixture: the source-derived Job is unconditionally suspended.
             objects[0]["spec"]["suspend"] = True
+            canonical = revised = yaml.safe_dump_all(objects).encode("utf-8")
             invocation += 1
         else:
+            if b"+argocd:skip-file-rendering" in canonical:
+                raise ValueError("source directive skips an operator identity")
             if relative in exclusions:
                 raise ValueError("ordinary operator identity excluded")
             for item in objects:
@@ -100,7 +114,14 @@ def operator_source():
                 if key[0] != "Namespace" and key[1] != NAMESPACE:
                     raise ValueError("operator identity namespace differs")
                 resources[key] = item
-        files[relative] = objects
+                if key == ("ServiceAccount", NAMESPACE, "kanz-model"):
+                    model = copy.deepcopy(item)
+                    model["metadata"].setdefault("annotations", {})[MARKER] = "revised"
+                    if path.suffix == ".json":
+                        revised = json.dumps(model).encode("utf-8")
+                    else:
+                        revised = yaml.safe_dump_all(model if doc is item else doc for doc in objects).encode("utf-8")
+        files[relative] = (canonical, revised)
     accounts = {key[2] for key in resources if key[0] == "ServiceAccount"}
     policies = {key[2] for key in resources if key[0] == "NetworkPolicy"}
     if (invocation != 1 or len(accounts) != 6 or policies != {name + "-egress" for name in accounts}
@@ -259,15 +280,10 @@ class Fixture:
         git("init", "--initial-branch=fixture")
         revisions = []
         for revised in (False, True):
-            variant = copy.deepcopy(files)
-            if revised:
-                model = next(item for objects in variant.values() for item in objects
-                             if item["kind"] == "ServiceAccount" and item["metadata"]["name"] == "kanz-model")
-                model["metadata"].setdefault("annotations", {})[MARKER] = "revised"
-            for name, objects in variant.items():
+            for name, (original, marked) in files.items():
                 target = operator / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(yaml.safe_dump_all(objects), encoding="utf-8")
+                target.write_bytes(marked if revised else original)
             git("add", ".")
             git("-c", "commit.gpgsign=false", "commit", "-m", "revised" if revised else "canonical")
             revisions.append(git("rev-parse", "HEAD"))

@@ -3,6 +3,7 @@ import copy
 import io
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -16,7 +17,12 @@ import proof
 class OperatorSourceTests(unittest.TestCase):
     def test_canonical_source_keeps_job_suspended_and_outside_selected_resources(self):
         files, resources, application, project = proof.operator_source()
-        self.assertTrue(files["halt-job.yaml"][0]["spec"]["suspend"])
+        self.assertTrue(yaml.safe_load(files["halt-job.yaml"][0])["spec"]["suspend"])
+        for name, (canonical, revised) in files.items():
+            if name != "halt-job.yaml":
+                self.assertEqual(canonical, (proof.ROOT / proof.SOURCE_PATH / name).read_bytes())
+            if name != "cli-identities.yaml":
+                self.assertEqual(canonical, revised)
         self.assertFalse(any(key[0] == "Job" for key in resources))
         self.assertEqual(len(resources), 13)
         self.assertEqual(application["metadata"]["name"], "kanz-primary-operator")
@@ -25,7 +31,9 @@ class OperatorSourceTests(unittest.TestCase):
     def source_mutation(self, mutate):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for path in (proof.ROOT / "kanz/infra/operator").rglob("*.yaml"):
+            for path in (proof.ROOT / "kanz/infra/operator").rglob("*"):
+                if not path.is_file():
+                    continue
                 target = root / path.relative_to(proof.ROOT)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -35,7 +43,47 @@ class OperatorSourceTests(unittest.TestCase):
                 (gitops / name).write_text((proof.ROOT / "kanz/infra/gitops" / name).read_text(encoding="utf-8"), encoding="utf-8")
             mutate(root)
             with mock.patch.object(proof, "ROOT", root):
-                proof.operator_source()
+                return proof.operator_source()
+
+    def test_plain_directory_formats_reach_the_immutable_git_source(self):
+        def change(root):
+            path = root / proof.SOURCE_PATH / "cli-identities.yaml"
+            objects = list(yaml.safe_load_all(path.read_bytes()))
+            model = next(item for item in objects if item["metadata"]["name"] == "kanz-model")
+            objects.remove(model)
+            path.unlink()
+            (path.parent / "remaining.yml").write_text(yaml.safe_dump_all(objects), encoding="utf-8")
+            (path.parent / "model.json").write_text(json.dumps(model), encoding="utf-8")
+
+        files, resources, _, _ = self.source_mutation(change)
+        self.assertEqual(len(resources), 13)
+        self.assertEqual(files["remaining.yml"][0], files["remaining.yml"][1])
+        canonical, revised = (json.loads(data) for data in files["model.json"])
+        self.assertEqual(revised["metadata"].pop("annotations"), {proof.MARKER: "revised"})
+        self.assertEqual(canonical, revised)
+
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(proof.os.environ, RUNNER_TEMP=scratch):
+            fixture = proof.Fixture(Path(scratch), "messaging-proof-000000000001")
+            revisions, _, _ = fixture.git_source(files)
+            for index, revision in enumerate(revisions):
+                for name, variants in files.items():
+                    actual = subprocess.check_output(
+                        ["git", "--git-dir", str(Path(scratch) / "source.git"),
+                         "cat-file", "blob", f"{revision}:{proof.SOURCE_PATH}/{name}"],
+                        env=fixture.environment, timeout=20)
+                    self.assertEqual(actual, variants[index])
+
+    def test_ordinary_source_cannot_disappear_from_the_controller_render(self):
+        def change(root):
+            path = root / proof.SOURCE_PATH / "cli-identities.yaml"
+            path.write_bytes(b"# +argocd:skip-file-rendering\n" + path.read_bytes())
+
+        with self.assertRaisesRegex(ValueError, "skips an operator identity"):
+            self.source_mutation(change)
+
+    def test_dynamic_operator_source_is_not_part_of_the_plain_inventory(self):
+        with self.assertRaisesRegex(ValueError, "Jsonnet"):
+            self.source_mutation(lambda root: (root / proof.SOURCE_PATH / "identity.jsonnet").write_text("{}"))
 
     @staticmethod
     def change_appset(root, edit):

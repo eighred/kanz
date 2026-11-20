@@ -10,8 +10,9 @@ contacts a deployed estate.
 The Application is a concrete rendering of the tracked primary/operator matrix
 entry. The fixture runs the actual Argo Application controller, rather than an
 ApplicationSet controller. Only the repository URL and target revision change to
-the local fixture source. Identity object contents remain canonical; a single
-test annotation on `kanz-model` supplies a reversible second revision. The
+the local fixture source. The initial fixture commit keeps ordinary YAML and JSON manifests byte-for-byte.
+The source check refuses a controller skip directive on an identity or a dynamic
+Jsonnet manifest. A single test annotation on `kanz-model` supplies a reversible second revision. The
 excluded manual Job is suspended in both fixture commits as an independent
 brake against accidental execution. No NATS, SPIRE server, halt process, order
 or resume operation runs.

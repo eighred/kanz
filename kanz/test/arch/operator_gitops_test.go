@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -57,8 +58,21 @@ func operatorGitOpsProblems(sources []gitOpsSyncSource, files map[string]string,
 	seen := map[string]bool{}
 	namespaces, jobs := 0, 0
 	for name, body := range files {
-		if extension := strings.ToLower(filepath.Ext(name)); extension != ".yaml" && extension != ".yml" {
+		switch filepath.Ext(name) {
+		case ".jsonnet":
+			problems = append(problems, "operator-dynamic-source: only plain identity manifests can be inventoried: "+name)
 			continue
+		case ".json":
+			if !json.Valid([]byte(body)) {
+				problems = append(problems, "operator-manifest-invalid: "+name)
+				continue
+			}
+		case ".yml", ".yaml":
+		default:
+			continue
+		}
+		if name != "halt-job.yaml" && strings.Contains(body, "+argocd:skip-file-rendering") {
+			problems = append(problems, "operator-identity-skipped: "+name)
 		}
 		docs, err := decodeYAMLStream[operatorGitOpsDoc]([]byte(body))
 		if err != nil {
@@ -172,6 +186,18 @@ func TestOperatorGitOpsGuardRejectsBoundaryMutations(t *testing.T) {
 		}},
 		{"extra automatic job", "operator-sync-kind", func(_ []gitOpsSyncSource, files map[string]string) bool {
 			files["second-job.yaml"] = strings.Replace(files["halt-job.yaml"], "name: kanz-halt", "name: second-halt", 1)
+			return allowed
+		}},
+		{"nonidentity JSON resource", "operator-sync-kind", func(_ []gitOpsSyncSource, files map[string]string) bool {
+			files["notes.json"] = `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"fixture","namespace":"kanz-operator"}}`
+			return allowed
+		}},
+		{"source skips ordinary identity", "operator-identity-skipped", func(_ []gitOpsSyncSource, files map[string]string) bool {
+			files["cli-identities.yaml"] = "# +argocd:skip-file-rendering\n" + files["cli-identities.yaml"]
+			return allowed
+		}},
+		{"dynamic source", "operator-dynamic-source", func(_ []gitOpsSyncSource, files map[string]string) bool {
+			files["identity.jsonnet"] = "{}"
 			return allowed
 		}},
 		{"project denies namespace", "operator-project-denied", func(_ []gitOpsSyncSource, _ map[string]string) bool { return false }},
