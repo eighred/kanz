@@ -401,7 +401,7 @@ def upgrade_retained_settlement(container, current):
     print("Prior settlement upgraded with checked order, evidence, cash and outbox rows, function OID, owner and privileges preserved", flush=True)
 
 
-def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=False):
+def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=False, go_handback=False):
     prior_sql = previous_settlement_sql() if upgrade_settlement else None
     packages = {path: list(names) for path, names in OWNERS.items()}
     if native:
@@ -415,8 +415,12 @@ def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=
         (stage / "prior-accounting").chmod(0o755)
         with prior_accounting.open("rb") as binary:
             print("Prior accounting SHA-256", hashlib.file_digest(binary, "sha256").hexdigest(), flush=True)
+    if go_handback:
+        packages = {"services/api_gateway/cmd/api_gateway": ["TestSyntheticReverseTransferToGo"]}
     targets = list(packages)
-    if native:
+    if go_handback:
+        targets.append("services/oms/cmd/oms")
+    elif native:
         targets.append("services/accounting/internal/consume")
     if browser:
         prepare_browser()
@@ -457,7 +461,18 @@ def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=
         fixture_env = {"TEST_POSTGRES_URL": dsn}
         if native:
             pending_migrations = provision_native(container, fixture_env)
-            provision_accounting(container, fixture_env)
+            if go_handback:
+                for migration in pending_migrations:
+                    sql(container, migration.read_text(encoding="utf-8"), DB)
+                gate = ROOT / "rust/services/synthetic_oms/go_writer.sql"
+                sql(container, gate.read_text(encoding="utf-8"), DB)
+                sql(container, "GRANT kanz_synthetic_oms_go_runtime TO kanz_synthetic_oms_runtime_g2; "
+                               "GRANT SELECT, UPDATE(published_at,attempts,last_error) ON outbox TO kanz_synthetic_oms_runtime_g2;", DB)
+                needed = ("RUNTIME", "ADAPTER", "CONTROL", "SWITCH", "NEXT_RUNTIME", "RELAY", "VENUE")
+                fixture_env = {f"SYNTHETIC_OMS_{role}_URL": fixture_env[f"SYNTHETIC_OMS_{role}_URL"] for role in needed}
+                fixture_env["KANZ_SYNTHETIC_GO_HANDBACK"] = "1"
+            else:
+                provision_accounting(container, fixture_env)
             if prior_accounting:
                 provision_upgrade(container, fixture_env)
             fixture_env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
@@ -475,6 +490,13 @@ def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=
                    *[arg for name in selected_env for arg in ("-e", name)],
                    "--entrypoint", "/fixture/" + base, RUNTIME if native else PG,
                    "-test.v", "-test.count=1", "-test.parallel=1", "-test.timeout=2m"]
+            if go_handback:
+                log = run_fixture_tests(cmd, names, selected_env, password)
+                for line in log.splitlines():
+                    if "GO_HANDBACK " in line:
+                        print(line.split("GO_HANDBACK ", 1)[1], flush=True)
+                print(f"{package}: signed Rust-to-Go handback passed without skips", flush=True)
+                continue
             if native and base == "api_gateway":
                 run_fixture_tests(cmd, ["TestSyntheticLegacyFundingRefusal"], selected_env, password)
                 print(f"{package}: legacy funding refusal passed without skips", flush=True)
@@ -595,6 +617,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--native", type=Path, help="run the complete slice with this checkout's Linux amd64 kanz-synthetic-oms")
+    mode.add_argument("--go-handback", type=Path, metavar="NATIVE", help="qualify Rust-to-Go recovery in a separate generation-one fixture with this Linux native binary")
     mode.add_argument("--owners-only", action="store_true", help="run existing component checks without native integration")
     parser.add_argument("--prior-accounting", type=Path, help="also use a Linux accounting test binary built from 7077c75b for the historical tenant")
     parser.add_argument("--browser", action="store_true", help="read the actual funded terminal order through signed gateway, BFF and isolated Chromium")
@@ -608,4 +631,5 @@ if __name__ == "__main__":
     if args.prior_accounting and not args.native:
         parser.error("--prior-accounting requires --native")
     with tempfile.TemporaryDirectory(prefix="kanz-synthetic-orders-") as directory:
-        run(Path(directory), args.native, args.prior_accounting, args.browser, args.upgrade_settlement)
+        run(Path(directory), args.native or args.go_handback, args.prior_accounting, args.browser, args.upgrade_settlement,
+            go_handback=bool(args.go_handback))
