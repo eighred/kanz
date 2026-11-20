@@ -201,6 +201,10 @@ one status: `ready to implement`, `blocked external`, `waiting on dependency`,
 `owner`, `active_prs`, `unresolved_dependencies`, `blocked_since`, and
 `order` when supported by evidence. `closure_proof` requires the exact
 `merge_sha`, `evidence`, `verified_on_main`, and `all_acceptance_passed`.
+When acceptance is rerun after the merge, record its revision in `verified_sha`
+and its receipt in `evidence`. Otherwise the merge revision is the tested
+revision. Closure candidates require acceptance on the current main with
+verified checks, a complete issue inventory and resolved dependencies.
 Use `keep_open` for an explicit hold. A link, stale date or green PR alone
 cannot make a closure candidate.
 Use `landed_scope_evidence` to show merged work awaiting acceptance even when

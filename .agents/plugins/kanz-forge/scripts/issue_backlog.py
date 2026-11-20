@@ -14,9 +14,10 @@ def date(value):
     return result.astimezone(timezone.utc)
 
 
-def summarize(backlog):
+def summarize(backlog, main):
     """Input is a reconciled snapshot; unknown evidence must stay unknown."""
     now = date(backlog["as_of"])
+    complete = backlog.get("inventory_complete") is True and backlog["open_total"] == len(backlog["issues"])
     rows = {}
     for item in backlog["issues"]:
         number = item["number"]
@@ -35,14 +36,17 @@ def summarize(backlog):
                 raise ValueError("blocker starts after inventory")
             age = (now - since).total_seconds() / 3600
         proof = item.get("closure_proof") or {}
-        closable = (status == STATUSES[4] and item["acceptance_documented"] is True
+        evidence = proof.get("evidence")
+        closable = (complete and main["verified_checks"] and status == STATUSES[4]
+                    and item["acceptance_documented"] is True
                     and proof.get("all_acceptance_passed") is True
                     and proof.get("verified_on_main") is True
                     and bool(re.fullmatch(r"[0-9a-f]{40}", proof.get("merge_sha", "")))
-                    and bool(proof.get("evidence")) and not item.get("keep_open"))
+                    and proof.get("verified_sha", proof.get("merge_sha")) == main["sha"]
+                    and isinstance(evidence, str) and bool(evidence.strip())
+                    and not item.get("unresolved_dependencies") and not item.get("keep_open"))
         rows[number] = dict(item, blocker_age_hours=age,
                             stale_review=(now - updated).days >= 90, closure_candidate=closable)
-    complete = backlog.get("inventory_complete") is True and backlog["open_total"] == len(rows)
     ready = [r for r in rows.values() if r["status"] == STATUSES[0]
              and r["acceptance_documented"] is True
              and (not r.get("active_prs") or r.get("independent_scope"))
@@ -60,7 +64,7 @@ def summarize(backlog):
         "awaiting_verification": sorted(r["number"] for r in rows.values()
                                         if (r["status"] == STATUSES[4] or r.get("landed_scope_evidence"))
                                         and not r["closure_candidate"]),
-        "closure_candidates": sorted(r["number"] for r in rows.values() if r["closure_candidate"]) if complete else [],
+        "closure_candidates": sorted(r["number"] for r in rows.values() if r["closure_candidate"]),
         "top_five": [r["number"] for r in ready[:5]],
         "issues": [rows[k] for k in sorted(rows)],
     }
