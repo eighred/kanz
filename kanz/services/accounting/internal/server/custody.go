@@ -50,11 +50,20 @@ func WithBreakStore(store BreakStore) Option {
 	return func(s *Server) { s.breaks = store }
 }
 
+// WithReadOnlyCustodyReview keeps the operator's break query available while
+// removing action handlers from the serving instance.
+func WithReadOnlyCustodyReview() Option {
+	return func(s *Server) { s.breakReviewReadOnly = true }
+}
+
 func (s *Server) custodyRoutes() {
 	if s.breaks == nil {
 		return
 	}
 	s.mux.HandleFunc("GET /v1/custody/breaks", s.handleListBreaks)
+	if s.breakReviewReadOnly {
+		return
+	}
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/assign", s.handleAssignBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/explain", s.handleExplainBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/actions", s.handleCustodyAction)
@@ -146,5 +155,5 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, toBreakView(b, now))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "actions_enabled": s.breaks.ActionsEnabled()})
+	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "actions_enabled": !s.breakReviewReadOnly && s.breaks.ActionsEnabled()})
 }

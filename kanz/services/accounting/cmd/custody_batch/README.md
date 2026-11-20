@@ -12,6 +12,8 @@ Revision 1 uses an empty previous digest. Each correction for the same business 
 
 ## Isolated pilot
 
+Set `ACCOUNTING_CUSTODY_REVIEW_READ_ONLY=true` on the pilot accounting instance. Its break list exposes the portfolio, custodian and the comparison that produced each observed discrepancy. The read-only instance omits claim and explanation handlers. A historical detection with no recorded source has no `detection` field.
+
 Apply the existing accounting migrations to a new `kanz_custody_pilot` database. From this directory, a database administrator on that database can apply the fixture grant once with `psql -v public_key="$(jq -r .public_key testdata/authority.json)" -f pilot_grants.sql`. Assign the resulting `kanz_custody_batch_pilot` NOLOGIN group to a dedicated NOSUPERUSER NOBYPASSRLS login with no other grants. The group can append the signed fixture's receipts and publish its statement outbox partition. Point the separate accounting runtime at the same database with its accounting role. Mount connection settings through each process's own `ACCOUNTING_DATABASE_URL_FILE`.
 
 Enable the following settings in the importing process and the accounting consumer for this synthetic tenant:

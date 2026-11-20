@@ -332,9 +332,10 @@ SELECT b.break_id, b.portfolio_id, b.custodian_id, b.kind, b.break_key, b.ibor, 
        b.revision, b.values_verified, COALESCE(d.run_id,''), COALESCE(d.statement_id,''),
        COALESCE(to_char(d.business_date,'YYYY-MM-DD'),''), COALESCE(d.book_basis->>'mode',''),
        COALESCE(d.book_basis->>'journal_position','')
-FROM custody_breaks b LEFT JOIN custody_runs d
+FROM custody_breaks b LEFT JOIN custody_break_detections link USING (tenant_id,break_id)
+LEFT JOIN custody_runs d
   ON (d.tenant_id,d.run_id,d.portfolio_id,d.custodian_id) =
-     (b.tenant_id,b.detection_run_id,b.portfolio_id,b.custodian_id)
+     (b.tenant_id,link.run_id,b.portfolio_id,b.custodian_id)
  AND d.outcome='breaks' AND d.statement_id<>'' `
 
 // OutstandingBreaks implements Store.

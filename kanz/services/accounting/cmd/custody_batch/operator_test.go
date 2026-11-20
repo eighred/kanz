@@ -85,7 +85,7 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		if proto.Unmarshal(message.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil || frame.GetEnvelope().GetTenantId() != tenant || fact.GetRunId() != run.RunID || fact.GetStatementId() != statement.StatementID {
 			t.Fatal("completion FACT did not identify the committed comparison")
 		}
-		site := httptest.NewServer(server.New(&server.Readiness{}, slog.Default(), journal, "USD", server.WithTenant(tenant), server.WithBreakStore(store)))
+		site := httptest.NewServer(server.New(&server.Readiness{}, slog.Default(), journal, "USD", server.WithTenant(tenant), server.WithBreakStore(store), server.WithReadOnlyCustodyReview()))
 		defer site.Close()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, site.URL+"/v1/custody/breaks", nil)
 		if err != nil {
@@ -101,10 +101,14 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		}
 		defer response.Body.Close()
 		var list struct {
-			Breaks []pilotBreak `json:"breaks"`
+			Breaks         []pilotBreak `json:"breaks"`
+			ActionsEnabled *bool        `json:"actions_enabled"`
 		}
 		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&list) != nil {
 			t.Fatalf("accounting read failed: %d", response.StatusCode)
+		}
+		if list.ActionsEnabled == nil || *list.ActionsEnabled {
+			t.Fatal("read-only pilot offered an operator action")
 		}
 		if revision == 2 {
 			if run.Outcome != custody.OutcomeClean || len(list.Breaks) != 0 {
@@ -119,6 +123,15 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		expected := custody.Detection{RunID: run.RunID, StatementID: statement.StatementID, BusinessDate: "2020-02-04", ScopeMode: custody.BasisDeclared, JournalPosition: "1"}
 		if b.Detection != expected || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Key != "SYN" || b.IBOR != "10.5" || b.Custodian != "9.5" || b.Difference != "1" {
 			t.Fatalf("unexpected accounting evidence: %+v", b)
+		}
+		for _, action := range []string{"actions", "assign", "explain"} {
+			probe := httptest.NewRequest(http.MethodPost, "/v1/custody/breaks/test/"+action, nil)
+			probe.Header = req.Header.Clone()
+			rec := httptest.NewRecorder()
+			site.Config.Handler.ServeHTTP(rec, probe)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("read-only %s returned %d", action, rec.Code)
+			}
 		}
 		if binary := os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"); binary != "" {
 			payload, err := json.Marshal(b)

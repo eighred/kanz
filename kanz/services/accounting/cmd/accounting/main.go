@@ -234,6 +234,9 @@ func run() int {
 		server.WithBreakStore(custodyStore),
 		server.WithCustodyBookScope(custodyCfg.scope),
 	}
+	if cfg.CustodyReviewReadOnly {
+		opts = append(opts, server.WithReadOnlyCustodyReview())
+	}
 	var collateralConsumer *collateralops.Consumer
 	if cfg.CollateralInputSource != "" || cfg.CollateralCustodySources != "" {
 		if ledgerPool == nil || cfg.NATSURL == "" {

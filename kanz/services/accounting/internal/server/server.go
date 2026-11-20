@@ -52,7 +52,8 @@ type Server struct {
 	// breaks is the custody reconciliation break queue (#962). Nil ⇒ the routes
 	// are not registered and the surface answers 404, which is the truthful
 	// answer for a deployment with no custody reconciliation.
-	breaks BreakStore
+	breaks              BreakStore
+	breakReviewReadOnly bool
 	// snapshotMetrics counts unbounded materializations. nil is inert.
 	snapshotMetrics *ledger.SnapshotMetrics
 	// custodyScope decides WHICH SLICE of a portfolio's journal the ad-hoc
