@@ -127,7 +127,7 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 25 FACTs" not in proof.stdout
+                or b"real JetStream replay and signed browser read passed with 27 FACTs" not in proof.stdout
                 or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
             locations = re.findall(rb"\b(?:main_test|operator_test)\.go:\d+(?=: )", proof.stdout)
             stage = re.search(rb"\breturn-browser-stage=[a-z-]+", proof.stdout)

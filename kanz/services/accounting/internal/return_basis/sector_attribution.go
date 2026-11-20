@@ -34,7 +34,7 @@ func (c datedSectors) Sector(_ context.Context, id string, horizon time.Time) (s
 
 func (s *Store) readSectorClassifications(ctx context.Context, e Evidence, report *performancepb.DailyReturnAssessment) ([]refdata.DatedSector, error) {
 	if s.sectorHistory == nil || report.SectorAttribution == nil || report.GetMeasured() == nil ||
-		report.GetBenchmarkComparison().GetMeasured() == nil || e.Flows.Split != nil ||
+		report.GetBenchmarkComparison().GetMeasured() == nil || report.GetExternalFlowCount() != 0 ||
 		e.PositionBasis.TradeCoverage != nil || e.PositionBasis.Opening == nil {
 		return nil, nil
 	}

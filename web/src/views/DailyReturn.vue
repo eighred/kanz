@@ -50,6 +50,11 @@ type SectorAttribution = {
 }
 type SectorRow = { label: string; effects: string[] }
 type SectorDisplay = { rows: SectorRow[]; total: SectorRow; classification: string; composition: string }
+type IntradayFlow = {
+  movement_id: string; command_digest: string; effective_time: string; signed_amount: Decimal
+  pre_flow_nav_reference: string; post_flow_nav_reference: string
+}
+type FlowDisplay = Omit<IntradayFlow, 'signed_amount'> & { amount: string }
 
 const props = defineProps<{ portfolio: string }>()
 const session = useSession()
@@ -59,7 +64,7 @@ const asOf = ref('')
 const pending = ref(false)
 const error = ref('')
 const result = ref<{
-  value?: number; reason?: string; digest: string; flow?: { time: string; amount: string }; benchmark: BenchmarkDisplay
+  value?: number; reason?: string; digest: string; flows: FlowDisplay[]; benchmark: BenchmarkDisplay
   contribution?: ContributionDisplay | string
   sectors?: SectorDisplay | string
 }>()
@@ -84,6 +89,7 @@ const benchmarkReasons: Record<string, string> = {
 }
 const contributionReasons: Record<string, string> = {
   portfolio_return_unassessed: 'The portfolio return is unassessed.',
+  multiple_external_flows_unsupported: 'Position contributions are unavailable for intervals with multiple external flows.',
   position_marks_missing: 'A dated price is missing for one or more holdings.',
   position_mark_window_mismatch: 'The price dates do not match the portfolio valuations.',
   position_nav_not_reconciled: 'The valued holdings and cash do not reconcile to the signed NAV.',
@@ -109,6 +115,34 @@ const sectorReasons: Record<string, string> = {
 function horizonKey(value: string) {
   const parts = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?Z$/.exec(value)
   return parts && parts[1] + '.' + (parts[2] ?? '').padEnd(6, '0')
+}
+
+function flowDisplay(report: {
+  intraday_flow?: IntradayFlow; intraday_flows?: IntradayFlow[]; external_flow_count?: string
+  start: string; end: string; measured?: { return_value: number }
+}): FlowDisplay[] {
+  const plural = report.intraday_flows === undefined ? [] : report.intraday_flows
+  if (!Array.isArray(plural) || plural.length === 1 || (plural.length && report.intraday_flow !== undefined)) throw new Error()
+  const flows = report.intraday_flow === undefined ? plural : [report.intraday_flow]
+  if ((flows.length || report.measured) && report.external_flow_count !== String(flows.length)) throw new Error()
+  let previous = horizonKey(report.start)
+  const end = horizonKey(report.end)
+  const movements = new Set<string>()
+  return flows.map(flow => {
+    const time = horizonKey(flow.effective_time)
+    if (typeof flow.signed_amount?.coefficient !== 'string' || !/^-?[1-9]\d*$/.test(flow.signed_amount.coefficient)) throw new Error()
+    const amount = formatDecimal(flow.signed_amount)
+    const before = flow.pre_flow_nav_reference ?? ''
+    const after = flow.post_flow_nav_reference ?? ''
+    if (!time || !previous || !end || time <= previous || time >= end || amount === null ||
+        typeof flow.movement_id !== 'string' || !flow.movement_id || movements.has(flow.movement_id) ||
+        !/^[0-9a-f]{64}$/.test(flow.command_digest) || typeof before !== 'string' || typeof after !== 'string' ||
+        (before && before === after) || (report.measured && (!before || !after))) throw new Error()
+    movements.add(flow.movement_id)
+    previous = time
+    return { effective_time: flow.effective_time, amount, movement_id: flow.movement_id, command_digest: flow.command_digest,
+      pre_flow_nav_reference: before, post_flow_nav_reference: after }
+  })
 }
 
 function benchmarkDisplay(comparison: BenchmarkComparison | undefined, report: {
@@ -218,7 +252,7 @@ async function read() {
     const report = await api.get<{ portfolio_id: string; currency: string; end: string; as_of: string
       source_digest: string; start: string; external_flow_count?: string; measured?: { portfolio_id: string; as_of: string; start: string; end: string; method: string; return_value: number }
       unassessed_reason?: string
-      intraday_flow?: { effective_time: string; signed_amount: Decimal; pre_flow_nav_reference: string; post_flow_nav_reference: string }
+      intraday_flow?: IntradayFlow; intraday_flows?: IntradayFlow[]
       benchmark_comparison?: BenchmarkComparison
       position_contribution?: PositionContribution
       sector_attribution?: SectorAttribution
@@ -231,23 +265,15 @@ async function read() {
     const benchmark = benchmarkDisplay(report.benchmark_comparison, report)
     const contribution = contributionDisplay(report.position_contribution, report.measured?.return_value)
     const sectors = sectorDisplay(report.sector_attribution, benchmark, report)
+    const flows = flowDisplay(report)
     if (report.measured) {
       const measured = report.measured
-      const split = report.intraday_flow
-      const amount = formatDecimal(split?.signed_amount)
-      const flowTime = split && horizonKey(split.effective_time)
-      const startTime = horizonKey(report.start)
-      const endTime = horizonKey(report.end)
-      const flow = split && flowTime && startTime && endTime && flowTime > startTime && flowTime < endTime && amount &&
-        split.pre_flow_nav_reference && split.post_flow_nav_reference && split.pre_flow_nav_reference !== split.post_flow_nav_reference
-        ? { time: split.effective_time, amount: amount + ' ' + report.currency } : undefined
-      const covered = (!split && report.external_flow_count === '0') || (flow && report.external_flow_count === '1')
-      if (report.unassessed_reason !== undefined || !covered || measured.portfolio_id !== props.portfolio ||
+      if (report.unassessed_reason !== undefined || measured.portfolio_id !== props.portfolio ||
           measured.method !== 'RETURN_METHOD_TIME_WEIGHTED' || measured.as_of !== report.as_of ||
           measured.start !== report.start || measured.end !== report.end || !Number.isFinite(measured.return_value)) throw new Error()
-      result.value = { value: measured.return_value, digest: report.source_digest, flow, benchmark, contribution, sectors }
+      result.value = { value: measured.return_value, digest: report.source_digest, flows, benchmark, contribution, sectors }
     } else if (report.unassessed_reason && Object.hasOwn(reasons, report.unassessed_reason)) {
-      result.value = { reason: reasons[report.unassessed_reason], digest: report.source_digest, benchmark, contribution, sectors }
+      result.value = { reason: reasons[report.unassessed_reason], digest: report.source_digest, flows, benchmark, contribution, sectors }
     } else throw new Error()
   } catch (e) {
     if (!request.signal.aborted) error.value = e instanceof ApiError && [403, 404].includes(e.status)
@@ -271,9 +297,19 @@ async function read() {
     <output v-if="result">
       <template v-if="result.value !== undefined">
         <div>Time-weighted return <strong>{{ percent.format(result.value) }}</strong></div>
-        <div v-if="result.flow">Two linked subperiods · {{ result.flow.amount }} external flow at {{ result.flow.time }}</div>
+        <div v-if="result.flows.length === 1 && result.flows[0]">Two linked subperiods · {{ result.flows[0].amount }} {{ currency }} external flow at {{ result.flows[0].effective_time }}</div>
+        <div v-else-if="result.flows.length > 1">{{ result.flows.length + 1 }} linked subperiods</div>
       </template>
       <template v-else>Unassessed. {{ result.reason }}</template>
+      <table v-if="result.flows.length > 1" class="position-contribution">
+        <caption>Intraday external flows</caption>
+        <thead><tr><th scope="col">Movement</th><th scope="col">Effective time (UTC)</th><th scope="col">Signed amount ({{ currency }})</th>
+          <th scope="col">Pre-flow NAV reference</th><th scope="col">Post-flow NAV reference</th><th scope="col">Command digest</th></tr></thead>
+        <tbody><tr v-for="flow in result.flows" :key="flow.movement_id">
+          <th scope="row">{{ flow.movement_id }}</th><td>{{ flow.effective_time }}</td><td>{{ flow.amount }}</td>
+          <td>{{ flow.pre_flow_nav_reference || 'Unavailable' }}</td><td>{{ flow.post_flow_nav_reference || 'Unavailable' }}</td><td><code>{{ flow.command_digest }}</code></td>
+        </tr></tbody>
+      </table>
       <div v-if="result.benchmark.measured">
         {{ result.benchmark.id }} return <strong>{{ percent.format(result.benchmark.measured.benchmark_return) }}</strong>
         <div>Active return <strong>{{ percentagePoints.format(result.benchmark.measured.active_return * 100) }} percentage points</strong></div>

@@ -64,8 +64,12 @@ func validPositionBasis(e Evidence) bool {
 func (s *Store) verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performancepb.DailyReturnAssessment, error) {
 	report := assessment(r)
 	if r.Evidence.SectorAttribution {
+		reason := "sector_portfolio_unassessed"
+		if report.GetMeasured() != nil && len(report.GetIntradayFlows()) != 0 {
+			reason = "sector_regime_unsupported"
+		}
 		report.SectorAttribution = &performancepb.DailySectorAttribution{
-			Result: &performancepb.DailySectorAttribution_UnassessedReason{UnassessedReason: "sector_portfolio_unassessed"},
+			Result: &performancepb.DailySectorAttribution_UnassessedReason{UnassessedReason: reason},
 		}
 	}
 	b := r.Evidence.PositionBasis
@@ -109,6 +113,9 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 ) (*performancepb.PositionContributionBreakdown, string, error) {
 	if report.GetMeasured() == nil {
 		return nil, "portfolio_return_unassessed", nil
+	}
+	if len(e.Flows.Splits) != 0 {
+		return nil, "multiple_external_flows_unsupported", nil
 	}
 	b := e.PositionBasis
 	split := e.Flows.Split

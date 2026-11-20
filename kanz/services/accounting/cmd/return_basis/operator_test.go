@@ -532,6 +532,102 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		}
 		t.Log("Datamaster was stopped for the fresh Accounting replay")
 
+		// A separate close has a subscription and a redemption. Each invested
+		// subperiod grows by 10%, so (11/10)^3 - 1 is exactly 331/1000.
+		multiDay := time.Date(2020, 2, 7, 0, 0, 0, 0, time.UTC)
+		multiEnd := multiDay.AddDate(0, 0, 1)
+		bookExternal := func(id string, kind cashmove.Kind, amount int64, hour int) returnbasis.FlowSplit {
+			t.Helper()
+			leg := cashmove.Command{Tenant: first.Tenant, Actor: command.Actor, Reason: "dated external capital",
+				Movement: cashmove.CashMovement{MovementID: id, PortfolioID: first.Portfolio, Kind: kind, Currency: first.Currency,
+					Amount: big.NewRat(amount, 1), SourceRef: "transfer-" + id, Effective: multiDay.Add(time.Duration(hour) * time.Hour)}}
+			digest, err := cashmove.ReviewDigest(leg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := commands.Accept(ctx, leg, digest); err != nil {
+				t.Fatal("accept external flow", id, err)
+			}
+			wait("unbooked external flow "+id, func(check context.Context) bool {
+				status, err := commands.Status(check, first.Tenant, first.Portfolio, id)
+				return err == nil && status.Status == "journal_recorded"
+			})
+			if kind == cashmove.Redemption {
+				amount = -amount
+			}
+			return returnbasis.FlowSplit{MovementID: id, CommandDigest: digest, Effective: leg.Movement.Effective, SignedAmount: dec.Exact(fmt.Sprint(amount))}
+		}
+		subscription := bookExternal("multi-subscription", cashmove.Subscription, 50, 10)
+		redemption := bookExternal("multi-redemption", cashmove.Redemption, 40, 16)
+		events, err = journal.Journal(ctx, first.Portfolio)
+		if err != nil {
+			t.Fatal("read multi-flow valuation journal", err)
+		}
+		multi := first
+		multi.CloseDate = multiEnd.Format(time.DateOnly)
+		multi.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		nav := func(ref, total string, a dec.Exact, cut time.Time) *returnbasis.Close {
+			t.Helper()
+			return captureNAV(ref, marks("prices-"+ref, a, "8", cut, multi.AsOf), total, cut, multi.AsOf)
+		}
+		multi.Opening = nav("multi-open", "100", "9", multiDay)
+		subscription.Before = nav("multi-before-1", "110", "11", subscription.Effective.Add(-time.Microsecond))
+		subscription.After = nav("multi-after-1", "160", "11", subscription.Effective)
+		redemption.Before = nav("multi-before-2", "176", "14.2", redemption.Effective.Add(-time.Microsecond))
+		redemption.After = nav("multi-after-2", "136", "14.2", redemption.Effective)
+		multi.Closing = nav("multi-close", "149.6", "16.92", multiEnd)
+		two := uint64(2)
+		multi.Flows = &returnbasis.FlowCompletion{Scope: first.Flows.Scope, Reference: "complete-multi-cash", EventCount: &two,
+			Splits: []returnbasis.FlowSplit{subscription, redemption}}
+		badSecond := redemption
+		badSecond.CommandDigest = subscription.CommandDigest
+		wrong = multi
+		wrongFlows := *multi.Flows
+		wrongFlows.Splits = []returnbasis.FlowSplit{subscription, badSecond}
+		wrong.Flows = &wrongFlows
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("second movement accepted another booked command's digest")
+		}
+		multiDigest := appendEdition(multi)
+		report, err := store.ReadObserved(ctx, multi.Portfolio, multi.Currency, multi.CloseDate, multi.AsOf)
+		if err != nil || report.GetMeasured() == nil || report.GetMeasured().GetReturnValue() != 0.331 || report.GetExternalFlowCount() != 2 ||
+			report.GetIntradayFlow() != nil || len(report.GetIntradayFlows()) != 2 {
+			t.Fatal("observed multi-flow TWR or flow coverage differs from 331/1000", report, err)
+		}
+		for i, leg := range multi.Flows.Splits {
+			got := report.GetIntradayFlows()[i]
+			amount, ok := dec.FromProtoChecked(got.GetSignedAmount())
+			want, _ := leg.SignedAmount.Rat()
+			if !ok || amount.Cmp(want) != 0 || got.GetMovementId() != leg.MovementID || got.GetCommandDigest() != leg.CommandDigest ||
+				!got.GetEffectiveTime().AsTime().Equal(leg.Effective) || got.GetPreFlowNavReference() != leg.Before.Reference || got.GetPostFlowNavReference() != leg.After.Reference {
+				t.Fatalf("published multi-flow leg %d differs from its booked command and signed cut", i)
+			}
+		}
+		partialMulti := multi
+		partialMulti.PreviousDigest = multiDigest
+		partialMulti.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		partialSecond := redemption
+		partialSecond.Before = nil
+		partialSet := *multi.Flows
+		partialSet.Splits = []returnbasis.FlowSplit{subscription, partialSecond}
+		partialMulti.Flows = &partialSet
+		partialDigest := appendEdition(partialMulti)
+		report, err = store.ReadObserved(ctx, multi.Portfolio, multi.Currency, multi.CloseDate, partialMulti.AsOf)
+		if err != nil || report.GetMeasured() != nil || report.GetUnassessedReason() != "nav_at_flow_missing" || len(report.GetIntradayFlows()) != 2 ||
+			report.GetIntradayFlows()[1].GetPreFlowNavReference() != "" {
+			t.Fatal("missing second NAV produced a measurement or discarded its movement", report, err)
+		}
+		bookExternal("multi-late-third", cashmove.Subscription, 1, 19)
+		omitted := multi
+		omitted.PreviousDigest = partialDigest
+		omitted.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		if _, err := admit(omitted); err == nil {
+			t.Fatal("multi-flow edition omitted a third independently booked movement")
+		}
+		if repeat, err := admit(multi); err != nil || repeat != multiDigest {
+			t.Fatal("new booking altered the historical multi-flow edition", err)
+		}
+
 		// A second booking learned after these editions must count even when it
 		// is denominated in another currency. Earlier reports remain immutable.
 		additional := command
@@ -633,9 +729,9 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 	}
 
 	assertRetained()
-	values := make([]map[string]string, len(editions))
+	values := make([]map[string]any, len(editions))
 	for i, e := range editions {
-		values[i] = map[string]string{"as_of": e.AsOf.Format(time.RFC3339Nano), "digest": digests[i], "date": e.CloseDate}
+		values[i] = map[string]any{"as_of": e.AsOf.Format(time.RFC3339Nano), "digest": digests[i], "date": e.CloseDate}
 		if reference := classificationReferences[digests[i]]; reference != "" {
 			values[i]["classification_reference"] = reference
 		}
@@ -655,6 +751,21 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 				t.Fatal(err)
 			}
 			values[i]["benchmark_digest"] = fmt.Sprintf("%x", sha256.Sum256(raw))
+		}
+		if e.Flows != nil && len(e.Flows.Splits) > 0 {
+			var legs []map[string]string
+			for _, leg := range e.Flows.Splits {
+				out := map[string]string{"movement_id": leg.MovementID, "command_digest": leg.CommandDigest, "effective_time": leg.Effective.Format(time.RFC3339Nano),
+					"signed_amount": string(leg.SignedAmount), "pre_flow_nav_reference": "", "post_flow_nav_reference": ""}
+				if leg.Before != nil {
+					out["pre_flow_nav_reference"] = leg.Before.Reference
+				}
+				if leg.After != nil {
+					out["post_flow_nav_reference"] = leg.After.Reference
+				}
+				legs = append(legs, out)
+			}
+			values[i]["flow_legs"] = legs
 		}
 	}
 	wire, err := json.Marshal(map[string]any{"date": first.CloseDate, "editions": values})
@@ -680,7 +791,8 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 	t.Logf("real JetStream replay and signed browser read passed with %d FACTs", after.State.Msgs)
 	t.Log("observed PostgreSQL bytes matched each original FACT before and after replay")
 	for i, e := range editions {
-		t.Logf("edition close=%s horizon=%s source_sha256=%s benchmark_sha256=%s classification=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i], values[i]["benchmark_digest"], values[i]["classification_reference"])
+		benchmarkDigest, _ := values[i]["benchmark_digest"].(string)
+		t.Logf("edition close=%s horizon=%s source_sha256=%s benchmark_sha256=%s classification=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i], benchmarkDigest, classificationReferences[digests[i]])
 	}
 }
 

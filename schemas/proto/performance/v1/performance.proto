@@ -193,6 +193,10 @@ message DailyReturnAssessment {
   DailyBenchmarkComparison benchmark_comparison = 16;
   DailyPositionContribution position_contribution = 17;
   DailySectorAttribution sector_attribution = 18;
+
+  // Chronological cash/NAV bridges for an edition with two or more flows.
+  // Single-flow editions retain intraday_flow.
+  repeated IntradayReturnFlow intraday_flows = 19;
 }
 
 // DailySectorAttribution is one-day Brinson-Hood-Beebower attribution over
@@ -207,8 +211,8 @@ message DailySectorAttribution {
   }
 }
 
-// IntradayReturnFlow identifies the verified same-time cash/NAV bridge used to
-// link the two subperiods. Money remains an exact Decimal.
+// IntradayReturnFlow identifies the verified same-time cash/NAV bridge between
+// adjacent invested subperiods. Money remains an exact Decimal.
 message IntradayReturnFlow {
   string movement_id = 1;
   string command_digest = 2;

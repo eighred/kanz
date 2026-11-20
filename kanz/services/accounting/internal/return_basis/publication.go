@@ -39,19 +39,11 @@ func assessment(r Receipt) *performancepb.DailyReturnAssessment {
 		out.FlowScope = e.Flows.Scope
 		out.FlowCompletionReference = e.Flows.Reference
 		out.ExternalFlowCount = e.Flows.EventCount
-		if split := e.Flows.Split; split != nil {
-			amount, _ := split.SignedAmount.Rat()
-			exact, _ := dec.ToProtoExact(amount)
-			out.IntradayFlow = &performancepb.IntradayReturnFlow{
-				MovementId: split.MovementID, CommandDigest: split.CommandDigest,
-				EffectiveTime: timestamppb.New(split.Effective), SignedAmount: exact,
-			}
-			if split.Before != nil {
-				out.IntradayFlow.PreFlowNavReference = split.Before.Reference
-			}
-			if split.After != nil {
-				out.IntradayFlow.PostFlowNavReference = split.After.Reference
-			}
+		if e.Flows.Split != nil {
+			out.IntradayFlow = publishedFlow(*e.Flows.Split)
+		}
+		for _, split := range e.Flows.Splits {
+			out.IntradayFlows = append(out.IntradayFlows, publishedFlow(split))
 		}
 	}
 	fraction, reason := measure(e)
@@ -64,6 +56,22 @@ func assessment(r Receipt) *performancepb.DailyReturnAssessment {
 		}}
 	}
 	out.BenchmarkComparison = compareBenchmark(r, out)
+	return out
+}
+
+func publishedFlow(split FlowSplit) *performancepb.IntradayReturnFlow {
+	amount, _ := split.SignedAmount.Rat()
+	exact, _ := dec.ToProtoExact(amount)
+	out := &performancepb.IntradayReturnFlow{
+		MovementId: split.MovementID, CommandDigest: split.CommandDigest,
+		EffectiveTime: timestamppb.New(split.Effective), SignedAmount: exact,
+	}
+	if split.Before != nil {
+		out.PreFlowNavReference = split.Before.Reference
+	}
+	if split.After != nil {
+		out.PostFlowNavReference = split.After.Reference
+	}
 	return out
 }
 
@@ -85,7 +93,9 @@ func exactReturn(e Evidence) (*big.Rat, string) {
 		return nil, "nav_missing"
 	case e.Flows == nil || e.Flows.EventCount == nil:
 		return nil, "flow_coverage_unknown"
-	case *e.Flows.EventCount != 0 && e.Flows.Split == nil:
+	}
+	bridges := e.Flows.bridges()
+	if *e.Flows.EventCount != uint64(len(bridges)) {
 		return nil, "external_flows_present"
 	}
 	opening, err := e.Opening.Total.Rat()
@@ -96,8 +106,11 @@ func exactReturn(e Evidence) (*big.Rat, string) {
 	if err != nil {
 		return nil, "nav_missing"
 	}
-	var growth *big.Rat
-	if split := e.Flows.Split; split != nil {
+	// Multiply invested subperiod growth in exact arithmetic. Each cash
+	// movement changes only the base of the following subperiod.
+	growth := big.NewRat(1, 1)
+	base := opening
+	for _, split := range bridges {
 		if split.Before == nil || split.After == nil {
 			return nil, "nav_at_flow_missing"
 		}
@@ -109,12 +122,10 @@ func exactReturn(e Evidence) (*big.Rat, string) {
 		if after.Sign() <= 0 {
 			return nil, "post_flow_nav_nonpositive"
 		}
-		// Link the two invested periods around the same-time cash movement.
-		// Convert only the completed statistical fraction to binary64.
-		growth = new(big.Rat).Mul(new(big.Rat).Quo(before, opening), new(big.Rat).Quo(closing, after))
-	} else {
-		growth = new(big.Rat).Quo(closing, opening)
+		growth.Mul(growth, new(big.Rat).Quo(before, base))
+		base = after
 	}
+	growth.Mul(growth, new(big.Rat).Quo(closing, base))
 	return growth.Sub(growth, big.NewRat(1, 1)), ""
 }
 
@@ -123,18 +134,28 @@ func lockJournal(ctx context.Context, tx pgx.Tx, portfolio string) error {
 	return err
 }
 
-func verifyBookedFlow(ctx context.Context, tx pgx.Tx, e Evidence) error {
-	if e.Flows == nil || e.Flows.Split == nil {
+func verifyBookedFlows(ctx context.Context, tx pgx.Tx, e Evidence) error {
+	if e.Flows == nil {
+		return nil
+	}
+	bridges := e.Flows.bridges()
+	if len(bridges) == 0 {
 		return nil
 	}
 	if err := lockJournal(ctx, tx, e.Portfolio); err != nil {
 		return err
 	}
-	split := e.Flows.Split
+	proofs := make([]cashmove.ExternalFlowProof, 0, len(bridges))
+	for _, bridge := range bridges {
+		amount, _ := bridge.SignedAmount.Rat()
+		proofs = append(proofs, cashmove.ExternalFlowProof{
+			MovementID: bridge.MovementID, CommandDigest: bridge.CommandDigest,
+			Effective: bridge.Effective, Amount: amount,
+		})
+	}
 	end, _ := time.Parse(time.DateOnly, e.CloseDate)
-	amount, _ := split.SignedAmount.Rat()
-	matches, err := cashmove.RecordedExternalFlow(ctx, tx, e.Tenant, e.Portfolio, e.Currency, split.MovementID,
-		split.CommandDigest, end.AddDate(0, 0, -1), end, e.AsOf, split.Effective, amount)
+	matches, err := cashmove.RecordedExternalFlows(ctx, tx, e.Tenant, e.Portfolio, e.Currency,
+		end.AddDate(0, 0, -1), end, e.AsOf, proofs)
 	if err != nil {
 		return err
 	}
@@ -208,7 +229,7 @@ func (s *Store) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 		}
 		return tx.Commit(ctx)
 	}
-	if err = verifyBookedFlow(ctx, tx, r.Evidence); err != nil {
+	if err = verifyBookedFlows(ctx, tx, r.Evidence); err != nil {
 		return err
 	}
 	report, err := s.verifiedAssessment(ctx, tx, r)

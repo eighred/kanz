@@ -37,7 +37,7 @@ async function main() {
           return response.json()
         }
         if (role !== 'authorized') {
-          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5], expected.editions[12], expected.editions[18]]) {
+          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5], expected.editions[12], expected.editions[18], expected.editions[25]]) {
             const body = await check(edition, status)
             const denied = JSON.stringify(body)
             assert(!denied.includes(edition.digest))
@@ -49,6 +49,9 @@ async function main() {
             assert(!denied.includes('position_contribution'))
             assert(!denied.includes('sector_attribution'))
             assert(!denied.includes('datamaster:'))
+            for (const flow of edition.flow_legs || []) {
+              assert(!denied.includes(flow.movement_id) && !denied.includes(flow.command_digest))
+            }
           }
           continue
         }
@@ -56,7 +59,7 @@ async function main() {
           missingBenchmark, mismatchedBenchmark, splitUnknown, missingMarks, badMarks, unsupported,
           traded, tradeRestated, unknownTrades, omittedTrade, wrongTradeTime, missingTradePrices,
           sectorOriginal, sectorRestated, unknownSector, missingComposition, incompleteComposition,
-          benchmarkDisagreement, unsupportedSector] = expected.editions
+          benchmarkDisagreement, unsupportedSector, twoFlows, missingSecondNAV] = expected.editions
         async function measured(edition, value, text, flowCount = '0') {
           const body = await check(edition, 200)
           assert.equal(body.source_digest, edition.digest)
@@ -66,6 +69,7 @@ async function main() {
           await section.getByText(text, { exact: true }).waitFor()
           if (flowCount === '1') {
             const flow = body.intraday_flow
+            assert.deepEqual(body.intraday_flows, [])
             assert.equal(flow.movement_id, edition.movement_id)
             assert.equal(flow.command_digest, edition.command_digest)
             assert.equal(flow.effective_time, '2020-02-04T12:00:00Z')
@@ -292,6 +296,34 @@ async function main() {
         const intraday = await measured(unsupportedSector, 119 / 750, '15.866667%', '1')
         assert.deepEqual(intraday.position_contribution, tradeRestatedBody.position_contribution)
         await unassessedSector(intraday, 'sector_regime_unsupported', 'This method requires a fully invested day without cash flows or trades.')
+        for (const edition of [twoFlows, missingSecondNAV]) {
+          const complete = edition === twoFlows
+          const body = complete ? await measured(edition, 331 / 1000, '33.1%', '2') : await check(edition, 200)
+          assert.equal(body.source_digest, edition.digest)
+          assert.equal(body.intraday_flow, undefined)
+          assert.equal(body.external_flow_count, '2')
+          assert.equal(body.intraday_flows.length, 2)
+          assert.deepEqual(edition.flow_legs.map(flow => flow.signed_amount), ['50', '-40'])
+          if (complete) {
+            await section.getByText('3 linked subperiods', { exact: true }).waitFor()
+          } else {
+            assert.equal(body.measured, undefined)
+            assert.equal(body.unassessed_reason, 'nav_at_flow_missing')
+            await section.getByText('Unassessed. A valuation at the cash flow is unavailable.', { exact: false }).waitFor()
+            assert.equal(await section.getByText('3 linked subperiods', { exact: true }).count(), 0)
+          }
+          const rows = section.getByRole('table', { name: 'Intraday external flows' }).locator('tbody tr')
+          await rows.nth(1).waitFor()
+          for (const [index, leg] of edition.flow_legs.entries()) {
+            const wire = body.intraday_flows[index]
+            for (const field of ['movement_id', 'command_digest', 'effective_time', 'pre_flow_nav_reference', 'post_flow_nav_reference']) assert.equal(wire[field], leg[field])
+            assert.equal(Number(wire.signed_amount.coefficient + 'e' + wire.signed_amount.exponent), Number(leg.signed_amount))
+            assert.deepEqual(await rows.nth(index).locator('th, td').allTextContents(), [
+              leg.movement_id, leg.effective_time, leg.signed_amount,
+              leg.pre_flow_nav_reference || 'Unavailable', leg.post_flow_nav_reference || 'Unavailable', leg.command_digest,
+            ])
+          }
+        }
         stage = 'authorized-reload-details'
         await page.reload()
         assert.deepEqual(await measured(original, 0.02, '2%'), originalBody)

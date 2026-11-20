@@ -37,10 +37,18 @@ type Close struct {
 // FlowCompletion is the signed issuer's affirmative conclusion for the whole
 // enrolled cash-flow scope in (start,end]. Missing coverage is a null object.
 type FlowCompletion struct {
-	Scope      string     `json:"scope"`
-	Reference  string     `json:"reference"`
-	EventCount *uint64    `json:"event_count"`
-	Split      *FlowSplit `json:"split,omitempty"`
+	Scope      string      `json:"scope"`
+	Reference  string      `json:"reference"`
+	EventCount *uint64     `json:"event_count"`
+	Split      *FlowSplit  `json:"split,omitempty"`
+	Splits     []FlowSplit `json:"splits,omitempty"`
+}
+
+func (f *FlowCompletion) bridges() []FlowSplit {
+	if f.Split != nil {
+		return []FlowSplit{*f.Split}
+	}
+	return f.Splits
 }
 
 // FlowSplit names one booked external movement and the authoritative NAVs
@@ -100,11 +108,22 @@ func parse(raw []byte) (Evidence, error) {
 		if !identifier.MatchString(e.Flows.Scope) || !identifier.MatchString(e.Flows.Reference) || e.Flows.EventCount == nil {
 			return Evidence{}, ErrEvidence
 		}
-		if split := e.Flows.Split; split != nil {
-			if *e.Flows.EventCount != 1 || !validSplit(split, end) {
+		flows := e.Flows
+		if len(flows.Splits) != 0 && (flows.Split != nil || len(flows.Splits) < 2) {
+			return Evidence{}, ErrEvidence
+		}
+		bridges := flows.bridges()
+		if len(bridges) != 0 && uint64(len(bridges)) != *flows.EventCount {
+			return Evidence{}, ErrEvidence
+		}
+		seen := make(map[string]struct{}, len(bridges))
+		for i, bridge := range bridges {
+			if _, duplicate := seen[bridge.MovementID]; duplicate ||
+				(i > 0 && !bridge.Effective.After(bridges[i-1].Effective)) || !validSplit(bridge, end) {
 				return Evidence{}, ErrEvidence
 			}
-			marks = append(marks, split.Before, split.After)
+			seen[bridge.MovementID] = struct{}{}
+			marks = append(marks, bridge.Before, bridge.After)
 		}
 	}
 	for _, close := range marks {
@@ -122,7 +141,7 @@ func parse(raw []byte) (Evidence, error) {
 	return e, nil
 }
 
-func validSplit(split *FlowSplit, end time.Time) bool {
+func validSplit(split FlowSplit, end time.Time) bool {
 	if !identifier.MatchString(split.MovementID) || !hash.MatchString(split.CommandDigest) ||
 		split.Effective.Location() != time.UTC || split.Effective.Nanosecond()%1000 != 0 ||
 		!split.Effective.After(end.AddDate(0, 0, -1)) || !split.Effective.Before(end) {

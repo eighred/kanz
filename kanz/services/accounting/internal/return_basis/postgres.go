@@ -83,7 +83,7 @@ func (s *Store) Accept(ctx context.Context, raw, signature []byte) (Receipt, err
 	if latest != e.PreviousDigest || !e.AsOf.After(horizon) {
 		return Receipt{}, ErrConflict
 	}
-	if err := verifyBookedFlow(ctx, tx, e); err != nil {
+	if err := verifyBookedFlows(ctx, tx, e); err != nil {
 		return Receipt{}, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO return_basis_receipts (portfolio_id,currency,close_date,as_of,digest,signed_payload,signature)

@@ -23,8 +23,18 @@ are `movement_id`, `command_digest`, `effective`, `signed_amount`, `before`
 and `after`. The cash instant must be strictly inside the day. Both NAV records
 refer to the same instant on either side of the booking. Their references must
 be distinct, and the exact NAV change must equal the signed cash amount.
-Explicit null in either NAV leaves the return unassessed. Multiple cash movements,
-or a positive count with no split, cannot produce a measured return.
+Explicit null in either NAV leaves the return unassessed.
+
+For two or more movements, use `splits` in place of `split` with one complete
+bridge per counted movement, in strictly increasing effective-time order.
+Each movement ID may appear once. Same-instant movements lack an unambiguous
+sequence of NAV versions under this format. A positive count without bridges
+or a bridge without both NAV versions leaves the return unassessed. Accounting
+links each invested subperiod in exact arithmetic and converts the completed
+fraction to the statistical wire type. The derived FACT and operator report
+carry the ordered `intraday_flows`. A one-flow edition keeps `intraday_flow`.
+Enable signed `splits` after the importer, outbox consumer and operator report
+all support the new representation.
 
 Accounting matches the accepted cash command to its immutable journal entry and
 counts cash entries across all currencies and accounts under the signed knowledge
