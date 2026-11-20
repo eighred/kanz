@@ -54,10 +54,11 @@ func TestHistoricalCustodyProjection(t *testing.T) {
 	query := base + "&run_id=" + url.QueryEscape("saved|run")
 	code, body := get("PF1", query, "reader", "PF1")
 	var receipt struct {
-		Tenant, Pass string
-		Breaks       []map[string]string
+		Tenant string `json:"tenant_id"`
+		Pass   string `json:"transaction_pass"`
+		Breaks []map[string]string
 	}
-	if code != 200 || json.Unmarshal([]byte(body), &receipt) != nil || len(receipt.Breaks) != 1 {
+	if code != 200 || json.Unmarshal([]byte(body), &receipt) != nil || len(receipt.Breaks) != 1 || receipt.Tenant != "reader" || receipt.Pass != "unknown" {
 		t.Fatal(code, body)
 	}
 	row := receipt.Breaks[0]
