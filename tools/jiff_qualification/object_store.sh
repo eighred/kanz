@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+umask 077
+export HOME=/work/home CARGO_HOME=/work/cargo CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 CARGO_PROFILE_TEST_DEBUG=0
+owner=/work/kanz/rust
+case "$1" in
+fetch)
+    mkdir -p "$HOME" "$CARGO_HOME" /work/source "$owner"
+    tar --no-same-owner -xf /inputs/object.tar -C /work/source
+    tar --no-same-owner -xf /inputs/kanz.tar -C /work/kanz
+    cat > "$owner/Cargo.toml" <<'EOF'
+[workspace]
+members = ["services/lake_snapshot"]
+resolver = "2"
+
+[patch.crates-io]
+object_store = { path = "/work/source" }
+EOF
+    # Seed the consumer from its real lock. Cargo records the new source in this disposable copy.
+    cargo fetch --manifest-path "$owner/Cargo.toml"
+    cargo fetch --manifest-path /work/source/Cargo.toml
+    ;;
+test)
+    export CARGO_NET_OFFLINE=true
+    sha256sum /work/source/Cargo.lock "$owner/Cargo.lock"
+    cargo test --locked --offline --manifest-path /work/source/Cargo.toml --features http --lib config::tests:: \
+        > /work/duration.txt
+    cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test worker \
+        --message-format=json-render-diagnostics > /work/worker.jsonl
+    python3 - <<'PY'
+import json
+from pathlib import Path
+
+def check_summary(lines):
+    if not any(line.startswith("test result: ok.") and "; 0 failed; 0 ignored;" in line for line in lines):
+        raise ValueError("missing a test summary with zero failures and skips")
+
+duration = Path("/work/duration.txt").read_text().splitlines()
+check_summary(duration)
+expected_duration = {"test_parse_duration", "test_parse_duration_formats", "test_fmt_duration_roundtrip"}
+passed_duration = {line.split("::")[-1].split()[0] for line in duration if line.startswith("test config::tests::") and line.endswith(" ... ok")}
+if not expected_duration.issubset(passed_duration):
+    raise ValueError(f"missing duration cases: {expected_duration - passed_duration}")
+
+lines = Path("/work/worker.jsonl").read_text().splitlines()
+check_summary(lines)
+artifacts = [json.loads(line) for line in lines if line.startswith("{")]
+owners = [row["package_id"] for row in artifacts
+          if row.get("reason") == "compiler-artifact" and row["target"]["name"] == "object_store"]
+if owners != ["path+file:///work/source#object_store@0.13.2"]:
+    raise ValueError(f"worker did not build the selected source: {owners}")
+expected_worker = {
+    "actual_sandbox_convert_preserves_exact_wire_and_unknown_coordinates",
+    "actual_datafusion_queries_preserve_zero_cursor_duplicates_and_nanoseconds",
+    "actual_worker_refuses_scope_hash_projection_order_and_query_capacity",
+    "actual_maximum_row_snapshot_crosses_checked_arrow_versions",
+    "actual_worker_refuses_hash_bound_wrong_storage_type_and_row_tenant",
+}
+passed_worker = {line.split()[1] for line in lines if line.startswith("test actual_") and line.endswith(" ... ok")}
+if not expected_worker.issubset(passed_worker):
+    raise ValueError(f"missing worker cases: {expected_worker - passed_worker}")
+print(f"Passed {len(passed_duration)} duration cases and {len(passed_worker)} real lake worker cases.")
+PY
+    ;;
+*) exit 2 ;;
+esac
