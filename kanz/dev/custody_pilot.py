@@ -2,6 +2,7 @@
 """Run the synthetic signed-custody operator workflow on a private local fixture."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -80,7 +81,31 @@ def local_engine(env):
     return ["docker", "--host", result]
 
 
-def qualify(docker, container, binaries, node, env):
+def verify_observations(path):
+    records = json.loads(path.read_bytes())
+    if not isinstance(records, list) or len(records) != 2:
+        raise RuntimeError("Both signed statement revisions must have a retained comparison.")
+    runs = set()
+    for revision, record in enumerate(records, 1):
+        if not isinstance(record, dict) or not all(type(record.get(key)) is int for key in
+                                                  ("revision", "outstanding_breaks", "completion_sequence")):
+            raise RuntimeError("Expected an observed revision, break count and completion sequence.")
+        raw = (CMD / "testdata" / f"statement-r{revision}.json").read_bytes()
+        statement_id = f"custody-batch.v1.synthetic-source.r{revision}." + hashlib.sha256(raw).hexdigest()
+        run_id = record.get("run_id")
+        expected = {
+            "revision": revision, "statement_id": statement_id, "run_id": run_id,
+            "business_date": json.loads(raw)["statement"]["businessDate"].split("T")[0],
+            "outcome": "breaks" if revision == 1 else "clean",
+            "outstanding_breaks": 1 if revision == 1 else 0, "completion_sequence": revision,
+        }
+        if not isinstance(run_id, str) or not run_id or run_id in runs or record != expected:
+            raise RuntimeError(f"Retained comparison differs from the signed pilot at revision {revision}.")
+        runs.add(run_id)
+    return records
+
+
+def qualify(docker, container, binaries, node, env, observations):
     owner_password = secrets.token_hex(24)
     source_password = secrets.token_hex(24)
 
@@ -135,6 +160,7 @@ def qualify(docker, container, binaries, node, env):
         CUSTODY_PILOT_BFF_PROBE=str(binaries["bff"]), TEST_MFA_NODE=node,
         TEST_MFA_STATIC_DIR=str(WEB / "dist"), TEST_MFA_PLAYWRIGHT=str(WEB / "node_modules/playwright"),
         CUSTODY_PILOT_BROWSER_SCRIPT=str(WEB / "e2e/custody-detection.cjs"),
+        CUSTODY_PILOT_RECEIPT=str(observations),
     )
     proof = subprocess.run([binaries["accounting"], "-test.run=^TestSignedCustodyOperatorReadback$",
                             "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
@@ -144,19 +170,22 @@ def qualify(docker, container, binaries, node, env):
         stage = re.search(rb"custody-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
         raise RuntimeError("Signed custody operator proof failed" + suffix + ".")
-    print("PASS: Chromium verified the retained signed break on load and reload, the three restricted "
-          "sessions, and read-only controls. Accounting confirmed the correction cleared the queue.")
+    return verify_observations(observations)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--node", default="node", help="Node executable matching web/.nvmrc")
+    parser.add_argument("--pull-image", action="store_true", help="Fetch the pinned PostgreSQL image before startup")
+    parser.add_argument("--receipt", type=Path, help="Write the verified synthetic comparison results as JSON")
     args = parser.parse_args()
     node = shutil.which(args.node)
     if not node:
         raise RuntimeError("Node executable unavailable.")
     env = host_environment()
     docker = local_engine(env)
+    if args.pull_image:
+        subprocess.run([*docker, "pull", IMAGE], check=True, env=env)
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
         # The image initializes its own secret in tmpfs. Local SQL administration
@@ -172,9 +201,14 @@ def main():
         # external service connection is accepted by the entrypoint.
         container = subprocess.check_output(run, env=env, text=True).strip()
         try:
-            qualify(docker, container, binaries, node, env)
+            records = qualify(docker, container, binaries, node, env, Path(directory) / "observations.json")
         finally:
             subprocess.run([*docker, "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
+    if args.receipt:
+        args.receipt.write_text(json.dumps({"postgres_image": IMAGE, "comparisons": records}, indent=2) + "\n",
+                                encoding="utf-8")
+    print("PASS: Chromium verified the retained signed break on load and reload, the three restricted "
+          "sessions, and read-only controls. Accounting confirmed the correction cleared the queue.")
 
 
 if __name__ == "__main__":

@@ -35,11 +35,22 @@ type pilotBreak struct {
 	Detection   custody.Detection `json:"detection"`
 }
 
+type pilotObservation struct {
+	Revision           int    `json:"revision"`
+	RunID              string `json:"run_id"`
+	StatementID        string `json:"statement_id"`
+	BusinessDate       string `json:"business_date"`
+	Outcome            string `json:"outcome"`
+	OutstandingBreaks  int    `json:"outstanding_breaks"`
+	CompletionSequence uint64 `json:"completion_sequence"`
+}
+
 // Use a fresh instance of the provisioned pilot database for each invocation.
 func TestSignedCustodyOperatorReadback(t *testing.T) {
 	if os.Getenv("CUSTODY_PILOT_VERIFY") != "1" {
 		t.Skip("requires a fresh provisioned synthetic custody pilot")
 	}
+	var observations []pilotObservation
 	checkSignedPilotCommand(t, 2*time.Minute, func(ctx context.Context, pool *pgxpool.Pool, statement custody.Statement, revision int, broker pilotBroker) {
 		const tenant = "synthetic-custody-pilot"
 		ctx = bus.WithTenantID(ctx, tenant)
@@ -110,6 +121,11 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		if list.ActionsEnabled == nil || *list.ActionsEnabled {
 			t.Fatal("read-only pilot offered an operator action")
 		}
+		observations = append(observations, pilotObservation{
+			Revision: revision, RunID: fact.GetRunId(), StatementID: fact.GetStatementId(),
+			BusinessDate: day.Format(time.DateOnly), Outcome: run.Outcome.String(),
+			OutstandingBreaks: len(list.Breaks), CompletionSequence: message.Sequence,
+		})
 		if revision == 2 {
 			if run.Outcome != custody.OutcomeClean || len(list.Breaks) != 0 {
 				t.Fatal("corrected statement left an outstanding break")
@@ -156,4 +172,13 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 			t.Log("signed gateway and Chromium verified the persisted detection")
 		}
 	})
+	if path := os.Getenv("CUSTODY_PILOT_RECEIPT"); path != "" && !t.Failed() {
+		raw, err := json.Marshal(observations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

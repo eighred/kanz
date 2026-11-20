@@ -559,6 +559,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Reconcile two signed custody statements through the operator browser
+        if: matrix.kind == 'quality'
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/custody-pilot"
+          python3 -B kanz/dev/custody_pilot.py --pull-image --receipt "$RUNNER_TEMP/custody-pilot/comparisons.json"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/custody-pilot/source.txt"
+
+      - name: Preserve signed custody comparison evidence
+        if: success() && matrix.kind == 'quality'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: custody-pilot-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/custody-pilot/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Prove tv-sync separate roles and checkpoint recovery
         if: matrix.shard == 0 || matrix.kind == 'quality'
         working-directory: kanz
