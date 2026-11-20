@@ -11,7 +11,7 @@ from test_validation_graph import SHA, MAIN, edge, gate, task
 class CollectorTests(unittest.TestCase):
     def setUp(self):
         self.calls = []
-        self.pr = dict(number=1, head=dict(sha=SHA), base=dict(sha=MAIN), draft=False, html_url="pr/1")
+        self.pr = dict(number=1, head=dict(sha=SHA), base=dict(sha=MAIN, ref="main"), draft=False, html_url="pr/1")
 
     def api(self, path):
         self.calls.append(path)
@@ -140,7 +140,7 @@ class CollectorTests(unittest.TestCase):
                 collect('eighred/kanz', api)
 
     def test_changing_pr_head_or_duplicate_final_pr_requires_recollection(self):
-        for change in ('head', 'base', 'duplicate'):
+        for change in ('head', 'base', 'base ref', 'draft', 'duplicate'):
             self.calls = []
             def api(path):
                 result = self.api(path)
@@ -149,11 +149,91 @@ class CollectorTests(unittest.TestCase):
                         result[0][0]['head']['sha'] = 'c' * 40
                     elif change == 'base':
                         result[0][0]['base']['sha'] = 'c' * 40
+                    elif change == 'base ref':
+                        result[0][0]['base']['ref'] = 'release'
+                    elif change == 'draft':
+                        result[0][0]['draft'] = True
                     else:
                         result[0].append(copy.deepcopy(result[0][0]))
                 return result
             with self.subTest(change=change), self.assertRaises(ValueError):
                 collect('eighred/kanz', api)
+
+    def test_draft_and_target_block_delivery_without_changing_check_evidence(self):
+        candidate = dict(gate("candidate"), kind="pr", subject="pr:1",
+                         review=dict(sha=SHA, passed=True, evidence="review/1"),
+                         integration=dict(base_sha=MAIN, head_sha=SHA, evidence="merge/1"),
+                         failure=dict(id="code", kind="code", evidence="reviewed failure"))
+        check = dict(gate("independent"), subject="pr:1")
+        shipment = task("ship", failure=dict(id="code", kind="code", evidence="reviewed dependent failure"))
+        contract = dict(main_revision=MAIN, nodes=[candidate, check, shipment],
+                        edges=[edge("ship", "candidate")])
+        contract["customer_workflow"] = dict(actor="release owner", outcome="ship reviewed source",
+                                             acceptance="issue/1", steps={"ship": "issue/1"})
+        status = "success"
+
+        def api(path):
+            response = self.api(path)
+            if path.endswith("/kanz"):
+                response[0]["default_branch"] = "trunk"
+            if "/check-runs?" in path:
+                response[0]["check_runs"][0]["conclusion"] = status
+            return response
+
+        for draft, target, base_sha, eligible in (
+                (True, "trunk", MAIN, False), (False, "release", MAIN, False),
+                (False, "trunk", "c" * 40, False), (True, "release", MAIN, False),
+                (False, "trunk", MAIN, True)):
+            self.pr.update(draft=draft, base=dict(ref=target, sha=base_sha))
+            with self.subTest(draft=draft, target=target, base=base_sha):
+                report = collect("eighred/kanz", api, contract)
+                self.assertEqual(report["prs"][0]["base_ref"], target)
+                self.assertEqual(report["default_branch"], "trunk")
+                assessment = report["assessment"]
+                row = assessment["nodes"]["candidate"]
+                self.assertEqual(row["state"], "DELIVERABLE" if eligible else "BLOCKED")
+                self.assertEqual(row["checks"], [dict(id="test", state="passed", evidence="job/12")])
+                self.assertEqual(assessment["nodes"]["independent"]["state"], "DELIVERABLE")
+                self.assertEqual(assessment["failure_groups"], {})
+                holds = report["validation_graph"]["nodes"][0]["live_pr_holds"]
+                hold_count = int(draft) + int(target != "trunk" or base_sha != MAIN)
+                self.assertEqual([h["evidence"] for h in holds], ["pr/1"] * hold_count)
+                if not eligible:
+                    self.assertEqual(assessment["nodes"]["ship"]["root_blockers"], ["candidate"])
+                    self.assertEqual(assessment["customer_workflow"]["blockers"]["candidate"]["holds"], holds)
+                # Recollect the emitted graph; previous live holds must expire.
+                contract = report["validation_graph"]
+
+        self.pr["draft"] = True
+        status = "failure"
+        contract["edges"].append(edge("candidate", "independent"))
+        assessment = collect("eighred/kanz", api, contract)["assessment"]
+        row = assessment["nodes"]["candidate"]
+        self.assertEqual(row["state"], "VALIDATION_FAILED")
+        self.assertEqual(row["checks"][0]["state"], "failed")
+        self.assertIn("pull request is a draft", row["reasons"])
+        self.assertEqual(row["root_blockers"], ["candidate", "independent"])
+        self.assertEqual(assessment["failure_groups"]["code"]["nodes"], ["candidate", "ship"])
+
+        self.pr["draft"] = False
+        status = "success"
+        candidate_hold = dict(reason="owner decision pending", evidence="issue/1")
+        contract["nodes"][0]["holds"] = [candidate_hold]
+        report = collect("eighred/kanz", api, contract)
+        self.assertEqual(report["validation_graph"]["nodes"][0]["holds"], [candidate_hold])
+        self.assertEqual(report["assessment"]["nodes"]["candidate"]["state"], "BLOCKED")
+
+    def test_invalid_or_missing_live_pr_target_and_draft_refuse_collection(self):
+        for field, values in (("draft", (None, "", 0)), ("ref", (None, "", "   ", False))):
+            for value in values:
+                pr = copy.deepcopy(self.pr)
+                target = pr if field == "draft" else pr["base"]
+                if value is None:
+                    del target[field]
+                else:
+                    target[field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "target or draft"):
+                    collect("eighred/kanz", self.inventory_api(prs=[pr]))
 
     def test_invalid_pr_revision_cannot_enter_the_snapshot(self):
         for field in ('head', 'base'):
