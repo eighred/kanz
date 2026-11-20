@@ -201,8 +201,14 @@ func TestFeaturePublicationForUnvaluedBaseCurrencyPositions(t *testing.T) {
 			if tc.other {
 				wantGross, wantVar = 100, 1
 			}
-			if got == nil || got.Values["GrossExposure"].GetScalar() != wantGross || got.Values["VaR99"].GetScalar() != wantVar {
-				t.Fatalf("feature: %v", got)
+			want := &inferencepb.FeatureVector{SubjectId: "fund", FeatureSetRef: "portfolio-risk:1", AsOf: at,
+				Values: map[string]*inferencepb.FeatureValue{
+					"GrossExposure": {Value: &inferencepb.FeatureValue_Scalar{Scalar: wantGross}},
+					"VaR99":         {Value: &inferencepb.FeatureValue_Scalar{Scalar: wantVar}},
+				},
+			}
+			if !proto.Equal(got, want) {
+				t.Fatalf("complete feature %v, want %v", got, want)
 			}
 		})
 	}
