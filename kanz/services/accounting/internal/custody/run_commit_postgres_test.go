@@ -9,6 +9,7 @@ import (
 
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -114,23 +115,6 @@ func TestPostgresCustodyRunRetryPreservesOriginalCompletionAndTenant(t *testing.
 	if err != nil || len(rows) != 1 || rows[0].Record.CorrelationID != later.RunID {
 		t.Fatalf("receipt replay republished a completion: %+v %v", rows, err)
 	}
-	// Pre-upgrade scheduled runs can still replay their original relay record.
-	if _, err := pool.Exec(ctx, "UPDATE custody_runs SET manual_receipt=NULL WHERE run_id=$1", later.RunID); err != nil {
-		t.Fatal(err)
-	}
-	legacy, err := st.CommitRun(ctx, later)
-	if err != nil || len(legacy.Breaks) != 1 || legacy.Breaks[0].Diff.Cmp(big.NewRat(20, 1)) != 0 {
-		t.Fatalf("legacy relay receipt: %+v %v", legacy, err)
-	}
-	if err := st.Outbox().MarkPublished(ctx, rows[0].ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE id=$1 AND published_at IS NOT NULL", rows[0].ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.CommitRun(ctx, later); !errors.Is(err, ErrRunCompletionMissing) {
-		t.Fatalf("unavailable historical completion: %v", err)
-	}
 	conflict := run
 	conflict.Subject.CustodianID = "OTHER"
 	if _, err := st.CommitRun(ctx, conflict); !errors.Is(err, ErrRunIdentityConflict) {
@@ -148,6 +132,84 @@ func TestPostgresCustodyRunRetryPreservesOriginalCompletionAndTenant(t *testing.
 	}
 	if rows, err := other.Outbox().Pending(t.Context(), pairKey("PF1", "CUST-A"), 10); err != nil || len(rows) != 0 {
 		t.Fatalf("cross-tenant completion disclosure: %+v %v", rows, err)
+	}
+}
+
+func TestPostgresCustodyRunLegacyCompletionRetention(t *testing.T) {
+	const tenant = "legacy-custody"
+	pool := newCustodyPool(t, tenant)
+	requireRestrictedCustodyRole(t, pool)
+	applyCustodySchema(t, pool)
+	ctx := bus.WithTenantID(t.Context(), tenant)
+	store := NewPostgres(pool)
+	run := Run{RunID: "scheduled-before-upgrade", Subject: subject(), Outcome: OutcomeNoStatement, CompletedAt: t0, Tolerance: new(big.Rat)}
+	for _, manual := range []bool{false, true} {
+		if manual {
+			run.RequestID = "4e13195f-83c4-4258-b4f8-519126590200"
+			run.RunID, run.Actor = "manual:"+run.RequestID, "original-operator"
+		}
+		if err := store.SaveRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+		record, err := runRecord(ctx, tenant, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, "UPDATE custody_runs SET manual_receipt=$1 WHERE run_id=$2", record.Payload, run.RunID); err == nil {
+			t.Fatal("missing original FACT admitted a legacy completion")
+		}
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if manual {
+			// Legacy manual writers set the receipt before enqueuing their FACT.
+			if _, err := tx.Exec(ctx, "UPDATE custody_runs SET manual_receipt=$1 WHERE run_id=$2", record.Payload, run.RunID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, record); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := store.CommitRun(ctx, run)
+		if err != nil || replayed.RunID != run.RunID || replayed.Outcome != OutcomeNoStatement || replayed.Actor != run.Actor {
+			t.Fatalf("legacy completion: %+v %v", replayed, err)
+		}
+		queue := store.Outbox()
+		rows, err := queue.Pending(ctx, pairKey("PF1", "CUST-A"), 10)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("legacy relay: %v %v", rows, err)
+		}
+		if err := queue.MarkPublished(ctx, rows[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE id=$1 AND published_at IS NOT NULL", rows[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.CommitRun(ctx, run)
+		if (manual && err != nil) || (!manual && !errors.Is(err, ErrRunCompletionMissing)) {
+			t.Fatalf("manual=%t after relay retention: %v", manual, err)
+		}
+	}
+	for _, query := range []string{
+		"UPDATE custody_runs SET manual_receipt=NULL WHERE run_id=$1",
+		"UPDATE custody_runs SET book_basis='{}'::jsonb WHERE run_id=$1",
+		"DELETE FROM custody_runs WHERE run_id=$1",
+	} {
+		_, err := pool.Exec(ctx, query, run.RunID)
+		var dbErr *pgconn.PgError
+		if !errors.As(err, &dbErr) || dbErr.Code != "P0001" {
+			t.Fatalf("retained completion mutation: expected immutability refusal, got %v", err)
+		}
+	}
+	_, err := pool.Exec(ctx, "TRUNCATE custody_runs CASCADE")
+	var dbErr *pgconn.PgError
+	if !errors.As(err, &dbErr) || dbErr.Code != "P0001" {
+		t.Fatalf("retained completion truncate: expected immutability refusal, got %v", err)
 	}
 }
 
