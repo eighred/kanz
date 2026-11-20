@@ -73,7 +73,7 @@ def build(node, work, env):
         subprocess.run(["go", "test", "-mod=readonly", "-p", "1", "-c", "-o", binary, package],
                        cwd=MODULE, env=dict(build_env, GOWORK="off"), check=True)
         binaries[name] = binary
-    for name, package in (("service", "accounting"), ("proof", "custody_proof")):
+    for name, package in (("service", "accounting"), ("proof", "custody_proof"), ("source", "custody_batch")):
         binary = work / (name + (".exe" if os.name == "nt" else ""))
         subprocess.run(["go", "build", "-mod=readonly", "-p", "1", "-o", binary,
                         "./services/accounting/cmd/" + package], cwd=MODULE,
@@ -307,6 +307,8 @@ def qualify(docker, container, binaries, node, env, observations, profile):
         pilot_env["CUSTODY_PILOT_LATE_QUANTITY"] = "1"
         pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-late-correction.cjs")
     if economics:
+        pilot_env["CUSTODY_PILOT_IMPORTER"] = str(binaries["source"])
+        pilot_env["CUSTODY_PILOT_SERVICE"] = str(binaries["service"])
         pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-execution-economics.cjs")
     if late or quantity_evidence or economics:
         pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.with_suffix(".downloads.json"))
