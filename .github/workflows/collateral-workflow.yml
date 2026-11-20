@@ -4,6 +4,10 @@ on:
   pull_request:
     paths: &qualification
       - 'tools/collateral_workflow/**'
+      - 'kanz/test/collateral_workflow/**'
+      - 'kanz/infra/nats/bootstrap-job.yaml'
+      - 'kanz/infra/nats/tenancy.yaml'
+      - 'tools/dev_compose/images.json'
       - '.github/workflows/collateral-workflow.yml'
       - 'kanz/services/accounting/internal/collateralops/**'
       - 'kanz/services/accounting/migrations/**'
@@ -18,7 +22,7 @@ jobs:
   release-runtime:
     if: github.repository == 'eighred/kanz' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -60,3 +64,26 @@ jobs:
       - run: python3 -B -m unittest discover -s tools/collateral_workflow
       - name: Inventory the released Linux binaries and bundled Accounting migrations
         run: python3 -B tools/collateral_workflow/release.py "$RUNNER_TEMP"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical wire types for the rehearsal clients
+        working-directory: schemas
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          buf generate
+          bash bootstrap-go-sdk.sh
+      - name: Build the gateway and typed observer and exercise the released Accounting workflow
+        working-directory: kanz
+        run: |
+          export CGO_ENABLED=0
+          mkdir "$RUNNER_TEMP/collateral-programs"
+          go build -trimpath -o "$RUNNER_TEMP/collateral-programs/probe" ./test/collateral_workflow
+          go build -trimpath -o "$RUNNER_TEMP/collateral-programs/gateway" ./services/api_gateway/cmd/api_gateway
+          python3 -B ../tools/collateral_workflow/runtime.py "$RUNNER_TEMP/collateral-programs"
