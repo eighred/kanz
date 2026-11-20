@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
-import { risk, orderHistoryLimit, type OrderSummary } from '../api/risk'
+import { risk, describeOrders, orderHistoryLimit, type OrderSummary } from '../api/risk'
 import { useSession } from '../stores/session'
 import { formatDecimal } from '../api/decimal'
 
@@ -34,7 +34,7 @@ const { data, error, loading } = usePortfolioRead(selection, async ({ portfolio,
   const requestedAt = new Date().toISOString()
   const page = await risk.orders(portfolio, tenant, signal)
   return { ...page, started, requestedAt }
-})
+}, describeOrders)
 
 // The age of the page is independent of any order's last effective time.
 const stale = ref(false)
@@ -123,6 +123,7 @@ function tone(o: OrderSummary): string {
         <tr>
           <th>Order</th><th>Instrument</th><th>Side</th><th>Status</th>
           <th>Quantity</th><th>Filled</th><th>Limit price</th><th>Avg fill</th>
+          <th>Unfilled quantity</th><th>Market mark at admission</th>
         </tr>
       </thead>
       <tbody>
@@ -151,9 +152,16 @@ function tone(o: OrderSummary): string {
           <td>{{ qty(o.filled_quantity) }}</td>
           <td>{{ qty(o.limit_price) }}</td>
           <td>{{ qty(o.average_fill_price) }}</td>
+          <td>{{ qty(o.leaves_quantity) }}</td>
+          <td>
+            <template v-if="o.arrival_at && formatDecimal(o.arrival_price) !== null">
+              {{ qty(o.arrival_price) }}<br /><time :datetime="o.arrival_at">{{ o.arrival_at }}</time>
+            </template>
+            <template v-else>Unavailable</template>
+          </td>
         </tr>
         <tr v-if="orders.length === 0">
-          <td colspan="8">
+          <td colspan="10">
             No orders are indexed for this portfolio.
             <template v-if="hasUnindexed">
               That is not the same as none having been placed — see the count above.

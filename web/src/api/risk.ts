@@ -117,6 +117,9 @@ export interface OrderSummary {
   status?: OrderStatus | number
   ordered_quantity?: Decimal
   filled_quantity?: Decimal
+  leaves_quantity?: Decimal
+  arrival_price?: Decimal
+  arrival_at?: string
   limit_price?: Decimal
   average_fill_price?: Decimal
   venue?: string
@@ -177,6 +180,7 @@ export const risk = {
           ids.has(order.order_id) || [order.instrument_id, order.venue].some(value => value !== undefined && typeof value !== 'string') ||
           !isWireEnum(order.side) || !isWireEnum(order.status)) throw new Error('The order history could not be verified.')
       if ((order.as_of !== undefined && !isTimestamp(order.as_of)) ||
+          (order.arrival_at !== undefined && !isTimestamp(order.arrival_at)) ||
           (order.quarantine !== undefined && (!order.quarantine || !isTimestamp(order.quarantine.at) ||
             (order.quarantine.last_query_at !== undefined && !isTimestamp(order.quarantine.last_query_at))))) {
         throw new Error('The order history could not be verified.')
@@ -184,6 +188,8 @@ export const risk = {
       ids.add(order.order_id)
       checkWireDecimal(order.ordered_quantity)
       checkWireDecimal(order.filled_quantity)
+      checkWireDecimal(order.leaves_quantity)
+      checkWireDecimal(order.arrival_price)
       checkWireDecimal(order.limit_price)
       checkWireDecimal(order.average_fill_price)
     }
@@ -228,4 +234,19 @@ export function describeRisk(e: unknown): string {
     default:
       return e.message
   }
+}
+
+export function describeOrders(e: unknown): string {
+  if (e instanceof ApiError) {
+    switch (e.status) {
+      case 403:
+        return 'Your account does not carry read authority for order history.'
+      case 404:
+        return 'Order history is unavailable for this portfolio. Check the selected portfolio or ask whether this deployment serves OMS history.'
+      case 502:
+      case 503:
+        return 'Order history is temporarily unavailable. Refresh to retry.'
+    }
+  }
+  return e instanceof Error ? e.message : 'The order history request failed.'
 }
