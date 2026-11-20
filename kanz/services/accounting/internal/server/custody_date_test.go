@@ -39,6 +39,9 @@ func TestDatedCustodyReadOnlyScope(t *testing.T) {
 		{"reader", "PF2", "custodian_id=C&business_date=2020-02-04", 404},
 		{"reader", "PF1", "custodian_id=X&business_date=2020-02-04", 404},
 		{"reader", "PF1", "custodian_id=C&business_date=2020-02-30", 400},
+		{"reader", "PF1", "custodian_id=C&business_date=2020-02-04&include=reported_execution_figures", 400},
+		{"reader", "PF1", "custodian_id=C&business_date=2020-02-04&run_id=R&include=reported_execution_figures&include=reported_execution_figures", 400},
+		{"reader", "PF1", "custodian_id=C&business_date=2020-02-04&run_id=R&include=unknown", 400},
 		{"reader", "PF1", "custodian_id=C&business_date=2020-02-04&custodian_id=X", 400},
 	} {
 		r := httptest.NewRequest("GET", "/v1/portfolios/PF1/custody/comparison?"+tc.query, nil)

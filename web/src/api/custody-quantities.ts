@@ -29,6 +29,35 @@ function measured(value: unknown): Required<Decimal> {
   return { coefficient, exponent }
 }
 
+export interface ReportedExecutionFigures {
+  basis: 'signed_custodian_statement'; signed_statement_sha256: string
+  rows: { external_ref: string; instrument_id: string; cash_currency: string; reported_price?: string; reported_cash?: string }[]
+}
+
+export function readReportedFigures(value: unknown, digest: string, referenceCount: string): ReportedExecutionFigures {
+  const section = record(value)
+  if (section.basis !== 'signed_custodian_statement' || section.signed_statement_sha256 !== digest || !Array.isArray(section.rows) ||
+      section.rows.length > 4096 || String(section.rows.length) !== referenceCount) return invalid()
+  const utf8 = new TextEncoder()
+  let previous = new Uint8Array()
+  const decimalText = (amount: unknown) => {
+    if (amount === undefined) return undefined
+    if (typeof amount !== 'string' || amount.length > 256 || !/^-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) || amount === '-0') return invalid()
+    return amount
+  }
+  const rows = section.rows.map(item => {
+    const { external_ref, instrument_id, cash_currency, reported_price, reported_cash } = record(item)
+    const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/
+    if (typeof external_ref !== 'string' || !external_ref || external_ref.length > receiptByteLimit || /^\p{White_Space}|\p{White_Space}$|\p{Cs}/u.test(external_ref) ||
+        typeof instrument_id !== 'string' || !id.test(instrument_id) || typeof cash_currency !== 'string' || !id.test(cash_currency)) return invalid()
+    const ref = utf8.encode(external_ref)
+    if (!precedes(previous, ref)) return invalid()
+    previous = ref
+    return { external_ref, instrument_id, cash_currency, reported_price: decimalText(reported_price), reported_cash: decimalText(reported_cash) }
+  })
+  return { basis: 'signed_custodian_statement', signed_statement_sha256: digest, rows }
+}
+
 export interface QuantityResolution {
   break_id: string; detection_run_id: string; entry_id: string; external_ref: string; instrument_id: string
   agreed_quantity: Required<Decimal>

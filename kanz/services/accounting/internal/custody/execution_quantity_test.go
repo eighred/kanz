@@ -142,12 +142,18 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 		if index == 2 {
 			qty = 1
 		}
+		price := 10
+		if index == 2 {
+			// Both quantities agree. The independent buy/sell at 9 versus the
+			// book's 10 have equal and opposite cash discrepancies.
+			price = 9
+		}
 		line := func(ref string, q int) string {
 			units := ""
 			if index > 0 {
 				units = `,"quantityInInstrumentUnits":true`
 			}
-			return fmt.Sprintf(`{"externalRef":%q,"instrumentId":"AAPL","currencyCode":"USD","tradeDate":%q,"quantity":{"coefficient":"%d"},"price":{"coefficient":"10"},"cash":{"coefficient":"%d"}%s}`, ref, sub.BusinessDate.Format(time.RFC3339), q, -10*q, units)
+			return fmt.Sprintf(`{"externalRef":%q,"instrumentId":"AAPL","currencyCode":"USD","tradeDate":%q,"quantity":{"coefficient":"%d"},"price":{"coefficient":"%d"},"cash":{"coefficient":"%d"}%s}`, ref, sub.BusinessDate.Format(time.RFC3339), q, price, -price*q, units)
 		}
 		level := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":%q,"positions":[],"cash":[],"transactions":[%s,%s],"grain":"STATEMENT_GRAIN_TRANSACTIONS"}`, sub.BusinessDate.Format(time.RFC3339), line("independent-buy", qty), line("independent-sell", -qty)))
 		raw, err := json.Marshal(signedBatch{BatchFormat, source.Source, tenant, source.Account, int64(pos + 1), previous, true, level})
@@ -261,6 +267,16 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 			t.Fatalf("historical revision %d: %+v %v", i, result, err)
 		}
 		verifyExecutionQuantityRevision(t, []int{0, 1, 0, 2}[i], result.Run.ExecutionQuantities)
+		reported, ok := result.ReportedExecutionFigures()
+		if ok != enrolled {
+			t.Fatalf("source details available without original account proof: %t", ok)
+		}
+		if enrolled && i == 3 {
+			want := []ReportedExecution{{"independent-buy", "AAPL", "9", "-9", "USD"}, {"independent-sell", "AAPL", "9", "9", "USD"}}
+			if !slices.Equal(reported, want) || result.Run.Outcome != OutcomeClean || len(result.Run.ExecutionQuantities.Differences) != 0 {
+				t.Fatalf("lost signed offsetting source figures: %+v", reported)
+			}
+		}
 	}
 	outstanding, err := st.OutstandingBreaks(ctx)
 	if err != nil || len(outstanding) != 0 {

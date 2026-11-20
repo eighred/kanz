@@ -23,19 +23,27 @@ watch(subject, clear, { flush: 'sync' })
 watch(savedRun, clear, { flush: 'sync' })
 watch(() => session.identity, () => { clear(); savedRun.value = ''; Object.assign(subject, { portfolio_id: '', custodian_id: '', business_date: '' }) }, { deep: true, flush: 'sync' })
 onUnmounted(clear)
-async function read(correctionStatement?: string) {
+async function read(correctionStatement?: string, reportedFigures = false) {
   if (pending.value || !session.identity) return
   const request = new AbortController()
   active = request
+  const previous = result.value
   result.value = undefined
   error.value = ''
   pending.value = true
   try {
-    const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal, savedRun.value)
+    const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal, savedRun.value, reportedFigures)
     if (correctionStatement && (dated.state !== 'recorded' || dated.outcome !== 'historical_quantity_correction' ||
         dated.statement_id !== correctionStatement)) throw new Error('Correction source changed.')
+    if (reportedFigures && (previous?.state !== 'recorded' || dated.state !== 'recorded' ||
+        previous.historical?.signed_statement_sha256 !== dated.historical?.signed_statement_sha256 || !dated.historical?.reported_execution_figures)) throw new Error('Unverified source.')
     if (!request.signal.aborted) result.value = dated
   } catch (e) {
+    if (!request.signal.aborted && reportedFigures && e instanceof ApiError && e.status === 422) {
+      result.value = previous
+      error.value = 'Signed execution figures are unavailable within the receipt limit.'
+      return
+    }
     if (!request.signal.aborted) error.value = e instanceof ApiError && [403, 404].includes(e.status)
       ? 'Access to this dated result is unavailable.' : 'Unable to verify the dated result.'
   } finally { if (!request.signal.aborted) pending.value = false }
@@ -95,6 +103,21 @@ const pendingLabels = {
     <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
+      <button v-if="result.account_assignment_verified && result.transactions?.transaction_pass === 'ran' && !result.historical.reported_execution_figures"
+        type="button" @click="read(undefined, true)">View custodian-reported price and cash</button>
+      <section v-if="result.historical.reported_execution_figures" aria-label="Custodian-reported execution figures">
+        <h3>Custodian-reported price and cash</h3>
+        <p>These figures come from the signed statement above. The currency shown applies to cash. Execution prices, cash and fees have no independent book comparison in this receipt.</p>
+        <table v-if="result.historical.reported_execution_figures.rows.length" aria-label="Reported execution figures">
+          <thead><tr><th scope="col">Execution reference</th><th scope="col">Instrument</th><th scope="col">Reported unit price</th>
+            <th scope="col">Reported signed cash</th><th scope="col">Cash currency</th></tr></thead>
+          <tbody><tr v-for="row in result.historical.reported_execution_figures.rows" :key="row.external_ref">
+            <th scope="row">{{ row.external_ref }}</th><td>{{ row.instrument_id }}</td><td>{{ row.reported_price ?? 'Unreported' }}</td>
+            <td>{{ row.reported_cash ?? 'Unreported' }}</td><td>{{ row.cash_currency }}</td>
+          </tr></tbody>
+        </table>
+        <p v-else>The signed statement reports zero execution lines.</p>
+      </section>
       <section v-if="result.historical.execution_quantities" aria-label="Execution quantities">
         <h3>Execution quantities</h3>
         <p>Matched references compared: {{ result.historical.execution_quantities.compared }} · Unassessed: {{ result.historical.execution_quantities.unassessed }}.</p>

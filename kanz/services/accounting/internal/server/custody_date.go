@@ -33,8 +33,11 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		ids, historical := query["run_id"]
 		delete(query, "run_id")
+		includes, requested := query["include"]
+		delete(query, "include")
+		validInclude := !requested || historical && len(includes) == 1 && includes[0] == "reported_execution_figures"
 		validID := !historical || len(ids) == 1 && custody.ValidReceiptID(ids[0])
-		if err != nil || !validID || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
+		if err != nil || !validID || !validInclude || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
 			writeJSON(w, 400, map[string]string{"error": "one custodian and business date required"})
 			return
 		}
@@ -141,6 +144,24 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 				response["scope_mode"] = b.Mode
 				response["journal_position"] = strconv.FormatInt(b.JournalPosition, 10)
 			}
+		}
+		if requested && result.State == "recorded" {
+			rows, ok := result.ReportedExecutionFigures()
+			if !ok {
+				writeJSON(w, 422, map[string]string{"error": "signed execution figures unavailable for this receipt"})
+				return
+			}
+			response["reported_execution_figures"] = map[string]any{
+				"basis": "signed_custodian_statement", "signed_statement_sha256": result.SignedStatementSHA256, "rows": rows,
+			}
+			encoded, err := json.Marshal(response)
+			if err != nil || len(encoded)+1 > custody.BatchLimit {
+				writeJSON(w, 422, map[string]string{"error": "signed execution figures exceed receipt limit"})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(append(encoded, '\n'))
+			return
 		}
 		writeJSON(w, 200, response)
 	}

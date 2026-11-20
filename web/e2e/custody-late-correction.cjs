@@ -48,7 +48,7 @@ async function main() {
             const response = await page.evaluate(async target => {
               const res = await fetch(target)
               return { status: res.status, body: await res.text() }
-            }, lookup(date, run))
+            }, lookup(date, run) + (run === e.original_run ? '&include=reported_execution_figures' : ''))
             assert.equal(response.status, status)
             for (const field of [...runs, ...sources, e.break_id, e.entry_id, e.external_ref, 'historical_quantity_correction_run_id', 'historical_quantity_resolutions']) {
               assert(!response.body.includes(field))
@@ -123,6 +123,19 @@ async function main() {
           }
           await comparisonDownload(page, region, ordinary)
           assert.equal(await table.count(), 0)
+          const enrichedURL = base + lookup(date, run) + '&include=reported_execution_figures'
+          const details = page.waitForResponse(res => res.url() === enrichedURL && res.request().method() === 'GET')
+          await region.getByRole('button', { name: 'View custodian-reported price and cash' }).click()
+          const enriched = await details
+          assert.equal(enriched.status(), 200)
+          const sourceReceipt = await enriched.json()
+          const rows = run === e.original_run ? [{ external_ref: e.external_ref, instrument_id: e.instrument_id, cash_currency: 'USD', reported_price: '1', reported_cash: '-9.5' }] : []
+          assert.deepEqual(sourceReceipt.reported_execution_figures, { basis: 'signed_custodian_statement', signed_statement_sha256: source.slice(-64), rows })
+          const figures = region.getByRole('region', { name: 'Custodian-reported execution figures' })
+          await figures.waitFor()
+          if (rows.length) assert.deepEqual(await figures.locator('tbody tr').first().locator('th,td').allTextContents(), [e.external_ref, e.instrument_id, '1', '-9.5', 'USD'])
+          else await figures.getByText('The signed statement reports zero execution lines.').waitFor()
+          await comparisonDownload(page, region, sourceReceipt)
         }
         const latest = await read(e.following_date)
         assert.equal(latest.state, 'recorded')

@@ -111,7 +111,16 @@ func historicalReceiptSnapshot(ctx context.Context, tx pgx.Tx, tenant string, su
 	} else if len(run.HistoricalQuantityResolutions) != 0 {
 		return unknown, nil
 	}
-	return DatedResult{State: "recorded", StatementID: statementID, Run: run, SignedStatementSHA256: hex.EncodeToString(digest), AccountAssignmentVerified: verifiedAssignment}, nil
+	result := DatedResult{State: "recorded", StatementID: statementID, Run: run, SignedStatementSHA256: hex.EncodeToString(digest), AccountAssignmentVerified: verifiedAssignment}
+	if verifiedAssignment && run.Outcome != OutcomeHistoricalQuantityCorrection && source.Grain == recon.GrainTransactions && basis.Transactions != nil && basis.Transactions.Pass == recon.LegRan.String() {
+		// This optional read projection comes from the retained independent signature.
+		// The original FACT and its comparison scope remain exactly as committed.
+		result.reportedTransactions = source.Transactions
+		if result.reportedTransactions == nil {
+			result.reportedTransactions = []recon.Transaction{}
+		}
+	}
+	return result, nil
 }
 
 func receiptFiguresMatch(run Run, source Statement) bool {

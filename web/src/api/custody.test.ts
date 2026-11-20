@@ -159,6 +159,36 @@ describe('custody response boundary', () => {
     await expect(custody.dated(subject, 'T')).rejects.toThrow('verified')
   })
 
+  it('reads source figures only on the explicitly requested, proven signed revision', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const digest = 'a'.repeat(64)
+    const base = { ...subject, tenant_id: 'fixture', state: 'recorded', outcome: 'clean', run_id: 'R',
+      completed_at: '2020-02-05T01:00:00Z', statement_id: 'custody-batch.v1.src.r1.' + digest,
+      journal_position: '2', scope_mode: 'declared', account_assignment_verified: true, transaction_pass: 'ran',
+      statement_reference_count: '2', book_reference_count: '2', unreferenced_book_trades: '0', breaks: [], signed_statement_sha256: digest }
+    const a = { external_ref: 'a', instrument_id: 'X', cash_currency: 'USD', reported_cash: '0' }
+    const b = { external_ref: 'b', instrument_id: 'X', cash_currency: 'USD', reported_price: '9007199254740993.1', reported_cash: '-9' }
+    const section = { basis: 'signed_custodian_statement', signed_statement_sha256: digest, rows: [a, b] }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce({ ...base, reported_execution_figures: section })
+    const read = () => custody.dated(subject, 'fixture', undefined, 'R', true)
+    const result = await read()
+    expect(get.mock.calls[0]?.[0]).toContain('run_id=R&include=reported_execution_figures')
+    expect(result.state === 'recorded' && result.historical?.reported_execution_figures).toEqual(section)
+    for (const changed of [{ ...section, basis: 'verified' }, { ...section, signed_statement_sha256: 'b'.repeat(64) },
+      { ...section, rows: [b, a] }, { ...section, rows: [a, a] }, { ...section, rows: [a] },
+      { ...section, rows: [a, { ...b, reported_cash: 0 }] }, { ...section, rows: [a, { ...b, cash_currency: '' }] },
+      { ...section, rows: [a, { ...b, external_ref: 'x'.repeat(1 << 20) }] }]) {
+      get.mockResolvedValueOnce({ ...base, reported_execution_figures: changed })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce({ ...base, reported_execution_figures: section })
+    await expect(custody.dated(subject, 'fixture', undefined, 'R')).rejects.toThrow('verified')
+    for (const fields of [{ tenant_id: 'other' }, { account_assignment_verified: undefined }, { reported_execution_figures: undefined }]) {
+      get.mockResolvedValueOnce({ ...base, reported_execution_figures: section, ...fields })
+      await expect(read()).rejects.toThrow('verified')
+    }
+  })
+
   it('only exports measured same-instrument amounts on a bound saved run', async () => {
     const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
     const digest = 'a'.repeat(64)

@@ -30,6 +30,13 @@ async function comparisonDownload(page, region, response) {
         ibor: amount(row.ibor), custodian: amount(row.custodian), difference: amount(row.difference),
       })) }
     }
+    if (response.reported_execution_figures !== undefined) {
+      const { basis, signed_statement_sha256, rows } = response.reported_execution_figures
+      expected.reported_execution_figures = { basis, signed_statement_sha256, rows: rows.map(
+        ({ external_ref, instrument_id, cash_currency, reported_cash, reported_price }) => ({
+          external_ref, instrument_id, cash_currency, ...(reported_cash !== undefined && { reported_cash }), ...(reported_price !== undefined && { reported_price }),
+        })) }
+    }
     expected.lookup = 'retained_run'
     expected.signed_statement_sha256 = response.signed_statement_sha256
     if (response.outcome === 'historical_quantity_correction') {
