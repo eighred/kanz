@@ -1,7 +1,7 @@
 {
   "ghcr.io/eighred/base/golang:1.27.4": "5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d",
   "ghcr.io/eighred/base/distroless-static:nonroot": "aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931",
-  "docker.io/docker/dockerfile:1": "4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e",
+  "docker.io/docker/dockerfile:1": "572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183",
   "docker.io/library/nats:2.10-alpine": "b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927",
   "docker.io/library/postgres:16-alpine": "1d5b02d3a9941fbd52437db4107f8c52d6297dac553ca1e5c299ebb3756b4857",
   "docker.io/natsio/nats-box:0.14.5": "0784ab710aefaf6ef037ed797ee7dcde613c6ad208c4dbff1945fc7c1b5b5375",
