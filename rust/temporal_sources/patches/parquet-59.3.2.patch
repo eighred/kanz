@@ -1,0 +1,12 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -396,7 +396,8 @@
+ default-features = false
+ 
+ [dependencies.chrono]
+-version = "0.4.40"
++package = "sad-chrono"
++version = "=0.5.1"
+ features = ["clock"]
+ default-features = false
+ 

@@ -1,11 +1,13 @@
 package arch
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -39,7 +41,8 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.6"`, "protoc-bin-vendored": `"=3.3.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
-	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render", "crates/ledger_replay", "crates/option_pricing", "crates/term_structure"]`, "resolver": `"2"`},
+	"patch.crates-io":    {},
+	"workspace":          {"members": `["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render", "crates/ledger_replay", "crates/option_pricing", "crates/term_structure"]`, "resolver": `"2"`, "exclude": `["temporal_sources/generated/*"]`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
@@ -141,6 +144,7 @@ func checkRustMigrationBoundary(root string) error {
 		return fmt.Errorf("Rust compatibility manifest missing: %w", err)
 	}
 	seen := map[string]bool{}
+	var patchLines []string
 	section := ""
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
@@ -157,12 +161,20 @@ func checkRustMigrationBoundary(root string) error {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if section == "patch.crates-io" {
+			patchLines = append(patchLines, line)
+			continue
+		}
 		want, allowed := rustMigrationCargo[section][key]
 		entry := section + "." + key
 		if !ok || !allowed || seen[entry] || rustMigrationCompact(value) != rustMigrationCompact(want) {
 			return fmt.Errorf("unreviewed Cargo declaration %q", entry)
 		}
 		seen[entry] = true
+	}
+	sort.Strings(patchLines)
+	if fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(patchLines, "\n")+"\n"))) != "062d55d99a39aa9b85148f1e544e9c080e6bb1884434ce97a1d6a749e1e97a9c" {
+		return fmt.Errorf("reviewed Apache Cargo patch coordinates differ")
 	}
 	for table, entries := range rustMigrationCargo {
 		for key := range entries {
@@ -236,6 +248,12 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
+			if rel == "temporal_sources/generated" {
+				if err := checkedApacheTemporalSources(root, true); err != nil {
+					return err
+				}
+				return filepath.SkipDir
+			}
 			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustLakePath || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms_store" || rel == "crates/proto_wire" || rel == "crates/oms_venue" || rel == "crates/order_core" || rel == "crates/oms_recovery" || rel == browserRenderPath || rel == rustLedgerPath || rel == rustOptionPricingPath || rel == rustTermPath {
 				return filepath.SkipDir
 			} // Separately guarded above.

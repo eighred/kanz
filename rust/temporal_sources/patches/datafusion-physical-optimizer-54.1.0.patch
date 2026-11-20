@@ -1,0 +1,11 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -47,7 +47,7 @@
+ version = "58.3.0"
+ features = [
+     "prettyprint",
+-    "chrono-tz",
++    "jiff",
+ ]
+ 
+ [dependencies.datafusion-common]

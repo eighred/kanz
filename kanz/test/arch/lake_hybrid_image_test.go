@@ -34,26 +34,35 @@ func lakeHybridImageRecipe(raw string) error {
 	tools := []string{
 		"FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-tools",
 		"RUN cargo install --locked --version 0.7.7 cargo-auditable",
-		"RUN cargo install --locked --version 0.1.78 cargo-chef", "WORKDIR /src/rust",
+		"RUN cargo install --locked --version 0.1.78 cargo-chef", "WORKDIR /src/rust", "ENV CARGO_BUILD_JOBS=3",
+	}
+	sources := []string{
+		"FROM rust-tools AS rust-sources", "COPY rust/temporal_sources/ ./temporal_sources/",
+		"COPY tools/jiff_qualification/chrono_advisories.py /opt/kanz/chrono_advisories.py",
+		"RUN python3 -B temporal_sources/prepare.py",
+		"RUN mkdir /kanz-source-evidence && python3 -B /opt/kanz/chrono_advisories.py --output /kanz-source-evidence/chrono-advisories.json",
 	}
 	planner := []string{
-		"FROM rust-tools AS rust-planner", "COPY rust/ ./",
+		"FROM rust-sources AS rust-planner", "COPY rust/ ./",
 		"RUN cargo chef prepare --recipe-path /recipe.json",
 	}
 	rust := []string{
-		"FROM rust-tools AS rust-build",
+		"FROM rust-sources AS rust-build",
 		"COPY --from=rust-planner /recipe.json /recipe.json",
 		"RUN cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot",
-		"COPY rust/ ./", "COPY schemas/proto/ /src/schemas/proto/", "ARG VERSION",
-		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot`,
+		"COPY --from=rust-sources /src/rust/temporal_sources/generated/ /src/rust/temporal_sources/generated/",
+		"COPY rust/ ./", "COPY schemas/proto/ /src/schemas/proto/",
+		"RUN python3 -B temporal_sources/prepare.py --check", "ENV CARGO_TARGET_DIR=/src/rust/target-provenance", "ARG VERSION",
+		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl && python3 -B temporal_sources/produce.py "$VERSION"`,
 	}
+	evidence := []string{"FROM scratch AS rust-source-evidence", "COPY --from=rust-build /kanz-source-evidence/ /"}
 	runtime := []string{
 		"FROM ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
 		"COPY --from=build /out/lake-sink /lake-sink",
-		"COPY --from=rust-build --chown=0:0 --chmod=0555 /src/rust/target/release/kanz-lake-snapshot /kanz-lake-snapshot",
+		"COPY --from=rust-build --chown=0:0 --chmod=0555 /src/rust/target-provenance/release/kanz-lake-snapshot /kanz-lake-snapshot",
 		"USER nonroot:nonroot", "EXPOSE 8085", `ENTRYPOINT ["/lake-sink"]`,
 	}
-	if len(stages) != 5 || !slices.Equal(stages[1], tools) || !slices.Equal(stages[2], planner) || !slices.Equal(stages[3], rust) || !slices.Equal(stages[4], runtime) {
+	if len(stages) != 7 || !slices.Equal(stages[1], tools) || !slices.Equal(stages[2], sources) || !slices.Equal(stages[3], planner) || !slices.Equal(stages[4], rust) || !slices.Equal(stages[5], evidence) || !slices.Equal(stages[6], runtime) {
 		return fmt.Errorf("lake hybrid image must preserve closed worker and runtime recipe")
 	}
 	return nil
@@ -252,6 +261,9 @@ func TestLakeHybridImageRecipe(t *testing.T) {
 		{"RUN cargo auditable chef cook", "ARG VERSION\nRUN cargo auditable chef cook"},
 		{"WORKDIR /src/rust", "WORKDIR /other"},
 		{"RUN cargo auditable chef cook", "RUN --mount=type=cache,target=/src/rust/target cargo auditable chef cook"},
+		{"RUN python3 -B temporal_sources/prepare.py --check", "RUN true"},
+		{"ENV CARGO_TARGET_DIR=/src/rust/target-provenance", "ENV CARGO_TARGET_DIR=/src/rust/target"},
+		{"python3 -B temporal_sources/produce.py", "true"},
 		{"--chown=0:0", "--chown=65532:65532"},
 		{"--chmod=0555", "--chmod=0755"},
 		{"COPY schemas/proto/ /src/schemas/proto/", ""},

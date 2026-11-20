@@ -2,6 +2,7 @@ FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169
 RUN cargo install --locked --version 0.7.7 cargo-auditable
 WORKDIR /src
 COPY rust/ rust/
+RUN python3 -B rust/temporal_sources/prepare.py
 COPY schemas/proto/ schemas/proto/
 ARG VERSION
 RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path rust/Cargo.toml -p kanz-okx-depth

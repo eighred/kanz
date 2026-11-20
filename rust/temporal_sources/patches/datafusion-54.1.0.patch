@@ -1,0 +1,32 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -278,7 +278,7 @@
+ version = "58.3.0"
+ features = [
+     "prettyprint",
+-    "chrono-tz",
++    "jiff",
+ ]
+ 
+ [dependencies.arrow-schema]
+@@ -294,7 +294,8 @@
+ optional = true
+ 
+ [dependencies.chrono]
+-version = "0.4.44"
++package = "sad-chrono"
++version = "=0.5.1"
+ default-features = false
+ 
+ [dependencies.datafusion-catalog]
+--- a/src/test/object_store.rs
++++ b/src/test/object_store.rs
+@@ -68,7 +68,7 @@
+     let metadata = std::fs::metadata(path).expect("Local file metadata");
+     ObjectMeta {
+         location,
+-        last_modified: metadata.modified().map(chrono::DateTime::from).unwrap(),
++        last_modified: metadata.modified().unwrap().try_into().expect("fixture mtime fits Jiff"),
+         size: metadata.len(),
+         e_tag: None,
+         version: None,

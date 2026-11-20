@@ -67,6 +67,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare reviewed workspace sources
+        run: python3 -B rust/temporal_sources/prepare.py
       - name: Provision disposable non-bypass transaction owner
         env:
           PGPASSWORD: kanz
@@ -188,6 +190,8 @@ jobs:
     timeout-minutes: 80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare reviewed workspace sources
+        run: python3 -B rust/temporal_sources/prepare.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: kanz/go.mod

@@ -7,5 +7,8 @@
 **/__pycache__
 **/.pytest_cache
 rust/target
+rust/target-provenance
+rust/temporal_sources/generated
+rust/temporal_sources/.prepared-*
 schemas/gen/python
 schemas/gen/ts

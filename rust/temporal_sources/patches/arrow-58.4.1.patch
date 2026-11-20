@@ -1,0 +1,20 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -40,6 +40,7 @@
+ all-features = true
+ 
+ [features]
++jiff = ["arrow-array/jiff"]
+ async = ["arrow-array/async"]
+ canonical_extension_types = ["arrow-schema/canonical_extension_types"]
+ chrono-tz = ["arrow-array/chrono-tz"]
+@@ -444,7 +445,8 @@
+ version = "1.9"
+ 
+ [dev-dependencies.chrono]
+-version = "0.4.40"
++package = "sad-chrono"
++version = "=0.5.1"
+ features = ["clock"]
+ default-features = false
+ 

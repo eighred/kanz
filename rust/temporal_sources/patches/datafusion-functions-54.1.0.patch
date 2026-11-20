@@ -1,0 +1,60 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -44,7 +44,7 @@
+     "blake2",
+     "blake3",
+ ]
+-datetime_expressions = ["chrono-tz"]
++datetime_expressions = []
+ default = [
+     "datetime_expressions",
+     "encoding_expressions",
+@@ -384,7 +384,7 @@
+ version = "58.3.0"
+ features = [
+     "prettyprint",
+-    "chrono-tz",
++    "jiff",
+ ]
+ 
+ [dependencies.arrow-buffer]
+@@ -404,12 +404,10 @@
+ optional = true
+ 
+ [dependencies.chrono]
+-version = "0.4.44"
++package = "sad-chrono"
++version = "=0.5.1"
+ default-features = false
+ 
+-[dependencies.chrono-tz]
+-version = "0.10.4"
+-optional = true
+ 
+ [dependencies.datafusion-common]
+ version = "54.1.0"
+--- a/src/datetime/common.rs
++++ b/src/datetime/common.rs
+@@ -121,17 +121,16 @@
+     // Note that %+ handles 'Z' at the end of the string without a space. This code doesn't
+     // handle named timezones with no preceding space since that would require writing a
+     // custom parser (or switching to Jiff)
+-    let tz: Option<chrono_tz::Tz> = if format.trim_end().ends_with(" %Z") {
++    let tz: Option<Tz> = if format.trim_end().ends_with(" %Z") {
+         // grab the string after the last space as the named timezone
+         if let Some((dt_str, timezone_name)) = datetime_str.trim_end().rsplit_once(' ') {
+             datetime_str = dt_str;
+ 
+             // attempt to parse the timezone name
+-            let result: Result<chrono_tz::Tz, chrono_tz::ParseError> =
+-                timezone_name.parse();
+-            let Ok(tz) = result else {
+-                return Err(err(&result.unwrap_err().to_string()));
+-            };
++            if timezone_name.starts_with(['+', '-']) {
++                return Err(err("failed to parse timezone"));
++            }
++            let tz = timezone_name.parse::<Tz>().map_err(|_| err("failed to parse timezone"))?;
+ 
+             // successfully parsed the timezone name, remove the ' %Z' from the format
+             format = &format[..format.len() - 3];
