@@ -88,9 +88,10 @@ def qualify(env):
             GRANT USAGE ON SEQUENCE outbox_id_seq TO basis_runtime;
             GRANT SELECT (tenant_id,portfolio_id,entry_id,venue_account_id,entry_type,cash_currency,
                 cash,effective_time,knowledge_time,source_ref,created_at,instrument_id,quantity,price,
-                action,settlement_status,settlement_date) ON ledger_entries TO basis_source;
+                action,settlement_status,settlement_date,execution_evidence) ON ledger_entries TO basis_source;
             GRANT SELECT (tenant_id,portfolio_id,movement_id,digest,payload) ON cash_commands TO basis_source;
             GRANT SELECT,INSERT ON cash_commands TO basis_runtime;
+            GRANT SELECT ON execution_fee_revisions TO basis_runtime;
             GRANT INSERT ON ledger_entries,ledger_append_positions,ledger_heads TO basis_runtime;
             GRANT UPDATE ON ledger_heads TO basis_runtime;
             GRANT UPDATE (observed_payload) ON return_basis_publications TO basis_runtime;
@@ -111,7 +112,7 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 12 FACTs" not in proof.stdout
+                or b"real JetStream replay and signed browser read passed with 18 FACTs" not in proof.stdout
                 or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
             locations = re.findall(rb"\b(?:main_test|operator_test)\.go:\d+(?=: )", proof.stdout)
             stage = re.search(rb"\breturn-browser-stage=[a-z-]+", proof.stdout)

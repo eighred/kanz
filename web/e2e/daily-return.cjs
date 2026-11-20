@@ -37,7 +37,7 @@ async function main() {
           return response.json()
         }
         if (role !== 'authorized') {
-          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5]]) {
+          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5], expected.editions[12]]) {
             const body = await check(edition, status)
             const denied = JSON.stringify(body)
             assert(!denied.includes(edition.digest))
@@ -51,7 +51,8 @@ async function main() {
           continue
         }
         const [original, corrected, unknown, splitOriginal, splitCorrected, indexCorrected,
-          missingBenchmark, mismatchedBenchmark, splitUnknown, missingMarks, badMarks, unsupported] = expected.editions
+          missingBenchmark, mismatchedBenchmark, splitUnknown, missingMarks, badMarks, unsupported,
+          traded, tradeRestated, unknownTrades, omittedTrade, wrongTradeTime, missingTradePrices] = expected.editions
         async function measured(edition, value, text, flowCount = '0') {
           const body = await check(edition, 200)
           assert.equal(body.source_digest, edition.digest)
@@ -64,8 +65,8 @@ async function main() {
             assert.equal(flow.movement_id, edition.movement_id)
             assert.equal(flow.command_digest, edition.command_digest)
             assert.equal(flow.effective_time, '2020-02-04T12:00:00Z')
-            assert.equal(flow.pre_flow_nav_reference, 'nav-pre-flow')
-            assert.equal(flow.post_flow_nav_reference, 'nav-post-flow')
+            assert.equal(flow.pre_flow_nav_reference, edition.pre_flow_nav)
+            assert.equal(flow.post_flow_nav_reference, edition.post_flow_nav)
             const { coefficient, exponent = 0 } = flow.signed_amount
             assert.equal(Number(coefficient) * 10 ** exponent, 40)
             await section.getByText('Two linked subperiods · 40 USD external flow at 2020-02-04T12:00:00Z').waitFor()
@@ -89,18 +90,30 @@ async function main() {
           await section.getByText(edition.benchmark_digest, { exact: true }).waitFor()
         }
         const contributionTable = () => section.getByRole('table', { name: 'Position contributions to time-weighted return' })
-        async function contribution(body, reference, rows, total) {
+        async function contribution(body, reference, rows, total, tradeReference) {
           const result = body.position_contribution
-          assert.equal(result.method, 'POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS')
+          assert.equal(result.method, tradeReference
+            ? 'POSITION_CONTRIBUTION_METHOD_LINKED_BOOKED_TRADES'
+            : 'POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS')
           assert.equal(result.unassessed_reason, undefined)
           assert.equal(result.opening_price_reference, 'prices-open')
           assert.equal(result.flow_price_reference, 'prices-flow')
           assert.equal(result.closing_price_reference, reference)
           const found = result.measured
           assert.deepEqual(found.positions.map(p => p.instrument_id), ['SYNTH-A', 'SYNTH-B'])
-          const toNumber = ({ coefficient, exponent = 0 }) => Number(coefficient) * 10 ** exponent
-          const amounts = [...found.positions.map(p => toNumber(p.pnl)), toNumber(found.cash_pnl), toNumber(found.total_pnl)]
-          const returns = [...found.positions.map(p => p.return_contribution), found.cash_return_contribution, found.total_return_contribution]
+          const toNumber = ({ coefficient, exponent = 0 }) => Number(coefficient + 'e' + exponent)
+          const amounts = found.positions.map(p => toNumber(p.pnl))
+          const returns = found.positions.map(p => p.return_contribution)
+          if (tradeReference) {
+            assert.equal(result.trade_coverage_reference, tradeReference)
+            amounts.push(toNumber(found.execution_costs.pnl))
+            returns.push(found.execution_costs.return_contribution)
+            await section.getByText(tradeReference, { exact: true }).waitFor()
+          } else {
+            assert.equal(found.execution_costs, undefined)
+          }
+          amounts.push(toNumber(found.cash_pnl), toNumber(found.total_pnl))
+          returns.push(found.cash_return_contribution, found.total_return_contribution)
           const expectedRows = [...rows, total]
           assert.deepEqual(amounts, expectedRows.map(p => p[1]))
           for (const [i, [label, amount, fraction, displayed]] of expectedRows.entries()) {
@@ -110,7 +123,7 @@ async function main() {
             await row.getByRole('cell', { name: displayed, exact: true }).waitFor()
           }
           assert.equal(returns.at(-1), body.measured.return_value)
-          assert.equal(amounts.slice(0, -1).reduce((sum, value) => sum + value, 0), amounts.at(-1))
+          assert(Math.abs(amounts.slice(0, -1).reduce((sum, value) => sum + value, 0) - amounts.at(-1)) <= 1e-12)
           assert(Math.abs(returns.slice(0, -1).reduce((sum, value) => sum + value, 0) - returns.at(-1)) <= 1e-12)
           await section.getByText('prices-open · prices-flow · ' + reference, { exact: true }).waitFor()
         }
@@ -182,9 +195,32 @@ async function main() {
         const badPrice = await measured(badMarks, -0.032, '-3.2%', '1')
         assert.equal(badPrice.previous_source_digest, missingMarks.digest)
         await unassessedContribution(badPrice, 'position_nav_not_reconciled', 'The valued holdings and cash do not reconcile to the signed NAV.')
-        const traded = await measured(unsupported, -0.032, '-3.2%', '1')
-        assert.equal(traded.previous_source_digest, badMarks.digest)
-        await unassessedContribution(traded, 'position_activity_unsupported', 'The holdings or journal activity require a different contribution method.')
+        const staticReport = await measured(unsupported, 163 / 750, '21.733333%', '1')
+        assert.equal(staticReport.previous_source_digest, badMarks.digest)
+        await unassessedContribution(staticReport, 'position_activity_unsupported', 'The holdings or journal activity require a different contribution method.')
+        stage = 'authorized-booked-trades'
+        const tradeBody = await measured(traded, 163 / 750, '21.733333%', '1')
+        assert.equal(tradeBody.previous_source_digest, unsupported.digest)
+        const tradesRows = [['SYNTH-A', 24.8, 409 / 1875, '+21.813333'],
+          ['SYNTH-B', 6.2, 277 / 7500, '+3.6933333'],
+          ['Execution costs', -2, -133 / 7500, '-1.7733333'], ['Cash and accruals', -3, -1 / 50, '-2']]
+        await contribution(tradeBody, 'prices-close-traded-r1', tradesRows, ['Total', 26, 163 / 750, '+21.733333'], 'booked-trades-r1')
+        const tradeRestatedBody = await measured(tradeRestated, 119 / 750, '15.866667%', '1')
+        assert.equal(tradeRestatedBody.previous_source_digest, traded.digest)
+        const tradeRestatedRows = [['SYNTH-A', 19.8, 223 / 1250, '+17.84'],
+          ['SYNTH-B', 3.2, 131 / 7500, '+1.7466667'],
+          ['Execution costs', -2, -43 / 2500, '-1.72'], ['Cash and accruals', -3, -1 / 50, '-2']]
+        await contribution(tradeRestatedBody, 'prices-close-traded-r2', tradeRestatedRows,
+          ['Total', 18, 119 / 750, '+15.866667'], 'booked-trades-r1')
+        stage = 'authorized-trade-coverage'
+        for (const [edition, reason, text] of [
+          [unknownTrades, 'trade_coverage_missing', 'Dated fill coverage is unavailable.'],
+          [omittedTrade, 'trade_coverage_mismatch', 'The signed fill list does not match the booked trades.'],
+          [wrongTradeTime, 'trade_timing_unverified', 'A booked trade could not be placed in the signed return subperiod.'],
+          [missingTradePrices, 'position_marks_missing', 'A dated price is missing for one or more holdings.'],
+        ]) {
+          await unassessedContribution(await measured(edition, 119 / 750, '15.866667%', '1'), reason, text)
+        }
         stage = 'authorized-reload-details'
         await page.reload()
         assert.deepEqual(await measured(original, 0.02, '2%'), originalBody)
@@ -193,6 +229,7 @@ async function main() {
         await contribution(splitBody, 'prices-close-r1', originalRows, ['Total', 25, 21 / 100, '+21'])
         assert.deepEqual(await measured(splitCorrected, -0.032, '-3.2%', '1'), splitUpdated)
         await comparison(splitUpdated, splitCorrected, 2 / 25, -14 / 125, '8%', '-11.2 percentage points')
+        assert.deepEqual(await measured(traded, 163 / 750, '21.733333%', '1'), tradeBody)
         await check({ date: splitOriginal.date, as_of: '2020-02-05T06:00:00Z' }, 404)
       } finally {
         await context.close()

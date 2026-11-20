@@ -17,6 +17,50 @@ func d(coeff int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}
 }
 
+func TestVerifiedTradeFeeRequiresScopedTimedBookedEconomics(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*orderpb.Fill)
+		valid  bool
+	}{
+		{name: "verified fee", valid: true},
+		{name: "no execution price", change: func(f *orderpb.Fill) { f.Price = nil }},
+		{name: "no execution time", change: func(f *orderpb.Fill) { f.ExecutedAt = nil }},
+		{name: "no execution account", change: func(f *orderpb.Fill) { f.VenueAccountId = "" }},
+		{name: "no explicit fee", change: func(f *orderpb.Fill) { f.Fee = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fill := &orderpb.Fill{
+				Venue: "BINANCE", FillId: "synth-fill", OrderId: "synth-order", InstrumentId: "SYNTH",
+				VenueAccountId: "synth-account", VenueExecutionId: "synth-execution", Side: orderpb.Side_SIDE_SELL,
+				Quantity: d(2, 0), Price: d(81, -1), ExecutedAt: timestamppb.New(day(2)),
+				Fee: &commonpb.Money{Amount: d(1, 0), CurrencyCode: "USD"},
+			}
+			if tc.change != nil {
+				tc.change(fill)
+			}
+			event, err := FromFill("PF", fill, "USD", day(3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fee, err := VerifiedTradeFee(event)
+			if !tc.valid {
+				if !errors.Is(err, ErrLegacyExecutionUnknown) {
+					t.Fatalf("incomplete trade economics were accepted: %v", err)
+				}
+				return
+			}
+			if err != nil || fee.Cmp(big.NewRat(1, 1)) != 0 {
+				t.Fatalf("explicit fee was not verified: %v", err)
+			}
+			event.Cash.Add(event.Cash, big.NewRat(1, 1))
+			if _, err := VerifiedTradeFee(event); !errors.Is(err, ErrLegacyExecutionUnknown) {
+				t.Fatal("cash that does not match the retained execution was verified")
+			}
+		})
+	}
+}
+
 func TestFromFillPreservesSubEightPlaceExecution(t *testing.T) {
 	fill := &orderpb.Fill{Venue: "BINANCE", FillId: "precision1594", OrderId: "O1",
 		InstrumentId: "BTC-USDT", Side: orderpb.Side_SIDE_BUY,

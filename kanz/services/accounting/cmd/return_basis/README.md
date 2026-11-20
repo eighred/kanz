@@ -82,6 +82,27 @@ linked contributions sum to the signed portfolio TWR. P&L is protobuf Decimal
 and linked fractions are statistical returns. This method measures absolute
 portfolio TWR contribution. Benchmark comparison remains a separate result.
 
+To assess intraday trading, add `trade_coverage` after the three position
+snapshots. Its `reference` versions the full `fills` list. Each fill names the
+immutable ledger `entry_id` and exact UTC `effective` time. An explicit
+`fills: null` records missing coverage. The importer and Accounting consumer
+read the booked execution evidence only for trades inside the report window
+and need SELECT on `ledger_entries.execution_evidence` for trading reports.
+The raw fill evidence stays in Accounting. Reports carry the coverage
+reference, not individual fill payloads.
+
+The booked-trades method reconciles the signed fill inventory and timestamps
+to the journal. It requires complete scope, price and explicit execution fee
+evidence, and verifies signed quantity, execution price, and net cash against
+the booked fill. For each subperiod, security P&L is closing marked value minus
+opening marked value minus signed traded principal. Execution costs are the
+negative of the booked commissions. Other cash and accrual P&L removes each
+fill's net cash from the booked cash/accrual change. Link all three before
+converting to statistical fractions. The external subscription is excluded at
+the NAV boundary. An execution at the same instant as that flow, intraday
+short holdings or a separate fee correction withholds this pilot breakdown.
+The original unchanged-holdings method keeps its existing eligibility.
+
 Submit compact canonical JSON in the order shown by the Go Evidence type, with
 a separate raw 64-byte Ed25519 signature. The `as_of` timestamp uses RFC 3339
 UTC with at most microsecond precision. The first edition has
@@ -145,8 +166,15 @@ external capital is excluded. Its linked contributions are +21.2, +1.8 and −2
 percentage points. A closing-price restatement produces exact P&L of USD 4,
 USD −9 and USD −3, with linked contributions of `98/1875`, `−241/3750` and
 `−1/50` of portfolio return, totaling −3.2%. A missing price, unreconciled NAV
-and an intraday round trip with unchanged ending holdings each withhold the
-breakdown while preserving the measured portfolio return.
+and any in-window trade under the unchanged-holdings method each withhold the
+breakdown while preserving the measured portfolio return. The booked-trades
+fixture then reports the sale before the USD 40 subscription and the purchase
+after it. Signed NAVs are 100, 110, 150 and 166. Exact position P&L is
+USD 24.8 and 6.2, execution costs are USD −2 and other cash P&L is USD −3.
+The total is USD 26 and linked return is `163/750` (about 21.733333%).
+A closing-price restatement to NAV 158 produces USD 18 and `119/750`.
+Missing fill coverage, an omitted fill, a fill signed in the wrong
+subperiod and a missing position price withhold the breakdown.
 
 The first estate needs a governed issuer and complete source scope before
 enrolling real keys. The synthetic fixture owns its signing key for one run.

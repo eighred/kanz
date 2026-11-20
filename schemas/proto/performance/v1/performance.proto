@@ -232,6 +232,9 @@ enum PositionContributionMethod {
   // Price changes on unchanged holdings and the booked cash/accrual change
   // excluding external capital, linked to the portfolio's daily TWR.
   POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS = 1;
+  // Mark-to-market on booked holdings, net of traded principal, with execution
+  // costs isolated from other booked cash and accrual P&L.
+  POSITION_CONTRIBUTION_METHOD_LINKED_BOOKED_TRADES = 2;
 }
 
 message DailyPositionContribution {
@@ -243,6 +246,7 @@ message DailyPositionContribution {
     PositionContributionBreakdown measured = 5;
     string unassessed_reason = 6;
   }
+  string trade_coverage_reference = 7;
 }
 
 message PositionContributionBreakdown {
@@ -251,6 +255,12 @@ message PositionContributionBreakdown {
   double cash_return_contribution = 3;
   common.v1.Decimal total_pnl = 4;
   double total_return_contribution = 5;
+  ExecutionCostContribution execution_costs = 6;
+}
+
+message ExecutionCostContribution {
+  common.v1.Decimal pnl = 1;
+  double return_contribution = 2;
 }
 
 message PositionReturnContribution {

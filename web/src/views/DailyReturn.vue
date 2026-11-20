@@ -24,6 +24,7 @@ type PositionContribution = {
   opening_price_reference: string
   flow_price_reference: string
   closing_price_reference: string
+  trade_coverage_reference?: string
   unassessed_reason?: string
   measured?: {
     positions: { instrument_id: string; pnl: Decimal; return_contribution: number }[]
@@ -31,10 +32,11 @@ type PositionContribution = {
     cash_return_contribution: number
     total_pnl: Decimal
     total_return_contribution: number
+    execution_costs?: { pnl: Decimal; return_contribution: number }
   }
 }
 type ContributionRow = { label: string; pnl: string; points: string }
-type ContributionDisplay = { rows: ContributionRow[]; references: string[]; total: ContributionRow }
+type ContributionDisplay = { rows: ContributionRow[]; references: string[]; total: ContributionRow; tradeReference?: string }
 
 const props = defineProps<{ portfolio: string }>()
 const session = useSession()
@@ -74,6 +76,11 @@ const contributionReasons: Record<string, string> = {
   position_activity_unsupported: 'The holdings or journal activity require a different contribution method.',
   position_journal_limit: 'The journal exceeds the supported assessment size.',
   position_contribution_out_of_range: 'A position contribution exceeds the supported range.',
+  trade_coverage_missing: 'Dated fill coverage is unavailable.',
+  trade_coverage_mismatch: 'The signed fill list does not match the booked trades.',
+  trade_timing_unverified: 'A booked trade could not be placed in the signed return subperiod.',
+  trade_economics_unverified: 'A fill is missing verified execution details or costs.',
+  trade_fee_revision_unsupported: 'An execution fee revision requires a different contribution method.',
 }
 
 function horizonKey(value: string) {
@@ -111,7 +118,8 @@ function benchmarkDisplay(comparison: BenchmarkComparison | undefined, report: {
 
 function contributionDisplay(contribution: PositionContribution | undefined, returnValue?: number): ContributionDisplay | string | undefined {
   if (!contribution) return undefined
-  if (contribution.method !== 'POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS') throw new Error()
+  const bookedTrades = contribution.method === 'POSITION_CONTRIBUTION_METHOD_LINKED_BOOKED_TRADES'
+  if (!bookedTrades && contribution.method !== 'POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS') throw new Error()
   const result = contribution.measured
   const reason = contribution.unassessed_reason
   if (!result) {
@@ -119,6 +127,7 @@ function contributionDisplay(contribution: PositionContribution | undefined, ret
     throw new Error()
   }
   if (reason !== undefined || returnValue === undefined || result.total_return_contribution !== returnValue ||
+      bookedTrades !== Boolean(result.execution_costs) || bookedTrades !== Boolean(contribution.trade_coverage_reference) ||
       !contribution.opening_price_reference || !contribution.closing_price_reference) throw new Error()
   const row = (label: string, amount: Decimal, fraction: number): ContributionRow => {
     const pnl = formatDecimal(amount)
@@ -126,11 +135,13 @@ function contributionDisplay(contribution: PositionContribution | undefined, ret
     return { label, pnl, points: percentagePoints.format(fraction * 100) }
   }
   const rows = result.positions.map(p => row(p.instrument_id, p.pnl, p.return_contribution))
+  if (result.execution_costs) rows.push(row('Execution costs', result.execution_costs.pnl, result.execution_costs.return_contribution))
   rows.push(row('Cash and accruals', result.cash_pnl, result.cash_return_contribution))
   return {
     rows,
     references: [contribution.opening_price_reference, contribution.flow_price_reference, contribution.closing_price_reference].filter(Boolean),
     total: row('Total', result.total_pnl, result.total_return_contribution),
+    tradeReference: contribution.trade_coverage_reference,
   }
 }
 
@@ -229,6 +240,7 @@ async function read() {
           </tfoot>
         </table>
         <p>Price sources <code>{{ result.contribution.references.join(' · ') }}</code></p>
+        <p v-if="result.contribution.tradeReference">Trade coverage <code>{{ result.contribution.tradeReference }}</code></p>
       </template>
       <p>Signed source <code>{{ result.digest }}</code></p>
       <p v-if="result.benchmark.digest">Benchmark source <code>{{ result.benchmark.digest }}</code></p>

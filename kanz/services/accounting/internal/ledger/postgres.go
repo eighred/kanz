@@ -230,7 +230,7 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 // it is the query that made #229 a request-path liability. Reach for
 // JournalSince instead unless you genuinely need the whole book from empty.
 func (p *Postgres) Journal(ctx context.Context, portfolioID string) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, nil, 0)
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, nil, 0, ExecutionWindow{})
 }
 
 // JournalSince seeks the immutable append index, never financial timestamps.
@@ -241,7 +241,7 @@ func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after i
 	if after == 0 {
 		return p.Journal(ctx, portfolioID)
 	}
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, &after, 0)
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, &after, 0, ExecutionWindow{})
 }
 
 // JournalAsOf returns replay-ready effects at the two PIT cutoffs. The SQL
@@ -250,7 +250,7 @@ func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after i
 // are derived replay stages, never additional persisted journal records. Replay
 // over this result equals ReplayAsOf over the immutable full journal.
 func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiveAsOf, knowledgeAsOf time.Time) ([]*Event, error) {
-	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, nil, 0)
+	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, nil, 0, ExecutionWindow{})
 	if err != nil {
 		return nil, err
 	}
@@ -265,12 +265,16 @@ func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiv
 // assessment. Both knowledge and the recording timestamp must fit the signed
 // horizon, so a later backdated entry cannot supply evidence to an old edition.
 // The caller holds the portfolio journal lock in the provided tenant transaction.
-func RecordedJournal(ctx context.Context, tx pgx.Tx, portfolioID string, horizon time.Time, limit int) ([]*Event, error) {
-	if horizon.IsZero() || limit <= 0 {
+func RecordedJournal(ctx context.Context, tx pgx.Tx, portfolioID string, horizon time.Time, limit int, executions ExecutionWindow) ([]*Event, error) {
+	if horizon.IsZero() || limit <= 0 || (!executions.End.IsZero() && (!executions.Start.Before(executions.End) || executions.Start.IsZero())) {
 		return nil, errors.New("ledger: recorded journal requires a horizon and positive limit")
 	}
-	return (&Postgres{q: tx}).journal(ctx, portfolioID, time.Time{}, horizon, nil, limit)
+	return (&Postgres{q: tx}).journal(ctx, portfolioID, time.Time{}, horizon, nil, limit, executions)
 }
+
+// ExecutionWindow retains fill evidence only in (Start, End] for a recorded
+// assessment. A zero window omits the raw execution column.
+type ExecutionWindow struct{ Start, End time.Time }
 
 // StalePortfolios also discovers untouched legacy portfolios with no head.
 // New portfolios compare commit positions, including late/equal-knowledge fills.
@@ -305,7 +309,7 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 	return out, rows.Err()
 }
 
-func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound time.Time, after *int64, recordedLimit int) ([]*Event, error) {
+func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound time.Time, after *int64, recordedLimit int, executions ExecutionWindow) ([]*Event, error) {
 	join, extraWhere, limit := "", "", ""
 	args := []any{portfolioID, nullTime(effBound), nullTime(knowBound)}
 	if after != nil {
@@ -327,9 +331,12 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 		  AND ($3::timestamptz IS NULL OR knowledge_time <= $3) ` + extraWhere + `
 		ORDER BY effective_time, knowledge_time, entry_id ` + limit
 	if recordedLimit > 0 {
-		// Keep the shared decoder's column shape without granting the
-		// valuation source access to the raw execution records.
-		query = strings.Replace(query, ", execution_evidence", ", NULL::bytea", 1)
+		executionEvidence := "NULL::bytea"
+		if !executions.End.IsZero() {
+			executionEvidence = "CASE WHEN effective_time > $5 AND effective_time <= $6 AND entry_type = $7 THEN execution_evidence END"
+			args = append(args, executions.Start, executions.End, EntryTrade)
+		}
+		query = strings.Replace(query, ", execution_evidence", ", "+executionEvidence, 1)
 	}
 	rows, err := p.q.Query(ctx, query, args...)
 	if err != nil {

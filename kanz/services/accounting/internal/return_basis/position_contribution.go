@@ -19,9 +19,10 @@ const positionJournalLimit = 4096
 // PositionBasis is signed with the dated NAV and cash evidence. Accounting
 // derives the holdings and non-security values from the recorded journal.
 type PositionBasis struct {
-	Opening *PositionMarks `json:"opening"`
-	AtFlow  *PositionMarks `json:"at_flow"`
-	Closing *PositionMarks `json:"closing"`
+	Opening       *PositionMarks `json:"opening"`
+	AtFlow        *PositionMarks `json:"at_flow"`
+	Closing       *PositionMarks `json:"closing"`
+	TradeCoverage *TradeCoverage `json:"trade_coverage,omitempty"`
 }
 
 type PositionMarks struct {
@@ -56,7 +57,7 @@ func validPositionBasis(e Evidence) bool {
 			}
 		}
 	}
-	return true
+	return validTradeCoverage(b.TradeCoverage)
 }
 
 func verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performancepb.DailyReturnAssessment, error) {
@@ -67,6 +68,10 @@ func verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performance
 	}
 	positions := &performancepb.DailyPositionContribution{
 		Method: performancepb.PositionContributionMethod_POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS,
+	}
+	if b.TradeCoverage != nil {
+		positions.Method = performancepb.PositionContributionMethod_POSITION_CONTRIBUTION_METHOD_LINKED_BOOKED_TRADES
+		positions.TradeCoverageReference = b.TradeCoverage.Reference
 	}
 	report.PositionContribution = positions
 	if b.Opening != nil {
@@ -107,7 +112,11 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 	if err := lockJournal(ctx, tx, e.Portfolio); err != nil {
 		return nil, "", err
 	}
-	entries, err := ledger.RecordedJournal(ctx, tx, e.Portfolio, e.AsOf, positionJournalLimit+1)
+	var executionWindow ledger.ExecutionWindow
+	if b.TradeCoverage != nil {
+		executionWindow = ledger.ExecutionWindow{Start: start, End: end}
+	}
+	entries, err := ledger.RecordedJournal(ctx, tx, e.Portfolio, e.AsOf, positionJournalLimit+1, executionWindow)
 	if err != nil {
 		return nil, "", err
 	}
@@ -125,6 +134,13 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 		switch event.Type {
 		case ledger.EntryFee, ledger.EntryAccrual:
 			if event.Action == nil && event.CashCurrency == e.Currency {
+				if b.TradeCoverage != nil && event.IsExecutionFeeAdjustment() {
+					return nil, "trade_fee_revision_unsupported", nil
+				}
+				continue
+			}
+		case ledger.EntryTrade:
+			if b.TradeCoverage != nil {
 				continue
 			}
 		case ledger.EntryCash:
@@ -136,17 +152,20 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 	}
 	openingBook := ledger.ReplayAsOf(e.Portfolio, entries, start, e.AsOf)
 	holdings := positionQuantities(openingBook)
-	for _, q := range holdings {
-		if q.Sign() < 0 {
-			return nil, "position_activity_unsupported", nil
-		}
+	var flowAt time.Time
+	if split != nil {
+		flowAt = split.Effective
+	}
+	firstTrading, secondTrading, tradeReason := verifyTrades(e, entries, holdings, start, end, flowAt)
+	if tradeReason != "" {
+		return nil, tradeReason, nil
 	}
 	valuate := func(marks *PositionMarks, mark *Close, at time.Time) (contributionValue, string) {
 		book := openingBook
 		if !at.Equal(start) {
 			book = ledger.ReplayAsOf(e.Portfolio, entries, at, e.AsOf)
 		}
-		return positionValuation(book, holdings, e.Currency, marks, mark)
+		return positionValuation(book, e.Currency, marks, mark)
 	}
 	opening, reason := valuate(b.Opening, e.Opening, start)
 	if reason != "" {
@@ -156,7 +175,7 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 	if reason != "" {
 		return nil, reason, nil
 	}
-	periods := []contributionPeriod{{from: opening, to: closing, link: big.NewRat(1, 1)}}
+	periods := []contributionPeriod{{from: opening, to: closing, link: big.NewRat(1, 1), trading: firstTrading}}
 	if split != nil {
 		before, reason := valuate(b.AtFlow, split.Before, split.Effective.Add(-time.Microsecond))
 		if reason != "" {
@@ -167,11 +186,11 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 			return nil, reason, nil
 		}
 		periods = []contributionPeriod{
-			{from: opening, to: before, link: new(big.Rat).Quo(closing.nav.Total, after.nav.Total)},
-			{from: after, to: closing, link: big.NewRat(1, 1)},
+			{from: opening, to: before, link: new(big.Rat).Quo(closing.nav.Total, after.nav.Total), trading: firstTrading},
+			{from: after, to: closing, link: big.NewRat(1, 1), trading: secondTrading},
 		}
 	}
-	return contributionBreakdown(e, holdings, periods)
+	return contributionBreakdown(e, periods)
 }
 
 func positionQuantities(book *ledger.Book) map[string]*big.Rat {
@@ -185,21 +204,19 @@ func positionQuantities(book *ledger.Book) map[string]*big.Rat {
 }
 
 type contributionValue struct {
-	nav    accounting.NAV
-	prices map[string]*big.Rat
+	nav       accounting.NAV
+	positions map[string]*big.Rat
 }
 
-func positionValuation(book *ledger.Book, holdings map[string]*big.Rat, currency string, marks *PositionMarks, close *Close) (contributionValue, string) {
+func positionValuation(book *ledger.Book, currency string, marks *PositionMarks, close *Close) (contributionValue, string) {
+	holdings := positionQuantities(book)
 	if marks.Prices == nil || len(marks.Prices) != len(holdings) {
 		return contributionValue{}, "position_marks_missing"
 	}
-	have := positionQuantities(book)
-	if len(have) != len(holdings) {
-		return contributionValue{}, "position_activity_unsupported"
-	}
 	prices := make(map[string]*big.Rat, len(holdings))
+	values := make(map[string]*big.Rat, len(holdings))
 	for id, q := range holdings {
-		if have[id] == nil || q.Cmp(have[id]) != 0 {
+		if q.Sign() < 0 {
 			return contributionValue{}, "position_activity_unsupported"
 		}
 		mark, ok := marks.Prices[id]
@@ -207,6 +224,7 @@ func positionValuation(book *ledger.Book, holdings map[string]*big.Rat, currency
 			return contributionValue{}, "position_marks_missing"
 		}
 		prices[id], _ = mark.Rat()
+		values[id] = new(big.Rat).Mul(q, prices[id])
 	}
 	nav, err := accounting.ComputeNAV(book, currency, marks.Effective, prices)
 	if err != nil {
@@ -216,18 +234,19 @@ func positionValuation(book *ledger.Book, holdings map[string]*big.Rat, currency
 	if signed.Cmp(nav.Total) != 0 {
 		return contributionValue{}, "position_nav_not_reconciled"
 	}
-	return contributionValue{nav: nav, prices: prices}, ""
+	return contributionValue{nav: nav, positions: values}, ""
 }
 
 type contributionPeriod struct {
 	from, to contributionValue
 	link     *big.Rat
+	trading  tradeLegs
 }
 
-func linkedContribution(periods []contributionPeriod, value func(contributionValue) *big.Rat) (*big.Rat, *big.Rat) {
+func linkedContribution(periods []contributionPeriod, changeFor func(contributionPeriod) *big.Rat) (*big.Rat, *big.Rat) {
 	pnl, contribution := new(big.Rat), new(big.Rat)
 	for _, period := range periods {
-		change := new(big.Rat).Sub(value(period.to), value(period.from))
+		change := changeFor(period)
 		pnl.Add(pnl, change)
 		rate := new(big.Rat).Quo(change, period.from.nav.Total)
 		contribution.Add(contribution, rate.Mul(rate, period.link))
@@ -235,14 +254,28 @@ func linkedContribution(periods []contributionPeriod, value func(contributionVal
 	return pnl, contribution
 }
 
-func contributionBreakdown(e Evidence, holdings map[string]*big.Rat, periods []contributionPeriod) (*performancepb.PositionContributionBreakdown, string, error) {
-	ids := make([]string, 0, len(holdings))
-	for id := range holdings {
+func contributionBreakdown(e Evidence, periods []contributionPeriod) (*performancepb.PositionContributionBreakdown, string, error) {
+	instruments := map[string]struct{}{}
+	for _, period := range periods {
+		for id := range period.from.positions {
+			instruments[id] = struct{}{}
+		}
+		for id := range period.to.positions {
+			instruments[id] = struct{}{}
+		}
+		for id := range period.trading.principal {
+			instruments[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(instruments))
+	for id := range instruments {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	cashPnL, cashContribution := linkedContribution(periods, func(v contributionValue) *big.Rat {
-		return new(big.Rat).Add(v.nav.Cash, v.nav.Accrued)
+	cashPnL, cashContribution := linkedContribution(periods, func(p contributionPeriod) *big.Rat {
+		from := new(big.Rat).Add(p.from.nav.Cash, p.from.nav.Accrued)
+		to := new(big.Rat).Add(p.to.nav.Cash, p.to.nav.Accrued)
+		return to.Sub(to.Sub(to, from), &p.trading.cash)
 	})
 	cash, ok := dec.ToProtoExact(cashPnL)
 	cashReturn, _ := cashContribution.Float64()
@@ -251,9 +284,22 @@ func contributionBreakdown(e Evidence, holdings map[string]*big.Rat, periods []c
 	}
 	out := &performancepb.PositionContributionBreakdown{CashPnl: cash, CashReturnContribution: cashReturn}
 	totalPnL, totalContribution := new(big.Rat).Set(cashPnL), new(big.Rat).Set(cashContribution)
+	if e.PositionBasis.TradeCoverage != nil {
+		pnl, rate := linkedContribution(periods, func(p contributionPeriod) *big.Rat {
+			return new(big.Rat).Neg(&p.trading.fees)
+		})
+		amount, ok := dec.ToProtoExact(pnl)
+		fraction, _ := rate.Float64()
+		if !ok || math.IsInf(fraction, 0) {
+			return nil, "position_contribution_out_of_range", nil
+		}
+		out.ExecutionCosts = &performancepb.ExecutionCostContribution{Pnl: amount, ReturnContribution: fraction}
+		totalPnL.Add(totalPnL, pnl)
+		totalContribution.Add(totalContribution, rate)
+	}
 	for _, id := range ids {
-		pnl, rate := linkedContribution(periods, func(v contributionValue) *big.Rat {
-			return new(big.Rat).Mul(holdings[id], v.prices[id])
+		pnl, rate := linkedContribution(periods, func(p contributionPeriod) *big.Rat {
+			return deltaPosition(p, id)
 		})
 		amount, ok := dec.ToProtoExact(pnl)
 		fraction, _ := rate.Float64()

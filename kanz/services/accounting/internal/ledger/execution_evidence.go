@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/fillfact"
@@ -13,6 +14,28 @@ import (
 )
 
 var ErrLegacyExecutionUnknown = errors.New("ledger: legacy execution attribution requires verified evidence")
+
+const executionFeeAdjustmentPrefix = "fee-correction:"
+
+func (e *Event) IsExecutionFeeAdjustment() bool {
+	return e.Type == EntryFee && strings.HasPrefix(e.EntryID, executionFeeAdjustmentPrefix)
+}
+
+// VerifiedTradeFee checks the original execution against the booked legs.
+// Attribution needs explicit commission, time and execution scope.
+func VerifiedTradeFee(e *Event) (*big.Rat, error) {
+	fill, err := executionFromEntry(e)
+	if err != nil || fill == nil || fill.GetOrderId() == "" || fill.GetVenueExecutionId() == "" ||
+		fill.GetVenueAccountId() == "" || fill.GetInstrumentId() == "" ||
+		(fill.GetSide() != orderpb.Side_SIDE_BUY && fill.GetSide() != orderpb.Side_SIDE_SELL) ||
+		fill.GetExecutedAt().CheckValid() != nil || fill.GetExecutedAt().AsTime().IsZero() ||
+		fill.GetExecutedAt().AsTime().Nanosecond()%1000 != 0 ||
+		e.Price == nil || e.Price.Sign() <= 0 || fill.GetFee().GetAmount() == nil ||
+		fill.GetFee().GetCurrencyCode() != e.CashCurrency {
+		return nil, ErrLegacyExecutionUnknown
+	}
+	return dec.MoneyIn(fill.GetFee(), e.CashCurrency)
+}
 
 func exactRat(a, b *big.Rat) bool {
 	if a == nil || b == nil {
@@ -119,5 +142,5 @@ func prepareExecutionEntry(ctx context.Context, tx pgx.Tx, e *Event) (*Event, er
 }
 
 func feeAdjustment(trade *Event, fill *orderpb.Fill, delta *big.Rat) *Event {
-	return &Event{EntryID: "fee-correction:" + fill.GetRecovery().GetCaseId() + ":" + fillfact.ExecutionKey(fill), PortfolioID: trade.PortfolioID, VenueAccountID: trade.VenueAccountID, Type: EntryFee, InstrumentID: trade.InstrumentID, Cash: delta, CashCurrency: trade.CashCurrency, Effective: trade.Effective, Knowledge: trade.Knowledge, SettlementBasis: trade.SettlementBasis, SettlementDate: trade.SettlementDate, SourceRef: trade.EntryID, ExecutionEvidence: append([]byte(nil), trade.ExecutionEvidence...)}
+	return &Event{EntryID: executionFeeAdjustmentPrefix + fill.GetRecovery().GetCaseId() + ":" + fillfact.ExecutionKey(fill), PortfolioID: trade.PortfolioID, VenueAccountID: trade.VenueAccountID, Type: EntryFee, InstrumentID: trade.InstrumentID, Cash: delta, CashCurrency: trade.CashCurrency, Effective: trade.Effective, Knowledge: trade.Knowledge, SettlementBasis: trade.SettlementBasis, SettlementDate: trade.SettlementDate, SourceRef: trade.EntryID, ExecutionEvidence: append([]byte(nil), trade.ExecutionEvidence...)}
 }

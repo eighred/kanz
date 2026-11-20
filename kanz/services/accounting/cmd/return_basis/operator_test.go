@@ -22,13 +22,18 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/pg"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
 	"github.com/eighred/kanz/services/accounting/internal/consume"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/return_basis"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const fixtureBenchmarkID = "SYNTH-TR"
@@ -65,8 +70,9 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ACCOUNTING_OTHER_FIXTURE",
-		Subjects: []string{consume.SubjectPortfolioCash, "accounting.cash.>", "accounting.custody.>", "accounting.collateral.>", "order.>", "market.>", "settlement.>", "dlq.>"}}); err != nil {
+	other, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ACCOUNTING_OTHER_FIXTURE",
+		Subjects: []string{consume.SubjectPortfolioCash, "accounting.cash.>", "accounting.custody.>", "accounting.collateral.>", "order.>", "market.>", "settlement.>", "dlq.>"}})
+	if err != nil {
 		t.Fatal(err)
 	}
 	start := func(group string) (string, func()) {
@@ -356,22 +362,94 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		badMarks.PositionBasis = &unreconciledPrices
 		badMarksDigest := appendEdition(badMarks)
 
-		// The same ending positions and cash can conceal real trading. The
-		// unchanged-holdings method must see and refuse the intraday round trip.
-		for i, units := range []int64{1, -1} {
-			at := start.Add(time.Duration(i+1) * time.Hour)
-			entry := &ledger.Event{EntryID: fmt.Sprintf("fixture-intraday-trade-%d", i), PortfolioID: first.Portfolio,
-				Type: ledger.EntryTrade, InstrumentID: "SYNTH-A", Quantity: big.NewRat(units, 1),
-				Price: big.NewRat(15, 1), Cash: big.NewRat(-15*units, 1), CashCurrency: first.Currency,
-				Effective: at, Knowledge: time.Now().UTC().Truncate(time.Microsecond)}
-			if err := journal.Append(ctx, entry, nil); err != nil {
-				t.Fatal("book synthetic intraday round trip", err)
-			}
+		// Deliver ordinary fill FACTs through the real Accounting subscriber.
+		// The sale precedes the external flow and the purchase follows it.
+		fillClient, err := bus.DialNATS(ctx, bus.NATSConfig{URL: broker.ClientURL(), Name: "return-pilot-fills"})
+		if err != nil {
+			t.Fatal("connect synthetic fill producer")
 		}
+		defer func() { _ = fillClient.Close() }()
+		producer, err := bus.NewProducer(fillClient, bus.ProducerConfig{Source: "oms", ProducerVersion: "pilot", Tenant: first.Tenant})
+		if err != nil {
+			t.Fatal("construct synthetic fill producer")
+		}
+		sell := publishReturnFill(t, ctx, producer, first, "sell-b", "SYNTH-B", orderpb.Side_SIDE_SELL, 2, "8.1", start.Add(2*time.Hour))
+		buy := publishReturnFill(t, ctx, producer, first, "buy-a", "SYNTH-A", orderpb.Side_SIDE_BUY, 1, "20.2", movement.Effective.Add(2*time.Hour))
+		wait("Accounting did not book both ordinary fill FACTs", func(check context.Context) bool {
+			rows, err := journal.Journal(check, first.Portfolio)
+			if err != nil {
+				return false
+			}
+			var found int
+			for _, entry := range rows {
+				if entry.EntryID == sell.EntryID || entry.EntryID == buy.EntryID {
+					found++
+				}
+			}
+			if found != 2 {
+				return false
+			}
+			events = rows
+			return true
+		})
 		unsupported := indexCorrected
 		unsupported.PreviousDigest = badMarksDigest
 		unsupported.AsOf = time.Now().UTC().Truncate(time.Microsecond)
-		lastDigest := appendEdition(unsupported)
+		tradedPrices := *intraday.PositionBasis
+		tradedPrices.Closing = marks("prices-close-traded-r1", "21", "10", end, unsupported.AsOf)
+		tradedFlow := split
+		tradedFlow.Before = captureNAV("nav-pre-flow-traded", tradedPrices.AtFlow, "110", movement.Effective.Add(-time.Microsecond), unsupported.AsOf)
+		tradedFlow.After = captureNAV("nav-post-flow-traded", tradedPrices.AtFlow, "150", movement.Effective, unsupported.AsOf)
+		tradedFlows := *intraday.Flows
+		tradedFlows.Split = &tradedFlow
+		unsupported.Flows = &tradedFlows
+		unsupported.PositionBasis = &tradedPrices
+		unsupported.Closing = captureNAV("nav-close-traded-r1", tradedPrices.Closing, "166", end, unsupported.AsOf)
+		staticDigest := appendEdition(unsupported)
+
+		traded := unsupported
+		traded.PreviousDigest = staticDigest
+		traded.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		coverage := returnbasis.TradeCoverage{Reference: "booked-trades-r1", Fills: []returnbasis.TradeReference{sell, buy}}
+		tradedBasis := tradedPrices
+		tradedBasis.TradeCoverage = &coverage
+		traded.PositionBasis = &tradedBasis
+		tradedDigest := appendEdition(traded)
+
+		tradeRestated := traded
+		tradeRestated.PreviousDigest = tradedDigest
+		tradeRestated.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		restatedTradeBasis := tradedBasis
+		restatedTradeBasis.Closing = marks("prices-close-traded-r2", "20", "9", end, tradeRestated.AsOf)
+		tradeRestated.PositionBasis = &restatedTradeBasis
+		tradeRestated.Closing = captureNAV("nav-close-traded-r2", restatedTradeBasis.Closing, "158", end, tradeRestated.AsOf)
+		lastDigest := appendEdition(tradeRestated)
+
+		for _, test := range []struct {
+			ref   string
+			fills []returnbasis.TradeReference
+		}{
+			{"booked-trades-unknown", nil},
+			{"booked-trades-incomplete", []returnbasis.TradeReference{sell}},
+			{"booked-trades-wrong-time", []returnbasis.TradeReference{sell, {EntryID: buy.EntryID, Effective: movement.Effective.Add(-time.Hour)}}},
+		} {
+			next := tradeRestated
+			next.PreviousDigest = lastDigest
+			next.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+			badCoverage := restatedTradeBasis
+			badCoverage.TradeCoverage = &returnbasis.TradeCoverage{Reference: test.ref, Fills: test.fills}
+			next.PositionBasis = &badCoverage
+			lastDigest = appendEdition(next)
+		}
+		unpricedTrade := tradeRestated
+		unpricedTrade.PreviousDigest = lastDigest
+		unpricedTrade.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		unpricedBasis := restatedTradeBasis
+		unpricedBasis.Closing = &returnbasis.PositionMarks{Reference: "prices-close-traded-incomplete", Effective: end,
+			KnownAt: unpricedTrade.AsOf, Prices: map[string]dec.Exact{"SYNTH-A": "20"}}
+		unpricedTrade.PositionBasis = &unpricedBasis
+		lastDigest = appendEdition(unpricedTrade)
+		t.Logf("ordinary booked fills sell=%s buy=%s", sell.EntryID, buy.EntryID)
 
 		// A second booking learned after these editions must count even when it
 		// is denominated in another currency. Earlier reports remain immutable.
@@ -450,6 +528,24 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		}
 		return false
 	})
+	wait("fresh durable did not acknowledge both ordinary fills", func(check context.Context) bool {
+		info, err := other.Consumer(check, "return-replay-order_order_filled")
+		if err != nil {
+			return false
+		}
+		state, err := info.Info(check)
+		return err == nil && state.AckFloor.Consumer >= 2 && state.NumAckPending == 0
+	})
+	pool, err := pg.NewTenantPool(ctx, runtimeDSN, first.Tenant)
+	if err != nil {
+		t.Fatal("reopen the journal after replay")
+	}
+	defer pool.Close()
+	var trades int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries
+		WHERE portfolio_id=$1 AND entry_type=$2 AND entry_id LIKE 'fill:%'`, first.Portfolio, ledger.EntryTrade).Scan(&trades); err != nil || trades != 2 {
+		t.Fatal("fill redelivery changed the booked execution count")
+	}
 	after, err := stream.Info(ctx)
 	if err != nil || after.State.Msgs != before.State.Msgs {
 		t.Fatal("replay produced another completion")
@@ -462,6 +558,12 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		if e.Flows != nil && e.Flows.Split != nil {
 			values[i]["movement_id"] = e.Flows.Split.MovementID
 			values[i]["command_digest"] = e.Flows.Split.CommandDigest
+			if e.Flows.Split.Before != nil {
+				values[i]["pre_flow_nav"] = e.Flows.Split.Before.Reference
+			}
+			if e.Flows.Split.After != nil {
+				values[i]["post_flow_nav"] = e.Flows.Split.After.Reference
+			}
 		}
 		if e.Benchmark != nil && e.Benchmark.Observation != nil {
 			raw, err := json.Marshal(e.Benchmark.Observation)
@@ -496,4 +598,24 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 	for i, e := range editions {
 		t.Logf("edition close=%s horizon=%s source_sha256=%s benchmark_sha256=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i], values[i]["benchmark_digest"])
 	}
+}
+
+func publishReturnFill(t *testing.T, ctx context.Context, producer *bus.Producer, scope returnbasis.Evidence,
+	id, instrument string, side orderpb.Side, quantity int64, price string, at time.Time) returnbasis.TradeReference {
+	t.Helper()
+	fill := &orderpb.Fill{
+		FillId: "pilot-fill-" + id, OrderId: "pilot-order-" + id, InstrumentId: instrument,
+		Venue: "BINANCE", VenueAccountId: "synthetic-spot", VenueExecutionId: "pilot-exec-" + id,
+		Side: side, Quantity: dec.ToProto(big.NewRat(quantity, 1)), Price: dec.ToProto(dec.Rat(price)),
+		ExecutedAt: timestamppb.New(at),
+		Fee:        &commonpb.Money{CurrencyCode: scope.Currency, Amount: dec.ToProto(big.NewRat(1, 1))},
+	}
+	if err := producer.Publish(ctx, bus.Event{
+		Subject: fillfact.SubjectFilled, EventType: fillfact.SubjectFilled, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion: 1, Domain: "order", EventTime: at, PartitionKey: fill.OrderId, PayloadSchemaRef: "order.v1.OrderFilled:1",
+		Payload: &orderpb.OrderFilled{OrderId: fill.OrderId, Fill: fill, State: &orderpb.OrderState{PortfolioId: scope.Portfolio}},
+	}); err != nil {
+		t.Fatal("publish synthetic typed fill FACT", err)
+	}
+	return returnbasis.TradeReference{EntryID: "fill:" + fillfact.ExecutionKey(fill), Effective: at}
 }

@@ -425,3 +425,68 @@ fn unchanged_positions_and_booked_fee_reconcile_to_linked_return() {
         assert_eq!(exact.into_iter().sum::<Rat>(), n(want));
     }
 }
+
+#[test]
+fn booked_buy_and_sell_conserve_nav_and_link_each_component() {
+    // Four A at 15 and five B at 8. Sell two B at 8.1 before the deposit,
+    // buy one A at 20.2 after it. Each execution costs 1 and the book pays
+    // another 3 as a non-execution fee.
+    let initial = [n("4") * n("15"), n("5") * n("8")];
+    let at_flow = [n("4") * n("18"), n("3") * n("38/5")];
+    let sale = n("2") * n("81/10");
+    let purchase = n("101/5");
+    let pre_cash = &sale - n("1");
+    let post_cash = &pre_cash + n("40");
+    let final_cash = &post_cash - &purchase - n("1") - n("3");
+    let opening: Rat = initial.iter().cloned().sum();
+    let before: Rat = at_flow.iter().cloned().sum::<Rat>() + &pre_cash;
+    let after = &before + n("40");
+    assert_eq!(
+        (&opening, &before, &after),
+        (&n("100"), &n("110"), &n("150"))
+    );
+    assert_eq!(final_cash, n("31"));
+    for (marks, nav, money, rates, total) in [
+        (
+            ["21", "10"],
+            "166",
+            ["124/5", "31/5", "-2", "-3"],
+            ["409/1875", "277/7500", "-133/7500", "-1/50"],
+            "163/750",
+        ),
+        (
+            ["20", "9"],
+            "158",
+            ["99/5", "16/5", "-2", "-3"],
+            ["223/1250", "131/7500", "-43/2500", "-1/50"],
+            "119/750",
+        ),
+    ] {
+        let closing = [n("5") * n(marks[0]), n("3") * n(marks[1])];
+        let close = closing.iter().cloned().sum::<Rat>() + &final_cash;
+        assert_eq!(close, n(nav));
+        let first = [
+            &at_flow[0] - &initial[0],
+            &at_flow[1] + &sale - &initial[1],
+            n("-1"),
+            n("0"),
+        ];
+        let second = [
+            &closing[0] - &at_flow[0] - &purchase,
+            &closing[1] - &at_flow[1],
+            n("-1"),
+            n("-3"),
+        ];
+        let combined = std::array::from_fn::<_, 4, _>(|i| &first[i] + &second[i]);
+        let linked = std::array::from_fn::<_, 4, _>(|i| {
+            (&close * &first[i] + &opening * &second[i]) / (&opening * &after)
+        });
+        assert_eq!(combined, money.map(n));
+        assert_eq!(linked, rates.map(n));
+        assert_eq!(
+            combined.into_iter().sum::<Rat>(),
+            &close - &opening - n("40")
+        );
+        assert_eq!(linked.into_iter().sum::<Rat>(), n(total));
+    }
+}
