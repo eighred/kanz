@@ -297,3 +297,83 @@ describe('custody exact review', () => {
     expect(wrapper.findAll('button').some((b) => b.text() === 'Claim')).toBe(false)
   })
 })
+
+describe('custody queue navigation', () => {
+  it('pages in both directions, indicates incompleteness, and reloads from the beginning without writing', async () => {
+    const read = vi.spyOn(custody, 'queue').mockImplementation(async (_signal, cursor) => cursor
+      ? { breaks: [{ ...row, break_id: 'second', actions_enabled: false }] }
+      : { breaks: [{ ...row, break_id: 'first', actions_enabled: false }], nextCursor: 'next' })
+    const post = vi.spyOn(api, 'post')
+    const wrapper = mount(CustodyBreaksView)
+    const click = async (name: string) => { await button(wrapper, name).trigger('click'); await flushPromises() }
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('More results are available.')
+      await click('Next page')
+      expect(wrapper.get('th[scope="row"]').text()).toBe('second')
+      expect(wrapper.text()).toContain('End of queue.')
+      expect(wrapper.findAll('button').map(b => b.text())).not.toContain('Claim')
+      expect(wrapper.findAll('button').map(b => b.text())).not.toContain('Explain')
+      await click('Previous page')
+      expect(wrapper.get('th[scope="row"]').text()).toBe('first')
+      await click('Next page')
+      await click('Reload queue')
+      expect(read.mock.calls.map(([, after]) => after)).toEqual([undefined, 'next', undefined, 'next', undefined])
+      expect(post).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+  it('clears a pending continuation and its data on tenant change', async () => {
+    const read = vi.spyOn(custody, 'queue').mockResolvedValueOnce({ breaks: [row], nextCursor: 'oldscope' })
+    let finish!: (value: { breaks: CustodyBreak[]; nextCursor: string }) => void
+    read.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    read.mockResolvedValueOnce({ breaks: [] })
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      await flushPromises()
+      await button(wrapper, 'Next page').trigger('click')
+      const old = read.mock.calls[1]![0]!
+      useSession().identity!.tenant = 'new-tenant'
+      await flushPromises()
+      expect(old.aborted).toBe(true)
+      expect(read.mock.calls.map(([, after]) => after)).toEqual([undefined, 'oldscope', undefined])
+      finish({ breaks: [{ ...row, break_id: 'foreign-result' }], nextCursor: 'foreign-next' })
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('foreign-result')
+      expect(wrapper.find('nav[aria-label="Custody queue pages"]').exists()).toBe(false)
+      expect(wrapper.findAll('button').map(b => b.text())).not.toContain('Claim')
+    } finally { wrapper.unmount() }
+  })
+  it('clears writable rows when the backend denies the next page', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValueOnce({ breaks: [row], nextCursor: 'next' })
+      .mockRejectedValueOnce(new ApiError(403, 'forbidden'))
+    const post = vi.spyOn(api, 'post')
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      await flushPromises()
+      expect(button(wrapper, 'Claim').exists()).toBe(true)
+      await button(wrapper, 'Next page').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[role="alert"]').text()).toContain('not permitted')
+      expect(wrapper.find('th[scope="row"]').exists()).toBe(false)
+      expect(wrapper.findAll('button').map(b => b.text())).not.toContain('Claim')
+      expect(post).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+  it('distinguishes a rejected or now-empty continuation from an empty queue', async () => {
+    const first = { breaks: [row], nextCursor: 'next' }
+    vi.spyOn(custody, 'queue').mockResolvedValueOnce(first).mockRejectedValueOnce(new ApiError(400, 'invalid cursor'))
+      .mockResolvedValueOnce(first).mockResolvedValueOnce({ breaks: [] })
+    const wrapper = mount(CustodyBreaksView)
+    const click = async (name: string) => { await button(wrapper, name).trigger('click'); await flushPromises() }
+    try {
+      await flushPromises()
+      await click('Next page')
+      expect(wrapper.get('[role="alert"]').text()).toContain('Reload the queue')
+      expect(wrapper.text()).not.toContain('No outstanding custody breaks')
+      await click('Reload queue')
+      await click('Next page')
+      expect(wrapper.text()).toContain('No outstanding breaks remain on this page')
+      expect(wrapper.text()).not.toContain('No outstanding custody breaks')
+    } finally { wrapper.unmount() }
+  })
+})

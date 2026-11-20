@@ -117,6 +117,10 @@ export function downloadCustodyComparison(receipt: Extract<DatedCustodyResult, {
   }, `custody-comparison-${receipt.business_date}.json`)
 }
 
+function validQueueCursor(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9_-]+$/.test(value)
+}
+
 export const custody = {
   async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = ''): Promise<DatedCustodyResult> {
     const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
@@ -183,10 +187,20 @@ export const custody = {
     return { ...scope, state: result.state as 'not_compared' | 'pending' | 'unknown',
       statement_id: result.statement_id as string | undefined, reason }
   },
-  async queue(signal?: AbortSignal): Promise<{ breaks: CustodyBreak[]; rerunActor?: string }> {
-    const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown; rerun_enabled?: unknown }>('/api/v1/custody/breaks', { signal })
+  async queue(signal?: AbortSignal, after?: string): Promise<{ breaks: CustodyBreak[]; nextCursor?: string; rerunActor?: string }> {
+    const limit = 100
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (after !== undefined) {
+      if (!validQueueCursor(after)) throw new Error('Invalid custody response.')
+      query.set('after', after)
+    }
+    const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown; rerun_enabled?: unknown; next_cursor?: unknown }>(
+      '/api/v1/custody/breaks?' + query.toString(), { signal })
     const rows = body?.breaks === null ? [] : body?.breaks
     if (!Array.isArray(rows) || body.count !== rows.length) throw new Error('Invalid custody response.')
+    const nextCursor = body.next_cursor
+    if (nextCursor !== undefined && (!validQueueCursor(nextCursor) || nextCursor === after ||
+        rows.length === 0 || rows.length > limit)) throw new Error('Invalid custody response.')
     if (body.actions_enabled !== undefined && typeof body.actions_enabled !== 'boolean') throw new Error('Invalid custody response.')
     if (body.rerun_enabled !== undefined && typeof body.rerun_enabled !== 'boolean') throw new Error('Invalid custody response.')
     const breaks = rows.map((value) => {
@@ -203,9 +217,9 @@ export const custody = {
         if (body.rerun_enabled === true && grants.routes.some(r => r.Capability === 'custody_rerun' && r.Pattern === 'POST /v1/portfolios/{id}/custody/reruns')) rerunActor = identity.subject
       } catch { signal?.throwIfAborted() }
       if (!canAct) for (const row of breaks) row.actions_enabled = false
-      return { breaks, rerunActor }
+      return { breaks, rerunActor, nextCursor }
     }
-    return { breaks }
+    return { breaks, nextCursor }
   },
   async rerun(request: CustodyRerunRequest, actor: string, signal?: AbortSignal): Promise<CustodyRerunReceipt> {
     const { portfolio_id, ...command } = request
@@ -245,6 +259,8 @@ export function describeCustodyAction(error: unknown): string {
 }
 
 export function describeCustody(error: unknown): string {
+  if (error instanceof ApiError && error.status === 400) return 'This queue page is no longer available. Reload the queue to start again.'
+  if (error instanceof ApiError && error.status === 422 && error.code === 'custody_queue_pagination_required') return 'The service requires paged custody results and could not return this page.'
   if (error instanceof ApiError && error.status === 403) return 'Your account is not permitted to read the custody-break queue.'
   if (error instanceof ApiError && error.status === 404) return 'Custody reconciliation is not enabled in this deployment.'
   if (error instanceof ApiError && error.status === 503) return 'Custody reconciliation is currently unavailable.'

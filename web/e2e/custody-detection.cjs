@@ -45,10 +45,16 @@ async function main() {
         let priorReceipt
         for (const navigation of ['open', 'reload']) {
           stage = name + '-' + navigation + '-response'
-          const response = page.waitForResponse(r => r.url() === endpoint && r.request().method() === 'GET')
+          const response = page.waitForResponse(r => {
+            const url = new URL(r.url())
+            return url.origin + url.pathname === endpoint && r.request().method() === 'GET'
+          })
           if (navigation === 'open') await page.goto(base + '/custody-breaks')
           else await page.reload()
           const received = await response
+          const query = new URL(received.url()).searchParams
+          assert.equal(query.get('limit'), '100')
+          assert.equal(query.has('after'), false)
           assert.equal(received.status(), status)
           stage = name + '-' + navigation + '-payload'
           const data = await received.json()

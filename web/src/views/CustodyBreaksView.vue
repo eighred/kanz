@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
 import { custody, describeCustody, describeCustodyAction, type CustodyBreak, type CustodyDecision, type CustodyEvidence } from '../api/custody'
 import { ApiError } from '../api/client'
@@ -11,6 +11,10 @@ const session = useSession()
 let queueRead: AbortController | undefined
 let command: AbortController | undefined
 const breaks = ref<CustodyBreak[]>([])
+interface QueuePage { number: number; after?: string }
+const pages = ref<QueuePage[]>([{ number: 1 }])
+const page = computed(() => pages.value.at(-1)!)
+const nextCursor = ref<string>()
 const rerunActor = ref('')
 const reviewingRerun = ref(false)
 const rerunReceipt = ref<CustodyRerunReceipt | null>(null)
@@ -38,19 +42,31 @@ function unavailable(item: CustodyBreak): string {
   return 'Actions unavailable in this deployment.'
 }
 
-async function reload() {
+function reload() { return loadPage([{ number: 1 }]) }
+
+function nextPage() {
+  if (!nextCursor.value) return
+  // Retain a bounded back history; Reload always starts from the first page.
+  return loadPage([...pages.value.slice(-31), { number: page.value.number + 1, after: nextCursor.value }])
+}
+
+async function loadPage(history: QueuePage[]) {
   queueRead?.abort()
   if (!session.signedIn) return
   const request = new AbortController()
   queueRead = request
+  pages.value = history
+  nextCursor.value = undefined
   loading.value = true
   error.value = ''
   breaks.value = []
   rerunActor.value = ''
   rerunReceipt.value = null
   try {
-    const result = await custody.queue(request.signal)
+    const result = await custody.queue(request.signal, page.value.after)
     if (request.signal.aborted) return
+    if (result.nextCursor && history.some(entry => entry.after === result.nextCursor)) throw new Error('Repeated custody queue cursor.')
+    nextCursor.value = result.nextCursor
     breaks.value = result.breaks
     rerunActor.value = result.rerunActor ?? ''
   }
@@ -60,6 +76,8 @@ async function reload() {
 function clearSession() {
   queueRead?.abort()
   command?.abort()
+  pages.value = [{ number: 1 }]
+  nextCursor.value = undefined
   breaks.value = []
   rerunActor.value = ''
   rerunReceipt.value = null
@@ -187,6 +205,11 @@ function age(seconds: number): string {
     <p v-if="rerunReceipt.journal_position !== undefined">Journal position <code>{{ rerunReceipt.journal_position }}</code></p>
   </section>
   <button ref="reloadButton" :disabled="loading || saving || !!selected || reviewingRerun" @click="reload">Reload queue</button>
+  <nav v-if="page.number > 1 || nextCursor" aria-label="Custody queue pages">
+    <p v-if="!loading && !error" role="status">Page {{ page.number }} · {{ breaks.length }} shown. {{ nextCursor ? 'More results are available.' : 'End of queue.' }}</p>
+    <button v-if="pages.length > 1" :disabled="loading || saving || !!selected || reviewingRerun" @click="loadPage(pages.slice(0, -1))">Previous page</button>
+    <button v-if="nextCursor" :disabled="loading || saving || !!selected || reviewingRerun" @click="nextPage">Next page</button>
+  </nav>
   <p v-if="loading">Loading…</p>
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
   <div v-else class="table-scroll">
@@ -227,7 +250,7 @@ function age(seconds: number): string {
             <span v-else>{{ unavailable(item) }}</span>
           </td>
         </tr>
-        <tr v-if="breaks.length === 0"><td colspan="12">No outstanding custody breaks were returned by the reconciliation service.</td></tr>
+        <tr v-if="breaks.length === 0"><td colspan="12">{{ page.number > 1 ? 'No outstanding breaks remain on this page. Reload the queue to check the first page.' : 'No outstanding custody breaks were returned by the reconciliation service.' }}</td></tr>
       </tbody>
     </table>
   </div>
