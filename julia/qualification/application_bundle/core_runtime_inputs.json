@@ -1,0 +1,193 @@
+{
+  "files": {
+    "LibUV.tar.gz": {
+      "bytes": 929229,
+      "sha256": "e1b328a509bedbe25f8426fee10e39e997bee10f5b141781c7a2c365e0bbb709",
+      "source": "https://github.com/JuliaBinaryWrappers/LibUV_jll.jl/releases/download/LibUV-v2.0.1%2B22/LibUV.v2.0.1.x86_64-linux-gnu.tar.gz"
+    },
+    "LibUnwind.tar.gz": {
+      "bytes": 1421579,
+      "sha256": "8c45bece9657cf47c90dc97d007b4d1a4e5f70df5f9e68df7ac9fb91f38b1163",
+      "source": "https://github.com/JuliaBinaryWrappers/LibUnwind_jll.jl/releases/download/LibUnwind-v1.8.3%2B1/LibUnwind.v1.8.3.x86_64-linux-gnu.tar.gz"
+    },
+    "Zstd.tar.gz": {
+      "bytes": 661891,
+      "sha256": "8b2d56159d22748eca8137d4df63699be3e01e3d788bd36f92c65750f8168dc6",
+      "source": "https://github.com/JuliaBinaryWrappers/Zstd_jll.jl/releases/download/Zstd-v1.5.7%2B1/Zstd.v1.5.7.x86_64-linux-gnu.tar.gz"
+    },
+    "full-parent.tar.gz": {
+      "bytes": 643900088,
+      "sha256": "176a3910fcbd5525494578f2344b61102eca80de1e81a910513951247c52a271",
+      "source": "https://github.com/JuliaBinaryWrappers/LLVM_full_jll.jl/releases/download/LLVM_full-v20.1.8%2B3/LLVM_full.v20.1.8.x86_64-linux-gnu-cxx11.tar.gz"
+    },
+    "gcc9.tar.gz": {
+      "bytes": 746889948,
+      "sha256": "cc8ddc4928ff48f86f58e54f3f4d056516b018a7ff8bdf4b172a808c247a4b86",
+      "source": "https://github.com/JuliaPackaging/Yggdrasil/releases/download/GCCBootstrap-v9.1.0+3/GCCBootstrap-x86_64-linux-gnu.v9.1.0.x86_64-linux-musl.unpacked.tar.gz"
+    },
+    "julia-1.13.3.tar.gz": {
+      "bytes": 15892342,
+      "sha256": "081fc9b95522a63baddf86cdae11cfab848bd12a90cf6e171b28c66341d9522e",
+      "source": "https://github.com/JuliaLang/julia/releases/download/v1.13.3/julia-1.13.3.tar.gz"
+    },
+    "julia-1.13.3.tar.gz.asc": {
+      "bytes": 833,
+      "sha256": "4d387ef42837c9d10bf0444020ee359bb72d24531a4b3593e63c2dedc8360431",
+      "source": "https://github.com/JuliaLang/julia/releases/download/v1.13.3/julia-1.13.3.tar.gz.asc"
+    },
+    "julia-release-key.asc": {
+      "bytes": 1635,
+      "sha256": "9c6ac79238b822f65ac66bbdad336442d0232bfffd4ee90883fa63efa31f9b1b",
+      "source": "https://julialang.org/assets/juliareleases.asc"
+    },
+    "julia.tar.gz": {
+      "bytes": 302726241,
+      "sha256": "5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4",
+      "source": "https://julialang-s3.julialang.org/bin/linux/x64/1.13/julia-1.13.3-linux-x86_64.tar.gz"
+    },
+    "libstdc++.a": {
+      "bytes": 6646958,
+      "sha256": "44a1fe201b3817475d290ca6c81dae9e7abee6b93496892557b29000bdf14fa6",
+      "source": "build_gcc_runtime.sh /opt/kanz-gcc/lib64/libstdc++.a"
+    },
+    "utf8proc.tar.gz": {
+      "bytes": 202580,
+      "sha256": "3e01616be4c767492b084d5eaece31b5d007b846522a5e19783c438277e6b0e8",
+      "source": "https://api.github.com/repos/JuliaLang/utf8proc/tarball/e5e799221b45bbb90f5fdc5c69b6b8dfbf017e78"
+    }
+  },
+  "gcc9Headers": {
+    "102010": {
+      "fix": "29e51a820d76c766ae417fcba912714337b0eb17",
+      "patchSHA256": "32604af922e152db6acf30702a9ebfee6c683023bc15903683289f7ee578ccba",
+      "postSHA256": "a070853b26c8ff8cd14660531714686db6a377679c71c83c367b6989fb14c54e",
+      "preSHA256": "b7ed22b049d5738c787ff860cb650248b4ee3073f4c20eb3fbc32d48a9fcd108",
+      "relative": "ext/pb_ds/detail/binary_heap_/erase_fn_imps.hpp",
+      "source": "https://github.com/gcc-mirror/gcc/commit/29e51a820d76c766ae417fcba912714337b0eb17"
+    },
+    "114690": {
+      "fix": "b346c341218a6a9a52c56e2bd1516b35b51c2bd2",
+      "patchSHA256": "807ab8c0fbb3af67984ade610118d3f159ad8ed7cc91f49372d04c22c6f6c52b",
+      "postSHA256": "75820173955f6efb1b3f7f46e305c3ba8dbd6ac0dde90c0c0a4825d0ee78aacc",
+      "preSHA256": "099a5af022c1a8de9173435bebfa7daeee14867f1c3fad4c4f830be2116b7921",
+      "relative": "parallel/search.h",
+      "source": "https://github.com/gcc-mirror/gcc/commit/b346c341218a6a9a52c56e2bd1516b35b51c2bd2"
+    },
+    "114691": {
+      "fix": "fe6ce779e8aaa48cd16f0c5e5575832982493346",
+      "patchSHA256": "ee8bd22d1e1acac69fac1de65e6d515ab11c6b56140ea029d12a1cc584a7d551",
+      "postSHA256": "85aeecb5738343c5300d45ef947d2c39a4ffe17dd50327718c79ece77587e3a4",
+      "preSHA256": "69776a3958c5c340f9094228067c39c8e8d7e4d0c8eee189d0e8dcee0cdf388f",
+      "relative": "bits/stl_bvector.h",
+      "source": "https://gitlab.com/redhat/centos-stream/rpms/gcc/-/raw/fe6ce779e8aaa48cd16f0c5e5575832982493346/gcc8-cve-2026-114691.patch"
+    },
+    "125709": {
+      "fix": "68b1b9056c70acb31f2964963b51c480ff820602",
+      "patchSHA256": "51e5dfe1434fb0aed38c545cae4978476681195ae55ece987358100d7505102e",
+      "postSHA256": "ac53037d12ef844323bc3c398ba18906a86f6a38ace7a4609d903aaf44a3055f",
+      "preSHA256": "d89fd2856578c86c13283cc34b5887b00426d4623c7087a02134a901281fe8dd",
+      "relative": "bits/fstream.tcc",
+      "source": "https://github.com/gcc-mirror/gcc/commit/68b1b9056c70acb31f2964963b51c480ff820602"
+    }
+  },
+  "utf8procSource": {
+    "LICENSE.md": {
+      "mode": "100644",
+      "path": "LICENSE.md",
+      "sha": "f18b1f3abdcb55e82ecdd84f476e7f366b00183b",
+      "size": 5125,
+      "type": "blob",
+      "url": "https://api.github.com/repos/JuliaStrings/utf8proc/git/blobs/f18b1f3abdcb55e82ecdd84f476e7f366b00183b"
+    },
+    "Makefile": {
+      "mode": "100644",
+      "path": "Makefile",
+      "sha": "6f51c16dca4b5d4e68c668f59d90ca538ec590a4",
+      "size": 7615,
+      "type": "blob",
+      "url": "https://api.github.com/repos/JuliaStrings/utf8proc/git/blobs/6f51c16dca4b5d4e68c668f59d90ca538ec590a4"
+    },
+    "utf8proc.c": {
+      "mode": "100644",
+      "path": "utf8proc.c",
+      "sha": "e8fa207af864e71814538da4f84f168da1548b1b",
+      "size": 33114,
+      "type": "blob",
+      "url": "https://api.github.com/repos/JuliaStrings/utf8proc/git/blobs/e8fa207af864e71814538da4f84f168da1548b1b"
+    },
+    "utf8proc.h": {
+      "mode": "100644",
+      "path": "utf8proc.h",
+      "sha": "8d9a2e41ee7976fe02f220d658285418ab0e9143",
+      "size": 34049,
+      "type": "blob",
+      "url": "https://api.github.com/repos/JuliaStrings/utf8proc/git/blobs/8d9a2e41ee7976fe02f220d658285418ab0e9143"
+    },
+    "utf8proc_data.c": {
+      "mode": "100644",
+      "path": "utf8proc_data.c",
+      "sha": "94988b33587bde1ef94a4a3b76aa2839a03deb6d",
+      "size": 2360214,
+      "type": "blob",
+      "url": "https://api.github.com/repos/JuliaStrings/utf8proc/git/blobs/94988b33587bde1ef94a4a3b76aa2839a03deb6d"
+    }
+  },
+  "llvmMembers": {
+    "libLLVMDemangle.a": [
+      "ItaniumDemangle.cpp.o"
+    ],
+    "libLLVMSupport.a": [
+      "ABIBreak.cpp.o",
+      "APFloat.cpp.o",
+      "APInt.cpp.o",
+      "CommandLine.cpp.o",
+      "ConvertUTF.cpp.o",
+      "ConvertUTFWrapper.cpp.o",
+      "CrashRecoveryContext.cpp.o",
+      "Debug.cpp.o",
+      "DebugCounter.cpp.o",
+      "Errno.cpp.o",
+      "Error.cpp.o",
+      "ErrorHandling.cpp.o",
+      "ExtensibleRTTI.cpp.o",
+      "FormatVariadic.cpp.o",
+      "GraphWriter.cpp.o",
+      "MD5.cpp.o",
+      "ManagedStatic.cpp.o",
+      "MemAlloc.cpp.o",
+      "MemoryBuffer.cpp.o",
+      "NativeFormatting.cpp.o",
+      "Path.cpp.o",
+      "Process.cpp.o",
+      "Program.cpp.o",
+      "RandomNumberGenerator.cpp.o",
+      "Signals.cpp.o",
+      "Signposts.cpp.o",
+      "SmallPtrSet.cpp.o",
+      "SmallVector.cpp.o",
+      "SourceMgr.cpp.o",
+      "Statistic.cpp.o",
+      "StringExtras.cpp.o",
+      "StringMap.cpp.o",
+      "StringRef.cpp.o",
+      "StringSaver.cpp.o",
+      "Threading.cpp.o",
+      "Timer.cpp.o",
+      "Twine.cpp.o",
+      "TypeSize.cpp.o",
+      "Unicode.cpp.o",
+      "VersionTuple.cpp.o",
+      "VirtualFileSystem.cpp.o",
+      "WithColor.cpp.o",
+      "YAMLParser.cpp.o",
+      "raw_ostream.cpp.o",
+      "xxhash.cpp.o"
+    ],
+    "libLLVMTargetParser.a": [
+      "ARMTargetParser.cpp.o",
+      "ARMTargetParserCommon.cpp.o",
+      "Host.cpp.o",
+      "Triple.cpp.o"
+    ]
+  }
+}

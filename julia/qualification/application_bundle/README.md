@@ -99,3 +99,29 @@ python3 -B "$q/gcc_runtime.py" stage-compiler "$scratch/pcre-compiler" \
 Use fresh, absolute input, scratch and output paths. Give UID 65532 write access to the empty runtime output directory. Select the staged compiler for the ordinary `build.jl` invocation above. Provide `--rebuilt-gcc "$out/runtime/libstdc++.so.6.0.34"` to readback. The receipt binds the actual OCI bytes and the original GCC JLL publisher bytes separately. All 6,097 versioned exports and their types, the SONAME, the dynamic dependencies and the glibc bounds are checked against the original. The other six shipped GCC libraries retain their publisher hashes. Run the benign standard-library controls from the build on the resulting immutable application image with the application's own library search path.
 
 Rebuilding the C++ shared library addresses the compiled aligned allocation path. Five header changes still require provenance for the prebuilt consumer binaries. The from_chars and file-stream changes correspond to GCC PR127666 and PR118099. The CentOS Stream GCC 15 package spec maps CVE-2026-115456 to PR127666. Red Hat's Hummingbird patch header maps CVE-2026-125709 to the GCC 16 backport of PR118099. The offline qualifier verifies the two immutable specs, the selected patch metadata and both compiled source identities. The independent LLVM review and all release checks still apply.
+
+### Rebuild Julia's private runtime for the safe AOT application
+
+The Linux/amd64 producer uses the signed Julia 1.13.3 source archive and the public input identities in `core_runtime_inputs.json`. Put its named files in one empty input directory. Extract `./opt/kanz-gcc/lib64/libstdc++.a` from the preceding GCC producer's `installed-libstdcxx.tar.gz`. Put the same musl root and GNU platform shards and the verified GCC 9.1 target shard in a fresh bootstrap directory. Name the target shard `gcc-gnu-bootstrap.tar.gz`. The official compiler image runs the Julia build as UID 65532 and uses the GNU sysroot's loader for the publisher's llvm-config. [Julia release](https://github.com/JuliaLang/julia/releases/tag/v1.13.3) and [LLVM_full producer](https://github.com/JuliaBinaryWrappers/LLVM_full_jll.jl/tree/4c99685d71410eb0134fe08adb0f1b331b75eee9)
+
+```sh
+q=julia/qualification/application_bundle
+python3 -B "$q/core_runtime.py" collect-vector-patch "$inputs/gcc8-vector.production.diff"
+python3 -B "$q/core_runtime.py" verify-shards "$bootstrap"
+python3 -B "$q/core_runtime.py" prepare "$inputs" "$gcc_fixes_git_dir" "$out/prepared"
+docker build --platform linux/amd64 --network none --iidfile "$out/core-bootstrap.id" \
+  -f "$q/core_runtime.Dockerfile" "$bootstrap"
+docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --user 65532:65532 --cpus 2 --memory 4g --memory-swap 4g --pids-limit 128 \
+  --tmpfs /tmp:rw,nosuid,exec,size=2500m,mode=1777 \
+  --mount "type=bind,src=$out/prepared,dst=/input,readonly" \
+  --mount "type=bind,src=$out/prepared/headers/libstdc++-v3/include,dst=/headers,readonly" \
+  --mount "type=bind,src=$PWD/$q/build_core_runtime.sh,dst=/core.sh,readonly" \
+  --mount "type=bind,src=$out/build,dst=/out" "$(cat "$out/core-bootstrap.id")" /core.sh
+python3 -B "$q/core_runtime.py" verify-abi "$original_core" "$out/build/libjulia-internal.so.1.13.3" \
+  "$extracted_base_libc" "$extracted_application_libstdcxx" "$out/build/libjulia-internal.linkmap"
+```
+
+Use an empty build output directory writable by UID 65532. The preparer verifies Julia's release signature, four GCC 9.1 header preimages and postimages, the five utf8proc source blobs and all archive hashes. The producer rebuilds utf8proc, flisp, support, the generated boot image and Julia's canonical release target. The original GCC 9 bitset predates the changed extractor. The checked link map identifies the corrected static C++ allocator and 50 prebuilt LLVM objects from Support, TargetParser and Demangle. The publisher compiled those objects with GCC 10.2.0. Their absence of debug-line metadata limits statements about optimized transitive header uses. No LLVM IR object is selected.
+
+The ELF check compares all 1,698 exported names and types, the 11 direct dependencies, SONAME and RUNPATH. The new private DSO requires `secure_getenv@GLIBC_2.17`. The pinned base provides that symbol, and the same application already requires it in libstdc++. This check covers the pinned amd64 image. Rebuild a fresh safe bundle with this core, compare its full OCI file inventory, and run the direct corpus, bounded Go supervisor and actual-image advisory checks before assessing a release.
