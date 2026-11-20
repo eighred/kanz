@@ -19,7 +19,7 @@ import synthetic_orders as fixture
 
 TEST = "TestSyntheticGoWriterLineageHandoff"
 WITHDRAWAL_MODES = ("funded-withdrawal", "funded-withdrawal-restart", "funded-withdrawal-publish-mark", "funded-withdrawal-race", "funded-withdrawal-contradiction")
-REMAINDER_MODES = ("funded-remainder", "funded-remainder-first-booked")
+REMAINDER_MODES = ("funded-remainder", "funded-remainder-first-booked", "funded-remainder-restart")
 ROLES = ("RUNTIME", "NEXT_RUNTIME", "SWITCH", "RELAY")
 
 
@@ -138,6 +138,9 @@ def run(stage, native, mode):
                 if mode == "funded-remainder-first-booked":
                     env["KANZ_SYNTHETIC_GO_REMAINDER_FIRST_BOOKED"] = "1"
                     test = "TestSyntheticFundedRemainderFirstBookedGoRustGo"
+                elif mode == "funded-remainder-restart":
+                    env["KANZ_SYNTHETIC_GO_REMAINDER_RESTART"] = "1"
+                    test = "TestSyntheticFundedRemainderRestartGoRustGo"
             elif mode == "funded-withdrawal-contradiction":
                 env["KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_CONTRADICTION"] = "1"
                 test = "TestSyntheticFundedWithdrawalContradictionGoRustGo"
@@ -217,6 +220,8 @@ if __name__ == "__main__":
                        help="book both executions when XSIM fills the remainder after transfer to Go")
     group.add_argument("--funded-remainder-first-booked", action="store_const", dest="mode", const="funded-remainder-first-booked",
                        help="book the original fill in G3 before XSIM executes the remainder")
+    group.add_argument("--funded-remainder-restart", action="store_const", dest="mode", const="funded-remainder-restart",
+                       help="interrupt publication of an already committed remainder before and after JetStream accepts it")
     group.add_argument("--funded-withdrawal", action="store_const", dest="mode", const="funded-withdrawal",
                        help="withdraw the working remainder after the funded Go handback")
     group.add_argument("--funded-withdrawal-restart", action="store_const", dest="mode", const="funded-withdrawal-restart",

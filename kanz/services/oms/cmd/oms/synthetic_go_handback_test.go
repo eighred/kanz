@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,7 +44,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		WithdrawalEventID                string
 		WithdrawalStage                  string
 		WithdrawalRaceDir                string
-		RemainderStage                   string
+		RemainderStage, RemainderEventID string
 		State                            []byte
 		Version                          int64
 		Generation                       int
@@ -56,7 +57,21 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	terminal := tenant == "synthetic-funded-cancel-fill"
 	working := tenant == "synthetic-go-funded-working"
 	remainder := in.RemainderStage != ""
-	if remainder && in.RemainderStage != "unbooked" && in.RemainderStage != "first-booked" && in.RemainderStage != "replay" {
+	pendingRestart := in.RemainderStage == "stop-after-puback" || in.RemainderStage == "restart-pending"
+	switch in.RemainderStage {
+	case "", "unbooked", "first-booked", "replay":
+		if in.RemainderEventID != "" {
+			t.Fatal("unexpected remainder cut-point event")
+		}
+	case "stop-before-publish", "stop-after-puback", "restart-pending":
+		id, ok := strings.CutPrefix(in.RemainderEventID, "xsim-remainder/")
+		if !ok || len(id) != 64 || id != strings.ToLower(id) {
+			t.Fatal("expected the scoped XSIM execution identity")
+		}
+		if _, err := hex.DecodeString(id); err != nil {
+			t.Fatal("invalid XSIM execution digest")
+		}
+	default:
 		t.Fatal("unknown synthetic remainder stage")
 	}
 	if remainder && (!working || in.Generation != 3 || in.WithdrawalEventID != "" || in.WithdrawalStage != "") {
@@ -189,7 +204,11 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if in.WithdrawalStage != "" {
 		opts = append(opts, order.WithSyntheticHandoffWithdrawal(store))
 	}
-	svc, e := order.NewService(tenant, store, order.NewEmitter(publisher), nil, execution.NewRouter(venues), nil, logger, opts...)
+	var startupPublisher order.Bus = publisher
+	if in.RemainderStage == "stop-before-publish" || in.RemainderStage == "stop-after-puback" {
+		startupPublisher = stopAtSettlementFact{Bus: publisher, subject: order.EventTypeFilled, orderID: state.OrderId, eventID: in.RemainderEventID, afterPublish: in.RemainderStage == "stop-after-puback"}
+	}
+	svc, e := order.NewService(tenant, store, order.NewEmitter(startupPublisher), nil, execution.NewRouter(venues), nil, logger, opts...)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -205,6 +224,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		if in.RemainderStage == "replay" {
 			wantClaims, wantPending = 4, 0
 		}
+		if pendingRestart {
+			wantClaims, wantPending = 4, 1
+		}
 		if in.RemainderStage == "first-booked" {
 			wantPending = 0
 		}
@@ -218,12 +240,22 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 			t.Fatalf("retained startup facts: wanted %d/%d, got %d/%d", wantClaims, wantPending, claims, pending)
 		}
 	}
+	if pendingRestart {
+		var matched int
+		err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE partition_key=$1 AND subject=$2 AND causation_id=$3 AND published_at IS NULL`, state.OrderId, order.EventTypeFilled, in.RemainderEventID).Scan(&matched)
+		if err != nil || matched != 1 {
+			t.Fatalf("restart requires the precise unmarked remainder FACT: %d %v", matched, err)
+		}
+	}
 	if n, err := svc.Outbox().DrainOnce(ctx); err != nil || n != pending {
 		t.Fatalf("startup outbox drain: got %d, expected %d: %v", n, pending, err)
 	}
+	if in.RemainderStage == "stop-after-puback" {
+		t.Fatal("startup drain missed the committed remainder publication")
+	}
 	if remainder {
 		attempts := 2
-		if in.RemainderStage == "replay" {
+		if in.RemainderStage == "replay" || in.RemainderStage == "restart-pending" {
 			stored, ver, err := store.Load(ctx, state.OrderId)
 			if err != nil || stored.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED || ver != in.Version+1 {
 				t.Fatalf("restart needs the retained terminal version: %d %v", ver, err)
@@ -234,6 +266,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 			if err := svc.ReconcileSyntheticHandoffRemainder(ctx, store, state.OrderId); err != nil {
 				t.Fatalf("G3 remainder reconciliation: %v", err)
 			}
+		}
+		if in.RemainderStage == "stop-before-publish" {
+			t.Fatal("settlement missed the committed remainder publication")
 		}
 		t.Logf("GO_HANDBACK %s process verified terminal XSIM remainder %d time(s) after draining %d retained FACTs", in.RemainderStage, attempts, pending)
 		return
@@ -271,7 +306,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if in.WithdrawalEventID != "" {
 		var events order.Bus = publisher
 		if in.WithdrawalStage == "reconcile" || in.WithdrawalStage == "reconcile-published" {
-			events = stopAtWithdrawalFact{Bus: publisher, eventID: in.WithdrawalEventID, orderID: state.OrderId,
+			events = stopAtSettlementFact{Bus: publisher, subject: order.EventTypeCancelled, eventID: in.WithdrawalEventID, orderID: state.OrderId,
 				afterPublish: in.WithdrawalStage == "reconcile-published"}
 		}
 		withdrawal, err := order.NewService(tenant, store, order.NewEmitter(events), nil, venueRouter, nil, logger,

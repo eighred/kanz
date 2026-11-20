@@ -189,7 +189,7 @@ func exerciseGoRustGoProfile(t *testing.T, tenant string, withdrawalMode goWithd
 }
 
 func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, receipt syntheticvenue.Receipt,
-	addr string, identity *testidentity.Source, event *envelopepb.Envelope, authorizeWithdrawal func(int) *fundedWithdrawalApproval,
+	addr string, identity *testidentity.Source, event *envelopepb.Envelope, authorize func(int) fundedHandoffEvidence,
 ) {
 	t.Helper()
 	tenant := event.TenantId
@@ -218,9 +218,9 @@ func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	if err != nil || replayed.OK || replayed.Code != "WRITER_FENCED" {
 		t.Fatalf("retired Rust funded adapter: %s %v", replayed.Code, err)
 	}
-	var withdrawal *fundedWithdrawalApproval
-	if authorizeWithdrawal != nil {
-		withdrawal = authorizeWithdrawal(generation)
+	var evidence fundedHandoffEvidence
+	if authorize != nil {
+		evidence = authorize(generation)
 	}
 	remainderStage := ""
 	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_REMAINDER") == "1" {
@@ -230,5 +230,5 @@ func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 		}
 	}
 	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, receipt, generation,
-		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, withdrawal, remainderStage)
+		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, evidence.withdrawal, remainderStage, evidence.remainder)
 }

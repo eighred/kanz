@@ -279,3 +279,19 @@ order. Accounting leaves 874 USD total and 126 USD held. A second Go process
 under the same writer generation reconciles the new execution, releases the
 BNB hold and preserves the booked debit until Accounting includes the second
 execution. The resulting balance and both cleared holds match the first profile.
+
+### Restart across final execution publication
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-remainder-restart
+```
+
+The first Go process exits after the final execution commits and before it
+publishes the filled fact. PostgreSQL retains the terminal order, both fills,
+the accounting obligation and one pending outbox row. The second process
+drains that row and exits after JetStream acknowledges it. The third process
+retries the pending row, marks it published and queries the same terminal
+history. The drill compares the SQL row, persisted UUIDv7, broker sequence
+and frame at both publication observations, then books both executions.
+JetStream suppresses this immediate retry within the configured duplicate
+window. Accounting replay uses each execution's independent durable identity.

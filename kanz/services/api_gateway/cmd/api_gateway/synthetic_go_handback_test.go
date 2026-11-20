@@ -165,7 +165,7 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 	if r, e := observe(ctx, dispatch); e != nil || r.OK || r.Code != "WRITER_FENCED" {
 		t.Fatalf("retired adapter: %s %v", r.Code, e)
 	}
-	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "", nil, "")
+	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "", nil, "", nil)
 	if sends.Load() != 1 || queries.Load() != 2 {
 		t.Fatalf("expected one original Execute and one Query per writer, got %d/%d", sends.Load(), queries.Load())
 	}
@@ -178,7 +178,7 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 }
 
 func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, tenant, addr string, identity *testidentity.Source,
-	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, withdrawal *fundedWithdrawalApproval, remainderStage string,
+	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, withdrawal *fundedWithdrawalApproval, remainderStage string, recovery *fundedRemainderRecovery,
 ) {
 	t.Helper()
 	_, socket := testidentity.StartWorkload(t, identity)
@@ -221,9 +221,9 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 		if wantExit != 0 {
 			var exited *exec.ExitError
 			if !errors.As(err, &exited) || exited.ExitCode() != wantExit {
-				t.Fatalf("Go withdrawal %s expected process exit %d: %v: %s", stage, wantExit, err, output)
+				t.Fatalf("Go recovery %s expected process exit %d: %v: %s", stage, wantExit, err, output)
 			}
-			t.Logf("GO_HANDBACK withdrawal %s process exited %d", stage, wantExit)
+			t.Logf("GO_HANDBACK %s process exited %d", stage, wantExit)
 		} else if err != nil || !strings.Contains(string(output), "--- PASS: TestSyntheticRecoveredGoStartup") {
 			t.Fatalf("Go startup sweep failed: %v: %s", err, output)
 		}
@@ -234,6 +234,29 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 		}
 	}
 	run := func(stage string, wantExit int) { t.Helper(); finish(launch(stage), stage, wantExit) }
+	if recovery != nil {
+		if remainderStage != "unbooked" || withdrawal != nil {
+			t.Fatal("remainder interruption requires the unbooked working profile")
+		}
+		args["remainderEventID"] = recovery.evidence.second.GetFillId()
+		runRemainderStage := func(stage string, wantExit int) {
+			args["remainderStage"] = stage
+			finish(launch(""), stage, wantExit)
+		}
+		runRemainderStage("stop-before-publish", 72)
+		retained := recovery.observe(t, ctx, s, false, false)
+		runRemainderStage("stop-after-puback", 73)
+		published := recovery.observe(t, ctx, s, true, false)
+		runRemainderStage("restart-pending", 0)
+		replayed := recovery.observe(t, ctx, s, true, true)
+		if retained.rowID != published.rowID || retained.eventID != published.eventID ||
+			published.rowID != replayed.rowID || published.eventID != replayed.eventID ||
+			published.sequence != replayed.sequence || !bytes.Equal(published.wire, replayed.wire) {
+			t.Fatal("remainder retry changed the retained row, UUID, broker sequence or frame")
+		}
+		t.Logf("GO_HANDBACK remainder SQL row %d retained broker sequence %d UUID %s and frame SHA256 %x", replayed.rowID, replayed.sequence, replayed.eventID, settlementHash(replayed.wire))
+		return
+	}
 	if remainderStage != "" {
 		run("", 0)
 		args["remainderStage"] = "replay"

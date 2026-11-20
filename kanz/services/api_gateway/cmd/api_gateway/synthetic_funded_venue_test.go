@@ -251,7 +251,12 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 	t.Run("claim_before_venue_send", testFundedDispatchBeforeSend)
 }
 
-type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope, func(int) *fundedWithdrawalApproval)
+type fundedHandoffEvidence struct {
+	withdrawal *fundedWithdrawalApproval
+	remainder  *fundedRemainderRecovery
+}
+
+type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope, func(int) fundedHandoffEvidence)
 
 func refuseFundedPartialHandback(t *testing.T, ctx context.Context, tenant string) {
 	t.Helper()
@@ -470,16 +475,20 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		_, partial := get()
 		requireFundedPendingFacts(t, ctx, proof, orderID, 3, []string{"order.order.partially_filled", "order.order.routed"})
 		queriesBefore := queries.Load()
-		var authorizeWithdrawal func(int) *fundedWithdrawalApproval
+		var authorizeWithdrawal func(int) fundedHandoffEvidence
 		if project != nil {
 			var expected remainderEvidence
 			firstBooked := os.Getenv("KANZ_SYNTHETIC_GO_REMAINDER_FIRST_BOOKED") == "1"
 			expectedQueries := queriesBefore + 4
-			prepare := func(generation int) *fundedWithdrawalApproval {
+			restart := os.Getenv("KANZ_SYNTHETIC_GO_REMAINDER_RESTART") == "1"
+			if restart {
+				expectedQueries-- // startup relay replays the retained FACT without querying XSIM
+			}
+			prepare := func(generation int) fundedHandoffEvidence {
 				if firstBooked {
 					// The gate requires an unbooked G2 fill. Start and exhaust the ordinary
 					// G3 working recovery before Accounting receives the partial FACT.
-					startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, partial, generation, os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), "", nil, "")
+					startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, partial, generation, os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), "", nil, "", nil)
 					requireFundedPendingFacts(t, ctx, proof, orderID, 3, nil)
 					if booked := applyVenueAccounting(t, ctx, s, proof, o, 252, 1); booked != 126 {
 						t.Fatal("G3 requires the first execution booked before the XSIM remainder")
@@ -488,7 +497,10 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 					expectedQueries++
 				}
 				expected = prepareFundedRemainder(t, ctx, control, cfg, partial, generation, project)
-				return nil
+				if restart {
+					return fundedHandoffEvidence{remainder: &fundedRemainderRecovery{control, partial, expected}}
+				}
+				return fundedHandoffEvidence{}
 			}
 			successor(t, ctx, s, partial, addr, identity, control.accepted, prepare)
 			if sends.Load() != 1 || withdrawals.Load() != 0 || queries.Load() != expectedQueries {
@@ -497,14 +509,14 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			return verifyFundedRemainder(t, ctx, s, control, partial, expected, firstBooked)
 		}
 		if withdrawalMode != noGoWithdrawal {
-			authorizeWithdrawal = func(generation int) *fundedWithdrawalApproval {
+			authorizeWithdrawal = func(generation int) fundedHandoffEvidence {
 				approval := control.prepareGoWithdrawal(t, ctx, s, partial, generation)
 				approval.mode = withdrawalMode
 				if withdrawalMode == goWithdrawalRace {
 					approval.race = newFundedWithdrawalRace()
 				}
 				withdrawal.Store(approval)
-				return approval
+				return fundedHandoffEvidence{withdrawal: approval}
 			}
 		}
 		successor(t, ctx, s, partial, addr, identity, control.accepted, authorizeWithdrawal)

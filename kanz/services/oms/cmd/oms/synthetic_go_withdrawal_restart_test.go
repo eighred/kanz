@@ -23,14 +23,14 @@ import (
 
 // The outbox publisher is reached only after the terminal SQL call commits
 // and before the relay writes its publication mark.
-type stopAtWithdrawalFact struct {
+type stopAtSettlementFact struct {
 	order.Bus
-	eventID, orderID string
-	afterPublish     bool
+	eventID, orderID, subject string
+	afterPublish              bool
 }
 
-func (p stopAtWithdrawalFact) Publish(ctx context.Context, event bus.Event) error {
-	if event.Subject == order.EventTypeCancelled && event.PartitionKey == p.orderID && event.CausationID == p.eventID {
+func (p stopAtSettlementFact) Publish(ctx context.Context, event bus.Event) error {
+	if event.Subject == p.subject && event.PartitionKey == p.orderID && event.CausationID == p.eventID {
 		if p.afterPublish {
 			if err := p.Bus.Publish(ctx, event); err != nil {
 				return err

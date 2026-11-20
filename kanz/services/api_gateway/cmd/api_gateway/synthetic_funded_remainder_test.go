@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/tools/syntheticvenue"
+	"github.com/google/uuid"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -71,10 +74,9 @@ func prepareFundedRemainder(t *testing.T, ctx context.Context, control fundedVen
 	return remainderEvidence{&retained, second, p}
 }
 
-func verifyFundedRemainder(t *testing.T, ctx context.Context, s syntheticSession, control fundedVenueControl, partial syntheticvenue.Receipt, want remainderEvidence, firstBooked bool) syntheticvenue.Receipt {
+func verifyFundedRemainderStored(t *testing.T, ctx context.Context, control fundedVenueControl, partial syntheticvenue.Receipt, want remainderEvidence) syntheticvenue.Receipt {
 	t.Helper()
-	o := control.order
-	id, tenant := o.command.OrderId, o.request.Tenant
+	id := control.order.command.OrderId
 	var state []byte
 	var version uint64
 	if err := control.proof.QueryRow(ctx, "SELECT state,version FROM orders WHERE order_id=$1", id).Scan(&state, &version); err != nil {
@@ -105,6 +107,14 @@ func verifyFundedRemainder(t *testing.T, ctx context.Context, s syntheticSession
 	if err := rows.Err(); err != nil || len(seen) != 2 {
 		t.Fatalf("immutable execution count=%d: %v", len(seen), err)
 	}
+	return syntheticvenue.Receipt{OK: true, State: state, OrderVersion: version}
+}
+
+func verifyFundedRemainder(t *testing.T, ctx context.Context, s syntheticSession, control fundedVenueControl, partial syntheticvenue.Receipt, want remainderEvidence, firstBooked bool) syntheticvenue.Receipt {
+	t.Helper()
+	o := control.order
+	id, tenant := o.command.OrderId, o.request.Tenant
+	retained := verifyFundedRemainderStored(t, ctx, control, partial, want)
 	requireFundedPendingFacts(t, ctx, control.proof, id, 4, nil)
 	stream, err := s.js.Stream(ctx, "SYNTHETIC_FACTS")
 	if err != nil {
@@ -156,7 +166,7 @@ func verifyFundedRemainder(t *testing.T, ctx context.Context, s syntheticSession
 		}
 	}
 	t.Log("XSIM placed one order, executed two distinct 0.625 fills at 200 USD plus 1 USD each, and received no cancellation. Go G3 replay preserved one filled FACT. Accounting booked 126 USD twice for two executions, leaving 748 USD and 8 BNB, both with zero reserves.")
-	return syntheticvenue.Receipt{OK: true, State: state, OrderVersion: version}
+	return retained
 }
 
 func marshalRemainderState(t *testing.T, state *orderpb.OrderState) []byte {
@@ -166,4 +176,80 @@ func marshalRemainderState(t *testing.T, state *orderpb.OrderState) []byte {
 		t.Fatal(err)
 	}
 	return wire
+}
+
+type fundedRemainderRecovery struct {
+	control  fundedVenueControl
+	partial  syntheticvenue.Receipt
+	evidence remainderEvidence
+}
+
+type remainderPublication struct {
+	rowID    int64
+	eventID  string
+	sequence uint64
+	wire     []byte
+}
+
+// observe checks the same committed fill and cash immediately after each
+// physical process exit. The broker frame is independent of the SQL mark.
+func (r fundedRemainderRecovery) observe(t *testing.T, ctx context.Context, s syntheticSession, published, marked bool) remainderPublication {
+	t.Helper()
+	o := r.control.order
+	verifyFundedRemainderStored(t, ctx, r.control, r.partial, r.evidence)
+	checkVenueCash(t, ctx, r.control.proof, o, 1000, 252, 252, 0, 252, 0)
+	var pending []string
+	if !marked {
+		pending = []string{fillfact.SubjectFilled}
+	}
+	requireFundedPendingFacts(t, ctx, r.control.proof, o.command.OrderId, 4, pending)
+
+	var result remainderPublication
+	var body []byte
+	var cause, correlation, trace string
+	var at time.Time
+	var savedMark bool
+	err := r.control.proof.QueryRow(ctx, `SELECT id,event_id::text,payload,event_time,causation_id,correlation_id,trace_context,published_at IS NOT NULL
+        FROM outbox WHERE partition_key=$1 AND subject=$2`, o.command.OrderId, fillfact.SubjectFilled).
+		Scan(&result.rowID, &result.eventID, &body, &at, &cause, &correlation, &trace, &savedMark)
+	var fact orderpb.OrderFilled
+	id, idErr := uuid.Parse(result.eventID)
+	if err != nil || result.rowID <= 0 || idErr != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 || id.String() != result.eventID ||
+		savedMark != marked || proto.Unmarshal(body, &fact) != nil || !proto.Equal(&fact, r.evidence.projection.Fact) ||
+		cause != r.evidence.second.GetFillId() || correlation == "" || at.IsZero() {
+		t.Fatalf("committed remainder publication differs from the approved FACT: %v", err)
+	}
+
+	stream, err := s.js.Stream(ctx, "SYNTHETIC_FACTS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := uint64(3)
+	if published {
+		expected++
+	}
+	info, err := stream.Info(ctx)
+	if err != nil || info.State.Msgs != expected || info.State.LastSeq != expected {
+		t.Fatalf("unexpected broker count at remainder publication cut, expected %d: %v", expected, err)
+	}
+	raw, err := stream.GetLastMsgForSubject(ctx, fillfact.SubjectFilled)
+	if !published {
+		if !errors.Is(err, jetstream.ErrMsgNotFound) {
+			t.Fatalf("the committed remainder reached JetStream before the publication cut: %v", err)
+		}
+		return result
+	}
+	if err != nil || raw.Sequence != expected {
+		t.Fatalf("the retained remainder is not the fourth broker record: %v", err)
+	}
+	env, payload, err := bus.Unframe(raw.Data)
+	if err != nil || bus.Validate(env) != nil || !bytes.Equal(payload, body) || env.GetSource() != "oms" ||
+		env.GetTenantId() != o.request.Tenant || env.GetPartitionKey() != o.command.OrderId ||
+		env.GetCorrelationId() != correlation || env.GetCausationId() != cause || env.GetTraceContext() != trace ||
+		env.GetEventType() != fillfact.SubjectFilled || !env.GetEventTime().AsTime().Equal(at) ||
+		env.GetEventId() != result.eventID || env.GetIdempotencyKey() != result.eventID || raw.Header.Get("Nats-Msg-Id") != result.eventID {
+		t.Fatalf("broker frame differs from the committed remainder publication: %v", err)
+	}
+	result.sequence, result.wire = raw.Sequence, raw.Data
+	return result
 }
