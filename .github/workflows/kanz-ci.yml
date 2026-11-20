@@ -559,7 +559,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Reconcile two signed custody statements through the operator browser
+      - name: Reconcile signed custody statements through the operator browser
         if: matrix.kind == 'quality'
         timeout-minutes: 12
         run: |
