@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -171,5 +172,63 @@ func TestManualAbsentLevelWaitsForRetainedSignedInput(t *testing.T) {
 	}
 	if run, err := r.ReconcileManual(ctx, sub, key, "operator"); err != nil || run.Outcome != OutcomeClean || run.StatementID != id {
 		t.Fatalf("delivered signed rerun: %+v %v", run, err)
+	}
+}
+
+func TestDatedSourceAttestationBindsOnlyVerifiedComparisons(t *testing.T) {
+	const tenant = "run-attestation"
+	pool := newCustodyPool(t, tenant)
+	requireRestrictedCustodyRole(t, pool)
+	applyCustodySchema(t, pool)
+	ctx := bus.WithTenantID(t.Context(), tenant)
+	st := NewPostgres(pool)
+	sub := subject()
+	sub.BusinessDate = BusinessDay(t0)
+	r := manualReconciler(t, st, LedgerBookLoader(ledger.NewPostgres(pool), closeScope(t, true), testLogger()), &capturePublisher{})
+	digest := func(id string) []byte {
+		t.Helper()
+		var got []byte
+		if err := pool.QueryRow(ctx, "SELECT signed_statement_sha256 FROM custody_runs WHERE run_id=$1", id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	missing, err := r.ReconcileManual(ctx, sub, uuid.NewString(), "operator")
+	if err != nil || missing.Outcome != OutcomeNoStatement || digest(missing.RunID) != nil {
+		t.Fatalf("missing: %+v %v", missing, err)
+	}
+	signed := manualSignedFeed(t, ctx, st)
+	id := signed(0, 0)
+	var raw []byte
+	if err := pool.QueryRow(ctx, "SELECT signed_batch FROM custody_batch_receipts WHERE statement_id=$1", id).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	// Metadata from an earlier deployment can name the exact same signed ID.
+	// It carries no proof of which source values were actually compared.
+	earlier := Run{RunID: "pre-enrollment", Subject: sub, StatementID: id, Outcome: OutcomeClean, CompletedAt: t0}
+	if err := st.SaveRun(ctx, earlier); err != nil || digest(earlier.RunID) != nil {
+		t.Fatal("pre-existing record was certified", err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE custody_runs SET signed_statement_sha256=$1 WHERE run_id=$2", sum[:], earlier.RunID); err == nil {
+		t.Fatal("historical attestation can be rewritten")
+	}
+	scheduled, err := r.Reconcile(t.Context(), sub) // scheduler identity comes from the tenant-scoped DB pool
+	if err != nil || scheduled.Outcome != OutcomeClean || !bytes.Equal(digest(scheduled.RunID), sum[:]) {
+		t.Fatalf("scheduled: %+v %v", scheduled, err)
+	}
+	manual, err := r.ReconcileManual(ctx, sub, uuid.NewString(), "operator")
+	if err != nil || manual.Outcome != OutcomeClean || !bytes.Equal(digest(manual.RunID), sum[:]) {
+		t.Fatalf("manual: %+v %v", manual, err)
+	}
+	// A normal, independently scheduled legacy comparison remains operational.
+	legacy := statement("ordinary-source", nil, nil)
+	legacy.BusinessDate = sub.BusinessDate.AddDate(0, 0, 1)
+	if err := st.SaveStatement(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	old, err := r.Reconcile(ctx, legacy.Subject())
+	if err != nil || old.Outcome != OutcomeClean || digest(old.RunID) != nil {
+		t.Fatalf("ordinary: %+v %v", old, err)
 	}
 }
