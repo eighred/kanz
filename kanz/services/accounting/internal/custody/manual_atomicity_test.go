@@ -90,7 +90,7 @@ func TestManualReceiptWriteRefusalRollsBackLifecycle(t *testing.T) {
 	}
 	// This additional policy permits scheduled records but refuses a manual
 	// snapshot. Production policy ownership stays with the deployment profile.
-	if _, err := pool.Exec(ctx, `CREATE POLICY fixture_no_manual_receipt ON custody_runs AS RESTRICTIVE FOR UPDATE USING (true) WITH CHECK (manual_receipt IS NULL)`); err != nil {
+	if _, err := pool.Exec(ctx, `CREATE POLICY fixture_no_manual_receipt ON custody_runs AS RESTRICTIVE FOR INSERT WITH CHECK (run_id NOT LIKE 'manual:%' OR manual_receipt IS NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	r := manualReconciler(t, store, LedgerBookLoader(journal, closeScope(t, true), testLogger()), &capturePublisher{})

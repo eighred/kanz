@@ -100,6 +100,37 @@ func TestPostgresCustodyRunRetryPreservesOriginalCompletionAndTenant(t *testing.
 	if err != nil || len(rows) != 2 || rows[0].Record.TenantID != "custody-a" || rows[0].Record.CorrelationID != run.RunID {
 		t.Fatalf("retry lost/duplicated completion: %+v %v", rows, err)
 	}
+	if err := st.Outbox().MarkPublished(ctx, rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE id=$1 AND published_at IS NOT NULL", rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	afterRetention, err := NewPostgres(pool).CommitRun(ctx, run)
+	if err != nil || len(afterRetention.Breaks) != 1 || afterRetention.Breaks[0].Diff.Cmp(big.NewRat(10, 1)) != 0 || !afterRetention.CompletedAt.Equal(t0) {
+		t.Fatalf("original scheduled comparison after relay retention: %+v %v", afterRetention, err)
+	}
+	rows, err = st.Outbox().Pending(ctx, pairKey("PF1", "CUST-A"), 10)
+	if err != nil || len(rows) != 1 || rows[0].Record.CorrelationID != later.RunID {
+		t.Fatalf("receipt replay republished a completion: %+v %v", rows, err)
+	}
+	// Pre-upgrade scheduled runs can still replay their original relay record.
+	if _, err := pool.Exec(ctx, "UPDATE custody_runs SET manual_receipt=NULL WHERE run_id=$1", later.RunID); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := st.CommitRun(ctx, later)
+	if err != nil || len(legacy.Breaks) != 1 || legacy.Breaks[0].Diff.Cmp(big.NewRat(20, 1)) != 0 {
+		t.Fatalf("legacy relay receipt: %+v %v", legacy, err)
+	}
+	if err := st.Outbox().MarkPublished(ctx, rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE id=$1 AND published_at IS NOT NULL", rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CommitRun(ctx, later); !errors.Is(err, ErrRunCompletionMissing) {
+		t.Fatalf("unavailable historical completion: %v", err)
+	}
 	conflict := run
 	conflict.Subject.CustodianID = "OTHER"
 	if _, err := st.CommitRun(ctx, conflict); !errors.Is(err, ErrRunIdentityConflict) {
