@@ -92,4 +92,55 @@ func TestPostgresHistoricalReceiptAfterCorrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUnknown(st, tenant, sub, "ACC1", legacy.RunID)
+	// Exercise old/restored records written before the read-time checks. Each
+	// variant gets an independent row. The valid signed source stays immutable.
+	digest := sha256.Sum256(raw)
+	for _, name := range []string{"legacy_missing_payload", "wrong_signed_digest", "wrong_statement", "wrong_decimal", "wrong_break_identity", "wrong_time", "wrong_date", "out_of_bounds", "unmeasured_coverage"} {
+		t.Run(name, func(t *testing.T) {
+			row := cloneRun(opened)
+			row.RequestID, row.Actor = uuid.NewString(), "operator"
+			row.RunID = "manual:" + row.RequestID
+			wire := cloneRun(row)
+			binding := digest
+			switch name {
+			case "wrong_signed_digest":
+				binding[0] ^= 1
+			case "wrong_statement":
+				wire.StatementID = corrected
+			case "wrong_decimal":
+				// Internally consistent subtraction still disagrees with signed r1.
+				wire.Breaks[0].Custodian, wire.Breaks[0].Diff = big.NewRat(7, 1), big.NewRat(3, 1)
+			case "wrong_break_identity":
+				wire.Breaks[0].BreakID = "other"
+			case "wrong_time":
+				wire.CompletedAt = wire.CompletedAt.Add(time.Minute)
+			case "wrong_date":
+				wire.Subject.BusinessDate = wire.Subject.BusinessDate.AddDate(0, 0, -1)
+			case "unmeasured_coverage":
+				row.Basis.Transactions = nil
+			}
+			record, err := runRecord(ctx, tenant, wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := record.Payload
+			switch name {
+			case "legacy_missing_payload":
+				payload = nil
+			case "out_of_bounds":
+				payload = make([]byte, BatchLimit+1)
+			}
+			if err := st.saveRun(ctx, row, binding[:], payload); err != nil {
+				t.Fatal(err)
+			}
+			if name == "unmeasured_coverage" {
+				got, err := st.HistoricalReceipt(ctx, sub, "ACC1", row.RunID)
+				if err != nil || got.State != "recorded" || got.Run.Basis == nil || got.Run.Basis.Transactions != nil {
+					t.Fatalf("legacy financial evidence acquired transaction coverage: %+v %v", got, err)
+				}
+				return
+			}
+			assertUnknown(st, tenant, sub, "ACC1", row.RunID)
+		})
+	}
 }
