@@ -58,7 +58,9 @@ const binanceOrderDoesNotExist = -2013
 // clientOrderId the submit stamped.
 //
 // It satisfies execution.Querier, which the venue adapter's gRPC face serves to
-// the OMS. Safe to call repeatedly: it places nothing and mutates nothing.
+// the OMS. The exchange operation is read-only. A positive response can record
+// the first verified exchange identity on the existing local dispatch row;
+// replay checks that identity before reading any match history.
 func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (OrderView, error) {
 	if st == nil {
 		return OrderView{}, errors.New("binance: nil order state")
@@ -124,8 +126,16 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		return OrderView{}, err
 	}
 
-	if v.durableOrders != nil && !hadDispatch {
-		return OrderView{State: OrderViewIndeterminate, Reason: "Binance reports an order without a matching durable local dispatch"}, nil
+	if v.durableOrders != nil {
+		if !hadDispatch {
+			return OrderView{State: OrderViewIndeterminate, Reason: "Binance reports an order without a matching durable local dispatch"}, nil
+		}
+		if err := v.acknowledgeResponse(ctx, st, symbol, resp, orderview.RecoveryQuery); err != nil {
+			if errors.Is(err, orderview.ErrPlacementConflict) {
+				return OrderView{State: OrderViewIndeterminate, Reason: "Binance recovery conflicts with the recorded exchange order"}, nil
+			}
+			return OrderView{}, err
+		}
 	}
 	return v.observedOrder(ctx, st, symbol, resp)
 }
