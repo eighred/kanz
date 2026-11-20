@@ -180,8 +180,9 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
     if not re.fullmatch(r"127\.0\.0\.1:[1-9]\d{0,4}", endpoint) or int(endpoint.split(":")[1]) > 65535:
         raise RuntimeError("PostgreSQL must have exactly one literal loopback port.")
     reader_url = f"postgres://pilot_check:{owner_password}@{endpoint}/{DATABASE}?sslmode=disable"
-    enroll_accounts(sql, DATABASE, endpoint, reader_url, binaries, env,
-                    CMD.parent / "custody_proof" / "testdata", check_startup=not (rerun or quantity_evidence))
+    check_withdrawal = enroll_accounts(sql, DATABASE, endpoint, reader_url, binaries, env,
+                                       CMD.parent / "custody_proof" / "testdata",
+                                       check_startup=not (rerun or quantity_evidence))
     pilot_env = dict(env,
         TEST_POSTGRES_URL=reader_url,
         TEST_CUSTODY_BATCH_DATABASE_URL=f"postgres://pilot_source:{source_password}@{endpoint}/{DATABASE}?sslmode=disable",
@@ -208,7 +209,8 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
-    return verify_observations(observations, fixture, rerun)
+    records = verify_observations(observations, fixture, rerun)
+    return records, check_withdrawal() if check_withdrawal else None
 
 
 def customer_downloads(observations, records):
@@ -261,7 +263,10 @@ def main():
             container = subprocess.check_output(run, env=env, text=True).strip()
             try:
                 observations = Path(directory) / (key + ".json")
-                results[key] = qualify(docker, container, binaries, node, env, observations, rerun, quantity_evidence)
+                results[key], onboarding = qualify(docker, container, binaries, node, env,
+                                                   observations, rerun, quantity_evidence)
+                if onboarding:
+                    results["account_onboarding"] = onboarding
                 if quantity_evidence:
                     results["customer_downloads"] = customer_downloads(observations, results[key])
             finally:

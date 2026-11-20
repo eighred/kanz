@@ -81,11 +81,25 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
             GRANT INSERT ON {table} TO {role};""".encode())
         issuer_env = dict(env, ACCOUNTING_DATABASE_URL=f"postgres://{role}:{password}@{endpoint}/{database}?sslmode=disable",
                           ACCOUNTING_TENANT=issuer["tenant_id"])
-        call = [binaries["proof"], "-kind", kind, "-evidence", fixture / (kind + ".json"),
-                "-signature", fixture / (kind + ".sig")]
         for _ in range(2):
-            result = subprocess.run(call, env=issuer_env, capture_output=True, timeout=10)
-            if result.returncode:
-                raise RuntimeError("The synthetic custody proof importer refused " + kind + ".")
+            import_evidence(binaries["proof"], issuer_env, fixture, kind, kind)
         if check_startup:
             verify_startup(binaries["service"], env, reader_url, kind == "custody_assignment")
+        if kind == "custody_assignment" and check_startup:
+            def check_withdrawal():
+                for name, admitted in (("custody_assignment_withdrawn", False),
+                                       ("custody_assignment_reinstated", True)):
+                    import_evidence(binaries["proof"], issuer_env, fixture, "custody_assignment", name)
+                    verify_startup(binaries["service"], env, reader_url, admitted)
+                return {"without_evidence": "refused", "identity_only": "refused", "assigned": "ready",
+                        "withdrawn": "refused", "reinstated": "ready"}
+            return check_withdrawal
+    return None
+
+
+def import_evidence(binary, env, fixture, kind, name):
+    call = [binary, "-kind", kind, "-evidence", fixture / (name + ".json"),
+            "-signature", fixture / (name + ".sig")]
+    result = subprocess.run(call, env=env, capture_output=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError("The synthetic custody proof importer refused " + name + ".")
