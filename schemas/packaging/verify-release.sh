@@ -84,8 +84,10 @@ import json, subprocess, sys
 from pathlib import Path
 
 sdk = json.loads(Path(sys.argv[1]).read_bytes())["go_module"]
-for app in ("accounting", "api_gateway"):
+for app in ("accounting", "api_gateway", "web_bff"):
     info = json.loads(subprocess.check_output(["go", "version", "-m", "-json", Path(sys.argv[2]) / app]))
+    if info["Path"] != f"github.com/eighred/kanz/services/{app}/cmd/{app}":
+        raise SystemExit(f"{app} has the wrong main package")
     deps = [dep for dep in info["Deps"] if dep["Path"] == sdk["Path"]]
     if len(deps) != 1 or deps[0].get("Replace") or (deps[0]["Version"], deps[0]["Sum"]) != (sdk["Version"], sdk["Sum"]):
         raise SystemExit(f"{app} did not link the published SDK")
