@@ -19,12 +19,13 @@ import synthetic_orders as fixture
 
 TEST = "TestSyntheticGoWriterLineageHandoff"
 WITHDRAWAL_MODES = ("funded-withdrawal", "funded-withdrawal-restart", "funded-withdrawal-publish-mark", "funded-withdrawal-race", "funded-withdrawal-contradiction")
+REMAINDER_MODES = ("funded-remainder", "funded-remainder-first-booked")
 ROLES = ("RUNTIME", "NEXT_RUNTIME", "SWITCH", "RELAY")
 
 
 def provision_funded(container, env, mode):
     roundtrip = mode != "funded-forward"
-    working = mode in ("funded-working", *WITHDRAWAL_MODES)
+    working = mode in ("funded-working", *REMAINDER_MODES, *WITHDRAWAL_MODES)
     tenant = "synthetic-go-funded-working" if working else "synthetic-funded-cancel-fill"
     tenants = (tenant,) if roundtrip else ("synthetic-go-funded-forward", "synthetic-go-funded-mismatch")
     fixture.sql(container, """
@@ -45,10 +46,14 @@ def provision_funded(container, env, mode):
         for migration in ("cancellation.sql", "settlement.sql", "go_writer.sql"):
             path = fixture.ROOT / "rust/services/synthetic_oms" / migration
             fixture.sql(container, path.read_text(encoding="utf-8"), fixture.DB)
-        if mode in WITHDRAWAL_MODES:
+        if mode in (*WITHDRAWAL_MODES, *REMAINDER_MODES):
             path = fixture.ROOT / "rust/services/synthetic_oms/go_cancel.sql"
             fixture.sql(container, path.read_text(encoding="utf-8"), fixture.DB)
             fixture.sql(container, "GRANT SELECT (order_id,fill) ON order_executions TO kanz_synthetic_oms_proof;", fixture.DB)
+        if mode in REMAINDER_MODES:
+            path = fixture.ROOT / "rust/services/synthetic_oms/go_remainder.sql"
+            fixture.sql(container, path.read_text(encoding="utf-8"), fixture.DB)
+            fixture.sql(container, "GRANT SELECT (fill_id) ON order_executions TO kanz_synthetic_oms_runtime_g3;", fixture.DB)
         role = "kanz_synthetic_oms_go_working_runtime" if working else "kanz_synthetic_oms_go_funded_runtime"
         fixture.sql(container, f"""
             GRANT {role} TO kanz_synthetic_oms_runtime_g3;
@@ -64,8 +69,8 @@ def provision_funded(container, env, mode):
 
 
 def run(stage, native, mode):
-    roundtrip = mode in ("roundtrip", "funded-roundtrip", "funded-working", *WITHDRAWAL_MODES)
-    funded = mode in ("funded-forward", "funded-roundtrip", "funded-working", *WITHDRAWAL_MODES)
+    roundtrip = mode in ("roundtrip", "funded-roundtrip", "funded-working", *REMAINDER_MODES, *WITHDRAWAL_MODES)
+    funded = mode in ("funded-forward", "funded-roundtrip", "funded-working", *REMAINDER_MODES, *WITHDRAWAL_MODES)
     targets = ["services/api_gateway/cmd/api_gateway"]
     if mode == "lineage":
         targets.append("services/oms/internal/order")
@@ -127,7 +132,13 @@ def run(stage, native, mode):
                 fixture.sql(container, (fixture.ROOT / "rust/services/synthetic_oms" / migration).read_text(encoding="utf-8"), fixture.DB)
         if funded:
             provision_funded(container, env, mode)
-            if mode == "funded-withdrawal-contradiction":
+            if mode in REMAINDER_MODES:
+                env["KANZ_SYNTHETIC_GO_FUNDED_REMAINDER"] = "1"
+                test = "TestSyntheticFundedRemainderGoRustGo"
+                if mode == "funded-remainder-first-booked":
+                    env["KANZ_SYNTHETIC_GO_REMAINDER_FIRST_BOOKED"] = "1"
+                    test = "TestSyntheticFundedRemainderFirstBookedGoRustGo"
+            elif mode == "funded-withdrawal-contradiction":
                 env["KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_CONTRADICTION"] = "1"
                 test = "TestSyntheticFundedWithdrawalContradictionGoRustGo"
             elif mode == "funded-withdrawal-race":
@@ -202,6 +213,10 @@ if __name__ == "__main__":
                        help="recover a single funded partial execution and cancellation across Go, Rust and Go")
     group.add_argument("--funded-working", action="store_const", dest="mode", const="funded-working",
                        help="recover a single open funded order after its partial execution")
+    group.add_argument("--funded-remainder", action="store_const", dest="mode", const="funded-remainder",
+                       help="book both executions when XSIM fills the remainder after transfer to Go")
+    group.add_argument("--funded-remainder-first-booked", action="store_const", dest="mode", const="funded-remainder-first-booked",
+                       help="book the original fill in G3 before XSIM executes the remainder")
     group.add_argument("--funded-withdrawal", action="store_const", dest="mode", const="funded-withdrawal",
                        help="withdraw the working remainder after the funded Go handback")
     group.add_argument("--funded-withdrawal-restart", action="store_const", dest="mode", const="funded-withdrawal-restart",

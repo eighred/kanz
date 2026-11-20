@@ -87,6 +87,11 @@ const (
 )
 
 func exerciseGoRustGo(t *testing.T, tenant string, withdrawalMode goWithdrawalMode) {
+	t.Helper()
+	exerciseGoRustGoProfile(t, tenant, withdrawalMode, nil)
+}
+
+func exerciseGoRustGoProfile(t *testing.T, tenant string, withdrawalMode goWithdrawalMode, project remainderProjector) {
 	funded := tenant != "synthetic-go-roundtrip"
 	t.Helper()
 	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
@@ -154,7 +159,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, withdrawalMode goWithdrawalMo
 		}
 
 		if funded {
-			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor, withdrawalMode)
+			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor, withdrawalMode, project)
 			requireNativeReceipt(t, ctx, request, "WRITER_FENCED")
 		} else {
 			exerciseSyntheticGoHandback(t, ctx, s, &cmd, request, 2)
@@ -165,10 +170,14 @@ func exerciseGoRustGo(t *testing.T, tenant string, withdrawalMode goWithdrawalMo
 			ARRAY(SELECT DISTINCT writer_epoch FROM synthetic_oms_observations WHERE order_id=c.order_id ORDER BY writer_epoch)
 			FROM synthetic_oms_commands c WHERE c.order_id=$1`, cmd.OrderId).Scan(&admitted, &retained, &observations)
 		wantEpochs := []int64{2}
-		if withdrawalMode != noGoWithdrawal {
+		if withdrawalMode != noGoWithdrawal || project != nil {
 			wantEpochs = []int64{2, 3}
+			wantOps := []string{"cancel_pending", "cancelled"}
+			if project != nil {
+				wantOps = []string{"fill"}
+			}
 			var operations []string
-			if e := reader.QueryRow(ctx, "SELECT array_agg(operation ORDER BY operation) FROM synthetic_oms_observations WHERE order_id=$1 AND writer_epoch=3", cmd.OrderId).Scan(&operations); e != nil || !slices.Equal(operations, []string{"cancel_pending", "cancelled"}) {
+			if e := reader.QueryRow(ctx, "SELECT array_agg(operation ORDER BY operation) FROM synthetic_oms_observations WHERE order_id=$1 AND writer_epoch=3", cmd.OrderId).Scan(&operations); e != nil || !slices.Equal(operations, wantOps) {
 				t.Fatalf("Go withdrawal journal: %v %v", operations, e)
 			}
 		}
@@ -213,6 +222,13 @@ func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	if authorizeWithdrawal != nil {
 		withdrawal = authorizeWithdrawal(generation)
 	}
+	remainderStage := ""
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_REMAINDER") == "1" {
+		remainderStage = "unbooked"
+		if os.Getenv("KANZ_SYNTHETIC_GO_REMAINDER_FIRST_BOOKED") == "1" {
+			remainderStage = "first-booked"
+		}
+	}
 	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, receipt, generation,
-		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, withdrawal)
+		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, withdrawal, remainderStage)
 }

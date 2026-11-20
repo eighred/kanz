@@ -235,7 +235,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				o := signedFundedOrder(t, ctx, s, fundedFirst, false)
 				o.authorize(t, ctx, o.request.Principal, time.Now().Add(time.Minute))
 				requireNativeReceipt(t, ctx, o.request, "ACCEPTED")
-				terminal := exerciseFundedVenue(t, ctx, s, o, scenario.extra, scenario.fillOnCancel, nil, noGoWithdrawal)
+				terminal := exerciseFundedVenue(t, ctx, s, o, scenario.extra, scenario.fillOnCancel, nil, noGoWithdrawal, nil)
 				if scenario.name == "partial_cancel_and_book" && os.Getenv("SYNTHETIC_BLOTTER_CAPTURE") == "1" {
 					// The runner pipes this synthetic native receipt into the separate read-only probe.
 					body, err := json.Marshal(map[string]any{"tenant": tenant, "portfolio": o.request.Portfolio, "state": terminal.State})
@@ -277,7 +277,7 @@ func requireFundedPendingFacts(t *testing.T, ctx context.Context, proof *pgxpool
 	}
 }
 
-func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, extra time.Duration, fillOnCancel bool, successor fundedGoSuccessor, withdrawalMode goWithdrawalMode) syntheticvenue.Receipt {
+func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, extra time.Duration, fillOnCancel bool, successor fundedGoSuccessor, withdrawalMode goWithdrawalMode, project remainderProjector) syntheticvenue.Receipt {
 	t.Helper()
 	tenant, portfolio, orderID := o.request.Tenant, o.request.Portfolio, o.command.OrderId
 	proof := syntheticPool(t, ctx, "PROOF", tenant)
@@ -292,6 +292,9 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 	}
 	// Select XSIM's clock value before execution so its retained fill stays reproducible.
 	fillTime := time.Now().UTC().Truncate(time.Microsecond).Add(extra)
+	if project != nil {
+		fillTime = fillTime.Truncate(time.Microsecond).Add(321 * time.Nanosecond)
+	}
 	cfg := syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: fillTime, LoseExecuteAck: true, FillOnExecute: !fillOnCancel, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
 	var sends, queries, withdrawals atomic.Int32
 	var withdrawal atomic.Pointer[fundedWithdrawalApproval]
@@ -468,6 +471,31 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		requireFundedPendingFacts(t, ctx, proof, orderID, 3, []string{"order.order.partially_filled", "order.order.routed"})
 		queriesBefore := queries.Load()
 		var authorizeWithdrawal func(int) *fundedWithdrawalApproval
+		if project != nil {
+			var expected remainderEvidence
+			firstBooked := os.Getenv("KANZ_SYNTHETIC_GO_REMAINDER_FIRST_BOOKED") == "1"
+			expectedQueries := queriesBefore + 4
+			prepare := func(generation int) *fundedWithdrawalApproval {
+				if firstBooked {
+					// The gate requires an unbooked G2 fill. Start and exhaust the ordinary
+					// G3 working recovery before Accounting receives the partial FACT.
+					startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, partial, generation, os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), "", nil, "")
+					requireFundedPendingFacts(t, ctx, proof, orderID, 3, nil)
+					if booked := applyVenueAccounting(t, ctx, s, proof, o, 252, 1); booked != 126 {
+						t.Fatal("G3 requires the first execution booked before the XSIM remainder")
+					}
+					checkVenueCash(t, ctx, proof, o, 874, 126, 252, 1, 126, 126)
+					expectedQueries++
+				}
+				expected = prepareFundedRemainder(t, ctx, control, cfg, partial, generation, project)
+				return nil
+			}
+			successor(t, ctx, s, partial, addr, identity, control.accepted, prepare)
+			if sends.Load() != 1 || withdrawals.Load() != 0 || queries.Load() != expectedQueries {
+				t.Fatalf("remainder calls: Execute=%d Cancel=%d Query since handback=%d", sends.Load(), withdrawals.Load(), queries.Load()-queriesBefore)
+			}
+			return verifyFundedRemainder(t, ctx, s, control, partial, expected, firstBooked)
+		}
 		if withdrawalMode != noGoWithdrawal {
 			authorizeWithdrawal = func(generation int) *fundedWithdrawalApproval {
 				approval := control.prepareGoWithdrawal(t, ctx, s, partial, generation)

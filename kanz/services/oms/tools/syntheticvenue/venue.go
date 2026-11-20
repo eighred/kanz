@@ -195,13 +195,92 @@ func (v *Venue) Execute(ctx context.Context, r *venuepb.ExecuteRequest) (*venuep
 	return &venuepb.ExecuteResponse{}, nil
 }
 func (v *Venue) halfFill(original *orderpb.OrderState) ([]byte, error) {
+	fill, err := v.firstExecution(original, v.cfg.ExecutionFee, timestamppb.New(v.cfg.FillTime))
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(fill)
+}
+
+func (v *Venue) firstExecution(original *orderpb.OrderState, fee *commonpb.Money, at *timestamppb.Timestamp) (*orderpb.Fill, error) {
 	half, ok := partialQuantity(original.GetOrderedQuantity())
 	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, "half the submitted quantity cannot be represented")
 	}
 	id := sourceID("xsim-partial", v.cfg.Tenant, v.cfg.Portfolio, original.OrderId)
-	return proto.Marshal(&orderpb.Fill{FillId: id, VenueExecutionId: id, OrderId: original.OrderId, InstrumentId: Instrument, Side: original.Side, Venue: MIC, VenueAccountId: Account,
-		Quantity: half, Price: original.LimitPrice, Fee: v.cfg.ExecutionFee, ExecutedAt: timestamppb.New(v.cfg.FillTime)})
+	return &orderpb.Fill{FillId: id, VenueExecutionId: id, OrderId: original.OrderId, InstrumentId: Instrument, Side: original.Side, Venue: MIC, VenueAccountId: Account,
+		Quantity: half, Price: original.LimitPrice, Fee: fee, ExecutedAt: at}, nil
+}
+
+// remainderExecution uses the persisted order and first execution. Restarting
+// the fixture with a different fee or clock cannot change the original terms.
+func (v *Venue) remainderExecution(orderID string, wire []byte, first *orderpb.Fill, at *timestamppb.Timestamp) (*orderpb.Fill, *commonpb.Decimal, error) {
+	var original orderpb.OrderState
+	if err := proto.Unmarshal(wire, &original); err != nil || original.OrderId != orderID || v.check(v.cfg.Tenant, &original) != nil {
+		return nil, nil, status.Error(codes.FailedPrecondition, "inconsistent synthetic order receipt")
+	}
+	if _, err := terms(&original); err != nil {
+		return nil, nil, err
+	}
+	if first.ExecutedAt.CheckValid() != nil || at.CheckValid() != nil || !at.AsTime().After(first.ExecutedAt.AsTime()) {
+		return nil, nil, status.Error(codes.FailedPrecondition, "remainder must execute after the first fill")
+	}
+	if fee := first.Fee; fee != nil && (fee.CurrencyCode != "USD" || !dec.InDomain(fee.Amount) || !dec.IsPositive(fee.Amount)) {
+		return nil, nil, status.Error(codes.FailedPrecondition, "inconsistent synthetic execution fee")
+	}
+	next, err := v.firstExecution(&original, first.Fee, first.ExecutedAt)
+	if err != nil || !proto.Equal(first, next) {
+		return nil, nil, status.Error(codes.FailedPrecondition, "inconsistent first synthetic execution")
+	}
+	next.FillId = sourceID("xsim-remainder", v.cfg.Tenant, v.cfg.Portfolio, orderID)
+	next.VenueExecutionId = next.FillId
+	next.ExecutedAt = at
+	return next, original.OrderedQuantity, nil
+}
+
+// RecordRemainder advances only this disposable XSIM fixture's working half.
+// QueryOrder exposes the resulting remote evidence over its ordinary typed API.
+func (v *Venue) RecordRemainder(ctx context.Context, orderID string, executedAt time.Time) error {
+	at := timestamppb.New(executedAt)
+	if orderID == "" || len(orderID) > 256 || executedAt.IsZero() || at.CheckValid() != nil {
+		return status.Error(codes.InvalidArgument, "invalid synthetic remainder coordinates")
+	}
+	return v.transaction(ctx, func(tx pgx.Tx) error {
+		var wire, firstWire, prior []byte
+		var working bool
+		err := tx.QueryRow(ctx, `SELECT terms,execution,working_partial,remainder_execution FROM synthetic_venue.receipts
+			WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3 FOR UPDATE`, v.cfg.Tenant, v.cfg.Portfolio, orderID).Scan(&wire, &firstWire, &working, &prior)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return status.Error(codes.NotFound, "unknown synthetic order")
+		}
+		if err != nil {
+			return err
+		}
+		if !working && prior == nil {
+			return status.Error(codes.FailedPrecondition, "synthetic order has no working half fill")
+		}
+		var first orderpb.Fill
+		if err := proto.Unmarshal(firstWire, &first); err != nil {
+			return err
+		}
+		fill, _, err := v.remainderExecution(orderID, wire, &first, at)
+		if err != nil {
+			return err
+		}
+		encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(fill)
+		if err != nil {
+			return err
+		}
+		if prior != nil {
+			if !bytes.Equal(prior, encoded) {
+				return status.Error(codes.FailedPrecondition, "synthetic remainder already recorded with different terms")
+			}
+			return nil
+		}
+		_, err = tx.Exec(ctx, `UPDATE synthetic_venue.receipts SET remainder_execution=$4, working_partial=false
+			WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, orderID, encoded)
+		return err
+	})
 }
 func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) (*venuepb.CancelOrderResponse, error) {
 	st := r.GetState()
@@ -214,8 +293,8 @@ func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) 
 	}
 	err = v.transaction(ctx, func(tx pgx.Tx) error {
 		var wire, prior []byte
-		var workingPartial bool
-		err := tx.QueryRow(ctx, `SELECT terms,execution,working_partial FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3 FOR UPDATE`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &prior, &workingPartial)
+		var workingPartial, filled bool
+		err := tx.QueryRow(ctx, `SELECT terms,execution,working_partial,remainder_execution IS NOT NULL FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3 FOR UPDATE`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &prior, &workingPartial, &filled)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return status.Error(codes.NotFound, "unknown synthetic order")
 		}
@@ -224,6 +303,9 @@ func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) 
 		}
 		if !bytes.Equal(requested, wire) {
 			return status.Error(codes.FailedPrecondition, "withdrawal terms differ from remote order")
+		}
+		if filled {
+			return status.Error(codes.FailedPrecondition, "filled synthetic order cannot be cancelled")
 		}
 		if prior != nil && !workingPartial {
 			return nil
@@ -255,9 +337,9 @@ func (v *Venue) QueryOrder(ctx context.Context, r *venuepb.QueryOrderRequest) (*
 	}
 	reply := &venuepb.QueryOrderResponse{}
 	err := v.transaction(ctx, func(tx pgx.Tx) error {
-		var wire, storedTerms []byte
+		var wire, storedTerms, remainder []byte
 		var partial bool
-		err := tx.QueryRow(ctx, `SELECT execution,terms,working_partial FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &storedTerms, &partial)
+		err := tx.QueryRow(ctx, `SELECT execution,terms,working_partial,remainder_execution FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &storedTerms, &partial, &remainder)
 		if errors.Is(err, pgx.ErrNoRows) {
 			reply.State = venuepb.OrderViewState_ORDER_VIEW_STATE_UNKNOWN
 			return nil
@@ -288,6 +370,19 @@ func (v *Venue) QueryOrder(ctx context.Context, r *venuepb.QueryOrderRequest) (*
 		}
 		reply.Fills = []*orderpb.Fill{&fill}
 		reply.ExecutedQuantity = fill.Quantity
+		if remainder != nil {
+			var last orderpb.Fill
+			if err := proto.Unmarshal(remainder, &last); err != nil {
+				return err
+			}
+			expected, total, err := v.remainderExecution(st.OrderId, storedTerms, &fill, last.ExecutedAt)
+			if err != nil || !proto.Equal(expected, &last) {
+				return status.Error(codes.FailedPrecondition, "inconsistent synthetic remainder receipt")
+			}
+			reply.State = venuepb.OrderViewState_ORDER_VIEW_STATE_FILLED
+			reply.Fills = append(reply.Fills, &last)
+			reply.ExecutedQuantity = total
+		}
 		return nil
 	})
 	if err != nil {

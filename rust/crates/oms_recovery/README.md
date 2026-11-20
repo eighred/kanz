@@ -251,3 +251,31 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 ```
 
 After the lost cancellation acknowledgement, XSIM returns the recorded fill ID with a changed fee over mTLS. Go refuses that reply. Before the next query returns the original receipt, the profile checks the retained partial order and version, pending withdrawal, three outbox records and cash holds. Delivery three settles the cancellation. A fresh durable replays it, and Accounting books the original 126 USD once.
+
+### New execution after Go takes ownership
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-remainder
+```
+
+The order remains working with one recorded 0.625 SYN execution when Go
+takes ownership. The disposable XSIM venue records the other 0.625 SYN
+after the handback. Its ordinary typed query returns both executions and the
+cumulative 1.25 SYN. Each execution occurs at 200 USD with a 1 USD fee.
+
+The verifier binds that history to the retained G2 execution and authorizes
+the exact G3 result. The scoped PostgreSQL function claims the new execution,
+advances the order, records the cash obligation and queues one filled fact in
+one transaction. A repeat query uses the same execution and fact. After two
+separate 126 USD Accounting inclusions, the balance is 748 USD and 8 BNB, with
+zero held in both currencies. This profile verifies the symmetric two-fill
+fixture. Production deployment and other settlement shapes retain separate
+acceptance.
+
+Add `--funded-remainder-first-booked` in place of `--funded-remainder` to
+book the first execution after handback and before the new venue observation.
+Go's first startup drains the retained facts and verifies the working partial
+order. Accounting leaves 874 USD total and 126 USD held. A second Go process
+under the same writer generation reconciles the new execution, releases the
+BNB hold and preserves the booked debit until Accounting includes the second
+execution. The resulting balance and both cleared holds match the first profile.

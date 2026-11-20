@@ -165,7 +165,7 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 	if r, e := observe(ctx, dispatch); e != nil || r.OK || r.Code != "WRITER_FENCED" {
 		t.Fatalf("retired adapter: %s %v", r.Code, e)
 	}
-	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "", nil)
+	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "", nil, "")
 	if sends.Load() != 1 || queries.Load() != 2 {
 		t.Fatalf("expected one original Execute and one Query per writer, got %d/%d", sends.Load(), queries.Load())
 	}
@@ -178,12 +178,13 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 }
 
 func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, tenant, addr string, identity *testidentity.Source,
-	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, withdrawal *fundedWithdrawalApproval,
+	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, withdrawal *fundedWithdrawalApproval, remainderStage string,
 ) {
 	t.Helper()
 	_, socket := testidentity.StartWorkload(t, identity)
 	args := map[string]any{"tenant": tenant, "endpoint": addr, "socket": socket, "broker": s.broker,
 		"state": working.State, "version": working.OrderVersion, "generation": generation, "cancelEventID": cancelEventID}
+	args["remainderStage"] = remainderStage
 	if withdrawal != nil {
 		args["withdrawalEventID"] = withdrawal.event.EventId
 	}
@@ -233,6 +234,12 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 		}
 	}
 	run := func(stage string, wantExit int) { t.Helper(); finish(launch(stage), stage, wantExit) }
+	if remainderStage != "" {
+		run("", 0)
+		args["remainderStage"] = "replay"
+		run("", 0)
+		return
+	}
 	if withdrawal != nil && withdrawal.mode == goWithdrawalRace {
 		dir := t.TempDir()
 		args["withdrawalRaceDir"] = dir

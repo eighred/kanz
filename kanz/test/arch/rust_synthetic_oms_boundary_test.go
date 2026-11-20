@@ -16,7 +16,7 @@ const syntheticOMSPath = "services/synthetic_oms"
 
 var syntheticOMSFiles = []string{
 	"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "go_admission.sql",
-	"funding.sql", "cancellation.sql", "settlement.sql", "go_cancel.sql",
+	"funding.sql", "cancellation.sql", "settlement.sql", "go_cancel.sql", "go_remainder.sql",
 }
 
 const syntheticOMSCargo = `[package]
@@ -243,6 +243,33 @@ func checkSyntheticOMS(root string) error {
 		!strings.Contains(settlement, "p_opNOTIN('cancel_pending','cancelled')") {
 		return fmt.Errorf("synthetic Go settlement entry widened")
 	}
+	remainder := rustMigrationCompact(stripSQLComments(files["go_remainder.sql"]))
+	const signature = "public.synthetic_oms_go_fill_remainder(text,text,text,bigint,integer,bytea,bytea,bytea,bytea)"
+	for _, marker := range []string{
+		"BEGIN;SETLOCALsearch_path=pg_catalog,public,pg_temp;",
+		"current_database()<>'kanz_synthetic_oms'",
+		"epoch:=public.synthetic_oms_assert_writer()",
+		"pg_advisory_xact_lock(hashtextextended(json_build_array(tenant,p_order)::text,1532))",
+		"old.writer_epoch=epoch-1",
+		"old.next_state_sha256=a.prior_state_sha256",
+		"(sha256(p_new_fill),sha256(p_new_fill),sha256(p_next_state),sha256(p_fact))",
+		"b.revision>0ANDNOTb.conflictedANDb.gap_revision<=b.revision",
+		"public.capital_reduce_exact(2*debit[1],debit[2])ISDISTINCTFROMapproved",
+		"INSERTINTOpublic.order_executions(",
+		"INSERTINTOpublic.outbox(",
+		"ALTERFUNCTION" + signature + "OWNERTOkanz_synthetic_settlement_guard",
+		"REVOKEALLONFUNCTION" + signature + "FROMPUBLIC",
+		"GRANTEXECUTEONFUNCTION" + signature + "TOkanz_synthetic_oms_go_working_runtime",
+	} {
+		if !strings.Contains(remainder, marker) {
+			return fmt.Errorf("synthetic Go remainder boundary changed %s", marker)
+		}
+	}
+	if strings.Count(remainder, "GRANTEXECUTEONFUNCTION") != 1 ||
+		strings.Count(remainder, "TOkanz_synthetic_oms_go_working_runtime") != 1 ||
+		!strings.HasSuffix(remainder, "COMMIT;") {
+		return fmt.Errorf("synthetic Go remainder must preserve its single scoped grant and atomic install")
+	}
 	return nil
 }
 
@@ -278,6 +305,11 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"go_cancel.sql", "observed.next_state_sha256=permit.prior_state_sha256", "TRUE"},
 		{"go_cancel.sql", "IF result='APPLIED' THEN RETURN 'SEND'", "IF TRUE THEN RETURN 'SEND'"},
 		{"go_cancel.sql", ") TO kanz_synthetic_oms_go_working_runtime", ") TO PUBLIC"},
+		{"go_remainder.sql", "epoch:=public.synthetic_oms_assert_writer()", "epoch:=3"},
+		{"go_remainder.sql", "old.next_state_sha256=a.prior_state_sha256", "TRUE"},
+		{"go_remainder.sql", "sha256(p_fact))", "NULL)"},
+		{"go_remainder.sql", "AND NOT b.conflicted", ""},
+		{"go_remainder.sql", ") TO kanz_synthetic_oms_go_working_runtime", ") TO PUBLIC"},
 		{"settlement.sql", "p_op NOT IN ('cancel_pending','cancelled')", "FALSE"},
 		{"settlement.sql", "f.proowner<>guard", "FALSE"},
 		{"settlement.sql", "a.relowner=writer.relowner", "TRUE"},

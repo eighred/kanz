@@ -30,6 +30,13 @@ func upgradingBook(tenant string) bool {
 	return tenant == "synthetic-funded-venue-nanos" && os.Getenv("SYNTHETIC_PRIOR_BOOK_BIN") != ""
 }
 
+func syntheticBookSubject(tenant string, sequence int) string {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_REMAINDER") == "1" && tenant == fundedWorkingTenant && sequence == 2 {
+		return fillfact.SubjectFilled
+	}
+	return fillfact.SubjectPartiallyFilled
+}
+
 func runSyntheticBookTrade(t *testing.T, ctx context.Context, s syntheticSession, tenant, step, orderID string, sequence int) {
 	t.Helper()
 	binary := os.Getenv("SYNTHETIC_BOOK_BIN")
@@ -38,7 +45,7 @@ func runSyntheticBookTrade(t *testing.T, ctx context.Context, s syntheticSession
 	}
 	cmd := exec.CommandContext(ctx, binary, "-test.v", "-test.count=1", "-test.run=^TestSyntheticSettlementJournal$")
 	cmd.Env = []string{"SYNTHETIC_BOOK_TENANT=" + tenant, "SYNTHETIC_BOOK_STEP=" + step, "SYNTHETIC_BOOK_ORDER=" + orderID, "SYNTHETIC_BOOK_URL=" + os.Getenv("SYNTHETIC_BOOK_URL"), "SYNTHETIC_BOOK_NATS=" + s.broker,
-		"SYNTHETIC_BOOK_SEQUENCE=" + strconv.Itoa(sequence), "SYNTHETIC_BOOK_UPGRADE=" + strconv.FormatBool(upgradingBook(tenant))}
+		"SYNTHETIC_BOOK_SUBJECT=" + syntheticBookSubject(tenant, sequence), "SYNTHETIC_BOOK_SEQUENCE=" + strconv.Itoa(sequence), "SYNTHETIC_BOOK_UPGRADE=" + strconv.FormatBool(upgradingBook(tenant))}
 	data, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(data), "--- PASS: TestSyntheticSettlementJournal") || strings.Contains(string(data), "--- SKIP:") {
 		t.Fatalf("accounting %s: %v\n%s", step, err, data)
@@ -130,7 +137,7 @@ func bookSyntheticTrade(t *testing.T, ctx context.Context, s syntheticSession, t
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := facts.GetLastMsgForSubject(ctx, fillfact.SubjectPartiallyFilled)
+	raw, err := facts.GetLastMsgForSubject(ctx, syntheticBookSubject(tenant, sequence))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +179,13 @@ func bookSyntheticTrade(t *testing.T, ctx context.Context, s syntheticSession, t
 		} else if !commit.GetComplete() || commit.GetUnattributedEntries() != 0 {
 			t.Fatal("cash acknowledgement did not attribute the exact execution")
 		} else if (i == 0 && !old) || (i == 1 && old) {
-			if len(commit.Applied) != 1 || commit.Applied[0].OrderId != orderID || dec.FromProto(commit.Applied[0].Debit).RatString() != "126" {
+			// Accounting publishes the changed order's cumulative debit. Only the
+			// remainder profile books both executions against the same order.
+			expectedDebit := "126"
+			if syntheticBookSubject(tenant, sequence) == fillfact.SubjectFilled {
+				expectedDebit = "252"
+			}
+			if len(commit.Applied) != 1 || commit.Applied[0].OrderId != orderID || dec.FromProto(commit.Applied[0].Debit).RatString() != expectedDebit {
 				t.Fatal("book did not attribute the exact USD debit")
 			}
 		} else if len(commit.Applied) != 0 {

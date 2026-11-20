@@ -116,7 +116,19 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := js.CreateOrUpdateConsumer(ctx, "SYNTHETIC_FACTS", jetstream.ConsumerConfig{Durable: "synthetic-accounting-fill", FilterSubject: fillfact.SubjectPartiallyFilled, AckPolicy: jetstream.AckExplicitPolicy})
+	subject, durable := os.Getenv("SYNTHETIC_BOOK_SUBJECT"), "synthetic-accounting-fill"
+	switch subject {
+	case "", fillfact.SubjectPartiallyFilled:
+		subject = fillfact.SubjectPartiallyFilled
+	case fillfact.SubjectFilled:
+		if tenant != "synthetic-go-funded-working" || os.Getenv("SYNTHETIC_BOOK_SEQUENCE") != "2" {
+			t.Fatal("terminal fill requires working handback and its second execution")
+		}
+		durable = "synthetic-accounting-remainder"
+	default:
+		t.Fatal("unexpected accounting fixture subject")
+	}
+	consumer, err := js.CreateOrUpdateConsumer(ctx, "SYNTHETIC_FACTS", jetstream.ConsumerConfig{Durable: durable, FilterSubject: subject, AckPolicy: jetstream.AckExplicitPolicy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +145,7 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	if err := bus.Validate(env); err != nil {
 		t.Fatal(err)
 	}
-	if env.GetSource() != "oms" || env.GetTenantId() != tenant || env.GetEventType() != fillfact.SubjectPartiallyFilled ||
+	if env.GetSource() != "oms" || env.GetTenantId() != tenant || env.GetEventType() != subject ||
 		env.GetPartitionKey() != orderID || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT || msg.Subject() != env.GetEventType() {
 		t.Fatal("unexpected OMS fill delivery")
 	}
@@ -141,8 +153,16 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	if err != nil || mode == "book" && info.NumDelivered != 1 || mode == "replay" && info.NumDelivered != 2 {
 		t.Fatal("unexpected fill redelivery", err)
 	}
-	var partial orderpb.OrderPartiallyFilled
-	if proto.Unmarshal(frame.Payload, &partial) != nil || partial.GetOrderId() != orderID || partial.GetState().GetPortfolioId() != portfolio || partial.GetFill().GetVenue() != "XSIM" {
+	var fact interface {
+		proto.Message
+		GetState() *orderpb.OrderState
+		GetOrderId() string
+		GetFill() *orderpb.Fill
+	} = &orderpb.OrderPartiallyFilled{}
+	if subject == fillfact.SubjectFilled {
+		fact = &orderpb.OrderFilled{}
+	}
+	if proto.Unmarshal(frame.Payload, fact) != nil || fact.GetOrderId() != orderID || fact.GetState().GetPortfolioId() != portfolio || fact.GetFill().GetVenue() != "XSIM" {
 		t.Fatal("fill has wrong scope")
 	}
 	ctx = bus.WithTraceContext(bus.WithCausationID(bus.WithCorrelationID(ctx, env.CorrelationId), env.EventId), env.TraceContext)
@@ -150,14 +170,14 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	sequence, err := strconv.Atoi(os.Getenv("SYNTHETIC_BOOK_SEQUENCE"))
-	if err != nil || sequence < 1 || sequence > 2 || (sequence == 2 && tenant != "synthetic-funded-venue-pair") {
+	if err != nil || sequence < 1 || sequence > 2 || (sequence == 2 && tenant != "synthetic-funded-venue-pair" && subject != fillfact.SubjectFilled) {
 		t.Fatal("invalid accounting fixture trade sequence")
 	}
 	entries, err := store.Journal(ctx, portfolio)
 	if err != nil || len(entries) != 2+sequence {
 		t.Fatal("unexpected number of opening and trade entries", len(entries), err)
 	}
-	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(partial.Fill)
+	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(fact.GetFill())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +200,10 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 			t.Fatal("journal lost the original execution time", err)
 		}
 		tradeTimes = append(tradeTimes, source.ExecutedAt.AsTime())
-		if source.OrderId == orderID {
+		if subject == fillfact.SubjectFilled && source.OrderId != orderID {
+			t.Fatal("both trades must belong to the transferred order")
+		}
+		if source.OrderId == orderID && (subject != fillfact.SubjectFilled || source.FillId == fact.GetFill().GetFillId()) {
 			seenCurrent = true
 			if !bytes.Equal(entry.ExecutionEvidence, wire) {
 				t.Fatal("stored execution differs from its signed-order fill FACT")

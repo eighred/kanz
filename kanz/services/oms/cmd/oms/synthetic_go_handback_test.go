@@ -43,6 +43,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		WithdrawalEventID                string
 		WithdrawalStage                  string
 		WithdrawalRaceDir                string
+		RemainderStage                   string
 		State                            []byte
 		Version                          int64
 		Generation                       int
@@ -54,6 +55,13 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	tenant := in.Tenant
 	terminal := tenant == "synthetic-funded-cancel-fill"
 	working := tenant == "synthetic-go-funded-working"
+	remainder := in.RemainderStage != ""
+	if remainder && in.RemainderStage != "unbooked" && in.RemainderStage != "first-booked" && in.RemainderStage != "replay" {
+		t.Fatal("unknown synthetic remainder stage")
+	}
+	if remainder && (!working || in.Generation != 3 || in.WithdrawalEventID != "" || in.WithdrawalStage != "") {
+		t.Fatal("remainder requires the isolated third-generation working order")
+	}
 	if in.WithdrawalEventID != "" && !working {
 		t.Fatal("a new withdrawal requires the isolated funded working profile")
 	}
@@ -136,7 +144,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatalf("discovered %d venues", len(venues))
 	}
 	venueRouter := execution.NewRouter(venues)
-	if working {
+	if working && !remainder {
 		var rawFill []byte
 		if err := pool.QueryRow(ctx, "SELECT fill FROM order_executions WHERE order_id=$1", state.OrderId).Scan(&rawFill); err != nil {
 			t.Fatalf("load retained working execution: %v", err)
@@ -194,6 +202,12 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	if working {
 		wantClaims, wantPending := 3, 2
+		if in.RemainderStage == "replay" {
+			wantClaims, wantPending = 4, 0
+		}
+		if in.RemainderStage == "first-booked" {
+			wantPending = 0
+		}
 		switch in.WithdrawalStage {
 		case "reconcile", "reconcile-published", "race-second":
 			wantPending = 0
@@ -206,6 +220,23 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	if n, err := svc.Outbox().DrainOnce(ctx); err != nil || n != pending {
 		t.Fatalf("startup outbox drain: got %d, expected %d: %v", n, pending, err)
+	}
+	if remainder {
+		attempts := 2
+		if in.RemainderStage == "replay" {
+			stored, ver, err := store.Load(ctx, state.OrderId)
+			if err != nil || stored.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED || ver != in.Version+1 {
+				t.Fatalf("restart needs the retained terminal version: %d %v", ver, err)
+			}
+			attempts = 1
+		}
+		for range attempts {
+			if err := svc.ReconcileSyntheticHandoffRemainder(ctx, store, state.OrderId); err != nil {
+				t.Fatalf("G3 remainder reconciliation: %v", err)
+			}
+		}
+		t.Logf("GO_HANDBACK %s process verified terminal XSIM remainder %d time(s) after draining %d retained FACTs", in.RemainderStage, attempts, pending)
+		return
 	}
 	if n, err := svc.SweepInterrupted(ctx); err != nil || n != wantSweep {
 		t.Fatalf("startup sweep: got %d: %v", n, err)

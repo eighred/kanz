@@ -17,6 +17,7 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -364,5 +365,119 @@ func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 			unknownRPC.executes.Load() != 0 || unknownRPC.cancels.Load() != 0 || unknownRPC.queries.Load() != 1 {
 			t.Fatal("unknown remote order escaped the unresolved claim")
 		}
+	}
+}
+
+func TestRemainderIsOneDurableExecution(t *testing.T) {
+	dsn := os.Getenv("TEST_SYNTHETIC_VENUE_POSTGRES_URL")
+	if dsn == "" {
+		t.Skip("requires the disposable XSIM receipt database")
+	}
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal("open synthetic receipt pool")
+	}
+	defer pool.Close()
+	st := fixtureOrder()
+	cfg := Config{Tenant: "fixture", Portfolio: st.PortfolioId, FillTime: time.Unix(1800000002, 123).UTC(), FillOnExecute: true,
+		ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
+	v, err := New(ctx, cfg, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := testidentity.NewAuthority(spiffeid.RequireTrustDomainFromString("kanz.internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, _ := Start(t, v, issue(t, ca, VenueIdentity))
+	rpc := Client(t, address, issue(t, ca, OMSIdentity))
+	execute := func(st *orderpb.OrderState) {
+		t.Helper()
+		if _, err := rpc.Execute(ctx, &venuepb.ExecuteRequest{TenantId: cfg.Tenant, State: st}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	query := func(st *orderpb.OrderState) *venuepb.QueryOrderResponse {
+		t.Helper()
+		reply, err := rpc.QueryOrder(ctx, &venuepb.QueryOrderRequest{TenantId: cfg.Tenant, State: st})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+	cancel := func(st *orderpb.OrderState) error {
+		_, err := rpc.CancelOrder(ctx, &venuepb.CancelOrderRequest{TenantId: cfg.Tenant, State: st})
+		return err
+	}
+	at := cfg.FillTime.Add(time.Nanosecond)
+	if err := v.RecordRemainder(ctx, st.OrderId, at); status.Code(err) != codes.NotFound {
+		t.Fatal("missing order", err)
+	}
+	execute(st)
+	partial := query(st)
+	if partial.State != venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED || len(partial.Fills) != 1 {
+		t.Fatal("missing first execution", partial)
+	}
+	if err := v.RecordRemainder(ctx, st.OrderId, cfg.FillTime); status.Code(err) != codes.FailedPrecondition {
+		t.Fatal("out-of-order time", err)
+	}
+	// A restarted controller uses only persisted evidence for this execution.
+	restartedCfg := cfg
+	restartedCfg.ExecutionFee = nil
+	restartedCfg.FillTime = at.Add(time.Hour)
+	restarted, err := New(ctx, restartedCfg, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 2)
+	go func() { done <- v.RecordRemainder(ctx, st.OrderId, at) }()
+	go func() { done <- restarted.RecordRemainder(ctx, st.OrderId, at) }()
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal("concurrent retry", err)
+		}
+	}
+	for _, err := range []error{v.RecordRemainder(ctx, st.OrderId, at.Add(time.Nanosecond)), cancel(st)} {
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatal("terminal contradiction", err)
+		}
+	}
+	execute(st)
+	filled := query(st)
+	if filled.State != venuepb.OrderViewState_ORDER_VIEW_STATE_FILLED || len(filled.Fills) != 2 ||
+		!proto.Equal(filled.ExecutedQuantity, st.OrderedQuantity) || !proto.Equal(filled.Fills[0], partial.Fills[0]) {
+		t.Fatal("incomplete terminal evidence", filled)
+	}
+	expected := proto.Clone(partial.Fills[0]).(*orderpb.Fill)
+	expected.FillId = sourceID("xsim-remainder", cfg.Tenant, cfg.Portfolio, st.OrderId)
+	expected.VenueExecutionId, expected.ExecutedAt = expected.FillId, timestamppb.New(at)
+	if !proto.Equal(filled.Fills[1], expected) || expected.FillId == filled.Fills[0].FillId {
+		t.Fatal("second receipt lost its identity, time or economics", filled.Fills[1])
+	}
+	err = v.transaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "UPDATE synthetic_venue.receipts SET execution=remainder_execution WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3", cfg.Tenant, cfg.Portfolio, st.OrderId)
+		return err
+	})
+	if err == nil || !proto.Equal(query(st), filled) {
+		t.Fatal("restricted role rewrote the first execution")
+	}
+	other := cfg
+	other.Tenant += "-other"
+	foreign, err := New(ctx, other, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := foreign.RecordRemainder(ctx, st.OrderId, at); status.Code(err) != codes.NotFound {
+		t.Fatal("cross-tenant order visible", err)
+	}
+	withdrawn := fixtureOrder()
+	execute(withdrawn)
+	if err := cancel(withdrawn); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.RecordRemainder(ctx, withdrawn.OrderId, at); status.Code(err) != codes.FailedPrecondition ||
+		query(withdrawn).State != venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED {
+		t.Fatal("cancelled order admitted a remainder", err)
 	}
 }
