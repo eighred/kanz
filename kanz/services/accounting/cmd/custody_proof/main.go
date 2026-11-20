@@ -90,12 +90,14 @@ const authorizedIssuer = `SELECT i.public_key
       AND i.tenant_id=$1 AND i.kind=$2 AND i.authority=$3
       AND s.account_id=$4 AND s.venue=$5 AND s.exchange_account_id=$6 AND s.portfolio_id=$7 AND s.custodian_id=$8
       AND NOT EXISTS (
-        SELECT 1 FROM (VALUES ('public.custody_proof_issuers'),('public.custody_proof_scopes'),('public.custody_account_proofs'),('public.custody_account_assignments')) AS t(rel)
-        WHERE has_table_privilege(session_user,t.rel,'UPDATE,DELETE,TRUNCATE,TRIGGER') OR has_any_column_privilege(session_user,t.rel,'UPDATE')
-      )
-      AND NOT has_any_column_privilege(session_user,'public.custody_proof_issuers','INSERT')
-      AND NOT has_any_column_privilege(session_user,'public.custody_proof_scopes','INSERT')
-      AND NOT has_any_column_privilege(session_user,CASE WHEN i.kind='venue_identity' THEN 'public.custody_account_assignments' ELSE 'public.custody_account_proofs' END,'INSERT')`
+        SELECT 1 FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
+        WHERE n.nspname='public' AND t.relkind IN ('r','p') AND (
+          has_table_privilege(session_user,t.oid,'UPDATE,DELETE,TRUNCATE,TRIGGER')
+          OR has_any_column_privilege(session_user,t.oid,'UPDATE')
+          OR (t.relname<>CASE WHEN i.kind='venue_identity' THEN 'custody_account_proofs' ELSE 'custody_account_assignments' END
+              AND has_any_column_privilege(session_user,t.oid,'INSERT'))
+        )
+      )`
 
 func importEvidence(ctx context.Context, pool *pgxpool.Pool, e custody.AccountEvidence, raw, sig []byte) error {
 	tx, err := pool.Begin(ctx)
@@ -136,12 +138,12 @@ func appendEvidence(ctx context.Context, tx pgx.Tx, e custody.AccountEvidence, r
             WHERE tenant_id=$1 AND account_id=$2 AND proof_id=$3 AND authority=$4 AND effective_from=$5::text::date AND effective_until=$6::text::date
             AND evidence_sha256=$7 AND evidence_payload=$8 AND signature=$9 AND venue=$10 AND exchange_account_id=$11 AND issuer_role=session_user`
 	case "custody_assignment":
-		args = append(args, e.PortfolioID, e.CustodianID, e.Version, e.Revision)
-		insert = `INSERT INTO public.custody_account_assignments(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_sha256,evidence_payload,signature,portfolio_id,custodian_id,version,revision)
-            VALUES ($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`
+		args = append(args, e.PortfolioID, e.CustodianID, e.Version, e.Revision, e.Withdrawn)
+		insert = `INSERT INTO public.custody_account_assignments(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_sha256,evidence_payload,signature,portfolio_id,custodian_id,version,revision,withdrawn)
+            VALUES ($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING`
 		lookup = `SELECT evidence_payload FROM public.custody_account_assignments
             WHERE tenant_id=$1 AND account_id=$2 AND proof_id=$3 AND authority=$4 AND effective_from=$5::text::date AND effective_until=$6::text::date
-            AND evidence_sha256=$7 AND evidence_payload=$8 AND signature=$9 AND portfolio_id=$10 AND custodian_id=$11 AND version=$12 AND revision=$13 AND issuer_role=session_user`
+            AND evidence_sha256=$7 AND evidence_payload=$8 AND signature=$9 AND portfolio_id=$10 AND custodian_id=$11 AND version=$12 AND revision=$13 AND withdrawn=$14 AND issuer_role=session_user`
 	default:
 		return errors.New("unknown account evidence")
 	}
