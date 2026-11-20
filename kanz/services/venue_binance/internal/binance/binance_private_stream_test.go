@@ -379,7 +379,10 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 	}
 	const fill = `{"e":"executionReport","E":1700000000002,"s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":8,"T":1700000000000}`
 	rest, uri := privateStreamFixture(t, func(ctx context.Context, conn *websocket.Conn) {
-		for _, frame := range []string{confirmed, `{"subscriptionId":0,"event":` + fill + "}", `{"subscriptionId":1,"event":` + fill + "}"} {
+		wrongInstrument := strings.NewReplacer("BTCUSDT", "ETHUSDT", "o1", "o2").Replace(fill)
+		wrongSide := strings.NewReplacer("BUY", "SELL", "o1", "o3").Replace(fill)
+		for _, frame := range []string{confirmed, `{"subscriptionId":0,"event":` + wrongInstrument + "}",
+			`{"subscriptionId":0,"event":` + wrongSide + "}", `{"subscriptionId":0,"event":` + fill + "}", `{"subscriptionId":1,"event":` + fill + "}"} {
 			if err := conn.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
 				t.Error(err)
 				return
@@ -391,7 +394,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 	if err != nil || !proof.Verified {
 		t.Fatal("fixture account proof failed", err)
 	}
-	view := newFakeOrders("o1")
+	view := newFakeOrders("o1", "o2", "o3")
 	for range 2 {
 		stream, stop, err := rest.subscribeUserData(ctx, uri)
 		if err != nil {
@@ -406,7 +409,13 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 	}
 	info, err := history.Info(ctx)
 	if err != nil || info.State.Msgs != 2 {
-		t.Fatal("want one authenticated fill per subscription", info, err)
+		t.Fatalf("want two attributable fills across reconnect, got %d: %v", info.State.Msgs, err)
+	}
+	for _, id := range []string{"o2", "o3"} {
+		st := view.get(t, id)
+		if st.GetQuarantine() == nil || st.GetFilledQuantity().GetCoefficient() != 0 {
+			t.Fatalf("conflicting signed trade advanced order %s or left it workable", id)
+		}
 	}
 	var first *orderpb.Fill
 	for seq := uint64(1); seq <= 2; seq++ {
