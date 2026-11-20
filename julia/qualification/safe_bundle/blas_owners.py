@@ -134,7 +134,7 @@ def map_native(native, previous, publishers):
     return mapped
 
 
-def scan_results(directory, manifest, config, retained):
+def scan_results(directory, manifest, config, retained, *, distribution="debian"):
     def read(name):
         return json.loads((directory / (name + ".json")).read_bytes())
     advertised = {n: {"uuid": r[0], "version": r[1]} for n, r in BLAS.items()}
@@ -158,7 +158,7 @@ def scan_results(directory, manifest, config, retained):
             or sbom["source"]["metadata"]["imageID"] != config or sbom["source"]["metadata"]["manifestDigest"] != manifest):
         raise ValueError("scanner identity differs from OCI")
     results = actual["Results"]
-    if (not any(r.get("Class") == "os-pkgs" and r.get("Type") == "debian" for r in results)
+    if (not any(r.get("Class") == "os-pkgs" and r.get("Type") == distribution for r in results)
             or any(r.get("ExperimentalModifiedFindings") for r in results)):
         raise ValueError("missing OS scan or modified findings")
     severity = Counter(f["Severity"] for r in results for f in r.get("Vulnerabilities", []))

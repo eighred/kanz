@@ -77,6 +77,11 @@ def qualify(image, source, inventory):
     launcher = inventory["application"]["bin/curve-worker"]["sha256"]
     if not re.fullmatch(r"[a-f0-9]{64}", launcher):
         raise ValueError("invalid launcher digest")
+    return {"base": BASE, "applicationLayerDiffID": layer, **run_corpus(image, source, launcher)}
+
+
+def run_corpus(image, source, launcher):
+    """Exercise the same immutable image through both production process boundaries."""
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         oracle(directory, "prepare")
@@ -118,7 +123,7 @@ def qualify(image, source, inventory):
         if len(matches) != len(CASES) or set(matches) != CASES or not output.rstrip().endswith("PASS"):
             raise ValueError("incomplete supervised corpus")
         supervisor = hashlib.sha256(executable.read_bytes()).hexdigest()
-    return {"image": image, "source": source, "base": BASE, "applicationLayerDiffID": layer,
+    return {"image": image, "source": source,
             "launcherSHA256": launcher, "supervisorSHA256": supervisor, "cases": sorted(CASES),
             "pidQuota": {"refusedLimit": 1, "recoveredLimit": 64,
                          "requestSHA256": hashlib.sha256(deposit).hexdigest()}}
