@@ -8,6 +8,7 @@ use kanz_order_core::proto::{
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::Signed;
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 
 fn rational(d: &Decimal) -> Result<BigRational, Error> {
@@ -111,7 +112,7 @@ pub fn economic_digest(f: &Fill) -> Result<String, Error> {
             hash.update((part.len() as u64).to_be_bytes());
             hash.update(part.as_bytes());
         }
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(lowercase_hex(&hash.finalize()))
     })();
     result.map_err(|_| Error::IdentityConflict)
 }

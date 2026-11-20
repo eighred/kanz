@@ -9,6 +9,7 @@ use kanz_order_core::proto::order::v1::{
     ExecutionRecovered, ExecutionRecoveryRecorded, OrderState,
 };
 use prost::Message;
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -294,10 +295,7 @@ async fn commit_batch(
             || p.source_cursor != status.source_cursor
             || p.payload_digest != batch.digest()
             || p.execution_digest
-                != format!(
-                    "{:x}",
-                    Sha256::digest(fill.without_recovery()?.journal_bytes()?)
-                )
+                != lowercase_hex(&Sha256::digest(fill.without_recovery()?.journal_bytes()?))
         {
             return Err(Error::InvalidInput);
         }

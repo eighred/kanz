@@ -25,7 +25,7 @@ prost-types = "=0.14.6"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
 num-traits = "=0.2.19"
-sha2 = "=0.10.9"
+sha2 = "=0.11.1"
 
 [build-dependencies]
 prost-build = "=0.14.6"

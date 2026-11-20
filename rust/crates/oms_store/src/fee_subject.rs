@@ -1,6 +1,7 @@
 //! Exact pinned Go strings.ToLower(strings.TrimSpace(...)) compatibility.
 //! This is normalization only, not authentication or approval authority.
 use crate::go_unicode::{LOWER, SPACE};
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 
 pub fn normalize(subject: &str) -> String {
@@ -29,5 +30,5 @@ pub fn scalar_digest() -> String {
             hash.update(value.as_bytes());
         }
     }
-    format!("{:x}", hash.finalize())
+    lowercase_hex(&hash.finalize())
 }

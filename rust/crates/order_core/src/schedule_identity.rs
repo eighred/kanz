@@ -20,18 +20,8 @@ impl ChildIds {
         let mut state = self.0.clone();
         state.update(index.to_string().as_bytes());
         let sum = state.finalize();
-        hex_child(&sum)
+        crate::lowercase_hex(&sum[..16])
     }
-}
-
-fn hex_child(sum: &[u8]) -> String {
-    let mut result = String::with_capacity(32);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in &sum[..16] {
-        result.push(HEX[(byte >> 4) as usize] as char);
-        result.push(HEX[(byte & 15) as usize] as char);
-    }
-    result
 }
 
 /// Epoch nanoseconds permit canonical Timestamp endpoints without truncation.
@@ -54,12 +44,21 @@ pub fn interval(start: i128, end: i128, slices: i64, index: i64) -> Option<(i128
 mod tests {
     use super::*;
     #[test]
+    fn full_and_truncated_digests_preserve_leading_zero_bytes() {
+        let digest = Sha256::digest(b"fixture:5476");
+        assert_eq!(
+            crate::lowercase_hex(&digest),
+            "00078eb3c539b05ee4452da1634368bb2d554e5237944a566bc6c82896e16d45"
+        );
+        assert_eq!(child_id("fixture", 5476), "00078eb3c539b05ee4452da1634368bb");
+    }
+    #[test]
     fn prefix_clone_preserves_long_parent_and_signed_index_bytes() {
         let parent = "α:".repeat(140_000);
         let ids = ChildIds::new(&parent);
         for index in [i64::MIN, -1, 0, 1, 99_999, i64::MAX] {
             let direct = Sha256::digest(format!("{parent}:{index}").as_bytes());
-            assert_eq!(ids.at(index), hex_child(&direct));
+            assert_eq!(ids.at(index), crate::lowercase_hex(&direct[..16]));
         }
         // Exercise the supported index boundary using a single prefix owner.
         // The source guard rejects moving parent hashing into this iteration.

@@ -31,7 +31,7 @@ datafusion = { version = "=54.1.0", default-features = false }
 parquet = { version = "=59.3.2", default-features = false, features = ["arrow"] }
 prost = "=0.14.6"
 prost-types = "=0.14.6"
-sha2 = "=0.10.9"
+sha2 = "=0.11.1"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

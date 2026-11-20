@@ -38,6 +38,17 @@ pub mod cost_basis;
 pub mod schedule_identity;
 pub use arithmetic::{decimal, exact_decimal, has_terminating_decimal, rational};
 
+/// Encode canonical identity and journal digest bytes, preserving leading zeros.
+pub fn lowercase_hex(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 15) as usize] as char);
+    }
+    result
+}
+
 /// Whole-message canonical Decimal domain, shared by projector and recovery
 /// preparation. Unknown fields are retained, never interpreted as money.
 pub fn decimal_domain(

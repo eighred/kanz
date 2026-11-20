@@ -5,6 +5,7 @@ use crate::Error;
 use kanz_oms_store::fee_subject;
 use kanz_order_core::{proto::order::v1::ExecutionFeeCorrectionProposed, Canonical};
 use kanz_proto_wire::Schema;
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 
 pub(crate) const DEFAULT_TTL_SECONDS: i64 = 24 * 60 * 60;
@@ -57,7 +58,7 @@ pub(crate) fn digest(
         h.update((part.len() as u64).to_be_bytes());
         h.update(part);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(lowercase_hex(&h.finalize()))
 }
 
 pub(crate) struct Control<'a> {

@@ -1,5 +1,6 @@
 use kanz_decimal_compat::{compare, in_domain};
 use kanz_order_core::proto::order::v1::Fill;
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::{cmp::Ordering, fmt::Write};
 
@@ -41,7 +42,8 @@ pub fn execution_key(f: &Fill) -> String {
         quoted(s, &mut encoded);
     }
     encoded.push(']');
-    format!("execution:v1:{:x}", Sha256::digest(encoded.as_bytes()))
+    let digest = Sha256::digest(encoded.as_bytes());
+    format!("execution:v1:{}", lowercase_hex(&digest))
 }
 pub(crate) fn domain(f: &Fill) -> bool {
     [

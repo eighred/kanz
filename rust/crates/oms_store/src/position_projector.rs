@@ -15,6 +15,7 @@ use kanz_order_core::proto::{
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, time::SystemTime};
 use tokio_postgres::Client;
@@ -144,10 +145,7 @@ fn recovery_ack(
     {
         return Err(Error::InvalidInput);
     }
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(wire.without_recovery()?.journal_bytes()?)
-    );
+    let digest = lowercase_hex(&Sha256::digest(wire.without_recovery()?.journal_bytes()?));
     if digest != p.execution_digest {
         return Err(Error::InvalidInput);
     }
@@ -258,10 +256,7 @@ pub async fn handle<P: Publisher, S: Sessions>(
             || fill.instrument_id != st.instrument_id
             || fill.side != st.side
             || p.execution_digest
-                != format!(
-                    "{:x}",
-                    Sha256::digest(wire.without_recovery()?.journal_bytes()?)
-                )
+                != lowercase_hex(&Sha256::digest(wire.without_recovery()?.journal_bytes()?))
         {
             return Err(Error::InvalidInput);
         }

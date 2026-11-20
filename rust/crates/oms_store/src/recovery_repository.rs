@@ -9,6 +9,7 @@ use kanz_order_core::proto::order::v1::{
 };
 use kanz_proto_wire::{Budget, Canonical};
 use prost::Message;
+use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use tokio_postgres::{types::Type, Client, Transaction};
@@ -155,7 +156,7 @@ pub fn text(s: &str, bound: usize) -> bool {
     !s.is_empty() && s.len() <= bound && s.trim() == s && !s.contains('\0')
 }
 pub fn digest(raw: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(raw))
+    lowercase_hex(&Sha256::digest(raw))
 }
 pub struct Mapping<'a> {
     pub tenant: &'a str,
