@@ -164,8 +164,25 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 	if r, e := observe(ctx, dispatch); e != nil || r.OK || r.Code != "WRITER_FENCED" {
 		t.Fatalf("retired adapter: %s %v", r.Code, e)
 	}
+	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "")
+	if sends.Load() != 1 || queries.Load() != 2 {
+		t.Fatalf("expected one original Execute and one Query per writer, got %d/%d", sends.Load(), queries.Load())
+	}
+	remote := syntheticPool(t, ctx, "VENUE", tenant)
+	var rows, executions int
+	if err = remote.QueryRow(ctx, "SELECT count(*),count(execution) FROM synthetic_venue.receipts WHERE order_id=$1", cmd.OrderId).Scan(&rows, &executions); err != nil || rows != 1 || executions != 0 {
+		t.Fatalf("remote receipts/fills: %d/%d %v", rows, executions, err)
+	}
+	t.Logf("GO_HANDBACK Raw claim and UNKNOWN refused; one XSIM Execute, two typed venue queries, zero executions; acknowledged working order transferred to Go generation %d and both retired Rust logins fenced.", generation)
+}
+
+func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, tenant, addr string, identity *testidentity.Source,
+	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string,
+) {
+	t.Helper()
 	_, socket := testidentity.StartWorkload(t, identity)
-	input, err := json.Marshal(map[string]any{"tenant": tenant, "endpoint": addr, "socket": socket, "broker": s.broker, "state": working.State, "version": working.OrderVersion, "generation": generation})
+	input, err := json.Marshal(map[string]any{"tenant": tenant, "endpoint": addr, "socket": socket, "broker": s.broker,
+		"state": working.State, "version": working.OrderVersion, "generation": generation, "cancelEventID": cancelEventID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,13 +198,4 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 			t.Log("GO_HANDBACK " + message)
 		}
 	}
-	if sends.Load() != 1 || queries.Load() != 2 {
-		t.Fatalf("expected one original Execute and one Query per writer, got %d/%d", sends.Load(), queries.Load())
-	}
-	remote := syntheticPool(t, ctx, "VENUE", tenant)
-	var rows, executions int
-	if err = remote.QueryRow(ctx, "SELECT count(*),count(execution) FROM synthetic_venue.receipts WHERE order_id=$1", cmd.OrderId).Scan(&rows, &executions); err != nil || rows != 1 || executions != 0 {
-		t.Fatalf("remote receipts/fills: %d/%d %v", rows, executions, err)
-	}
-	t.Logf("GO_HANDBACK Raw claim and UNKNOWN refused; one XSIM Execute, two typed venue queries, zero executions; acknowledged working order transferred to Go generation %d and both retired Rust logins fenced.", generation)
 }

@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/testidentity"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/tools/syntheticvenue"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 )
@@ -17,11 +20,30 @@ func TestSyntheticGoRustGoRoundTrip(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_ROUNDTRIP") != "1" {
 		t.Skip("requires a disposable Go-to-Rust-to-Go fixture")
 	}
-	const tenant = "synthetic-go-roundtrip"
+	exerciseGoRustGo(t, "synthetic-go-roundtrip", false)
+}
+
+func TestSyntheticFundedGoRustGoRoundTrip(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_ROUNDTRIP") != "1" {
+		t.Skip("requires a disposable funded Go-to-Rust-to-Go fixture")
+	}
+	exerciseGoRustGo(t, "synthetic-funded-cancel-fill", true)
+}
+
+func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
+	t.Helper()
 	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
+		admit, policy := admitSignedGoOrigin, jetstream.DeliverAllPolicy
+		var flags []string
+		if funded {
+			prepareSyntheticAccounting(t, ctx, s, tenant)
+			s.frame = submitSignedGoFundedOrder(t, s)
+			admit, policy = admitSignedFundedGoOrigin, jetstream.DeliverLastPolicy
+			flags = []string{"--funded"}
+		}
 		consumer, err := s.js.CreateConsumer(ctx, "SYNTHETIC_ORDERS", jetstream.ConsumerConfig{
 			Durable: "roundtrip-origin", FilterSubject: bus.TenantRoutedSubject(tenant, "order.order.submit"),
-			AckPolicy: jetstream.AckExplicitPolicy,
+			AckPolicy: jetstream.AckExplicitPolicy, DeliverPolicy: policy,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -31,7 +53,7 @@ func TestSyntheticGoRustGoRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 		wire := msg.Data()
-		source, request := admitSignedGoOrigin(t, ctx, s, msg)
+		source, request := admit(t, ctx, s, msg)
 		var cmd orderpb.SubmitOrder
 		if err = proto.Unmarshal(source.Payload, &cmd); err != nil {
 			t.Fatal(err)
@@ -64,7 +86,7 @@ func TestSyntheticGoRustGoRoundTrip(t *testing.T) {
 		if err != nil || meta.NumDelivered != 2 || !bytes.Equal(retry.Data(), wire) {
 			t.Fatal("successor did not receive the original signed delivery")
 		}
-		goOriginResult(t, ctx, retry.Data(), "REFUSED")
+		goOriginResult(t, ctx, retry.Data(), "REFUSED", flags...)
 		useWriterGeneration(t, "NEXT")
 		reopened := requireNativeReceipt(t, ctx, request, "DUPLICATE")
 		if reopened.OrderVersion != 0 || !bytes.Equal(reopened.State, state) {
@@ -74,7 +96,12 @@ func TestSyntheticGoRustGoRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		exerciseSyntheticGoHandback(t, ctx, s, &cmd, request, 2)
+		if funded {
+			exerciseRetainedFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, exerciseFundedGoSuccessor)
+			requireNativeReceipt(t, ctx, request, "WRITER_FENCED")
+		} else {
+			exerciseSyntheticGoHandback(t, ctx, s, &cmd, request, 2)
+		}
 
 		var observations []int64
 		err = reader.QueryRow(ctx, `SELECT c.writer_epoch,c.go_gateway_frame,
@@ -83,6 +110,20 @@ func TestSyntheticGoRustGoRoundTrip(t *testing.T) {
 		if err != nil || admitted != 1 || !bytes.Equal(retained, wire) || len(observations) != 1 || observations[0] != 2 {
 			t.Fatalf("retained first admission or venue lineage changed: epoch %d, observations %v: %v", admitted, observations, err)
 		}
-		t.Log("Go generation 1 admitted the original signed command, Rust generation 2 recovered its redelivery and venue history, Go generation 3 resumed the same acknowledged order")
+		t.Log("Go generation 1 admitted the original signed command, Rust generation 2 recovered its redelivery and venue history, Go generation 3 recovered the same order")
 	})
+}
+
+func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, terminal syntheticvenue.Receipt,
+	addr string, identity *testidentity.Source, cancel *envelopepb.EventFrame,
+) {
+	t.Helper()
+	tenant := cancel.Envelope.TenantId
+	operator := syntheticPool(t, ctx, "SWITCH", tenant)
+	var generation int
+	if err := operator.QueryRow(ctx, "SELECT synthetic_test_recovery_handoff()").Scan(&generation); err != nil || generation != 3 {
+		t.Fatalf("funded Rust-to-Go handback: epoch %d: %v", generation, err)
+	}
+	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, terminal, generation,
+		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancel.Envelope.EventId)
 }
