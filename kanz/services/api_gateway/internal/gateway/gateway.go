@@ -244,6 +244,17 @@ func (h *Handler) listOrders(w http.ResponseWriter, r *http.Request) {
 		PortfolioId: id,
 		Limit:       parseLimit(r),
 	})
+	// The index selects a row, but OrderState is decoded from its stored wire
+	// bytes. Both must name the requested portfolio before the page is served.
+	if err == nil {
+		for _, order := range resp.GetOrders() {
+			if order.GetPortfolioId() != id {
+				writeError(w, http.StatusNotFound, notFoundMsg)
+				return
+			}
+		}
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	h.writeOwned(w, r, resp, err)
 }
 

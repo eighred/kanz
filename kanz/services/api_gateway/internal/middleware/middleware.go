@@ -157,9 +157,29 @@ func IdempotencyWith(claims bus.Deduper, ttl time.Duration, max int) func(http.H
 				next.ServeHTTP(w, r)
 				return
 			}
+			// A cached 202 names the original order. An operator reusing its
+			// key for different bytes must see a conflict, including on this
+			// process where a completed receipt can be replayed.
+			var submitDigest [sha256.Size]byte
+			if r.Method == http.MethodPost && r.URL.Path == "/v1/orders" {
+				bounded := http.MaxBytesReader(w, r.Body, MaxRequestBody)
+				body, err := io.ReadAll(bounded)
+				_ = bounded.Close()
+				if err != nil {
+					var tooLarge *http.MaxBytesError
+					if errors.As(err, &tooLarge) {
+						writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+					} else {
+						writeError(w, http.StatusBadRequest, "read order body failed")
+					}
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				submitDigest = sha256.Sum256(body)
+			}
 			key := idempotencyScope(r, header)
 			if cached, ok := bodies.get(key); ok {
-				replay(w, cached)
+				replay(w, cached, submitDigest)
 				return
 			}
 			if !claims.Claim(key) {
@@ -168,7 +188,7 @@ func IdempotencyWith(claims bus.Deduper, ttl time.Duration, max int) func(http.H
 				// Re-read the cache first — the winner may have committed
 				// between the miss above and here.
 				if cached, ok := bodies.get(key); ok {
-					replay(w, cached)
+					replay(w, cached, submitDigest)
 					return
 				}
 				writeError(w, http.StatusConflict, "this Idempotency-Key is already being processed, "+
@@ -183,7 +203,7 @@ func IdempotencyWith(claims bus.Deduper, ttl time.Duration, max int) func(http.H
 			// run — holding it would turn one transient fault into a permanently
 			// unusable key.
 			if rec.status < 500 {
-				bodies.put(key, cachedResponse{status: rec.status, body: rec.buf})
+				bodies.put(key, cachedResponse{status: rec.status, body: rec.buf, submitDigest: submitDigest})
 				claims.Commit(key)
 				return
 			}
@@ -211,7 +231,11 @@ func idempotencyScope(r *http.Request, header string) string {
 	}, "\x00")
 }
 
-func replay(w http.ResponseWriter, cached cachedResponse) {
+func replay(w http.ResponseWriter, cached cachedResponse, submitDigest [sha256.Size]byte) {
+	if cached.submitDigest != submitDigest {
+		writeError(w, http.StatusConflict, "this Idempotency-Key belongs to a different order submission")
+		return
+	}
 	w.Header().Set("Idempotent-Replayed", "true")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(cached.status)
@@ -219,8 +243,9 @@ func replay(w http.ResponseWriter, cached cachedResponse) {
 }
 
 type cachedResponse struct {
-	status int
-	body   []byte
+	submitDigest [sha256.Size]byte
+	status       int
+	body         []byte
 }
 
 type replayEntry struct {

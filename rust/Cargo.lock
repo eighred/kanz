@@ -2263,6 +2263,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanz-synthetic-oms"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "kanz-oms-store",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "kanz-term-structure"
 version = "0.1.0"
 dependencies = [

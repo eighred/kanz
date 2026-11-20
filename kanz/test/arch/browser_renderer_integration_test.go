@@ -26,8 +26,8 @@ func TestBrowserRendererConnectedBoundary(t *testing.T) {
 		"web/src/api/browser-renderer.ts":                                "a9a5d220f406b0c5bb97297bdc6c117c8ae8a98e62792d705dffb949d43ca4cf",
 		"web/src/api/browser-renderer-loader.ts":                         "32c98a41116e93b2e177f9c6e1f6486a0686183af25872b9bd673f42853cc613",
 		"web/src/api/browser-renderer.test.ts":                           "d032221f084d8513fcab9e1ae095ede43671d6785c077d815465b1fdcbe8255e",
-		"web/e2e/browser-renderer.cjs":                                   "ed5e640597a250521913bf7749860ac8c3d255faba50e1ed1419c85afa0a02c7",
-		"kanz/services/web_bff/internal/server/browser_renderer_test.go": "d82a94f16519c43dd6ee740eec4ec5fb4ec422acab9d84e08bb8d4592450fee8",
+		"web/e2e/browser-renderer.cjs":                                   "f92bbb132d3b3bc28062dce1fc2347df8601546cfb64edfa809e38aa00d4d742",
+		"kanz/services/web_bff/internal/server/browser_renderer_test.go": "97079125d7c2d0bbe18c63bfe018d69322fdd2a693cce5d9855528c8e87f338f",
 		".github/scripts/check_browser_renderer_evidence.py":             "1e391e6e9e53415797b38771743cbfc69bb780de013bd0260dbd50722573cb76",
 		".github/scripts/test_check_browser_renderer_evidence.py":        "b79a11e941b004a1d50c5d2d5757312567b2f18b0ac4384790807ae3b3ba101f",
 	}

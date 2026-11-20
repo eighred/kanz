@@ -67,3 +67,41 @@ describe('failures a reader can act on', () => {
     expect(describeRisk(new ApiError(418, 'teapot'))).toBe('teapot')
   })
 })
+
+describe('the portfolio order-history wire contract', () => {
+  const page = { owner_tenant: 'tenant', orders: [], unindexed: '0' }
+  const order = { portfolio_id: 'PF/1', order_id: 'A' }
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('accepts an explicitly empty page and preserves the escaped selected portfolio', async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json(page))
+    vi.stubGlobal('fetch', fetch)
+    await expect(risk.orders('PF/1', 'tenant')).resolves.toEqual(page)
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/portfolios/PF%2F1/orders?limit=200')
+  })
+
+  it.each([
+    {}, { ...page, orders: null }, { ...page, orders: undefined }, { ...page, owner_tenant: 'other' },
+    ...[undefined, null, '', '01', '-1', 0, '9223372036854775808'].map(unindexed => ({ ...page, unindexed })),
+    ...[{ as_of: 'bad' }, { quarantine: null }, { quarantine: {} },
+      { quarantine: { at: '2026-01-01T00:00:00Z', last_query_at: 'bad' } }].map(extra => ({ ...page, orders: [{ ...order, ...extra }] })),
+    { ...page, orders: [order, order] }, { ...page, orders: [{ ...order, order_id: '' }] },
+    { ...page, orders: [{ ...order, portfolio_id: 'other' }] }, { ...page, orders: [null] },
+    { ...page, orders: [{ ...order, limit_price: { amount: {}, currency_code: 'USD' } }] },
+    { ...page, orders: Array.from({ length: 201 }, (_, i) => ({ ...order, order_id: String(i) })) },
+  ])('refuses an incomplete, malformed or misattributed history %#', async body => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(body)))
+    await expect(risk.orders('PF/1', 'tenant')).rejects.toThrow()
+  })
+
+  it('preserves unrecognized numeric enum values without assigning a known status or side', async () => {
+    const body = { ...page, orders: [{ ...order, side: 99, status: 42 }] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(body)))
+    await expect(risk.orders('PF/1', 'tenant')).resolves.toEqual(body)
+  })
+
+  it('refuses a partial HTTP success', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(page, { status: 206 })))
+    await expect(risk.orders('PF/1', 'tenant')).rejects.toThrow('Unexpected success status')
+  })
+})
