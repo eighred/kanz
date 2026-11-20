@@ -102,7 +102,7 @@ func TestBinanceSubEightPlaceFillAndCommission(t *testing.T) {
 	}
 	assertPreciseFill(t, fills[0])
 	cap := &reconCapture{}
-	frame := `{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.000000001","L":"1.000000009","z":"0.000000001","t":7,"n":"0.000000003","N":"USDT","T":1700000000000}`
+	frame := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.000000001","L":"1.000000009","z":"0.000000001","t":7,"n":"0.000000003","N":"USDT","T":1700000000000}`
 	if err := ingesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background()); len(cap.events) != 1 {
 		t.Fatalf("stream emitted %d events: %v", len(cap.events), err)
 	}
@@ -130,7 +130,7 @@ func assertPreciseFill(t *testing.T, fill *orderpb.Fill) {
 }
 
 func TestBinanceUnsupportedFillRefusesWholeReport(t *testing.T) {
-	base := `{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.1","L":"1","z":"0.1","t":7,"n":"0.01","N":"USDT","T":1700000000000}`
+	base := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.1","L":"1","z":"0.1","t":7,"n":"0.01","N":"USDT","T":1700000000000}`
 	for _, field := range []string{`"l":"0.1"`, `"L":"1"`, `"z":"0.1"`, `"n":"0.01"`} {
 		for _, value := range []string{"1e999999999", "1.1234567890123456789"} {
 			cap := &reconCapture{}

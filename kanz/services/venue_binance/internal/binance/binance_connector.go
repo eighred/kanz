@@ -145,7 +145,7 @@ func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps W
 
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 	ing := newUserDataIngester(UserDataConfig{
-		Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
+		Symbols: StaticSymbolMap(c.settings.Symbols), Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
 		OnRefused: deps.OnFillRefused, OnDropped: deps.OnFillDropped, Logger: deps.Logger,
 	})
 	// THE RE-DIAL RATE IS THE THING THIS LOOP DECIDES, AND IT IS A VENUE-SAFETY

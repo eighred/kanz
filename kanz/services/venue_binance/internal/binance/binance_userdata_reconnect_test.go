@@ -120,8 +120,9 @@ func TestUserDataReconnect_OnlyAResolvedReportCountsAsProgress(t *testing.T) {
 	}
 
 	blind := newUserDataIngester(UserDataConfig{
-		Stream: &fakeStream{frames: [][]byte{[]byte(report)}},
-		Orders: newUnreadableOrders("o1"), Pub: &reconCapture{},
+		Symbols: fixtureTradeSymbols(),
+		Stream:  &fakeStream{frames: [][]byte{[]byte(report)}},
+		Orders:  newUnreadableOrders("o1"), Pub: &reconCapture{},
 		Venue: "BINANCE", Tenant: "fund-alpha",
 	})
 	_ = blind.Run(context.Background())

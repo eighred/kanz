@@ -286,14 +286,14 @@ func TestPrivateStreamCancellationAndMalformedExecution(t *testing.T) {
 }
 
 func TestPrivateStreamExecutionRequiresWireIdentity(t *testing.T) {
-	const trade = `{"e":"executionReport","x":"TRADE","s":"BTCUSDT","c":"o1","X":"FILLED","l":"1","L":"2","z":"1","t":0,"T":1700000000000}`
+	const trade = `{"e":"executionReport","x":"TRADE","s":"BTCUSDT","c":"o1","S":"BUY","X":"FILLED","l":"1","L":"2","z":"1","t":0,"T":1700000000000}`
 	for _, field := range []string{`"x":"TRADE",`, `"s":"BTCUSDT",`, `"c":"o1",`, `"X":"FILLED",`, `"t":0,`, `,"T":1700000000000`} {
 		ing := newUserDataIngester(UserDataConfig{})
 		if err := ing.handle(t.Context(), []byte(strings.Replace(trade, field, "", 1))); err == nil || err.Error() != "binance: malformed private execution report" {
 			t.Fatalf("missing %s did not end the session", field)
 		}
 	}
-	ing := newUserDataIngester(UserDataConfig{Orders: newFakeOrders("o1"), Pub: &reconCapture{}})
+	ing := newUserDataIngester(UserDataConfig{Symbols: fixtureTradeSymbols(), Orders: newFakeOrders("o1"), Pub: &reconCapture{}})
 	if err := ing.handle(t.Context(), []byte(trade)); err != nil || !ing.resolvedAReport() {
 		t.Fatal("valid exchange trade zero was refused", err)
 	}
@@ -302,6 +302,49 @@ func TestPrivateStreamExecutionRequiresWireIdentity(t *testing.T) {
 		if err := ing.handle(t.Context(), []byte(raw)); err == nil || strings.Contains(err.Error(), "fixture-secret") {
 			t.Fatalf("invalid %s was accepted or exposed", field)
 		}
+	}
+}
+
+func TestPrivateTradeRequiresKnownInstrumentAndSide(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		symbols  StaticSymbolMap
+		stored   orderpb.Side
+		reported string
+		publish  bool
+	}{
+		{"sell", fixtureTradeSymbols(), orderpb.Side_SIDE_SELL, "SELL", true},
+		{"missing symbol mapping", nil, orderpb.Side_SIDE_SELL, "SELL", false},
+		{"unknown stored side", fixtureTradeSymbols(), orderpb.Side_SIDE_UNSPECIFIED, "SELL", false},
+		{"missing reported side", fixtureTradeSymbols(), orderpb.Side_SIDE_SELL, "", false},
+		{"unknown reported side", fixtureTradeSymbols(), orderpb.Side_SIDE_SELL, "OTHER", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := newFakeOrders()
+			order := kanzOrder("o1")
+			order.Side = tc.stored
+			if err := view.store.Record(t.Context(), order); err != nil {
+				t.Fatal(err)
+			}
+			capture := &reconCapture{}
+			ing := newUserDataIngester(UserDataConfig{Orders: view, Symbols: tc.symbols, Pub: capture})
+			frame := fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":%q,"x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","t":1,"T":1700000000000}`, tc.reported)
+			if err := ing.handle(t.Context(), []byte(frame)); err != nil {
+				t.Fatal(err)
+			}
+			st := view.get(t, "o1")
+			if tc.publish {
+				if len(capture.events) != 1 {
+					t.Fatal("valid sell did not publish")
+				}
+				fill := capture.events[0].Payload.(*orderpb.OrderFilled).GetFill()
+				if fill.GetSide() != orderpb.Side_SIDE_SELL || fill.GetInstrumentId() != order.GetInstrumentId() || st.GetQuarantine() != nil {
+					t.Fatal("valid sell lost admitted identity")
+				}
+			} else if len(capture.events) != 0 || ing.resolvedAReport() || st.GetQuarantine() == nil || st.GetFilledQuantity().GetCoefficient() != 0 {
+				t.Fatal("unverified trade was published, advanced the order, or left it workable")
+			}
+		})
 	}
 }
 
@@ -400,7 +443,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ing := newUserDataIngester(UserDataConfig{Stream: stream, Orders: view, Pub: prod, Tenant: "fund-alpha"})
+		ing := newUserDataIngester(UserDataConfig{Symbols: fixtureTradeSymbols(), Stream: stream, Orders: view, Pub: prod, Tenant: "fund-alpha"})
 		err = ing.Run(ctx)
 		stop()
 		if err == nil || !strings.Contains(err.Error(), "unexpected private subscription") || !ing.resolvedAReport() {
@@ -408,8 +451,11 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 		}
 	}
 	info, err := history.Info(ctx)
-	if err != nil || info.State.Msgs != 2 {
-		t.Fatalf("want two attributable fills across reconnect, got %d: %v", info.State.Msgs, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State.Msgs != 2 {
+		t.Fatalf("want two attributable fills across reconnect, got %d", info.State.Msgs)
 	}
 	for _, id := range []string{"o2", "o3"} {
 		st := view.get(t, id)

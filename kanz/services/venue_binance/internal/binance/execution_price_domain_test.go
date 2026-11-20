@@ -19,7 +19,7 @@ import (
 )
 
 func priceDomainReport(id, status, price string) []byte {
-	return []byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"x":"TRADE","X":%q,"l":"1","L":%q,"z":"1","t":7,"T":1700000000000}`, id, status, price))
+	return []byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE","X":%q,"l":"1","L":%q,"z":"1","t":7,"T":1700000000000}`, id, status, price))
 }
 
 func TestExecutedPriceUserDataRefusesBeforeEffects(t *testing.T) {
@@ -30,6 +30,7 @@ func TestExecutedPriceUserDataRefusesBeforeEffects(t *testing.T) {
 				capture := &reconCapture{}
 				refused := 0
 				ing := newUserDataIngester(UserDataConfig{
+					Symbols: fixtureTradeSymbols(),
 					Stream: &fakeStream{frames: [][]byte{
 						priceDomainReport("bad", status, price),
 						priceDomainReport("good", "FILLED", "0.000000001"),
@@ -144,8 +145,9 @@ func TestExecutedPriceRefusalReachesNoBroker(t *testing.T) {
 	view := newFakeOrders(zero, negative, good)
 	refused := 0
 	ing := newUserDataIngester(UserDataConfig{
-		Stream: &fakeStream{frames: [][]byte{priceDomainReport(zero, "FILLED", "0"), priceDomainReport(negative, "FILLED", "-1"), priceDomainReport(good, "FILLED", "1")}},
-		Orders: view, Pub: producer, Venue: "BINANCE", Tenant: "fund-alpha", OnRefused: func(string, string, string) { refused++ },
+		Symbols: fixtureTradeSymbols(),
+		Stream:  &fakeStream{frames: [][]byte{priceDomainReport(zero, "FILLED", "0"), priceDomainReport(negative, "FILLED", "-1"), priceDomainReport(good, "FILLED", "1")}},
+		Orders:  view, Pub: producer, Venue: "BINANCE", Tenant: "fund-alpha", OnRefused: func(string, string, string) { refused++ },
 	})
 	if err := ing.Run(ctx); !errors.Is(err, io.EOF) {
 		t.Fatal(err)

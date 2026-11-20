@@ -79,15 +79,20 @@ func kanzOrder(id string) *orderpb.OrderState {
 	}
 }
 
+func fixtureTradeSymbols() StaticSymbolMap {
+	return StaticSymbolMap{"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT"}
+}
+
 func ingesterOver(frames [][]byte, cap *reconCapture) *UserDataIngester {
 	return ingesterOverView(frames, cap, newFakeOrders("o1"))
 }
 
 func ingesterOverView(frames [][]byte, cap *reconCapture, view *fakeOrders) *UserDataIngester {
 	return newUserDataIngester(UserDataConfig{
-		Stream: &fakeStream{frames: frames},
-		Orders: view,
-		Pub:    cap, Venue: "BINANCE", Tenant: "fund-alpha",
+		Symbols: fixtureTradeSymbols(),
+		Stream:  &fakeStream{frames: frames},
+		Orders:  view,
+		Pub:     cap, Venue: "BINANCE", Tenant: "fund-alpha",
 	})
 }
 
@@ -122,7 +127,7 @@ func TestUserData_PartialAndNoiseHandling(t *testing.T) {
 		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"NEW","X":"NEW"}`),                                                           // not a fill
 		[]byte(`{"e":"outboundAccountPosition"}`),                                                                                              // unrelated event
 		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"unknown","x":"TRADE","X":"FILLED","l":"1","L":"1","z":"1","t":9,"T":1700000000000}`), // unknown order
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50000","z":"0.5","q":"1","t":8,"T":1700000000001}`),
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50000","z":"0.5","q":"1","t":8,"T":1700000000001}`),
 	}
 	_ = ingesterOver(frames, cap).Run(context.Background())
 

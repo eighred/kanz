@@ -108,9 +108,10 @@ func TestUserDataFillEmitsAValidEnvelope(t *testing.T) {
 		`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
 
 	ing := newUserDataIngester(UserDataConfig{
-		Stream: &fakeStream{frames: [][]byte{[]byte(report)}},
-		Orders: newFakeOrders("o1"),
-		Pub:    prod, Venue: "BINANCE", Tenant: "fund-alpha",
+		Symbols: fixtureTradeSymbols(),
+		Stream:  &fakeStream{frames: [][]byte{[]byte(report)}},
+		Orders:  newFakeOrders("o1"),
+		Pub:     prod, Venue: "BINANCE", Tenant: "fund-alpha",
 	})
 	_ = ing.Run(context.Background()) // returns io.EOF at end of frames
 

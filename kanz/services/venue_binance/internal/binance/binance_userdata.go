@@ -76,7 +76,8 @@ type executionReport struct {
 // Fills are keyed by a deterministic fill_id (symbol-tradeId) identical to the
 // BinanceVenue synchronous path, so downstream folds dedup the two idempotently.
 type UserDataIngester struct {
-	stream UserDataStream
+	stream  UserDataStream
+	symbols StaticSymbolMap
 	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
 	// enrich the report; written so the fill this ingester just published as a
 	// FACT is also the fill the adapter believes in — see handle.
@@ -107,6 +108,7 @@ type UserDataIngester struct {
 
 // UserDataConfig configures the ingester.
 type UserDataConfig struct {
+	Symbols   StaticSymbolMap
 	Stream    UserDataStream
 	Orders    OrderTracker
 	Pub       Publisher
@@ -128,7 +130,7 @@ func newUserDataIngester(cfg UserDataConfig) *UserDataIngester {
 		cfg.Logger = slog.Default()
 	}
 	return &UserDataIngester{
-		stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
+		stream: cfg.Stream, symbols: cfg.Symbols, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
 		refusal: ReportRefusal{
 			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused,
 			OnDropped: cfg.OnDropped, Logger: cfg.Logger,
@@ -220,6 +222,14 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		// account and a second replica both produce these routinely. Counted so
 		// the store_error arm above has a baseline to be read against.
 		i.refusal.Dropped(rep.ClientOrderID, DropUnknownOrder)
+		return nil
+	}
+	// A client order ID identifies the stored order. The authenticated trade
+	// must also agree with its venue symbol and side before it can move the books.
+	symbol, mapped := i.symbols.Symbol(st.GetInstrumentId())
+	side, sideErr := binanceSide(st.GetSide())
+	if !mapped || symbol != rep.Symbol || sideErr != nil || side != rep.Side {
+		i.refusal.Refuse(rep.ClientOrderID, errors.New("binance: private trade does not match admitted instrument and side"))
 		return nil
 	}
 	// EVERY NUMBER ON THIS FILL CONVERTS BEFORE ANY OF IT IS PUBLISHED (#94).
