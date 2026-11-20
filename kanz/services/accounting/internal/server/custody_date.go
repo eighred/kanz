@@ -67,13 +67,20 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		}
 		// An operator may have reassigned this custodian since the run. The
 		// customer report must not describe that old account as today's basis.
-		if result.State == "recorded" && (result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
+		if result.HistoricalQuantityCorrectionRunID != "" || (result.State == "recorded" && (result.Run.Outcome == custody.OutcomeHistoricalQuantityCorrection || result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks)) {
 			basis := result.Run.Basis
 			if basis == nil || basis.Mode != custody.BasisDeclared || len(basis.Accounts[custodian]) != 1 || len(configured) != 1 || !configured.Has(basis.Accounts[custodian][0]) {
-				result = custody.DatedResult{State: "unknown"}
+				if result.State == "pending" {
+					result.HistoricalQuantityCorrectionRunID = ""
+				} else {
+					result = custody.DatedResult{State: "unknown"}
+				}
 			}
 		}
 		response := map[string]any{"tenant_id": principal.Tenant, "state": result.State, "portfolio_id": portfolio, "custodian_id": custodian, "business_date": date.Format(time.DateOnly)}
+		if result.HistoricalQuantityCorrectionRunID != "" && result.State == "pending" {
+			response["historical_quantity_correction_run_id"] = result.HistoricalQuantityCorrectionRunID
+		}
 		if result.Reason != "" {
 			response["reason"] = result.Reason
 		}
@@ -81,7 +88,7 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			response["statement_id"] = result.StatementID
 		}
 		if result.State == "recorded" {
-			if result.AccountAssignmentVerified && (result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
+			if result.AccountAssignmentVerified && (result.Run.Outcome == custody.OutcomeHistoricalQuantityCorrection || result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
 				response["account_assignment_verified"] = true
 			}
 			response["run_id"] = result.Run.RunID
@@ -115,7 +122,20 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 					rows = append(rows, map[string]string{"break_id": v.BreakID, "kind": v.Kind, "key": v.Key,
 						"values_state": v.ValuesState, "ibor": v.IBOR, "custodian": v.Custodian, "difference": v.Difference})
 				}
-				response["breaks"] = rows
+				if result.Run.Outcome == custody.OutcomeHistoricalQuantityCorrection {
+					var links []json.RawMessage
+					for _, link := range result.Run.HistoricalQuantityResolutions {
+						raw, err := (protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}).Marshal(link)
+						if err != nil {
+							writeJSON(w, 503, map[string]string{"error": "dated comparison unavailable"})
+							return
+						}
+						links = append(links, raw)
+					}
+					response["historical_quantity_resolutions"] = links
+				} else {
+					response["breaks"] = rows
+				}
 			}
 			if b := result.Run.Basis; b != nil {
 				response["scope_mode"] = b.Mode

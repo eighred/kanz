@@ -223,7 +223,7 @@ func (p *Postgres) LatestRun(ctx context.Context, portfolioID, custodianID strin
 	const q = `
 SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis
 FROM custody_runs
-WHERE portfolio_id = $1 AND custodian_id = $2
+WHERE portfolio_id = $1 AND custodian_id = $2 AND outcome<>'historical_quantity_correction'
 ORDER BY completed_at DESC
 LIMIT 1`
 	var (

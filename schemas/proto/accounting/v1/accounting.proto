@@ -647,6 +647,8 @@ enum ReconciliationOutcome {
   // materialized, or a figure was not representable. It is NOT a clean book and
   // must never be read as one; the failure_reason says which.
   RECONCILIATION_OUTCOME_FAILED = 4;
+  // Only previously open historical execution quantities were corrected.
+  RECONCILIATION_OUTCOME_HISTORICAL_QUANTITY_CORRECTION = 5;
 }
 
 // ReconciliationBreakKind classifies a discrepancy. The values mirror
@@ -836,6 +838,17 @@ message ReconciliationRun {
   // mutable break queue retain their balances and reference-membership meaning.
   // Absent on historical completions and sources without unit attestations.
   ExecutionQuantityComparison execution_quantities = 13;
+  repeated HistoricalQuantityResolution historical_quantity_resolutions = 14;
+}
+
+// An equality established by a newer signed statement on an earlier business date.
+message HistoricalQuantityResolution {
+  string break_id = 1;
+  string detection_run_id = 2;
+  string entry_id = 3;
+  string external_ref = 4;
+  string instrument_id = 5;
+  common.v1.Decimal agreed_quantity = 6;
 }
 
 message ExecutionQuantityComparison {

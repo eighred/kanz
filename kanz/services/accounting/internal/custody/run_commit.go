@@ -102,7 +102,7 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	}
 	// The immutable lookup bounds both the full payload and the working breaks.
 	// Refuse before the queue transaction commits an unreadable completion.
-	if run.ExecutionQuantities != nil && (len(msg.Breaks) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
+	if (run.ExecutionQuantities != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
 		return outbox.Record{}, errQuantityReceiptLimit
 	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
@@ -151,6 +151,9 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 			return Run{}, ErrRunIdentityConflict
 		}
 		return cloneRun(prior), nil
+	}
+	if run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 {
+		return Run{}, ErrDurableActionStore
 	}
 	run = cloneRun(run)
 	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
@@ -279,6 +282,9 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		prior.Basis = basis
 		return prior, tx.Commit(ctx)
 	}
+	if run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 || (run.Basis != nil && run.Basis.HistoricalDetections != nil) {
+		return Run{}, ErrUnverifiedPrecision
+	}
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
@@ -328,9 +334,6 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		if err != nil {
 			return Run{}, err
 		}
-		if later {
-			return Run{}, ErrHistoricalLifecycle
-		}
 		if run.Basis != nil {
 			var newer bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM custody_runs WHERE tenant_id=app_current_tenant()
@@ -342,37 +345,67 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 				return Run{}, ErrBookBasisChanged
 			}
 		}
+		if later && run.RequestID == "" && len(run.measured) > 0 {
+			// Scheduled late application needs the same signed intake frontier
+			// as a manual command: a newer published-but-undelivered revision wins.
+			signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
+			if err != nil {
+				return Run{}, err
+			}
+		}
 		if run.compared != nil {
 			current, err := staged.LatestStatement(ctx, run.Subject)
 			if err := run.confirmStatement(current, err); err != nil {
 				return Run{}, err
 			}
 		}
-		if d := run.detection(); d.RunID != "" {
-			if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_detection_run',$1,true)`, d.RunID); err != nil {
+		if later {
+			// Never sweep another date's working set. Only a newer independently signed
+			// equality for a still-open item can yield this narrower completion.
+
+			resolutions, err := quantityObservations(ctx, tx, run, signedDigest, true)
+			if err != nil {
 				return Run{}, err
 			}
-		}
-		if run.Basis != nil {
-			var assignmentJSON string
-			if run.Basis.Assignments != nil {
-				value, err := json.Marshal(assignmentsForCustodian(run.Basis.Assignments, run.Subject.CustodianID))
-				if err != nil {
+			if len(resolutions) == 0 {
+				return Run{}, ErrHistoricalLifecycle
+			}
+			run.Outcome = OutcomeHistoricalQuantityCorrection
+			run.HistoricalQuantityResolutions = resolutions
+			run.Basis = run.Basis.clone()
+			run.Basis.HistoricalDetections = make(map[string]string, len(resolutions))
+			for _, link := range resolutions {
+				run.Basis.HistoricalDetections[link.BreakId] = link.DetectionRunId
+			}
+			run.ExecutionQuantities = nil
+			run.Breaks = nil
+		} else {
+			if d := run.detection(); d.RunID != "" {
+				if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_detection_run',$1,true)`, d.RunID); err != nil {
 					return Run{}, err
 				}
-				assignmentJSON = string(value)
 			}
-			if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_break_scope',
+			if run.Basis != nil {
+				var assignmentJSON string
+				if run.Basis.Assignments != nil {
+					value, err := json.Marshal(assignmentsForCustodian(run.Basis.Assignments, run.Subject.CustodianID))
+					if err != nil {
+						return Run{}, err
+					}
+					assignmentJSON = string(value)
+				}
+				if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_break_scope',
                 jsonb_strip_nulls(jsonb_build_object('mode',$1::text,'accounts',$2::text[],'assignments',NULLIF($3,'')::jsonb))::text,true)`,
-				run.Basis.Mode, run.Basis.Accounts[run.Subject.CustodianID], assignmentJSON); err != nil {
+					run.Basis.Mode, run.Basis.Accounts[run.Subject.CustodianID], assignmentJSON); err != nil {
+					return Run{}, err
+				}
+			}
+			stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
+			if err != nil {
 				return Run{}, err
 			}
+			run.Breaks = breaksForSubject(stored, run.Subject)
 		}
-		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
-		if err != nil {
-			return Run{}, err
-		}
-		run.Breaks = breaksForSubject(stored, run.Subject)
 	}
 	record, err := runRecord(ctx, tenant, run)
 	if err != nil {
@@ -382,7 +415,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, err
 	}
 	if len(run.measured) > 0 {
-		if err := recordQuantityObservations(ctx, tx, run, signedDigest); err != nil {
+		if _, err := quantityObservations(ctx, tx, run, signedDigest, false); err != nil {
 			return Run{}, err
 		}
 		run.measured = nil
@@ -400,7 +433,7 @@ func runFromRecord(payload []byte) (Run, error) {
 	if err := proto.Unmarshal(payload, &msg); err != nil {
 		return Run{}, err
 	}
-	run := Run{ExecutionQuantities: msg.GetExecutionQuantities(), RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
+	run := Run{HistoricalQuantityResolutions: msg.GetHistoricalQuantityResolutions(), ExecutionQuantities: msg.GetExecutionQuantities(), RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
 		Outcome: parseOutcome(strings.ToLower(strings.TrimPrefix(msg.GetOutcome().String(), "RECONCILIATION_OUTCOME_"))), StatementID: msg.GetStatementId(), CompletedAt: msg.GetCompletedAt().AsTime(), FailureReason: msg.GetFailureReason()}
 	var ok bool
 	if run.Tolerance, ok = dec.FromProtoChecked(msg.GetTolerance()); !ok {

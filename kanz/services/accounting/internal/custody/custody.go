@@ -98,6 +98,7 @@ const (
 	// OutcomeFailed: the run could not complete. NOT a clean book, and the
 	// FailureReason says why.
 	OutcomeFailed
+	OutcomeHistoricalQuantityCorrection
 )
 
 func (o Outcome) String() string {
@@ -110,6 +111,8 @@ func (o Outcome) String() string {
 		return "no_statement"
 	case OutcomeFailed:
 		return "failed"
+	case OutcomeHistoricalQuantityCorrection:
+		return "historical_quantity_correction"
 	default:
 		return "unspecified"
 	}
@@ -123,7 +126,7 @@ func (o Outcome) String() string {
 // the metric is pre-seeded from this list. A new outcome added above therefore
 // gets its series without anybody remembering to add it in a second place.
 func Outcomes() []Outcome {
-	return []Outcome{OutcomeClean, OutcomeBreaks, OutcomeNoStatement, OutcomeFailed}
+	return []Outcome{OutcomeClean, OutcomeBreaks, OutcomeNoStatement, OutcomeFailed, OutcomeHistoricalQuantityCorrection}
 }
 
 // wireOutcome renders an Outcome onto the wire.
@@ -137,6 +140,8 @@ func wireOutcome(o Outcome) accountingpb.ReconciliationOutcome {
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_NO_STATEMENT
 	case OutcomeFailed:
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_FAILED
+	case OutcomeHistoricalQuantityCorrection:
+		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_HISTORICAL_QUANTITY_CORRECTION
 	default:
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_UNSPECIFIED
 	}
@@ -386,21 +391,22 @@ func (s Statement) Subject() Subject {
 type Run struct {
 	// compared holds the statement read before loading the book. CommitRun
 	// validates it under the pair lock and drops it before retaining the run.
-	compared            *Statement
-	observedMissing     bool
-	measured            []recon.ExecutionQuantityDifference
-	ExecutionQuantities *accountingpb.ExecutionQuantityComparison
-	RunID               string
-	RequestID           string
-	Actor               string
-	Subject             Subject
-	Outcome             Outcome
-	StatementID         string
-	Basis               *RunBasis
-	Breaks              []Break
-	Tolerance           *big.Rat
-	CompletedAt         time.Time
-	FailureReason       string
+	compared                      *Statement
+	observedMissing               bool
+	measured                      []recon.ExecutionQuantityDifference
+	ExecutionQuantities           *accountingpb.ExecutionQuantityComparison
+	HistoricalQuantityResolutions []*accountingpb.HistoricalQuantityResolution
+	RunID                         string
+	RequestID                     string
+	Actor                         string
+	Subject                       Subject
+	Outcome                       Outcome
+	StatementID                   string
+	Basis                         *RunBasis
+	Breaks                        []Break
+	Tolerance                     *big.Rat
+	CompletedAt                   time.Time
+	FailureReason                 string
 }
 
 // Detection identifies the comparison that last wrote a break's financial figures.

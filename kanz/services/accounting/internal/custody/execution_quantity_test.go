@@ -315,13 +315,16 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 	next.BusinessDate = next.BusinessDate.AddDate(0, 0, 1)
 	nextLevel := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":%q,"positions":[],"cash":[],"transactions":[],"grain":"STATEMENT_GRAIN_TRANSACTIONS"}`, next.BusinessDate.Format(time.RFC3339)))
 	deliver(nextLevel, 1, "")
-	if future, err := r.Reconcile(ctx, next); err != nil || future.Outcome != OutcomeClean {
+	future, err := r.Reconcile(ctx, next)
+	if err != nil || future.Outcome != OutcomeClean {
 		t.Fatalf("future comparison: %+v %v", future, err)
 	}
-	late, _ := deliver(levelAt(4), 6, digest)
+	// An omitted unit assertion on D cannot resolve even one item after D+1.
+	omitted, nextDigest := deliver(levelAt(1), 6, digest)
 	if _, err := r.Reconcile(ctx, sub); !errors.Is(err, ErrHistoricalLifecycle) {
-		t.Fatal("historical comparison", err)
+		t.Fatalf("legacy source resolved a historical item: %v", err)
 	}
+
 	for _, other := range [][]string{{"other-portfolio"}, {"other-portfolio", "another"}} {
 		denied, err := st.OutstandingBreaks(ctx, other...)
 		if err != nil || len(denied) != 0 {
@@ -333,9 +336,118 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 		t.Fatal("late correction removed open items", blocked, err)
 	}
 	for _, item := range blocked {
-		if item.LateCorrectionStatementID != late || item.Detection.RunID != original.RunID {
+		if item.LateCorrectionStatementID != omitted || item.Detection.RunID != original.RunID {
 			t.Fatal("late correction replaced original detection", item)
 		}
+	}
+
+	// Only one source line asserts comparable units. The other reference stays
+	// open with its original detection despite the successful partial correction.
+	partialLevel := strings.Replace(string(levelAt(4)), `"quantityInInstrumentUnits":true`, `"quantityInInstrumentUnits":false`, 1)
+	partialID, partialDigest := deliver(json.RawMessage(partialLevel), 7, nextDigest)
+	partial, err := r.Reconcile(ctx, sub)
+	if err != nil || partial.Outcome != OutcomeHistoricalQuantityCorrection || len(partial.HistoricalQuantityResolutions) != 1 {
+		t.Fatal("partial signed correction", partial, err)
+	}
+	remaining, err := st.OutstandingBreaks(ctx, sub.PortfolioID)
+	if err != nil || len(remaining) != 1 || remaining[0].Detection.RunID != original.RunID || remaining[0].Key != "independent-buy" || remaining[0].LateCorrectionStatementID != partialID {
+		t.Fatal("unmeasured reference was cleared", remaining, err)
+	}
+	late, lateDigest := deliver(levelAt(4), 8, partialDigest)
+	// Separate reconcilers/pools emulate simultaneous delivery, using the
+	// original authenticated command identity for replay after contention.
+	const request = "e8b0a101-bdbd-431f-8390-5413c6a28bde"
+	type reply struct {
+		run Run
+		err error
+	}
+	start := make(chan struct{})
+	done := make(chan reply, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			run, err := r.ReconcileManual(ctx, sub, request, "operator:quantity")
+			done <- reply{run, err}
+		}()
+	}
+	close(start)
+	var accepted bool
+	for i := 0; i < 2; i++ {
+		got := <-done
+		if got.err == nil {
+			accepted = true
+			if got.run.Outcome != OutcomeHistoricalQuantityCorrection {
+				t.Fatal(got.run)
+			}
+		} else if !errors.Is(got.err, ErrRunBusy) {
+			t.Fatal("concurrent correction", got.err)
+		}
+	}
+	if !accepted {
+		t.Fatal("both contenders refused")
+	}
+	receipt, err := r.ReconcileManual(ctx, sub, request, "operator:quantity")
+	if err != nil || receipt.Outcome != OutcomeHistoricalQuantityCorrection || receipt.StatementID != late || len(receipt.HistoricalQuantityResolutions) != 1 || len(receipt.Breaks) != 0 {
+		t.Fatalf("unexpected late receipt: %+v %v", receipt, err)
+	}
+	for _, link := range receipt.HistoricalQuantityResolutions {
+		if link.DetectionRunId != original.RunID || link.InstrumentId != "AAPL" || link.EntryId != link.ExternalRef {
+			t.Fatal("unbound correction", link)
+		}
+		sign := int64(1)
+		if link.ExternalRef == "independent-sell" {
+			sign = -1
+		} else if link.ExternalRef != "independent-buy" {
+			t.Fatal(link)
+		}
+		if link.AgreedQuantity == nil || link.AgreedQuantity.Coefficient != sign || link.AgreedQuantity.Exponent != 0 {
+			t.Fatal("wrong agreed units", link)
+		}
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM custody_execution_quantity_observations WHERE run_id=$1 AND source_revision=8 AND difference='0'", receipt.RunID).Scan(&count); err != nil || count != 1 {
+		t.Fatal("replayed correction", count, err)
+	}
+	after, err := st.OutstandingBreaks(ctx, sub.PortfolioID)
+	if err != nil || len(after) != 0 {
+		t.Fatal("late equality did not clear its two specific items", after, err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE tenant_id=app_current_tenant()"); err != nil {
+		t.Fatal(err)
+	}
+	restart := NewPostgres(pool)
+	for _, want := range []Run{original, future, partial, receipt} {
+		saved, err := restart.HistoricalReceipt(ctx, want.Subject, source.Account, want.RunID)
+		if err != nil || saved.State != "recorded" || saved.Run.Outcome != want.Outcome || saved.StatementID != want.StatementID || len(saved.Run.HistoricalQuantityResolutions) != len(want.HistoricalQuantityResolutions) {
+			t.Fatalf("prior/saved independent receipt: %s %s %+v %v", want.RunID, want.Outcome, saved, err)
+		}
+	}
+	current, err := restart.DatedResult(ctx, sub)
+	if err != nil || current.State != "pending" || current.HistoricalQuantityCorrectionRunID != receipt.RunID {
+		t.Fatalf("current historical discovery: %+v %v", current, err)
+	}
+	nextRead, err := restart.DatedResult(ctx, next)
+	if err != nil || nextRead.State != "recorded" || nextRead.Run.RunID != future.RunID {
+		t.Fatal("replaced later close", nextRead, err)
+	}
+
+	// An incoming higher revision has reached the trusted receipt table but not the consumer.
+	// It suppresses current discovery while the explicitly requested historical receipt survives.
+	raw, err := json.Marshal(signedBatch{BatchFormat, source.Source, tenant, source.Account, 9, lateDigest, true, levelAt(4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingID, err := importer.Import(ctx, raw, ed25519.Sign(key, raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := restart.DatedResult(ctx, sub)
+	if err != nil || pending.State != "pending" || pending.StatementID != pendingID || pending.HistoricalQuantityCorrectionRunID != "" {
+		t.Fatal("stale correction link", pending, err)
+	}
+	inaccessible, err := restart.HistoricalReceipt(ctx, sub, "another-account", receipt.RunID)
+	if err != nil || inaccessible.State != "unknown" {
+		t.Fatal("wrong account saw correction", inaccessible, err)
 	}
 
 }
