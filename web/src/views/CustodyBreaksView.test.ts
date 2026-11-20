@@ -15,9 +15,31 @@ function button(wrapper: ReturnType<typeof mount>, text: string) {
 }
 
 describe('custody exact review', () => {
+  it('recovers a failed comparison with the same reviewed identity and shows the committed receipt', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [], rerunActor: 'operator' })
+    const compare = vi.spyOn(custody, 'rerun').mockRejectedValueOnce(new ApiError(503, 'pending')).mockImplementationOnce(async req => ({
+      ...req, actor: 'operator', run_id: 'retained-run', completed_at: '2020-02-05T10:00:00Z', outcome: 'no_statement',
+    }))
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      await flushPromises()
+      const form = wrapper.get('form')
+      for (const [i, value] of ['PF1', 'CUST-A', '2020-02-04'].entries()) await form.findAll('input')[i]!.setValue(value)
+      await form.trigger('submit')
+      expect(compare).not.toHaveBeenCalled()
+      await button(wrapper, 'Run comparison').trigger('click')
+      await flushPromises()
+      await button(wrapper, 'Retry same request').trigger('click')
+      await flushPromises()
+      expect(compare.mock.calls[0]).toEqual(compare.mock.calls[1])
+      expect(wrapper.get('[aria-label="Recorded custody comparison"]').text()).toContain('no_statement')
+      expect(wrapper.text()).toContain('retained-run')
+    } finally { wrapper.unmount() }
+  })
+
   it('reads detection again on reload and preserves unknown historical fields', async () => {
     const detection = { run_id: 'recorded-run', statement_id: 'signed-statement-r1', business_date: '2020-02-04', journal_position: '9007199254740993' }
-    const get = vi.spyOn(custody, 'breaks').mockResolvedValueOnce([{ ...row, portfolio_id: 'PF1', custodian_id: 'CUST-A', detection }]).mockResolvedValueOnce([row])
+    const get = vi.spyOn(custody, 'queue').mockResolvedValueOnce({ breaks: [{ ...row, portfolio_id: 'PF1', custodian_id: 'CUST-A', detection }] }).mockResolvedValueOnce({ breaks: [row] })
     const wrapper = mount(CustodyBreaksView)
     try {
       await flushPromises()
@@ -62,7 +84,7 @@ describe('custody exact review', () => {
   })
 
   it('requires review, preserves the retry identity, and reloads after evidence', async () => {
-    const read = vi.spyOn(custody, 'breaks').mockResolvedValue([row])
+    const read = vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [row] })
     const act = vi.spyOn(custody, 'act').mockRejectedValueOnce(new Error('network lost')).mockResolvedValueOnce(receipt)
     const wrapper = mount(CustodyBreaksView, { attachTo: document.body })
     await flushPromises()
@@ -90,7 +112,7 @@ describe('custody exact review', () => {
   })
 
   it('moves keyboard focus through both reviews and returns to the invoking row on cancel', async () => {
-    vi.spyOn(custody, 'breaks').mockResolvedValue([row, { ...row, break_id: 'PF|CUST|quantity|ETH/USD', key: 'ETH/USD' }])
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [row, { ...row, break_id: 'PF|CUST|quantity|ETH/USD', key: 'ETH/USD' }] })
     const act = vi.spyOn(custody, 'act')
     const wrapper = mount(CustodyBreaksView, { attachTo: document.body })
     try {
@@ -112,7 +134,7 @@ describe('custody exact review', () => {
   })
 
   it('requires a fresh review after a revision conflict', async () => {
-    vi.spyOn(custody, 'breaks').mockResolvedValue([row])
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [row] })
     vi.spyOn(custody, 'act').mockRejectedValue(new ApiError(409, 'private database detail'))
     const wrapper = mount(CustodyBreaksView, { attachTo: document.body })
     await flushPromises()
@@ -130,7 +152,7 @@ describe('custody exact review', () => {
   })
 
   it('does not offer actions or present legacy rounded numbers as exact', async () => {
-    vi.spyOn(custody, 'breaks').mockResolvedValue([{ ...row, values_state: 'legacy_unverified', actions_enabled: false }])
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [{ ...row, values_state: 'legacy_unverified', actions_enabled: false }] })
     const wrapper = mount(CustodyBreaksView)
     await flushPromises()
     expect(wrapper.text()).toContain('source replay and reconciliation required')

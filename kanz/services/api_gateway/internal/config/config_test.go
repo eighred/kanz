@@ -259,3 +259,13 @@ func TestLoadRefusesATradeRoleThatIsTheBaselineRole(t *testing.T) {
 		t.Fatal("Load() accepted the baseline role AS the trade role — every reader can now submit orders")
 	}
 }
+
+func TestCustodyRerunRequiresIndependentRole(t *testing.T) {
+	c := Config{RequiredRole: "baseline", TradeRole: "trade", OperatorRole: "operate", FundRole: "fund", ApproveRole: "approve", MandateRole: "mandate", AuditRole: "audit", AccountingAddr: "http://accounting"}
+	for _, role := range []string{"baseline", "trade", "operate", "fund", "approve", "mandate", "audit", "kanz-identity-admin", "two roles", "one,two"} {
+		c.CustodyRerunRole = role
+		if err := c.validateAuth(); err == nil || !strings.Contains(err.Error(), "custody rerun") {
+			t.Errorf("rerun role %q: %v", role, err)
+		}
+	}
+}

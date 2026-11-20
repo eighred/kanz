@@ -54,6 +54,8 @@ type Server struct {
 	// answer for a deployment with no custody reconciliation.
 	breaks              BreakStore
 	breakReviewReadOnly bool
+	rerunRole           string
+	rerun               ManualCustodyRerun
 	// snapshotMetrics counts unbounded materializations. nil is inert.
 	snapshotMetrics *ledger.SnapshotMetrics
 	// custodyScope decides WHICH SLICE of a portfolio's journal the ad-hoc

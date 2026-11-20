@@ -47,7 +47,11 @@ func TestCustodyPilotEndpoint(t *testing.T) {
 
 // The accounting harness supplies the independently retained detection on stdin
 // while its signed statement is still the active break. All identities are minted here.
-func TestSignedCustodyOperatorBrowser(t *testing.T) {
+func TestSignedCustodyOperatorBrowser(t *testing.T) { custodyBrowser(t, false) }
+func TestSignedCustodyRerunBrowser(t *testing.T)    { custodyBrowser(t, true) }
+
+func custodyBrowser(t *testing.T, rerun bool) {
+	t.Helper()
 	backendURL := os.Getenv("CUSTODY_PILOT_ACCOUNTING_URL")
 	if backendURL == "" {
 		t.Skip("requires a running synthetic accounting pilot")
@@ -69,6 +73,9 @@ func TestSignedCustodyOperatorBrowser(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Config{RequiredRole: baselineRole, FundRole: treasuryRole}
+	if rerun {
+		cfg.CustodyRerunRole = "custody-pilot-rerun"
+	}
 	hc := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer hc.CloseIdleConnections()
 	be := proxy.NewMeshBackend(map[proxy.Service]string{proxy.ServiceAccounting: backendURL}, hc)
@@ -80,21 +87,33 @@ func TestSignedCustodyOperatorBrowser(t *testing.T) {
 	}
 	gw := httptest.NewServer(router)
 	defer gw.Close()
-	mint := func(tenant, portfolio string, fund bool) string {
+	mint := func(name, tenant, portfolio string, fund bool) string {
 		t.Helper()
 		roles := []string{baselineRole}
 		if fund {
 			roles = append(roles, treasuryRole)
 		}
-		tok, _, err := id.signer.Mint(&identity.User{Subject: "custody-pilot-reader", Tenant: tenant, Portfolios: []string{portfolio}, Roles: roles, Status: identity.StatusActive})
+		subject := "custody-pilot-reader"
+		if rerun {
+			subject = "custody-pilot-rerun-" + name
+			if name != "unfunded" {
+				roles = append(roles, cfg.CustodyRerunRole)
+			}
+		}
+		tok, _, err := id.signer.Mint(&identity.User{Subject: subject, Tenant: tenant, Portfolios: []string{portfolio}, Roles: roles, Status: identity.StatusActive})
 		if err != nil {
 			t.Fatal("fixture session unavailable")
 		}
 		return tok
 	}
 	const tenant = "synthetic-custody-pilot"
-	claims := map[string]string{"authorized": mint(tenant, "PF1", true), "foreign": mint(tenant+"-other", "PF1", true), "excluded": mint(tenant, "PF2", true), "unfunded": mint(tenant, "PF1", false)}
-	b, err := json.Marshal(map[string]any{"gateway": gw.URL, "issuer": id.url, "key": id.signer.JWKS().Keys[0], "claims": claims, "expected": json.RawMessage(expected)})
+	claims := map[string]string{
+		"authorized": mint("authorized", tenant, "PF1", true),
+		"foreign":    mint("foreign", tenant+"-other", "PF1", true),
+		"excluded":   mint("excluded", tenant, "PF2", true),
+		"unfunded":   mint("unfunded", tenant, "PF1", rerun), // Fund-only for the rerun check.
+	}
+	b, err := json.Marshal(map[string]any{"rerun": rerun, "gateway": gw.URL, "issuer": id.url, "key": id.signer.JWKS().Keys[0], "claims": claims, "expected": json.RawMessage(expected)})
 	if err != nil {
 		t.Fatal("fixture input unavailable")
 	}

@@ -24,6 +24,7 @@ func TestCustodyPilotBFFBrowser(t *testing.T) {
 		t.Skip("requires the isolated pilot gateway process")
 	}
 	var input struct {
+		Rerun           bool
 		Gateway, Issuer string
 		Key             jose.JSONWebKey
 		Claims          map[string]string
@@ -70,7 +71,11 @@ func TestCustodyPilotBFFBrowser(t *testing.T) {
 		if signed.Claims(input.Key.Key, &standard, &scope) != nil {
 			t.Fatal("fixture identity signature refused")
 		}
-		if standard.Validate(jwt.Expected{Issuer: input.Issuer, Subject: "custody-pilot-reader", AnyAudience: jwt.Audience{"kanz-api"}, Time: time.Now()}) != nil || standard.Expiry == nil {
+		actor := "custody-pilot-reader"
+		if input.Rerun {
+			actor = "custody-pilot-rerun-" + name
+		}
+		if standard.Validate(jwt.Expected{Issuer: input.Issuer, Subject: actor, AnyAudience: jwt.Audience{"kanz-api"}, Time: time.Now()}) != nil || standard.Expiry == nil {
 			t.Fatal("fixture identity claims refused")
 		}
 		if scope.Tenant != tenant {

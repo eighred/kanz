@@ -149,6 +149,7 @@ type Handler struct {
 // authorize — authz.Mux does — but it is where the route is registered, and
 // REGISTRATION is the decision: see Routes.
 type Roles struct {
+	CustodyRerun string
 	// Fund is the deployment's funder (API_GATEWAY_FUND_ROLE). EMPTY ⇒ the
 	// cash-movement route is not registered.
 	Fund string
@@ -325,6 +326,9 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// caller close any break by posting a statement that agrees with the book — the
 	// hand-resolve #966 removed, arriving through the comparison engine instead of
 	// through the lifecycle. The handler records no run and upserts no break.
+	if h.roles.CustodyRerun != "" {
+		mux.Handle(authz.CustodyRerun, "POST /v1/portfolios/{id}/custody/reruns", h.handle(ServiceAccounting, true, nil))
+	}
 	if h.roles.Fund != "" {
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/collateral/actions", h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/cash-forecast", h.handle(ServiceAccounting, true, nil))

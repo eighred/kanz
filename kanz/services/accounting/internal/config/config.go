@@ -46,6 +46,7 @@ type Config struct {
 	CustodyStatementSubject string
 	CustodySignedBatchOnly  bool
 	CustodyReviewReadOnly   bool
+	CustodyRerunRole        string
 	// CustodyPairs are the "portfolio:custodian" pairs the scheduled
 	// reconciliation covers.
 	//
@@ -284,6 +285,7 @@ func Load() (Config, error) {
 
 		CustodySignedBatchOnly:  signedOnly,
 		CustodyReviewReadOnly:   readOnlyReview,
+		CustodyRerunRole:        os.Getenv("ACCOUNTING_CUSTODY_RERUN_ROLE"),
 		CustodyStatementSubject: env.Or("ACCOUNTING_CUSTODY_STATEMENT_SUBJECT", DefaultCustodyStatementSubject),
 		CustodyPairs:            env.SplitList(os.Getenv("ACCOUNTING_CUSTODY_PAIRS")),
 		CustodyAccounts:         os.Getenv("ACCOUNTING_CUSTODY_ACCOUNTS"),
