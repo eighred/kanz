@@ -4,6 +4,7 @@ use crate::{
     publisher::{self, Framer, Venue},
     source::{self, Event},
 };
+use jiff::SignedDuration;
 use std::{
     env,
     error::Error,
@@ -188,10 +189,15 @@ fn fresh(venue: Option<prost_types::Timestamp>, wall: prost_types::Timestamp) ->
     let Some(venue) = venue else {
         return false;
     };
-    let delta = i128::from(wall.seconds) * 1_000_000_000 + i128::from(wall.nanos)
-        - i128::from(venue.seconds) * 1_000_000_000
-        - i128::from(venue.nanos);
-    (-1_000_000_000..=5_000_000_000).contains(&delta)
+    // Work on elapsed time directly. Protobuf's final valid day extends beyond
+    // Jiff's absolute Timestamp range, but its differences fit in SignedDuration.
+    let Some(seconds) = wall.seconds.checked_sub(venue.seconds) else {
+        return false;
+    };
+    let nanos = i64::from(wall.nanos) - i64::from(venue.nanos);
+    let age = SignedDuration::from_secs(seconds).checked_add(SignedDuration::from_nanos(nanos));
+    let window = SignedDuration::from_secs(-1)..=SignedDuration::from_secs(5);
+    age.is_some_and(|elapsed| window.contains(&elapsed))
 }
 
 async fn operations(
@@ -490,6 +496,38 @@ mod tests {
             }),
             wall
         ));
+    }
+
+    #[test]
+    fn freshness_keeps_inclusive_nanosecond_boundaries_across_protobuf_range() {
+        use prost_types::Timestamp;
+
+        for base in [-62_135_596_800, -5, 253_402_300_792] {
+            let wall = Timestamp {
+                seconds: base + 5,
+                nanos: 100,
+            };
+            for (seconds, nanos, expected) in [
+                (base, 99, false),      // five seconds and one nanosecond old
+                (base, 100, true),      // exactly five seconds old
+                (base + 5, 101, true),  // one nanosecond in the future
+                (base + 6, 100, true),  // exactly one second in the future
+                (base + 6, 101, false), // one second and one nanosecond ahead
+            ] {
+                assert_eq!(fresh(Some(Timestamp { seconds, nanos }), wall), expected);
+            }
+        }
+        let first = Timestamp {
+            seconds: -62_135_596_800,
+            nanos: 0,
+        };
+        let last = Timestamp {
+            seconds: 253_402_300_799,
+            nanos: 999_999_999,
+        };
+        assert!(fresh(Some(last), last));
+        assert!(!fresh(Some(first), last));
+        assert!(!fresh(Some(last), first));
     }
 }
 

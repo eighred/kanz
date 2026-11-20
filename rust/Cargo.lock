@@ -2056,6 +2056,7 @@ name = "kanz-market-feed"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "jiff",
  "kanz-decimal-compat",
  "num-bigint 0.4.6",
  "num-rational",
