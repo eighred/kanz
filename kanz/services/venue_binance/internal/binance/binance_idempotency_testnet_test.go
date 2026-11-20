@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
@@ -129,9 +130,17 @@ func (t *loseAcceptedPlacementTransport) RoundTrip(req *http.Request) (*http.Res
 
 func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 	evidence := requireFreshOrderAuthorization(t)
-	key, secret := os.Getenv("BINANCE_TESTNET_KEY"), os.Getenv("BINANCE_TESTNET_SECRET")
+	key, apiSecret := os.Getenv("BINANCE_TESTNET_KEY"), os.Getenv("BINANCE_TESTNET_SECRET")
+	account := strings.TrimSpace(os.Getenv("BINANCE_VENUE_ACCOUNT"))
+	if account == "" {
+		account = "BINANCE"
+	}
+	uid, err := secret.Read("BINANCE_VENUE_ACCOUNT_UID")
+	if err != nil || strings.TrimSpace(uid) == "" {
+		t.Fatal("testnet placement needs its bound BINANCE_VENUE_ACCOUNT_UID")
+	}
 	price, quantity := strings.TrimSpace(os.Getenv("BINANCE_TESTNET_PROOF_PRICE")), strings.TrimSpace(os.Getenv("BINANCE_TESTNET_PROOF_QUANTITY"))
-	if key == "" || secret == "" || price == "" || quantity == "" {
+	if key == "" || apiSecret == "" || price == "" || quantity == "" {
 		t.Fatal("BINANCE_TESTNET_KEY/_SECRET and operator-approved BINANCE_TESTNET_PROOF_PRICE/_QUANTITY are required")
 	}
 	priceValue, priceOK := new(big.Rat).SetString(price)
@@ -141,7 +150,7 @@ func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 	}
 	orderID := orderid.Mint()
 	st := &orderpb.OrderState{
-		OrderId: orderID, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
+		OrderId: orderID, Venue: "BINANCE", VenueAccountId: account, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
 		OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTC,
 		OrderedQuantity: bdec(quantity), LimitPrice: bdec(price),
 	}
@@ -154,12 +163,16 @@ func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 	loss := &loseAcceptedPlacementTransport{next: next, cancel: expirePlacement}
 	client := &http.Client{Transport: loss, Timeout: 10 * time.Second}
 	rest := newBinanceREST(restConfig{
-		BaseURL: "https://testnet.binance.vision", APIKey: key, APISecret: secret,
+		BaseURL: "https://testnet.binance.vision", APIKey: key, APISecret: apiSecret,
 		Bucket: newWeightBucket(1200, time.Minute, nil), HTTPClient: client,
 	})
 	venue := NewBinanceVenue(BinanceConfig{
-		MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest,
+		MIC: "BINANCE", Account: account, Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest,
 	})
+
+	if _, err := venue.verifyAccount(placementCtx, strings.TrimSpace(uid), slog.Default()); err != nil {
+		t.Fatal("testnet account verification failed")
+	}
 
 	cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 30*time.Second)
 	defer stopCleanup()

@@ -29,7 +29,7 @@ func TestUserData_NegativeCumulativeIsRefusedAndQuarantined(t *testing.T) {
 			}
 			capture := &reconCapture{}
 			refused := 0
-			ing := newUserDataIngester(UserDataConfig{
+			ing := fixtureUserDataIngester(UserDataConfig{
 				Symbols: fixtureTradeSymbols(),
 				Stream: &fakeStream{frames: [][]byte{[]byte(fmt.Sprintf(
 					`{"e":"executionReport","s":"BTCUSDT","c":"negative1620","S":"BUY","x":"TRADE","X":%q,"l":"1","L":"1","z":"-1","t":7,"T":1700000000000}`, status))}},
@@ -63,7 +63,7 @@ func TestUserData_NegativeCumulativeIsRefusedAndQuarantined(t *testing.T) {
 
 func negativeQuantityOrder(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
-		OrderId: id, PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
+		OrderId: id, Venue: "BINANCE", VenueAccountId: fixtureAccount, PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
 		Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT,
 		Status: orderpb.OrderStatus_ORDER_STATUS_ROUTED, LimitPrice: &commonpb.Decimal{Coefficient: 1},
 		OrderedQuantity: &commonpb.Decimal{Coefficient: 10}, FilledQuantity: &commonpb.Decimal{}, LeavesQuantity: &commonpb.Decimal{Coefficient: 10},
@@ -119,7 +119,7 @@ func TestNegativeCumulativeReachesNoBroker(t *testing.T) {
 			report.id, report.cumulative, identity+int64(i))))
 	}
 	refused := 0
-	ing := newUserDataIngester(UserDataConfig{
+	ing := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream:  &fakeStream{frames: frames}, Orders: view, Pub: producer,
 		Venue: "BINANCE", Tenant: "fund-alpha",

@@ -78,17 +78,9 @@ func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps W
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	if expectedUID == "" {
-		return execution.AccountProof{}, fmt.Errorf("%w: bound BINANCE_VENUE_ACCOUNT_UID or its file mount is required", accountproof.ErrUnverifiable)
-	}
-	proof, err := accountproof.Resolve(ctx, c.rest, accountproof.Want{Account: c.settings.Account, ExchangeUID: expectedUID}, deps.Logger)
+	proof, err := c.venue.verifyAccount(ctx, expectedUID, deps.Logger)
 	if err != nil {
-		if errors.Is(err, accountproof.ErrWrongAccount) {
-			return execution.AccountProof{}, accountproof.ErrWrongAccount
-		}
-		// Exchange error text may echo credentials. The operator can distinguish
-		// an unavailable proof from a confirmed account mismatch.
-		return execution.AccountProof{}, accountproof.ErrUnverifiable
+		return execution.AccountProof{}, err
 	}
 	// Reconciliation loop (secondary audit; emits correcting FACTs) + the
 	// In-Flight Certainty healing watchdog, which runs on its own fast tick.
@@ -160,9 +152,30 @@ func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps W
 	return proof, nil
 }
 
+// verifyAccount binds the local routing account to the UID returned for the
+// same credential used by placement, history and the private subscription.
+func (v *BinanceVenue) verifyAccount(ctx context.Context, expectedUID string, logger *slog.Logger) (execution.AccountProof, error) {
+	v.accountVerified.Store(false)
+	if expectedUID == "" || v.account == "" {
+		return execution.AccountProof{}, fmt.Errorf("%w: a local account and bound BINANCE_VENUE_ACCOUNT_UID or its file mount are required", accountproof.ErrUnverifiable)
+	}
+	proof, err := accountproof.Resolve(ctx, v.rest, accountproof.Want{Account: v.account, ExchangeUID: expectedUID}, logger)
+	if err != nil {
+		if errors.Is(err, accountproof.ErrWrongAccount) {
+			return execution.AccountProof{}, accountproof.ErrWrongAccount
+		}
+		// Exchange error text may echo credentials. The operator can distinguish
+		// an unavailable proof from a confirmed account mismatch.
+		return execution.AccountProof{}, accountproof.ErrUnverifiable
+	}
+	v.accountVerified.Store(proof.Verified)
+	return proof, nil
+}
+
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 	ing := newUserDataIngester(UserDataConfig{
-		Symbols: StaticSymbolMap(c.settings.Symbols), Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
+		provenAccount: c.venue.provenAccount(),
+		Symbols:       StaticSymbolMap(c.settings.Symbols), Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
 		OnRefused: deps.OnFillRefused, OnDropped: deps.OnFillDropped, Logger: deps.Logger,
 	})
 	// THE RE-DIAL RATE IS THE THING THIS LOOP DECIDES, AND IT IS A VENUE-SAFETY

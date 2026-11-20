@@ -107,7 +107,7 @@ func TestUserDataFillEmitsAValidEnvelope(t *testing.T) {
 	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
 		`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
 
-	ing := newUserDataIngester(UserDataConfig{
+	ing := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream:  &fakeStream{frames: [][]byte{[]byte(report)}},
 		Orders:  newFakeOrders("o1"),

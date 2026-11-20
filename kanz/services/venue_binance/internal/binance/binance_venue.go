@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -26,11 +27,12 @@ import (
 // come back inline and are returned to the router; a resting LIMIT returns no
 // fills here and is filled asynchronously by the user-data stream (Phase 3.2).
 type BinanceVenue struct {
-	mic     string
-	account string
-	rest    *binanceREST
-	symbols SymbolMapper
-	now     func() time.Time
+	mic             string
+	account         string
+	accountVerified atomic.Bool
+	rest            *binanceREST
+	symbols         SymbolMapper
+	now             func() time.Time
 	// The RPC server records every dispatch here before calling Execute.
 	// A memory view can forget the entire history during restart.
 	durableOrders *orderview.Postgres
@@ -79,6 +81,22 @@ func (v *BinanceVenue) MIC() string { return v.mic }
 // Account is the exchange account this adapter's API credential belongs to — the
 // collateral pool every fill it produces settles against.
 func (v *BinanceVenue) Account() string { return v.account }
+
+// A configured local account label acquires meaning only after Start has
+// checked this same REST credential against the deployment's bound exchange UID.
+func (v *BinanceVenue) provenAccount() string {
+	if v != nil && v.accountVerified.Load() {
+		return v.account
+	}
+	return ""
+}
+
+func checkOrderAccount(st *orderpb.OrderState, mic, account string) error {
+	if account == "" || mic == "" || st.GetVenueAccountId() != account || st.GetVenue() != mic {
+		return fmt.Errorf("%w: Binance order does not match the verified venue account", execution.ErrReconcileEvidence)
+	}
+	return nil
+}
 
 // ReadCapitalEvidence rechecks the exchange catalogue at read time and returns
 // current fee evidence. The response intentionally carries no approved maximum.
@@ -218,6 +236,9 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 		return nil, err
 	}
 
+	if err := checkOrderAccount(st, v.mic, v.provenAccount()); err != nil {
+		return nil, err
+	}
 	resp, err := v.rest.newOrder(ctx, params)
 	if err != nil {
 		// Idempotency recovery: an ambiguous failure (timeout, duplicate) may
@@ -241,8 +262,29 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 			return nil, err
 		}
 		resp = q
+		ctx = recoveryCtx
 	}
-	return v.fills(resp, st)
+	if resp.Status == "NEW" || resp.Status == "FILLED" || resp.Status == "PARTIALLY_FILLED" {
+		// FULL supplies only an order-level time. Placement and later recovery
+		// both require the signed per-match history before exposing executions.
+		view, err := v.observedOrder(ctx, st, symbol, resp)
+		if err != nil {
+			return nil, err
+		}
+		switch view.State {
+		case OrderViewWorking, OrderViewPartiallyFilled, OrderViewFilled:
+			return view.Fills, nil
+		}
+		return nil, fmt.Errorf("%w: %s", execution.ErrHistoryIncomplete, view.Reason)
+	}
+	// Execute can express a working order or executions. A withdrawal,
+	// rejection or unresolved history needs QueryOrder's typed verdict.
+	return nil, fmt.Errorf("%w: Binance status %q does not establish a resting order or complete executions", execution.ErrHistoryIncomplete, resp.Status)
+}
+
+func confirmedResting(resp *orderResponse, st *orderpb.OrderState) bool {
+	total, ok := parseDec(resp.ExecutedQty)
+	return ok && total.GetCoefficient() == 0 && len(resp.Fills) == 0 && st.GetFilledQuantity().GetCoefficient() == 0
 }
 
 // binanceUnknownOrder is Binance's -2011 "Unknown order sent". For a CANCEL this
@@ -264,6 +306,9 @@ func (v *BinanceVenue) CancelOrder(ctx context.Context, st *orderpb.OrderState) 
 	symbol, ok := v.symbols.Symbol(st.GetInstrumentId())
 	if !ok {
 		return fmt.Errorf("binance: no symbol mapping for %s", st.GetInstrumentId())
+	}
+	if err := checkOrderAccount(st, v.mic, v.provenAccount()); err != nil {
+		return err
 	}
 	_, err := v.rest.cancelOrder(ctx, symbol, st.GetOrderId())
 	var apiErr *APIError
@@ -411,6 +456,10 @@ func binanceTimeInForce(tif orderpb.TimeInForce) (string, error) {
 // read" — reporting an unreadable execution as no execution is how a real trade
 // goes unbooked while the request looks successful.
 func (v *BinanceVenue) fills(resp *orderResponse, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	account := v.provenAccount()
+	if err := checkOrderAccount(st, v.mic, account); err != nil {
+		return nil, err
+	}
 	out := make([]*orderpb.Fill, 0, len(resp.Fills))
 	for _, f := range resp.Fills {
 		qty, qok := parseDec(f.Qty)
@@ -436,6 +485,7 @@ func (v *BinanceVenue) fills(resp *orderResponse, st *orderpb.OrderState) ([]*or
 			Price:            px,
 			Fee:              feeMoney,
 			Venue:            v.mic,
+			VenueAccountId:   account,
 			VenueExecutionId: strconv.FormatInt(f.TradeID, 10),
 			ExecutedAt:       timestamppb.New(v.now().UTC()),
 		})

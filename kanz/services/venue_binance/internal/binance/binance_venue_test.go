@@ -104,10 +104,12 @@ func fullFill(clientOrderID string) string {
 		`"executedQty":"1.00000000","fills":[{"price":"50000.00","qty":"1.00000000","commission":"0.001","commissionAsset":"BNB","tradeId":42}]}`
 }
 
+const fullTradeHistory = `[{"symbol":"BTCUSDT","orderId":1,"id":42,"qty":"1.00000000","price":"50000.00","commission":"0.001","commissionAsset":"BNB","isBuyer":true,"time":1750000000123}]`
+
 func venueOverFake(f *fakeBinance) *BinanceVenue {
 	bucket := newWeightBucket(1200, time.Minute, nil)
 	rest := newBinanceREST(restConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Bucket: bucket})
-	return NewBinanceVenue(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
+	return provenBinanceFixture(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
 }
 
 func bdec(v string) *commonpb.Decimal {
@@ -120,7 +122,7 @@ func bdec(v string) *commonpb.Decimal {
 
 func marketOrder(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
-		OrderId: id, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
+		OrderId: id, PortfolioId: "fund-alpha", Venue: "BINANCE", VenueAccountId: fixtureAccount, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
 		OrderType: orderpb.OrderType_ORDER_TYPE_MARKET, OrderedQuantity: bdec("1"),
 	}
 }
@@ -128,6 +130,7 @@ func marketOrder(id string) *orderpb.OrderState {
 func TestBinance_MarketOrderFillsWithClientOrderID(t *testing.T) {
 	f := newFakeBinance(t)
 	f.newOrderBody = fullFill("ORDER-123")
+	f.myTradesBody = fullTradeHistory
 	v := venueOverFake(f)
 
 	fills, err := v.Execute(context.Background(), marketOrder("ORDER-123"))
@@ -163,7 +166,7 @@ func TestBinance_RestingLimitReturnsNoFills(t *testing.T) {
 	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":2,"clientOrderId":"L1","status":"NEW","executedQty":"0","fills":[]}`
 	v := venueOverFake(f)
 	st := &orderpb.OrderState{
-		OrderId: "L1", InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
+		OrderId: "L1", PortfolioId: "fund-alpha", Venue: "BINANCE", VenueAccountId: fixtureAccount, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
 		OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, OrderedQuantity: bdec("1"), LimitPrice: bdec("40000"),
 	}
 	fills, err := v.Execute(context.Background(), st)
@@ -185,6 +188,7 @@ func TestBinance_DuplicateRecoversViaQuery(t *testing.T) {
 	f.newOrderStatus = 400
 	f.newOrderBody = `{"code":-2010,"msg":"Duplicate order sent."}`
 	f.queryBody = fullFill("DUP-1")
+	f.myTradesBody = fullTradeHistory
 	v := venueOverFake(f)
 
 	fills, err := v.Execute(context.Background(), marketOrder("DUP-1"))
@@ -240,7 +244,7 @@ func TestBinance_RateLimitBudgetExhausted(t *testing.T) {
 	bucket := newWeightBucket(0, time.Minute, func() time.Time { return time.Unix(0, 0) })
 	throttled := false
 	rest := newBinanceREST(restConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Bucket: bucket, OnThrottle: func() { throttled = true }})
-	v := NewBinanceVenue(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
+	v := provenBinanceFixture(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
 
 	_, err := v.Execute(context.Background(), marketOrder("RL-1"))
 	if err == nil {

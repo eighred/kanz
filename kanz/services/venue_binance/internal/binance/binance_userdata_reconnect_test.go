@@ -119,7 +119,7 @@ func TestUserDataReconnect_OnlyAResolvedReportCountsAsProgress(t *testing.T) {
 			"to the cap, losing fills the stream would otherwise have delivered")
 	}
 
-	blind := newUserDataIngester(UserDataConfig{
+	blind := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream:  &fakeStream{frames: [][]byte{[]byte(report)}},
 		Orders:  newUnreadableOrders("o1"), Pub: &reconCapture{},

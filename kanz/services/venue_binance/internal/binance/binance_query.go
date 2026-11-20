@@ -58,7 +58,7 @@ const binanceOrderDoesNotExist = -2013
 //
 // It satisfies execution.Querier, which the venue adapter's gRPC face serves to
 // the OMS. Safe to call repeatedly: it places nothing and mutates nothing.
-func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (result OrderView, err error) {
+func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (OrderView, error) {
 	if st == nil {
 		return OrderView{}, errors.New("binance: nil order state")
 	}
@@ -76,6 +76,9 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		}, nil
 	}
 
+	if err := checkOrderAccount(st, v.mic, v.provenAccount()); err != nil {
+		return OrderView{}, err
+	}
 	resp, err := v.rest.queryOrder(ctx, symbol, st.GetOrderId())
 	if err != nil {
 		// THE RATE-LIMIT CHECK IS FIRST AND IS NOT AN APIError. An exhausted
@@ -106,14 +109,31 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		return OrderView{}, err
 	}
 
+	return v.observedOrder(ctx, st, symbol, resp)
+}
+
+func (v *BinanceVenue) observedOrder(ctx context.Context, st *orderpb.OrderState, symbol string, resp *orderResponse) (result OrderView, err error) {
 	defer func() {
-		if err == nil {
-			result = execution.WithExecutionTotal(result, resp.ExecutedQty)
+		if err != nil {
+			return
+		}
+		result = execution.WithExecutionTotal(result, resp.ExecutedQty)
+		switch result.State {
+		case OrderViewFilled, OrderViewPartiallyFilled, OrderViewCancelled, OrderViewExpired, OrderViewRejected:
+			fills, check := execution.CompleteHistory(st, result)
+			if check != nil {
+				result = OrderView{State: OrderViewIndeterminate, Reason: check.Error()}
+				return
+			}
+			result.Fills = fills
 		}
 	}()
 	switch resp.Status {
 	case "NEW":
-		return OrderView{State: OrderViewWorking}, nil
+		if confirmedResting(resp, st) {
+			return OrderView{State: OrderViewWorking}, nil
+		}
+		return OrderView{State: OrderViewIndeterminate, Reason: "Binance NEW order lacks consistent zero-execution evidence"}, nil
 
 	case "PARTIALLY_FILLED", "FILLED":
 		fills, ferr := v.tradesFor(ctx, st, symbol, resp)

@@ -90,10 +90,11 @@ type UserDataIngester struct {
 	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
 	// enrich the report; written so the fill this ingester just published as a
 	// FACT is also the fill the adapter believes in — see handle.
-	orders OrderTracker
-	pub    Publisher
-	venue  string
-	tenant string
+	orders  OrderTracker
+	pub     Publisher
+	venue   string
+	account string
+	tenant  string
 	// refusal is the SHARED answer to an execution report this ingester will not
 	// publish (#1045): counter, ERROR log, and a freeze on the adapter's own view.
 	// Shared with the OKX connector rather than written out here, because the
@@ -117,13 +118,14 @@ type UserDataIngester struct {
 
 // UserDataConfig configures the ingester.
 type UserDataConfig struct {
-	Symbols   StaticSymbolMap
-	Stream    UserDataStream
-	Orders    OrderTracker
-	Pub       Publisher
-	Venue     string
-	Tenant    string
-	OnRefused func(mic, orderID, reason string)
+	provenAccount string
+	Symbols       StaticSymbolMap
+	Stream        UserDataStream
+	Orders        OrderTracker
+	Pub           Publisher
+	Venue         string
+	Tenant        string
+	OnRefused     func(mic, orderID, reason string)
 	// OnDropped counts an execution report this ingester could not resolve to an
 	// order it holds (#1047) — unknown_order or store_error. Distinct from
 	// OnRefused, which counts a report it DID resolve and will not honour.
@@ -139,7 +141,8 @@ func newUserDataIngester(cfg UserDataConfig) *UserDataIngester {
 		cfg.Logger = slog.Default()
 	}
 	return &UserDataIngester{
-		stream: cfg.Stream, symbols: cfg.Symbols, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
+		account: cfg.provenAccount,
+		stream:  cfg.Stream, symbols: cfg.Symbols, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
 		refusal: ReportRefusal{
 			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused,
 			OnDropped: cfg.OnDropped, Logger: cfg.Logger,
@@ -237,6 +240,10 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		i.refusal.Dropped(rep.ClientOrderID, DropUnknownOrder)
 		return nil
 	}
+	if err := checkOrderAccount(st, i.venue, i.account); err != nil {
+		i.refusal.Refuse(rep.ClientOrderID, err)
+		return nil
+	}
 	// A client order ID identifies the stored order. The authenticated trade
 	// must also agree with its venue symbol and side before it can move the books.
 	symbol, mapped := i.symbols.Symbol(st.GetInstrumentId())
@@ -318,6 +325,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		Price:            px,
 		Fee:              feeMoney,
 		Venue:            i.venue,
+		VenueAccountId:   i.account,
 		VenueExecutionId: strconv.FormatInt(*rep.TradeID, 10),
 		ExecutedAt:       executedAt,
 	}

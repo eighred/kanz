@@ -32,6 +32,11 @@ const fixtureTime int64 = 1700000000000
 
 func privateStreamFixture(t *testing.T, serve func(context.Context, *websocket.Conn), routes ...func(*http.ServeMux)) (*binanceREST, string) {
 	t.Helper()
+	return privateAccountStreamFixture(t, 123, serve, routes...)
+}
+
+func privateAccountStreamFixture(t *testing.T, uid int, serve func(context.Context, *websocket.Conn), routes ...func(*http.ServeMux)) (*binanceREST, string) {
+	t.Helper()
 	mux := http.NewServeMux()
 	for _, register := range routes {
 		register(mux)
@@ -45,7 +50,7 @@ func privateStreamFixture(t *testing.T, serve func(context.Context, *websocket.C
 			w.WriteHeader(401)
 			return
 		}
-		fmt.Fprint(w, `{"uid":123}`)
+		fmt.Fprintf(w, `{"uid":%d}`, uid)
 	})
 	mux.HandleFunc("/ws-api/v3", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" || r.Header.Get("X-MBX-APIKEY") != "" {
@@ -296,7 +301,7 @@ func TestPrivateStreamExecutionRequiresWireIdentity(t *testing.T) {
 			t.Fatalf("missing %s did not end the session", field)
 		}
 	}
-	ing := newUserDataIngester(UserDataConfig{Symbols: fixtureTradeSymbols(), Orders: newFakeOrders("o1"), Pub: &reconCapture{}})
+	ing := fixtureUserDataIngester(UserDataConfig{Symbols: fixtureTradeSymbols(), Orders: newFakeOrders("o1"), Pub: &reconCapture{}})
 	if err := ing.handle(t.Context(), []byte(trade)); err != nil || !ing.resolvedAReport() {
 		t.Fatal("valid exchange trade zero was refused", err)
 	}
@@ -330,7 +335,7 @@ func TestPrivateTradeRequiresKnownInstrumentAndSide(t *testing.T) {
 				t.Fatal(err)
 			}
 			capture := &reconCapture{}
-			ing := newUserDataIngester(UserDataConfig{Orders: view, Symbols: tc.symbols, Pub: capture})
+			ing := fixtureUserDataIngester(UserDataConfig{Orders: view, Symbols: tc.symbols, Pub: capture})
 			frame := fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":%q,"x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","t":1,"T":1700000000000}`, tc.reported)
 			if err := ing.handle(t.Context(), []byte(frame)); err != nil {
 				t.Fatal(err)
@@ -423,7 +428,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const fill = `{"e":"executionReport","E":1700000000002,"s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":8,"T":1700000000000}`
+	const fill = `{"e":"executionReport","E":1700000000002,"s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":8,"T":1700000000000,"n":"0","N":"USDT"}`
 	rest, uri := privateStreamFixture(t, func(ctx context.Context, conn *websocket.Conn) {
 		wrongInstrument := strings.NewReplacer("BTCUSDT", "ETHUSDT", "o1", "o2").Replace(fill)
 		wrongSide := strings.NewReplacer("BUY", "SELL", "o1", "o3").Replace(fill)
@@ -464,7 +469,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 			if r.URL.Query().Get("orderId") != "2" || r.URL.Query().Get("symbol") != "BTCUSDT" {
 				t.Error("unexpected history scope")
 			}
-			fmt.Fprint(w, `[{"orderId":2,"symbol":"BTCUSDT","id":8,"qty":"1","price":"50000","isBuyer":true,"time":1700000000000}]`)
+			fmt.Fprint(w, `[{"orderId":2,"symbol":"BTCUSDT","id":8,"qty":"1","price":"50000","commission":"0","commissionAsset":"USDT","isBuyer":true,"time":1700000000000}]`)
 		})
 	})
 	// The credential used to subscribe belongs to the same REST client that resolved the bound account.
@@ -473,6 +478,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 		t.Fatal("fixture account proof failed", err)
 	}
 	venue := NewBinanceVenue(BinanceConfig{Account: "fixture-account", Symbols: fixtureTradeSymbols(), REST: rest})
+	venue.accountVerified.Store(proof.Verified)
 	historyView, err := venue.QueryOrder(ctx, marketOrder("o1"))
 	if err != nil || len(historyView.Fills) != 1 || historyView.State != OrderViewFilled {
 		t.Fatalf("queried trade: %v %v", historyView, err)
@@ -483,7 +489,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ing := newUserDataIngester(UserDataConfig{Symbols: fixtureTradeSymbols(), Stream: stream, Orders: view, Pub: prod, Tenant: "fund-alpha"})
+		ing := newUserDataIngester(UserDataConfig{provenAccount: venue.provenAccount(), Symbols: fixtureTradeSymbols(), Stream: stream, Orders: view, Pub: prod, Tenant: "fund-alpha"})
 		err = ing.Run(ctx)
 		stop()
 		if err == nil || !strings.Contains(err.Error(), "unexpected private subscription") || !ing.resolvedAReport() {
@@ -518,7 +524,7 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 			t.Fatal(err)
 		}
 		fill := payload.GetFill()
-		if fill.GetFillId() != "BTCUSDT-8" || fill.GetVenueExecutionId() != "8" || fill.GetOrderId() != "o1" || dec.Cmp(fill.GetQuantity(), bdec("1")) != 0 || fill.GetExecutedAt().AsTime().UnixMilli() != fixtureTime {
+		if fill.GetVenueAccountId() != fixtureAccount || fillfact.ExecutionKey(fill) == fill.FillId || fill.GetFillId() != "BTCUSDT-8" || fill.GetVenueExecutionId() != "8" || fill.GetOrderId() != "o1" || dec.Cmp(fill.GetQuantity(), bdec("1")) != 0 || fill.GetExecutedAt().AsTime().UnixMilli() != fixtureTime {
 			t.Fatal("fill attribution changed", fill)
 		}
 		if !fillfact.SameExecution(historyView.Fills[0], fill) || !fillfact.SameExecution(fill, historyView.Fills[0]) || fillfact.ExecutionKey(historyView.Fills[0]) != fillfact.ExecutionKey(fill) {

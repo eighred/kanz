@@ -73,7 +73,7 @@ func (f *fakeOrders) openIDs(t *testing.T) []string {
 
 func kanzOrder(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
-		OrderId: id, PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
+		OrderId: id, Venue: "BINANCE", VenueAccountId: fixtureAccount, PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
 		Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT,
 		OrderedQuantity: bdec("1"),
 	}
@@ -88,7 +88,7 @@ func ingesterOver(frames [][]byte, cap *reconCapture) *UserDataIngester {
 }
 
 func ingesterOverView(frames [][]byte, cap *reconCapture, view *fakeOrders) *UserDataIngester {
-	return newUserDataIngester(UserDataConfig{
+	return fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream:  &fakeStream{frames: frames},
 		Orders:  view,

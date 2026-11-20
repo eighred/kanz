@@ -81,7 +81,7 @@ func TestUserData_StoreErrorIsNotASkip(t *testing.T) {
 	view := newUnreadableOrders("o1")
 
 	var dropped []string
-	ing := newUserDataIngester(UserDataConfig{
+	ing := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
@@ -148,7 +148,7 @@ func TestUserData_StoreErrorReasonIsNotUsedForAnUnknownOrder(t *testing.T) {
 	view := newFakeOrders() // empty view, reads fine
 
 	var dropped []string
-	ing := newUserDataIngester(UserDataConfig{
+	ing := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"somebody-elses","S":"BUY","x":"TRADE","X":"FILLED",` +

@@ -29,7 +29,7 @@ func TestExecutedPriceUserDataRefusesBeforeEffects(t *testing.T) {
 				view := newFakeOrders("bad", "good")
 				capture := &reconCapture{}
 				refused := 0
-				ing := newUserDataIngester(UserDataConfig{
+				ing := fixtureUserDataIngester(UserDataConfig{
 					Symbols: fixtureTradeSymbols(),
 					Stream: &fakeStream{frames: [][]byte{
 						priceDomainReport("bad", status, price),
@@ -65,7 +65,7 @@ func TestExecutedPriceUserDataRefusesBeforeEffects(t *testing.T) {
 }
 
 func TestExecutedPriceRESTRefusesWholeConversion(t *testing.T) {
-	v := &BinanceVenue{mic: "BINANCE", now: time.Now}
+	v := provenBinanceFixture(BinanceConfig{MIC: "BINANCE", Now: time.Now})
 	for _, price := range []string{"0", "-1", "-0.000000001"} {
 		t.Run(price, func(t *testing.T) {
 			fills, err := v.fills(&orderResponse{Symbol: "BTCUSDT", Fills: []orderFill{
@@ -80,7 +80,7 @@ func TestExecutedPriceRESTRefusesWholeConversion(t *testing.T) {
 }
 
 func TestExecutedPriceExactPositiveControls(t *testing.T) {
-	v := &BinanceVenue{mic: "BINANCE", now: time.Now}
+	v := provenBinanceFixture(BinanceConfig{MIC: "BINANCE", Now: time.Now})
 	for text, want := range map[string]*big.Rat{
 		"0.000000001":   big.NewRat(1, 1000000000),
 		"1000000000000": big.NewRat(1000000000000, 1),
@@ -144,7 +144,7 @@ func TestExecutedPriceRefusalReachesNoBroker(t *testing.T) {
 	zero, negative, good := fmt.Sprintf("price-zero-%d", identity), fmt.Sprintf("price-negative-%d", identity), fmt.Sprintf("price-good-%d", identity)
 	view := newFakeOrders(zero, negative, good)
 	refused := 0
-	ing := newUserDataIngester(UserDataConfig{
+	ing := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),
 		Stream:  &fakeStream{frames: [][]byte{priceDomainReport(zero, "FILLED", "0"), priceDomainReport(negative, "FILLED", "-1"), priceDomainReport(good, "FILLED", "1")}},
 		Orders:  view, Pub: producer, Venue: "BINANCE", Tenant: "fund-alpha", OnRefused: func(string, string, string) { refused++ },
