@@ -111,7 +111,7 @@ export const custody = {
   async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = ''): Promise<DatedCustodyResult> {
     const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
     if (runID) {
-      if (runID !== runID.trim() || /[\u0000-\u001f\u007f]/u.test(runID) || new TextEncoder().encode(runID).length > 512) throw new Error('Invalid saved run ID.')
+      if (runID !== runID.trim() || /\p{Cc}/u.test(runID) || new TextEncoder().encode(runID).length > 512) throw new Error('Invalid saved run ID.')
       query.set('run_id', runID)
     }
     const result = await api.get<Record<string, unknown>>('/api/v1/portfolios/' + encodeURIComponent(subject.portfolio_id) + '/custody/comparison?' + query, { expectedStatus: 200, signal })
@@ -119,14 +119,15 @@ export const custody = {
     if (!nonempty(tenant) || !result || result.tenant_id !== tenant || result.portfolio_id !== subject.portfolio_id || result.custodian_id !== subject.custodian_id ||
         result.business_date !== subject.business_date || (result.statement_id !== undefined && !nonempty(result.statement_id))) throw invalid()
     if (result.reason !== undefined && (result.state !== 'pending' || result.reason !== 'journal_changed')) throw invalid()
-    const scope = { ...subject, tenant_id: tenant }
+    const scope = { tenant_id: tenant, portfolio_id: subject.portfolio_id, custodian_id: subject.custodian_id, business_date: subject.business_date }
     const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
     const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
     let historical: HistoricalComparison | undefined
     if (runID && result.state === 'recorded') {
       const digest = result.signed_statement_sha256
       if (!verified || result.run_id !== runID || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
-          typeof result.statement_id !== 'string' || !result.statement_id.endsWith('.' + digest) || !Array.isArray(result.breaks) ||
+          typeof result.statement_id !== 'string' || !/^custody-batch\.v1\.[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.r[1-9]\d{0,18}\.[a-f0-9]{64}$/.test(result.statement_id) ||
+          !result.statement_id.endsWith('.' + digest) || !Array.isArray(result.breaks) ||
           result.breaks.length > 4096 || (result.outcome === 'clean') !== (result.breaks.length === 0)) throw invalid()
       const breaks = result.breaks.map(retainedBreak)
       if (new Set(breaks.map(row => row.break_id)).size !== breaks.length) throw invalid()
