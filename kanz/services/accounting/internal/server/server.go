@@ -431,7 +431,7 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// it is not a statement date and nothing here persists a statement or run.
 	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
 	now := time.Now().UTC()
-	book, executions, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger, custody.EffectiveCutoff{AsOf: now})(r.Context(), subject)
+	book, executions, _, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger, custody.EffectiveCutoff{AsOf: now})(r.Context(), subject)
 	if err != nil {
 		// The loader refuses rather than returning a partial book — an exchange
 		// account no custodian claims, most often. Surface the reason: it names

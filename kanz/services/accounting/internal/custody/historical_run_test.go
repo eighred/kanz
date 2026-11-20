@@ -112,7 +112,7 @@ func checkDelayedComparison(t *testing.T, st Store, ctx context.Context) {
 	// Let the correction complete inside the first run's book load. This
 	// establishes the exact interleaving without relying on sleep or scheduling.
 	var correction Run
-	older := makeReconciler(func(ctx context.Context, s Subject) (*ledger.Book, []ledger.Execution, error) {
+	older := makeReconciler(func(ctx context.Context, s Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error) {
 		replacement := statement("statement-corrected", map[string]int64{"AAPL": 90}, nil)
 		replacement.ReceivedAt = observed.ReceivedAt.Add(time.Minute)
 		if err := st.SaveStatement(ctx, replacement); err != nil {
@@ -123,7 +123,7 @@ func checkDelayedComparison(t *testing.T, st Store, ctx context.Context) {
 		if err != nil || correction.Outcome != OutcomeBreaks || len(correction.Breaks) != 1 {
 			t.Fatalf("correction: %+v, %v", correction, err)
 		}
-		return book, nil, nil
+		return loaderFor(book)(ctx, s)
 	}, t0)
 	failed, err := older.Reconcile(ctx, observed.Subject())
 	if !errors.Is(err, ErrStatementChanged) || failed.Outcome != OutcomeFailed {

@@ -51,7 +51,7 @@ func TestPostgresCustodyReconcilesTheStatementUTCDate(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			load := LedgerBookLoader(journal, closeScope(t, declared), testLogger())
-			book, executions, err := load(ctx, subject())
+			book, executions, _, err := load(ctx, subject())
 			if err != nil || book.Positions["AAPL"].Qty.Cmp(big.NewRat(10, 1)) != 0 || book.CashBalance("USD").Cmp(big.NewRat(-100, 1)) != 0 || len(executions) != 1 || executions[0].Ref != "close-buy" {
 				t.Fatalf("D2 midnight trade leaked into D1: book=%v executions=%v err=%v", book, executions, err)
 			}
@@ -76,7 +76,7 @@ func TestPostgresCustodyReconcilesTheStatementUTCDate(t *testing.T) {
 		Cash: big.NewRat(-3, 1), CashCurrency: "USD", Effective: day.Add(time.Hour), Knowledge: day.Add(72 * time.Hour)}, nil); err != nil {
 		t.Fatal(err)
 	}
-	book, executions, err := LedgerBookLoader(journal, closeScope(t, true), testLogger())(ctx, subject())
+	book, executions, _, err := LedgerBookLoader(journal, closeScope(t, true), testLogger())(ctx, subject())
 	if err != nil || book.CashBalance("USD").Cmp(big.NewRat(-103, 1)) != 0 || len(executions) != 1 {
 		t.Fatalf("restated D1 omitted a late-known fee: book=%v executions=%v err=%v", book, executions, err)
 	}
@@ -85,7 +85,7 @@ func TestPostgresCustodyReconcilesTheStatementUTCDate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer otherPool.Close()
-	otherBook, otherExecutions, err := LedgerBookLoader(ledger.NewPostgres(otherPool), closeScope(t, true), testLogger())(ctx, subject())
+	otherBook, otherExecutions, _, err := LedgerBookLoader(ledger.NewPostgres(otherPool), closeScope(t, true), testLogger())(ctx, subject())
 	if err != nil || len(otherBook.Positions) != 0 || len(otherBook.Cash) != 0 || len(otherExecutions) != 0 {
 		t.Fatalf("another tenant discovered dated holdings: book=%v executions=%v err=%v", otherBook, otherExecutions, err)
 	}

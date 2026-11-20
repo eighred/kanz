@@ -59,7 +59,7 @@ func TestCustodyBookUsesTheStatementBusinessClose(t *testing.T) {
 				{"negative offset names UTC day two", day.Add(27 * time.Hour).In(time.FixedZone("minus-four", -4*60*60)), 6, -60, 2},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					book, executions, err := load(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: tc.date})
+					book, executions, _, err := load(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: tc.date})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -94,7 +94,7 @@ func TestCustodyBookUsesTheStatementBusinessClose(t *testing.T) {
 			if err := st.Append(ctx, correction, nil); err != nil {
 				t.Fatal(err)
 			}
-			book, executions, err := load(ctx, subject())
+			book, executions, _, err := load(ctx, subject())
 			if err != nil || book.CashBalance("USD").Cmp(big.NewRat(-103, 1)) != 0 || len(executions) != 1 {
 				t.Fatalf("late-known correction missing from restated D1: book=%v executions=%v err=%v", book, executions, err)
 			}
@@ -121,7 +121,7 @@ func TestCustodyBusinessCloseIncludesTheUTCDateOnly(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			book, executions, err := LedgerBookLoader(st, closeScope(t, true), testLogger())(ctx, subject())
+			book, executions, _, err := LedgerBookLoader(st, closeScope(t, true), testLogger())(ctx, subject())
 			if err != nil || book.Positions["AAPL"].Qty.Cmp(big.NewRat(tc.want, 1)) != 0 || book.CashBalance("USD").Cmp(big.NewRat(-10*tc.want, 1)) != 0 {
 				t.Fatalf("boundary %s: book=%v executions=%v err=%v; want %d", tc.name, book, executions, err, tc.want)
 			}
@@ -130,7 +130,7 @@ func TestCustodyBusinessCloseIncludesTheUTCDateOnly(t *testing.T) {
 }
 
 func TestCustodyBookRefusesAMissingBusinessDate(t *testing.T) {
-	_, _, err := LedgerBookLoader(ledger.NewMemoryStore(), closeScope(t, true), testLogger())(context.Background(), Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
+	_, _, _, err := LedgerBookLoader(ledger.NewMemoryStore(), closeScope(t, true), testLogger())(context.Background(), Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
 	if err == nil || !strings.Contains(err.Error(), "business_date") {
 		t.Fatalf("missing business date=%v, want refusal", err)
 	}
@@ -145,7 +145,7 @@ func TestCustodyExplicitEffectiveCutoffIsRequiredAndInclusive(t *testing.T) {
 		}
 	}
 	dateFree := Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}
-	book, executions, err := LedgerBookLoader(st, closeScope(t, true), testLogger(), EffectiveCutoff{AsOf: t0})(ctx, dateFree)
+	book, executions, _, err := LedgerBookLoader(st, closeScope(t, true), testLogger(), EffectiveCutoff{AsOf: t0})(ctx, dateFree)
 	if err != nil || book.Positions["AAPL"].Qty.Cmp(big.NewRat(10, 1)) != 0 || book.CashBalance("USD").Cmp(big.NewRat(-100, 1)) != 0 || len(executions) != 1 {
 		t.Fatalf("explicit current cutoff failed: book=%v executions=%v err=%v", book, executions, err)
 	}
@@ -159,7 +159,7 @@ func TestCustodyExplicitEffectiveCutoffIsRequiredAndInclusive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Even a valid scheduled date cannot turn an invalid explicit option
 			// into a silent fallback to the business close or current clock.
-			_, _, err := LedgerBookLoader(st, closeScope(t, true), testLogger(), tc.options...)(ctx, subject())
+			_, _, _, err := LedgerBookLoader(st, closeScope(t, true), testLogger(), tc.options...)(ctx, subject())
 			if err == nil || !strings.Contains(err.Error(), "cutoff") {
 				t.Fatalf("invalid explicit cutoff=%v, want refusal", err)
 			}

@@ -170,8 +170,8 @@ func (p *Postgres) SaveRun(ctx context.Context, r Run) error {
 	}
 	const q = `
 INSERT INTO custody_runs
-    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
+    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10)
 ON CONFLICT (tenant_id, run_id) DO NOTHING`
 	tx, err := p.exactTransaction(ctx)
 	if err != nil {
@@ -180,7 +180,7 @@ ON CONFLICT (tenant_id, run_id) DO NOTHING`
 	defer func() { _ = tx.Rollback(ctx) }()
 	_, err = tx.Exec(ctx, q,
 		r.RunID, r.Subject.PortfolioID, r.Subject.CustodianID, BusinessDay(r.Subject.BusinessDate),
-		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason)
+		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason, r.Basis)
 	if err != nil {
 		return fmt.Errorf("custody: save run %s: %w", r.RunID, err)
 	}
@@ -190,7 +190,7 @@ ON CONFLICT (tenant_id, run_id) DO NOTHING`
 // LatestRun implements Store.
 func (p *Postgres) LatestRun(ctx context.Context, portfolioID, custodianID string) (Run, error) {
 	const q = `
-SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified
+SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis
 FROM custody_runs
 WHERE portfolio_id = $1 AND custodian_id = $2
 ORDER BY completed_at DESC
@@ -203,7 +203,7 @@ LIMIT 1`
 	)
 	err := p.pool.QueryRow(ctx, q, portfolioID, custodianID).Scan(
 		&r.RunID, &r.Subject.PortfolioID, &r.Subject.CustodianID, &businessDate,
-		&outcome, &r.StatementID, &tolerance, &completedAt, &r.FailureReason, &verified)
+		&outcome, &r.StatementID, &tolerance, &completedAt, &r.FailureReason, &verified, &r.Basis)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, ErrNoRun
 	}

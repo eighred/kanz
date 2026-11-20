@@ -115,6 +115,8 @@ func (e Execution) CustodyDate() time.Time {
 // they are reconciling, and two return paths is how that divergence gets
 // introduced by a change that looks local.
 type CustodyBasis struct {
+	// JournalPosition counts the full immutable portfolio prefix read before the effective-date filter.
+	JournalPosition int64
 	// Book is the fold of the entries in the basis.
 	Book *Book
 	// Executions are the entries in the basis that carry an external reference,
