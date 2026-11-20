@@ -180,6 +180,13 @@ def validate_report(report, source, runtime_sha256, native_expected):
         raise ValueError('malformed image inventory') from None
 
 
+def expected_native(directory):
+    native_expected = openssl_runtime.overlay(native_inventory.expected_archive(directory / 'julia.tar.gz'),
+                                              directory / 'openssl.tar.gz')
+    native_expected = curl_runtime.overlay(native_expected, directory / 'libcurl.tar.gz')
+    return native_mapping.overlay(native_expected, directory / 'p7zip.tar.gz')
+
+
 def main():
     output = Path(os.environ['JULIA_OCI_EVIDENCE'])
     output.mkdir(parents=True, exist_ok=False)
@@ -193,10 +200,7 @@ def main():
     if not runtime:
         raise ValueError('verified host Julia executable missing')
     runtime_sha256 = hashlib.sha256(Path(runtime).read_bytes()).hexdigest()
-    native_expected = openssl_runtime.overlay(
-        native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz'),
-        Path(os.environ['RUNNER_TEMP']) / 'openssl.tar.gz')
-    native_expected = curl_runtime.overlay(native_expected, Path(os.environ['RUNNER_TEMP']) / 'libcurl.tar.gz')
+    native_expected = expected_native(Path(os.environ['RUNNER_TEMP']))
     report = {'sourceSHA': source, 'localOnly': True, 'passed': False, 'cleanupPassed': False,
               'juliaAdvisoryCoverage': 'unqualified-release-blocker', 'archiveSHA256': ARCHIVE_SHA256, 'cases': []}
     names = []

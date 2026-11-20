@@ -124,15 +124,18 @@ native = Dict("files"=>native_files, "links"=>native_links, "jll"=>native_jll,
 println(stderr, "KANZ_OCI_STAGE=native-version")
 seven_path = "/opt/julia/libexec/julia/7z"
 @test realpath(seven_path) == seven_path && !islink(seven_path)
-@test native_files["libexec/julia/7z"]["sha256"] == "a15c6706c64672f07d4cc7358cc7eee3aa0d0f7cfe3fdfcf31deb808d3b0b8ee"
+@test native_files["libexec/julia/7z"]["sha256"] == "05800b241166de20a1c423dde760407ba3a024cd41e1af02ad4b58fd120277a9"
 seven_output = open(`$seven_path i`, "r") do io
     bytes = read(io, 65537)
     @test length(bytes) <= 65536
     String(bytes)
 end
-@test occursin(r"(?m)^7-Zip \(a\) 26\.03 \(x64\) : Copyright \(c\) 1999-2026 Igor Pavlov : 2026-09-03\r?$", seven_output)
+@test occursin(r"(?m)^7-Zip \(a\) 26\.06 \(x64\) : Copyright \(c\) 1999-2026 Igor Pavlov : 2026-11-06\r?$", seven_output)
+seven_licenses = Dict(name => bounded_hash("/opt/julia/share/licenses/kanz-p7zip-runtime/$name", 32768)
+                      for name in ("License.txt", "copying.txt"))
 seven = Dict("path"=>"libexec/julia/7z", "sha256"=>native_files["libexec/julia/7z"]["sha256"],
-    "version"=>"26.03", "versionCommand"=>"i")
+    "version"=>"26.06", "versionCommand"=>"i", "originalJLLVersion"=>native_jll["p7zip_jll"]["version"],
+    "licenses"=>seven_licenses, "archiveSHA256"=>"34237526097e68036fde82041b9e20f02c3026e53c3ff91666ba7c3c189b1fce")
 println(stderr, "KANZ_OCI_STAGE=openssl-version")
 openssl_files = Dict{String,Any}()
 for (name, expected) in (("libcrypto.so.3", "09ac6b8640f13b13badf5d2430a8cd326d27ad77668868ad6c9a36de87c4857d"),

@@ -60,7 +60,7 @@ var juliaOCIMarkers = map[string][]string{
 		"5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4  /tmp/julia.tar.gz",
 		"sha256sum --check --strict /tmp/locked.sha256",
 		"COPY julia/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh",
-		"bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz",
+		"bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz /tmp/p7zip.tar.gz",
 		"COPY schemas/proto/ /opt/schemas/proto/",
 		"/opt/julia/share/julia/base/JuliaSyntax/docs", "/opt/julia/share/julia/stdlib/v1.13/TOML/docs",
 		"/opt/julia/share/julia/stdlib/v1.13/TOML/benchmark", "/opt/julia/share/julia/stdlib/v1.13/Tar/test",
@@ -78,7 +78,8 @@ var juliaOCIMarkers = map[string][]string{
 		"native_mapping.validate_component(inventory, native_expected)",
 		"openssl_runtime.validate_component(inventory)", "native_expected = openssl_runtime.overlay(",
 		"curl_runtime.validate_component(inventory)", "native_expected = curl_runtime.overlay(native_expected,",
-		"native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz')",
+		"native_mapping.overlay(native_expected,",
+		"native_inventory.expected_archive(directory / 'julia.tar.gz')",
 		"if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:",
 		"if inventory['generated'] != generated:", "if (inventory['sources'] != sources or",
 		"oracle(scratch, 'verify')", "report['passed'] &= clean",
@@ -92,7 +93,7 @@ var juliaOCIMarkers = map[string][]string{
 		"@test !isempty(outside)",
 		`open(` + "`$seven_path i`" + `, "r")`, "read(io, 65537)", "length(bytes) <= 65536",
 		"realpath(seven_path) == seven_path && !islink(seven_path)",
-		"a15c6706c64672f07d4cc7358cc7eee3aa0d0f7cfe3fdfcf31deb808d3b0b8ee",
+		"05800b241166de20a1c423dde760407ba3a024cd41e1af02ad4b58fd120277a9",
 		`"native7zip"=>seven`,
 		`"nativeOpenSSL"=>openssl`, `Libdl.dlsym(crypto, :OpenSSL_version)`,
 		`OpenSSL 3.5.9 29 Sep 2026`, `@test ssl_context != C_NULL`,
@@ -128,12 +129,13 @@ var juliaOCIMarkers = map[string][]string{
 		"inventory.get('nativeOpenSSL') != expected", "originalJLLVersion': '3.5.8+0'",
 	},
 	"julia/qualification/install-native-runtime.sh": {
-		`[[ $(uname -s) == Linux && $# == 4 ]]`, `$(realpath -e -- "$root") == "$root"`,
+		`[[ $(uname -s) == Linux && $# == 5 ]]`, `$(realpath -e -- "$root") == "$root"`,
 		`check 5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4 "$julia_archive"`,
 		`check 8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063 "$openssl_archive"`,
 		`check 97a3b0d65c9e03a30bfdc89185ddf1ef0fe14b7e1a95d93d8ffc9cf57fb2a161 "$curl_archive"`,
+		`check 34237526097e68036fde82041b9e20f02c3026e53c3ff91666ba7c3c189b1fce "$seven_archive"`,
 		`check "${original[$i]}" "$path"`, `check "${replacement[$i]}" "$file"`,
-		`mv -T -- "${temporary[$i]}" "$root/lib/julia/${names[$i]}"`,
+		`mv -T -- "${temporary[$i]}" "$root/${targets[$i]}"`,
 	},
 	"julia/qualification/curl_runtime.py": {
 		"openssl_runtime.verified_artifact(path, ARCHIVE_SHA256,",
@@ -170,6 +172,7 @@ var juliaOCIMarkers = map[string][]string{
 		"validate_sources({key: value.encode('utf-8') for key, value in report['sourceBytes'].items()})",
 		"hashlib.sha256(raw).hexdigest() != item['sha256']", "vulnStatus') != 'Analyzed'",
 		"json.dumps(cve.get('configurations'), sort_keys=True) != json.dumps(CONFIG, sort_keys=True)",
+		"cab_affected('26.05', cab['raw'], checked)", "CVE-2026-125742",
 		"dt.timedelta(hours=24)", "versionEndExcluding': '26.03'",
 		"not affected('26.02', cve) or affected('26.03', cve)",
 		"finding['PkgID'] == UUID", "finding['InstalledVersion'] == '17.8.3+0'",
@@ -188,8 +191,7 @@ var juliaOCIMarkers = map[string][]string{
 		"native_mapping.qualify(run, qualification['inventory'],",
 		"openssl_advisory.qualify(run, qualification['inventory'],",
 		"openssl_advisory.validate_report(report.get('opensslAdvisory'), qualification['inventory'],",
-		"openssl_runtime.overlay(",
-		"curl_runtime.overlay(openssl_runtime.overlay(",
+		"proof.expected_native(Path(os.environ['RUNNER_TEMP']))",
 		"curl_advisory.qualify(run, qualification['inventory'],",
 		"curl_advisory.validate_report(report.get('curlAdvisory'), qualification['inventory'],",
 		"native_mapping.validate_report(report.get('nativeVersionMapping'), qualification['inventory'],", "jll_advisory.validate_report(report.get(\"jllAdvisory\"),",
@@ -199,7 +201,7 @@ var juliaOCIMarkers = map[string][]string{
 		"image_config_digest(image, scratch)",
 		"validate_database(metadata, dt.datetime.now(dt.timezone.utc))",
 		"digest(db / 'trivy.db') != db_hash", "validate_report(report, qualification, expected)",
-		"proof.native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz')",
+		"proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),",
 		"'--image-src', 'docker', image", "'--ignore-unfixed=false'",
 		"'stdlib-runtime-native-advisory-coverage-unqualified'",
 		"actual != expected", "'known vulnerable Julia control not detected'",
@@ -254,7 +256,7 @@ func checkJuliaOCI(files map[string]string) error {
 	nativeHost := 0
 	for _, step := range job.Steps {
 		if strings.Contains(step.Run, "bash julia/qualification/install-native-runtime.sh") {
-			if step.If != "" || !strings.Contains(step.Run, `bash julia/qualification/install-native-runtime.sh "$RUNNER_TEMP/julia-1.13.3" "$RUNNER_TEMP/julia.tar.gz" "$RUNNER_TEMP/openssl.tar.gz" "$RUNNER_TEMP/libcurl.tar.gz"`) {
+			if step.If != "" || !strings.Contains(step.Run, `bash julia/qualification/install-native-runtime.sh "$RUNNER_TEMP/julia-1.13.3" "$RUNNER_TEMP/julia.tar.gz" "$RUNNER_TEMP/openssl.tar.gz" "$RUNNER_TEMP/libcurl.tar.gz" "$RUNNER_TEMP/p7zip.tar.gz"`) {
 				return fmt.Errorf("host native repair conditional or substituted")
 			}
 			nativeHost++

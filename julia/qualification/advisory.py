@@ -224,10 +224,7 @@ def main():
         source = proof.required(['git', 'rev-parse', 'HEAD']).decode().strip()
         qualification = json.loads((directory / 'julia-oci.json').read_text())
         proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),
-            curl_runtime.overlay(openssl_runtime.overlay(
-                proof.native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz'),
-                Path(os.environ['RUNNER_TEMP']) / 'openssl.tar.gz'),
-                Path(os.environ['RUNNER_TEMP']) / 'libcurl.tar.gz'))
+            proof.expected_native(Path(os.environ['RUNNER_TEMP'])))
         image = qualification['imageID']
         info = json.loads(proof.required(['docker', 'image', 'inspect', image]))[0]
         if info['Id'] != image or info['Config']['Labels']['org.opencontainers.image.revision'] != source:

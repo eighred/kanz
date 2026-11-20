@@ -210,27 +210,21 @@ unassigned files retain their explicit ownership/coverage limitations. The
 is incomplete for artifacts. Standard release publication remains blocked on
 that unresolved coverage; no scanner suppression or native clearance is added.
 
-The first qualified native identity is the archive's `libexec/julia/7z`. Julia
-1.13.3 bundles 7-Zip **26.03** while its compatibility `p7zip_jll` metadata says
-17.8.3+0. The unchanged raw Trivy finding for CVE-2026-58052 is retained, not
-suppressed. Qualification requires the exact independently archive-bound binary
-hash, its successful `7z i` banner executed inside the same restricted OCI image,
-checksum-pinned [Julia build metadata](https://github.com/JuliaLang/julia/blob/67ac47b9cd855e02134d41d5428ac9f2a73f2694/deps/p7zip.version)
-and [upstream release history](https://github.com/ip7z/7zip/blob/0766b733fe3e06dd2a7f9a3cfbf2108ac73abd17/DOC/src-history.txt),
-and a newly retrieved, analyzed [NVD record](https://nvd.nist.gov/vuln/detail/CVE-2026-58052).
-The exact CPE/range must identify versions before 26.03 as affected; numerical
-controls must classify 26.02 as affected and 26.03 as fixed. These controls use
-version inputs, not execution of a vulnerable binary. Public source bytes and
-the bounded NVD response/checksum are retained for independent validation.
-Freshness is evaluated at the recorded scan-time qualification window; an old
-passing artifact is not permanent advisory clearance. HTTPS redirects cannot
-downgrade to HTTP.
-Changed ranges, additional CPE conditions, unknown findings, mismatched UUIDs,
-wrapper/native versions, hashes, source bytes or stale advisory snapshots refuse.
-No file or worker dependency is removed. This corrects one component identity;
-it does not clear other native/runtime files, platform reachability, or future
-advisories. Standard release publication remains blocked on residual UNKNOWN
-coverage under #1413.
+The runtime installer replaces Julia 1.13.3's bundled 7-Zip 26.03 with the
+publisher's 26.06 Linux executable before Julia package operations. The checked
+archive, original executable, replacement, and both redistribution notices
+bind the installed bytes to the selected artifact. The OCI check executes its
+information command and records the original `p7zip_jll` 17.8.3+0 metadata.
+The separate Julia build revision identifies the replacement package.
+[Julia 26.06 build pin](https://github.com/JuliaLang/julia/commit/3c3663cbe7b5193db8c7254536d61c68b8277a1b) · [Publisher artifact](https://github.com/JuliaBinaryWrappers/p7zip_jll.jl/releases/tag/p7zip-v17.8.6%2B0)
+
+The raw CVE-2026-58052 wrapper finding remains in the scanner report. Its
+bounded NVD response must identify the 26.03 fix and the 26.02 affected control.
+A separate published CNA record must classify 26.05 as affected by CVE-2026-125742
+and the installed 26.06 as outside that range. The qualifier verifies both
+upstream source hashes, the advisory identities and the observed executable.
+Other native findings and release qualification stay with #1536.
+[Publisher 26.06 history](https://github.com/ip7z/7zip/blob/d3296e39e1f1f92c7b41c0c3848e65640428d42d/DOC/src-history.txt) · [CVE Program record](https://www.cve.org/CVERecord?id=CVE-2026-125742)
 
 The OCI runtime explicitly replaces Julia 1.13.3's bundled OpenSSL 3.5.8
 `libcrypto.so.3` and `libssl.so.3` with the two regular library members from the

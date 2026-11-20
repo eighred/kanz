@@ -7,7 +7,8 @@ RUN curl --fail --location --retry 3 --output /tmp/julia.tar.gz https://julialan
 COPY julia/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh
 RUN curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/openssl.tar.gz https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/releases/download/OpenSSL-v3.5.9%2B0/OpenSSL.v3.5.9.x86_64-linux-gnu.tar.gz \
  && curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/libcurl.tar.gz https://github.com/JuliaBinaryWrappers/LibCURL_jll.jl/releases/download/LibCURL-v8.23.0%2B0/LibCURL.v8.23.0.x86_64-linux-gnu.tar.gz \
- && bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz
+ && curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/p7zip.tar.gz https://github.com/JuliaBinaryWrappers/p7zip_jll.jl/releases/download/p7zip-v17.8.6%2B0/p7zip.v17.8.6.x86_64-linux-gnu.tar.gz \
+ && bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz /tmp/p7zip.tar.gz
 ENV JULIA_DEPOT_PATH=/opt/julia-depot JULIA_LOAD_PATH=@:@stdlib JULIA_CPU_TARGET=generic JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 WORKDIR /opt/kanz-jl
 COPY julia/Project.toml julia/Manifest.toml ./

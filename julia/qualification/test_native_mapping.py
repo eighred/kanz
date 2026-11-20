@@ -9,8 +9,8 @@ from unittest.mock import patch
 import native_mapping as n
 
 NOW = dt.datetime(2026, 11, 6, 20, tzinfo=dt.timezone.utc)
-RAW_SOURCES = {'julia': 'P7ZIP_VER := 26.03\n',
-               'upstream': '26.03\nFixed CVE-2026-58052\n26.02\n'}
+RAW_SOURCES = {'julia': 'P7ZIP_VER := 26.06\n',
+               'upstream': '26.06\n26.03\nFixed CVE-2026-58052\n26.02\n'}
 SOURCES = {key: {**n.SOURCES[key], 'sha256': hashlib.sha256(raw.encode()).hexdigest()}
            for key, raw in RAW_SOURCES.items()}
 
@@ -22,17 +22,36 @@ def fixture(now=NOW):
                 'lastModified': (now-dt.timedelta(hours=1)).isoformat(),
                 'configurations': copy.deepcopy(n.CONFIG)}}]}
     raw = json.dumps(data)
+    cab = json.dumps({'dataType': 'CVE_RECORD', 'dataVersion': '5.2',
+        'cveMetadata': {'cveId': n.LZX_CVE, 'state': 'PUBLISHED', 'assignerOrgId': n.CNA_ID,
+                        'dateUpdated': (now-dt.timedelta(hours=1)).isoformat()},
+        'containers': {'cna': {'providerMetadata': {'orgId': n.CNA_ID}, 'affected': [
+            {'vendor': '7-Zip', 'product': '7-Zip', 'repo': 'https://github.com/ip7z/7zip',
+             'defaultStatus': 'unaffected', 'versions': [
+                 {'version': '0', 'lessThan': '26.06', 'versionType': 'custom', 'status': 'affected'}]}]}}})
     inventory = {'native7zip': copy.deepcopy(n.COMPONENT),
                  'nativeRuntime': {'files': {n.PATH: copy.deepcopy(n.FILE)}}}
     report = {'component': copy.deepcopy(n.COMPONENT), 'sources': SOURCES,
               'sourceBytes': RAW_SOURCES, 'checkedAt': now.isoformat(),
               'nvd': {'url': n.NVD_URL, 'raw': raw, 'sha256': hashlib.sha256(raw.encode()).hexdigest()},
+              'cabAdvisory': {'url': n.CNA_URL, 'raw': cab, 'sha256': hashlib.sha256(cab.encode()).hexdigest(),
+                              'controls': {'26.05': 'affected', '26.06': 'fixed'}},
               'controls': {'26.02': 'affected', '26.03': 'fixed'},
               'status': 'fixed-native-version-for-reviewed-advisory'}
     return report, inventory
 
 
 class NativeMappingTests(unittest.TestCase):
+    def test_cab_affected_control_and_changed_authority(self):
+        report, _ = fixture()
+        raw = report['cabAdvisory']['raw']
+        self.assertTrue(n.cab_affected('26.05', raw, NOW))
+        self.assertFalse(n.cab_affected('26.06', raw, NOW))
+        for before, after in [('26.06', '26.05'), (n.CNA_ID, 'other'), ('PUBLISHED', 'REJECTED'),
+                              ('"lessThan"', '"lessThanOrEqual"'), ('"affected"', '"unknown"')]:
+            with self.subTest(before=before), self.assertRaises((ValueError, KeyError)):
+                n.cab_affected('26.06', raw.replace(before, after), NOW)
+
     def test_complete_mapping_and_all_required_fields(self):
         report, inventory = fixture()
         with patch.object(n, 'SOURCES', SOURCES):
@@ -126,11 +145,12 @@ class NativeMappingTests(unittest.TestCase):
             calls.append(args)
             self.assertEqual(kwargs['limit'], n.LIMIT)
             if args[-1] == n.NVD_URL: return report['nvd']['raw'].encode()
+            if args[-1] == n.CNA_URL: return report['cabAdvisory']['raw'].encode()
             return next(RAW_SOURCES[key].encode() for key, value in SOURCES.items() if value['url'] == args[-1])
         with patch.object(n, 'SOURCES', SOURCES):
             result = n.qualify(run, inventory, lambda: NOW)
             self.assertEqual(result, report)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertTrue(all(args[0] == 'curl' and args[args.index('--proto-redir')+1] == '=https' for args in calls))
 
 
