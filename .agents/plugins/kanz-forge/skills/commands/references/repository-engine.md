@@ -78,8 +78,15 @@ For equivalent executable tasks the graph accepts one optional
 `customer_workflow` with `actor`, `outcome`, an `acceptance` reference and
 `steps` mapping task IDs to evidence that each is needed. It gives that
 workflow precedence within its existing priority, after shared gate recovery.
-Report the first missing step that can be completed, the last verified user
-operation and the evidence still required from an external party.
+The assessment returns the actor, outcome and acceptance reference alongside
+`validated_steps` and `remaining_steps`. A validated step has reached
+`DELIVERABLE` at its cited review revision. Each remaining step names its
+reviewed state and root blockers. Read `unmet_dependencies` for the declared
+edges and `blockers` for their reasons and hold citations, including when
+`next_actionable` is empty. Report customer UAT, deployment or payment only
+when the corresponding independent evidence is available. Report the first missing
+step that can be completed, the last verified user operation and the evidence
+still required from an external party.
 
 ## Stop repeating unchanged failures
 
