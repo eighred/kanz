@@ -124,6 +124,22 @@ func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	if err := operator.QueryRow(ctx, "SELECT synthetic_test_recovery_handoff()").Scan(&generation); err != nil || generation != 3 {
 		t.Fatalf("funded Rust-to-Go handback: epoch %d: %v", generation, err)
 	}
+	var state orderpb.OrderState
+	if err := proto.Unmarshal(terminal.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	at := cancel.Envelope.EventTime
+	replayed, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_ADAPTER_URL"), struct {
+		Version int `json:"version"`
+		syntheticvenue.Command
+	}{1, syntheticvenue.Command{
+		Op: "cancel_pending", Tenant: tenant, Portfolio: state.PortfolioId, OrderID: state.OrderId,
+		Principal: syntheticvenue.OMSIdentity, EventID: cancel.Envelope.EventId,
+		EffectiveSeconds: at.Seconds, EffectiveNanos: at.Nanos,
+	}})
+	if err != nil || replayed.OK || replayed.Code != "WRITER_FENCED" {
+		t.Fatalf("retired Rust funded adapter: %s %v", replayed.Code, err)
+	}
 	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, terminal, generation,
 		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancel.Envelope.EventId)
 }

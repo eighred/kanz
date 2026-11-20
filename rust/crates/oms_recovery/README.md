@@ -188,4 +188,14 @@ For the same order across three writer generations, run:
 python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --roundtrip
 ```
 
-Go generation one commits the signed admission before acknowledging the delivery. Rust generation two recovers the original bytes, publishes the retained acceptance and sends one order to the synthetic venue. The database refuses a Go handback while the dispatch result is unknown. After a typed venue query establishes a working order, Go generation three drains the routed fact and runs the ordinary startup sweep. The same order version and both outbox rows survive. The synthetic venue reports one placement, two queries and zero fills. Funded orders and other retained venue states have separate acceptance requirements.
+Go generation one commits the signed admission before acknowledging the delivery. Rust generation two recovers the original bytes, publishes the retained acceptance and sends one order to the synthetic venue. The database refuses a Go handback while the dispatch result is unknown. After a typed venue query establishes a working order, Go generation three drains the routed fact and runs the ordinary startup sweep. The same order version and both outbox rows survive. The synthetic venue reports one placement, two queries and zero fills.
+
+### Funded terminal order
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-roundtrip
+```
+
+This profile uses the same signed Go admission and retains the original funded reservation with the order. Rust applies one partial execution and confirms withdrawal of the remainder through XSIM. The database refuses handback while withdrawal is unresolved. The funded recovery role can activate Go after terminal confirmation when the signed withdrawal, settlement authorization, execution journal, queued facts and unbooked cash obligations agree.
+
+Go starts its ordinary outbox relay and startup sweep. The isolated successor fixture verifies the original signed withdrawal against the retained receipt before acknowledging its replay. Accounting replays the signed facts and books 126 USD once, leaving 874 USD and releasing all remaining holds. Both retired Rust logins are fenced. This profile covers the synthetic terminal state with one partial execution before accounting has booked it. Production withdrawal consumption and other funded recovery states require their own acceptance evidence.

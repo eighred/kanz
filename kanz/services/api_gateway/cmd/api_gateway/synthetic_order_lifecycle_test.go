@@ -89,8 +89,9 @@ func syntheticPool(t *testing.T, ctx context.Context, role, tenant string) *pgxp
 	t.Helper()
 	dsn := os.Getenv("SYNTHETIC_OMS_" + role + "_URL")
 	expected := map[string]string{"SWITCH": "kanz_synthetic_handoff_probe", "RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "ADAPTER": "kanz_synthetic_oms_adapter", "VENUE": "kanz_synthetic_venue", "FUNDING": "kanz_synthetic_oms_funding", "PROOF": "kanz_synthetic_oms_proof", "CASH": "kanz_synthetic_oms_cash"}[role]
-	if expected == "" || !(isolatedOrderDSN(dsn, expected) || (role == "RUNTIME" && isolatedOrderDSN(dsn, expected+"_g2"))) {
-		t.Fatal("refused a database outside the synthetic role and loopback scope")
+	successor := role == "RUNTIME" || role == "ADAPTER"
+	if expected == "" || !(isolatedOrderDSN(dsn, expected) || (successor && isolatedOrderDSN(dsn, expected+"_g2"))) {
+		t.Fatalf("refused %s database outside the synthetic role and loopback scope", role)
 	}
 	pool, err := pg.NewTenantPool(ctx, dsn, tenant)
 	if err != nil {

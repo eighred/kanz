@@ -113,9 +113,12 @@ func checkSyntheticOMS(root string) error {
 		"NEW.writer_epochISDISTINCTFROMpublic.synthetic_oms_assert_writer()",
 		"gateway_frame_sha256=sha256(NEW.go_gateway_frame)",
 		"cardinality(sources)ISDISTINCTFROM5ORsourcesISDISTINCTFROMNEW.evidence_ids",
-		"NOTenabledANDxmin<>pg_current_xact_id()::xidFORSHARE",
+		"ANDxmin<>pg_current_xact_id()::xidFORSHARE",
+		"armedISDISTINCTFROM(NEW.go_funding_amountsISNOTNULL)",
+		"a.currencies=ARRAY['BNB','USD']ANDa.amounts=NEW.go_funding_amounts",
+		"c.xmin=pg_current_xact_id()::xidANDm.xmin=pg_current_xact_id()::xid",
 		"b.xmin=pg_current_xact_id()::xid",
-		"DEFERRABLEINITIALLYDEFERREDFOREACHROW",
+		"CREATECONSTRAINTTRIGGERsynthetic_go_admissionAFTERINSERTONpublic.synthetic_oms_commandsDEFERRABLEINITIALLYDEFERREDFOREACHROWWHEN(NEW.go_gateway_frameISNOTNULL)EXECUTEFUNCTIONpublic.synthetic_oms_check_go_admission();",
 	} {
 		if !strings.Contains(goAdmission, marker) {
 			return fmt.Errorf("synthetic Go admission changed %s", marker)
@@ -226,7 +229,7 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"writer.sql", "expected IS DISTINCT FROM old_epoch", "FALSE"},
 		{"go_admission.sql", "gateway_frame_sha256=sha256(NEW.go_gateway_frame)", "TRUE"},
 		{"go_admission.sql", "b.xmin=pg_current_xact_id()::xid", "TRUE"},
-		{"go_admission.sql", "DEFERRABLE INITIALLY DEFERRED", "NOT DEFERRABLE"},
+		{"go_admission.sql", "    ON public.synthetic_oms_commands DEFERRABLE INITIALLY DEFERRED FOR EACH ROW", "    ON public.synthetic_oms_commands NOT DEFERRABLE FOR EACH ROW"},
 		{"go_writer.sql", "current_setting('transaction_isolation')<>'read committed'", "FALSE"},
 		{"go_writer.sql", "c.phase<>'working' OR o.status<>2", "FALSE"},
 		{"go_writer.sql", "a.observation=convert_to(c.order_id,'UTF8')", "TRUE"},
