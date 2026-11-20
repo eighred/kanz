@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -242,6 +243,15 @@ func result(err error) string {
 func (m *BusMetrics) observePublish(subject string, d time.Duration, err error) {
 	if m == nil {
 		return
+	}
+	// Routing embeds a tenant in the broker subject. The public metrics
+	// endpoint aggregates the same operation across tenants.
+	if routed, ok := strings.CutPrefix(subject, TenantRoutePrefix); ok {
+		_, logical, named := strings.Cut(routed, ".")
+		subject = "tenant.invalid"
+		if named && logical != "" {
+			subject = logical
+		}
 	}
 	m.publishTotal.WithLabelValues(subject, result(err)).Inc()
 	m.publishLatency.WithLabelValues(subject).Observe(d.Seconds())

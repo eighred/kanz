@@ -8,6 +8,8 @@ equivalent to repository CI. `make help` lists the available targets.
 
 ## Prerequisites
 
+For the Rust OMS and portfolio blotter on an isolated local database, use the [synthetic order runbook](synthetic-orders.md).
+
 - Go (see `go.mod` for the language/toolchain pin), Docker with a working Linux
   engine and Compose v2, Python 3, GNU make, a POSIX shell, and
   [buf 1.69.0](https://buf.build/docs/installation). `make generate` refuses a

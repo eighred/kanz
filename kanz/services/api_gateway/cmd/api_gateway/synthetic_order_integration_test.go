@@ -11,11 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/pkg/observability"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
+	"strings"
 
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/internal/platform/halt"
@@ -36,9 +38,20 @@ func TestSyntheticOrderAuthenticatedIngress(t *testing.T) {
 	signedSyntheticOrder(t)
 }
 
+type syntheticSession struct {
+	frame       *envelopepb.EventFrame
+	broker      string
+	js          jetstream.JetStream
+	cancelOrder func() *envelopepb.EventFrame
+}
+
 func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
+	return exerciseSyntheticSession(t, nil)
+}
+
+func exerciseSyntheticSession(t *testing.T, exercise func(context.Context, syntheticSession)) *envelopepb.EventFrame {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	broker, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir(), NoSigs: true})
 	if err != nil {
@@ -61,7 +74,7 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 	}
 	const tenant, portfolio, orderID = "synthetic-tenant", "synthetic-portfolio", "0f36dca681444918a676761d47b63844"
 	orderSubject := bus.TenantRoutedSubject(tenant, "order.order.submit")
-	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "SYNTHETIC_ORDERS", Subjects: []string{orderSubject}, Storage: jetstream.FileStorage})
+	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "SYNTHETIC_ORDERS", Subjects: []string{orderSubject, bus.TenantRoutedSubject(tenant, "order.order.cancel")}, Storage: jetstream.FileStorage})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +86,8 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 	cfg := config.Config{Source: "api-gateway", NATSURL: broker.ClientURL(), RequiredRole: baselineRole, TradeRole: traderRole}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gate := halt.NewGate(time.Now)
-	reg := prometheus.NewRegistry()
+	obs := testObservability(t)
+	reg := obs.Registry
 	producer, consumer, closeBus, err := buildBus(ctx, cfg, gate, logger, bus.NewBusMetrics(reg))
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +108,7 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 	if err := revocations.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	router, err := buildRouter(cfg, gateway.New(nil, nil, nil, "", logger), orders.New(producer, "", gate), proxy.New(nil, proxyRoles(cfg)), nil, testObservability(t), &atomic.Bool{}, logger, recorder, authn, nil)
+	router, err := buildRouter(cfg, gateway.New(nil, nil, nil, "", logger), orders.New(producer, "", gate), proxy.New(nil, proxyRoles(cfg)), nil, obs, &atomic.Bool{}, logger, recorder, authn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +124,9 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 	}
 	trader := token("synthetic-trader", baselineRole, traderRole)
 	body := []byte(`{"order_id":"` + orderID + `","portfolio_id":"` + portfolio + `","instrument_id":"SYNTH-USD","side":"SIDE_BUY","quantity":{"coefficient":"25","exponent":-1},"limit_price":{"coefficient":"9101","exponent":-2},"order_type":"ORDER_TYPE_LIMIT","time_in_force":"TIME_IN_FORCE_GTC","venue":"XSIM"}`)
-	post := func(jwt, key string, want int) {
+	post := func(path, jwt, key string, payload []byte, want int) {
 		t.Helper()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.URL+"/v1/orders", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.URL+path, bytes.NewReader(payload))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,9 +145,9 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 			t.Fatalf("submit: got HTTP %d (%s), want %d: %v", resp.StatusCode, reply, want, err)
 		}
 	}
-	post("", "no-session", http.StatusUnauthorized)
-	post(token("synthetic-viewer", baselineRole), "no-trade", http.StatusForbidden)
-	post(trader, "before-resume", http.StatusLocked)
+	post("/v1/orders", "", "no-session", body, http.StatusUnauthorized)
+	post("/v1/orders", token("synthetic-viewer", baselineRole), "no-trade", body, http.StatusForbidden)
+	post("/v1/orders", trader, "before-resume", body, http.StatusLocked)
 	info, err := stream.Info(ctx)
 	if err != nil || info.State.Msgs != 0 {
 		t.Fatal("a refused request reached the order stream", err)
@@ -161,11 +175,15 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 		}
 	}
 	const key = "synthetic-first-order"
-	post(trader, key, http.StatusAccepted)
-	post(trader, key, http.StatusAccepted)
+	post("/v1/orders", trader, key, body, http.StatusAccepted)
+	post("/v1/orders", trader, key, body, http.StatusAccepted)
 	info, err = stream.Info(ctx)
 	if err != nil || info.State.Msgs != 1 {
 		t.Fatal("expected exactly one durable order command", err)
+	}
+	if exercise != nil {
+		conflict := bytes.Replace(body, []byte(`"9101"`), []byte(`"9102"`), 1)
+		post("/v1/orders", trader, key, conflict, http.StatusConflict)
 	}
 	raw, err := stream.GetMsg(ctx, info.State.LastSeq)
 	if err != nil {
@@ -180,12 +198,41 @@ func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
 	if err = proto.Unmarshal(frame.GetPayload(), &command); err != nil {
 		t.Fatal(err)
 	}
+	tid := trace.SpanContextFromContext(observability.ContextWithTraceparent(ctx, env.GetTraceContext())).TraceID()
+	if !tid.IsValid() {
+		t.Fatal("order ingress produced no trace ID")
+	}
+	metrics, err := api.Client().Get(api.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metrics.Body.Close()
+	metricWire, err := io.ReadAll(io.LimitReader(metrics.Body, 1<<20))
+	if err != nil || metrics.StatusCode != http.StatusOK || !strings.Contains(string(metricWire), `kanz_bus_publish_total{result="ok",subject="order.order.submit"} 1`) || strings.Contains(string(metricWire), orderSubject) {
+		t.Fatalf("gateway order publish metric must aggregate exactly one command across tenants (HTTP %d)", metrics.StatusCode)
+	}
 	scope := command.GetMetadata()
 	if env.GetTenantId() != tenant || env.GetIdempotencyKey() != key || env.GetPartitionKey() != orderID || command.GetOrderId() != orderID || scope.GetIssuer() != "user:synthetic-trader" || scope.GetTargetId() != orderID || len(scope.GetPrincipalPortfolios()) != 1 || scope.GetPrincipalPortfolios()[0] != portfolio || command.GetPortfolioId() != portfolio {
 		t.Fatal("durable command changed the authenticated order identity")
 	}
 	if command.GetLimitPrice().GetCoefficient() != 9101 || command.GetLimitPrice().GetExponent() != -2 || command.GetQuantity().GetCoefficient() != 25 || command.GetQuantity().GetExponent() != -1 {
 		t.Fatal("durable command changed exact price or quantity")
+	}
+	if exercise != nil {
+		exercise(ctx, syntheticSession{frame: &frame, broker: broker.ClientURL(), js: js, cancelOrder: func() *envelopepb.EventFrame {
+			t.Helper()
+			post("/v1/orders/"+orderID+"/cancel", trader, "synthetic-cancel", nil, http.StatusAccepted)
+			msg, err := stream.GetLastMsgForSubject(ctx, bus.TenantRoutedSubject(tenant, "order.order.cancel"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cancelFrame envelopepb.EventFrame
+			var cancelCmd orderpb.CancelOrder
+			if proto.Unmarshal(msg.Data, &cancelFrame) != nil || proto.Unmarshal(cancelFrame.Payload, &cancelCmd) != nil || cancelFrame.GetEnvelope().GetEventClass() != envelopepb.EventClass_EVENT_CLASS_COMMAND || cancelFrame.GetEnvelope().GetEventType() != "order.order.cancel" || cancelFrame.GetEnvelope().GetSource() != "api-gateway" || cancelFrame.GetEnvelope().GetTenantId() != tenant || cancelCmd.GetOrderId() != orderID || cancelCmd.GetMetadata().GetIssuer() != scope.GetIssuer() || !auth.PortfolioEntitled(cancelCmd.GetMetadata().GetPrincipalPortfolios(), portfolio) {
+				t.Fatal("cancellation did not carry the authenticated order authority")
+			}
+			return &cancelFrame
+		}})
 	}
 	return &frame
 }

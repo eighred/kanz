@@ -533,6 +533,7 @@ func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *s
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:              cfg.Source,
 		ProducerVersion:     version.String(),
+		Metrics:             busMetrics,
 		VerifyCommandIssuer: auth.VerifyCommandIssuer,
 	})
 	if err != nil {

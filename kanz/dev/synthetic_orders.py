@@ -1,6 +1,6 @@
 """Run the OMS checks against disposable Linux processes with no network egress."""
 import argparse
-import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -38,7 +38,7 @@ def sql(container, statement, database="postgres"):
     # Unix socket. It has no network password. Never echo provisioning SQL.
     subprocess.run(["docker", "exec", "-i", "--user", "postgres", container, "psql",
                     "-Xq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", database],
-                   input=statement, text=True, check=True, stdout=subprocess.DEVNULL)
+                   input=statement.encode("utf-8"), check=True, stdout=subprocess.DEVNULL)
 
 
 def build(stage, packages):
@@ -58,13 +58,64 @@ def require_tests(log, names):
     return len(passed)
 
 
-def run(stage):
-    build(stage, OWNERS)
+ROLES = {
+    "CONTROL": "kanz_synthetic_oms_control",
+    "RUNTIME": "kanz_synthetic_oms_runtime",
+    "ADAPTER": "kanz_synthetic_oms_adapter",
+    "VENUE": "kanz_synthetic_venue",
+    "READ": "kanz_synthetic_oms_read",
+    "RELAY": "kanz_synthetic_oms_relay",
+}
+
+
+def provision_native(container, fixture_env):
+    for label, role in ROLES.items():
+        password = secrets.token_hex(24)
+        sql(container, f"CREATE ROLE {role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{password}';")
+        fixture_env[f"SYNTHETIC_OMS_{label}_URL"] = f"postgres://{role}:{password}@127.0.0.1:5432/{DB}?sslmode=disable"
+    migrations = sorted((ROOT / "kanz/services/oms/migrations").glob("*.sql"))
+    if not migrations:
+        raise RuntimeError("no canonical OMS migrations")
+    for migration in [*migrations, ROOT / "rust/services/synthetic_oms/schema.sql",
+                      ROOT / "kanz/services/oms/tools/syntheticvenue/schema.sql"]:
+        sql(container, migration.read_text(encoding="utf-8"), DB)
+    sql(container, "GRANT SELECT ON orders TO kanz_synthetic_oms_read; "
+                   "GRANT SELECT, UPDATE(published_at,attempts,last_error) ON outbox TO kanz_synthetic_oms_relay;", DB)
+
+
+    # Exercise the ambiguous-COMMIT API. The first admitted order fails only
+    # after the canonical order and its outbox entry have both been written.
+    # A sequence is deliberately nontransactional so a verified retry succeeds.
+    sql(container, """
+        CREATE SEQUENCE synthetic_commit_probe;
+        GRANT USAGE ON SEQUENCE synthetic_commit_probe TO kanz_synthetic_oms_runtime;
+        CREATE FUNCTION synthetic_reject_first_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          IF nextval('public.synthetic_commit_probe') = 1 THEN
+            RAISE EXCEPTION 'synthetic deferred commit failure';
+          END IF;
+          RETURN NULL;
+        END $$;
+        CREATE CONSTRAINT TRIGGER synthetic_deferred_failure AFTER INSERT ON orders
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          EXECUTE FUNCTION synthetic_reject_first_commit();
+    """, DB)
+
+
+def run(stage, native):
+    packages = {path: list(names) for path, names in OWNERS.items()}
+    if native:
+        packages["services/api_gateway/cmd/api_gateway"].append("TestSyntheticOrderCommandLifecycle")
+        shutil.copyfile(native, stage / "native")
+        (stage / "native").chmod(0o755)
+        with native.open("rb") as binary:
+            print("Rust owner SHA-256", hashlib.file_digest(binary, "sha256").hexdigest(), flush=True)
+    build(stage, packages)
     # Local peer auth is for migration setup only. All other local users and
     # all remote administrators are refused. Only the test user gets a SCRAM DSN.
     hba = stage / "pg_hba.conf"
     hba.write_text("local all postgres peer\nlocal all all reject\n"
-                   f"host {DB} kanz_synthetic_test 127.0.0.1/32 scram-sha-256\n"
+                   f"host {DB} {','.join(['kanz_synthetic_test', *ROLES.values()])} 127.0.0.1/32 scram-sha-256\n"
                    "host all all 0.0.0.0/0 reject\nhost all all ::/0 reject\n", encoding="ascii")
     with_env = dict(os.environ, POSTGRES_PASSWORD=secrets.token_hex(32))
     container = output("docker", "run", "-d", "--rm", "--network", "none",
@@ -90,20 +141,29 @@ def run(stage):
             raise RuntimeError("test role bypasses tenant RLS")
         print("PostgreSQL", posture, flush=True)
         dsn = f"postgres://kanz_synthetic_test:{password}@127.0.0.1:5432/{DB}?sslmode=disable"
-        for package, names in OWNERS.items():
+        fixture_env = {"TEST_POSTGRES_URL": dsn}
+        if native:
+            provision_native(container, fixture_env)
+            fixture_env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
+        for package, names in packages.items():
             base = package.rsplit("/", 1)[-1]
+            selected_env = fixture_env if base == "api_gateway" else {"TEST_POSTGRES_URL": dsn}
             # Only the temporary test binaries, working directories and
             # migrations are mounted. Nothing from the user's home is visible.
             cmd = ["docker", "run", "--rm", "--platform", "linux/amd64", "--read-only",
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "65532:65532",
                    "--network", "container:" + container, "--tmpfs", "/tmp:exec,mode=1777",
                    "-v", f"{stage}:/fixture:ro", "-w", "/fixture/" + package,
-                   "-e", "TEST_POSTGRES_URL", "--entrypoint", "/fixture/" + base, PG,
+                   *[arg for name in selected_env for arg in ("-e", name)],
+                   "--entrypoint", "/fixture/" + base, RUNTIME if native else PG,
                    "-test.v", "-test.count=1", "-test.parallel=1", "-test.timeout=2m",
                    "-test.run", "^(" + "|".join(names) + ")$"]
-            proc = subprocess.run(cmd, env=dict(os.environ, TEST_POSTGRES_URL=dsn),
+            proc = subprocess.run(cmd, env=dict(os.environ, **selected_env),
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=150)
             log = proc.stdout.replace(password, "[redacted]")
+            for value in fixture_env.values():
+                if value.startswith("postgres://"):
+                    log = log.replace(value, "[fixture connection]")
             if proc.returncode:
                 raise RuntimeError(log)
             count = require_tests(log, names)
@@ -114,6 +174,9 @@ def run(stage):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--native", type=Path, help="run the complete slice with this checkout's Linux amd64 kanz-synthetic-oms")
+    mode.add_argument("--owners-only", action="store_true", help="run existing component checks without native integration")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="kanz-synthetic-orders-") as directory:
-        run(Path(directory))
+        run(Path(directory), args.native)
