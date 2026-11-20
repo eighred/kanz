@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Memory is the in-process Queue.
@@ -61,6 +63,7 @@ type Memory struct {
 
 type memRow struct {
 	id       int64
+	eventID  string
 	attempts int
 	rec      Record
 	enqueued time.Time
@@ -86,16 +89,22 @@ var _ Queue = (*Memory)(nil)
 func (m *Memory) Append(records ...Record) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, r := range records {
+	eventIDs := make([]uuid.UUID, len(records))
+	for i, r := range records {
 		if r.TenantID == "" {
 			return errors.New("outbox: record with no tenant")
 		}
+		id, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		eventIDs[i] = id
 	}
 	// Callers commit their state only after Append succeeds. Refuse the whole
 	// batch before retaining a prefix, advancing its counter or reading the clock.
-	for _, r := range records {
+	for i, r := range records {
 		m.next++
-		m.rows = append(m.rows, &memRow{id: m.next, rec: r, enqueued: m.nowFunc().UTC()})
+		m.rows = append(m.rows, &memRow{id: m.next, eventID: eventIDs[i].String(), rec: r, enqueued: m.nowFunc().UTC()})
 	}
 	return nil
 }
@@ -165,7 +174,7 @@ func (m *Memory) Pending(_ context.Context, key string, limit int) ([]Pending, e
 		if r.rec.PartitionKey != key {
 			continue
 		}
-		out = append(out, Pending{ID: r.id, Attempts: r.attempts, Record: r.rec, LastError: r.lastErr})
+		out = append(out, Pending{ID: r.id, eventID: r.eventID, Attempts: r.attempts, Record: r.rec, LastError: r.lastErr})
 		if len(out) == limit {
 			break
 		}

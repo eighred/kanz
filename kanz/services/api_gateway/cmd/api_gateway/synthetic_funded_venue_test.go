@@ -442,7 +442,7 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		if withdrawalMode != noGoWithdrawal {
 			authorizeWithdrawal = func(generation int) *fundedWithdrawalApproval {
 				approval := control.prepareGoWithdrawal(t, ctx, s, partial, generation)
-				approval.restart = withdrawalMode == goWithdrawalRestart
+				approval.mode = withdrawalMode
 				withdrawal.Store(approval)
 				return approval
 			}

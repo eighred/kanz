@@ -288,10 +288,12 @@ read-after-lock ordering, stop-at-first-failure, background progress on other
 keys and the full-batch Flush stall. Broker acknowledgement precedes
 MarkPublished. Acknowledgement followed by an unconfirmed database result leaves
 at-least-once redelivery possible; it is never proof that publication rolled back.
-Go Record.Event does not persist EventID, so each retry receives a fresh UUIDv7
-and idempotency key while durable payload, timestamp and attribution survive.
+The relay reuses the UUIDv7 stored in each outbox row for its event ID and
+JetStream message ID. Retries retain their economic time and lineage and receive
+a fresh publication time and producer sequence. Broker deduplication lasts for
+the stream's configured duplicate window.
 
-The normal queue-page read remains unchanged. If its aggregate byte budget refuses
+The normal queue-page read bounds dynamic field bytes. If its aggregate byte budget refuses
 the page, the relay reads one bounded record at a time under the same key lock,
 up to the configured batch count. This adds SQL round trips only on that fallback.
 A corrupt or oversized later record can follow an acknowledged prefix; the suffix

@@ -180,12 +180,14 @@ func TestPostgresOutboxLegacyOwnershipBlocksStateCommitAndDrain(t *testing.T) {
 	if err := pool.QueryRow(ctx, legacyInsert, testTenant, record.Payload, time.Now(), int32(record.EventClass)).Scan(&publishedID); err != nil {
 		t.Fatal(err)
 	}
-	ddl, err := os.ReadFile(filepath.Join(omsMigrations, ownershipMigration))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, string(ddl)); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{ownershipMigration, "0030_outbox_event_id.sql"} {
+		ddl, err := os.ReadFile(filepath.Join(omsMigrations, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(ddl)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	q := NewPostgres(pool, ServiceOMS)
 	if _, err := q.PendingKeys(ctx, 10); !errors.Is(err, ErrUnownedPending) {
@@ -232,6 +234,14 @@ func TestPostgresOutboxLegacyOwnershipBlocksStateCommitAndDrain(t *testing.T) {
 	rows, err := q.Pending(ctx, "legacy", 10)
 	if err != nil || len(rows) != 1 || rows[0].ID != legacyID {
 		t.Fatalf("reconciled pending=%v err=%v", rows, err)
+	}
+	var migratedID string
+	if err := pool.QueryRow(ctx, `SELECT event_id::text FROM outbox WHERE id=$1`, legacyID).Scan(&migratedID); err != nil {
+		t.Fatal(err)
+	}
+	event, err := rows[0].Event()
+	if err != nil || migratedID == "" || event.EventID != migratedID {
+		t.Fatalf("reconciled row did not retain its migration-assigned event ID: %v", err)
 	}
 	enqueueOwned(t, pool, ServiceOMS, record)
 	var historicalOwner *string

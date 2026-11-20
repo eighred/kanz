@@ -163,7 +163,7 @@ func (p *Postgres) requireOwnedPending(ctx context.Context) error {
 // Pending below, in the same order; test/arch/outbox_projection_test.go proves
 // the counts match, because a mismatch is a pgx error that only appears on a
 // box with TEST_POSTGRES_URL set — which a developer's is not.
-const pendingColumns = `id, attempts, envelope_tenant_id, partition_key, subject, event_type,
+const pendingColumns = `id, event_id::text, attempts, envelope_tenant_id, partition_key, subject, event_type,
 	event_class, schema_version, domain, payload_schema_ref, event_time,
 	correlation_id, causation_id, trace_context, payload, last_error`
 
@@ -322,7 +322,7 @@ func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pendin
 			schemaVer int32
 			eventTime time.Time
 		)
-		if err := rows.Scan(&p.ID, &p.Attempts, &p.Record.TenantID, &p.Record.PartitionKey,
+		if err := rows.Scan(&p.ID, &p.eventID, &p.Attempts, &p.Record.TenantID, &p.Record.PartitionKey,
 			&p.Record.Subject, &p.Record.EventType, &class, &schemaVer, &p.Record.Domain,
 			&p.Record.PayloadSchemaRef, &eventTime, &p.Record.CorrelationID,
 			&p.Record.CausationID, &p.Record.TraceContext, &p.Record.Payload,
@@ -338,12 +338,9 @@ func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pendin
 }
 
 // MarkPublished stamps published_at. A row whose publish succeeded and whose
-// mark then failed is retried on the next pass and published twice — the
-// at-least-once direction, and the one every consumer of these FACTs already
-// tolerates (tv-sync appends an identical revision; the position book claims
-// each fill_id before folding). The other direction — marking before publishing
-// — would lose the FACT outright, which is the failure this whole package
-// exists to remove.
+// mark then failed is retried on the next pass with the same event identity.
+// Brokers can suppress this retry within their deduplication window. Consumers
+// remain idempotent for retries outside that window.
 func (p *Postgres) MarkPublished(ctx context.Context, id int64) error {
 	tag, err := p.pool.Exec(ctx,
 		`UPDATE outbox SET published_at = COALESCE(published_at, now()), last_error = ''

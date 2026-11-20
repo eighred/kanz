@@ -258,7 +258,9 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 	if err := Validate(env); err != nil {
 		return fmt.Errorf("envelope validation: %w", err)
 	}
-	payloadBytes, err := proto.Marshal(e.Payload)
+	// The same durable event can be reconstructed on another attempt. Keep
+	// map ordering stable for persisted publication identities.
+	payloadBytes, err := (proto.MarshalOptions{Deterministic: e.EventID != ""}).Marshal(e.Payload)
 	if err != nil {
 		return fmt.Errorf("payload marshal: %w", err)
 	}

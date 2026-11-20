@@ -60,8 +60,9 @@ import (
 // held until the broker has it.
 //
 // IT STORES THE PRODUCER-FACING EVENT, NOT A STAMPED ENVELOPE. bus.Producer
-// stamps event_id, publish_time, producer_sequence and source at publish time,
-// and every one of those would be a lie if frozen at enqueue time: publish_time
+// stamps publish_time, producer_sequence and source at publish time.
+// The queue allocates the event_id with the row so a relay can retry the same
+// publication. The per-attempt fields still belong to the producer: publish_time
 // would predate the publish, and producer_sequence is a per-process counter that
 // means nothing once a different goroutine — or a different pod — does the
 // sending. So the row carries exactly the fields the CALLER knew, and the relay
@@ -111,6 +112,7 @@ type Pending struct {
 	ID       int64
 	Attempts int
 	Record   Record
+	eventID  string
 	// RecordError is an owner's failure to reconstruct this durable row.
 	// It stalls this key at the row, like an undecodable payload.
 	RecordError error
@@ -141,7 +143,11 @@ func (p Pending) Event() (bus.Event, error) {
 	if p.RecordError != nil {
 		return bus.Event{}, p.RecordError
 	}
-	return p.Record.Event()
+	event, err := p.Record.Event()
+	if err == nil {
+		event.EventID = p.eventID
+	}
+	return event, err
 }
 
 // causeLimit bounds a recorded cause. It is a COLUMN, not a log line: a venue
@@ -226,8 +232,7 @@ func From(ctx context.Context, e bus.Event) (Record, error) {
 
 	// Same precedence as pkg/bus/producer.go stamp(): explicit field, then ctx.
 	// The root default (correlation = the event's own id) is NOT applied here —
-	// it needs the event_id, which only the producer mints, so it is left to the
-	// producer exactly as it is on the synchronous path.
+	// it needs the queue's retained event_id, so it is left to the producer.
 	correlation := e.CorrelationID
 	if correlation == "" {
 		correlation = bus.CorrelationIDFromContext(ctx)

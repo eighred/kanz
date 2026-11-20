@@ -68,9 +68,11 @@ impl Framer {
             sequence_bytes: 0,
         })
     }
-    pub fn frame(&mut self, r: &Record) -> Result<Frame, PublishFailure> {
+    pub fn frame(&mut self, r: &Record, event_id: uuid::Uuid) -> Result<Frame, PublishFailure> {
         let bad = PublishFailure::InvalidRecord;
-        if r.event_class != EventClass::Fact as i32
+        if event_id.get_version_num() != 7
+            || event_id.get_variant() != uuid::Variant::RFC4122
+            || r.event_class != EventClass::Fact as i32
             || r.schema_version <= 0
             || r.event_type.is_empty()
             || r.domain.is_empty()
@@ -107,7 +109,7 @@ impl Framer {
             return Err(bad);
         }
         let now = timestamp(SystemTime::now()).ok_or(bad)?;
-        let id = uuid::Uuid::now_v7().to_string();
+        let id = event_id.to_string();
         let seq = if r.partition_key.is_empty() {
             0
         } else {
@@ -460,7 +462,7 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
                     stalled: Some(Stall::Stopped),
                 });
             }
-            let published = match self.framer.frame(&p.record) {
+            let published = match self.framer.frame(&p.record, p.event_id) {
                 Ok(frame) => {
                     work_remaining(expires, sent)?;
                     tokio::time::timeout(Duration::from_secs(10), self.publisher.publish(&frame))
@@ -575,12 +577,14 @@ mod tests {
         }
     }
     #[test]
-    fn retry_keeps_payload_lineage_but_has_new_go_style_identity() {
+    fn retry_keeps_outbox_identity_and_advances_local_sequence() {
         let mut f = Framer::new("oms/test".into(), "version".into()).unwrap();
         let r = record();
-        let a = f.frame(&r).unwrap();
-        let b = f.frame(&r).unwrap();
-        assert_ne!(a.event_id, b.event_id);
+        let id = uuid::Uuid::now_v7();
+        let a = f.frame(&r, id).unwrap();
+        let b = f.frame(&r, id).unwrap();
+        assert_eq!(a.event_id, id.to_string());
+        assert_eq!(b.event_id, a.event_id);
         let a = EventFrame::decode(a.body.as_slice()).unwrap();
         let b = EventFrame::decode(b.body.as_slice()).unwrap();
         assert_eq!(a.payload, r.payload);
@@ -590,10 +594,27 @@ mod tests {
         assert_eq!(a.producer_sequence, 1);
         assert_eq!(b.producer_sequence, 2);
         assert_eq!(a.idempotency_key, a.event_id);
+        assert_eq!(b.idempotency_key, a.idempotency_key);
+        assert_eq!(a.event_time, b.event_time);
         assert_eq!(a.tenant_id, r.tenant);
         assert_eq!(a.correlation_id, r.correlation_id);
         assert_eq!(a.causation_id, r.causation_id);
         assert_eq!(a.trace_context, r.trace_context);
+    }
+    #[test]
+    fn rejects_persisted_ids_outside_the_uuidv7_contract() {
+        let mut f = Framer::new("oms/test".into(), "version".into()).unwrap();
+        let record = record();
+        for invalid in [
+            "018fd20a-1abc-4000-8000-000000000001",
+            "018fd20a-1abc-7000-c000-000000000001",
+        ] {
+            let id = uuid::Uuid::parse_str(invalid).unwrap();
+            assert!(matches!(
+                f.frame(&record, id),
+                Err(PublishFailure::InvalidRecord)
+            ));
+        }
     }
     #[test]
     fn command_outcome_descriptor_is_in_the_live_fact_domain() {
@@ -601,7 +622,7 @@ mod tests {
         let mut r = record();
         r.payload_schema_ref = "command.v1.CommandOutcome:1".into();
         r.payload = vec![8, 1, 18, 1, b'a'];
-        let frame = f.frame(&r).unwrap();
+        let frame = f.frame(&r, uuid::Uuid::now_v7()).unwrap();
         assert_eq!(
             EventFrame::decode(frame.body.as_slice()).unwrap().payload,
             r.payload
@@ -612,19 +633,19 @@ mod tests {
         let mut f = Framer::new("oms/test".into(), "version".into()).unwrap();
         let mut r = record();
         r.payload_schema_ref = "missing.Type:1".into();
-        assert!(f.frame(&r).is_err());
+        assert!(f.frame(&r, uuid::Uuid::now_v7()).is_err());
         let mut r = record();
         r.tenant.clear();
-        assert!(f.frame(&r).is_err());
+        assert!(f.frame(&r, uuid::Uuid::now_v7()).is_err());
         let mut r = record();
         r.event_class = 0;
-        assert!(f.frame(&r).is_err());
+        assert!(f.frame(&r, uuid::Uuid::now_v7()).is_err());
         let mut r = record();
         r.event_time = UNIX_EPOCH - Duration::from_secs(62135596800);
-        assert!(f.frame(&r).is_err());
+        assert!(f.frame(&r, uuid::Uuid::now_v7()).is_err());
         let mut r = record();
         r.payload = vec![0; MAX_BYTES + 1];
-        assert!(f.frame(&r).is_err());
+        assert!(f.frame(&r, uuid::Uuid::now_v7()).is_err());
     }
     #[test]
     fn sequence_key_storage_is_bounded() {
@@ -632,7 +653,7 @@ mod tests {
         let mut r = record();
         for n in 0..20 {
             r.partition_key = format!("{}-{n}", "x".repeat(MAX_BYTES / 2));
-            f.frame(&r).unwrap();
+            f.frame(&r, uuid::Uuid::now_v7()).unwrap();
         }
         let bytes: usize = f.sequence.keys().map(|(a, b)| a.len() + b.len()).sum();
         assert!(bytes <= 8 * MAX_BYTES);

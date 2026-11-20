@@ -65,7 +65,7 @@ func verifyRelayFrame(t *testing.T, record outbox.Record, raw []byte, sequence u
 	}
 	id, err := uuid.Parse(e.EventId)
 	if err != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 {
-		t.Fatal("per-attempt identity is not UUIDv7")
+		t.Fatal("frame identity is not UUIDv7")
 	}
 	for _, stamp := range []time.Time{e.GetIngestionTime().AsTime(), e.GetPublishTime().AsTime()} {
 		if stamp.Before(since) || stamp.After(time.Now().Add(time.Second)) {
@@ -191,6 +191,7 @@ func TestRustRelayFrameCompatibility(t *testing.T) {
 type relayBroker struct {
 	consumer jetstream.Consumer
 	client   bus.Client
+	stream   jetstream.Stream
 }
 
 func newRelayBroker(t *testing.T, f *fixture) relayBroker {
@@ -230,10 +231,32 @@ func newRelayBroker(t *testing.T, f *fixture) relayBroker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	return relayBroker{consumer, client}
+	streamHandle, err := js.Stream(f.ctx, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relayBroker{consumer: consumer, client: client, stream: streamHandle}
+}
+
+func (b relayBroker) goRelay(t *testing.T, f *fixture) *outbox.Relay {
+	t.Helper()
+	producer, err := bus.NewProducer(b.client, bus.ProducerConfig{Source: "oms/relay-fixture", ProducerVersion: os.Getenv("KANZ_OMS_STORE_VERSION")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := outbox.NewRelay(outbox.NewPostgres(f.pool, outbox.ServiceOMS), producer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relay
 }
 
 func (b relayBroker) next(t *testing.T, key string) []byte {
+	t.Helper()
+	return bytes.Clone(b.nextMessage(t, key).Data())
+}
+
+func (b relayBroker) nextMessage(t *testing.T, key string) jetstream.Msg {
 	t.Helper()
 	for i := 0; i < 10000; i++ {
 		msg, err := b.consumer.Next(jetstream.FetchMaxWait(5 * time.Second))
@@ -255,7 +278,7 @@ func (b relayBroker) next(t *testing.T, key string) []byte {
 			if msg.Headers().Get("Nats-Msg-Id") != env.IdempotencyKey || msg.Headers().Get("Kanz-Partition-Key") != key {
 				t.Fatal("broker frame headers lost identity or partition")
 			}
-			return bytes.Clone(msg.Data())
+			return msg
 		}
 	}
 	t.Fatal("foreign fixture traffic exceeded bound")
@@ -289,6 +312,23 @@ func pendingRelay(t *testing.T, f *fixture, key string) []outbox.Pending {
 		t.Fatal(err)
 	}
 	return rows
+}
+
+func storedRelayID(t *testing.T, f *fixture, row outbox.Pending) string {
+	t.Helper()
+	var stored string
+	if err := f.pool.QueryRow(f.ctx, "SELECT event_id::text FROM outbox WHERE id=$1 AND producer_service=$2", row.ID, outbox.ServiceOMS).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	id, err := uuid.Parse(stored)
+	if err != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 || id.String() != stored {
+		t.Fatalf("invalid stored UUIDv7 %q", stored)
+	}
+	event, err := row.Event()
+	if err != nil || event.EventID != stored {
+		t.Fatalf("Go pending row event ID %q differs from stored ID %q: %v", event.EventID, stored, err)
+	}
+	return stored
 }
 
 func TestRustRelayPostgresNATS(t *testing.T) {
@@ -397,24 +437,46 @@ func TestRustRelayPostgresNATS(t *testing.T) {
 		key := f.schema
 		r := relayRecord(t, key, 1)
 		enqueueRelay(t, f, outbox.ServiceOMS, r)
+		before := pendingRelay(t, f, key)
+		if len(before) != 1 {
+			t.Fatalf("expected one enqueued row, got %d", len(before))
+		}
+		wantID := storedRelayID(t, f, before[0])
 		_, err := f.pool.Exec(f.ctx, `CREATE FUNCTION refuse_relay_mark() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'fixture'; END$$; CREATE CONSTRAINT TRIGGER refuse_relay_mark AFTER UPDATE ON outbox DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_relay_mark()`)
 		if err != nil {
 			t.Fatal(err)
 		}
 		since := time.Now()
 		result := runResult(t, relayRequest(f, "flush", key, 10))
-		if result.Status != "error" || !result.SessionsClosed || result.Sent != 0 || len(pendingRelay(t, f, key)) != 1 {
+		after := pendingRelay(t, f, key)
+		if result.Status != "error" || !result.SessionsClosed || result.Sent != 0 || len(after) != 1 || after[0].ID != before[0].ID || storedRelayID(t, f, after[0]) != wantID {
 			t.Fatal("failed mark claimed durable publication")
 		}
-		first := verifyRelayFrame(t, r, b.next(t, key), 1, since)
+		first := b.nextMessage(t, key)
+		frame := verifyRelayFrame(t, r, first.Data(), 1, since)
+		if frame.Envelope.EventId != wantID || first.Headers().Get("Nats-Msg-Id") != wantID {
+			t.Fatal("Rust published a different identity from the durable row")
+		}
+		meta, err := first.Metadata()
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err = f.pool.Exec(f.ctx, "DROP TRIGGER refuse_relay_mark ON outbox"); err != nil {
 			t.Fatal(err)
 		}
-		relayResult(t, runResult(t, relayRequest(f, "flush", key, 10)), 1, "")
-		second := verifyRelayFrame(t, r, b.next(t, key), 1, since)
-		if first.Envelope.EventId == second.Envelope.EventId {
-			t.Fatal("Go per-attempt identity contract changed")
+		// A Go successor drains the row whose first publication Rust could not mark.
+		if n, err := b.goRelay(t, f).Flush(f.ctx, key); err != nil || n != 1 || len(pendingRelay(t, f, key)) != 0 {
+			t.Fatalf("Go retry did not mark the one retained row: sent=%d err=%v", n, err)
 		}
+		info, err := b.stream.Info(f.ctx)
+		if err != nil || time.Since(since) >= info.Config.Duplicates {
+			t.Fatalf("retry must complete inside the stream's configured duplicate window: %v", err)
+		}
+		original, err := b.stream.GetMsg(f.ctx, meta.Sequence.Stream)
+		if err != nil || original.Subject != relaySubject || original.Header.Get("Nats-Msg-Id") != wantID || !bytes.Equal(original.Data, first.Data()) {
+			t.Fatalf("JetStream did not retain the original terminal FACT: %v", err)
+		}
+		b.noNext(t, key)
 	})
 	t.Run("mark-failed-refusal", func(t *testing.T) {
 		f := newFixture(t)
@@ -438,6 +500,14 @@ func TestRustRelayPostgresNATS(t *testing.T) {
 		key := f.schema
 		r := relayRecord(t, key, 1)
 		enqueueRelay(t, f, outbox.ServiceOMS, r, r)
+		rows := pendingRelay(t, f, key)
+		if len(rows) != 2 {
+			t.Fatalf("expected two independent enqueues, got %d", len(rows))
+		}
+		firstID, secondID := storedRelayID(t, f, rows[0]), storedRelayID(t, f, rows[1])
+		if firstID == secondID {
+			t.Fatal("identical FACT contents collapsed two distinct outbox rows")
+		}
 		req := relayRequest(f, "run", key, 10)
 		req["other"] = "block-first"
 		req["relay_hold_ms"] = 500
@@ -447,10 +517,14 @@ func TestRustRelayPostgresNATS(t *testing.T) {
 		if time.Since(since) < 450*time.Millisecond || len(pendingRelay(t, f, key)) != 1 {
 			t.Fatal("run returned before owned publication completed")
 		}
-		verifyRelayFrame(t, r, b.next(t, key), 1, since)
+		if got := verifyRelayFrame(t, r, b.next(t, key), 1, since); got.Envelope.EventId != firstID {
+			t.Fatal("first identical FACT did not retain its own identity")
+		}
 		b.noNext(t, key)
 		relayResult(t, runResult(t, relayRequest(f, "flush", key, 10)), 1, "")
-		verifyRelayFrame(t, r, b.next(t, key), 1, since)
+		if got := verifyRelayFrame(t, r, b.next(t, key), 1, since); got.Envelope.EventId != secondID {
+			t.Fatal("second identical FACT did not retain its own identity")
+		}
 	})
 	t.Run("competing-go-rust", func(t *testing.T) {
 		f := newFixture(t)
@@ -459,14 +533,7 @@ func TestRustRelayPostgresNATS(t *testing.T) {
 		for i := int64(1); i <= 3; i++ {
 			enqueueRelay(t, f, outbox.ServiceOMS, relayRecord(t, key, i))
 		}
-		producer, err := bus.NewProducer(b.client, bus.ProducerConfig{Source: "oms/relay-fixture", ProducerVersion: os.Getenv("KANZ_OMS_STORE_VERSION")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		goRelay, err := outbox.NewRelay(outbox.NewPostgres(f.pool, outbox.ServiceOMS), producer, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		if err != nil {
-			t.Fatal(err)
-		}
+		goRelay := b.goRelay(t, f)
 		ch := make(chan fixtureResult, 1)
 		since := time.Now()
 		go func() { defer close(ch); ch <- runResult(t, relayRequest(f, "flush", key, 10)) }()

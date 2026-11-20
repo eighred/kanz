@@ -10,6 +10,7 @@ const LOCK_IDS: &str = "SELECT hashtext(current_database() || '/' || ('outbox'::
 
 pub struct Pending {
     pub id: i64,
+    pub event_id: uuid::Uuid,
     pub attempts: i32,
     pub record: Record,
     pub last_error: String,
@@ -67,7 +68,7 @@ pub async fn pending(
     owned(&tx).await?;
     // Each dynamic field is withheld when the whole requested page exceeds the
     // byte budget. A failed page never returns an apparently complete prefix.
-    let rows = tx.query_typed("WITH selected AS (SELECT * FROM outbox WHERE published_at IS NULL AND partition_key=$1 AND producer_service='oms' ORDER BY id LIMIT $2), bounded AS (SELECT *,sum(octet_length(envelope_tenant_id)+octet_length(partition_key)+octet_length(subject)+octet_length(event_type)+octet_length(domain)+octet_length(payload_schema_ref)+octet_length(correlation_id)+octet_length(causation_id)+octet_length(trace_context)+octet_length(payload)+octet_length(last_error)) OVER () <= $3 AS fits FROM selected) SELECT id,attempts,event_class,schema_version,event_time,CASE WHEN fits THEN ARRAY[envelope_tenant_id,partition_key,subject,event_type,domain,payload_schema_ref,correlation_id,causation_id,trace_context,last_error] END,CASE WHEN fits THEN payload END FROM bounded ORDER BY id", &[(&key, Type::TEXT), (&limit, Type::INT8), (&(MAX_BYTES as i64), Type::INT8)]).await?;
+    let rows = tx.query_typed("WITH selected AS (SELECT * FROM outbox WHERE published_at IS NULL AND partition_key=$1 AND producer_service='oms' ORDER BY id LIMIT $2), bounded AS (SELECT *,sum(octet_length(envelope_tenant_id)+octet_length(partition_key)+octet_length(subject)+octet_length(event_type)+octet_length(domain)+octet_length(payload_schema_ref)+octet_length(correlation_id)+octet_length(causation_id)+octet_length(trace_context)+octet_length(payload)+octet_length(last_error)) OVER () <= $3 AS fits FROM selected) SELECT id,attempts,event_class,schema_version,event_time,CASE WHEN fits THEN ARRAY[envelope_tenant_id,partition_key,subject,event_type,domain,payload_schema_ref,correlation_id,causation_id,trace_context,last_error] END,CASE WHEN fits THEN payload END,pg_catalog.uuid_send(event_id) FROM bounded ORDER BY id", &[(&key, Type::TEXT), (&limit, Type::INT8), (&(MAX_BYTES as i64), Type::INT8)]).await?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
         let fields = row
@@ -94,6 +95,8 @@ pub async fn pending(
         };
         result.push(Pending {
             id: row.try_get(0)?,
+            event_id: uuid::Uuid::from_slice(row.try_get::<_, &[u8]>(7)?)
+                .map_err(|_| Error::Database)?,
             attempts: row.try_get(1)?,
             record,
             last_error: next()?,

@@ -18,7 +18,7 @@ import synthetic_orders as fixture
 
 
 TEST = "TestSyntheticGoWriterLineageHandoff"
-WITHDRAWAL_MODES = ("funded-withdrawal", "funded-withdrawal-restart")
+WITHDRAWAL_MODES = ("funded-withdrawal", "funded-withdrawal-restart", "funded-withdrawal-publish-mark")
 ROLES = ("RUNTIME", "NEXT_RUNTIME", "SWITCH", "RELAY")
 
 
@@ -127,7 +127,10 @@ def run(stage, native, mode):
                 fixture.sql(container, (fixture.ROOT / "rust/services/synthetic_oms" / migration).read_text(encoding="utf-8"), fixture.DB)
         if funded:
             provision_funded(container, env, mode)
-            if mode == "funded-withdrawal-restart":
+            if mode == "funded-withdrawal-publish-mark":
+                env["KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_PUBLISH_MARK"] = "1"
+                test = "TestSyntheticFundedWithdrawalPublishMarkGoRustGo"
+            elif mode == "funded-withdrawal-restart":
                 env["KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_RESTART"] = "1"
                 test = "TestSyntheticFundedWithdrawalRestartGoRustGo"
             elif mode == "funded-withdrawal":
@@ -197,6 +200,8 @@ if __name__ == "__main__":
                        help="withdraw the working remainder after the funded Go handback")
     group.add_argument("--funded-withdrawal-restart", action="store_const", dest="mode", const="funded-withdrawal-restart",
                        help="recover a funded withdrawal across two process exits and publish its retained terminal fact")
+    group.add_argument("--funded-withdrawal-publish-mark", action="store_const", dest="mode", const="funded-withdrawal-publish-mark",
+                       help="recover a withdrawal after broker publication and before its SQL outbox acknowledgement")
     parser.set_defaults(mode="lineage")
     args = parser.parse_args()
     if not args.native.is_file():

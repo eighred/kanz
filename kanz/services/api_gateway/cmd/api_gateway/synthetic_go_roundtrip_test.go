@@ -54,12 +54,20 @@ func TestSyntheticFundedWithdrawalRestartGoRustGo(t *testing.T) {
 	exerciseGoRustGo(t, fundedWorkingTenant, goWithdrawalRestart)
 }
 
+func TestSyntheticFundedWithdrawalPublishMarkGoRustGo(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_PUBLISH_MARK") != "1" {
+		t.Skip("requires the disposable funded withdrawal publish/mark fixture")
+	}
+	exerciseGoRustGo(t, fundedWorkingTenant, goWithdrawalPublishMark)
+}
+
 type goWithdrawalMode int
 
 const (
 	noGoWithdrawal goWithdrawalMode = iota
 	goWithdrawal
 	goWithdrawalRestart
+	goWithdrawalPublishMark
 )
 
 func exerciseGoRustGo(t *testing.T, tenant string, withdrawalMode goWithdrawalMode) {

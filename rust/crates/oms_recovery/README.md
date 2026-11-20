@@ -227,3 +227,11 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 ```
 
 Three separate Go processes use the same writer login and JetStream durable. The first exits after XSIM has withdrawn the order and lost the response, before the handler can ACK. Startup defers the proven current-writer withdrawal claim to its retained command while the ordinary sweep remains active. The second process queries XSIM on redelivery and exits after PostgreSQL commits the terminal state and before the outbox publisher sends it. The third startup drains that one fact and acknowledges the third delivery without contacting XSIM again. The runner compares the cash holds, retained state, broker acknowledgements and published payload across both process cuts.
+
+For an exit after JetStream accepts the terminal fact and before PostgreSQL marks it published, run:
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-withdrawal-publish-mark
+```
+
+Go and Rust relay attempts use the row's persisted UUIDv7 as the JetStream message ID. The new process retries the same terminal row, marks it published, and acknowledges delivery three. The proof requires the original JetStream sequence, UUID and frame bytes to survive the retry and verifies one Accounting debit. This broker suppression applies within the stream's duplicate window. Consumer idempotency still applies after that window. Before upgrading an existing publisher estate, reconcile pending rows that an older publisher might already have sent under a per-attempt UUID. Such an identity cannot be reconstructed from the old SQL row.

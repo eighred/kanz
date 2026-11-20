@@ -20,6 +20,8 @@ use tokio_postgres::{config::Host, NoTls};
 struct Input {
     mode: String,
     #[serde(default)]
+    event_id: Option<String>,
+    #[serde(default)]
     relay_hold_ms: u64,
     #[serde(default)]
     base_currency: String,
@@ -232,7 +234,16 @@ async fn run(input: Input) -> Result<Value, ()> {
         )
         .map_err(|_| ())?;
         let record = record(input.records.into_iter().next().ok_or(())?)?;
-        return Ok(match framer.frame(&record) {
+        // Standalone framing has no durable row. SQL relay attempts always read
+        // the identity committed with their pending row.
+        let event_id = match input.event_id {
+            Some(value) => match uuid::Uuid::parse_str(&value) {
+                Ok(id) if id.to_string() == value => id,
+                _ => return Ok(json!({"status":"InvalidRecord"})),
+            },
+            None => uuid::Uuid::now_v7(),
+        };
+        return Ok(match framer.frame(&record, event_id) {
             Ok(frame) => json!({"status":"framed","state":STANDARD.encode(frame.body)}),
             Err(_) => json!({"status":"InvalidRecord"}),
         });

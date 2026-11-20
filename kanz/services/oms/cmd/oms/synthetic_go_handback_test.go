@@ -58,7 +58,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	switch in.WithdrawalStage {
 	case "":
-	case "send", "reconcile", "publish":
+	case "send", "reconcile", "reconcile-published", "publish", "publish-mark":
 		if in.WithdrawalEventID == "" {
 			t.Fatal("restart stages require the original withdrawal event")
 		}
@@ -91,7 +91,8 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	} else if working {
 		wantStatus = orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
 	}
-	if in.WithdrawalStage == "publish" {
+	publishing := in.WithdrawalStage == "publish" || in.WithdrawalStage == "publish-mark"
+	if publishing {
 		wantSweep = 0
 	}
 	if state.Status != wantStatus {
@@ -180,9 +181,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if working {
 		wantClaims, wantPending := 3, 2
 		switch in.WithdrawalStage {
-		case "reconcile":
+		case "reconcile", "reconcile-published":
 			wantPending = 0
-		case "publish":
+		case "publish", "publish-mark":
 			wantClaims, wantPending = 4, 1
 		}
 		if claims != wantClaims || pending != wantPending {
@@ -204,7 +205,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if e = pool.QueryRow(ctx, "SELECT state,version FROM orders WHERE order_id=$1", state.OrderId).Scan(&wire, &version); e != nil {
 		t.Fatalf("read startup state: %v", e)
 	}
-	if in.WithdrawalStage == "publish" {
+	if publishing {
 		expected, _, err := order.Cancel(&state, state.GetAsOf().AsTime())
 		var actual orderpb.OrderState
 		if err != nil || proto.Unmarshal(wire, &actual) != nil || actual.GetAsOf().CheckValid() != nil ||
@@ -224,8 +225,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept %d working orders and preserved native version %d and %d outbox rows", in.Generation, pending, wantSweep, version, facts)
 	if in.WithdrawalEventID != "" {
 		var events order.Bus = publisher
-		if in.WithdrawalStage == "reconcile" {
-			events = stopBeforeWithdrawalFact{Bus: publisher, eventID: in.WithdrawalEventID, orderID: state.OrderId}
+		if in.WithdrawalStage == "reconcile" || in.WithdrawalStage == "reconcile-published" {
+			events = stopAtWithdrawalFact{Bus: publisher, eventID: in.WithdrawalEventID, orderID: state.OrderId,
+				afterPublish: in.WithdrawalStage == "reconcile-published"}
 		}
 		withdrawal, err := order.NewService(tenant, store, order.NewEmitter(events), nil, venueRouter, nil, logger,
 			order.WithHaltGate(halt.NewGate(nil)), order.WithSyntheticHandoffWithdrawal(store))

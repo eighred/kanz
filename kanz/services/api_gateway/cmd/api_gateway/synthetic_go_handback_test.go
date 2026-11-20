@@ -212,7 +212,7 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 			}
 		}
 	}
-	if withdrawal == nil || !withdrawal.restart {
+	if withdrawal == nil || withdrawal.mode == goWithdrawal {
 		run("", 0)
 		return
 	}
@@ -222,6 +222,21 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	}
 	withdrawal.verifyRemoteAfterCrash(t, ctx)
 	withdrawal.verifyBrokerBeforePublish(t, ctx, s, 1)
+	if withdrawal.mode == goWithdrawalPublishMark {
+		run("reconcile-published", 73)
+		withdrawal.verifyTerminal(t, ctx, []string{"order.order.cancelled"})
+		before := withdrawal.publishedWithdrawal(t, ctx, s)
+		withdrawal.verifyWithdrawalDelivery(t, ctx, s, 2, 0, 1)
+		run("publish-mark", 0)
+		withdrawal.verifyWithdrawalDelivery(t, ctx, s, 3, 3, 0)
+		withdrawal.verifyTerminal(t, ctx, nil)
+		after := withdrawal.publishedWithdrawal(t, ctx, s)
+		if before.storedID != before.eventID || after.storedID != after.eventID || before.rowID != after.rowID || before.sequence != after.sequence || before.eventID != after.eventID || !bytes.Equal(before.wire, after.wire) {
+			t.Fatal("outbox retry changed the broker frame, stream sequence or SQL identity, or the publication UUID differs from the retained SQL UUID")
+		}
+		t.Logf("GO_HANDBACK terminal outbox row %d was pending after broker PubAck and marked on restart; broker retained sequence %d, UUIDv7 %s, frame SHA256 %x", after.rowID, after.sequence, after.eventID, settlementHash(after.wire))
+		return
+	}
 	run("reconcile", 72)
 	withdrawal.verifyTerminal(t, ctx, []string{"order.order.cancelled"})
 	withdrawal.verifyBrokerBeforePublish(t, ctx, s, 2)

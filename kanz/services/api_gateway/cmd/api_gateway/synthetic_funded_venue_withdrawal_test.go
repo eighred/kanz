@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/eighred/kanz/pkg/bus"
-	"github.com/nats-io/nats.go/jetstream"
 	"slices"
 	"strings"
 	"sync"
@@ -15,7 +13,10 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/tools/syntheticvenue"
+	"github.com/google/uuid"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -23,7 +24,7 @@ import (
 // state seen at handoff. Its terminal approval additionally requires the actual
 // XSIM query and the original execution journal bytes.
 type fundedWithdrawalApproval struct {
-	restart    bool
+	mode       goWithdrawalMode
 	control    *fundedVenueControl
 	event      *envelopepb.Envelope
 	generation int64
@@ -206,19 +207,41 @@ func verifyGoWithdrawalBooking(t *testing.T, ctx context.Context, s syntheticSes
 	t.Helper()
 	terminal := a.verifyTerminal(t, ctx, nil)
 	o := control.order
+	a.publishedWithdrawal(t, ctx, s)
+	applyVenueAccounting(t, ctx, s, control.proof, o, 126, 0)
+	t.Log("XSIM funded withdrawal: gateway-authorized G3 cancel, one placement, one committed withdrawal, lost ACK, terminal query, one execution, one 126 USD debit; remaining cash 874 USD, zero reserves")
+	return terminal
+}
+
+type publishedWithdrawal struct {
+	storedID string
+	rowID    int64
+	eventID  string
+	sequence uint64
+	wire     []byte
+}
+
+func (a *fundedWithdrawalApproval) publishedWithdrawal(t *testing.T, ctx context.Context, s syntheticSession) publishedWithdrawal {
+	t.Helper()
+	control := a.control
+	o := control.order
 	facts, err := s.js.Stream(ctx, "SYNTHETIC_FACTS")
 	if err != nil {
 		t.Fatal(err)
 	}
 	info, err := facts.Info(ctx)
-	if err != nil || info.State.Msgs != 4 || info.State.LastSeq != 4 {
-		t.Fatalf("expected precisely four published lifecycle records: %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State.Msgs != 4 || info.State.LastSeq != 4 {
+		t.Fatalf("duplicate or missing OMS lifecycle FACT: broker messages=%d last sequence=%d, expected 4/4", info.State.Msgs, info.State.LastSeq)
 	}
 	raw, err := facts.GetLastMsgForSubject(ctx, "order.order.cancelled")
 	if err != nil || raw.Sequence != 4 {
 		t.Fatalf("terminal cancellation was not the fourth broker record: %v", err)
 	}
 	env, payload, err := bus.Unframe(raw.Data)
+	var rowID int64
 	var retained []byte
 	var recordedAt time.Time
 	if err != nil || env.GetTenantId() != o.request.Tenant || env.GetPartitionKey() != o.command.OrderId ||
@@ -226,13 +249,22 @@ func verifyGoWithdrawalBooking(t *testing.T, ctx context.Context, s syntheticSes
 		env.GetTraceContext() != a.event.TraceContext || env.GetEventTime().CheckValid() != nil {
 		t.Fatalf("published withdrawal lineage differs from retained authority: %v", err)
 	}
-	if err = control.proof.QueryRow(ctx, "SELECT payload,event_time FROM outbox WHERE partition_key=$1 AND subject='order.order.cancelled'", o.command.OrderId).Scan(&retained, &recordedAt); err != nil ||
+	if err = control.proof.QueryRow(ctx, "SELECT id,payload,event_time FROM outbox WHERE partition_key=$1 AND subject='order.order.cancelled'", o.command.OrderId).Scan(&rowID, &retained, &recordedAt); err != nil ||
 		!bytes.Equal(payload, retained) || !env.GetEventTime().AsTime().Equal(recordedAt) {
 		t.Fatalf("published withdrawal differs from the terminal outbox record: %v", err)
 	}
-	applyVenueAccounting(t, ctx, s, control.proof, o, 126, 0)
-	t.Log("XSIM funded withdrawal: gateway-authorized G3 cancel, one placement, one committed withdrawal, lost ACK, terminal query, one execution, one 126 USD debit; remaining cash 874 USD, zero reserves")
-	return terminal
+	var storedID string
+	if a.mode == goWithdrawalPublishMark {
+		if err := control.proof.QueryRow(ctx, "SELECT event_id::text FROM outbox WHERE id=$1", rowID).Scan(&storedID); err != nil {
+			t.Fatalf("read immutable terminal outbox UUID: %v", err)
+		}
+		id, err := uuid.Parse(env.GetEventId())
+		if err != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 || id.String() != env.EventId ||
+			env.IdempotencyKey != env.EventId || raw.Header.Get("Nats-Msg-Id") != env.EventId {
+			t.Fatal("terminal JetStream frame and broker header must carry the same canonical UUIDv7")
+		}
+	}
+	return publishedWithdrawal{storedID: storedID, rowID: rowID, eventID: env.EventId, sequence: raw.Sequence, wire: raw.Data}
 }
 
 // Observe the remote store without adding a venue query on behalf of the first
@@ -265,6 +297,11 @@ func (a *fundedWithdrawalApproval) verifyBrokerBeforePublish(t *testing.T, ctx c
 	if _, err = facts.GetLastMsgForSubject(ctx, "order.order.cancelled"); !errors.Is(err, jetstream.ErrMsgNotFound) {
 		t.Fatalf("unexpected terminal FACT before restart at delivery %d: %v", delivery, err)
 	}
+	a.verifyWithdrawalDelivery(t, ctx, s, delivery, 0, 1)
+}
+
+func (a *fundedWithdrawalApproval) verifyWithdrawalDelivery(t *testing.T, ctx context.Context, s syntheticSession, delivery, ackFloor uint64, pending int) {
+	t.Helper()
 	subject := bus.TenantRoutedSubject(a.event.TenantId, "order.order.cancel")
 	durable := "synthetic-go-funded-withdrawal-" + strings.ReplaceAll(subject, ".", "_")
 	consumer, err := s.js.Consumer(ctx, "SYNTHETIC_ORDERS", durable)
@@ -275,7 +312,7 @@ func (a *fundedWithdrawalApproval) verifyBrokerBeforePublish(t *testing.T, ctx c
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Delivered.Consumer != delivery || state.AckFloor.Consumer != 0 || state.NumAckPending != 1 {
+	if state.Delivered.Consumer != delivery || state.AckFloor.Consumer != ackFloor || state.NumAckPending != pending {
 		t.Fatalf("withdrawal durable after process exit: deliveries=%d (want %d), ACK floor=%d, pending=%d", state.Delivered.Consumer, delivery, state.AckFloor.Consumer, state.NumAckPending)
 	}
 }

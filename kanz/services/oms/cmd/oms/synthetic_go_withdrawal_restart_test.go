@@ -19,15 +19,23 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// The outbox publisher is reached only after the terminal SQL call commits.
-// Stop before sending to JetStream or returning the command handler's ACK.
-type stopBeforeWithdrawalFact struct {
+// The outbox publisher is reached only after the terminal SQL call commits
+// and before the relay writes its publication mark.
+type stopAtWithdrawalFact struct {
 	order.Bus
 	eventID, orderID string
+	afterPublish     bool
 }
 
-func (p stopBeforeWithdrawalFact) Publish(ctx context.Context, event bus.Event) error {
+func (p stopAtWithdrawalFact) Publish(ctx context.Context, event bus.Event) error {
 	if event.Subject == order.EventTypeCancelled && event.PartitionKey == p.orderID && event.CausationID == p.eventID {
+		if p.afterPublish {
+			if err := p.Bus.Publish(ctx, event); err != nil {
+				return err
+			}
+			fmt.Println("GO_HANDBACK stopped after JetStream accepted the FACT and before the SQL publication mark")
+			os.Exit(73)
+		}
 		fmt.Println("GO_HANDBACK stopped after terminal commit and before FACT publication")
 		os.Exit(72)
 	}
@@ -83,7 +91,7 @@ func restartSyntheticFundedWithdrawal(t *testing.T, ctx context.Context, client 
 	}()
 	select {
 	case err := <-result:
-		if stage != "publish" || err != nil {
+		if (stage != "publish" && stage != "publish-mark") || err != nil {
 			t.Fatalf("withdrawal stage %s returned unexpectedly: %v", stage, err)
 		}
 	case <-ctx.Done():
