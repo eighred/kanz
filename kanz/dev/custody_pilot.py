@@ -160,8 +160,6 @@ def qualify(docker, container, binaries, node, env, observations, rerun):
         GRANT SELECT, INSERT, UPDATE, DELETE ON custody_break_detections TO pilot_check;
         GRANT USAGE ON SEQUENCE outbox_id_seq TO pilot_check;
     """)
-    if rerun:
-        sql(DATABASE, b"GRANT UPDATE(manual_receipt) ON custody_runs TO pilot_check")
     sql("postgres", (
         "CREATE ROLE pilot_source LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE kanz_custody_batch_pilot "
         f"PASSWORD '{source_password}';"
