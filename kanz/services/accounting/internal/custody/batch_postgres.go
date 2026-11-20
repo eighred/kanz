@@ -62,8 +62,8 @@ func (i *BatchImporter) Import(ctx context.Context, raw, signature []byte) (stri
 	}
 	day := b.statement.BusinessDate.AsTime().Format(time.DateOnly)
 	part := b.statement.PortfolioId
-	key := fmt.Sprintf("%s/%s/%s", tenant, part, a.Custodian)
-	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "custody-batch/"+key); err != nil {
+	key := batchLockKey(tenant, part, a.Custodian)
+	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", key); err != nil {
 		return "", err
 	}
 	var stored string
@@ -87,6 +87,10 @@ func (i *BatchImporter) Import(ctx context.Context, raw, signature []byte) (stri
 		return b.statement.StatementId, fmt.Errorf("custody batch: receipt committed, publication pending: %w", err)
 	}
 	return b.statement.StatementId, nil
+}
+
+func batchLockKey(tenant, portfolio, custodian string) string {
+	return fmt.Sprintf("custody-batch/%s/%s/%s", tenant, portfolio, custodian)
 }
 
 func (i *BatchImporter) append(ctx context.Context, tx pgx.Tx, b batchInput, raw, signature []byte, day string) error {

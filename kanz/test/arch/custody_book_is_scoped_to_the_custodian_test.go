@@ -51,13 +51,26 @@ func TestCustodyBookIsScopedToTheCustodian(t *testing.T) {
 	fset := token.NewFileSet()
 
 	var (
-		file            *ast.File
-		loaderTakesSubj bool
-		loaderReadsCust bool
-		reconcilePasses bool
-		found           bool
+		manualEntry, scheduledEntry bool
+		file                        *ast.File
+		loaderTakesSubj             bool
+		loaderReadsCust             bool
+		reconcilePasses             bool
+		found                       bool
 	)
 	walkGoFiles(t, root, "services/accounting/internal/custody", fset, func(rel string, f *ast.File) {
+		for _, declaration := range f.Decls {
+			fd, ok := declaration.(*ast.FuncDecl)
+			if !ok || !receiverIs(fd, "Reconciler") {
+				continue
+			}
+			switch fd.Name.Name {
+			case "ReconcileManual":
+				manualEntry = passesSubjectParam(fd, "reconcile")
+			case "Reconcile":
+				scheduledEntry = passesSubjectParam(fd, "reconcile")
+			}
+		}
 		if rel != custodyReconcileFile {
 			return
 		}
@@ -98,8 +111,8 @@ func TestCustodyBookIsScopedToTheCustodian(t *testing.T) {
 		// Arm 3: Reconcile hands the loader the WHOLE subject. Passing
 		// subject.PortfolioID is exactly the call that produced the defect, and it
 		// still compiles the moment BookLoader is narrowed.
-		case fd.Name.Name == "Reconcile" && receiverIs(fd, "Reconciler"):
-			reconcilePasses = passesWholeSubjectToBook(fd)
+		case fd.Name.Name == "reconcile" && receiverIs(fd, "Reconciler"):
+			reconcilePasses = passesSubjectParam(fd, "book")
 		}
 	}
 
@@ -113,6 +126,9 @@ func TestCustodyBookIsScopedToTheCustodian(t *testing.T) {
 		t.Errorf("custody.LedgerBookLoader never reads %s off the subject it is handed.\n\n"+
 			"A loader that accepts the custodian and ignores it produces the same whole-portfolio book "+
 			"the defect produced, behind a signature that looks repaired.", custodianField)
+	}
+	if !manualEntry || !scheduledEntry {
+		t.Error("both reconciliation entry points must pass their full subject parameter to the shared comparator")
 	}
 	if !reconcilePasses {
 		t.Errorf("Reconciler.Reconcile does not pass the whole subject to the book loader.\n\n" +
@@ -167,31 +183,69 @@ func receiverIs(fd *ast.FuncDecl, typeName string) bool {
 	return ok && id.Name == typeName
 }
 
-// passesWholeSubjectToBook reports whether Reconcile calls its book loader with a
-// bare identifier rather than a field of one.
-//
-// It looks for a call whose Fun is a selector ending in `.book` — the Reconciler's
-// loader field — and requires its last argument to be a plain identifier. The
-// pre-#1006 call was `r.book(ctx, subject.PortfolioID)`, a SelectorExpr, which is
-// precisely what this rejects.
-func passesWholeSubjectToBook(fd *ast.FuncDecl) bool {
-	ok := false
-	ast.Inspect(fd, func(n ast.Node) bool {
-		call, isCall := n.(*ast.CallExpr)
-		if !isCall {
+// Every hop must forward its incoming Subject to the named method on the
+// same receiver. A partial reconstructed Subject or an unrelated receiver
+// cannot satisfy the guard by including one otherwise valid call.
+func passesSubjectParam(fd *ast.FuncDecl, method string) bool {
+	var subjects []string
+	for _, p := range fd.Type.Params.List {
+		if isSubjectType(p.Type) {
+			for _, n := range p.Names {
+				subjects = append(subjects, n.Name)
+			}
+		}
+	}
+	receiver := fd.Recv.List[0].Names[0].Name
+	found, valid := false, true
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
 			return true
 		}
-		sel, isSel := call.Fun.(*ast.SelectorExpr)
-		if !isSel || sel.Sel.Name != "book" || len(call.Args) == 0 {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != method {
 			return true
 		}
-		last := call.Args[len(call.Args)-1]
-		if id, isID := last.(*ast.Ident); isID && !strings.EqualFold(id.Name, "nil") {
-			ok = true
+		id, ok := sel.X.(*ast.Ident)
+		if !ok || id.Name != receiver {
+			return true
+		}
+		found = true
+		if len(call.Args) == 0 {
+			valid = false
+			return true
+		}
+		arg, ok := call.Args[len(call.Args)-1].(*ast.Ident)
+		if !ok || !slices.Contains(subjects, arg.Name) {
+			valid = false
 		}
 		return true
 	})
-	return ok
+	return found && valid
+}
+
+func TestCustodySubjectForwardingMutations(t *testing.T) {
+	for _, hop := range []struct{ entry, callee string }{{"Reconcile", "reconcile"}, {"ReconcileManual", "reconcile"}, {"reconcile", "book"}} {
+		for _, tc := range []struct {
+			forward string
+			want    bool
+		}{
+			{"r.CALLEE(ctx,subject)", true},
+			{"r.CALLEE(ctx,subject.PortfolioID)", false},
+			{"r.CALLEE(ctx,Subject{PortfolioID:subject.PortfolioID})", false},
+			{"r.CALLEE(ctx,subject); r.CALLEE(ctx,other)", false},
+			{"other.CALLEE(ctx,subject)", false},
+		} {
+			src := "package custody\nfunc (r *Reconciler) " + hop.entry + "(ctx Context, subject Subject) {" + strings.ReplaceAll(tc.forward, "CALLEE", hop.callee) + "}"
+			f, err := parser.ParseFile(token.NewFileSet(), "mutation.go", src, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := passesSubjectParam(f.Decls[0].(*ast.FuncDecl), hop.callee); got != tc.want {
+				t.Errorf("%s: %s got %v, want %v", hop.entry, tc.forward, got, tc.want)
+			}
+		}
+	}
 }
 
 // TestEveryBookReconciledAgainstACustodianIsScopedToOne is the SAME invariant

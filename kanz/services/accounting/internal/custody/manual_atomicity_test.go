@@ -50,9 +50,7 @@ func TestManualAbsentReadCannotOverwriteArrivedStatement(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if err := store.SaveStatement(ctx, statement("just-arrived", nil, nil)); err != nil {
-		t.Fatal(err)
-	}
+	arrivedID := manualSignedFeed(t, ctx, store)(0, 0)
 	close(paused.resume)
 	if err := <-done; !errors.Is(err, ErrStatementChanged) {
 		t.Fatalf("stale absence: %v", err)
@@ -60,7 +58,7 @@ func TestManualAbsentReadCannotOverwriteArrivedStatement(t *testing.T) {
 	pub := &capturePublisher{err: errors.New("broker offline")}
 	live := manualReconciler(t, store, load, pub)
 	first, err := live.ReconcileManual(ctx, sub, key, "operator")
-	if !errors.Is(err, ErrPublicationPending) || first.Outcome != OutcomeClean || first.StatementID != "just-arrived" {
+	if !errors.Is(err, ErrPublicationPending) || first.Outcome != OutcomeClean || first.StatementID != arrivedID {
 		t.Fatalf("pending completion: %+v %v", first, err)
 	}
 	pub.err = nil
@@ -100,11 +98,7 @@ func TestManualReceiptWriteRefusalRollsBackLifecycle(t *testing.T) {
 	if err != nil || prior.Outcome != OutcomeBreaks || len(prior.Breaks) != 1 {
 		t.Fatalf("scheduled: %+v %v", prior, err)
 	}
-	fixed := statement("corrected", map[string]int64{"AAPL": 10}, map[string]int64{"USD": -100})
-	fixed.ReceivedAt = t0.Add(time.Minute)
-	if err := store.SaveStatement(ctx, fixed); err != nil {
-		t.Fatal(err)
-	}
+	manualSignedFeed(t, ctx, store)(10, -100)
 	key := uuid.NewString()
 	got, err := r.ReconcileManual(ctx, sub, key, "operator")
 	if err == nil || got.RunID != "" {

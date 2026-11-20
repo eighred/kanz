@@ -61,13 +61,19 @@ func (run *Run) confirmStatement(current Statement, err error) error {
 	}
 	prior := run.compared
 	run.compared = nil
-	if current.StatementID != prior.StatementID || !current.ReceivedAt.Equal(prior.ReceivedAt) ||
-		current.Grain != prior.Grain || !maps.EqualFunc(current.Positions, prior.Positions, equalFigure) ||
-		!maps.EqualFunc(current.Cash, prior.Cash, equalFigure) ||
-		!slices.EqualFunc(current.Transactions, prior.Transactions, equalTransaction) {
+	if !sameComparison(current, *prior) {
 		return ErrStatementChanged
 	}
 	return nil
+}
+
+func sameComparison(current, prior Statement) bool {
+	return current.StatementID == prior.StatementID && current.PortfolioID == prior.PortfolioID &&
+		current.CustodianID == prior.CustodianID && current.BusinessDate.Equal(prior.BusinessDate) &&
+		current.ReceivedAt.Equal(prior.ReceivedAt) && current.Grain == prior.Grain &&
+		maps.EqualFunc(current.Positions, prior.Positions, equalFigure) &&
+		maps.EqualFunc(current.Cash, prior.Cash, equalFigure) &&
+		slices.EqualFunc(current.Transactions, prior.Transactions, equalTransaction)
 }
 
 func equalFigure(a, b *big.Rat) bool {
@@ -209,10 +215,10 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if !locked {
 		return Run{}, ErrRunBusy
 	}
+	if run.RequestID != "" && bus.TenantIDFromContext(ctx) != tenant {
+		return Run{}, ErrInvalidManualRequest
+	}
 	if incoming := bus.TenantIDFromContext(ctx); incoming != "" {
-		if run.RequestID != "" && incoming != tenant {
-			return Run{}, ErrInvalidManualRequest
-		}
 		if err := bus.RequireTenantScope(incoming, tenant); err != nil {
 			return Run{}, err
 		}
@@ -253,6 +259,19 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
+	var signedDigest []byte
+	switch {
+	case run.RequestID != "" && (verifying(run) || run.observedMissing):
+		signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
+	case verifying(run) && run.compared != nil && isBatchStatement(run.StatementID) && run.Basis != nil && run.Basis.Mode == BasisDeclared:
+		// A scheduled comparison of an authorized signed account receives the
+		// same durable attestation as a manual one. Ordinary source modes
+		// retain their original comparison outcome and carry no signed proof.
+		signedDigest, err = signedStatementDigest(ctx, tx, tenant, run)
+	}
+	if err != nil {
+		return Run{}, err
+	}
 	if run.observedMissing {
 		_, err := staged.LatestStatement(ctx, run.Subject)
 		if err == nil {
@@ -313,7 +332,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		run.Breaks = breaksForSubject(stored, run.Subject)
 	}
-	if err := staged.SaveRun(ctx, run); err != nil {
+	if err := staged.saveRun(ctx, run, signedDigest); err != nil {
 		return Run{}, err
 	}
 	record, err := runRecord(ctx, tenant, run)

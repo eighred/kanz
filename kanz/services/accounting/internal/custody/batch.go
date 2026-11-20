@@ -166,8 +166,12 @@ func (v batchVerifier) verify(raw, signature []byte) (batchInput, error) {
 		}
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
-	msg.StatementId = fmt.Sprintf("%s%s.r%d.%s", batchStatementPrefix, a.Source, h.Revision, digest)
+	msg.StatementId = batchStatementID(a.Source, h.Revision, digest)
 	return batchInput{h, digest, msg}, nil
+}
+
+func batchStatementID(source string, revision int64, digest string) string {
+	return fmt.Sprintf("%s%s.r%d.%s", batchStatementPrefix, source, revision, digest)
 }
 
 func isBatchDigest(value string) bool {
