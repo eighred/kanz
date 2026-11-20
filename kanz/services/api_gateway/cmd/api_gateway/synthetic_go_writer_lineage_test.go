@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"testing"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/protobuf/proto"
@@ -37,7 +38,15 @@ func TestSyntheticGoWriterLineageHandoff(t *testing.T) {
 	if err := rehearsal.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+	cmd := &orderpb.SubmitOrder{OrderId: orderID, PortfolioId: "synthetic-portfolio", InstrumentId: "SYNTH-USD", Venue: "XSIM",
+		Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+		Quantity: &commonpb.Decimal{Coefficient: 1}, LimitPrice: &commonpb.Decimal{Coefficient: 200}}
+	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	child := exec.CommandContext(ctx, "/fixture/order", "-test.v", "-test.run=^TestSyntheticGoRetainedAdmission$")
+	child.Stdin = bytes.NewReader(wire)
 	child.Env = []string{"KANZ_SYNTHETIC_GO_LINEAGE=1", "SYNTHETIC_OMS_RUNTIME_URL=" + os.Getenv("SYNTHETIC_OMS_RUNTIME_URL")}
 	log, err := child.CombinedOutput()
 	if err != nil || bytes.Count(log, []byte("--- PASS: TestSyntheticGoRetainedAdmission ")) != 1 {
@@ -84,16 +93,22 @@ func TestSyntheticGoWriterLineageHandoff(t *testing.T) {
 			t.Fatalf("writer generations %d: %v", generations, err)
 		}
 		get := nativeSubmit{Version: 1, Op: "get", Tenant: tenant, OrderID: orderID, Portfolio: "synthetic-portfolio", Principal: "user:go-owner"}
-		for _, candidate := range []struct{ role, code string }{{"RUNTIME", "NOT_FOUND"}, {"NEXT_RUNTIME", "WRITER_FENCED"}} {
-			r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_"+candidate.role+"_URL"), get)
-			if err != nil || r.OK || r.Code != candidate.code || len(r.State) != 0 || r.OrderVersion != 0 {
-				t.Fatalf("%s lookup returned %s: %v", candidate.role, r.Code, err)
+		for _, role := range []string{"RUNTIME", "NEXT_RUNTIME"} {
+			r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_"+role+"_URL"), get)
+			if err != nil || r.OK || r.Code != "NOT_FOUND" || len(r.State) != 0 || r.OrderVersion != 0 {
+				t.Fatalf("%s unbound lookup returned %s: %v", role, r.Code, err)
 			}
+		}
+		submit := nativeSubmit{Version: 1, Op: "submit", Tenant: tenant, Portfolio: cmd.PortfolioId,
+			Principal: get.Principal, Key: "go-retained-command", Command: wire}
+		r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_NEXT_RUNTIME_URL"), submit)
+		if err != nil || r.OK || r.Code != "WRITER_FENCED" || len(r.State) != 0 || r.OrderVersion != 0 {
+			t.Fatalf("successor submission returned %s: %v", r.Code, err)
 		}
 		after, queued := read()
 		if !bytes.Equal(state, after) || queued != pending {
 			t.Fatal("refused transfer changed the Go state or its pending acceptance")
 		}
 	}
-	t.Log("Go retained v0 and its sole pending acceptance across two P1533 refusals; current Rust lookup NOT_FOUND and successor WRITER_FENCED")
+	t.Log("Go retained v0 and its sole pending acceptance across two P1533 refusals; both Rust lookups NOT_FOUND and successor submit WRITER_FENCED")
 }

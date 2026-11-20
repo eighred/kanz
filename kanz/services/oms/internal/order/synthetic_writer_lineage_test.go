@@ -2,13 +2,13 @@ package order
 
 import (
 	"errors"
+	"io"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
 
@@ -39,10 +39,12 @@ func TestSyntheticGoRetainedAdmission(t *testing.T) {
 	if err != nil || !restricted {
 		t.Fatal("requires the active restricted first-generation writer")
 	}
-	cmd := &orderpb.SubmitOrder{OrderId: orderID, PortfolioId: "synthetic-portfolio", InstrumentId: "SYNTH-USD", Venue: "XSIM",
-		Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTC,
-		Quantity: &commonpb.Decimal{Coefficient: 1}, LimitPrice: &commonpb.Decimal{Coefficient: 200}}
-	st, err := Accept(cmd, time.Now().UTC())
+	wire, err := io.ReadAll(io.LimitReader(os.Stdin, 65537))
+	var cmd orderpb.SubmitOrder
+	if err != nil || len(wire) > 65536 || proto.Unmarshal(wire, &cmd) != nil || cmd.OrderId != orderID {
+		t.Fatal("invalid fixture order")
+	}
+	st, err := Accept(&cmd, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
