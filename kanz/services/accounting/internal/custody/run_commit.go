@@ -24,7 +24,7 @@ import (
 )
 
 var ErrPublicationPending = errors.New("custody: run committed; completion FACT publication pending")
-var errQuantityReceiptLimit = errors.New("custody: execution quantity completion exceeds the retained receipt limit")
+var errRunReceiptLimit = errors.New("custody: comparison exceeds the retained receipt limit")
 
 const historicalBreakLimit = 4096
 
@@ -95,6 +95,14 @@ func equalTransaction(a, b recon.Transaction) bool {
 		equalFigure(a.Price, b.Price) && equalFigure(a.Cash, b.Cash)
 }
 
+// The customer can reopen a signed full comparison by its run ID even when
+// the signed source attests balances only. Preserve the bounds on the other
+// retained execution evidence and the existing unsigned comparison contract.
+func (run Run) requiresBoundedReceipt() bool {
+	return run.Outcome.IsHistoricalComparison() || (verifying(run) && isBatchStatement(run.StatementID)) ||
+		run.ExecutionQuantities != nil || run.ExecutionEconomics != nil || len(run.HistoricalQuantityResolutions) > 0
+}
+
 func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, error) {
 	msg, err := runToProto(run)
 	if err != nil {
@@ -102,8 +110,8 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	}
 	// The immutable lookup bounds both the full payload and the working breaks.
 	// Refuse before the queue transaction commits an unreadable completion.
-	if (run.Outcome.IsHistoricalComparison() || run.ExecutionQuantities != nil || run.ExecutionEconomics != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
-		return outbox.Record{}, errQuantityReceiptLimit
+	if run.requiresBoundedReceipt() && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
+		return outbox.Record{}, errRunReceiptLimit
 	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
@@ -443,6 +451,11 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			run.ExecutionQuantities = nil
 			run.Breaks = nil
 		default:
+			// This many detected rows cannot fit the saved view even before
+			// operator annotations are added. Check the final bytes in runRecord.
+			if len(run.Breaks) > historicalBreakLimit && run.requiresBoundedReceipt() {
+				return Run{}, errRunReceiptLimit
+			}
 			if d := run.detection(); d.RunID != "" {
 				if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_detection_run',$1,true)`, d.RunID); err != nil {
 					return Run{}, err

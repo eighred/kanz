@@ -51,11 +51,11 @@ func signedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgr
 }
 
 // Keep the committed import and its signed consumer delivery as two real steps.
-func retainedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgres, account string) func(json.RawMessage) (string, func()) {
+func retainedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgres, account string, instruments ...string) func(json.RawMessage) (string, func()) {
 	t.Helper()
 	tenant := bus.TenantIDFromContext(ctx)
 	a, key := exampleAuthority(t, tenant)
-	a.Account, a.Instruments = account, []string{"AAPL"}
+	a.Account, a.Instruments = account, append([]string{"AAPL"}, instruments...)
 	importer, err := NewBatchImporter(a, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:"+account, st.pool, &capturePublisher{}, testLogger())
 	if err != nil {
 		t.Fatal(err)

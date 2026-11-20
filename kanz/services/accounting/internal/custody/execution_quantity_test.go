@@ -645,7 +645,7 @@ func TestQuantityReceiptRefusesOversizedSerializedCompletion(t *testing.T) {
 		q.Differences = append(q.Differences, &accountingpb.ExecutionQuantityDifference{ExternalRef: fmt.Sprintf("%04d-%s", i, strings.Repeat("r", 470)), InstrumentId: "A", Ibor: one, Custodian: two, Difference: minusOne})
 	}
 	q.Compared = uint32(len(q.Differences))
-	if _, err := runRecord(ctx, "quantity-size", run); !errors.Is(err, errQuantityReceiptLimit) {
+	if _, err := runRecord(ctx, "quantity-size", run); !errors.Is(err, errRunReceiptLimit) {
 		t.Fatal("oversized serialized completion", err)
 	}
 	q.Differences = q.Differences[:1900]
