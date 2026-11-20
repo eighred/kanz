@@ -104,43 +104,32 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	if !validID(portfolio) || !validID(currency) || !validID(orderID) || now.IsZero() || maxAge <= 0 {
 		return ErrInvalid
 	}
+	// Validate the Go boundary before using the transaction, as for other
+	// capital operations. The shared kernel also validates independently.
 	required, err := amount(string(debit), true)
 	if err != nil {
 		return err
 	}
-	faulted, err := sourceFault(ctx, tx)
+	var verdict string
+	err = tx.QueryRow(ctx, `SELECT capital_reserve($1,$2,$3,$4,$5,$6,$7)`,
+		portfolio, currency, orderID, required.RatString(), now.Unix(), int32(now.Nanosecond()), int64(maxAge)).Scan(&verdict)
 	if err != nil {
 		return err
 	}
-	if faulted {
+	switch verdict {
+	case "RESERVED":
+		return nil
+	case "UNKNOWN":
 		return ErrUnknown
-	}
-	b, err := lock(ctx, tx, portfolio, currency)
-	if err != nil {
-		return err
-	}
-	if !cashKnown(b, now, maxAge) {
-		return ErrUnknown
-	}
-	next := new(big.Rat).Add(b.reserved, required)
-	if next.Cmp(b.total) > 0 {
+	case "INSUFFICIENT":
 		return ErrInsufficient
-	}
-	if _, err := amount(next.RatString(), true); err != nil {
-		return err
-	}
-	tag, err := tx.Exec(ctx, `INSERT INTO capital_commitments(order_id,portfolio_id,currency,required_debit,admission_debit)
-		VALUES($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING`, orderID, portfolio, currency, required.RatString())
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
+	case "INVALID":
+		return ErrInvalid
+	case "CONFLICT":
 		return ErrConflict
+	default:
+		return errors.New("capital: unrecognized reservation verdict")
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency) VALUES($1,$1,$2)`, orderID, currency); err != nil {
-		return err
-	}
-	return writeReserved(ctx, tx, portfolio, currency, next)
 }
 
 // Change replaces total required debit (executed debit plus the worst remaining

@@ -62,8 +62,17 @@ def require_tests(log, names):
     return len(passed)
 
 
+def require_cases(log, root, names):
+    for name in names:
+        case = re.escape(f"{root}/{name}")
+        if len(re.findall(rf"^\s*--- PASS: {case} ", log, re.MULTILINE)) != 1:
+            raise RuntimeError(f"missing synthetic proof: {root}/{name}")
+
+
 ROLES = {
     "CONTROL": "kanz_synthetic_oms_control",
+    "FUNDING": "kanz_synthetic_oms_funding",
+    "PROOF": "kanz_synthetic_oms_proof",
     "SWITCH": "kanz_synthetic_handoff_probe",
     "NEXT_RUNTIME": "kanz_synthetic_oms_runtime_g2",
     "NEXT_ADAPTER": "kanz_synthetic_oms_adapter_g2",
@@ -202,7 +211,7 @@ def provision_native(container, fixture_env):
           RETURN NULL;
         END $$;
         CREATE CONSTRAINT TRIGGER synthetic_deferred_failure AFTER INSERT ON orders
-          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.tenant_id='synthetic-tenant')
           EXECUTE FUNCTION synthetic_reject_first_commit();
     """, DB)
     return migrations[diagnostic:]
@@ -282,12 +291,19 @@ def run(stage, native):
                 print(f"{package}: legacy funding refusal passed without skips", flush=True)
                 for migration in pending_migrations:
                     sql(container, migration.read_text(encoding="utf-8"), DB)
+                funding = ROOT / "rust/services/synthetic_oms/funding.sql"
+                sql(container, funding.read_text(encoding="utf-8"), DB)
+                fixture = ROOT / "kanz/dev/synthetic_funding_fixture.sql"
+                sql(container, fixture.read_text(encoding="utf-8"), DB)
+                funded = "TestSyntheticFundedOrderAdmission"
+                funded_log = run_fixture_tests(cmd, [funded], selected_env, password)
+                cases = ("ok", "ok/funded_dispatch_held", "short", "short-fee", "race", "rollback", "stale", "foreign")
+                require_cases(funded_log, funded, cases)
+                print(f"{package}: funded admission passed ({', '.join(cases)}) without skips", flush=True)
             log = run_fixture_tests(cmd, names, selected_env, password)
             if native and base == "api_gateway":
-                for name in ("armed_without_reservation", "unrelated_order_constraint", "fenced_restart", "unknown_across_handoff"):
-                    case = rf"^\s*--- PASS: TestSyntheticOrderCommandLifecycle/{name} "
-                    if len(re.findall(case, log, re.MULTILINE)) != 1:
-                        raise RuntimeError("missing writer recovery proof: " + name)
+                require_cases(log, "TestSyntheticOrderCommandLifecycle",
+                              ("armed_without_reservation", "unrelated_order_constraint", "fenced_restart", "unknown_across_handoff"))
                 sql(container, """
                     DO $$ BEGIN
                         IF NOT EXISTS (SELECT FROM pg_proc

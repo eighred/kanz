@@ -35,6 +35,22 @@ The fixture applies the canonical OMS migrations, the isolated command schema an
 
 The HTTP interfaces used by the exercise are `POST /v1/orders`, `POST /v1/orders/{order_id}/cancel`, and `GET /v1/portfolios/{id}/orders`. The browser uses the corresponding `/api/v1/` routes through the web BFF. Submission uses an explicitly named order, `Idempotency-Key`, and canonical Protobuf JSON, including string Decimal coefficients. HTTP 202 records publication of the command. The state returned from the portfolio read records the durable outcome.
 
+## Funded admission
+
+The fixture arms capital admission for a fresh tenant and submits a signed XSIM limit order. The Go capital owner calculates the physical debit and fees. A separate insert-only role records the resulting amounts against the tenant, principal, portfolio, order, command digest and expiry. The native writer validates the five control decisions and calls the same PostgreSQL reservation function as Go, within the transaction that records the order and its acceptance. An independent tenant-scoped reader checks the resulting ledger. [Go capital contract](https://github.com/eighred/kanz/pull/1317) · [Reservation migration](../services/oms/migrations/0027_capital_reserve.sql) · [Synthetic authorization](../../rust/services/synthetic_oms/funding.sql)
+
+| Case | Expected durable result |
+| --- | --- |
+| Buy 1.25 SYN at 200 USD with fees of 2 USD and 1 BNB | From opening cash of 1000 USD and 8 BNB, reserve 252 USD and 1 BNB. Persist two commitments, two memberships, one order, one command claim and one accepted fact. |
+| Restart and replay the accepted command | Return the same order state and version. All row counts and reserved balances stay at their first-acceptance values. |
+| Submit with 99 USD or with zero BNB | Return `FUNDING_INSUFFICIENT`. Both reserved balances and all order, funding and outbox counts remain zero. |
+| Compete for 150 USD | Hold the USD row until two distinct native writers are waiting. Exactly one of two orders requiring 100 USD and 1 BNB commits. |
+| Fail during the accepted outbox write | The database witnesses both memberships, both commitments, order and claim before the failure. A separate reader sees zero reservations and zero orders, claims or facts. Retrying commits once. |
+| Reuse an order ID across tenants | Each tenant can reserve its own cash. RLS hides the first tenant's reservation from the second. An expired or wrong-principal approval is refused. |
+| Dispatch a funded acceptance | Return `FUNDED_LIFECYCLE_HELD`. Both reservations remain held and no adapter observation is recorded. |
+
+This fixture covers admission through the accepted fact. Funded venue execution, settlement, release and production activation require their own acceptance. [Funded OMS scope](https://github.com/eighred/kanz/issues/1532) · [Pending cash scope](https://github.com/eighred/kanz/issues/1316)
+
 ## Read the same order in Chromium
 
 The browser probe requires the pinned Node and Playwright installation from `web/`, Chromium, a production web build, and a Go test binary for `./services/web_bff/internal/server`. Run it in the same loopback namespace as the disposable database. The read role needs scoped SELECT access to `orders`. Provide a receipt from the native owner, and keep the test DSN in the process environment.
@@ -63,4 +79,4 @@ The probe expects a JSON object with `tenant`, `portfolio`, and `state`. The las
 
 Install the synthetic schema first, then apply the atomic writer migration. Preexisting records retain an unknown epoch and prevent automatic enrollment. [Writer migration](../../rust/services/synthetic_oms/writer.sql)
 
-The native run also enrolls the empty synthetic store and checks exclusive PostgreSQL writer generations. It kills a separate broker consumer after its native transaction commits and before ACK. It observes an actual in-flight SQL writer blocking handoff and a stale surviving native backend blocked by the handoff. The new writer reconciles the original delivery and stored order version. A further generation change preserves the quarantined venue outcome before the typed query resolves it. Both transfers use fresh database logins. An unknown legacy order or missing generation refuses enrollment or writing. The fixture operator alone advances the generation. Funded reservation, production failover and an operational Go-to-Rust-to-Go handoff retain separate acceptance. [Writer handoff](https://github.com/eighred/kanz/issues/1533) � [Pending cash](https://github.com/eighred/kanz/issues/1316)
+The native run also enrolls the empty synthetic store and checks exclusive PostgreSQL writer generations. It kills a separate broker consumer after its native transaction commits and before ACK. It observes an actual in-flight SQL writer blocking handoff and a stale surviving native backend blocked by the handoff. The new writer reconciles the original delivery and stored order version. A further generation change preserves the quarantined venue outcome before the typed query resolves it. Both transfers use fresh database logins. An unknown legacy order or missing generation refuses enrollment or writing. The fixture operator alone advances the generation. Production failover and an operational Go-to-Rust-to-Go handoff retain separate acceptance. [Writer handoff](https://github.com/eighred/kanz/issues/1533) · [Pending cash](https://github.com/eighred/kanz/issues/1316)

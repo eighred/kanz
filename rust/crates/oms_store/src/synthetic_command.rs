@@ -69,6 +69,23 @@ impl From<Error> for Refusal {
 }
 impl From<tokio_postgres::Error> for Refusal {
     fn from(e: tokio_postgres::Error) -> Self {
+        if let Some(db) = e.as_db_error() {
+            if db.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                && db.schema() == Some("public")
+                && db.table() == Some("synthetic_oms_commands")
+            {
+                match db.constraint() {
+                    Some("funding_authorization_invalid" | "funding_invalid") => {
+                        return Self::Controls("FUNDING_AUTHORIZATION_INVALID");
+                    }
+                    Some("funding_insufficient") => return Self::Controls("FUNDING_INSUFFICIENT"),
+                    Some("funding_unknown") => return Self::Controls("FUNDING_UNKNOWN"),
+                    Some("funding_conflict") => return Self::Controls("FUNDING_CONFLICT"),
+                    Some("funded_lifecycle_held") => return Self::Controls("FUNDED_LIFECYCLE_HELD"),
+                    _ => {}
+                }
+            }
+        }
         Self::Store(e.into())
     }
 }

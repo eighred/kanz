@@ -90,7 +90,7 @@ func isolatedOrderDSN(raw, role string) bool {
 func syntheticPool(t *testing.T, ctx context.Context, role, tenant string) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("SYNTHETIC_OMS_" + role + "_URL")
-	expected := map[string]string{"SWITCH": "kanz_synthetic_handoff_probe", "RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "VENUE": "kanz_synthetic_venue"}[role]
+	expected := map[string]string{"SWITCH": "kanz_synthetic_handoff_probe", "RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "VENUE": "kanz_synthetic_venue", "FUNDING": "kanz_synthetic_oms_funding", "PROOF": "kanz_synthetic_oms_proof"}[role]
 	if expected == "" || !(isolatedOrderDSN(dsn, expected) || (role == "RUNTIME" && isolatedOrderDSN(dsn, expected+"_g2"))) {
 		t.Fatal("refused a database outside the synthetic role and loopback scope")
 	}

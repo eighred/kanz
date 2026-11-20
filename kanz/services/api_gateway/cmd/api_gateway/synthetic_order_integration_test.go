@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"strings"
 
@@ -43,6 +44,7 @@ type syntheticSession struct {
 	broker      string
 	js          jetstream.JetStream
 	cancelOrder func() *envelopepb.EventFrame
+	submitOrder func(string, *orderpb.SubmitOrder) *envelopepb.EventFrame
 }
 
 func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
@@ -219,7 +221,25 @@ func exerciseSyntheticSession(t *testing.T, tenant string, exercise func(context
 		t.Fatal("durable command changed exact price or quantity")
 	}
 	if exercise != nil {
-		exercise(ctx, syntheticSession{frame: &frame, broker: broker.ClientURL(), js: js, cancelOrder: func() *envelopepb.EventFrame {
+		submitOrder := func(key string, cmd *orderpb.SubmitOrder) *envelopepb.EventFrame {
+			t.Helper()
+			payload, err := protojson.Marshal(cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			post("/v1/orders", trader, key, payload, http.StatusAccepted)
+			msg, err := stream.GetLastMsgForSubject(ctx, orderSubject)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var next envelopepb.EventFrame
+			if proto.Unmarshal(msg.Data, &next) != nil || next.GetEnvelope().GetIdempotencyKey() != key ||
+				next.GetEnvelope().GetPartitionKey() != cmd.GetOrderId() || next.GetEnvelope().GetTenantId() != tenant {
+				t.Fatal("signed gateway submission did not produce the requested durable command")
+			}
+			return &next
+		}
+		exercise(ctx, syntheticSession{frame: &frame, broker: broker.ClientURL(), js: js, submitOrder: submitOrder, cancelOrder: func() *envelopepb.EventFrame {
 			t.Helper()
 			post("/v1/orders/"+orderID+"/cancel", trader, "synthetic-cancel", nil, http.StatusAccepted)
 			msg, err := stream.GetLastMsgForSubject(ctx, bus.TenantRoutedSubject(tenant, "order.order.cancel"))

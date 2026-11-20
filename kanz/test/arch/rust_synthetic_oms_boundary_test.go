@@ -49,7 +49,7 @@ func checkSyntheticOMS(root string) error {
 			return nil
 		}
 		switch rel {
-		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql":
+		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql":
 		default:
 			return fmt.Errorf("unexpected synthetic OMS input %s", rel)
 		}
@@ -63,7 +63,7 @@ func checkSyntheticOMS(root string) error {
 	if err != nil {
 		return err
 	}
-	if len(files) != 4 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
+	if len(files) != 5 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
 		return fmt.Errorf("synthetic OMS workspace recipe changed")
 	}
 	source, err := rustMigrationWithoutComments(files["src/main.rs"])
@@ -101,6 +101,23 @@ func checkSyntheticOMS(root string) error {
 			return fmt.Errorf("synthetic OMS writer fence changed %s", marker)
 		}
 	}
+	funding := rustMigrationCompact(files["funding.sql"])
+	for _, marker := range []string{
+		"current_database()<>'kanz_synthetic_oms'",
+		"ALTERTABLEpublic.synthetic_oms_funding_authorizationsFORCEROWLEVELSECURITY",
+		"GRANTINSERTONpublic.synthetic_oms_funding_authorizationsTOkanz_synthetic_oms_funding",
+		"public.synthetic_oms_assert_writer()ISDISTINCTFROMNEW.writer_epoch",
+		"NEW.command_sha256<>sha256(NEW.command)",
+		"sourcesISDISTINCTFROMNEW.evidence_ids",
+		"outcome:=public.capital_reserve(",
+		"REVOKEALLONFUNCTIONpublic.synthetic_oms_reserve_authorized()FROMPUBLIC",
+		"reserve_synthetic_fundingAFTERINSERTONpublic.synthetic_oms_commands",
+		"EXECUTEFUNCTIONpublic.synthetic_oms_hold_funded_lifecycle()",
+	} {
+		if !strings.Contains(funding, marker) {
+			return fmt.Errorf("synthetic OMS funding boundary changed %s", marker)
+		}
+	}
 	for _, marker := range []string{`current_database()<>'kanz_synthetic_oms'`, `ALTERTABLE%IFORCEROWLEVELSECURITY`, `GRANTINSERTONsynthetic_oms_evidenceTOkanz_synthetic_oms_control`, `UNIQUE(tenant_id,idempotency_key)`, `PRIMARYKEY(tenant_id,order_id,event_id)`, `effective_secondsbigintNOTNULL`, `recorded_attimestamptzNOTNULLDEFAULTtransaction_timestamp()`} {
 		if !strings.Contains(sql, marker) {
 			return fmt.Errorf("synthetic OMS evidence/persistence changed %s", marker)
@@ -117,6 +134,9 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"writer.sql", "WHERE singleton FOR SHARE", "WHERE singleton FOR KEY SHARE"},
 		{"writer.sql", "session_user::regrole::oid", "current_user::regrole::oid"},
 		{"writer.sql", "expected IS DISTINCT FROM old_epoch", "FALSE"},
+		{"funding.sql", "TO kanz_synthetic_oms_funding;", "TO kanz_synthetic_oms_runtime;"},
+		{"funding.sql", "NEW.command_sha256 <> sha256(NEW.command)", "FALSE"},
+		{"funding.sql", "outcome := public.capital_reserve(", "outcome := public.other_reserve("},
 		{"Cargo.toml", `["synthetic-command"]`, `["qualification-diagnostics"]`},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
@@ -125,7 +145,7 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "src"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql"} {
+			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql"} {
 				raw, err := os.ReadFile(filepath.Join(root, syntheticOMSPath, name))
 				if err != nil {
 					t.Fatal(err)
