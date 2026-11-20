@@ -209,7 +209,8 @@ For unscoped `/work`, select and complete the highest-priority feasible task
 from source, existing branches, PRs and Issues:
 
 1. Reconcile current main, source gaps, branch ownership, issue acceptance,
-   active PRs, and dependencies. Rank by repository priority and impact.
+   active PRs, and dependencies. [Resolve delegated engineering decisions](repository-engine.md#resolve-engineering-decisions-during-work-selection)
+   before ranking feasible work by repository priority and impact.
    Within comparable priority, prefer
    completing an existing change with a clear path to verified main.
 2. Name the selected task and its acceptance, then act. Fill in discoverable

@@ -37,6 +37,27 @@ Use `kind: "branch"` for branch recovery. Supply this only after reviewing the
 actual diff and current ownership. It breaks otherwise equal selection ranks;
 it cannot clear a blocker, authorize delivery or replace current-head checks.
 
+## Resolve engineering decisions during work selection
+
+Include `decision-needed` issues when selecting work. Identify the choice and
+who can make it from the user's request, the owning contract and any recorded
+decision. When the choice falls within delegated engineering authority, make it.
+Compare viable options against the institutional workflow they serve. Consider
+how quickly operators can act and the system can respond, correctness under
+failure and replay, the evidence an auditor can reconstruct, operating burden,
+and what the team can implement and verify with available inputs. Use measured
+results when available and state material assumptions.
+
+Record the choice, decisive trade-off and acceptance check in the owning issue
+or its existing decision record. Carry the choice through implementation,
+review and merged-main verification under the normal delivery rules.
+
+For mixed decisions, identify the precise action that needs separate authority,
+such as setting financial policy, buying licensed data, publishing a signed
+release or changing a live estate. Keep that action with its authorized owner
+and continue any independently authorized design, implementation and disposable
+verification. Count the issue only when its full acceptance is met.
+
 ## Stop repeating unchanged failures
 
 Read the owning issue's latest substantive evidence before reproducing a known
