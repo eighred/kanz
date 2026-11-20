@@ -177,16 +177,21 @@ def qualify(docker, container, binaries, node, env, observations, rerun):
         CUSTODY_PILOT_BFF_PROBE=str(binaries["bff"]), TEST_MFA_NODE=node,
         TEST_MFA_STATIC_DIR=str(WEB / "dist"), TEST_MFA_PLAYWRIGHT=str(WEB / "node_modules/playwright"),
         CUSTODY_PILOT_BROWSER_SCRIPT=str(WEB / "e2e" / ("custody-rerun.cjs" if rerun else "custody-detection.cjs")),
-        CUSTODY_PILOT_RECEIPT=str(observations),
+        CUSTODY_PILOT_DATED_SCRIPT=str(WEB / "e2e/custody-dated.cjs"), CUSTODY_PILOT_RECEIPT=str(observations),
     )
     test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
     proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
                             "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
     output = proof.stdout
     if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
-            or b"signed gateway and Chromium verified the persisted detection" not in output):
+            or b"signed gateway and Chromium verified the persisted detection" not in output
+            or (not rerun and b"signed customer verified clean, missing and unobserved business dates" not in output)):
         stage = re.search(rb"custody-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
+        if not stage:
+            location = re.search(rb"\b(operator_test|pilot_test|rollback_test)\.go:([0-9]+):", output)
+            if location:
+                suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
     return verify_observations(observations, rerun)
 
@@ -227,8 +232,9 @@ def main():
     if args.receipt:
         args.receipt.write_text(json.dumps(results, indent=2) + "\n",
                                 encoding="utf-8")
-    print("PASS: Chromium verified the retained signed break on load and reload, the three restricted "
-          "sessions and read-only controls. A separate authorized browser rerun produced one durable receipt and FACT. The correction cleared both queues.")
+    print("PASS: The signed customer read the discrepancy, corrected clean date, missing statement and "
+          "unobserved date in Chromium. The customer could not post cash, change the break or start a rerun. "
+          "A separate operator replayed one request with one durable receipt and completion FACT.")
 
 
 if __name__ == "__main__":

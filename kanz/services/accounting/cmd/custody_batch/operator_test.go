@@ -114,9 +114,9 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 		if proto.Unmarshal(message.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil || frame.GetEnvelope().GetTenantId() != tenant || fact.GetRunId() != run.RunID || fact.GetStatementId() != statement.StatementID {
 			t.Fatal("completion FACT did not identify the committed comparison")
 		}
-		options := []server.Option{server.WithTenant(tenant), server.WithBreakStore(store)}
+		options := []server.Option{server.WithTenant(tenant), server.WithBreakStore(store), server.WithCustodyBookScope(scope)}
 		if rerun {
-			options = append(options, server.WithCustodyBookScope(scope), server.WithCustodyReruns("custody-pilot-rerun", r.ReconcileManual))
+			options = append(options, server.WithCustodyReruns("custody-pilot-rerun", r.ReconcileManual))
 		} else {
 			options = append(options, server.WithReadOnlyCustodyReview())
 		}
@@ -154,6 +154,25 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			if run.Outcome != custody.OutcomeClean || len(list.Breaks) != 0 {
 				t.Fatal("corrected statement left an outstanding break")
 			}
+			if !rerun && os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE") != "" {
+				missing := subject
+				missing.BusinessDate = day.AddDate(0, 0, 1)
+				absent, err := r.Reconcile(ctx, missing)
+				if err != nil || absent.Outcome != custody.OutcomeNoStatement || absent.StatementID != "" || absent.RunID == "" {
+					t.Fatal("scheduled missing statement did not produce a distinct dated outcome")
+				}
+				baseline := pilotFinancialSnapshot(t, ctx, pool)
+				provePilotBrowser(t, ctx, site.URL, "TestSignedCustodyOperatorBrowser", os.Getenv("CUSTODY_PILOT_DATED_SCRIPT"), map[string]string{
+					"portfolio": subject.PortfolioID, "custodian": subject.CustodianID, "clean_date": day.Format(time.DateOnly),
+					"clean_run": run.RunID, "statement": run.StatementID, "missing_date": missing.BusinessDate.Format(time.DateOnly),
+					"missing_run": absent.RunID, "unobserved_date": day.AddDate(0, 0, 2).Format(time.DateOnly),
+				})
+				info, err := broker.completions.Info(ctx)
+				if err != nil || info.State.Msgs != 3 || baseline != pilotFinancialSnapshot(t, ctx, pool) {
+					t.Fatal("dated read or denied operator action modified accounting or its completion stream")
+				}
+				t.Log("signed customer verified clean, missing and unobserved business dates")
+			}
 			return
 		}
 		if run.Outcome != custody.OutcomeBreaks || len(list.Breaks) != 1 {
@@ -185,26 +204,11 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			}
 		}
 		if binary := os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"); binary != "" {
-			payload, err := json.Marshal(b)
-			if err != nil {
-				t.Fatal(err)
-			}
 			testName := "TestSignedCustodyOperatorBrowser"
 			if rerun {
 				testName = "TestSignedCustodyRerunBrowser"
 			}
-			probe := exec.CommandContext(ctx, binary, "-test.run=^"+testName+"$", "-test.count=1", "-test.v")
-			probe.Stdin = bytes.NewReader(payload)
-			probe.Env = []string{"CUSTODY_PILOT_ACCOUNTING_URL=" + site.URL}
-			for _, k := range []string{"PATH", "SystemRoot", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR", "CUSTODY_PILOT_BROWSER_SCRIPT"} {
-				if v, ok := os.LookupEnv(k); ok {
-					probe.Env = append(probe.Env, k+"="+v)
-				}
-			}
-			log, err := probe.CombinedOutput()
-			if err != nil || !bytes.Contains(log, []byte("--- PASS: "+testName)) {
-				t.Fatalf("signed gateway/browser exercise failed: %v\n%s", err, log)
-			}
+			provePilotBrowser(t, ctx, site.URL, testName, os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"), b)
 			t.Log("signed gateway and Chromium verified the persisted detection")
 		}
 		if rerun {
@@ -239,4 +243,39 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func provePilotBrowser(t *testing.T, ctx context.Context, endpoint, testName, script string, expected any) {
+	t.Helper()
+	payload, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := exec.CommandContext(ctx, os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"), "-test.run=^"+testName+"$", "-test.count=1", "-test.v")
+	probe.Stdin = bytes.NewReader(payload)
+	probe.Env = []string{"CUSTODY_PILOT_ACCOUNTING_URL=" + endpoint, "CUSTODY_PILOT_BROWSER_SCRIPT=" + script}
+	for _, k := range []string{"PATH", "SystemRoot", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR"} {
+		if v, ok := os.LookupEnv(k); ok {
+			probe.Env = append(probe.Env, k+"="+v)
+		}
+	}
+	log, err := probe.CombinedOutput()
+	if err != nil || !bytes.Contains(log, []byte("--- PASS: "+testName)) {
+		t.Fatalf("signed gateway/browser exercise failed: %v\n%s", err, log)
+	}
+}
+
+func pilotFinancialSnapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
+	t.Helper()
+	var snapshot string
+	err := pool.QueryRow(ctx, `SELECT jsonb_build_array(
+		(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.run_id) FROM custody_runs r),
+		(SELECT jsonb_agg(to_jsonb(b) ORDER BY b.break_id) FROM custody_breaks b),
+		(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.request_id) FROM custody_actions a),
+		(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.entry_id) FROM ledger_entries e),
+		(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM outbox o))::text`).Scan(&snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
