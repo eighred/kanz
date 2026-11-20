@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
@@ -44,6 +45,9 @@ type Config struct {
 	// CustodyStatementSubject is where custodian statements arrive (#962). Empty
 	// ⇒ no statement consumer.
 	CustodyStatementSubject string
+	CustodySignedBatchOnly  bool
+	CustodyReviewReadOnly   bool
+	CustodyRerunRole        string
 	// CustodyPairs are the "portfolio:custodian" pairs the scheduled
 	// reconciliation covers.
 	//
@@ -243,6 +247,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	signedOnly, err := env.Bool("ACCOUNTING_CUSTODY_SIGNED_BATCH_ONLY", false)
+	if err != nil {
+		return Config{}, err
+	}
+	readOnlyReview, err := env.Bool("ACCOUNTING_CUSTODY_REVIEW_READ_ONLY", false)
+	if err != nil {
+		return Config{}, err
+	}
+	rerunRole := os.Getenv("ACCOUNTING_CUSTODY_RERUN_ROLE")
+	if rerunRole != "" && !readOnlyReview && !signedOnly {
+		return Config{}, errors.New("accounting: custody reruns require ACCOUNTING_CUSTODY_SIGNED_BATCH_ONLY=true")
+	}
 	custodyInterval, err := env.Duration("ACCOUNTING_CUSTODY_INTERVAL", DefaultCustodyInterval)
 	if err != nil {
 		return Config{}, err
@@ -272,6 +288,9 @@ func Load() (Config, error) {
 		SnapshotInterval: snapshotInterval,
 		SnapshotBatch:    snapshotBatch,
 
+		CustodySignedBatchOnly:  signedOnly,
+		CustodyReviewReadOnly:   readOnlyReview,
+		CustodyRerunRole:        rerunRole,
 		CustodyStatementSubject: env.Or("ACCOUNTING_CUSTODY_STATEMENT_SUBJECT", DefaultCustodyStatementSubject),
 		CustodyPairs:            env.SplitList(os.Getenv("ACCOUNTING_CUSTODY_PAIRS")),
 		CustodyAccounts:         os.Getenv("ACCOUNTING_CUSTODY_ACCOUNTS"),

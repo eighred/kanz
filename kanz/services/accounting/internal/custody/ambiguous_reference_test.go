@@ -45,7 +45,7 @@ func ambiguousReferenceBook(t *testing.T, ctx context.Context, store ledger.Stor
 		}
 	}
 	loader := LedgerBookLoader(store, nil, testLogger())
-	book, executions, err := loader(ctx, subject())
+	book, executions, _, err := loader(ctx, subject())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,11 +194,11 @@ func TestSchedulerContinuesAfterAmbiguousReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	badLoader := ambiguousReferenceBook(t, ctx, ledger.NewMemoryStore())
-	loader := func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error) {
+	loader := func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error) {
 		if subject.PortfolioID == "PF1" {
 			return badLoader(ctx, subject)
 		}
-		return ledger.NewBook(subject.PortfolioID), nil, nil
+		return ledger.NewBook(subject.PortfolioID), nil, nil, nil
 	}
 	pub := &capturePublisher{}
 	reg := prometheus.NewRegistry()

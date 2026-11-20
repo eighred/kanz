@@ -98,6 +98,7 @@ const (
 	// OutcomeFailed: the run could not complete. NOT a clean book, and the
 	// FailureReason says why.
 	OutcomeFailed
+	OutcomeHistoricalQuantityCorrection
 )
 
 func (o Outcome) String() string {
@@ -110,6 +111,8 @@ func (o Outcome) String() string {
 		return "no_statement"
 	case OutcomeFailed:
 		return "failed"
+	case OutcomeHistoricalQuantityCorrection:
+		return "historical_quantity_correction"
 	default:
 		return "unspecified"
 	}
@@ -123,7 +126,7 @@ func (o Outcome) String() string {
 // the metric is pre-seeded from this list. A new outcome added above therefore
 // gets its series without anybody remembering to add it in a second place.
 func Outcomes() []Outcome {
-	return []Outcome{OutcomeClean, OutcomeBreaks, OutcomeNoStatement, OutcomeFailed}
+	return []Outcome{OutcomeClean, OutcomeBreaks, OutcomeNoStatement, OutcomeFailed, OutcomeHistoricalQuantityCorrection}
 }
 
 // wireOutcome renders an Outcome onto the wire.
@@ -137,6 +140,8 @@ func wireOutcome(o Outcome) accountingpb.ReconciliationOutcome {
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_NO_STATEMENT
 	case OutcomeFailed:
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_FAILED
+	case OutcomeHistoricalQuantityCorrection:
+		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_HISTORICAL_QUANTITY_CORRECTION
 	default:
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_UNSPECIFIED
 	}
@@ -162,6 +167,8 @@ func wireKind(k recon.BreakKind) (accountingpb.ReconciliationBreakKind, bool) {
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_CASH, true
 	case recon.BreakExecutionMissingAtCustodian:
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_AT_CUSTODIAN, true
+	case recon.BreakExecutionQuantity:
+		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_QUANTITY, true
 	case recon.BreakExecutionMissingInIBOR:
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_IN_IBOR, true
 	default:
@@ -382,22 +389,45 @@ func (s Statement) Subject() Subject {
 // event. The age of the newest run per (portfolio, custodian) is what the
 // staleness alert reads.
 type Run struct {
-	RunID         string
-	Subject       Subject
-	Outcome       Outcome
-	StatementID   string
-	Breaks        []Break
-	Tolerance     *big.Rat
-	CompletedAt   time.Time
-	FailureReason string
+	// compared holds the statement read before loading the book. CommitRun
+	// validates it under the pair lock and drops it before retaining the run.
+	compared                      *Statement
+	observedMissing               bool
+	measured                      []recon.ExecutionQuantityDifference
+	ExecutionQuantities           *accountingpb.ExecutionQuantityComparison
+	HistoricalQuantityResolutions []*accountingpb.HistoricalQuantityResolution
+	RunID                         string
+	RequestID                     string
+	Actor                         string
+	Subject                       Subject
+	Outcome                       Outcome
+	StatementID                   string
+	Basis                         *RunBasis
+	Breaks                        []Break
+	Tolerance                     *big.Rat
+	CompletedAt                   time.Time
+	FailureReason                 string
+}
+
+// Detection identifies the comparison that last wrote a break's financial figures.
+type Detection struct {
+	RunID           string `json:"run_id"`
+	StatementID     string `json:"statement_id"`
+	BusinessDate    string `json:"business_date"`
+	ScopeMode       string `json:"scope_mode,omitempty"`
+	JournalPosition string `json:"journal_position,omitempty"`
 }
 
 // Break is one discrepancy, carried as a working item rather than a log line.
 type Break struct {
+	Detection                 Detection
+	InstrumentID              string
+	LateCorrectionStatementID string
 	// BreakID is stable ACROSS RUNS, derived from (portfolio, custodian, kind,
 	// key) — see BreakID. The age depends on it: a break given a fresh id every
 	// day would be permanently one day old.
-	BreakID string
+	BreakID    string
+	comparison *RunBasis // volatile store redetection scope
 	// Ownership comes from the reconciliation subject or stored columns, never
 	// from parsing the opaque working-item ID.
 	PortfolioID string `json:"-"`

@@ -1,6 +1,15 @@
-import { api, ApiError } from './client'
+import { api, auth, ApiError } from './client'
+import { users } from './users'
+import { downloadJson } from './evidence'
+import { readExecutionQuantities, readReportedFigures, type ReportedExecutionFigures, readQuantityResolutions, validCustodyRunID, type ExecutionQuantities, type QuantityResolution } from './custody-quantities'
+
+export interface CustodyDetection {
+  run_id: string; statement_id: string; business_date: string
+  journal_position?: string; scope_mode?: string
+}
 
 export interface CustodyBreak {
+  portfolio_id?: string; custodian_id?: string; detection?: CustodyDetection; instrument_id?: string; late_correction_statement_id?: string
   break_id: string; kind: string; key: string; ibor: string; custodian: string; difference: string
   status: string; assignee?: string; explanation?: string; first_seen_at: string
   last_seen_at: string; status_changed_at: string; age_seconds: number
@@ -19,6 +28,23 @@ export interface CustodyEvidence {
   before: ActionState; after: ActionState; values: { ibor: string; custodian: string; difference: string }
 }
 
+function nonempty(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function validDetection(value: unknown): value is CustodyDetection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const source = value as Record<string, unknown>
+  if (!nonempty(source.run_id) || !nonempty(source.statement_id) || !nonempty(source.business_date)) return false
+  const day = source.business_date
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false
+  const instant = new Date(day + 'T00:00:00Z')
+  if (!Number.isFinite(instant.getTime()) || instant.toISOString().slice(0, 10) !== day) return false
+  const position = source.journal_position
+  if (position !== undefined && (typeof position !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(position) || BigInt(position) > 9223372036854775807n)) return false
+  return source.scope_mode === undefined || nonempty(source.scope_mode)
+}
+
 function parseBreak(value: unknown): CustodyBreak {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid custody response.')
   const row = value as Record<string, unknown>
@@ -31,23 +57,227 @@ function parseBreak(value: unknown): CustodyBreak {
   if (['ibor', 'custodian', 'difference'].some((key) => typeof row[key] !== 'string')) throw new Error('Invalid custody response.')
   if ((row.values_state === 'exact' || row.values_state === undefined) && ['ibor', 'custodian', 'difference'].some((key) => !exact(row[key]))) throw new Error('Invalid custody response.')
   if (row.revision !== undefined && !revision(row.revision)) throw new Error('Invalid custody response.')
+  if ((row.portfolio_id !== undefined || row.custodian_id !== undefined || row.detection !== undefined) &&
+      (!nonempty(row.portfolio_id) || !nonempty(row.custodian_id))) throw new Error('Invalid custody response.')
+  if (row.detection !== undefined && !validDetection(row.detection)) throw new Error('Invalid custody response.')
+  if (row.late_correction_statement_id !== undefined && (row.kind !== 'execution_quantity' || !nonempty(row.late_correction_statement_id))) throw new Error('Invalid custody response.')
+  if (row.kind === 'execution_quantity' && (typeof row.instrument_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(row.instrument_id) ||
+      row.values_state !== 'exact' || !validDetection(row.detection) || row.revision !== undefined || row.status !== 'open')) throw new Error('Invalid custody response.')
   return row as unknown as CustodyBreak
 }
 
+export interface CustodyRerunRequest { portfolio_id: string; custodian_id: string; business_date: string; request_id: string }
+export interface CustodyRerunReceipt extends CustodyRerunRequest {
+  actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'no_statement' | 'failed' | 'historical_quantity_correction'
+  statement_id?: string; scope_mode?: string; journal_position?: string; failure_code?: string
+}
+
+export interface CustodySubject { portfolio_id: string; custodian_id: string; business_date: string }
+export type TransactionComparison =
+  | { transaction_pass: 'ran'; statement_reference_count: string; book_reference_count: string; unreferenced_book_trades: string }
+  | { transaction_pass: 'balances_only' | 'unknown' }
+interface RetainedBreak {
+  break_id: string; kind: string; key: string; values_state: 'exact' | 'unavailable'
+  ibor: string; custodian: string; difference: string
+}
+type HistoricalComparison = { signed_statement_sha256: string; reported_execution_figures?: ReportedExecutionFigures } & (
+  | { breaks: RetainedBreak[]; execution_quantities?: ExecutionQuantities; historical_quantity_resolutions?: never }
+  | { historical_quantity_resolutions: QuantityResolution[]; breaks?: never; execution_quantities?: never }
+)
+
+function signedStatement(value: unknown): value is string {
+  return typeof value === 'string' && /^custody-batch\.v1\.[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.r[1-9]\d{0,18}\.[a-f0-9]{64}$/.test(value)
+}
+
+function retainedBreak(value: unknown): RetainedBreak {
+  const invalid = () => new Error('Historical difference could not be verified.')
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid()
+  const row = value as Record<string, unknown>
+  if (!nonempty(row.break_id) || !nonempty(row.kind) || !nonempty(row.key)) throw invalid()
+  const { break_id, kind, key, values_state, ibor, custodian, difference } = row
+  if (values_state === 'unavailable' && ibor === '' && custodian === '' && difference === '') {
+    return { break_id, kind, key, values_state, ibor, custodian, difference }
+  }
+  if (values_state !== 'exact' || !exact(ibor) || !exact(custodian) || !exact(difference)) throw invalid()
+  return { break_id, kind, key, values_state, ibor, custodian, difference }
+}
+
+const pendingReasons = ['journal_changed', 'assignment_changed', 'assignment_unproven'] as const
+type PendingReason = typeof pendingReasons[number]
+function isPendingReason(reason: unknown): reason is PendingReason {
+  return pendingReasons.some(candidate => candidate === reason)
+}
+
+export type DatedCustodyResult = CustodySubject & { tenant_id: string } & (
+  | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: PendingReason; historical_quantity_correction_run_id?: string }
+  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; account_assignment_verified?: true; transactions?: TransactionComparison; historical?: HistoricalComparison }
+)
+
+function comparisonArtifact(receipt: Extract<DatedCustodyResult, { state: 'recorded' }>) {
+  const { transactions, historical, ...comparison } = receipt
+  return {
+    format: 'kanz.custody-comparison.v1',
+    ...comparison,
+    ...(transactions?.transaction_pass === 'ran' ? { transaction_comparison_basis: 'external_reference_membership' } : {}),
+    ...transactions,
+    ...(historical && { lookup: 'retained_run', ...historical }),
+  }
+}
+
+export function downloadCustodyComparison(receipt: Extract<DatedCustodyResult, { state: 'recorded' }>): void {
+  downloadJson(comparisonArtifact(receipt), `custody-comparison-${receipt.business_date}.json`)
+}
+
+export class ReportedFiguresExportLimit extends Error {
+  constructor(readonly signedStatementSHA256: string) {
+    super('Custodian-reported execution figures exceed the download limit.')
+  }
+}
+
+function validQueueCursor(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9_-]+$/.test(value)
+}
+
 export const custody = {
-  async breaks(): Promise<CustodyBreak[]> {
-    const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown }>('/api/v1/custody/breaks')
+  async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = '', reportedFigures = false): Promise<DatedCustodyResult> {
+    const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
+    if (runID) {
+      if (!validCustodyRunID(runID)) throw new Error('Invalid saved run ID.')
+      query.set('run_id', runID)
+    }
+    if (reportedFigures) {
+      if (!runID) throw new Error('A saved run is required for source figures.')
+      query.set('include', 'reported_execution_figures')
+    }
+    const result = await api.get<Record<string, unknown>>('/api/v1/portfolios/' + encodeURIComponent(subject.portfolio_id) + '/custody/comparison?' + query, { expectedStatus: 200, signal })
+    const invalid = () => new Error('Dated result could not be verified.')
+    if (!nonempty(tenant) || !result || result.tenant_id !== tenant || result.portfolio_id !== subject.portfolio_id || result.custodian_id !== subject.custodian_id ||
+        result.business_date !== subject.business_date || (result.statement_id !== undefined && !nonempty(result.statement_id))) throw invalid()
+    const reason = result.reason
+    if (reason !== undefined && (result.state !== 'pending' || !isPendingReason(reason))) throw invalid()
+    const scope = { tenant_id: tenant, portfolio_id: subject.portfolio_id, custodian_id: subject.custodian_id, business_date: subject.business_date }
+    const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
+    const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
+    const correction = result.state === 'recorded' && result.outcome === 'historical_quantity_correction'
+    if ((!reportedFigures || !verified) && result.reported_execution_figures !== undefined) throw invalid()
+    const correctionID = result.historical_quantity_correction_run_id
+    if (correctionID !== undefined && (runID || result.state !== 'pending' || !signedStatement(result.statement_id) || !validCustodyRunID(correctionID))) throw invalid()
+    if (correction && (!runID || result.account_assignment_verified !== true || result.scope_mode !== 'declared' || result.breaks !== undefined)) throw invalid()
+    if (!correction && result.historical_quantity_resolutions !== undefined) throw invalid()
+    if (result.account_assignment_verified !== undefined &&
+        (result.account_assignment_verified !== true || (!verified && !correction) || result.scope_mode !== 'declared')) throw invalid()
+    let historical: HistoricalComparison | undefined
+    if (runID && result.state === 'recorded') {
+      const digest = result.signed_statement_sha256
+      if ((!verified && !correction) || result.run_id !== runID || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
+          !signedStatement(result.statement_id) || !result.statement_id.endsWith('.' + digest)) throw invalid()
+      if (correction) {
+        historical = { signed_statement_sha256: digest, historical_quantity_resolutions: readQuantityResolutions(result.historical_quantity_resolutions) }
+      } else {
+        if (!Array.isArray(result.breaks) || result.breaks.length > 4096 || (result.outcome === 'clean') !== (result.breaks.length === 0)) throw invalid()
+        const breaks = result.breaks.map(retainedBreak)
+        if (new Set(breaks.map(row => row.break_id)).size !== breaks.length) throw invalid()
+        historical = { signed_statement_sha256: digest, breaks }
+      }
+    } else if ((runID && result.state !== 'unknown') || result.breaks !== undefined || result.signed_statement_sha256 !== undefined) throw invalid()
+    let transactions: TransactionComparison | undefined
+    if (verified) {
+      if (result.transaction_pass === 'ran') {
+        const count = (key: typeof referenceCounts[number]): string => {
+          const value = result[key]
+          if (typeof value !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(value) || BigInt(value) > 9223372036854775807n) throw invalid()
+          return value
+        }
+        transactions = { transaction_pass: 'ran', statement_reference_count: count('statement_reference_count'),
+          book_reference_count: count('book_reference_count'), unreferenced_book_trades: count('unreferenced_book_trades') }
+      } else if (result.transaction_pass === 'balances_only' || result.transaction_pass === 'unknown') {
+        transactions = { transaction_pass: result.transaction_pass }
+      } else throw invalid()
+    } else if (result.transaction_pass !== undefined) throw invalid()
+    if (transactions?.transaction_pass !== 'ran' && referenceCounts.some(key => result[key] !== undefined)) throw invalid()
+    if (result.execution_quantities !== undefined) {
+      if (!historical || transactions?.transaction_pass !== 'ran') throw invalid()
+      historical.execution_quantities = readExecutionQuantities(result.execution_quantities, transactions.statement_reference_count, transactions.book_reference_count)
+    }
+    if (result.state === 'recorded') {
+      if (!nonempty(result.run_id) || !nonempty(result.completed_at) || !Number.isFinite(Date.parse(result.completed_at)) ||
+          !['clean', 'breaks', 'no_statement', 'failed', 'historical_quantity_correction'].some(value => value === result.outcome)) throw invalid()
+      if (result.outcome === 'no_statement' && result.statement_id !== undefined) throw invalid()
+      const scoped = result.journal_position !== undefined || result.scope_mode !== undefined
+      if (scoped && (!['declared', 'derived'].some(value => value === result.scope_mode) || typeof result.journal_position !== 'string' ||
+          !/^(0|[1-9]\d{0,18})$/.test(result.journal_position) || BigInt(result.journal_position) > 9223372036854775807n)) throw invalid()
+      if ((result.outcome === 'clean' || result.outcome === 'breaks') && (!result.statement_id || !scoped)) throw invalid()
+      if (reportedFigures) {
+        if (!historical || correction || result.account_assignment_verified !== true || transactions?.transaction_pass !== 'ran') throw invalid()
+        historical.reported_execution_figures = readReportedFigures(result.reported_execution_figures, historical.signed_statement_sha256, transactions.statement_reference_count)
+      }
+      const receipt = { ...scope, state: 'recorded' as const, outcome: result.outcome as CustodyRerunReceipt['outcome'], run_id: result.run_id,
+        completed_at: result.completed_at, statement_id: result.statement_id as string | undefined,
+        scope_mode: result.scope_mode as string | undefined, journal_position: result.journal_position as string | undefined,
+        account_assignment_verified: result.account_assignment_verified as true | undefined, transactions, historical }
+      if (historical?.reported_execution_figures && new TextEncoder().encode(JSON.stringify(comparisonArtifact(receipt), null, 2)).length > (1 << 20)) {
+        throw new ReportedFiguresExportLimit(historical.signed_statement_sha256)
+      }
+      return receipt
+    } else if (!['not_compared', 'pending', 'unknown'].some(value => value === result.state) ||
+        (result.state === 'pending' && !result.statement_id) || (result.state === 'unknown' && result.statement_id !== undefined) ||
+        ['run_id', 'outcome', 'completed_at', 'scope_mode', 'journal_position'].some(key => result[key] !== undefined)) throw invalid()
+    return { ...scope, state: result.state as 'not_compared' | 'pending' | 'unknown',
+      statement_id: result.statement_id as string | undefined, reason, ...(correctionID !== undefined && { historical_quantity_correction_run_id: correctionID }) }
+  },
+  async queue(signal?: AbortSignal, after?: string): Promise<{ breaks: CustodyBreak[]; nextCursor?: string; rerunActor?: string }> {
+    const limit = 100
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (after !== undefined) {
+      if (!validQueueCursor(after)) throw new Error('Invalid custody response.')
+      query.set('after', after)
+    }
+    const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown; rerun_enabled?: unknown; next_cursor?: unknown }>(
+      '/api/v1/custody/breaks?' + query.toString(), { signal })
     const rows = body?.breaks === null ? [] : body?.breaks
     if (!Array.isArray(rows) || body.count !== rows.length) throw new Error('Invalid custody response.')
+    const nextCursor = body.next_cursor
+    if (nextCursor !== undefined && (!validQueueCursor(nextCursor) || nextCursor === after ||
+        rows.length === 0 || rows.length > limit)) throw new Error('Invalid custody response.')
     if (body.actions_enabled !== undefined && typeof body.actions_enabled !== 'boolean') throw new Error('Invalid custody response.')
-    return rows.map((value) => {
+    if (body.rerun_enabled !== undefined && typeof body.rerun_enabled !== 'boolean') throw new Error('Invalid custody response.')
+    const breaks = rows.map((value) => {
       const row = parseBreak(value)
       return { ...row, actions_enabled: body.actions_enabled === true && row.values_state === 'exact' && revision(row.revision) && BigInt(row.revision) < 9223372036854775807n && statuses.slice(0, 3).includes(row.status) }
     })
+    if (body.rerun_enabled === true || breaks.some(row => row.actions_enabled)) {
+      let canAct = false
+      let rerunActor: string | undefined
+      try {
+        const identity = await auth.me(signal)
+        const grants = await users.gatewayPermissions(identity, signal)
+        canAct = grants.routes.some(r => r.Capability === 'fund' && r.Pattern === 'POST /v1/custody/breaks/{id}/actions')
+        if (body.rerun_enabled === true && grants.routes.some(r => r.Capability === 'custody_rerun' && r.Pattern === 'POST /v1/portfolios/{id}/custody/reruns')) rerunActor = identity.subject
+      } catch { signal?.throwIfAborted() }
+      if (!canAct) for (const row of breaks) row.actions_enabled = false
+      return { breaks, rerunActor, nextCursor }
+    }
+    return { breaks, nextCursor }
   },
-  async act(row: CustodyBreak, decision: CustodyDecision): Promise<CustodyEvidence> {
+  async rerun(request: CustodyRerunRequest, actor: string, signal?: AbortSignal): Promise<CustodyRerunReceipt> {
+    const { portfolio_id, ...command } = request
+    const receipt = await api.post<CustodyRerunReceipt>('/api/v1/portfolios/' + encodeURIComponent(portfolio_id) + '/custody/reruns', command, 200, signal)
+    if (!receipt || receipt.request_id !== request.request_id || receipt.portfolio_id !== portfolio_id ||
+        receipt.custodian_id !== request.custodian_id || receipt.business_date !== request.business_date || receipt.actor !== actor ||
+        !nonempty(receipt.run_id) || !Number.isFinite(Date.parse(receipt.completed_at)) ||
+        !['clean', 'breaks', 'no_statement', 'failed', 'historical_quantity_correction'].includes(receipt.outcome) ||
+        (receipt.outcome === 'historical_quantity_correction' && (!validCustodyRunID(receipt.run_id) || !signedStatement(receipt.statement_id) ||
+          receipt.scope_mode !== 'declared' || receipt.journal_position === undefined)) ||
+        (receipt.failure_code !== undefined && (receipt.outcome !== 'failed' || !['historical_lifecycle', 'comparison_failed'].includes(receipt.failure_code))) ||
+        (['clean', 'breaks'].includes(receipt.outcome) && !nonempty(receipt.statement_id)) ||
+        (receipt.outcome === 'no_statement' && receipt.statement_id !== undefined) ||
+        (receipt.scope_mode !== undefined && !nonempty(receipt.scope_mode)) ||
+        (receipt.journal_position !== undefined && (typeof receipt.journal_position !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(receipt.journal_position) || BigInt(receipt.journal_position) > 9223372036854775807n))) throw new Error('Comparison receipt could not be verified.')
+    return receipt
+  },
+  async act(row: CustodyBreak, decision: CustodyDecision, signal?: AbortSignal): Promise<CustodyEvidence> {
     if (!row.actions_enabled || row.values_state !== 'exact' || !revision(row.revision) || BigInt(row.revision) >= 9223372036854775807n || decision.expected_revision !== row.revision || !decision.request_id || decision.review_contract !== 'exact-v1' || !['claim', 'explain'].includes(decision.action) || (decision.action === 'explain' && !decision.explanation?.trim())) throw new Error('Invalid custody review.')
-    const value = await api.post<CustodyEvidence>(`/api/v1/custody/breaks/${encodeURIComponent(row.break_id)}/actions`, decision)
+    const value = await api.post<CustodyEvidence>(`/api/v1/custody/breaks/${encodeURIComponent(row.break_id)}/actions`, decision, undefined, signal)
     const state = (s: ActionState) => s && statuses.includes(s.status) && typeof s.assignee === 'string' && typeof s.explanation === 'string' && revision(s.revision)
     if (!value || value.request_id !== decision.request_id || value.break_id !== row.break_id || value.action !== decision.action || typeof value.actor !== 'string' || !value.actor.trim() || !Number.isFinite(Date.parse(value.recorded_at)) || !state(value.before) || !state(value.after) || value.before.revision !== row.revision || BigInt(value.after.revision) !== BigInt(row.revision) + 1n || value.before.status !== row.status || value.before.assignee !== (row.assignee || '') || value.before.explanation !== (row.explanation || '') || !value.values || value.values.ibor !== row.ibor || value.values.custodian !== row.custodian || value.values.difference !== row.difference) throw new Error('Custody action evidence could not be verified.')
     const { before, after } = value
@@ -69,6 +299,8 @@ export function describeCustodyAction(error: unknown): string {
 }
 
 export function describeCustody(error: unknown): string {
+  if (error instanceof ApiError && error.status === 400) return 'This queue page is no longer available. Reload the queue to start again.'
+  if (error instanceof ApiError && error.status === 422 && error.code === 'custody_queue_pagination_required') return 'The service requires paged custody results and could not return this page.'
   if (error instanceof ApiError && error.status === 403) return 'Your account is not permitted to read the custody-break queue.'
   if (error instanceof ApiError && error.status === 404) return 'Custody reconciliation is not enabled in this deployment.'
   if (error instanceof ApiError && error.status === 503) return 'Custody reconciliation is currently unavailable.'

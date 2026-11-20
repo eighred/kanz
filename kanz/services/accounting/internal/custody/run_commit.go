@@ -2,9 +2,13 @@ package custody
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,26 +24,98 @@ import (
 )
 
 var ErrPublicationPending = errors.New("custody: run committed; completion FACT publication pending")
+var errQuantityReceiptLimit = errors.New("custody: execution quantity completion exceeds the retained receipt limit")
+
+const historicalBreakLimit = 4096
+
 var ErrRunBusy = errors.New("custody: reconciliation pair is being committed")
 var ErrRunCompletionMissing = errors.New("custody: existing run has no immutable completion FACT")
 var ErrRunIdentityConflict = errors.New("custody: run ID belongs to another subject")
+var ErrHistoricalLifecycle = errors.New("custody: a later business date already controls outstanding breaks")
+var ErrStatementChanged = errors.New("custody: the authoritative statement changed during comparison")
+
+const custodyPairLockKeySQL = `hashtextextended(app_current_tenant() || ':custody-run:' || $1,0)`
+
+func lockCustodyPair(ctx context.Context, tx pgx.Tx, subject Subject) (string, error) {
+	var tenant string
+	var locked bool
+	err := tx.QueryRow(ctx, `SELECT app_current_tenant(), pg_try_advisory_xact_lock(`+custodyPairLockKeySQL+`)`, pairKey(subject.PortfolioID, subject.CustodianID)).Scan(&tenant, &locked)
+	if err == nil && !locked {
+		err = ErrRunBusy
+	}
+	return tenant, err
+}
 
 func verifying(run Run) bool { return run.Outcome == OutcomeClean || run.Outcome == OutcomeBreaks }
+
+func (run Run) detection() Detection {
+	if run.Outcome != OutcomeBreaks || run.StatementID == "" {
+		return Detection{}
+	}
+	d := Detection{RunID: run.RunID, StatementID: run.StatementID, BusinessDate: BusinessDay(run.Subject.BusinessDate).Format(time.DateOnly)}
+	if run.Basis != nil {
+		d.ScopeMode = run.Basis.Mode
+		d.JournalPosition = strconv.FormatInt(run.Basis.JournalPosition, 10)
+	}
+	return d
+}
+
+func (run *Run) confirmStatement(current Statement, err error) error {
+	if err != nil {
+		return err
+	}
+	prior := run.compared
+	run.compared = nil
+	if !sameComparison(current, *prior) {
+		return ErrStatementChanged
+	}
+	return nil
+}
+
+func sameComparison(current, prior Statement) bool {
+	return current.StatementID == prior.StatementID && current.PortfolioID == prior.PortfolioID &&
+		current.CustodianID == prior.CustodianID && current.BusinessDate.Equal(prior.BusinessDate) &&
+		current.ReceivedAt.Equal(prior.ReceivedAt) && current.Grain == prior.Grain &&
+		maps.EqualFunc(current.Positions, prior.Positions, equalFigure) &&
+		maps.EqualFunc(current.Cash, prior.Cash, equalFigure) &&
+		slices.EqualFunc(current.Transactions, prior.Transactions, equalTransaction)
+}
+
+func equalFigure(a, b *big.Rat) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Cmp(b) == 0
+}
+
+func equalTransaction(a, b recon.Transaction) bool {
+	return a.ExternalRef == b.ExternalRef && a.InstrumentID == b.InstrumentID && a.QuantityInInstrumentUnits == b.QuantityInInstrumentUnits &&
+		a.CurrencyCode == b.CurrencyCode && a.TradeDate.Equal(b.TradeDate) &&
+		a.SettlementDate.Equal(b.SettlementDate) && equalFigure(a.Quantity, b.Quantity) &&
+		equalFigure(a.Price, b.Price) && equalFigure(a.Cash, b.Cash)
+}
 
 func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, error) {
 	msg, err := runToProto(run)
 	if err != nil {
 		return outbox.Record{}, err
 	}
+	// The immutable lookup bounds both the full payload and the working breaks.
+	// Refuse before the queue transaction commits an unreadable completion.
+	if (run.ExecutionQuantities != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
+		return outbox.Record{}, errQuantityReceiptLimit
+	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
-		TenantID: tenant, EventTime: run.CompletedAt, CorrelationID: run.RunID,
+		TenantID: tenant, EventTime: run.CompletedAt, CorrelationID: run.RunID, CausationID: run.RequestID,
 		PartitionKey:     pairKey(run.Subject.PortfolioID, run.Subject.CustodianID),
 		PayloadSchemaRef: schemaRefRun, Payload: msg})
 }
 
 func cloneRun(run Run) Run {
 	run.Tolerance = cloneRat(run.Tolerance)
+	run.Basis = run.Basis.clone()
+	run.ExecutionQuantities = proto.CloneOf(run.ExecutionQuantities)
 	run.Breaks = append([]Break(nil), run.Breaks...)
 	for i := range run.Breaks {
 		b := &run.Breaks[i]
@@ -76,7 +152,40 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		return cloneRun(prior), nil
 	}
+	if run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 {
+		return Run{}, ErrDurableActionStore
+	}
 	run = cloneRun(run)
+	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
+	if run.Basis != nil && run.Basis.Assignments != nil {
+		return Run{}, ErrUnprovenAssignment
+	}
+	if run.ExecutionQuantities != nil {
+		return Run{}, errBatchReceipt
+	}
+	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
+		return Run{}, ErrHistoricalLifecycle
+	}
+	if run.observedMissing {
+		_, err := m.latestStatementLocked(run.Subject)
+		if !errors.Is(err, ErrNoStatement) {
+			return Run{}, ErrStatementChanged
+		}
+		run.observedMissing = false
+	}
+	if verifying(run) && run.Basis != nil {
+		for _, prior := range m.runs[pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)] {
+			if verifying(prior) && prior.Subject.Key() == run.Subject.Key() && prior.Basis != nil && prior.Basis.JournalPosition > run.Basis.JournalPosition {
+				return Run{}, ErrBookBasisChanged
+			}
+		}
+	}
+	if run.compared != nil {
+		current, err := m.latestStatementLocked(run.Subject)
+		if err := run.confirmStatement(current, err); err != nil {
+			return Run{}, err
+		}
+	}
 	// Stage into a detached map. Encoding/tenant/outbox refusal must leave the
 	// original lifecycle intact, just as a PostgreSQL rollback does.
 	staged := NewMemoryStore()
@@ -84,6 +193,10 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		staged.breaks[id] = b
 	}
 	if verifying(run) {
+		for i := range run.Breaks {
+			run.Breaks[i].comparison = run.Basis
+			run.Breaks[i].Detection = run.detection()
+		}
 		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
 		if err != nil {
 			return Run{}, err
@@ -105,25 +218,27 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	tx, err := p.pool.Begin(ctx)
+	// Re-read the admitted set after the tenant assignment lock is acquired.
+	// A deployment-level repeatable-read default would retain an older snapshot.
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Run{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var tenant string
-	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT app_current_tenant(), pg_try_advisory_xact_lock(hashtextextended(app_current_tenant() || ':custody-run:' || $1,0))`, pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)).Scan(&tenant, &locked); err != nil {
+	tenant, err := lockCustodyPair(ctx, tx, run.Subject)
+	if err != nil {
 		return Run{}, err
 	}
-	if !locked {
-		return Run{}, ErrRunBusy
-	}
 	// Run IDs are tenant-wide even if an erroneous caller changes the pair.
+	var locked bool
 	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended(app_current_tenant() || ':custody-run-id:' || $1,0))`, run.RunID).Scan(&locked); err != nil {
 		return Run{}, err
 	}
 	if !locked {
 		return Run{}, ErrRunBusy
+	}
+	if run.RequestID != "" && bus.TenantIDFromContext(ctx) != tenant {
+		return Run{}, ErrInvalidManualRequest
 	}
 	if incoming := bus.TenantIDFromContext(ctx); incoming != "" {
 		if err := bus.RequireTenantScope(incoming, tenant); err != nil {
@@ -136,9 +251,22 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, err
 	}
 	if exists {
+		if run.RequestID != "" {
+			prior, err := storedManualReceipt(ctx, tx, run)
+			if err != nil {
+				return Run{}, err
+			}
+			return prior, tx.Commit(ctx)
+		}
 		var payload []byte
-		err := tx.QueryRow(ctx, `SELECT payload FROM outbox WHERE producer_service=$1 AND event_type=$2 AND correlation_id=$3 ORDER BY id LIMIT 1`, outbox.ServiceAccounting, SubjectRun, run.RunID).Scan(&payload)
-		if errors.Is(err, pgx.ErrNoRows) {
+		// Older scheduled runs kept their only completion in the relay. Never
+		// reconstruct their figures from the current, mutable break queue.
+		var basis *RunBasis
+		err := tx.QueryRow(ctx, `SELECT COALESCE(manual_receipt, (
+			SELECT payload FROM outbox WHERE producer_service=$1 AND event_type=$2 AND correlation_id=$3 ORDER BY id LIMIT 1
+		)), book_basis FROM custody_runs WHERE tenant_id=app_current_tenant() AND run_id=$3`,
+			outbox.ServiceAccounting, SubjectRun, run.RunID).Scan(&payload, &basis)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && payload == nil) {
 			return Run{}, ErrRunCompletionMissing
 		}
 		if err != nil {
@@ -148,27 +276,188 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		if err != nil {
 			return Run{}, err
 		}
-		if prior.RunID != run.RunID || prior.Subject.Key() != run.Subject.Key() {
+		if prior.RunID != run.RunID || prior.Subject.Key() != run.Subject.Key() || prior.RequestID != "" {
 			return Run{}, ErrRunIdentityConflict
 		}
+		prior.Basis = basis
 		return prior, tx.Commit(ctx)
+	}
+	if run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 || (run.Basis != nil && run.Basis.HistoricalDetections != nil) {
+		return Run{}, ErrUnverifiedPrecision
 	}
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
+	var signedDigest []byte
+	switch {
+	case run.RequestID != "" && (verifying(run) || run.observedMissing):
+		signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
+	case verifying(run) && run.compared != nil && isBatchStatement(run.StatementID) && run.Basis != nil && run.Basis.Mode == BasisDeclared:
+		// A scheduled comparison of an authorized signed account receives the
+		// same durable attestation as a manual one. Ordinary source modes
+		// retain their original comparison outcome and carry no signed proof.
+		signedDigest, err = signedStatementDigest(ctx, tx, tenant, run)
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	if run.ExecutionQuantities != nil && len(signedDigest) == 0 {
+		return Run{}, errBatchReceipt
+	}
+	if run.observedMissing {
+		_, err := staged.LatestStatement(ctx, run.Subject)
+		if err == nil {
+			return Run{}, ErrStatementChanged
+		}
+		if !errors.Is(err, ErrNoStatement) {
+			return Run{}, err
+		}
+		run.observedMissing = false
+	}
 	if verifying(run) {
-		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
+		if run.Basis != nil && run.Basis.Assignments != nil {
+			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtextextended('custody-assignment-tenant:' || public.app_current_tenant(),0))"); err != nil {
+				return Run{}, err
+			}
+			if _, err := confirmRunAssignments(ctx, tx, run.Subject, run.Basis, false); err != nil {
+				return Run{}, err
+			}
+		}
+		// The transaction already owns the pair lock. A later clean run is as
+		// authoritative as a later break and must prevent historical reopening.
+		var later bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM custody_runs WHERE tenant_id=app_current_tenant()
+			AND portfolio_id=$1 AND custodian_id=$2 AND outcome IN ('clean','breaks')
+			AND business_date > $3::date)`, run.Subject.PortfolioID, run.Subject.CustodianID,
+			BusinessDay(run.Subject.BusinessDate)).Scan(&later)
 		if err != nil {
 			return Run{}, err
 		}
-		run.Breaks = breaksForSubject(stored, run.Subject)
-	}
-	if err := staged.SaveRun(ctx, run); err != nil {
-		return Run{}, err
+		if run.Basis != nil {
+			var newer bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM custody_runs WHERE tenant_id=app_current_tenant()
+				AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3::date AND outcome IN ('clean','breaks')
+				AND (book_basis->>'journal_position')::bigint > $4)`, run.Subject.PortfolioID, run.Subject.CustodianID, BusinessDay(run.Subject.BusinessDate), run.Basis.JournalPosition).Scan(&newer); err != nil {
+				return Run{}, err
+			}
+			if newer {
+				return Run{}, ErrBookBasisChanged
+			}
+		}
+		if later && run.RequestID == "" && len(run.measured) > 0 {
+			// Scheduled late application needs the same signed intake frontier
+			// as a manual command: a newer published-but-undelivered revision wins.
+			signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
+			if err != nil {
+				return Run{}, err
+			}
+		}
+		if run.compared != nil {
+			current, err := staged.LatestStatement(ctx, run.Subject)
+			if err := run.confirmStatement(current, err); err != nil {
+				return Run{}, err
+			}
+		}
+		if later {
+			// Never sweep another date's working set. Only a newer independently signed
+			// equality for a still-open item can yield this narrower completion.
+
+			resolutions, err := quantityObservations(ctx, tx, run, signedDigest, true)
+			if err != nil {
+				return Run{}, err
+			}
+			if len(resolutions) == 0 {
+				// Scheduled redelivery has no operator request identity. A fully
+				// retained correction for this exact source and prefix is its original
+				// result; repeating it must not emit a second completion or false failure.
+				if run.RequestID == "" && len(run.measured) > 0 && run.Basis != nil && len(run.Basis.Accounts[run.Subject.CustodianID]) == 1 {
+					var id string
+					err := tx.QueryRow(ctx, `SELECT run_id FROM custody_runs
+                        WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3
+                          AND outcome='historical_quantity_correction' AND statement_id=$4 AND signed_statement_sha256=$5
+                          AND (book_basis->>'journal_position')::bigint=$6
+                        ORDER BY completed_at DESC,run_id LIMIT 1`, run.Subject.PortfolioID, run.Subject.CustodianID, run.Subject.BusinessDate, run.StatementID, signedDigest, run.Basis.JournalPosition).Scan(&id)
+					if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+						return Run{}, err
+					}
+					if err == nil {
+						prior, err := historicalReceiptSnapshot(ctx, tx, tenant, run.Subject, run.Basis.Accounts[run.Subject.CustodianID][0], id)
+						if err != nil {
+							return Run{}, err
+						}
+						if prior.State == "recorded" && run.Basis.sameScope(prior.Run.Basis, run.Subject.CustodianID) {
+							return prior.Run, tx.Commit(ctx)
+						}
+					}
+				}
+				return Run{}, ErrHistoricalLifecycle
+			}
+			// ledger_prepare_append takes this portfolio lock before advancing the
+			// canonical head. A booking arriving after materialization requires an
+			// actual re-read before an open historical item can be cleared.
+			var stable bool
+			if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, run.Subject.PortfolioID).Scan(&stable); err != nil {
+				return Run{}, err
+			}
+			if !stable {
+				return Run{}, ErrRunBusy
+			}
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT FROM ledger_heads WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND position=$2)`, run.Subject.PortfolioID, run.Basis.JournalPosition).Scan(&stable); err != nil {
+				return Run{}, err
+			}
+			if !stable {
+				return Run{}, ErrBookBasisChanged
+			}
+			run.Outcome = OutcomeHistoricalQuantityCorrection
+			run.HistoricalQuantityResolutions = resolutions
+			run.Basis = run.Basis.clone()
+			run.Basis.HistoricalDetections = make(map[string]string, len(resolutions))
+			for _, link := range resolutions {
+				run.Basis.HistoricalDetections[link.BreakId] = link.DetectionRunId
+			}
+			run.ExecutionQuantities = nil
+			run.Breaks = nil
+		} else {
+			if d := run.detection(); d.RunID != "" {
+				if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_detection_run',$1,true)`, d.RunID); err != nil {
+					return Run{}, err
+				}
+			}
+			if run.Basis != nil {
+				var assignmentJSON string
+				if run.Basis.Assignments != nil {
+					value, err := json.Marshal(assignmentsForCustodian(run.Basis.Assignments, run.Subject.CustodianID))
+					if err != nil {
+						return Run{}, err
+					}
+					assignmentJSON = string(value)
+				}
+				if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_break_scope',
+                jsonb_strip_nulls(jsonb_build_object('mode',$1::text,'accounts',$2::text[],'assignments',NULLIF($3,'')::jsonb))::text,true)`,
+					run.Basis.Mode, run.Basis.Accounts[run.Subject.CustodianID], assignmentJSON); err != nil {
+					return Run{}, err
+				}
+			}
+			stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
+			if err != nil {
+				return Run{}, err
+			}
+			run.Breaks = breaksForSubject(stored, run.Subject)
+		}
 	}
 	record, err := runRecord(ctx, tenant, run)
 	if err != nil {
 		return Run{}, err
+	}
+	if err := staged.saveRun(ctx, run, signedDigest, record.Payload); err != nil {
+		return Run{}, err
+	}
+	if len(run.measured) > 0 {
+		if _, err := quantityObservations(ctx, tx, run, signedDigest, false); err != nil {
+			return Run{}, err
+		}
+		run.measured = nil
 	}
 	if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, record); err != nil {
 		return Run{}, err
@@ -183,7 +472,7 @@ func runFromRecord(payload []byte) (Run, error) {
 	if err := proto.Unmarshal(payload, &msg); err != nil {
 		return Run{}, err
 	}
-	run := Run{RunID: msg.GetRunId(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
+	run := Run{HistoricalQuantityResolutions: msg.GetHistoricalQuantityResolutions(), ExecutionQuantities: msg.GetExecutionQuantities(), RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
 		Outcome: parseOutcome(strings.ToLower(strings.TrimPrefix(msg.GetOutcome().String(), "RECONCILIATION_OUTCOME_"))), StatementID: msg.GetStatementId(), CompletedAt: msg.GetCompletedAt().AsTime(), FailureReason: msg.GetFailureReason()}
 	var ok bool
 	if run.Tolerance, ok = dec.FromProtoChecked(msg.GetTolerance()); !ok {

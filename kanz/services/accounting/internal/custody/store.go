@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ type Store interface {
 	// CommitRun commits the run, its verifying break transitions and completion
 	// FACT together. Failed/no-statement runs leave existing breaks unchanged.
 	CommitRun(context.Context, Run) (Run, error)
+	ManualReceipt(context.Context, Run) (Run, error)
 	Outbox() outbox.Queue
 	// SaveStatement records a custodian statement, idempotent on StatementID. A
 	// restatement for a subject already reconciled REPLACES the latest statement;
@@ -77,7 +79,10 @@ type Store interface {
 
 	// OutstandingBreaks returns every break that is still work, for the gauge and
 	// for the operator surface. A nil portfolioID/custodianID means "all".
-	OutstandingBreaks(ctx context.Context) ([]Break, error)
+	OutstandingBreaks(ctx context.Context, portfolios ...string) ([]Break, error)
+
+	// BreakPage returns up to limit authorized, outstanding items strictly after a break ID.
+	BreakPage(ctx context.Context, portfolios []string, after string, limit int) ([]Break, error)
 
 	// LoadBreak returns one break by id, or ErrNoBreak.
 	LoadBreak(ctx context.Context, breakID string) (Break, error)
@@ -118,12 +123,13 @@ var ErrNoBreak = errors.New("custody: no such break")
 // behaviour proven only against MemoryStore is not proven at all — the
 // Postgres-gated tests are the ones that exercise it.
 type MemoryStore struct {
-	mu         sync.Mutex
-	statements map[string][]Statement // subject key -> statements, append order
-	runs       map[string][]Run       // portfolio|custodian -> runs, append order
-	runIDs     map[string]runReference
-	breaks     map[string]Break // break id -> break
-	outbox     *outbox.Memory
+	mu            sync.Mutex
+	statements    map[string][]Statement // subject key -> statements, append order
+	runs          map[string][]Run       // portfolio|custodian -> runs, append order
+	runIDs        map[string]runReference
+	verifiedDates map[[2]string]time.Time
+	breaks        map[string]Break // break id -> break
+	outbox        *outbox.Memory
 }
 
 // runReference locates the one canonical run in append-only history. Capture
@@ -138,11 +144,12 @@ type runReference struct {
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		statements: map[string][]Statement{},
-		runs:       map[string][]Run{},
-		runIDs:     map[string]runReference{},
-		breaks:     map[string]Break{},
-		outbox:     outbox.NewMemory(),
+		statements:    map[string][]Statement{},
+		runs:          map[string][]Run{},
+		runIDs:        map[string]runReference{},
+		verifiedDates: map[[2]string]time.Time{},
+		breaks:        map[string]Break{},
+		outbox:        outbox.NewMemory(),
 	}
 }
 
@@ -150,6 +157,10 @@ func pairKey(portfolioID, custodianID string) string { return portfolioID + "|" 
 
 // SaveStatement implements Store.
 func (m *MemoryStore) SaveStatement(_ context.Context, s Statement) error {
+	if isBatchStatement(s.StatementID) {
+		// Signed intake requires the immutable receipt in the tenant database.
+		return errBatchReceipt
+	}
 	if err := s.Validate(); err != nil {
 		return err
 	}
@@ -175,6 +186,10 @@ func (m *MemoryStore) SaveStatement(_ context.Context, s Statement) error {
 func (m *MemoryStore) LatestStatement(_ context.Context, subject Subject) (Statement, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.latestStatementLocked(subject)
+}
+
+func (m *MemoryStore) latestStatementLocked(subject Subject) (Statement, error) {
 	list := m.statements[subject.Key()]
 	if len(list) == 0 {
 		return Statement{}, ErrNoStatement
@@ -212,6 +227,13 @@ func (m *MemoryStore) appendRunLocked(run Run, completionCaptured bool) {
 	key := pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)
 	m.runIDs[run.RunID] = runReference{pair: key, index: len(m.runs[key]), completionCaptured: completionCaptured}
 	m.runs[key] = append(m.runs[key], cloneRun(run))
+	if verifying(run) {
+		pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
+		date := BusinessDay(run.Subject.BusinessDate)
+		if date.After(m.verifiedDates[pair]) {
+			m.verifiedDates[pair] = date
+		}
+	}
 }
 
 // LatestRun implements Store.
@@ -240,11 +262,12 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 	for _, d := range detected {
 		d.PortfolioID, d.CustodianID = subject.PortfolioID, subject.CustodianID
 		seen[d.BreakID] = struct{}{}
-		if prior, ok := m.breaks[d.BreakID]; ok && prior.Status != BreakResolved {
+		if prior, ok := m.breaks[d.BreakID]; ok && prior.Status != BreakResolved && prior.comparison.sameScope(d.comparison, subject.CustodianID) {
 			// KNOWN AND STILL OUTSTANDING: the figures and LastSeenAt advance;
 			// the operator's work does not. Overwriting status here is the bug
 			// that resets an assignment on every daily run.
 			prior.IBOR, prior.Custodian, prior.Diff = d.IBOR, d.Custodian, d.Diff
+			prior.Detection = d.Detection
 			prior.ValuesVerified = true
 			prior.LastSeenAt = now
 			prior.Revision++
@@ -296,16 +319,35 @@ func sameSubject(b Break, subject Subject) bool {
 }
 
 // OutstandingBreaks implements Store.
-func (m *MemoryStore) OutstandingBreaks(_ context.Context) ([]Break, error) {
+func (m *MemoryStore) OutstandingBreaks(_ context.Context, portfolios ...string) ([]Break, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.outstandingLocked(), nil
+	return m.outstandingLocked(portfolios...), nil
 }
 
-func (m *MemoryStore) outstandingLocked() []Break {
+func (m *MemoryStore) BreakPage(_ context.Context, portfolios []string, after string, limit int) ([]Break, error) {
+	if err := validQueueFetch(limit); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var items []Break
+	for _, b := range m.breaks {
+		if !b.Status.Outstanding() || b.PortfolioID == "" || b.BreakID <= after || (len(portfolios) > 0 && !slices.Contains(portfolios, b.PortfolioID)) {
+			continue
+		}
+		items = append(items, b)
+		if len(items) == 2*limit {
+			items = sortQueuePage(items, limit)
+		}
+	}
+	return sortQueuePage(items, limit), nil
+}
+
+func (m *MemoryStore) outstandingLocked(portfolios ...string) []Break {
 	var out []Break
 	for _, b := range m.breaks {
-		if b.Status.Outstanding() {
+		if b.Status.Outstanding() && (len(portfolios) == 0 || slices.Contains(portfolios, b.PortfolioID)) {
 			out = append(out, b)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ type Publisher interface {
 // the shape #1073 was filed on; returning them together is what makes the
 // transaction pass inherit the custodian scoping the guard over this hop already
 // enforces, rather than needing a guard of its own to be remembered.
-type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error)
+type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error)
 
 // EffectiveCutoff explicitly selects an effective instant for the read-only
 // ad-hoc comparison, whose request has no statement business date. Zero refuses
@@ -82,12 +83,12 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error) {
+	return func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error) {
 		var close time.Time
 		switch len(cutoff) {
 		case 0:
 			if err := subject.Validate(); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			// BusinessDay names a UTC calendar date. Its close includes that
 			// entire date and excludes the following midnight; no venue-local
@@ -96,27 +97,31 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 		case 1:
 			close = cutoff[0].AsOf.UTC()
 			if close.IsZero() {
-				return nil, nil, errors.New("custody: explicit effective cutoff is zero")
+				return nil, nil, nil, errors.New("custody: explicit effective cutoff is zero")
 			}
 			// Validate the same subject identity against the explicit read
 			// instant. This does not invent a stored statement business date.
 			identity := subject
 			identity.BusinessDate = close
 			if err := identity.Validate(); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		default:
-			return nil, nil, errors.New("custody: multiple effective cutoffs")
+			return nil, nil, nil, errors.New("custody: multiple effective cutoffs")
 		}
 		// Both modes are restated effective views of the recorded journal,
 		// with no historical knowledge-time bound.
 		if !scope.Declared(subject.PortfolioID) {
+			if scope != nil && scope.admission != nil {
+				// A journal attributes trades to accounts but cannot establish their custodian.
+				return nil, nil, nil, ErrUnprovenAssignment
+			}
 			// ONE CUSTODIAN: the scope is derived from the journal rather than
 			// declared. See ledger.MaterializeAttributed for why that is scoped by
 			// construction and why no declaration could add to it.
 			basis, err := ledger.MaterializeAttributed(ctx, store, subject.PortfolioID, close)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			accounts, residue := basis.Accounts, basis.Residue
 			if len(accounts) == 0 && !residue.Empty() {
@@ -128,7 +133,7 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 				// NewBookScope already refuses an operator who declares an empty
 				// account set, in these words and for this reason; a basis derived
 				// to the same emptiness must not be quieter than one declared.
-				return nil, nil, fmt.Errorf("custody: portfolio %s holds value (%s) and NO journal entry names "+
+				return nil, nil, nil, fmt.Errorf("custody: portfolio %s holds value (%s) and NO journal entry names "+
 					"an exchange account, so the book slice compared against %s's statement would fold to "+
 					"nothing and every position the custodian holds would break as MISSING_IN_IBOR. The "+
 					"producers stamp venue_account_id and never default it: set it on the fills and cash "+
@@ -137,19 +142,25 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 			}
 			stateResidue(logger, subject, BasisDerived, residue)
 			stateUnreferenced(logger, subject, BasisDerived, basis)
-			return basis.Book, basis.Executions, nil
+			return basis.Book, basis.Executions, scope.runBasis(subject, BasisDerived, basis), nil
 		}
 		accounts, claimed := scope.For(subject.PortfolioID, subject.CustodianID)
 		if len(accounts) == 0 {
 			// NewBookScope refuses this configuration, so reaching it means the
 			// scope was built by some other path. Fail rather than fall back to
 			// the whole book, which is the exact wrong answer #1006 is about.
-			return nil, nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
+			return nil, nil, nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
 				"book slice to compare its statement against", subject.PortfolioID, subject.CustodianID)
+		}
+		proofSubject := subject
+		proofSubject.BusinessDate = BusinessDay(close)
+		assignments, err := scope.assignmentsAt(ctx, proofSubject)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 		basis, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed, close)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(basis.Unmapped) > 0 {
 			// A PARTIAL BOOK MUST NOT RECONCILE. accounting.proto says it on the
@@ -158,14 +169,26 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 			// is worse than no reconciliation at all because it buries the real
 			// breaks in noise." An account nobody claimed is that, on the book
 			// side — so the run FAILS and names the account.
-			return nil, nil, fmt.Errorf("custody: portfolio %s holds value in exchange account(s) %s, which no "+
+			return nil, nil, nil, fmt.Errorf("custody: portfolio %s holds value in exchange account(s) %s, which no "+
 				"custodian in ACCOUNTING_CUSTODY_ACCOUNTS claims. Reconciling %s without them would compare "+
 				"a book missing those holdings and break every one of them; add each account to the custodian "+
 				"that holds it", subject.PortfolioID, strings.Join(basis.Unmapped, ", "), subject.CustodianID)
 		}
 		stateResidue(logger, subject, BasisDeclared, basis.Residue)
 		stateUnreferenced(logger, subject, BasisDeclared, basis)
-		return basis.Book, basis.Executions, nil
+		if len(cutoff) != 0 && scope.admission != nil {
+			// The ad-hoc route has no CommitRun transaction to fence scope changes.
+			current, err := scope.assignmentsAt(ctx, proofSubject)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !slices.Equal(assignments, current) {
+				return nil, nil, nil, ErrUnprovenAssignment
+			}
+		}
+		runBasis := scope.runBasis(subject, BasisDeclared, basis)
+		runBasis.Assignments = assignments
+		return basis.Book, basis.Executions, runBasis, nil
 	}
 }
 
@@ -294,11 +317,19 @@ func NewReconciler(store Store, book BookLoader, publisher Publisher, tolerance 
 // evidence, and returning only the run would let a caller treat a failure as a
 // verdict about the book.
 func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error) {
+	return r.reconcile(ctx, Run{}, subject)
+}
+
+func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (Run, error) {
 	if err := subject.Validate(); err != nil {
 		return Run{}, err
 	}
 	subject.BusinessDate = BusinessDay(subject.BusinessDate)
 	now := r.now().UTC()
+	run.Subject, run.CompletedAt, run.Tolerance = subject, now, r.tolerance
+	if run.RunID == "" {
+		run.RunID = runID(subject, now)
+	}
 
 	stmt, err := r.store.LatestStatement(ctx, subject)
 	switch {
@@ -307,37 +338,64 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		// silence, and it is emitted as a first-class outcome rather than
 		// skipped: an empty statement would reconcile as "the custodian holds
 		// nothing" and manufacture a break for every position the book holds.
-		return r.record(ctx, Run{
-			RunID:       runID(subject, now),
-			Subject:     subject,
-			Outcome:     OutcomeNoStatement,
-			Tolerance:   r.tolerance,
-			CompletedAt: now,
-		})
+		run.Outcome, run.observedMissing = OutcomeNoStatement, true
+		return r.record(ctx, run)
 	case err != nil:
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("load statement: %w", err))
+		return r.recordFailure(ctx, run, fmt.Errorf("load statement: %w", err))
 	}
 
 	// BOTH GRAINS OUT OF ONE CALL, and the pair is bound here rather than
 	// re-derived: the executions must be the ones behind THIS book, over the same
 	// slice of the journal the custodian is scoped to.
-	book, executions, err := r.book(ctx, subject)
+	book, executions, basis, err := r.book(ctx, subject)
 	if err != nil {
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("materialize book: %w", err))
+		return r.recordFailure(ctx, run, fmt.Errorf("materialize book: %w", err))
 	}
 
-	detected, leg, err := recon.Reconcile(book, executions, recon.Statement{
+	comparison := recon.Statement{
 		PortfolioID:  subject.PortfolioID,
 		Positions:    stmt.Positions,
 		Cash:         stmt.Cash,
 		BusinessDate: subject.BusinessDate,
 		Transactions: stmt.Transactions,
 		Grain:        stmt.Grain,
-	}, r.tolerance)
+	}
+	detected, leg, err := recon.Reconcile(book, executions, comparison, r.tolerance)
 	if err != nil {
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("compare executions: %w", err))
+		return r.recordFailure(ctx, run, fmt.Errorf("compare executions: %w", err))
+	}
+	if isBatchStatement(stmt.StatementID) && basis != nil && basis.Mode == BasisDeclared {
+		observed, err := recon.AssessExecutionQuantities(executions, comparison)
+		if err != nil {
+			return r.recordFailure(ctx, run, err)
+		}
+		if observed != nil && len(basis.Assignments) > 0 {
+			run.measured = observed.Measured
+		}
+		run.ExecutionQuantities, err = quantityEvidence(observed)
+		if err != nil {
+			return r.recordFailure(ctx, run, err)
+		}
 	}
 	r.stateLeg(subject, stmt, leg, len(executions))
+	if basis != nil {
+		basis = basis.clone()
+		if len(run.measured) > 0 {
+			basis.MeasuredEntries = make(map[string]string, len(run.measured))
+			for _, m := range run.measured {
+				basis.MeasuredEntries[m.EntryID] = m.ExternalRef
+			}
+		}
+		switch {
+		case leg == recon.LegBalancesOnly:
+			basis.Transactions = &TransactionComparison{Pass: leg.String()}
+		case leg.Ran() && basis.Transactions != nil:
+			basis.Transactions.Pass = leg.String()
+			basis.Transactions.StatementReferences = new(len(stmt.Transactions))
+		default:
+			basis.Transactions = nil
+		}
+	}
 
 	outcome := OutcomeClean
 	if len(detected) > 0 {
@@ -348,19 +406,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	// FirstSeenAt an operator has been working against — and publishing the
 	// freshly built ones would announce every break as OPEN and one run old, so
 	// any consumer of the FACT would see an aging problem reset to zero daily.
-	run, err := r.record(ctx, Run{
-		RunID:       runID(subject, now),
-		Subject:     subject,
-		Outcome:     outcome,
-		StatementID: stmt.StatementID,
-		Breaks:      FromRecon(subject, detected, now),
-		Tolerance:   r.tolerance,
-		CompletedAt: now,
-	})
+	run.compared, run.Outcome, run.StatementID, run.Basis = &stmt, outcome, stmt.StatementID, basis
+	run.Breaks = FromRecon(subject, detected, now)
+	stored, err := r.record(ctx, run)
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("commit reconciliation: %w", err))
+		// Transient contention or invalidated observations must not consume an
+		// operator's idempotency key as a permanently failed comparison.
+		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) && !errors.Is(err, errBatchReceipt) && !errors.Is(err, errQuantityReceiptLimit) {
+			return Run{}, err
+		}
+		return r.recordFailure(ctx, run, fmt.Errorf("commit reconciliation: %w", err))
 	}
-	return run, err
+	return stored, err
 }
 
 // stateLeg says, once per run, whether the TRANSACTION pass actually happened
@@ -397,15 +454,18 @@ func (r *Reconciler) stateLeg(subject Subject, stmt Statement, leg recon.LegStat
 // reconciliation which could not run looks exactly like one that never came due.
 // The estate must be able to tell "the book would not materialize for three days"
 // from "nothing was scheduled".
-func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now time.Time, reason error) (Run, error) {
-	run, err := r.record(ctx, Run{
-		RunID:         runID(subject, now),
-		Subject:       subject,
-		Outcome:       OutcomeFailed,
-		Tolerance:     r.tolerance,
-		CompletedAt:   now,
-		FailureReason: reason.Error(),
-	})
+func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (Run, error) {
+	run.ExecutionQuantities = nil
+	run.measured = nil
+	run.compared, run.Breaks, run.Outcome, run.FailureReason = nil, nil, OutcomeFailed, reason.Error()
+	if run.RequestID == "" {
+		run.StatementID, run.Basis = "", nil
+	} else if errors.Is(reason, ErrHistoricalLifecycle) {
+		run.FailureReason = ErrHistoricalLifecycle.Error()
+	} else if errors.Is(reason, errBatchReceipt) {
+		run.FailureReason = errBatchReceipt.Error()
+	}
+	run, err := r.record(ctx, run)
 	if err != nil {
 		return run, errors.Join(reason, err)
 	}
@@ -422,6 +482,9 @@ func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now tim
 func (r *Reconciler) record(ctx context.Context, run Run) (Run, error) {
 	stored, err := r.store.CommitRun(ctx, run)
 	if err != nil {
+		if run.RequestID != "" {
+			return Run{}, fmt.Errorf("custody: commit manual run: %w", err)
+		}
 		return run, fmt.Errorf("custody: commit run: %w", err)
 	}
 	run = stored
@@ -463,15 +526,19 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 		return nil, fmt.Errorf("custody: run %s: tolerance is not representable as a Decimal", run.RunID)
 	}
 	out := &accountingpb.ReconciliationRun{
-		RunId:         run.RunID,
-		PortfolioId:   run.Subject.PortfolioID,
-		CustodianId:   run.Subject.CustodianID,
-		BusinessDate:  timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
-		Outcome:       wireOutcome(run.Outcome),
-		StatementId:   run.StatementID,
-		Tolerance:     tolerance,
-		CompletedAt:   timestamppb.New(run.CompletedAt),
-		FailureReason: run.FailureReason,
+		ExecutionQuantities:           run.ExecutionQuantities,
+		RunId:                         run.RunID,
+		RequestId:                     run.RequestID,
+		Actor:                         run.Actor,
+		PortfolioId:                   run.Subject.PortfolioID,
+		CustodianId:                   run.Subject.CustodianID,
+		BusinessDate:                  timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
+		Outcome:                       wireOutcome(run.Outcome),
+		HistoricalQuantityResolutions: run.HistoricalQuantityResolutions,
+		StatementId:                   run.StatementID,
+		Tolerance:                     tolerance,
+		CompletedAt:                   timestamppb.New(run.CompletedAt),
+		FailureReason:                 run.FailureReason,
 	}
 	for _, b := range run.Breaks {
 		kind, ok := wireKind(b.Kind)

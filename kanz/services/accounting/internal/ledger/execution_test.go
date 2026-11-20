@@ -40,7 +40,7 @@ func TestCustodyBasisExecutionsInheritTheAccountScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	basis := foldForAccounts("PF", events, okx, claimed)
+	basis := foldForAccounts("PF", events, okx, claimed, time.Time{})
 
 	if len(basis.Executions) != 1 || basis.Executions[0].Ref != "fill-a" {
 		t.Fatalf("executions = %v, want exactly fill-a.\n\nThe transaction pass must be over the SAME "+
@@ -73,7 +73,7 @@ func TestCustodyBasisCountsTradesWithNoReference(t *testing.T) {
 	}
 	basis := foldForAccounts("PF", []*Event{
 		execEvent("e1", "okx-sub-1", "AAPL", "fill-a", 10, at), unreferenced, cash,
-	}, scope, scope)
+	}, scope, scope, time.Time{})
 
 	if len(basis.Executions) != 1 || basis.Executions[0].Ref != "fill-a" {
 		t.Fatalf("executions = %v, want only fill-a.\n\nA custodian's transaction lines are TRADE "+
@@ -102,7 +102,7 @@ func TestCustodyBasisDedupesARestatedEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	basis := foldForAccounts("PF", []*Event{original, restated}, scope, scope)
+	basis := foldForAccounts("PF", []*Event{original, restated}, scope, scope, time.Time{})
 	if len(basis.Executions) != 1 {
 		t.Fatalf("executions = %v, want 1 — a restatement is one execution seen twice, and the second "+
 			"copy would be reported as one the custodian never settled on every run forever",

@@ -23,8 +23,14 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
@@ -34,7 +40,7 @@ import (
 // subset of custody.Store this package uses, declared here so the server depends
 // on the two operations it calls rather than on the whole store.
 type BreakStore interface {
-	OutstandingBreaks(ctx context.Context) ([]custody.Break, error)
+	BreakPage(ctx context.Context, portfolios []string, after string, limit int) ([]custody.Break, error)
 	ApplyAction(ctx context.Context, action custody.Action) (custody.ActionEvidence, error)
 	ActionsEnabled() bool
 }
@@ -50,11 +56,26 @@ func WithBreakStore(store BreakStore) Option {
 	return func(s *Server) { s.breaks = store }
 }
 
+// WithReadOnlyCustodyReview keeps the operator's break query available while
+// removing action handlers from the serving instance.
+func WithReadOnlyCustodyReview() Option {
+	return func(s *Server) { s.breakReviewReadOnly = true }
+}
+
 func (s *Server) custodyRoutes() {
 	if s.breaks == nil {
 		return
 	}
 	s.mux.HandleFunc("GET /v1/custody/breaks", s.handleListBreaks)
+	if reader, ok := s.breaks.(datedCustodyReader); ok && s.custodyScope != nil {
+		s.mux.HandleFunc("GET /v1/portfolios/{id}/custody/comparison", s.datedCustodyResult(reader))
+	}
+	if s.breakReviewReadOnly {
+		return
+	}
+	if s.rerunRole != "" && s.rerun != nil && s.custodyScope != nil {
+		s.mux.HandleFunc("POST /v1/portfolios/{id}/custody/reruns", s.handleCustodyRerun)
+	}
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/assign", s.handleAssignBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/explain", s.handleExplainBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/actions", s.handleCustodyAction)
@@ -65,21 +86,26 @@ func (s *Server) custodyRoutes() {
 // and a quantity beyond float's exact range would be shown to the person deciding
 // what to do about it as a different number from the one the book holds.
 type breakView struct {
-	BreakID         string `json:"break_id"`
-	Kind            string `json:"kind"`
-	Key             string `json:"key"`
-	IBOR            string `json:"ibor"`
-	Custodian       string `json:"custodian"`
-	Difference      string `json:"difference"`
-	Status          string `json:"status"`
-	Assignee        string `json:"assignee,omitempty"`
-	Explanation     string `json:"explanation,omitempty"`
-	FirstSeenAt     string `json:"first_seen_at"`
-	LastSeenAt      string `json:"last_seen_at"`
-	StatusChangedAt string `json:"status_changed_at"`
-	AgeSeconds      int64  `json:"age_seconds"`
-	Revision        int64  `json:"revision,string"`
-	ValuesState     string `json:"values_state"`
+	LateCorrectionStatementID string             `json:"late_correction_statement_id,omitempty"`
+	PortfolioID               string             `json:"portfolio_id"`
+	CustodianID               string             `json:"custodian_id"`
+	Detection                 *custody.Detection `json:"detection,omitempty"`
+	BreakID                   string             `json:"break_id"`
+	Kind                      string             `json:"kind"`
+	Key                       string             `json:"key"`
+	InstrumentID              string             `json:"instrument_id,omitempty"`
+	IBOR                      string             `json:"ibor"`
+	Custodian                 string             `json:"custodian"`
+	Difference                string             `json:"difference"`
+	Status                    string             `json:"status"`
+	Assignee                  string             `json:"assignee,omitempty"`
+	Explanation               string             `json:"explanation,omitempty"`
+	FirstSeenAt               string             `json:"first_seen_at"`
+	LastSeenAt                string             `json:"last_seen_at"`
+	StatusChangedAt           string             `json:"status_changed_at"`
+	AgeSeconds                int64              `json:"age_seconds"`
+	Revision                  int64              `json:"revision,string,omitempty"`
+	ValuesState               string             `json:"values_state"`
 }
 
 func toBreakView(b custody.Break, now time.Time) breakView {
@@ -95,12 +121,17 @@ func toBreakView(b custody.Break, now time.Time) breakView {
 	if state != "exact" {
 		ibor, custodian, difference = "", "", ""
 	}
+	var source *custody.Detection
+	if b.Detection.RunID != "" {
+		source = &b.Detection
+	}
 	return breakView{
+		PortfolioID: b.PortfolioID, CustodianID: b.CustodianID, Detection: source,
 		ValuesState: state,
 		BreakID:     b.BreakID,
 		Revision:    b.Revision,
 		Kind:        b.Kind.String(),
-		Key:         b.Key,
+		Key:         b.Key, InstrumentID: b.InstrumentID, LateCorrectionStatementID: b.LateCorrectionStatementID,
 		IBOR:        ibor,
 		Custodian:   custodian,
 		Difference:  difference,
@@ -124,13 +155,18 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	breaks, err := s.breaks.OutstandingBreaks(r.Context())
+	w.Header().Set("Cache-Control", "no-store")
+	limit, after, paged, err := custodyQueueWindow(r.URL.RawQuery)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	breaks, err := s.breaks.BreakPage(r.Context(), principal.Portfolios, after, limit+1)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "custody values could not be verified"})
 		return
 	}
 	now := time.Now().UTC()
-	w.Header().Set("Cache-Control", "no-store")
 	out := make([]breakView, 0, len(breaks))
 	for _, b := range breaks {
 		if b.PortfolioID == "" || !auth.PortfolioInScope(principal.Portfolios, b.PortfolioID) {
@@ -138,5 +174,51 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, toBreakView(b, now))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "actions_enabled": s.breaks.ActionsEnabled()})
+	var next string
+	if len(out) > limit {
+		if !paged {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "Custody queue exceeds the complete response limit. Request a page with limit.", "code": "custody_queue_pagination_required", "limit": custody.MaxQueuePage})
+			return
+		}
+		out = out[:limit]
+		next = base64.RawURLEncoding.EncodeToString([]byte(out[limit-1].BreakID))
+		if len(next) > maxQueueCursor {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Custody queue continuation exceeds the supported size."})
+			return
+		}
+	}
+	response := map[string]any{"breaks": out, "count": len(out), "rerun_enabled": !s.breakReviewReadOnly && s.rerun != nil && s.custodyScope != nil && s.rerunRole != "" && principal.HasRole(s.rerunRole), "actions_enabled": !s.breakReviewReadOnly && s.breaks.ActionsEnabled()}
+	if next != "" {
+		response["next_cursor"] = next
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// A cursor positions a live read. Authorization is recomputed independently for every page.
+const maxQueueCursor = 8192
+
+func custodyQueueWindow(raw string) (limit int, after string, paged bool, err error) {
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		return 0, "", false, errors.New("Invalid custody queue query.")
+	}
+	if !q.Has("limit") && !q.Has("after") {
+		return custody.MaxQueuePage, "", false, nil
+	}
+	limit, err = strconv.Atoi(q.Get("limit"))
+	if len(q["limit"]) != 1 || err != nil || limit < 1 || limit > custody.MaxQueuePage || strconv.Itoa(limit) != q.Get("limit") {
+		return 0, "", false, errors.New("Custody page limit must be an integer between 1 and 4096.")
+	}
+	if !q.Has("after") {
+		return limit, "", true, nil
+	}
+	token := q.Get("after")
+	if len(q["after"]) != 1 || token == "" || len(token) > maxQueueCursor {
+		return 0, "", false, errors.New("Invalid custody queue cursor.")
+	}
+	id, err := base64.RawURLEncoding.Strict().DecodeString(token)
+	if err != nil || !utf8.Valid(id) || strings.IndexByte(string(id), 0) >= 0 || base64.RawURLEncoding.EncodeToString(id) != token {
+		return 0, "", false, errors.New("Invalid custody queue cursor.")
+	}
+	return limit, string(id), true, nil
 }

@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,9 +28,10 @@ import (
 // statement six times produced six runs of identical evidence, burying the daily
 // record under redelivery noise.
 type StatementConsumer struct {
-	store  Store
-	tenant string
-	logger *slog.Logger
+	signedOnly bool
+	store      Store
+	tenant     string
+	logger     *slog.Logger
 }
 
 // NewStatementConsumer wires a consumer over store, pinned to tenant.
@@ -51,6 +53,19 @@ func NewStatementConsumer(store Store, tenant string, logger *slog.Logger) (*Sta
 		logger = slog.Default()
 	}
 	return &StatementConsumer{store: store, tenant: tenant, logger: logger}, nil
+}
+
+// NewSignedBatchConsumer restricts this tenant's entire intake to statements
+// backed by its durable signed receipts, including the first delivery.
+func NewSignedBatchConsumer(store Store, tenant string, logger *slog.Logger) (*StatementConsumer, error) {
+	if _, ok := store.(*Postgres); !ok {
+		return nil, errors.New("custody: signed statements require a durable receipt store")
+	}
+	c, err := NewStatementConsumer(store, tenant, logger)
+	if err == nil {
+		c.signedOnly = true
+	}
+	return c, err
 }
 
 // Handle folds one statement delivery.
@@ -77,7 +92,19 @@ func (c *StatementConsumer) Handle(ctx context.Context, env *envelopepb.Envelope
 	if err != nil {
 		return err
 	}
-	if err := c.store.SaveStatement(ctx, stmt); err != nil {
+	if c.signedOnly || isBatchStatement(stmt.StatementID) || env.GetSource() == BatchProducer {
+		writer, ok := c.store.(interface {
+			saveStatement(context.Context, Statement, []byte) error
+		})
+		if !ok || env.GetSource() != BatchProducer || !isBatchStatement(stmt.StatementID) {
+			return errBatchReceipt
+		}
+		digest := sha256.Sum256(payload)
+		err = writer.saveStatement(ctx, stmt, digest[:])
+	} else {
+		err = c.store.SaveStatement(ctx, stmt)
+	}
+	if err != nil {
 		return fmt.Errorf("custody: save statement %s: %w", stmt.StatementID, err)
 	}
 	c.logger.Info("accounting: custodian statement stored",
@@ -181,12 +208,13 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			return Statement{}, fmt.Errorf("custody: statement %s: transaction %s carries a figure that is not a valid Decimal", stmt.StatementID, ref)
 		}
 		out := recon.Transaction{
-			ExternalRef:  ref,
-			InstrumentID: tx.GetInstrumentId(),
-			Quantity:     qty,
-			Price:        price,
-			Cash:         cash,
-			CurrencyCode: tx.GetCurrencyCode(),
+			ExternalRef:               ref,
+			QuantityInInstrumentUnits: tx.GetQuantityInInstrumentUnits(),
+			InstrumentID:              tx.GetInstrumentId(),
+			Quantity:                  qty,
+			Price:                     price,
+			Cash:                      cash,
+			CurrencyCode:              tx.GetCurrencyCode(),
 		}
 		if td := tx.GetTradeDate(); td != nil {
 			if err := td.CheckValid(); err != nil {

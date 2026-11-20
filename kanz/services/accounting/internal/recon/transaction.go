@@ -98,13 +98,14 @@ type Transaction struct {
 	// It is the whole of the match.
 	ExternalRef string
 
-	TradeDate      time.Time
-	SettlementDate time.Time
-	InstrumentID   string
-	Quantity       *big.Rat
-	Price          *big.Rat
-	Cash           *big.Rat
-	CurrencyCode   string
+	TradeDate                 time.Time
+	SettlementDate            time.Time
+	InstrumentID              string
+	QuantityInInstrumentUnits bool
+	Quantity                  *big.Rat
+	Price                     *big.Rat
+	Cash                      *big.Rat
+	CurrencyCode              string
 }
 
 // LegStatus is whether the transaction pass RAN, and why not when it did not.
@@ -203,25 +204,9 @@ func transactionLeg(executions []ledger.Execution, stmt Statement) ([]Break, Leg
 	if stmt.BusinessDate.IsZero() {
 		return nil, LegNoBusinessDate, nil
 	}
-	window := businessDay(stmt.BusinessDate)
-
-	// EntryID is the immutable book identity. Raw venue references can legitimately
-	// be reused across accounts or instruments, so distinct identities cannot be
-	// matched to one statement line without an authoritative mapping. Refuse the
-	// comparison instead of selecting a winner or fabricating an execution break.
-	inBook := map[string]ledger.Execution{}
-	for _, e := range executions {
-		if e.Ref == "" || !e.CustodyDate().Equal(window) {
-			continue
-		}
-		if prior, dup := inBook[e.Ref]; dup {
-			if e.EntryID == "" || prior.EntryID == "" || e.EntryID != prior.EntryID {
-				// Bound diagnostic text; the identity comparison uses the full ref.
-				return nil, LegRefused, fmt.Errorf("%w: %.128q", ErrAmbiguousExecutionReference, e.Ref)
-			}
-			continue
-		}
-		inBook[e.Ref] = e
+	inBook, err := datedExecutions(executions, businessDay(stmt.BusinessDate))
+	if err != nil {
+		return nil, LegRefused, err
 	}
 
 	inStatement := map[string]Transaction{}
@@ -270,4 +255,27 @@ func transactionLeg(executions []ledger.Execution, stmt Statement) ([]Break, Leg
 		return breaks[i].Key < breaks[j].Key
 	})
 	return breaks, LegRan, nil
+}
+
+func datedExecutions(executions []ledger.Execution, window time.Time) (map[string]ledger.Execution, error) {
+	// EntryID is the immutable book identity. Raw venue references can legitimately
+	// be reused across accounts or instruments, so distinct identities cannot be
+	// matched to one statement line without an authoritative mapping. Refuse the
+	// comparison instead of selecting a winner or fabricating an execution break.
+	inBook := map[string]ledger.Execution{}
+	for _, e := range executions {
+		if e.Ref == "" || !e.CustodyDate().Equal(window) {
+			continue
+		}
+		if prior, dup := inBook[e.Ref]; dup {
+			if e.EntryID == "" || prior.EntryID == "" || e.EntryID != prior.EntryID {
+				// Bound diagnostic text; the identity comparison uses the full ref.
+				return nil, fmt.Errorf("%w: %.128q", ErrAmbiguousExecutionReference, e.Ref)
+			}
+			continue
+		}
+		inBook[e.Ref] = e
+	}
+
+	return inBook, nil
 }

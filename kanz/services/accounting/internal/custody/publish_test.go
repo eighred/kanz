@@ -83,8 +83,8 @@ func newRealProducerReconciler(t *testing.T, cfg bus.ProducerConfig) (*custody.R
 		CashCurrency: "USD", Effective: runAt, Knowledge: runAt,
 	})
 	r, err := custody.NewReconciler(store,
-		func(context.Context, custody.Subject) (*ledger.Book, []ledger.Execution, error) {
-			return book, nil, nil
+		func(context.Context, custody.Subject) (*ledger.Book, []ledger.Execution, *custody.RunBasis, error) {
+			return book, nil, nil, nil
 		},
 		prod, new(big.Rat), nil, nil, func() time.Time { return runAt })
 	if err != nil {

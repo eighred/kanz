@@ -149,6 +149,8 @@ type Handler struct {
 // authorize — authz.Mux does — but it is where the route is registered, and
 // REGISTRATION is the decision: see Routes.
 type Roles struct {
+	CustodyRead  string
+	CustodyRerun string
 	// Fund is the deployment's funder (API_GATEWAY_FUND_ROLE). EMPTY ⇒ the
 	// cash-movement route is not registered.
 	Fund string
@@ -327,13 +329,23 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// caller close any break by posting a statement that agrees with the book — the
 	// hand-resolve #966 removed, arriving through the comparison engine instead of
 	// through the lifecycle. The handler records no run and upserts no break.
+	if h.roles.Fund != "" || h.roles.CustodyRead != "" {
+		capability := authz.Fund
+		if h.roles.CustodyRead != "" {
+			capability = authz.CustodyRead
+		}
+		read := h.custodyReader()
+		mux.Handle(capability, "GET /v1/custody/breaks", read)
+		mux.Handle(capability, "GET /v1/portfolios/{id}/custody/comparison", read)
+	}
+	if h.roles.CustodyRerun != "" {
+		mux.Handle(authz.CustodyRerun, "POST /v1/portfolios/{id}/custody/reruns", h.handle(ServiceAccounting, true, nil))
+	}
 	if h.roles.Fund != "" {
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/collateral/actions", h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/cash-forecast", h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/collateral/{workflow}", h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/collateral/{workflow}/proof", h.handle(ServiceAccounting, true, nil))
-		mux.Handle(authz.Fund, "GET /v1/custody/breaks",
-			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/assign",
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/explain",
@@ -551,6 +563,28 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// the same service, and why they are not mounted here.
 	mux.Handle(authz.Read, "POST /v1/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
 	mux.Handle(authz.Read, "POST /v2/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
+}
+
+// A separate customer read grant always names portfolios. Existing Fund holders
+// retain the deployment's established tenant-wide read semantics.
+func (h *Handler) custodyReader() http.HandlerFunc {
+	forward := h.handle(ServiceAccounting, true, nil)
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := middleware.PrincipalFromContext(r.Context())
+		if p != nil && h.roles.CustodyRead != "" && p.HasRole(h.roles.CustodyRead) && !(h.roles.Fund != "" && p.HasRole(h.roles.Fund)) && len(p.Portfolios) == 0 {
+			writeError(w, http.StatusForbidden, "an explicit custody portfolio is required")
+			return
+		}
+		// URL.Query drops malformed fields. Losing an invalid continuation
+		// would restart the operator at page one without reporting the failure.
+		if r.URL.Path == "/v1/custody/breaks" {
+			if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid custody queue query")
+				return
+			}
+		}
+		forward(w, r)
+	}
 }
 
 // identityPath forwards the request path unchanged: regulatory serves

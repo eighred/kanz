@@ -109,5 +109,5 @@ export const auth = {
   redeem: (token: string, credential: string) =>
     api.post<Identity>('/auth/redeem', { token, credential }),
   logout: () => api.post<void>('/auth/logout'),
-  me: () => api.get<Identity>('/auth/me'),
+  me: (signal?: AbortSignal) => api.get<Identity>('/auth/me', { signal }),
 }

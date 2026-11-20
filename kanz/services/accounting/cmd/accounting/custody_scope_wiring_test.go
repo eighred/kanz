@@ -40,21 +40,15 @@ func TestTwoCustodiansWithoutAnAccountDeclarationRefusesToStart(t *testing.T) {
 	}
 }
 
-// The same configuration, correctly declared, starts and schedules both pairs.
-func TestTwoCustodiansWithAnAccountDeclarationStarts(t *testing.T) {
+// Syntactically correct declarations still require independent account proofs.
+func TestTwoCustodiansWithOnlyADeclarationRefusesToStart(t *testing.T) {
 	cfg := baseCfg()
 	cfg.CustodyPairs = []string{"PF1:CUST-A", "PF1:CUST-B"}
 	cfg.CustodyAccounts = "PF1:CUST-A:okx-sub-1 PF1:CUST-B:bin-main"
 
 	plane, err := buildPlane(t, cfg, &capturingHandler{})
-	if err != nil {
-		t.Fatalf("a correctly declared two-custodian portfolio was refused: %v", err)
-	}
-	if plane.scheduler == nil {
-		t.Fatal("no scheduler was armed — nothing would reconcile on any cadence")
-	}
-	if got := plane.scheduler.Pairs(); len(got) != 2 {
-		t.Fatalf("pairs = %+v, want both custodians scheduled", got)
+	if err == nil || plane != nil || !strings.Contains(err.Error(), "custody account assignment admission failed") {
+		t.Fatalf("armed an unproven custody declaration: plane=%v err=%v", plane != nil, err)
 	}
 }
 

@@ -1,0 +1,11 @@
+{
+  "kind": "venue_identity",
+  "authority": "synthetic-venue-identity-authority",
+  "tenant_id": "synthetic-custody-pilot",
+  "account_id": "sandbox-account",
+  "proof_id": "synthetic-venue-confirmation-v1",
+  "effective_from": "2020-02-04",
+  "effective_until": "2030-01-01",
+  "venue": "XSIM",
+  "exchange_account_id": "xs-account-1"
+}

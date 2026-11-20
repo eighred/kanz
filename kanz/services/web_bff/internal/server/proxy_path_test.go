@@ -44,3 +44,30 @@ func TestProxyReachesVersionedAuditSearchWithFilters(t *testing.T) {
 		t.Fatalf("audit proxy status: %d", response.Code)
 	}
 }
+
+func TestCustodyQueueBFFPreservesContinuationAndStatus(t *testing.T) {
+	for _, tc := range []struct {
+		query  string
+		status int
+		body   string
+	}{
+		{"limit=1&after=UEZ8Q3xxdWFudGl0eXzpm6o", 200, `{"count":1,"next_cursor":"cTE6YWJj"}`},
+		{"limit=1&after=YQ&after=Yg", 400, `{"error":"Invalid custody queue cursor."}`},
+		{"", 422, `{"code":"custody_queue_pagination_required","limit":4096}`},
+	} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/custody/breaks" || r.URL.RawQuery != tc.query {
+				t.Errorf("changed URL %s", r.URL)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		s := bffWithSigning(t, upstream.URL, "")
+		w := proxyAs(t, s, http.MethodGet, "/api/v1/custody/breaks?"+tc.query, "")
+		upstream.Close()
+		if w.Code != tc.status || w.Body.String() != tc.body {
+			t.Fatalf("%s status %d body %s", tc.query, w.Code, w.Body.String())
+		}
+	}
+}

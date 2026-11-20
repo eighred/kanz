@@ -920,7 +920,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 // discoverable only by running a gateway with no upstreams and noticing a 404
 // where a 503 belonged.
 func proxyRoles(cfg config.Config) proxy.Roles {
-	return proxy.Roles{Fund: cfg.FundRole, CashHistory: cfg.CashHistoryRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
+	return proxy.Roles{CustodyRead: cfg.CustodyReadRole, CustodyRerun: cfg.CustodyRerunRole, Fund: cfg.FundRole, CashHistory: cfg.CashHistoryRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -1198,6 +1198,15 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	}
 	if cfg.CashHistoryRole != "" {
 		grants[cfg.CashHistoryRole] = []authz.Capability{authz.CashHistory}
+	}
+	if cfg.CustodyReadRole != "" {
+		grants[cfg.CustodyReadRole] = []authz.Capability{authz.Read, authz.CustodyRead}
+		if cfg.FundRole != "" {
+			grants[cfg.FundRole] = append(grants[cfg.FundRole], authz.CustodyRead)
+		}
+	}
+	if cfg.CustodyRerunRole != "" {
+		grants[cfg.CustodyRerunRole] = []authz.Capability{authz.Read, authz.CustodyRerun}
 	}
 	// THE APPROVER GIVES THE SECOND SIGNATURE (#539, #410 act one) on an act
 	// somebody else proposed. Conditional for the same reason the fund role is —

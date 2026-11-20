@@ -89,6 +89,10 @@ const (
 	// reconcile cash commitments. It is separate from Fund: a service credential
 	// allowed to reconstruct coverage must never be able to post a redemption.
 	CashHistory Capability = "cash-history"
+	// CustodyRead permits a portfolio-scoped customer to read custody results and breaks.
+	CustodyRead Capability = "custody_read"
+	// CustodyRerun authorizes a fresh comparison against recorded statements.
+	CustodyRerun Capability = "custody_rerun"
 	// Approve: GIVE THE SECOND SIGNATURE. Sign off an act another person proposed — today a
 	// pricing/compliance override (#410 act one), and by design the order and mandate
 	// approvals that follow (#539).
