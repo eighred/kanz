@@ -29,6 +29,7 @@ async function main() {
   const correctionRow = { break_id: e.break_id, detection_run_id: e.original_run, entry_id: e.entry_id,
     external_ref: e.external_ref, instrument_id: e.instrument_id, agreed_quantity: { coefficient: '105', exponent: -1 } }
   let retained
+  const reportedDownloads = []
   stage = 'launch'
   const browser = await chromium.launch({ headless: true, timeout: 10_000 })
   try {
@@ -135,7 +136,7 @@ async function main() {
           await figures.waitFor()
           if (rows.length) assert.deepEqual(await figures.locator('tbody tr').first().locator('th,td').allTextContents(), [e.external_ref, e.instrument_id, '1', '-9.5', 'USD'])
           else await figures.getByText('The signed statement reports zero execution lines.').waitFor()
-          await comparisonDownload(page, region, sourceReceipt)
+          reportedDownloads.push(JSON.parse(await comparisonDownload(page, region, sourceReceipt)))
         }
         const latest = await read(e.following_date)
         assert.equal(latest.state, 'recorded')
@@ -149,7 +150,8 @@ async function main() {
   stage = 'retain-corrective-download'
   assert(retained)
   if (process.env.CUSTODY_PILOT_RETAINED_DOWNLOADS) {
-    await writeFile(process.env.CUSTODY_PILOT_RETAINED_DOWNLOADS, JSON.stringify(retained), { flag: 'wx', mode: 0o600 })
+    const downloads = { correction: retained, reported: reportedDownloads }
+    await writeFile(process.env.CUSTODY_PILOT_RETAINED_DOWNLOADS, JSON.stringify(downloads), { flag: 'wx', mode: 0o600 })
   }
 }
 

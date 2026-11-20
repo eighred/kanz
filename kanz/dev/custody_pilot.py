@@ -128,7 +128,8 @@ def verify_late_correction(path, fixture):
     download_path = path.with_suffix(".downloads.json")
     if download_path.stat().st_size > 128 * 1024:
         raise RuntimeError("Historical correction exceeds the pilot receipt bound.")
-    download = json.loads(download_path.read_bytes())
+    downloads = json.loads(download_path.read_bytes())
+    download = downloads["correction"]
     expected = {"tenant": "synthetic-custody-pilot", "portfolio": "PF1", "custodian": "CUST-A",
                 "business_date": "2020-02-04", "following_date": "2020-02-05",
                 "entry_id": "pilot-trade-7", "external_ref": "external-7", "instrument_id": "SYN", "agreed_quantity": "10.5"}
@@ -150,9 +151,20 @@ def verify_late_correction(path, fixture):
             or download.get("signed_statement_sha256") != expected["corrected_statement"].rsplit(".", 1)[-1]
             or download.get("account_assignment_verified") is not True
             or download.get("historical_quantity_resolutions") != [resolution]
-            or any(key in download for key in ("breaks", "execution_quantities", "transaction_pass"))):
+            or any(key in download for key in ("breaks", "execution_quantities", "transaction_pass", "reported_execution_figures"))):
         raise RuntimeError("Customer download does not match the applied historical quantity correction.")
-    return {"evidence": observed, "customer_download": download}
+    reported = downloads["reported"]
+    signed_trade = {"external_ref": expected["external_ref"], "instrument_id": expected["instrument_id"],
+                    "reported_price": "1", "reported_cash": "-9.5", "cash_currency": "USD"}
+    for receipt, run, stmt, rows in zip(reported, runs[:2], ("original_statement", "following_statement"),
+                                        ([signed_trade], []), strict=True):
+        digest = expected[stmt].rsplit(".", 1)[-1]
+        if (receipt.get("run_id") != run or receipt.get("statement_id") != expected[stmt]
+                or receipt.get("signed_statement_sha256") != digest or receipt.get("account_assignment_verified") is not True
+                or receipt.get("reported_execution_figures") != {
+                    "basis": "signed_custodian_statement", "signed_statement_sha256": digest, "rows": rows}):
+            raise RuntimeError("Downloaded execution figures differ from the original signed pilot statement.")
+    return {"evidence": observed, "customer_download": download, "reported_execution_downloads": reported}
 
 
 def qualify(docker, container, binaries, node, env, observations, profile):
