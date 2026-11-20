@@ -30,13 +30,13 @@ type syntheticControls struct {
 	observed          time.Time
 }
 
-func newSyntheticControls(now time.Time) syntheticControls {
+func newSyntheticControls(tenant string, now time.Time) syntheticControls {
 	const portfolio = "synthetic-portfolio"
 	usd := &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1000}}
 	return syntheticControls{
-		tenant: "synthetic-tenant", portfolio: portfolio,
+		tenant: tenant, portfolio: portfolio,
 		book: &compliance.Book{PortfolioID: portfolio, BaseCurrency: "USD", Cash: usd, NAV: usd, NAVBasis: compliance.NAVBasisEquity, CashCompleteness: &compliance.CashCompleteness{}},
-		mandate: &compliancepb.Mandate{TenantId: "synthetic-tenant", PortfolioId: portfolio, MandateId: "synthetic-spot", Version: 1, EffectiveAt: timestamppb.New(now.Add(-time.Hour)), Rules: []*compliancepb.Rule{
+		mandate: &compliancepb.Mandate{TenantId: tenant, PortfolioId: portfolio, MandateId: "synthetic-spot", Version: 1, EffectiveAt: timestamppb.New(now.Add(-time.Hour)), Rules: []*compliancepb.Rule{
 			{RuleId: "synthetic-gross-leverage", Type: compliancepb.RuleType_RULE_TYPE_GROSS_LEVERAGE, Params: &compliancepb.Rule_LeverageCap{LeverageCap: &compliancepb.LeverageCap{MaxGrossLeverage: &commonpb.Decimal{Coefficient: 1}}}},
 			{RuleId: "synthetic-buying-power", Type: compliancepb.RuleType_RULE_TYPE_BUYING_POWER, Params: &compliancepb.Rule_BuyingPower{BuyingPower: &compliancepb.BuyingPowerLimit{MinCashAfter: &commonpb.Decimal{Coefficient: 100}}}},
 		}},
@@ -150,7 +150,7 @@ func TestSyntheticOrderControlEvidence(t *testing.T) {
 		{"missing-mandate", func(c *syntheticControls) { c.mandate = nil }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newSyntheticControls(now)
+			c := newSyntheticControls("synthetic-tenant", now)
 			tc.change(&c)
 			rows, err := c.evaluate(t.Context(), frame, now)
 			if tc.want {

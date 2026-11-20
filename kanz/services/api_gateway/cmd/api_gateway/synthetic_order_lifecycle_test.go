@@ -16,6 +16,7 @@ import (
 	"time"
 
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -101,45 +102,80 @@ func syntheticPool(t *testing.T, ctx context.Context, role, tenant string) *pgxp
 	return pool
 }
 
+func prepareSyntheticOrder(t *testing.T, ctx context.Context, s syntheticSession, controlTenant string) (*orderpb.SubmitOrder, nativeSubmit) {
+	t.Helper()
+	env := s.frame.GetEnvelope()
+	var cmd orderpb.SubmitOrder
+	if err := proto.Unmarshal(s.frame.Payload, &cmd); err != nil {
+		t.Fatal(err)
+	}
+	tenant, portfolio, orderID := env.GetTenantId(), cmd.GetPortfolioId(), cmd.GetOrderId()
+	request := nativeSubmit{Version: 1, Op: "submit", Tenant: tenant, Portfolio: portfolio, Principal: cmd.GetMetadata().GetIssuer(), Key: env.GetIdempotencyKey(), Command: s.frame.Payload}
+	requireNativeReceipt(t, ctx, request, "CONTROL_DENIED")
+	now := time.Now().UTC()
+	controls := newSyntheticControls(controlTenant, now)
+	rows, err := controls.evaluate(ctx, s.frame, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := syntheticPool(t, ctx, "CONTROL", tenant)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	digest := sha256.Sum256(s.frame.Payload)
+	for _, r := range rows {
+		traceContext := ""
+		if r.kind == "entitlement" {
+			traceContext = env.GetTraceContext()
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO synthetic_oms_evidence (tenant_id,principal_id,portfolio_id,order_id,instrument_id,command_sha256,kind,decision,source_id,effective_at,observed_at,expires_at,trace_context) VALUES($1,$2,$3,$4,$5,$6,$7,'ALLOW',$8,$9,$10,$11,$12)`, tenant, request.Principal, portfolio, orderID, cmd.GetInstrumentId(), digest[:], r.kind, r.sourceID, r.effective, r.observed, r.expires, traceContext)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return &cmd, request
+}
+
+func exerciseArmedOrderRefusal(t *testing.T) {
+	const tenant = "synthetic-armed"
+	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
+		_, request := prepareSyntheticOrder(t, ctx, s, tenant)
+		requireNativeReceipt(t, ctx, request, "STORE_UNAVAILABLE")
+		pool := syntheticPool(t, ctx, "RUNTIME", tenant)
+		var orders, claims, facts int
+		if err := pool.QueryRow(ctx, `SELECT (SELECT count(order_id) FROM orders),
+			(SELECT count(order_id) FROM synthetic_oms_commands),(SELECT count(producer_service) FROM outbox)`).Scan(&orders, &claims, &facts); err != nil || orders != 0 || claims != 0 || facts != 0 {
+			t.Fatalf("armed refusal left orders=%d claims=%d facts=%d: %v", orders, claims, facts, err)
+		}
+		// The current receipt groups database refusals. Check the canonical
+		// trigger under the same login so a broken grant cannot pass this case.
+		_, err := pool.Exec(ctx, `INSERT INTO orders(tenant_id,order_id,status,state,portfolio_id,parent_order_id)
+			VALUES(app_current_tenant(),'armed-direct-probe',1,decode('00','hex'),'synthetic-portfolio','')`)
+		var pgerr *pgconn.PgError
+		if !errors.As(err, &pgerr) || pgerr.Code != "23514" || pgerr.Message != "capital activation refuses an unfunded order" {
+			t.Fatalf("unfunded write lacked the canonical activation refusal: %v", err)
+		}
+	})
+}
+
 func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_OMS_BIN") == "" {
 		t.Skip("use python kanz/dev/synthetic_orders.py --native <Linux owner>")
 	}
-	exerciseSyntheticSession(t, func(ctx context.Context, s syntheticSession) {
+	if !t.Run("armed_without_reservation", exerciseArmedOrderRefusal) {
+		t.FailNow()
+	}
+	exerciseSyntheticSession(t, "synthetic-tenant", func(ctx context.Context, s syntheticSession) {
 		env := s.frame.GetEnvelope()
-		var cmd orderpb.SubmitOrder
-		if err := proto.Unmarshal(s.frame.Payload, &cmd); err != nil {
-			t.Fatal(err)
-		}
-		tenant, portfolio, orderID := env.GetTenantId(), cmd.GetPortfolioId(), cmd.GetOrderId()
-		request := nativeSubmit{Version: 1, Op: "submit", Tenant: tenant, Portfolio: portfolio, Principal: cmd.GetMetadata().GetIssuer(), Key: env.GetIdempotencyKey(), Command: s.frame.Payload}
-		requireNativeReceipt(t, ctx, request, "CONTROL_DENIED")
+		cmd, request := prepareSyntheticOrder(t, ctx, s, "synthetic-tenant")
+		tenant, portfolio, orderID := request.Tenant, request.Portfolio, cmd.GetOrderId()
 		now := time.Now().UTC()
-		controls := newSyntheticControls(now)
-		rows, err := controls.evaluate(ctx, s.frame, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pool := syntheticPool(t, ctx, "CONTROL", tenant)
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer tx.Rollback(ctx)
-		digest := sha256.Sum256(s.frame.Payload)
-		for _, r := range rows {
-			traceContext := ""
-			if r.kind == "entitlement" {
-				traceContext = env.GetTraceContext()
-			}
-			_, err = tx.Exec(ctx, `INSERT INTO synthetic_oms_evidence (tenant_id,principal_id,portfolio_id,order_id,instrument_id,command_sha256,kind,decision,source_id,effective_at,observed_at,expires_at,trace_context) VALUES($1,$2,$3,$4,$5,$6,$7,'ALLOW',$8,$9,$10,$11,$12)`, tenant, request.Principal, portfolio, orderID, cmd.GetInstrumentId(), digest[:], r.kind, r.sourceID, r.effective, r.observed, r.expires, traceContext)
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err = tx.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
+		var err error
 		requireNativeReceipt(t, ctx, request, "COMMIT_UNCONFIRMED")
 		runtimePool := syntheticPool(t, ctx, "RUNTIME", tenant)
 		var orders, commands, factsAtRollback int
@@ -159,7 +195,7 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 			t.Fatal("duplicate submission changed order state")
 		}
 		conflict := request
-		changed := proto.Clone(&cmd).(*orderpb.SubmitOrder)
+		changed := proto.Clone(cmd).(*orderpb.SubmitOrder)
 		changed.LimitPrice = &commonpb.Decimal{Coefficient: 9102, Exponent: -2}
 		conflict.Command, err = proto.Marshal(changed)
 		if err != nil {

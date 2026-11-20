@@ -6,6 +6,19 @@ BEGIN
   END IF;
 END $$;
 
+-- The canonical order trigger initializes a disabled tenant and locks its
+-- activation row before it consults membership. Keep those privileges with
+-- the trigger in this disposable estate, outside every writer generation.
+CREATE ROLE kanz_synthetic_activation_guard NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+GRANT SELECT (tenant_id,enabled), INSERT (tenant_id), UPDATE (tenant_id)
+    ON public.capital_activation TO kanz_synthetic_activation_guard;
+GRANT SELECT (tenant_id,order_id) ON public.capital_members TO kanz_synthetic_activation_guard;
+ALTER FUNCTION public.require_funded_order_after_activation()
+    SET search_path = pg_catalog, public, pg_temp;
+ALTER FUNCTION public.require_funded_order_after_activation() OWNER TO kanz_synthetic_activation_guard;
+REVOKE ALL ON FUNCTION public.require_funded_order_after_activation() FROM PUBLIC;
+ALTER FUNCTION public.require_funded_order_after_activation() SECURITY DEFINER;
+
 CREATE TABLE synthetic_oms_evidence (
   tenant_id text NOT NULL DEFAULT app_current_tenant(),
   principal_id text NOT NULL,

@@ -12,7 +12,7 @@ Use Python 3.11+, Docker with Linux amd64 support, the Go toolchain in `kanz/go.
 python3 -B kanz/dev/synthetic_orders.py --native rust/target/debug/kanz-synthetic-oms
 ```
 
-On Windows, generate the schemas as described in the development setup, build the same Linux binary in a Linux checkout or builder, and pass its path to `python -B kanz/dev/synthetic_orders.py --native <linux-binary>`. The runner prints the executable SHA-256 and PostgreSQL role attributes. A separate command runs the ten existing component and gateway checks on hosts without a Linux Rust build.
+On Windows, generate the schemas as described in the development setup, build the same Linux binary in a Linux checkout or builder, and pass its path to `python -B kanz/dev/synthetic_orders.py --native <linux-binary>`. The runner prints the executable SHA-256 and PostgreSQL role attributes. A separate command runs the component and gateway checks on hosts without a Linux Rust build.
 
 ```sh
 python3 -B kanz/dev/synthetic_orders.py --owners-only
@@ -29,6 +29,7 @@ The fixture applies the canonical OMS migrations, the isolated command schema an
 | Evaluate market and limits | Missing, stale, future or invalid market evidence refuses. The engine projects exact post-trade cash and gross leverage against the effective tenant mandate. An expired or absent evidence set cannot admit an order. |
 | Lose the venue response after sending | The stored order retains its last confirmed state and exposes quarantine. The gateway read shows the uncertainty. Redelivery queries the existing remote order before another economic effect. |
 | Cancel during partial execution | The mock venue fills 1.25 units of the 2.5-unit order before confirming cancellation. The Rust owner records the exact executed quantity. Replaying the cancellation preserves the state and version. |
+| Submit with capital admission enabled | A second tenant has 1000 USD and no reservation. The same signed order passes the synthetic controls and the canonical PostgreSQL activation trigger refuses it. The runner checks cash, commitments, membership, order, command claim and outbox after rollback. |
 | Refuse the database commit | A deferred trigger raises after order, command claim and outbox writes. The service reports an unconfirmed commit. An independent scoped read finds zero rows in all three tables before the retry. |
 | Read the blotter | The authorized portfolio reader obtains the exact canonical state. A foreign tenant and an out-of-scope portfolio receive indistinguishable refusals. |
 

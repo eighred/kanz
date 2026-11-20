@@ -46,10 +46,10 @@ type syntheticSession struct {
 }
 
 func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
-	return exerciseSyntheticSession(t, nil)
+	return exerciseSyntheticSession(t, "synthetic-tenant", nil)
 }
 
-func exerciseSyntheticSession(t *testing.T, exercise func(context.Context, syntheticSession)) *envelopepb.EventFrame {
+func exerciseSyntheticSession(t *testing.T, tenant string, exercise func(context.Context, syntheticSession)) *envelopepb.EventFrame {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
@@ -72,7 +72,7 @@ func exerciseSyntheticSession(t *testing.T, exercise func(context.Context, synth
 	if err != nil {
 		t.Fatal(err)
 	}
-	const tenant, portfolio, orderID = "synthetic-tenant", "synthetic-portfolio", "0f36dca681444918a676761d47b63844"
+	const portfolio, orderID = "synthetic-portfolio", "0f36dca681444918a676761d47b63844"
 	orderSubject := bus.TenantRoutedSubject(tenant, "order.order.submit")
 	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "SYNTHETIC_ORDERS", Subjects: []string{orderSubject, bus.TenantRoutedSubject(tenant, "order.order.cancel")}, Storage: jetstream.FileStorage})
 	if err != nil {

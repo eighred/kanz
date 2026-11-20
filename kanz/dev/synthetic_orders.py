@@ -18,6 +18,9 @@ OWNERS = {
     "services/api_gateway/cmd/api_gateway": [
         "TestSyntheticOrderAuthenticatedIngress", "TestSyntheticOrderControlEvidence"],
     "services/oms/internal/order": [
+        "TestPostgresCapitalActivationRefusesLegacyAndOldWriter",
+        "TestPostgresFundedAdmissionCompetitionAndRedelivery",
+        "TestPostgresFundedAdmissionOutboxFailureRollsBackCash",
         "TestPostgresCreateIsAtomicAdmissionGate",
         "TestPostgresCreateFailingAtCommitLeavesNoOutboxRecord",
         "TestPostgresSaveFailingAtCommitLeavesNoOutboxRecord",
@@ -157,6 +160,28 @@ def provision_native(container, fixture_env):
     sql(container, "GRANT SELECT ON orders TO kanz_synthetic_oms_read; "
                    "GRANT SELECT, UPDATE(published_at,attempts,last_error) ON outbox TO kanz_synthetic_oms_relay;", DB)
 
+    # An activated tenant has known cash but no reservation for its next
+    # command. Only the fixture operator seeds this independent estate.
+    sql(container, """
+        BEGIN; SET LOCAL app.tenant_id='synthetic-armed';
+        INSERT INTO capital_activation(enabled,activated_at) VALUES(true,clock_timestamp());
+        INSERT INTO capital_balances(portfolio_id,currency,revision,coverage_complete,total)
+            VALUES('synthetic-portfolio','USD',1,true,'1000');
+        DO $$ DECLARE principal name; BEGIN
+            FOR principal IN SELECT rolname FROM pg_roles WHERE NOT rolsuper AND (
+                    pg_has_role(oid,'kanz_synthetic_oms_runtime','MEMBER') OR
+                    pg_has_role(oid,'kanz_synthetic_oms_adapter','MEMBER')) LOOP
+                IF pg_has_role(principal,'kanz_synthetic_activation_guard','MEMBER') OR EXISTS (
+                    SELECT FROM pg_class WHERE relnamespace='public'::regnamespace
+                      AND starts_with(relname,'capital_') AND relkind='r' AND
+                      (has_any_column_privilege(principal,oid,'SELECT,INSERT,UPDATE,REFERENCES') OR
+                       has_table_privilege(principal,oid,'DELETE,TRUNCATE,TRIGGER'))) THEN
+                    RAISE EXCEPTION 'synthetic writer has direct capital privileges';
+                END IF;
+            END LOOP;
+        END $$;
+        COMMIT;
+    """, DB)
 
     # Exercise the ambiguous-COMMIT API. The first admitted order fails only
     # after the canonical order and its outbox entry have both been written.
@@ -242,10 +267,24 @@ def run(stage, native):
             if proc.returncode:
                 raise RuntimeError(log)
             if native and base == "api_gateway":
-                for name in ("fenced_restart", "unknown_across_handoff"):
+                for name in ("armed_without_reservation", "fenced_restart", "unknown_across_handoff"):
                     case = rf"^\s*--- PASS: TestSyntheticOrderCommandLifecycle/{name} "
                     if len(re.findall(case, log, re.MULTILINE)) != 1:
                         raise RuntimeError("missing writer recovery proof: " + name)
+                sql(container, """
+                    DO $$ BEGIN
+                        IF (SELECT count(*) FROM capital_balances WHERE tenant_id='synthetic-armed')<>1
+                           OR NOT EXISTS (SELECT FROM capital_balances WHERE tenant_id='synthetic-armed'
+                            AND portfolio_id='synthetic-portfolio' AND currency='USD'
+                            AND revision=1 AND total='1000' AND reserved='0')
+                           OR EXISTS (SELECT FROM capital_members WHERE tenant_id='synthetic-armed')
+                           OR EXISTS (SELECT FROM capital_commitments WHERE tenant_id='synthetic-armed')
+                           OR NOT EXISTS (SELECT FROM capital_activation WHERE tenant_id='synthetic-armed' AND enabled)
+                           OR NOT EXISTS (SELECT FROM capital_activation WHERE tenant_id='synthetic-tenant' AND NOT enabled) THEN
+                            RAISE EXCEPTION 'unexpected capital state after synthetic submissions';
+                        END IF;
+                    END $$;
+                """, DB)
             count = require_tests(log, names)
             print(f"{package}: {count} named tests passed without skips", flush=True)
     finally:
