@@ -7,6 +7,7 @@ import type { CustodyRerunReceipt } from '../api/custody'
 
 const breaks = ref<CustodyBreak[]>([])
 const rerunActor = ref('')
+const reviewingRerun = ref(false)
 const rerunReceipt = ref<CustodyRerunReceipt | null>(null)
 const loading = ref(true)
 const error = ref('')
@@ -135,7 +136,7 @@ function age(seconds: number): string {
       <button :disabled="saving" @click="cancel">Cancel</button>
     </div>
   </section>
-  <CustodyRerunForm v-if="rerunActor" :actor="rerunActor" @completed="showRerun" />
+  <CustodyRerunForm v-if="rerunActor && !selected" :actor="rerunActor" @reviewing="reviewingRerun = $event" @completed="showRerun" />
   <section v-if="rerunReceipt" aria-label="Recorded custody comparison" role="status">
     <h2>Recorded comparison</h2>
     <p>{{ rerunReceipt.portfolio_id }} · {{ rerunReceipt.custodian_id }} · {{ rerunReceipt.business_date }}</p>
@@ -146,7 +147,7 @@ function age(seconds: number): string {
     <p v-if="rerunReceipt.statement_id">Statement <code>{{ rerunReceipt.statement_id }}</code></p>
     <p v-if="rerunReceipt.journal_position !== undefined">Journal position <code>{{ rerunReceipt.journal_position }}</code></p>
   </section>
-  <button ref="reloadButton" :disabled="loading || saving || !!selected" @click="reload">Reload queue</button>
+  <button ref="reloadButton" :disabled="loading || saving || !!selected || reviewingRerun" @click="reload">Reload queue</button>
   <p v-if="loading">Loading…</p>
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
   <div v-else class="table-scroll">
@@ -181,8 +182,8 @@ function age(seconds: number): string {
           <td>{{ item.explanation || '—' }}</td>
           <td>
             <div v-if="item.actions_enabled" class="actions">
-              <button :disabled="!!selected || saving" @click="choose(item, 'claim', $event)">Claim</button>
-              <button :disabled="!!selected || saving" @click="choose(item, 'explain', $event)">Explain</button>
+              <button :disabled="!!selected || saving || reviewingRerun" @click="choose(item, 'claim', $event)">Claim</button>
+              <button :disabled="!!selected || saving || reviewingRerun" @click="choose(item, 'explain', $event)">Explain</button>
             </div>
             <span v-else>{{ unavailable(item) }}</span>
           </td>
