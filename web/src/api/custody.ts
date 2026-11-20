@@ -1,6 +1,12 @@
 import { api, ApiError } from './client'
 
+export interface CustodyDetection {
+  run_id: string; statement_id: string; business_date: string
+  journal_position?: string; scope_mode?: string
+}
+
 export interface CustodyBreak {
+  portfolio_id?: string; custodian_id?: string; detection?: CustodyDetection
   break_id: string; kind: string; key: string; ibor: string; custodian: string; difference: string
   status: string; assignee?: string; explanation?: string; first_seen_at: string
   last_seen_at: string; status_changed_at: string; age_seconds: number
@@ -19,6 +25,23 @@ export interface CustodyEvidence {
   before: ActionState; after: ActionState; values: { ibor: string; custodian: string; difference: string }
 }
 
+function nonempty(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function validDetection(value: unknown): value is CustodyDetection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const source = value as Record<string, unknown>
+  if (!nonempty(source.run_id) || !nonempty(source.statement_id) || !nonempty(source.business_date)) return false
+  const day = source.business_date
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false
+  const instant = new Date(day + 'T00:00:00Z')
+  if (!Number.isFinite(instant.getTime()) || instant.toISOString().slice(0, 10) !== day) return false
+  const position = source.journal_position
+  if (position !== undefined && (typeof position !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(position) || BigInt(position) > 9223372036854775807n)) return false
+  return source.scope_mode === undefined || nonempty(source.scope_mode)
+}
+
 function parseBreak(value: unknown): CustodyBreak {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid custody response.')
   const row = value as Record<string, unknown>
@@ -31,6 +54,9 @@ function parseBreak(value: unknown): CustodyBreak {
   if (['ibor', 'custodian', 'difference'].some((key) => typeof row[key] !== 'string')) throw new Error('Invalid custody response.')
   if ((row.values_state === 'exact' || row.values_state === undefined) && ['ibor', 'custodian', 'difference'].some((key) => !exact(row[key]))) throw new Error('Invalid custody response.')
   if (row.revision !== undefined && !revision(row.revision)) throw new Error('Invalid custody response.')
+  if ((row.portfolio_id !== undefined || row.custodian_id !== undefined || row.detection !== undefined) &&
+      (!nonempty(row.portfolio_id) || !nonempty(row.custodian_id))) throw new Error('Invalid custody response.')
+  if (row.detection !== undefined && !validDetection(row.detection)) throw new Error('Invalid custody response.')
   return row as unknown as CustodyBreak
 }
 

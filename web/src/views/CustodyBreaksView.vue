@@ -125,7 +125,7 @@ function age(seconds: number): string {
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
   <div v-else class="table-scroll">
     <table>
-      <thead><tr><th>Break ID</th><th>Age</th><th>Kind / key</th><th>IBOR</th><th>Custodian</th><th>Difference</th><th>Status</th><th>Assignee</th><th>Last detected</th><th>Explanation</th><th>Investigation</th></tr></thead>
+      <thead><tr><th>Break ID</th><th>Age</th><th>Kind / key</th><th>IBOR</th><th>Custodian</th><th>Difference</th><th>Status</th><th>Assignee</th><th>Last detected</th><th>Detection evidence</th><th>Explanation</th><th>Investigation</th></tr></thead>
       <tbody>
         <tr v-for="item in breaks" :key="item.break_id">
           <th scope="row"><code>{{ item.break_id }}</code></th>
@@ -133,7 +133,26 @@ function age(seconds: number): string {
           <td>{{ item.kind }}<br /><code>{{ item.key }}</code></td>
           <td v-for="field in figures" :key="field">{{ item.values_state === 'exact' ? item[field] : item.values_state === 'unavailable' ? 'Unavailable' : 'Unverified' }}</td>
           <td>{{ item.status }}</td><td>{{ item.assignee || 'Unassigned' }}</td>
-          <td>{{ item.last_seen_at }}</td><td>{{ item.explanation || '—' }}</td>
+          <td>{{ item.last_seen_at }}</td>
+          <td>
+            <details v-if="item.detection || item.portfolio_id">
+              <summary>View detection evidence</summary>
+              <dl class="custody-origin">
+                <dt>Portfolio</dt><dd>{{ item.portfolio_id }}</dd>
+                <dt>Custodian ID</dt><dd>{{ item.custodian_id }}</dd>
+                <template v-if="item.detection">
+                  <dt>Business date</dt><dd>{{ item.detection.business_date }}</dd>
+                  <dt>Reconciliation run</dt><dd><code>{{ item.detection.run_id }}</code></dd>
+                  <dt>Statement</dt><dd><code>{{ item.detection.statement_id }}</code></dd>
+                  <dt>Journal position</dt><dd>{{ item.detection.journal_position ?? 'Unavailable' }}</dd>
+                  <dt>Account scope</dt><dd>{{ item.detection.scope_mode ?? 'Unavailable' }}</dd>
+                </template>
+              </dl>
+              <span v-if="!item.detection">Detection source unavailable.</span>
+            </details>
+            <span v-else>Detection source unavailable.</span>
+          </td>
+          <td>{{ item.explanation || '—' }}</td>
           <td>
             <div v-if="item.actions_enabled" class="actions">
               <button :disabled="!!selected || saving" @click="choose(item, 'claim', $event)">Claim</button>
@@ -142,7 +161,7 @@ function age(seconds: number): string {
             <span v-else>{{ unavailable(item) }}</span>
           </td>
         </tr>
-        <tr v-if="breaks.length === 0"><td colspan="11">No outstanding custody breaks were returned by the reconciliation service.</td></tr>
+        <tr v-if="breaks.length === 0"><td colspan="12">No outstanding custody breaks were returned by the reconciliation service.</td></tr>
       </tbody>
     </table>
   </div>
@@ -152,4 +171,6 @@ function age(seconds: number): string {
 .custody-review { margin-bottom: 24px; }
 .custody-review p { margin: 0; }
 .actions { flex-wrap: wrap; }
+.custody-origin { display: grid; gap: .2rem .6rem; grid-template-columns: max-content minmax(12rem, 1fr); }
+.custody-origin dd { margin: 0; overflow-wrap: anywhere; white-space: normal; }
 </style>

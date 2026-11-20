@@ -15,6 +15,23 @@ function button(wrapper: ReturnType<typeof mount>, text: string) {
 }
 
 describe('custody exact review', () => {
+  it('reads detection again on reload and preserves unknown historical fields', async () => {
+    const detection = { run_id: 'recorded-run', statement_id: 'signed-statement-r1', business_date: '2020-02-04', journal_position: '9007199254740993' }
+    const get = vi.spyOn(custody, 'breaks').mockResolvedValueOnce([{ ...row, portfolio_id: 'PF1', custodian_id: 'CUST-A', detection }]).mockResolvedValueOnce([row])
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      await flushPromises()
+      const source = wrapper.get('details').text()
+      for (const value of ['PF1', 'CUST-A', ...Object.values(detection)]) expect(source).toContain(value)
+      expect(source).toContain('Account scopeUnavailable')
+      await button(wrapper, 'Reload queue').trigger('click')
+      await flushPromises()
+      expect(get).toHaveBeenCalledTimes(2)
+      expect(wrapper.text()).not.toContain(detection.statement_id)
+      expect(wrapper.text()).toContain('Detection source unavailable.')
+    } finally { wrapper.unmount() }
+  })
+
   it('identifies the selected break from the queue through confirmation and the recorded receipt', async () => {
     const other = { ...row, break_id: 'PF2|CUST|quantity|BTC/USD' }
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [row, other], count: 2, actions_enabled: true })
