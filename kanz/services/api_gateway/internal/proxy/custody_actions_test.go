@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -62,6 +63,48 @@ func TestCustodyCustomerReadRequiresScopeAndCannotWrite(t *testing.T) {
 		m.ServeHTTP(w, r)
 		if w.Code != tc.code || (tc.code != 200 && be.last.Service != "") {
 			t.Fatalf("%s %s %s: %d", tc.role, tc.method, tc.path, w.Code)
+		}
+	}
+}
+
+func TestCustodyQueueGatewayPreservesContinuationAndStatus(t *testing.T) {
+	for _, tc := range []struct {
+		query          string
+		upstream, want int
+		body           string
+	}{
+		{"limit=1&after=UEZ8Q3xxdWFudGl0eXzpm6o", 200, 200, `{"count":1,"next_cursor":"cTE6YWJj"}`},
+		{"limit=1&after=YQ&after=Yg", 400, 400, `{"error":"Invalid custody queue cursor."}`},
+		{"", 422, 422, `{"code":"custody_queue_pagination_required","limit":4096}`},
+		{"limit=1&after=%ZZ", 0, 400, ""},
+	} {
+		calls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if r.URL.Path != "/v1/custody/breaks" {
+				t.Error(r.URL.Path)
+			}
+			if tc.upstream == 200 && (r.URL.Query().Get("after") != "UEZ8Q3xxdWFudGl0eXzpm6o" || r.URL.Query().Get("limit") != "1") {
+				t.Error(r.URL.RawQuery)
+			}
+			if tc.upstream == 400 && strings.Join(r.URL.Query()["after"], ",") != "YQ,Yg" {
+				t.Error(r.URL.RawQuery)
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(tc.upstream)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		be := NewMeshBackend(map[Service]string{ServiceAccounting: upstream.URL}, upstream.Client())
+		m := authz.NewMux(authz.Grants{"reader": {authz.CustodyRead}}, nil)
+		New(be, Roles{CustodyRead: "reader"}).Routes(m)
+		r := httptest.NewRequest("GET", "/v1/custody/breaks?"+tc.query, nil)
+		r = r.WithContext(middleware.WithPrincipal(r.Context(), &middleware.Principal{Subject: "reader", Tenant: "T", Roles: []string{"reader"}, Portfolios: []string{"PF"}}))
+		w := httptest.NewRecorder()
+		m.ServeHTTP(w, r)
+		upstream.Close()
+		if w.Code != tc.want || (tc.upstream == 0 && calls != 0) || (tc.upstream != 0 && (calls != 1 || w.Body.String() != tc.body || w.Header().Get("Cache-Control") != "no-store")) {
+			t.Fatalf("%q status %d calls %d body %s", tc.query, w.Code, calls, w.Body.String())
 		}
 	}
 }

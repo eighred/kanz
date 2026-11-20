@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/eighred/kanz/services/accounting/internal/recon"
@@ -85,24 +87,78 @@ func recordQuantityObservations(ctx context.Context, tx pgx.Tx, run Run, digest 
 	return nil
 }
 
+// MaxQueuePage is the largest complete customer queue or explicit page.
+const MaxQueuePage = 4096
+
+func validQueueFetch(limit int) error {
+	// The extra row tells the HTTP reader whether a continuation exists.
+	if limit < 1 || limit > MaxQueuePage+1 {
+		return errors.New("custody: invalid break page size")
+	}
+	return nil
+}
+
+func sortQueuePage(items []Break, limit int) []Break {
+	slices.SortFunc(items, func(a, b Break) int { return strings.Compare(a.BreakID, b.BreakID) })
+	if limit > 0 && len(items) > limit {
+		return items[:limit]
+	}
+	return items
+}
+
+// The aliases are SQL literals from the two internal queries. The scope and
+// continuation stay bound parameters. C collation is the same byte order as Go.
+func queuePredicates(alias string, portfolios []string, after string, limit int) (string, []any) {
+	var q string
+	var args []any
+	if len(portfolios) > 0 {
+		q += " AND " + alias + "portfolio_id=ANY($1)"
+		args = append(args, portfolios)
+	}
+	if limit > 0 {
+		args = append(args, after)
+		q += " AND " + alias + "portfolio_id<>'' AND " + alias + "break_id COLLATE \"C\" > $" + strconv.Itoa(len(args))
+	}
+	return q, args
+}
+
+func queueOrder(alias string, limit int) string {
+	q := " ORDER BY " + alias + "break_id COLLATE \"C\""
+	if limit > 0 {
+		q += " LIMIT " + strconv.Itoa(limit)
+	}
+	return q
+}
+
+func (p *Postgres) BreakPage(ctx context.Context, portfolios []string, after string, limit int) ([]Break, error) {
+	if err := validQueueFetch(limit); err != nil {
+		return nil, err
+	}
+	return p.outstandingBreaks(ctx, portfolios, after, limit)
+}
+
 func (p *Postgres) OutstandingBreaks(ctx context.Context, portfolios ...string) ([]Break, error) {
+	return p.outstandingBreaks(ctx, portfolios, "", 0)
+}
+
+func (p *Postgres) outstandingBreaks(ctx context.Context, portfolios []string, after string, limit int) ([]Break, error) {
 	if p.tx != nil {
-		return p.outstandingInSnapshot(ctx, portfolios...)
+		return p.outstandingInSnapshot(ctx, portfolios, after, limit)
 	}
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	out, err := (&Postgres{pool: p.pool, tx: tx}).outstandingInSnapshot(ctx, portfolios...)
+	out, err := (&Postgres{pool: p.pool, tx: tx}).outstandingInSnapshot(ctx, portfolios, after, limit)
 	if err != nil {
 		return nil, err
 	}
 	return out, tx.Commit(ctx)
 }
 
-func (p *Postgres) outstandingInSnapshot(ctx context.Context, portfolios ...string) ([]Break, error) {
-	out, err := p.balanceAndMembershipBreaks(ctx, portfolios...)
+func (p *Postgres) outstandingInSnapshot(ctx context.Context, portfolios []string, after string, limit int) ([]Break, error) {
+	out, err := p.balanceAndMembershipBreaks(ctx, portfolios, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -117,14 +173,12 @@ func (p *Postgres) outstandingInSnapshot(ctx context.Context, portfolios ...stri
     ORDER BY candidate.revision DESC LIMIT 1),'') ELSE '' END
  FROM (SELECT DISTINCT ON (portfolio_id,custodian_id,business_date,break_id) *
  FROM custody_execution_quantity_observations WHERE tenant_id=app_current_tenant()`
-	var args []any
-	if len(portfolios) > 0 {
-		q += " AND portfolio_id=ANY($1)"
-		args = append(args, portfolios)
-	}
+	scope, args := queuePredicates("", portfolios, after, limit)
+	q += scope
 	q += `
  ORDER BY portfolio_id,custodian_id,business_date,break_id,source_revision DESC,observation DESC) q
  JOIN custody_runs r ON r.tenant_id=q.tenant_id AND r.run_id=q.run_id WHERE q.difference<>'0'`
+	q += queueOrder("q.", limit)
 	rows, err := p.tx.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -148,6 +202,5 @@ func (p *Postgres) outstandingInSnapshot(ctx context.Context, portfolios ...stri
 		b.StatusChangedAt = b.FirstSeenAt
 		out = append(out, b)
 	}
-	slices.SortFunc(out, func(a, b Break) int { return strings.Compare(a.BreakID, b.BreakID) })
-	return out, rows.Err()
+	return sortQueuePage(out, limit), rows.Err()
 }

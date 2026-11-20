@@ -570,6 +570,14 @@ func (h *Handler) custodyReader() http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "an explicit custody portfolio is required")
 			return
 		}
+		// URL.Query drops malformed fields. Losing an invalid continuation
+		// would restart the operator at page one without reporting the failure.
+		if r.URL.Path == "/v1/custody/breaks" {
+			if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid custody queue query")
+				return
+			}
+		}
 		forward(w, r)
 	}
 }
