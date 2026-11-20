@@ -55,17 +55,18 @@ type FlowSplit struct {
 }
 
 type Evidence struct {
-	Format         string          `json:"format"`
-	Tenant         string          `json:"tenant"`
-	Portfolio      string          `json:"portfolio"`
-	Currency       string          `json:"currency"`
-	CloseDate      string          `json:"close_date"`
-	AsOf           time.Time       `json:"as_of"`
-	Issuer         string          `json:"issuer"`
-	PreviousDigest string          `json:"previous_digest"`
-	Opening        *Close          `json:"opening"`
-	Closing        *Close          `json:"closing"`
-	Flows          *FlowCompletion `json:"external_flows"`
+	Format         string             `json:"format"`
+	Tenant         string             `json:"tenant"`
+	Portfolio      string             `json:"portfolio"`
+	Currency       string             `json:"currency"`
+	CloseDate      string             `json:"close_date"`
+	AsOf           time.Time          `json:"as_of"`
+	Issuer         string             `json:"issuer"`
+	PreviousDigest string             `json:"previous_digest"`
+	Opening        *Close             `json:"opening"`
+	Closing        *Close             `json:"closing"`
+	Flows          *FlowCompletion    `json:"external_flows"`
+	Benchmark      *BenchmarkEvidence `json:"benchmark,omitempty"`
 }
 
 type authority struct {
@@ -90,6 +91,9 @@ func parse(raw []byte) (Evidence, error) {
 		return Evidence{}, ErrEvidence
 	}
 	marks := []*Close{e.Opening, e.Closing}
+	if !validBenchmark(e) {
+		return Evidence{}, ErrEvidence
+	}
 	if e.Flows != nil {
 		if !identifier.MatchString(e.Flows.Scope) || !identifier.MatchString(e.Flows.Reference) || e.Flows.EventCount == nil {
 			return Evidence{}, ErrEvidence

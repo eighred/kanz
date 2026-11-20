@@ -37,13 +37,19 @@ async function main() {
           return response.json()
         }
         if (role !== 'authorized') {
-          for (const edition of [expected.editions[0], expected.editions[3]]) {
+          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5]]) {
             const body = await check(edition, status)
-            assert(!JSON.stringify(body).includes(edition.digest))
+            const denied = JSON.stringify(body)
+            assert(!denied.includes(edition.digest))
+            if (edition.benchmark_digest) {
+              assert(!denied.includes(edition.benchmark_digest))
+              assert(!denied.includes('SYNTH-TR'))
+            }
           }
           continue
         }
-        const [original, corrected, unknown, splitOriginal, splitCorrected, splitUnknown] = expected.editions
+        const [original, corrected, unknown, splitOriginal, splitCorrected, indexCorrected,
+          missingBenchmark, mismatchedBenchmark, splitUnknown] = expected.editions
         async function measured(edition, value, text, flowCount = '0') {
           const body = await check(edition, 200)
           assert.equal(body.source_digest, edition.digest)
@@ -64,8 +70,25 @@ async function main() {
           }
           return body
         }
+        async function comparison(body, edition, benchmark, active, benchmarkText, activeText) {
+          const value = body.benchmark_comparison
+          assert.equal(value.source_digest, edition.benchmark_digest)
+          assert.equal(value.definition.benchmark_id, 'SYNTH-TR')
+          assert.equal(value.definition.currency_code, 'USD')
+          assert.equal(value.start, body.start)
+          assert.equal(value.end, body.end)
+          assert(Date.parse(value.known_at) <= Date.parse(body.as_of))
+          assert.equal(value.unassessed_reason, undefined)
+          assert(Math.abs(value.measured.benchmark_return - benchmark) <= 1e-12)
+          assert(Math.abs(value.measured.active_return - active) <= 1e-12)
+          await section.getByText('SYNTH-TR return', { exact: false }).waitFor()
+          await section.getByText(benchmarkText, { exact: true }).waitFor()
+          await section.getByText(activeText, { exact: true }).waitFor()
+          await section.getByText(edition.benchmark_digest, { exact: true }).waitFor()
+        }
         stage = 'authorized-open-payload'
         const originalBody = await measured(original, 0.02, '2%')
+        assert.equal(originalBody.benchmark_comparison, undefined)
         const updated = await measured(corrected, 0, '0%')
         assert.equal(updated.previous_source_digest, original.digest)
         const unassessed = await check(unknown, 200)
@@ -76,19 +99,46 @@ async function main() {
         await section.getByText('Unassessed. External flow coverage is unavailable.', { exact: false }).waitFor()
         stage = 'authorized-intraday-payload'
         const splitBody = await measured(splitOriginal, 0.21, '21%', '1')
+        await comparison(splitBody, splitOriginal, 2 / 25, 13 / 100, '8%', '+13 percentage points')
         const splitUpdated = await measured(splitCorrected, -0.032, '-3.2%', '1')
         assert.equal(splitUpdated.previous_source_digest, splitOriginal.digest)
+        await comparison(splitUpdated, splitCorrected, 2 / 25, -14 / 125, '8%', '-11.2 percentage points')
+        assert.equal(splitUpdated.benchmark_comparison.source_digest, splitBody.benchmark_comparison.source_digest)
+        stage = 'authorized-benchmark-restatement'
+        const revisedIndex = await measured(indexCorrected, -0.032, '-3.2%', '1')
+        assert.equal(revisedIndex.previous_source_digest, splitCorrected.digest)
+        assert.notEqual(revisedIndex.benchmark_comparison.source_digest, splitUpdated.benchmark_comparison.source_digest)
+        await comparison(revisedIndex, indexCorrected, 1 / 10, -33 / 250, '10%', '-13.2 percentage points')
+        stage = 'authorized-benchmark-coverage'
+        const missingIndex = await measured(missingBenchmark, -0.032, '-3.2%', '1')
+        assert.equal(missingIndex.previous_source_digest, indexCorrected.digest)
+        assert.equal(missingIndex.benchmark_comparison.unassessed_reason, 'benchmark_missing')
+        assert.equal(missingIndex.benchmark_comparison.measured, undefined)
+        assert.equal(missingIndex.benchmark_comparison.definition, undefined)
+        assert(!missingIndex.benchmark_comparison.source_digest)
+        await section.getByText('Benchmark comparison unassessed. A dated benchmark observation is unavailable.').waitFor()
+        const wrongWindow = await measured(mismatchedBenchmark, -0.032, '-3.2%', '1')
+        assert.equal(wrongWindow.previous_source_digest, missingBenchmark.digest)
+        assert.equal(wrongWindow.benchmark_comparison.source_digest, mismatchedBenchmark.benchmark_digest)
+        assert.equal(wrongWindow.benchmark_comparison.end, wrongWindow.start)
+        assert.equal(wrongWindow.benchmark_comparison.measured, undefined)
+        assert.equal(wrongWindow.benchmark_comparison.unassessed_reason, 'benchmark_window_mismatch')
+        await section.getByText('Benchmark comparison unassessed. The benchmark dates do not match this return window.').waitFor()
         const splitUnassessed = await check(splitUnknown, 200)
         assert.equal(splitUnassessed.source_digest, splitUnknown.digest)
-        assert.equal(splitUnassessed.previous_source_digest, splitCorrected.digest)
+        assert.equal(splitUnassessed.previous_source_digest, mismatchedBenchmark.digest)
         assert.equal(splitUnassessed.measured, undefined)
         assert.equal(splitUnassessed.unassessed_reason, 'nav_at_flow_missing')
+        assert.equal(splitUnassessed.benchmark_comparison.measured, undefined)
+        assert.equal(splitUnassessed.benchmark_comparison.unassessed_reason, 'portfolio_return_unassessed')
         await section.getByText('Unassessed. A valuation at the cash flow is unavailable.', { exact: false }).waitFor()
         stage = 'authorized-reload-details'
         await page.reload()
         assert.deepEqual(await measured(original, 0.02, '2%'), originalBody)
         await check({ as_of: '2020-02-04T06:00:00Z' }, 404)
         assert.deepEqual(await measured(splitOriginal, 0.21, '21%', '1'), splitBody)
+        assert.deepEqual(await measured(splitCorrected, -0.032, '-3.2%', '1'), splitUpdated)
+        await comparison(splitUpdated, splitCorrected, 2 / 25, -14 / 125, '8%', '-11.2 percentage points')
         await check({ date: splitOriginal.date, as_of: '2020-02-05T06:00:00Z' }, 404)
       } finally {
         await context.close()

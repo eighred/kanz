@@ -16,8 +16,9 @@ type Store struct{ pool *pgxpool.Pool }
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 type Receipt struct {
-	Evidence Evidence
-	Digest   string
+	Evidence        Evidence
+	Digest          string
+	benchmarkDigest string
 }
 
 // Accept admits the signed source before any downstream result can use it.
@@ -39,11 +40,15 @@ func (s *Store) Accept(ctx context.Context, raw, signature []byte) (Receipt, err
 	if err != nil {
 		return Receipt{}, err
 	}
+	benchmarkDigest, err := verifyBenchmark(ctx, tx, e)
+	if err != nil {
+		return Receipt{}, err
+	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
 		'return-basis', app_current_tenant(), $1::text, $2::text, $3::text)::text,0))`, e.Portfolio, e.Currency, e.CloseDate); err != nil {
 		return Receipt{}, err
 	}
-	receipt := Receipt{Evidence: e, Digest: digest(raw)}
+	receipt := Receipt{Evidence: e, Digest: digest(raw), benchmarkDigest: benchmarkDigest}
 	var existing string
 	var saved, savedSignature []byte
 	err = tx.QueryRow(ctx, `SELECT digest,signed_payload,signature FROM return_basis_receipts
@@ -118,7 +123,11 @@ func (s *Store) Read(ctx context.Context, portfolio, ccy, date string, horizon t
 		saved != digest(raw) || !a.verifies(e, raw, signature) {
 		return Receipt{}, ErrEvidence
 	}
-	return Receipt{Evidence: e, Digest: saved}, nil
+	benchmarkDigest, err := verifyBenchmark(ctx, tx, e)
+	if err != nil {
+		return Receipt{}, err
+	}
+	return Receipt{Evidence: e, Digest: saved, benchmarkDigest: benchmarkDigest}, nil
 }
 
 func lookupAuthority(ctx context.Context, tx pgx.Tx, tenant, portfolio, ccy string) (authority, error) {

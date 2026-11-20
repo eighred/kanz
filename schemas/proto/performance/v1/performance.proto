@@ -190,6 +190,7 @@ message DailyReturnAssessment {
     string unassessed_reason = 14;
   }
   IntradayReturnFlow intraday_flow = 15;
+  DailyBenchmarkComparison benchmark_comparison = 16;
 }
 
 // IntradayReturnFlow identifies the verified same-time cash/NAV bridge used to
@@ -201,4 +202,26 @@ message IntradayReturnFlow {
   common.v1.Decimal signed_amount = 4;
   string pre_flow_nav_reference = 5;
   string post_flow_nav_reference = 6;
+}
+
+// DailyBenchmarkComparison binds an authorized return-series observation to
+// the parent report. Source metadata identifies the observation even when its
+// economic window does not match. Missing evidence carries only a reason.
+message DailyBenchmarkComparison {
+  BenchmarkDefinition definition = 1;
+  string source_digest = 2;
+  google.protobuf.Timestamp start = 3;
+  google.protobuf.Timestamp end = 4;
+  google.protobuf.Timestamp known_at = 5;
+  oneof result {
+    BenchmarkRelativeReturn measured = 6;
+    string unassessed_reason = 7;
+  }
+}
+
+message BenchmarkRelativeReturn {
+  // benchmark_return and active_return are fractions. An active return of 0.13
+  // is 13 percentage points. Active return is portfolio minus benchmark.
+  double benchmark_return = 1;
+  double active_return = 2;
 }

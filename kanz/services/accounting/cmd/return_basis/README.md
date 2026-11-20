@@ -33,6 +33,27 @@ The source login needs read access to the referenced columns in `cash_commands`
 and `ledger_entries` under tenant RLS. It cannot write either table. The signed
 issuer supplies the retained NAV versions and attests the full flow inventory.
 
+The authority operator can enroll one total-return index and its separate
+Ed25519 issuer per reporting scope in `return_basis_benchmark_authorities`.
+Grant the restricted source, consumer and reader SELECT on that table. Only the
+operator may enroll keys. Each benchmark observation binds the tenant,
+portfolio, currency, index definition date, start and end dates, knowledge
+time, and exact positive opening and closing index levels. It is signed as
+compact canonical JSON in `BenchmarkObservation` field order. Its SHA-256
+digest is the source version.
+
+An optional final `benchmark` object in the close bundle carries
+`observation` followed by `signature`, which is the base64-encoded 64-byte
+benchmark signature. Both fields are null when the observation is unavailable.
+Accounting rechecks both signatures and matches the observation's exact UTC
+window, currency and knowledge time to the report. An authentic observation
+for a different window or a missing observation leaves the comparison
+unassessed while preserving any measured portfolio return. An observation
+learned after the reporting horizon is refused at intake. A benchmark
+correction is a new close edition with a later horizon and an updated
+signed observation. This keeps earlier editions and their benchmark versions
+addressable by their original horizon.
+
 Submit compact canonical JSON in the order shown by the Go Evidence type, with
 a separate raw 64-byte Ed25519 signature. The `as_of` timestamp uses RFC 3339
 UTC with at most microsecond precision. The first edition has
@@ -62,6 +83,8 @@ date, reporting currency and exact knowledge time. The panel distinguishes
 a measured zero from an unassessed period. For a measured split it shows the cash
 amount and effective time along with the linked result. Enter the earlier knowledge
 time to reopen the original published result after a correction.
+The same result shows the benchmark return, active return in percentage points,
+and signed benchmark digest when a comparison is supported.
 
 For the isolated acceptance, generate the Go schema SDK and install the
 locked Web dependencies and Chromium. From the repository root run
@@ -79,6 +102,14 @@ original horizon. The fixture also checks a missing pre-flow NAV, a cash amount
 that differs from the booking, an unreconciled NAV split, a horizon before
 booking, a second cash movement recorded in another currency, tenant and fund
 denial, and byte-identical JetStream redelivery.
+
+The benchmark fixture values the independently signed synthetic total-return
+index from 250 to 270 over the same UTC window. Its 8% return gives +13
+percentage points against 21%. The corrected portfolio close gives −11.2 points.
+A benchmark-only correction to 275 gives 10% and −13.2 points, with portfolio
+return remaining −3.2%. Missing and wrong-date editions withhold the comparison
+and retain the portfolio return. The fixture checks foreign scope, altered
+signatures, future knowledge and the enrolled index identity.
 
 The first estate needs a governed issuer and complete source scope before
 enrolling real keys. The synthetic fixture owns its signing key for one run.

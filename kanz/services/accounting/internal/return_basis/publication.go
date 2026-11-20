@@ -63,6 +63,7 @@ func assessment(r Receipt) *performancepb.DailyReturnAssessment {
 			Method: performancepb.ReturnMethod_RETURN_METHOD_TIME_WEIGHTED, ReturnValue: fraction,
 		}}
 	}
+	out.BenchmarkComparison = compareBenchmark(r, out)
 	return out
 }
 

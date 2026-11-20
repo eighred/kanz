@@ -156,7 +156,26 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		t.Fatal("foreign portfolio appeared")
 	}
 	if os.Getenv("RETURN_PILOT_VERIFY") == "1" {
-		proveDailyReturn(t, scope, read, []returnbasis.Evidence{original, correction, incomplete}, []string{oldDigest, newDigest, unknownDigest}, func(e returnbasis.Evidence) (string, error) { return put(e, priv) })
+		benchmarkKey, benchmarkSigner, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := authorities.Exec(ctx, `INSERT INTO return_basis_benchmark_authorities
+			(portfolio_id,currency,benchmark_id,issuer_id,public_key) VALUES ($1,$2,$3,$4,$5)`,
+			portfolio, ccy, fixtureBenchmarkID, fixtureBenchmarkIssuer, []byte(benchmarkKey)); err != nil {
+			t.Fatal("enroll scoped synthetic benchmark issuer", err)
+		}
+		foreignPool, err := pg.NewTenantPool(ctx, reader, "other")
+		if err != nil {
+			t.Fatal("open foreign benchmark reader")
+		}
+		defer foreignPool.Close()
+		var visible int
+		if err := foreignPool.QueryRow(ctx, `SELECT count(*) FROM return_basis_benchmark_authorities`).Scan(&visible); err != nil || visible != 0 {
+			t.Fatal("benchmark authority was visible to a foreign tenant")
+		}
+		proveDailyReturn(t, scope, read, benchmarkSigner, []returnbasis.Evidence{original, correction, incomplete},
+			[]string{oldDigest, newDigest, unknownDigest}, func(e returnbasis.Evidence) (string, error) { return put(e, priv) })
 	}
 
 }

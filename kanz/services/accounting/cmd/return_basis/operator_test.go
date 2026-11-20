@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -28,7 +31,10 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/return_basis"
 )
 
-func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
+const fixtureBenchmarkID = "SYNTH-TR"
+const fixtureBenchmarkIssuer = "synthetic-index-publisher"
+
+func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, benchmarkSigner ed25519.PrivateKey, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
 	t.Helper()
 	runtimeDSN := os.Getenv("TEST_RETURN_BASIS_RUNTIME")
 	if runtimeDSN == "" || os.Getenv("RETURN_PILOT_ACCOUNTING_BIN") == "" || os.Getenv("RETURN_PILOT_GATEWAY_PROBE") == "" {
@@ -189,6 +195,20 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 			Before:       captureNAV("nav-pre-flow", "11", "110", movement.Effective, movement.Effective.Add(-time.Microsecond), intraday.AsOf),
 			After:        captureNAV("nav-post-flow", "11", "150", movement.Effective, movement.Effective, intraday.AsOf)}
 		intraday.Flows = &returnbasis.FlowCompletion{Scope: first.Flows.Scope, Reference: "fund-flows-split", EventCount: &count, Split: &split}
+		benchmark := returnbasis.BenchmarkObservation{
+			Format: returnbasis.BenchmarkFormat, Tenant: first.Tenant, Portfolio: first.Portfolio, Currency: first.Currency,
+			BenchmarkID: fixtureBenchmarkID, Issuer: fixtureBenchmarkIssuer, DefinitionEffective: seedTime,
+			Start: start, End: end, KnownAt: end.Add(time.Hour), OpeningLevel: "250", ClosingLevel: "270",
+		}
+		signIndex := func(mark returnbasis.BenchmarkObservation) *returnbasis.BenchmarkEvidence {
+			t.Helper()
+			raw, err := json.Marshal(mark)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &returnbasis.BenchmarkEvidence{Observation: &mark, Signature: ed25519.Sign(benchmarkSigner, raw)}
+		}
+		intraday.Benchmark = signIndex(benchmark)
 		badSplit := split
 		badSplit.SignedAmount = "41"
 		badSplit.After = &returnbasis.Close{Reference: "wrong-post-flow-nav", Total: "151"}
@@ -208,14 +228,61 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 		if _, err := admit(wrong); err == nil {
 			t.Fatal("knowledge cut before booking accepted a future cash movement")
 		}
+		wrong = intraday
+		altered := benchmark
+		altered.KnownAt = wrong.AsOf.Add(time.Hour)
+		wrong.Benchmark = signIndex(altered)
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("future benchmark became visible under an older knowledge horizon")
+		}
+		altered = benchmark
+		altered.BenchmarkID = "UNENROLLED-TR"
+		wrong.Benchmark = signIndex(altered)
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("signer reused for an unapproved benchmark")
+		}
+		altered = benchmark
+		altered.Tenant = "other"
+		wrong.Benchmark = signIndex(altered)
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("foreign benchmark evidence reached the local report")
+		}
+		wrong.Benchmark = signIndex(benchmark)
+		wrong.Benchmark.Observation.ClosingLevel = "275"
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("Accounting close signature authorized a changed benchmark")
+		}
 		splitDigest := appendEdition(intraday)
 		corrected := intraday
 		corrected.PreviousDigest = splitDigest
 		corrected.AsOf = time.Now().UTC().Truncate(time.Microsecond)
 		corrected.Closing = captureNAV("nav-intraday-restated", "9.2", "132", end, end, corrected.AsOf)
 		correctedDigest := appendEdition(corrected)
-		missing := corrected
-		missing.PreviousDigest = correctedDigest
+		indexCorrected := corrected
+		indexCorrected.PreviousDigest = correctedDigest
+		indexCorrected.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		revision := benchmark
+		revision.ClosingLevel = "275"
+		revision.KnownAt = indexCorrected.AsOf
+		indexCorrected.Benchmark = signIndex(revision)
+		indexDigest := appendEdition(indexCorrected)
+
+		missingBenchmark := indexCorrected
+		missingBenchmark.PreviousDigest = indexDigest
+		missingBenchmark.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		missingBenchmark.Benchmark = &returnbasis.BenchmarkEvidence{}
+		missingIndexDigest := appendEdition(missingBenchmark)
+		mismatched := missingBenchmark
+		mismatched.PreviousDigest = missingIndexDigest
+		mismatched.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		wrongDay := benchmark
+		wrongDay.Start, wrongDay.End = start.AddDate(0, 0, -1), start
+		wrongDay.KnownAt = wrongDay.End.Add(time.Hour)
+		mismatched.Benchmark = signIndex(wrongDay)
+		mismatchDigest := appendEdition(mismatched)
+
+		missing := indexCorrected
+		missing.PreviousDigest = mismatchDigest
 		missing.AsOf = time.Now().UTC().Truncate(time.Microsecond)
 		partial := split
 		partial.Before = nil
@@ -314,6 +381,13 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 			values[i]["movement_id"] = e.Flows.Split.MovementID
 			values[i]["command_digest"] = e.Flows.Split.CommandDigest
 		}
+		if e.Benchmark != nil && e.Benchmark.Observation != nil {
+			raw, err := json.Marshal(e.Benchmark.Observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values[i]["benchmark_digest"] = fmt.Sprintf("%x", sha256.Sum256(raw))
+		}
 	}
 	wire, err := json.Marshal(map[string]any{"date": first.CloseDate, "editions": values})
 	if err != nil {
@@ -338,6 +412,6 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, e
 	t.Logf("real JetStream replay and signed browser read passed with %d FACTs", after.State.Msgs)
 	t.Log("observed PostgreSQL bytes matched each original FACT before and after replay")
 	for i, e := range editions {
-		t.Logf("edition close=%s horizon=%s source_sha256=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i])
+		t.Logf("edition close=%s horizon=%s source_sha256=%s benchmark_sha256=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i], values[i]["benchmark_digest"])
 	}
 }

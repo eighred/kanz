@@ -78,7 +78,7 @@ def qualify(env):
             except RuntimeError:
                 raise RuntimeError("Accounting migration failed: " + path.name) from None
         sql("basis", """
-            GRANT SELECT ON return_basis_authorities, return_basis_receipts, return_basis_publications
+            GRANT SELECT ON return_basis_authorities, return_basis_receipts, return_basis_publications, return_basis_benchmark_authorities
                 TO basis_source,basis_reader,basis_runtime;
             GRANT INSERT ON return_basis_receipts TO basis_source;
             GRANT INSERT (portfolio_id,currency,close_date,as_of) ON return_basis_publications TO basis_source;
@@ -110,11 +110,15 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 6 FACTs" not in proof.stdout
+                or b"real JetStream replay and signed browser read passed with 9 FACTs" not in proof.stdout
                 or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
-            location = re.search(rb"\b(?:main_test|operator_test)\.go:\d+: [^\n]{1,160}", proof.stdout)
-            # Only print the source location. Runtime errors may carry a DSN.
-            raise RuntimeError("return pilot failed" + (" at " + location[0].decode().split(": ", 1)[0] if location else ""))
+            locations = re.findall(rb"\b(?:main_test|operator_test)\.go:\d+(?=: )", proof.stdout)
+            stage = re.search(rb"\breturn-browser-stage=[a-z-]+", proof.stdout)
+            # Only print the source location and browser stage. Runtime errors may carry a DSN.
+            detail = f" at {locations[-1].decode()}" if locations else ""
+            if stage:
+                detail += f" ({stage[0].decode()})"
+            raise RuntimeError("return pilot failed" + detail)
         return proof.stdout
     finally:
         subprocess.run(["docker", "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
@@ -140,7 +144,7 @@ def main():
         receipt = qualify(env)
     if args.receipt:
         args.receipt.write_bytes(receipt)
-    print("PASS: Signed zero-flow and intraday-linked returns, booked cash, scoped browser and retained replay.")
+    print("PASS: Signed daily returns and dated benchmark comparisons, scoped browser and retained replay.")
 
 
 if __name__ == "__main__":
