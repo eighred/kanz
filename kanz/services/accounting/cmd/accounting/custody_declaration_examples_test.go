@@ -297,15 +297,20 @@ func TestTheRemediationARefusalPrintsActuallyLiftsIt(t *testing.T) {
 			}
 
 			remedy := remediationLine(t, err.Error())
-			fixed, perr := custody.ParseCustodyAccounts(remedy)
+			cfg := baseCfg()
+			cfg.CustodyPairs = []string{"PF1:CUST-A", "PF1:CUST-B"}
+			cfg.CustodyAccounts = remedy
+			if _, err := buildCustodyConfig(cfg); err == nil || !strings.Contains(err.Error(), "placeholder") {
+				t.Fatalf("boot accepted the unfilled account template or refused for another reason: %v", err)
+			}
+			cfg.CustodyAccounts = strings.NewReplacer("<accounts-held-at-CUST-A>", "okx-sub-1", "<accounts-held-at-CUST-B>", "bin-main").Replace(remedy)
+			if _, err := buildCustodyConfig(cfg); err != nil {
+				t.Fatalf("boot refused the completed account declaration: %v", err)
+			}
+			fixed, perr := custody.ParseCustodyAccounts(cfg.CustodyAccounts)
 			if perr != nil {
 				t.Fatalf("the refusal tells an operator to set %s%s, which does not parse: %v",
 					accountsKey, remedy, perr)
-			}
-			if _, err := custody.NewBookScope(pairs, fixed); err != nil {
-				t.Fatalf("applying the refusal's own remediation does not lift the refusal: %v\n\n"+
-					"remediation was %s%s. An operator following the message gets the same exit 2, "+
-					"which is #1029.", err, accountsKey, remedy)
 			}
 			if got := len(fixed["PF1"]); got != len(pairs) {
 				t.Errorf("the remediation covers %d of %d custodians (%v) — an incomplete one is "+
@@ -321,6 +326,15 @@ func TestTheRemediationARefusalPrintsActuallyLiftsIt(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCustodyBootRejectsAPlaceholderMixedWithAnAccount(t *testing.T) {
+	cfg := baseCfg()
+	cfg.CustodyPairs = []string{"PF1:CUST-A"}
+	cfg.CustodyAccounts = "PF1:CUST-A:okx-sub-1,<accounts-held-at-CUST-B>"
+	if _, err := buildCustodyConfig(cfg); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("boot accepted a copied placeholder alongside a configured account: %v", err)
 	}
 }
 

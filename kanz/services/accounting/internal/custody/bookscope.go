@@ -9,6 +9,9 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
+// The remediation renders a separate reserved marker for each missing custodian.
+const accountPlaceholderPrefix = "<accounts-held-at-"
+
 // BookScope decides WHICH SLICE of a portfolio's journal one custodian's
 // reconciliation compares against (#1006).
 //
@@ -121,6 +124,9 @@ func NewBookScope(pairs []Subject, accounts map[string]map[string][]string) (*Bo
 				s.claimed[portfolio] = ledger.AccountScope{}
 			}
 			for id := range scope {
+				if strings.HasPrefix(id, accountPlaceholderPrefix) && strings.HasSuffix(id, ">") {
+					return nil, fmt.Errorf("custody: replace the account placeholder %q for %s:%s with the assigned account ID", id, portfolio, custodian)
+				}
 				if s.claimed[portfolio][id] {
 					return nil, fmt.Errorf("custody: exchange account %q is claimed by more than one custodian "+
 						"of portfolio %s — the holding would be counted at both, so neither can break when it "+
@@ -181,7 +187,7 @@ func (s *BookScope) declTemplate(portfolio string, custodians []string) string {
 			// Named after the custodian so two undeclared custodians do not both
 			// claim one placeholder id — which the refusal above would reject as
 			// an account counted at both.
-			ids = []string{"<accounts-held-at-" + c + ">"}
+			ids = []string{accountPlaceholderPrefix + c + ">"}
 		}
 		entries = append(entries, portfolio+":"+c+":"+strings.Join(ids, ","))
 	}
