@@ -8,7 +8,10 @@ use std::sync::Arc;
 fn timestamp(input: &str) -> datafusion::error::Result<i64> {
     let config = Arc::new(ConfigOptions::default());
     let function = to_timestamp_seconds(&config);
-    let fields = vec![Arc::new(Field::new("arg", DataType::Utf8, false)); 2];
+    let fields = vec![
+        Arc::new(Field::new("timestamp", DataType::Utf8, false)),
+        Arc::new(Field::new("format", DataType::Utf8, false)),
+    ];
     let result = function
         .inner()
         .return_type(&[DataType::Utf8, DataType::Utf8])?;
