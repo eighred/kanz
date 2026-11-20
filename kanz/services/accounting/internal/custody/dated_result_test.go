@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -165,6 +166,12 @@ func TestSignedDatedReferenceCoverage(t *testing.T) {
 		CREATE TRIGGER test_reference_input BEFORE INSERT ON custody_runs FOR EACH ROW EXECUTE FUNCTION test_reference_input()`); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.WithoutCancel(ctx), `DROP TRIGGER test_reference_input ON custody_runs;
+			DROP FUNCTION test_reference_input(); DROP TABLE test_reference_inputs`); err != nil {
+			t.Errorf("remove test input fixtures: %v", err)
+		}
+	})
 	execute := func(source string, outcome Outcome) Run {
 		t.Helper()
 		now = now.Add(time.Minute)
