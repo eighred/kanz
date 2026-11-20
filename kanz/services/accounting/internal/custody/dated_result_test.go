@@ -148,16 +148,49 @@ func TestSignedDatedReferenceCoverage(t *testing.T) {
 		t.Helper()
 		return write(json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":%q,"positions":[],"cash":[],"transactions":%s,"grain":"STATEMENT_GRAIN_%s"}`, date, trades, grain)))
 	}
-	check := func(source string, outcome Outcome, want *TransactionComparison) Run {
+	// Model old or corrupt writers at insert time. Eligible runs still go through
+	// the signed source, normal commit, and dated reader. Each injection is
+	// consumed by a single insert for its particular statement revision.
+	if _, err := pool.Exec(ctx, `CREATE TABLE test_reference_inputs (statement_id text PRIMARY KEY, evidence jsonb);
+		CREATE FUNCTION test_reference_input() RETURNS trigger LANGUAGE plpgsql AS $$
+		DECLARE fixture jsonb;
+		BEGIN
+			DELETE FROM test_reference_inputs WHERE statement_id=NEW.statement_id RETURNING evidence INTO fixture;
+			IF FOUND THEN
+				NEW.book_basis := CASE WHEN fixture IS NULL THEN NEW.book_basis-'transactions'
+					ELSE jsonb_set(NEW.book_basis,'{transactions}',fixture) END;
+			END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER test_reference_input BEFORE INSERT ON custody_runs FOR EACH ROW EXECUTE FUNCTION test_reference_input()`); err != nil {
+		t.Fatal(err)
+	}
+	execute := func(source string, outcome Outcome) Run {
 		t.Helper()
 		now = now.Add(time.Minute)
 		run, err := r.Reconcile(ctx, sub)
-		if err != nil || run.Outcome != outcome {
+		if err != nil || run.Outcome != outcome || run.StatementID != source {
 			t.Fatalf("reconcile %s: %+v, %v", source, run, err)
 		}
+		return run
+	}
+	check := func(source string, outcome Outcome, want *TransactionComparison) {
+		t.Helper()
+		run := execute(source, outcome)
 		got, err := NewPostgres(pool).DatedResult(ctx, sub)
 		if err != nil || got.State != "recorded" || got.StatementID != source || got.Run.RunID != run.RunID || got.Run.Basis == nil || !reflect.DeepEqual(got.Run.Basis.Transactions, want) {
 			t.Fatalf("dated reference coverage: %+v, want %+v, err=%v", got, want, err)
+		}
+	}
+	insertWithEvidence := func(source string, evidence any) Run {
+		t.Helper()
+		if _, err := pool.Exec(ctx, "INSERT INTO test_reference_inputs(statement_id,evidence) VALUES ($1,$2::jsonb)", source, evidence); err != nil {
+			t.Fatal(err)
+		}
+		run := execute(source, OutcomeClean)
+		var stored bool
+		if err := pool.QueryRow(ctx, `SELECT (book_basis->'transactions') IS NOT DISTINCT FROM $2::jsonb FROM custody_runs WHERE run_id=$1`, run.RunID, evidence).Scan(&stored); err != nil || !stored {
+			t.Fatalf("fixture was not persisted at insert: %v, %v", stored, err)
 		}
 		return run
 	}
@@ -167,14 +200,11 @@ func TestSignedDatedReferenceCoverage(t *testing.T) {
 	zero := feed("BALANCES_ONLY", "[]")
 	check(zero, OutcomeClean, &TransactionComparison{Pass: "balances_only"})
 	full := feed("TRANSACTIONS", "[]")
-	measured := check(full, OutcomeClean, ran(0, 0, 0))
 	// A retained run written before reference evidence existed can still
 	// establish its signed balances. Its historical transaction scope is unknown.
-	if _, err := pool.Exec(ctx, "UPDATE custody_runs SET book_basis=book_basis-'transactions' WHERE run_id=$1", measured.RunID); err != nil {
-		t.Fatal(err)
-	}
+	legacy := insertWithEvidence(full, nil)
 	old, err := st.DatedResult(ctx, sub)
-	if err != nil || old.State != "recorded" || old.Run.Basis == nil || old.Run.Basis.Transactions != nil {
+	if err != nil || old.State != "recorded" || old.Run.RunID != legacy.RunID || old.Run.Basis == nil || old.Run.Basis.Transactions != nil {
 		t.Fatal("legacy run invented reference coverage", old, err)
 	}
 	check(full, OutcomeClean, ran(0, 0, 0))
@@ -204,7 +234,7 @@ func TestSignedDatedReferenceCoverage(t *testing.T) {
 	disputed := feed("TRANSACTIONS", trades("different-buy"))
 	check(disputed, OutcomeBreaks, ran(2, 2, 2))
 	matching := feed("TRANSACTIONS", trades("independent-buy"))
-	last := check(matching, OutcomeClean, ran(2, 2, 2))
+	check(matching, OutcomeClean, ran(2, 2, 2))
 	// Retained counts must fit the actual prefix, the signed inventory, and
 	// the membership result. None of these changes can describe the measured run.
 	for _, counts := range []string{
@@ -214,9 +244,9 @@ func TestSignedDatedReferenceCoverage(t *testing.T) {
 		`{"pass":"ran","statement_references":2,"book_references":2,"unreferenced_book_trades":5}`,
 		`{"pass":"balances_only"}`,
 	} {
-		if _, err := pool.Exec(ctx, "UPDATE custody_runs SET book_basis=jsonb_set(book_basis,'{transactions}',$2::jsonb) WHERE run_id=$1", last.RunID, counts); err != nil {
-			t.Fatal(err)
-		}
+		// A fresh signed revision makes this the only candidate. An ambiguous
+		// tie with another receipt must not produce a false-positive refusal.
+		insertWithEvidence(feed("TRANSACTIONS", trades("independent-buy")), counts)
 		got, err := st.DatedResult(ctx, sub)
 		if err != nil || got.State != "unknown" || got.Run.RunID != "" {
 			t.Fatalf("inconsistent coverage exposed: %+v, %v", got, err)
