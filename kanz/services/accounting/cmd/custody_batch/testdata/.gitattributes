@@ -1,0 +1,2 @@
+statement-*.json -text
+*.sig binary
