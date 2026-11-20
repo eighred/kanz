@@ -3,26 +3,14 @@ set -eu
 umask 077
 export HOME=/work/home CARGO_HOME=/work/cargo CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 CARGO_PROFILE_TEST_DEBUG=0
 owner=/work/kanz/rust
-mode=$2
-case "$mode" in upstream|published) ;; *) exit 2 ;; esac
+export RUSTUP_TOOLCHAIN=1.90.0-x86_64-unknown-linux-gnu
 case "$1" in
 fetch)
-    mkdir -p "$HOME" "$CARGO_HOME" /work/source "$owner"
-    tar --no-same-owner -xf /inputs/object.tar -C /work/source
+    mkdir -p "$HOME" "$CARGO_HOME" /work/kanz
     tar --no-same-owner -xf /inputs/kanz.tar -C /work/kanz
-    cat > "$owner/Cargo.toml" <<'EOF'
-[workspace]
-members = ["services/lake_snapshot"]
-resolver = "2"
-
-[patch.crates-io]
-object_store = { path = "/work/source" }
-EOF
-    # Seed the consumer from its real lock. Cargo records the new source in this disposable copy.
-    cp "$owner/Cargo.lock" /work/kanz.lock
-    cargo fetch --manifest-path "$owner/Cargo.toml"
-    python3 -B /inputs/lake_sources.py "$mode"
-    cargo fetch --manifest-path "$owner/Cargo.toml"
+    python3 -B "$owner/temporal_sources/prepare.py"
+    cp -R "$owner/temporal_sources/generated/object_store-0.13.2" /work/source
+    cargo fetch --locked --manifest-path "$owner/Cargo.toml"
     cargo fetch --manifest-path /work/source/Cargo.toml
     ;;
 test)
@@ -36,20 +24,14 @@ test)
         local::tests::bubble_up_io_errors -- --ignored --exact > /work/permission.txt
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test worker \
         --message-format=json-render-diagnostics > /work/worker.jsonl
-    cp /inputs/named_zone.rs "$owner/services/lake_snapshot/tests/named_zone.rs"
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test named_zone \
         > /work/named_zone.txt
-    cp /inputs/object_metadata.rs "$owner/services/lake_snapshot/tests/object_metadata.rs"
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test object_metadata \
         > /work/metadata.txt
-    if test "$mode" = published; then
-        cp /inputs/shared_arrow.rs "$owner/services/lake_snapshot/tests/shared_arrow.rs"
-        cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test shared_arrow \
-            > /work/shared-arrow.txt
-    fi
-    PYTHONPATH=/inputs python3 -B - "$mode" <<'PY'
-import sys
-from lake_sources import verify
+    cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test shared_arrow \
+        > /work/shared-arrow.txt
+    PYTHONPATH=/inputs python3 -B - <<'PY'
+from worker_sources import verify
 from pathlib import Path
 
 def check_summary(lines):
@@ -89,13 +71,11 @@ if not expected_duration.issubset(passed_duration):
 
 lines = Path("/work/worker.jsonl").read_text().splitlines()
 check_summary(lines)
-mode = sys.argv[1]
-verify(lines, mode)
-if mode == "published":
-    bridge = Path("/work/shared-arrow.txt").read_text().splitlines()
-    check_summary(bridge)
-    if "test both_arrow_versions_share_the_published_temporal_type ... ok" not in bridge:
-        raise ValueError("the cross-version published type test did not run")
+verify(lines)
+bridge = Path("/work/shared-arrow.txt").read_text().splitlines()
+check_summary(bridge)
+if "test both_arrow_versions_share_the_published_temporal_type ... ok" not in bridge:
+    raise ValueError("the cross-version published type test did not run")
 zone = Path("/work/named_zone.txt").read_text().splitlines()
 check_summary(zone)
 if "test named_zone_timestamps ... ok" not in zone:

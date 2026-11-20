@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'rust/services/lake_snapshot/**'
+      - 'rust/temporal_sources/**'
+      - 'rust/Cargo.toml'
       - 'rust/Cargo.lock'
       - 'schemas/proto/envelope/**'
       - 'schemas/proto/lake/**'
@@ -13,6 +15,8 @@ on:
     branches: [main]
     paths:
       - 'rust/services/lake_snapshot/**'
+      - 'rust/temporal_sources/**'
+      - 'rust/Cargo.toml'
       - 'rust/Cargo.lock'
       - 'schemas/proto/envelope/**'
       - 'schemas/proto/lake/**'
@@ -50,13 +54,11 @@ jobs:
           docker pull --platform linux/amd64 ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f
       - name: Compare Jiff timestamps and durations
         run: python -B tools/jiff_qualification/run.py
-      - name: Exercise combined duration and timezone backports in the lake worker
-        run: python -B tools/jiff_qualification/object_store.py
       - name: Test published temporal package advisory refusals
         run: python -B -m unittest discover -s tools/jiff_qualification -p test_chrono_advisories.py
       - name: Exercise the published temporal package across both Arrow versions
         id: bridge
-        run: python -B tools/jiff_qualification/object_store.py --published-bridge "$RUNNER_TEMP/chrono-advisories.json"
+        run: python -B tools/jiff_qualification/object_store.py --advisories "$RUNNER_TEMP/chrono-advisories.json"
       - name: Retain the advisory inputs used for the published package
         if: always() && steps.bridge.outcome != 'skipped'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
