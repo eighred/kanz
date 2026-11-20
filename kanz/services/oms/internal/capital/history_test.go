@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/eighred/kanz/internal/gatewaysig"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -25,7 +26,7 @@ func historyPage(t *testing.T, revision, through int64) cashview.CommitPage {
 }
 
 func TestHistoryClientRejectsUnsafeConfiguration(t *testing.T) {
-	provider := func(context.Context) (string, error) { return "test", nil }
+	provider := testHistoryCredentials
 	for _, endpoint := range []string{"http://gateway", "https://user@gateway", "https://gateway/path", "https://gateway?query=1", "https://gateway#fragment", ""} {
 		if _, err := NewHistoryClient(endpoint, nil, provider); err == nil {
 			t.Fatalf("accepted unsafe history origin %q", endpoint)
@@ -45,7 +46,7 @@ func TestHistoryClientCancellationClosesRequest(t *testing.T) {
 		close(finished)
 	}))
 	defer server.Close()
-	client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test", nil })
+	client, err := NewHistoryClient(server.URL, server.Client(), testHistoryCredentials)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,8 +74,17 @@ func TestHistoryClientRefusesMissingScopeAndCredentialsBeforeHTTP(t *testing.T) 
 	var calls atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); w.WriteHeader(http.StatusForbidden) }))
 	defer server.Close()
-	for _, token := range []string{"", "\t", "bad\nvalue", "bad value"} {
-		client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return token, nil })
+	for _, credential := range []HistoryCredentials{
+		{SigningKey: "fixture-signing"},
+		{Bearer: "\t", SigningKey: "fixture-signing"},
+		{Bearer: "bad\nvalue", SigningKey: "fixture-signing"},
+		{Bearer: "bad value", SigningKey: "fixture-signing"},
+		{Bearer: "test"},
+		{Bearer: "test", SigningKey: " "},
+	} {
+		client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (HistoryCredentials, error) {
+			return credential, nil
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +92,7 @@ func TestHistoryClientRefusesMissingScopeAndCredentialsBeforeHTTP(t *testing.T) 
 			t.Fatal("invalid credential accepted")
 		}
 	}
-	client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test", nil })
+	client, err := NewHistoryClient(server.URL, server.Client(), testHistoryCredentials)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +110,7 @@ func TestHistoryClientPreservesExactCursorAndRotatesCredentials(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		call := calls.Add(1)
-		if r.Header.Get("Authorization") != "Bearer test-"+strconv.Itoa(int(call)) || r.URL.Query().Get("after") != "9007199254740992" || r.URL.Query().Get("through") != "9007199254740993" || r.URL.Path != "/v1/portfolios/fund/cash-commits" {
+		if !gatewaysig.Verify([]byte("fixture-key-"+strconv.Itoa(int(call))), r.Method, r.URL.Path, nil, r.Header.Get(gatewaysig.Header)) || r.Header.Get("Authorization") != "Bearer test-"+strconv.Itoa(int(call)) || r.URL.Query().Get("after") != "9007199254740992" || r.URL.Query().Get("through") != "9007199254740993" || r.URL.Path != "/v1/portfolios/fund/cash-commits" {
 			t.Error("request changed identity, credential rotation or exact cursor")
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -109,7 +119,10 @@ func TestHistoryClientPreservesExactCursorAndRotatesCredentials(t *testing.T) {
 	}))
 	defer server.Close()
 	var credentials atomic.Int32
-	client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test-" + strconv.Itoa(int(credentials.Add(1))), nil })
+	client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (HistoryCredentials, error) {
+		n := strconv.Itoa(int(credentials.Add(1)))
+		return HistoryCredentials{Bearer: "test-" + n, SigningKey: "fixture-key-" + n}, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +160,7 @@ func TestHistoryClientRefusesContradictoryPages(t *testing.T) {
 			change(&page)
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(page) }))
 			defer server.Close()
-			client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test", nil })
+			client, err := NewHistoryClient(server.URL, server.Client(), testHistoryCredentials)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -178,7 +191,7 @@ func TestHistoryClientRefusesRedirectsAndOversizedHTTPBodies(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test", nil })
+			client, err := NewHistoryClient(server.URL, server.Client(), testHistoryCredentials)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +231,7 @@ func TestPostgresRetainedRecoveryResumesAfterHTTPFailure(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(pages[after])
 	}))
 	defer server.Close()
-	client, err := NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test", nil })
+	client, err := NewHistoryClient(server.URL, server.Client(), testHistoryCredentials)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,4 +261,8 @@ func TestPostgresRetainedRecoveryResumesAfterHTTPFailure(t *testing.T) {
 	if err := restarted.QueryRow(ctx, `SELECT count(*) FROM capital_cash_events`).Scan(&receipts); err != nil || receipts != 3 {
 		t.Fatalf("lost immutable receipts: %d %v", receipts, err)
 	}
+}
+
+func testHistoryCredentials(context.Context) (HistoryCredentials, error) {
+	return HistoryCredentials{Bearer: "test", SigningKey: "fixture-signing"}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/eighred/kanz/internal/gatewaysig"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -151,14 +152,16 @@ func TestLegacyActivationReplaysAuthenticatedCashHistory(t *testing.T) {
 	}
 	page := cashview.CommitPage{TenantID: testTenant, PortfolioID: "fund", Currency: "USD", Through: 1, Next: 1, Records: []cashview.CommitRecord{{Revision: 1, Payload: payload}}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-oms" || r.URL.Path != "/v1/portfolios/fund/cash-commits" || r.URL.Query().Get("currency") != "USD" {
+		if !gatewaysig.Verify([]byte("fixture-cash-key"), r.Method, r.URL.Path, nil, r.Header.Get(gatewaysig.Header)) || r.Header.Get("Authorization") != "Bearer test-oms" || r.URL.Path != "/v1/portfolios/fund/cash-commits" || r.URL.Query().Get("currency") != "USD" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	}))
 	defer server.Close()
-	history, err := capital.NewHistoryClient(server.URL, server.Client(), func(context.Context) (string, error) { return "test-oms", nil })
+	history, err := capital.NewHistoryClient(server.URL, server.Client(), func(context.Context) (capital.HistoryCredentials, error) {
+		return capital.HistoryCredentials{Bearer: "test-oms", SigningKey: "fixture-cash-key"}, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

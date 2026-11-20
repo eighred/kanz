@@ -516,6 +516,33 @@ func run() int {
 	return fatal.Code()
 }
 
+// Both listeners use API-01d. Only the dedicated peer can select the OMS key;
+// it is never tried as an alternate key on an ordinary request.
+func authenticateGatewayListener(cfg config.Config, authn middleware.Authenticator, logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		ordinary := middleware.Chain(
+			middleware.Signing(cfg.SigningSecret),
+			middleware.Auth(authn, cfg.RequiredRole, logger),
+		)(next)
+		var history http.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "cash history signing unavailable", http.StatusServiceUnavailable)
+		})
+		if cfg.CashHistorySigningSecret != "" && cfg.CashHistorySigningSecret != cfg.SigningSecret && cfg.CashHistoryRole != "" {
+			history = middleware.Chain(
+				middleware.Signing(cfg.CashHistorySigningSecret),
+				middleware.Auth(authn, cfg.CashHistoryRole, logger),
+			)(next)
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if authz.IsOMSHistoryRequest(r) {
+				history.ServeHTTP(w, r)
+				return
+			}
+			ordinary.ServeHTTP(w, r)
+		})
+	}
+}
+
 func newOMSHistoryServer(addr string, router http.Handler, source transport.Source) (*http.Server, error) {
 	if router == nil || source == nil {
 		return nil, errors.New("cash-history listener requires workload identity and the authenticated gateway router")
@@ -1337,8 +1364,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		// already refused for repeated auth failures should not have its headers
 		// examined at all, and both are cheaper than the HMAC they protect.
 		middleware.BodyLimit(middleware.MaxRequestBody),
-		middleware.Signing(cfg.SigningSecret),
-		middleware.Auth(authn, cfg.RequiredRole, logger),
+		authenticateGatewayListener(cfg, authn, logger),
 		gwMetrics.Measure(),
 		middleware.Quota(limits, gwMetrics),
 		middleware.IdempotencyWith(idemClaims, idempotencyTTL, idempotencyMax),

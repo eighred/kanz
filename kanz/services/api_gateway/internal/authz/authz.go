@@ -288,14 +288,20 @@ func FromOMSHistoryListener(next http.Handler) http.Handler {
 	})
 }
 
+// IsOMSHistoryRequest reports whether this request entered through the OMS-only mTLS listener.
+func IsOMSHistoryRequest(r *http.Request) bool {
+	return r.Context().Value(omsHistoryPeerKey{}) == true
+}
+
 func (m *Mux) requestGrant(r *http.Request, p *middleware.Principal, cap Capability) (role string, allowed, workload bool) {
 	if cap != CashHistory {
 		role, allowed = m.grants.grantingRole(p.Roles, cap)
 		return
 	}
-	if r.Context().Value(omsHistoryPeerKey{}) == true {
+	if IsOMSHistoryRequest(r) {
 		role = m.cashHistoryRole
-		allowed = role != "" && p.HasRole(role) && m.grants.Allows([]string{role}, CashHistory)
+		allowed = role != "" && p.HasRole(role) && m.grants.Allows([]string{role}, CashHistory) &&
+			p.Tenant != "" && auth.PortfolioEntitled(p.Portfolios, r.PathValue("id"))
 		return role, allowed, allowed
 	}
 	// Human readers reach this financial evidence through their existing Fund

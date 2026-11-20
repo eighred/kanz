@@ -59,12 +59,12 @@ func TestCashHistoryMFAAndTransportUseTheRecordedGrant(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &capturingRecorder{}
 			mux := authz.NewMux(authz.Grants{"history": {authz.CashHistory}, "fund": {authz.CashHistory, authz.Fund}, "reader": {authz.Read}}, rec, authz.WithCashHistoryRole("history"), authz.WithMFARequired(true))
-			mux.Handle(authz.CashHistory, "GET /cash", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-			p := &middleware.Principal{Subject: "subject", Tenant: "tenant", Roles: []string{tc.role}}
+			mux.Handle(authz.CashHistory, "GET /v1/portfolios/{id}/cash-commits", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+			p := &middleware.Principal{Subject: "subject", Tenant: "tenant", Roles: []string{tc.role}, Portfolios: []string{"PF"}}
 			if tc.fresh {
 				p.MFA = auth.MFA{Required: true, VerifiedAt: time.Now().Add(-time.Minute)}
 			}
-			req := httptest.NewRequest(http.MethodGet, "/cash", nil)
+			req := httptest.NewRequest(http.MethodGet, "/v1/portfolios/PF/cash-commits", nil)
 			req = req.WithContext(middleware.WithPrincipal(req.Context(), p))
 			w := httptest.NewRecorder()
 			var route http.Handler = mux

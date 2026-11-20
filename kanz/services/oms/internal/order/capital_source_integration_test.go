@@ -59,7 +59,9 @@ func TestCapitalCashHandlerRecoversBrokerRetentionGap(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(page)
 	}))
 	t.Cleanup(history.Close)
-	reader, err := capital.NewHistoryClient(history.URL, history.Client(), func(context.Context) (string, error) { return "test-only", nil })
+	reader, err := capital.NewHistoryClient(history.URL, history.Client(), func(context.Context) (capital.HistoryCredentials, error) {
+		return capital.HistoryCredentials{Bearer: "test-only", SigningKey: "fixture-cash-key"}, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

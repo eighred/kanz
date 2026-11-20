@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/cashview"
+	"github.com/eighred/kanz/internal/gatewaysig"
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/jackc/pgx/v5"
@@ -21,26 +22,32 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// HistoryReader reads the authenticated accounting domain API. Production uses
-// HistoryClient through the gateway's Fund-capability and portfolio checks.
+// HistoryReader retrieves the authorized portfolio's retained accounting evidence.
+// OMS uses the gateway's dedicated workload listener and cash-history grant.
 type HistoryReader interface {
 	ReadCashCommits(context.Context, string, string, int64, int64, int) (cashview.CommitPage, error)
 }
 
+// HistoryCredentials authorize the single cash-history read on the private gateway.
+type HistoryCredentials struct {
+	Bearer     string
+	SigningKey string
+}
+
 type HistoryClient struct {
-	base  *url.URL
-	http  *http.Client
-	token func(context.Context) (string, error)
+	base        *url.URL
+	http        *http.Client
+	credentials func(context.Context) (HistoryCredentials, error)
 }
 
 // NewHistoryClient requires HTTPS and refuses redirects: an upstream redirect
 // must never move a financial evidence request or its bearer to another route.
-// The token callback reads the deployment's current credential at request time,
+// The provider reads the dedicated bearer and request key at request time,
 // allowing rotation without retaining an expired bearer in the client.
-func NewHistoryClient(endpoint string, client *http.Client, token func(context.Context) (string, error)) (*HistoryClient, error) {
+func NewHistoryClient(endpoint string, client *http.Client, credentials func(context.Context) (HistoryCredentials, error)) (*HistoryClient, error) {
 	base, err := url.Parse(endpoint)
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" ||
-		(base.Path != "" && base.Path != "/") || token == nil {
+		(base.Path != "" && base.Path != "/") || credentials == nil {
 		return nil, errors.New("capital: history requires an HTTPS gateway origin and credential provider")
 	}
 	var bounded http.Client
@@ -58,7 +65,7 @@ func NewHistoryClient(endpoint string, client *http.Client, token func(context.C
 	}
 	bounded.Timeout = 0 // request context owns the complete call budget
 	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &HistoryClient{base: base, http: &bounded, token: token}, nil
+	return &HistoryClient{base: base, http: &bounded, credentials: credentials}, nil
 }
 
 // CloseIdleConnections releases pooled sockets after the caller has stopped
@@ -81,14 +88,16 @@ func (c *HistoryClient) ReadCashCommits(ctx context.Context, portfolio, currency
 	if err != nil {
 		return page, err
 	}
-	token, err := c.token(ctx)
+	credentials, err := c.credentials(ctx)
 	if err != nil {
 		return page, errors.New("capital: history credential unavailable")
 	}
-	if strings.TrimSpace(token) == "" || strings.IndexFunc(token, func(r rune) bool { return r <= 32 || r >= 127 }) >= 0 {
+	token := credentials.Bearer
+	if strings.TrimSpace(credentials.SigningKey) == "" || strings.TrimSpace(token) == "" || strings.IndexFunc(token, func(r rune) bool { return r <= 32 || r >= 127 }) >= 0 {
 		return page, errors.New("capital: history credential unavailable")
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
+	gatewaysig.SignRequest(request, []byte(credentials.SigningKey), nil)
 	request.Header.Set("Accept", "application/json")
 	response, err := c.http.Do(request)
 	if err != nil {

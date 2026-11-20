@@ -25,7 +25,9 @@ type Config struct {
 	BFFTLSListen string
 	// HistoryListen admits the OMS SVID to the authenticated cash-history GET only.
 	HistoryListen string
-	LogLevel      slog.Level
+	// CashHistorySigningSecret is exclusive to the OMS workload listener.
+	CashHistorySigningSecret string
+	LogLevel                 slog.Level
 
 	// Source is the gateway's service identity (logs, metrics, spans).
 	Source string
@@ -362,6 +364,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	historySigningSecret, err := secret.Read("API_GATEWAY_CASH_HISTORY_SIGNING_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
 	allowDevHS256, err := parseBool("API_GATEWAY_ALLOW_DEV_HS256")
 	if err != nil {
 		return Config{}, err
@@ -372,6 +378,8 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
+		CashHistorySigningSecret: historySigningSecret,
+
 		Listen:             env.Or("API_GATEWAY_LISTEN", ":8080"),
 		BFFTLSListen:       os.Getenv("API_GATEWAY_BFF_TLS_LISTEN"),
 		HistoryListen:      os.Getenv("API_GATEWAY_HISTORY_LISTEN"),
@@ -467,6 +475,12 @@ func Load() (Config, error) {
 func (c Config) validateAuth() error {
 	if c.HistoryListen != "" && c.SPIFFESocket == "" {
 		return errors.New("api-gateway: API_GATEWAY_HISTORY_LISTEN requires API_GATEWAY_SPIFFE_SOCKET for mTLS")
+	}
+	if c.HistoryListen != "" && (strings.TrimSpace(c.CashHistorySigningSecret) == "" || c.CashHistorySigningSecret == c.SigningSecret || c.CashHistoryRole == "") {
+		return errors.New("api-gateway: API_GATEWAY_HISTORY_LISTEN requires a dedicated API_GATEWAY_CASH_HISTORY_ROLE and a separate API_GATEWAY_CASH_HISTORY_SIGNING_SECRET")
+	}
+	if c.CashHistorySigningSecret != "" && c.HistoryListen == "" {
+		return errors.New("api-gateway: API_GATEWAY_CASH_HISTORY_SIGNING_SECRET requires API_GATEWAY_HISTORY_LISTEN")
 	}
 	for _, role := range []string{c.RequiredRole, c.TradeRole, c.OperatorRole, c.FundRole, c.CashHistoryRole, c.ApproveRole, c.MandateRole, c.AuditRole} {
 		if role == identity.AdminRole {

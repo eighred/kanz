@@ -22,12 +22,8 @@ func capitalCashHistory(cfg config.Config, source transport.Source) (capital.His
 	}
 	// Validate the declared secret mount before subscribing. Read it again per
 	// request so a rotated short-lived gateway credential takes effect promptly.
-	value, err := secret.Read("OMS_CASH_HISTORY_TOKEN")
-	if err != nil {
+	if _, err := historyCredentials(context.Background()); err != nil {
 		return nil, err
-	}
-	if strings.TrimSpace(value) == "" {
-		return nil, errors.New("OMS_CASH_HISTORY_GATEWAY requires OMS_CASH_HISTORY_TOKEN or its secret mount")
 	}
 	gatewayID, err := spiffeid.FromString("spiffe://kanz.internal/ns/kanz-services/sa/api-gateway")
 	if err != nil {
@@ -41,7 +37,20 @@ func capitalCashHistory(cfg config.Config, source transport.Source) (capital.His
 	tr.MaxConnsPerHost = 8
 	tr.MaxIdleConnsPerHost = 8
 	client := &http.Client{Transport: tr}
-	return capital.NewHistoryClient(cfg.CashHistoryGateway, client, func(context.Context) (string, error) {
-		return secret.Read("OMS_CASH_HISTORY_TOKEN")
-	})
+	return capital.NewHistoryClient(cfg.CashHistoryGateway, client, historyCredentials)
+}
+
+func historyCredentials(_ context.Context) (capital.HistoryCredentials, error) {
+	token, err := secret.Read("OMS_CASH_HISTORY_TOKEN")
+	if err != nil {
+		return capital.HistoryCredentials{}, err
+	}
+	key, err := secret.Read("OMS_CASH_HISTORY_SIGNING_SECRET")
+	if err != nil {
+		return capital.HistoryCredentials{}, err
+	}
+	if strings.TrimSpace(token) == "" || strings.TrimSpace(key) == "" {
+		return capital.HistoryCredentials{}, errors.New("OMS cash history requires a bearer and its dedicated request signing key")
+	}
+	return capital.HistoryCredentials{Bearer: token, SigningKey: key}, nil
 }

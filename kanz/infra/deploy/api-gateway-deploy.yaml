@@ -115,7 +115,16 @@ spec:
             - { containerPort: 8080, name: http }
             - { containerPort: 8443, name: cash-history }
           env:
-            - { name: API_GATEWAY_HISTORY_LISTEN, value: ":8443" }
+            # Opt in only after both OMS and gateway have distinct service
+            # grants on the same dedicated signing key. The default deployment
+            # has no replay listener and requires no new secret mount.
+            # On OMS set OMS_CASH_HISTORY_GATEWAY to
+            # https://api-gateway.kanz-services.svc:8443, OMS_CASH_HISTORY_TOKEN_FILE
+            # to its scoped bearer mount, and OMS_CASH_HISTORY_SIGNING_SECRET_FILE
+            # to its read-only mount of this dedicated signing key. The bearer
+            # needs the cash-history role and explicit tenant/portfolio scope.
+            # - { name: API_GATEWAY_HISTORY_LISTEN, value: ":8443" }
+            # - { name: API_GATEWAY_CASH_HISTORY_SIGNING_SECRET_FILE, value: /run/secrets/cash-history-signing/signing-secret }
             # WHICH TENANTS HAVE THEIR OWN INSTANCES (#668). MT-02 renders some
             # services per tenant (internal/tenantgen.Services), each with its own
             # Service, database scope and NATS account. This gateway dials one
@@ -459,11 +468,19 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            # For the optional OMS replay listener, mount the separately
+            # provisioned key. The ordinary gateway signer stays independent.
+            # - { name: cash-history-signing, mountPath: /run/secrets/cash-history-signing, readOnly: true }
             - { name: gateway, mountPath: /run/secrets/gateway, readOnly: true }
             - { name: redis, mountPath: /run/secrets/redis, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
+        # Optional OMS replay signing volume, paired with the mount above:
+        # - name: cash-history-signing
+        #   secret:
+        #     secretName: api-gateway-cash-history-signing
+        #     items: [{ key: signing-secret, path: signing-secret }]
         - name: tmp
           emptyDir: {}
         # The Redis DSN backing the cross-pod idempotency claim (#721). Removing this
