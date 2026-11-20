@@ -1,6 +1,12 @@
 -- Explicit administrator provisioning for the isolated synthetic pilot database.
 -- Pass public_key from the operator-approved policy as a psql variable.
+-- On an already provisioned pilot, run this file with -v review_fence_only=on.
+-- This updates the review policy without reprovisioning the signed source.
 \set ON_ERROR_STOP on
+\if :{?review_fence_only}
+\else
+\set review_fence_only off
+\endif
 BEGIN;
 DO $$
 BEGIN
@@ -13,9 +19,12 @@ END $$;
 -- claim or explanation inserts its receipt in the same transaction as the
 -- break revision and FACT. Enforce the pilot's read-only boundary on all
 -- runtime roles while allowing reconciliation and other tenants to continue.
+DROP POLICY IF EXISTS signed_pilot_read_only_actions ON custody_actions;
 CREATE POLICY signed_pilot_read_only_actions ON custody_actions AS RESTRICTIVE
     FOR INSERT TO PUBLIC WITH CHECK (tenant_id <> 'synthetic-custody-pilot');
 
+\if :review_fence_only
+\else
 CREATE ROLE kanz_custody_batch_pilot NOLOGIN NOSUPERUSER NOBYPASSRLS;
 GRANT USAGE ON SCHEMA public TO kanz_custody_batch_pilot;
 GRANT SELECT, INSERT ON custody_batch_receipts TO kanz_custody_batch_pilot;
@@ -38,4 +47,5 @@ CREATE POLICY signed_pilot_outbox ON outbox AS RESTRICTIVE TO kanz_custody_batch
            subject = 'accounting.custody.statement' AND event_type = subject AND
            domain = 'accounting' AND event_class = 1 AND schema_version = 1 AND
            payload_schema_ref = 'accounting.v1.CustodianStatement:1');
+\endif
 COMMIT;
