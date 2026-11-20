@@ -21,13 +21,15 @@ type DatedResult struct {
 	Run                   Run
 }
 
-func (p TransactionComparison) matches(stmt Statement) bool {
+func (p TransactionComparison) matches(stmt Statement, outcome Outcome, prefix int64) bool {
 	switch stmt.Grain {
 	case recon.GrainBalancesOnly:
 		return p.Pass == recon.LegBalancesOnly.String() && p.StatementReferences == nil && p.BookReferences == nil && p.UnreferencedBookTrades == nil
 	case recon.GrainTransactions:
 		return p.Pass == recon.LegRan.String() && p.StatementReferences != nil && *p.StatementReferences == len(stmt.Transactions) &&
-			p.BookReferences != nil && *p.BookReferences >= 0 && p.UnreferencedBookTrades != nil && *p.UnreferencedBookTrades >= 0
+			p.BookReferences != nil && *p.BookReferences >= 0 && p.UnreferencedBookTrades != nil && *p.UnreferencedBookTrades >= 0 &&
+			int64(*p.UnreferencedBookTrades) <= prefix-int64(*p.BookReferences) &&
+			(outcome != OutcomeClean || *p.BookReferences == *p.StatementReferences)
 	}
 	return false
 }
@@ -157,7 +159,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		if changed {
 			return DatedResult{State: "pending", StatementID: id, Reason: "journal_changed"}, nil
 		}
-		if proof := run.Basis.Transactions; proof != nil && !proof.matches(materialized) {
+		if proof := run.Basis.Transactions; proof != nil && !proof.matches(materialized, run.Outcome, run.Basis.JournalPosition) {
 			return DatedResult{State: "unknown"}, nil
 		}
 		run.compared = nil

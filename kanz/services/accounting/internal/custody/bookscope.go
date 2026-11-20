@@ -95,6 +95,15 @@ func (b *RunBasis) clone() *RunBasis {
 	out := *b
 	if b.Transactions != nil {
 		tx := *b.Transactions
+		if tx.StatementReferences != nil {
+			tx.StatementReferences = new(*tx.StatementReferences)
+		}
+		if tx.BookReferences != nil {
+			tx.BookReferences = new(*tx.BookReferences)
+		}
+		if tx.UnreferencedBookTrades != nil {
+			tx.UnreferencedBookTrades = new(*tx.UnreferencedBookTrades)
+		}
 		out.Transactions = &tx
 	}
 	out.Accounts = make(map[string][]string, len(b.Accounts))
