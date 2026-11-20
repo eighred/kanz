@@ -346,7 +346,7 @@ func serve(cfg config.Config) error {
 		OnThrottle: func() {
 			logger.Error("binance: REST weight budget exhausted — backing off (structural alert)")
 		},
-	}, cfg.WSBase)
+	}, cfg.WSBase, view)
 	if err := conn.VerifyCatalogue(ctx); err != nil {
 		return fmt.Errorf("BINANCE_SYMBOLS exchange verification: %w", err)
 	}

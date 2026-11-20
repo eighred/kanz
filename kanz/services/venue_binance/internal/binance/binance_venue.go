@@ -15,6 +15,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
 // BinanceVenue implements the execution.Venue seam against Binance Spot (compiled
@@ -30,6 +31,9 @@ type BinanceVenue struct {
 	rest    *binanceREST
 	symbols SymbolMapper
 	now     func() time.Time
+	// The RPC server records every dispatch here before calling Execute.
+	// A memory view can forget the entire history during restart.
+	durableOrders *orderview.Postgres
 }
 
 // BinanceConfig configures a BinanceVenue.

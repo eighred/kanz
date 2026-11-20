@@ -59,7 +59,7 @@ func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 	c := NewBinanceConnector(VenueSettings{
 		MIC: "BINANCE", BaseURL: f.srv.URL, APIKey: "k", APISecret: "s",
 		Symbols: map[string]string{"BTC-USD": "BTCUSDT"}, WeightBudget: 1200,
-	}, "")
+	}, "", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if _, err := c.Start(ctx, "123", WorkerDeps{
