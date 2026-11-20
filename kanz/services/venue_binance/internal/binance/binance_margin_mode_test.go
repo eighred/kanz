@@ -107,6 +107,7 @@ func TestExecuteRefusesANonSpotRegimeWithoutTouchingTheExchange(t *testing.T) {
 func TestExecuteStillPlacesASpotOrder(t *testing.T) {
 	f := newFakeBinance(t)
 	f.newOrderBody = fullFill("M-1")
+	f.myTradesBody = fullTradeHistory
 	v := venueOverFake(f)
 
 	st := marketOrder("M-1")

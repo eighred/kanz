@@ -186,7 +186,11 @@ func (c *binanceREST) signedGetRequest(ctx context.Context, path string, params 
 // newOrderRespType=FULL so the immediate fills come back inline.
 func (c *binanceREST) newOrder(ctx context.Context, params url.Values) (*orderResponse, error) {
 	params.Set("newOrderRespType", "FULL")
-	return c.signedOrderCall(ctx, http.MethodPost, "/api/v3/order", params, 1)
+	body, status, err := c.signedOrderRequest(ctx, http.MethodPost, "/api/v3/order", params, 1)
+	if err != nil {
+		return nil, err
+	}
+	return decodeBoundOrder(body, status, params.Get("symbol"), params.Get("newClientOrderId"))
 }
 
 // queryOrder uses the original client order ID after an ambiguous placement.
@@ -200,13 +204,13 @@ func (c *binanceREST) queryOrder(ctx context.Context, symbol, origClientOrderID 
 	if err != nil {
 		return nil, err
 	}
-	return decodeOrderQuery(body, status, symbol, origClientOrderID)
+	return decodeBoundOrder(body, status, symbol, origClientOrderID)
 }
 
 // An order lookup can authorize adoption, withdrawal, or a second placement.
 // A negative venue verdict must be an unambiguous error; a positive verdict
 // must identify the exact order that was requested.
-func decodeOrderQuery(body []byte, status int, symbol, clientID string) (*orderResponse, error) {
+func decodeBoundOrder(body []byte, status int, symbol, clientID string) (*orderResponse, error) {
 	var order orderResponse
 	if !validPrivateJSON(body, &order) {
 		return nil, fmt.Errorf("%w: malformed Binance order query response", execution.ErrReconcileEvidence)

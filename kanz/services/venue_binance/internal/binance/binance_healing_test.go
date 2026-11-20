@@ -172,7 +172,7 @@ func TestBinanceVenue_CancelOrderDispatches(t *testing.T) {
 	f.cancelBody = `{"symbol":"BTCUSDT","origClientOrderId":"o1","status":"CANCELED"}`
 	v := venueOverFake(f)
 
-	err := v.CancelOrder(context.Background(), &orderpb.OrderState{OrderId: "o1", InstrumentId: "BTC-USD"})
+	err := v.CancelOrder(context.Background(), omsCancelling("o1"))
 	if err != nil {
 		t.Fatalf("CancelOrder: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestBinanceVenue_CancelUnknownOrderIsConfirmed(t *testing.T) {
 	f.cancelBody = `{"code":-2011,"msg":"Unknown order sent."}`
 	v := venueOverFake(f)
 
-	if err := v.CancelOrder(context.Background(), &orderpb.OrderState{OrderId: "o1", InstrumentId: "BTC-USD"}); err != nil {
+	if err := v.CancelOrder(context.Background(), omsCancelling("o1")); err != nil {
 		t.Fatalf("CancelOrder = %v, want nil (-2011 ⇒ already gone ⇒ confirmed)", err)
 	}
 }
@@ -203,7 +203,7 @@ func TestBinanceVenue_CancelErrorSurfaces(t *testing.T) {
 	f.cancelBody = `{"code":-1001,"msg":"internal error"}`
 	v := venueOverFake(f)
 
-	if err := v.CancelOrder(context.Background(), &orderpb.OrderState{OrderId: "o1", InstrumentId: "BTC-USD"}); err == nil {
+	if err := v.CancelOrder(context.Background(), omsCancelling("o1")); err == nil {
 		t.Fatal("CancelOrder = nil, want an error — an unconfirmed cancel must never look like a success")
 	}
 }

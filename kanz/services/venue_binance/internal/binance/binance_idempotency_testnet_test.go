@@ -10,8 +10,8 @@ package binance
 // and operator-selected price/quantity inside the approved mandate. It places a
 // resting testnet LIMIT with one deterministic newClientOrderId, deliberately
 // loses the accepted POST response, and proves the connector recovers with GET.
-// It then deliberately repeats the POST and proves Binance still identifies one
-// exchange order. Cleanup cancels that exact client id under a detached bound.
+// A second typed Execute must be refused from the persisted dispatch row.
+// The typed query and venue order ID must still identify the original placement.
 
 import (
 	"context"
@@ -22,18 +22,24 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/eighred/kanz/internal/orderid"
+	"github.com/eighred/kanz/internal/platform/halt"
+	"github.com/eighred/kanz/internal/venueadapter/server"
 	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/test/backing"
 )
 
 const liveOrderProofGate = "I_ACCEPT_ONE_CONTROLLED_TESTNET_ORDER"
@@ -92,7 +98,6 @@ func requireFreshOrderAuthorization(t *testing.T) preflightEvidence {
 // the real network boundary: Binance has answered, while the connector has not.
 type loseAcceptedPlacementTransport struct {
 	next   http.RoundTripper
-	lose   sync.Once
 	cancel context.CancelFunc
 	posts  atomic.Int32
 	gets   atomic.Int32
@@ -104,11 +109,8 @@ func (t *loseAcceptedPlacementTransport) RoundTrip(req *http.Request) (*http.Res
 	}
 	switch req.Method {
 	case http.MethodPost:
-		t.posts.Add(1)
-		lost := false
-		t.lose.Do(func() { lost = true })
-		if !lost {
-			return t.next.RoundTrip(req)
+		if t.posts.Add(1) != 1 {
+			return nil, errors.New("testnet proof refused a second placement request")
 		}
 		resp, err := t.next.RoundTrip(req)
 		if err != nil {
@@ -126,6 +128,32 @@ func (t *loseAcceptedPlacementTransport) RoundTrip(req *http.Request) (*http.Res
 		t.gets.Add(1)
 	}
 	return t.next.RoundTrip(req)
+}
+
+func TestLostTestnetACKTransportForwardsOnePlacement(t *testing.T) {
+	var forwarded atomic.Int32
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			forwarded.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer loopback.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	proof := &loseAcceptedPlacementTransport{next: loopback.Client().Transport, cancel: cancel}
+	for _, requestCtx := range []context.Context{ctx, t.Context()} {
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, loopback.URL+"/api/v3/order", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := proof.RoundTrip(req); err == nil {
+			t.Fatal("test transport returned a placement acknowledgement")
+		}
+	}
+	if ctx.Err() == nil || forwarded.Load() != 1 || proof.posts.Load() != 2 {
+		t.Fatalf("loopback POSTs=%d attempts=%d expired=%v", forwarded.Load(), proof.posts.Load(), ctx.Err())
+	}
 }
 
 func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
@@ -148,13 +176,19 @@ func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 	if !priceOK || !quantityOK || priceValue.Sign() <= 0 || quantityValue.Sign() <= 0 {
 		t.Fatal("proof price and quantity must be exact positive base-10 decimals")
 	}
+	if os.Getenv("TEST_POSTGRES_URL") == "" {
+		t.Fatal("the testnet single-placement proof requires a restricted-role TEST_POSTGRES_URL for its disposable adapter view")
+	}
+	open := backing.VenueStore(t, "../../migrations")
+	view := open()
 	orderID := orderid.Mint()
 	st := &orderpb.OrderState{
 		OrderId: orderID, Venue: "BINANCE", VenueAccountId: account, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
 		OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTC,
 		OrderedQuantity: bdec(quantity), LimitPrice: bdec(price),
 	}
-	placementCtx, expirePlacement := context.WithCancel(context.Background())
+	placementCtx, expirePlacement := context.WithCancel(t.Context())
+	defer expirePlacement()
 	baseClient := newExchangeHTTPClient(0)
 	next := baseClient.Transport
 	if next == nil {
@@ -170,24 +204,30 @@ func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 		MIC: "BINANCE", Account: account, Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest,
 	})
 
-	if _, err := venue.verifyAccount(placementCtx, strings.TrimSpace(uid), slog.Default()); err != nil {
+	proof, err := venue.verifyAccount(placementCtx, strings.TrimSpace(uid), slog.Default())
+	if err != nil || !proof.Verified {
 		t.Fatal("testnet account verification failed")
 	}
 
-	cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 30*time.Second)
-	defer stopCleanup()
+	venue.durableOrders = view
+	adapter := server.NewWithDispatchEvidence(venue, view, view, proof, halt.OpenGate(nil), slog.Default())
 	defer func() {
-		if err := venue.CancelOrder(cleanupCtx, st); err != nil {
+		cleanupCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stop()
+		if _, err := adapter.CancelOrder(cleanupCtx, &venuepb.CancelOrderRequest{State: st}); err != nil {
 			t.Errorf("CRITICAL: cleanup could not cancel testnet order %s: %v", orderID, err)
 		}
 	}()
 
-	if fills, err := venue.Execute(placementCtx, st); err != nil {
+	request := &venuepb.ExecuteRequest{State: st}
+	if ack, err := adapter.Execute(placementCtx, request); err != nil {
 		t.Fatalf("ambiguous placement was not recovered by client-order-id query: %v", err)
-	} else if len(fills) != 0 {
-		t.Fatalf("proof order unexpectedly traded during ambiguous recovery: fills=%d", len(fills))
+	} else if len(ack.GetFills()) != 0 {
+		t.Fatalf("proof order unexpectedly traded during ambiguous recovery: fills=%d", len(ack.GetFills()))
 	}
-	first, err := rest.queryOrder(cleanupCtx, "BTCUSDT", orderID)
+	observeCtx, stopObserve := context.WithTimeout(t.Context(), 30*time.Second)
+	defer stopObserve()
+	first, err := rest.queryOrder(observeCtx, "BTCUSDT", orderID)
 	if err != nil {
 		t.Fatalf("query accepted proof order: %v", err)
 	}
@@ -196,21 +236,26 @@ func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 			first.ClientOrderID == orderID, first.OrderID != 0, first.Status)
 	}
 
-	if fills, err := venue.Execute(context.Background(), st); err != nil {
-		t.Fatalf("deliberate duplicate was not recovered by client-order-id query: %v", err)
-	} else if len(fills) != 0 {
-		t.Fatalf("duplicate proof unexpectedly returned fills: %d", len(fills))
+	reopened := open()
+	replay := server.NewWithDispatchEvidence(venue, reopened, reopened, proof, halt.OpenGate(nil), slog.Default())
+	if _, err := replay.Execute(observeCtx, request); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("recorded placement must refuse a duplicate Execute: %v", err)
 	}
-	second, err := rest.queryOrder(cleanupCtx, "BTCUSDT", orderID)
+	recovered, err := replay.QueryOrder(observeCtx, &venuepb.QueryOrderRequest{State: st})
+	if err != nil || recovered.GetState() != venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING ||
+		recovered.GetExecutedQuantity() == nil || recovered.GetExecutedQuantity().GetCoefficient() != 0 || len(recovered.GetFills()) != 0 {
+		t.Fatalf("recorded placement did not reconcile to a resting order: %v %v", recovered.GetState(), err)
+	}
+	second, err := rest.queryOrder(observeCtx, "BTCUSDT", orderID)
 	if err != nil {
-		t.Fatalf("query after deliberate duplicate: %v", err)
+		t.Fatalf("query after duplicate Execute: %v", err)
 	}
 	if second.OrderID != first.OrderID || second.ClientOrderID != orderID {
 		t.Fatalf("duplicate produced a different exchange order: same_venue_id=%t client_match=%t",
 			second.OrderID == first.OrderID, second.ClientOrderID == orderID)
 	}
-	if got := loss.posts.Load(); got != 2 {
-		t.Fatalf("placement requests=%d, want initial plus one deliberate duplicate", got)
+	if got := loss.posts.Load(); got != 1 {
+		t.Fatalf("placement requests=%d, want exactly one", got)
 	}
 	if got := loss.gets.Load(); got < 3 {
 		t.Fatalf("client-order-id queries=%d, want recovery plus before/after identity reads", got)

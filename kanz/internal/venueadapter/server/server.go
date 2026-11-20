@@ -96,8 +96,7 @@ func New(venue execution.Venue, view orderview.Store, closes execution.CloseTrac
 	return s
 }
 
-// NewWithDispatchEvidence prevents a second placement while an earlier caller
-// may already have sent the order and the adapter has received no acknowledgement.
+// NewWithDispatchEvidence directs retries of a recorded placement to QueryOrder.
 func NewWithDispatchEvidence(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, gate *halt.Gate, logger *slog.Logger) *Server {
 	s := New(venue, view, closes, proof, gate, logger)
 	s.recordDispatch = orderview.DispatchAfterEvidence
@@ -226,8 +225,8 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 	// difference is worth its branch: "the exchange already finished this order"
 	// and "this adapter cannot read its own view" demand different actions.
 	if err := s.recordDispatch(ctx, s.view, st); err != nil {
-		if errors.Is(err, orderview.ErrPendingDispatch) {
-			return nil, status.Error(codes.FailedPrecondition, "venue: prior dispatch pending acknowledgement; reconcile order before placement")
+		if errors.Is(err, orderview.ErrDispatchRecorded) {
+			return nil, status.Error(codes.FailedPrecondition, "venue: placement already recorded; reconcile the existing order")
 		}
 		if errors.Is(err, orderview.ErrTerminalNotRedispatched) {
 			// AlreadyExists, not the halt gate's FailedPrecondition: an operator

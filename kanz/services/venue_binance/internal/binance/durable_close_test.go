@@ -6,7 +6,6 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/venueadapter/server"
-	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/test/backing"
@@ -31,10 +30,10 @@ func TestDurableCloseRecoveryWithRealBroker(t *testing.T) {
 	f.cancelStatus = 504
 	f.queryBody = "{"
 	id := fmt.Sprintf("close-%d", time.Now().UnixNano())
-	st := &orderpb.OrderState{OrderId: id, InstrumentId: "BTC-USD"}
+	st := omsCancelling(id)
 	srv := server.New(venueOverFake(f), store, store, execution.AccountProof{Verified: true, ExchangeAccountID: "test-account"}, halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, err := srv.CancelOrder(ctx, &venuepb.CancelOrderRequest{State: st}); err == nil {
-		t.Fatal("expected ambiguous cancellation")
+	if _, err := srv.CancelOrder(ctx, &venuepb.CancelOrderRequest{State: st}); err == nil || f.deletes != 1 {
+		t.Fatalf("expected ambiguous venue cancellation: deletes=%d err=%v", f.deletes, err)
 	}
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: broker, Name: "close-recovery"})
 	if err != nil {

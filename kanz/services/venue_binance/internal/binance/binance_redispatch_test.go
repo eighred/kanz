@@ -109,10 +109,9 @@ func TestRedispatch_AFilledOrderIsNeitherReplacedNorReopened(t *testing.T) {
 	}
 }
 
-// THE NON-REGRESSION, END TO END. A partial fill leaves the order LIVE, and a
-// re-dispatch of a live order must still reach the exchange. If this stops
-// posting, the guard has turned every recovery path into a trading outage.
-func TestRedispatch_APartiallyFilledOrderStillReachesTheExchange(t *testing.T) {
+// The private stream already observed a real execution on this order. The
+// remaining quantity belongs to the same placement.
+func TestRedispatch_APartiallyFilledOrderKeepsItsOriginalPlacement(t *testing.T) {
 	ctx := context.Background()
 
 	view := newFakeOrders("o1")
@@ -127,11 +126,10 @@ func TestRedispatch_APartiallyFilledOrderStillReachesTheExchange(t *testing.T) {
 		execution.AccountProof{Verified: true, ExchangeAccountID: "12345678"},
 		halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	if _, err := srv.Execute(ctx, &venuepb.ExecuteRequest{State: omsRedispatch("o1")}); err != nil {
-		t.Fatalf("re-dispatching a partially filled order was refused: %v — the order is still "+
-			"live at the exchange and re-working it is how an interrupted one recovers", err)
+	if _, err := srv.Execute(ctx, &venuepb.ExecuteRequest{State: omsRedispatch("o1")}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("redispatch of a partially filled order: %v", err)
 	}
-	if f.posts != 1 {
-		t.Fatalf("the exchange saw %d placements for a live order, want 1", f.posts)
+	if f.posts != 0 {
+		t.Fatalf("the exchange saw %d replacement placements", f.posts)
 	}
 }

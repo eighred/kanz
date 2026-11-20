@@ -1037,17 +1037,16 @@ func Dispatch(ctx context.Context, store Store, requested *orderpb.OrderState) e
 	return dispatch(ctx, store, requested, false)
 }
 
-// ErrPendingDispatch means a previous placement may already be in flight.
-var ErrPendingDispatch = errors.New("orderview: placement already recorded and awaiting venue evidence")
+// ErrDispatchRecorded directs further observation of the original placement to QueryOrder.
+var ErrDispatchRecorded = errors.New("orderview: placement already recorded")
 
-// DispatchAfterEvidence fences concurrent or repeated placement while the prior
-// dispatch still has no venue acknowledgement or fill. The decision runs again
-// on a contended insert, before either caller is permitted to place the order.
+// DispatchAfterEvidence records one placement. A venue acknowledgement or
+// partial fill adds evidence about that placement and never authorizes another.
 func DispatchAfterEvidence(ctx context.Context, store Store, requested *orderpb.OrderState) error {
 	return dispatch(ctx, store, requested, true)
 }
 
-func dispatch(ctx context.Context, store Store, requested *orderpb.OrderState, requireEvidence bool) error {
+func dispatch(ctx context.Context, store Store, requested *orderpb.OrderState, singlePlacement bool) error {
 	id := requested.GetOrderId()
 	if id == "" {
 		return errors.New("orderview: cannot record a dispatch for an order with empty order_id")
@@ -1065,8 +1064,8 @@ func dispatch(ctx context.Context, store Store, requested *orderpb.OrderState, r
 			return nil, fmt.Errorf("%w: %s was frozen — %s", ErrQuarantinedNotRedispatched, id,
 				cur.GetQuarantine().GetReason())
 		}
-		if found && requireEvidence && cur.GetVenueAckAt() == nil && cur.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED {
-			return nil, ErrPendingDispatch
+		if found && singlePlacement {
+			return nil, ErrDispatchRecorded
 		}
 		next, ok := proto.Clone(requested).(*orderpb.OrderState)
 		if !ok {

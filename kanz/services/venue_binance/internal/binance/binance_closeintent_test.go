@@ -61,7 +61,7 @@ func healReconOverFake(f *fakeBinance, cap *reconCapture, reg PendingCloses) *Re
 // what a CancelOrderRequest actually carries on the wire.
 func omsCancelling(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
-		OrderId: id, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
+		OrderId: id, Venue: "BINANCE", VenueAccountId: fixtureAccount, PortfolioId: "fund-alpha", InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
 		OrderType:  orderpb.OrderType_ORDER_TYPE_LIMIT,
 		Status:     orderpb.OrderStatus_ORDER_STATUS_ROUTED,
 		LimitPrice: bdec("50000"), OrderedQuantity: bdec("1"),

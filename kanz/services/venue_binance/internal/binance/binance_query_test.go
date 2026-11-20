@@ -85,7 +85,7 @@ func TestBinanceAmbiguousPlacementCannotAdoptAnotherOrder(t *testing.T) {
 
 func queryOrderState(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
-		OrderId: id, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
+		OrderId: id, PortfolioId: "fund-alpha", Venue: "BINANCE", VenueAccountId: fixtureAccount, InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
 		OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, OrderedQuantity: bdec("1"),
 	}
 }
@@ -151,7 +151,7 @@ func TestBinanceQuery_RateLimitedIsAnErrorNeverUnknown(t *testing.T) {
 	// Three units cannot fund a four-unit order lookup.
 	bucket := newWeightBucket(3, time.Minute, nil)
 	rest := newBinanceREST(restConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Bucket: bucket})
-	v := NewBinanceVenue(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
+	v := provenBinanceFixture(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
 
 	view, err := v.QueryOrder(context.Background(), queryOrderState("o1"))
 	if !errors.Is(err, ErrRateLimited) {

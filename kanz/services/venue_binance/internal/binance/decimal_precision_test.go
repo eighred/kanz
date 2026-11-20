@@ -32,7 +32,7 @@ func TestBinanceExactDecimalWire(t *testing.T) {
 			requests := make(chan url.Values, 1)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests <- r.URL.Query()
-				_, _ = w.Write([]byte(`{"status":"NEW","executedQty":"0","fills":[]}`))
+				_, _ = w.Write([]byte(`{"symbol":"BTCUSDT","orderId":7,"clientOrderId":"precision1594","status":"NEW","executedQty":"0","fills":[]}`))
 			}))
 			defer srv.Close()
 			if _, err := venueOverFake(&fakeBinance{srv: srv}).Execute(context.Background(), preciseOrder(kind)); err != nil {

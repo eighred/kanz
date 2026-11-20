@@ -9,7 +9,7 @@ import (
 
 func TestHistoryRequiresTradeIdentitySideAndTimeForEveryMatch(t *testing.T) {
 	const order = `{"symbol":"BTCUSDT","clientOrderId":"o1","orderId":7,"status":"FILLED","executedQty":"1"}`
-	const trades = `[{"symbol":"BTCUSDT","orderId":7,"isBuyer":true,"id":0,"qty":"0.4","price":"500","time":1750000000999},{"symbol":"BTCUSDT","orderId":7,"isBuyer":true,"id":42,"qty":"0.6","price":"501","time":1750000001001}]`
+	const trades = `[{"symbol":"BTCUSDT","orderId":7,"isBuyer":true,"id":0,"qty":"0.4","price":"500","commission":"0","commissionAsset":"USD","time":1750000000999},{"symbol":"BTCUSDT","orderId":7,"isBuyer":true,"id":42,"qty":"0.6","price":"501","commission":"0","commissionAsset":"USD","time":1750000001001}]`
 	for _, tc := range []struct{ name, find, replace string }{
 		{"missing trade zero", `"id":0,`, ""},
 		{"null trade zero", `"id":0`, `"id":null`},
