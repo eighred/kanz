@@ -102,6 +102,8 @@ async function main() {
           const text = await region.innerText()
           if (run) assert(text.includes(run))
           if (outcome === 'clean' || outcome === 'breaks') {
+            assert.equal(receipt.account_assignment_verified, true)
+            assert(text.includes('Custody account assignment verified for this close'))
             assert.equal(receipt.journal_position, '1')
             assert.equal(receipt.transaction_pass, 'ran')
             assert.equal(receipt.book_reference_count, '1')
@@ -111,6 +113,7 @@ async function main() {
             if (!quantityEvidence || !saved) assert(text.includes('Individual trade quantities, prices and cash amounts remain unverified.'))
             assert(text.includes(receipt.statement_id))
           } else {
+            assert.equal(receipt.account_assignment_verified, undefined)
             assert.equal(receipt.transaction_pass, undefined)
             assert(!text.includes(statement))
           }

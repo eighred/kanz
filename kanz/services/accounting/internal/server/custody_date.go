@@ -81,6 +81,9 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			response["statement_id"] = result.StatementID
 		}
 		if result.State == "recorded" {
+			if result.AccountAssignmentVerified && (result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
+				response["account_assignment_verified"] = true
+			}
 			response["run_id"] = result.Run.RunID
 			response["outcome"] = result.Run.Outcome.String()
 			response["completed_at"] = result.Run.CompletedAt.UTC().Format(time.RFC3339Nano)

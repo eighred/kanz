@@ -16,7 +16,7 @@ async function comparisonDownload(page, region, response) {
   const bytes = Buffer.concat(chunks)
   const expected = { format: 'kanz.custody-comparison.v1' }
   for (const key of ['tenant_id', 'portfolio_id', 'custodian_id', 'business_date', 'state', 'outcome',
-    'run_id', 'completed_at', 'statement_id', 'journal_position', 'scope_mode', 'transaction_pass',
+    'run_id', 'completed_at', 'statement_id', 'journal_position', 'scope_mode', 'account_assignment_verified', 'transaction_pass',
     'statement_reference_count', 'book_reference_count', 'unreferenced_book_trades']) {
     if (response[key] !== undefined) expected[key] = response[key]
   }

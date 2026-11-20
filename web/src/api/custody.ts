@@ -94,7 +94,7 @@ function retainedBreak(value: unknown): RetainedBreak {
 
 export type DatedCustodyResult = CustodySubject & { tenant_id: string } & (
   | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: 'journal_changed' }
-  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; transactions?: TransactionComparison; historical?: HistoricalComparison }
+  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; account_assignment_verified?: true; transactions?: TransactionComparison; historical?: HistoricalComparison }
 )
 
 export function downloadCustodyComparison(receipt: Extract<DatedCustodyResult, { state: 'recorded' }>): void {
@@ -123,6 +123,8 @@ export const custody = {
     const scope = { tenant_id: tenant, portfolio_id: subject.portfolio_id, custodian_id: subject.custodian_id, business_date: subject.business_date }
     const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
     const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
+    if (result.account_assignment_verified !== undefined &&
+        (result.account_assignment_verified !== true || !verified || result.scope_mode !== 'declared')) throw invalid()
     let historical: HistoricalComparison | undefined
     if (runID && result.state === 'recorded') {
       const digest = result.signed_statement_sha256
@@ -163,7 +165,8 @@ export const custody = {
       if ((result.outcome === 'clean' || result.outcome === 'breaks') && (!result.statement_id || !scoped)) throw invalid()
       return { ...scope, state: 'recorded', outcome: result.outcome as CustodyRerunReceipt['outcome'], run_id: result.run_id,
         completed_at: result.completed_at, statement_id: result.statement_id as string | undefined,
-        scope_mode: result.scope_mode as string | undefined, journal_position: result.journal_position as string | undefined, transactions, historical }
+        scope_mode: result.scope_mode as string | undefined, journal_position: result.journal_position as string | undefined,
+        account_assignment_verified: result.account_assignment_verified, transactions, historical }
     } else if (!['not_compared', 'pending', 'unknown'].some(value => value === result.state) ||
         (result.state === 'pending' && !result.statement_id) || (result.state === 'unknown' && result.statement_id !== undefined) ||
         ['run_id', 'outcome', 'completed_at', 'scope_mode', 'journal_position'].some(key => result[key] !== undefined)) throw invalid()

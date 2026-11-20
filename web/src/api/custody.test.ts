@@ -41,8 +41,13 @@ describe('custody response boundary', () => {
     const get = vi.spyOn(api, 'get').mockResolvedValueOnce(data)
     const projected = await custody.dated(subject, 'tenant')
     expect(projected).toMatchObject({ state: 'recorded', journal_position: '9007199254740993', transactions: { transaction_pass: 'balances_only' } })
+    expect(projected).not.toHaveProperty('account_assignment_verified', true)
+    get.mockResolvedValueOnce({ ...data, account_assignment_verified: true })
+    expect(await custody.dated(subject, 'tenant')).toMatchObject({ account_assignment_verified: true })
     expect(get.mock.calls[0]?.[0]).toBe('/api/v1/portfolios/PF%2F1/custody/comparison?custodian_id=C+%26+A&business_date=2020-02-04')
     for (const patch of [{ tenant_id: 'foreign' }, { tenant_id: undefined }, { transaction_pass: undefined },
+      { account_assignment_verified: 'true' }, { account_assignment_verified: false },
+      { account_assignment_verified: true, scope_mode: 'derived' }, { account_assignment_verified: true, outcome: 'failed' },
       { transaction_pass: 'unknown', book_reference_count: '0' }, { transaction_pass: 'ran', statement_reference_count: '1' },
       { transaction_pass: 'ran', book_reference_count: '0', statement_reference_count: 1, unreferenced_book_trades: '0' }, { portfolio_id: 'PF2' }, { statement_id: undefined }, { state: 'not_compared' }, { journal_position: 9007199254740992 }, { journal_position: '-1' }, { journal_position: undefined }, { outcome: 'no_statement' }]) {
       get.mockResolvedValueOnce({ ...data, ...patch })

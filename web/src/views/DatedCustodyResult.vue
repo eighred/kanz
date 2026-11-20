@@ -66,6 +66,9 @@ const states = { not_compared: 'No comparison recorded', pending: 'Statement awa
       <template v-if="result.state === 'recorded'">
         · Run <code>{{ result.run_id }}</code> · Completed {{ result.completed_at }}
         <span v-if="result.journal_position !== undefined"> · Journal position <code>{{ result.journal_position }}</code> · Account scope {{ result.scope_mode }}</span>
+        <span v-if="result.outcome === 'clean' || result.outcome === 'breaks'">
+          · {{ result.account_assignment_verified ? 'Custody account assignment verified for this close' : 'Custody account assignment unverified for this close' }}
+        </span>
         <span v-if="result.transactions?.transaction_pass === 'ran'">
           · Independent reference comparison · Statement references {{ result.transactions.statement_reference_count }}
           · Book references {{ result.transactions.book_reference_count }}

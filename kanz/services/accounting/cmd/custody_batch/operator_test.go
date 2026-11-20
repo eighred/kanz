@@ -95,6 +95,10 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			t.Fatal(err)
 		}
 		store := custody.NewPostgres(pool)
+		scope, err = scope.AdmitAssignments(ctx, time.Now().UTC(), store)
+		if err != nil {
+			t.Fatalf("independent custody account assignment was not admitted: %v", err)
+		}
 		r, err := custody.NewReconciler(store, custody.LedgerBookLoader(journal, scope, slog.Default()), publisher, new(big.Rat), nil, slog.Default(), time.Now)
 		if err != nil {
 			t.Fatal(err)

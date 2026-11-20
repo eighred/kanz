@@ -15,6 +15,8 @@ import tempfile
 import time
 import uuid
 
+from custody_pilot_accounts import enroll_accounts
+
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "kanz"
 WEB = ROOT / "web"
@@ -68,6 +70,12 @@ def build(node, work, env):
         binary = work / (name + (".exe" if os.name == "nt" else ""))
         subprocess.run(["go", "test", "-mod=readonly", "-p", "1", "-c", "-o", binary, package],
                        cwd=MODULE, env=dict(build_env, GOWORK="off"), check=True)
+        binaries[name] = binary
+    for name, package in (("service", "accounting"), ("proof", "custody_proof")):
+        binary = work / (name + (".exe" if os.name == "nt" else ""))
+        subprocess.run(["go", "build", "-mod=readonly", "-p", "1", "-o", binary,
+                        "./services/accounting/cmd/" + package], cwd=MODULE,
+                       env=dict(build_env, GOWORK="off"), check=True)
         binaries[name] = binary
     return binaries
 
@@ -171,8 +179,11 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
     endpoint = subprocess.check_output([*docker, "port", container, "5432/tcp"], env=env, text=True).strip()
     if not re.fullmatch(r"127\.0\.0\.1:[1-9]\d{0,4}", endpoint) or int(endpoint.split(":")[1]) > 65535:
         raise RuntimeError("PostgreSQL must have exactly one literal loopback port.")
+    reader_url = f"postgres://pilot_check:{owner_password}@{endpoint}/{DATABASE}?sslmode=disable"
+    enroll_accounts(sql, DATABASE, endpoint, reader_url, binaries, env,
+                    CMD.parent / "custody_proof" / "testdata", check_startup=not (rerun or quantity_evidence))
     pilot_env = dict(env,
-        TEST_POSTGRES_URL=f"postgres://pilot_check:{owner_password}@{endpoint}/{DATABASE}?sslmode=disable",
+        TEST_POSTGRES_URL=reader_url,
         TEST_CUSTODY_BATCH_DATABASE_URL=f"postgres://pilot_source:{source_password}@{endpoint}/{DATABASE}?sslmode=disable",
         CUSTODY_PILOT_VERIFY="1", CUSTODY_PILOT_GATEWAY_PROBE=str(binaries["gateway"]),
         CUSTODY_PILOT_BFF_PROBE=str(binaries["bff"]), TEST_MFA_NODE=node,
@@ -210,6 +221,7 @@ def customer_downloads(observations, records):
     for receipt, record in zip(receipts, records):
         if (not isinstance(receipt, dict) or receipt.get("format") != "kanz.custody-comparison.v1"
                 or receipt.get("lookup") != "retained_run"
+                or receipt.get("account_assignment_verified") is not True
                 or receipt.get("run_id") != record["run_id"] or receipt.get("statement_id") != record["statement_id"]
                 or receipt.get("signed_statement_sha256") != record["statement_id"].rsplit(".", 1)[-1]):
             raise RuntimeError("Browser download does not match the independently stored comparison.")
