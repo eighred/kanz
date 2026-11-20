@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestSyntheticFundedGoRustGoRoundTrip(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_ROUNDTRIP") != "1" {
 		t.Skip("requires a disposable funded Go-to-Rust-to-Go fixture")
 	}
-	exerciseGoRustGo(t, "synthetic-funded-cancel-fill", true)
+	exerciseGoRustGo(t, "synthetic-funded-cancel-fill", false)
 }
 
 const fundedWorkingTenant = "synthetic-go-funded-working"
@@ -36,10 +37,18 @@ func TestSyntheticFundedWorkingGoRustGo(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WORKING") != "1" {
 		t.Skip("requires a disposable funded working-order handback")
 	}
+	exerciseGoRustGo(t, fundedWorkingTenant, false)
+}
+
+func TestSyntheticFundedWithdrawalGoRustGo(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL") != "1" {
+		t.Skip("requires the disposable funded Go withdrawal fixture")
+	}
 	exerciseGoRustGo(t, fundedWorkingTenant, true)
 }
 
-func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
+func exerciseGoRustGo(t *testing.T, tenant string, freshWithdrawal bool) {
+	funded := tenant != "synthetic-go-roundtrip"
 	t.Helper()
 	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
 		admit, policy := admitSignedGoOrigin, jetstream.DeliverAllPolicy
@@ -106,7 +115,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
 		}
 
 		if funded {
-			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor)
+			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor, freshWithdrawal)
 			requireNativeReceipt(t, ctx, request, "WRITER_FENCED")
 		} else {
 			exerciseSyntheticGoHandback(t, ctx, s, &cmd, request, 2)
@@ -116,7 +125,15 @@ func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
 		err = reader.QueryRow(ctx, `SELECT c.writer_epoch,c.go_gateway_frame,
 			ARRAY(SELECT DISTINCT writer_epoch FROM synthetic_oms_observations WHERE order_id=c.order_id ORDER BY writer_epoch)
 			FROM synthetic_oms_commands c WHERE c.order_id=$1`, cmd.OrderId).Scan(&admitted, &retained, &observations)
-		if err != nil || admitted != 1 || !bytes.Equal(retained, wire) || len(observations) != 1 || observations[0] != 2 {
+		wantEpochs := []int64{2}
+		if freshWithdrawal {
+			wantEpochs = []int64{2, 3}
+			var operations []string
+			if e := reader.QueryRow(ctx, "SELECT array_agg(operation ORDER BY operation) FROM synthetic_oms_observations WHERE order_id=$1 AND writer_epoch=3", cmd.OrderId).Scan(&operations); e != nil || !slices.Equal(operations, []string{"cancel_pending", "cancelled"}) {
+				t.Fatalf("Go withdrawal journal: %v %v", operations, e)
+			}
+		}
+		if err != nil || admitted != 1 || !bytes.Equal(retained, wire) || !slices.Equal(observations, wantEpochs) {
 			t.Fatalf("retained first admission or venue lineage changed: epoch %d, observations %v: %v", admitted, observations, err)
 		}
 		t.Log("Go generation 1 admitted the original signed command, Rust generation 2 recovered its redelivery and venue history, Go generation 3 recovered the same order")
@@ -124,7 +141,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
 }
 
 func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, receipt syntheticvenue.Receipt,
-	addr string, identity *testidentity.Source, event *envelopepb.Envelope,
+	addr string, identity *testidentity.Source, event *envelopepb.Envelope, authorizeWithdrawal func(int) string,
 ) {
 	t.Helper()
 	tenant := event.TenantId
@@ -153,6 +170,10 @@ func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	if err != nil || replayed.OK || replayed.Code != "WRITER_FENCED" {
 		t.Fatalf("retired Rust funded adapter: %s %v", replayed.Code, err)
 	}
+	withdrawalEventID := ""
+	if authorizeWithdrawal != nil {
+		withdrawalEventID = authorizeWithdrawal(generation)
+	}
 	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, receipt, generation,
-		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID)
+		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, withdrawalEventID)
 }

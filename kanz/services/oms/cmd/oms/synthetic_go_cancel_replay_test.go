@@ -14,6 +14,8 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/order"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -116,6 +118,11 @@ func deliverSyntheticFundedCancel(t *testing.T, ctx context.Context, client *bus
 	case <-ctx.Done():
 		t.Fatal("ordinary cancellation handler did not receive the replay")
 	}
+	awaitSyntheticCancelAck(t, ctx, commands, subject, group, deliveries)
+}
+
+func awaitSyntheticCancelAck(t *testing.T, ctx context.Context, commands jetstream.Stream, subject, group string, deliveries uint64) {
+	t.Helper()
 	durable := group + "-" + strings.ReplaceAll(subject, ".", "_")
 	for ctx.Err() == nil {
 		info, err := commands.Consumer(ctx, durable)
@@ -128,4 +135,78 @@ func deliverSyntheticFundedCancel(t *testing.T, ctx context.Context, client *bus
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("broker did not acknowledge cancellation at delivery %d", deliveries)
+}
+
+func consumeSyntheticFundedWithdrawal(t *testing.T, ctx context.Context, client *bus.NATSClient, svc *order.Service, broker, eventID string) {
+	t.Helper()
+	nc, err := nats.Connect(broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands, err := js.Stream(ctx, "SYNTHETIC_ORDERS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := js.Stream(ctx, "SYNTHETIC_FACTS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := facts.Info(ctx)
+	if err != nil || before.State.Msgs != 3 {
+		t.Fatalf("new withdrawal requires exactly three earlier OMS facts: %v", err)
+	}
+	subject := bus.TenantRoutedSubject(bus.TenantIDFromContext(ctx), order.SubjectCancel)
+	const group = "synthetic-go-funded-withdrawal"
+	ctx, stop := context.WithTimeout(ctx, 12*time.Second)
+	defer stop()
+	consumer, err := bus.NewConsumer(client, bus.WithDLQ(client), bus.WithRetainedRetries(subject))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 3)
+	done := make(chan error, 1)
+	go func() {
+		done <- consumer.Subscribe(ctx, subject, group, func(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+			if env.GetEventId() != eventID {
+				return bus.Terminal(errors.New("unexpected event in successor withdrawal durable"))
+			}
+			err := svc.Handle(ctx, env, payload)
+			result <- err
+			return err
+		})
+	}()
+	defer func() {
+		stop()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("withdrawal subscription: %v", err)
+		}
+	}()
+	select {
+	case err := <-result:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("first withdrawal must lose its XSIM acknowledgement: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("missing first withdrawal attempt")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("redelivered withdrawal did not reconcile: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("missing broker redelivery after withdrawal acknowledgement loss")
+	}
+	awaitSyntheticCancelAck(t, ctx, commands, subject, group, 2)
+	deliverSyntheticFundedCancel(t, ctx, client, svc, commands, subject, group+"-replay", eventID, 1)
+	after, err := facts.Info(ctx)
+	if err != nil || after.State.Msgs != before.State.Msgs+1 || after.State.LastSeq != before.State.LastSeq+1 {
+		t.Fatalf("withdrawal and replay did not yield exactly one terminal FACT: %v", err)
+	}
+	t.Log("GO_HANDBACK Go lost the XSIM cancel ACK, completed on JetStream delivery two, and ACKed the completed command on a fresh durable")
 }

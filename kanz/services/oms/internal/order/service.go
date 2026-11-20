@@ -61,6 +61,7 @@ type Service struct {
 	logger  *slog.Logger
 
 	retainedCancelReplay func(context.Context, *envelopepb.Envelope, []byte, *orderpb.CancelOrder, *orderpb.OrderState, int64) (bool, error)
+	fundedWithdrawal     func(context.Context, *envelopepb.Envelope, []byte, *orderpb.CancelOrder, *orderpb.OrderState) error
 
 	// accounts binds each portfolio to the exchange account it may execute against.
 	// Empty ⇒ nothing is bound, and every portfolio trades whatever account its
@@ -1697,6 +1698,10 @@ func (s *Service) handleCancellation(ctx context.Context, env *envelopepb.Envelo
 			}
 		}
 		return s.completeCancelAnnouncement(ctx, st, ver, st.GetLeavesQuantity(), now)
+	}
+
+	if s.fundedWithdrawal != nil && !IsTerminal(st) {
+		return s.fundedWithdrawal(ctx, env, payload, &cmd, st)
 	}
 
 	// Validate the withdrawal against the aggregate first (the terminal guard), so

@@ -177,12 +177,16 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 }
 
 func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, tenant, addr string, identity *testidentity.Source,
-	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string,
+	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, newWithdrawalEventID ...string,
 ) {
 	t.Helper()
 	_, socket := testidentity.StartWorkload(t, identity)
+	var withdrawalEventID string
+	if len(newWithdrawalEventID) == 1 {
+		withdrawalEventID = newWithdrawalEventID[0]
+	}
 	input, err := json.Marshal(map[string]any{"tenant": tenant, "endpoint": addr, "socket": socket, "broker": s.broker,
-		"state": working.State, "version": working.OrderVersion, "generation": generation, "cancelEventID": cancelEventID})
+		"state": working.State, "version": working.OrderVersion, "generation": generation, "cancelEventID": cancelEventID, "withdrawalEventID": withdrawalEventID})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -208,15 +208,25 @@ func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) 
 	if err := v.check(r.GetTenantId(), st); err != nil {
 		return nil, err
 	}
-	err := v.transaction(ctx, func(tx pgx.Tx) error {
+	requested, err := terms(st)
+	if err != nil {
+		return nil, err
+	}
+	err = v.transaction(ctx, func(tx pgx.Tx) error {
 		var wire, prior []byte
 		var workingPartial bool
 		err := tx.QueryRow(ctx, `SELECT terms,execution,working_partial FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3 FOR UPDATE`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId).Scan(&wire, &prior, &workingPartial)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return status.Error(codes.NotFound, "unknown synthetic order")
 		}
-		if err != nil || prior != nil && !workingPartial {
+		if err != nil {
 			return err
+		}
+		if !bytes.Equal(requested, wire) {
+			return status.Error(codes.FailedPrecondition, "withdrawal terms differ from remote order")
+		}
+		if prior != nil && !workingPartial {
+			return nil
 		}
 		if workingPartial {
 			_, err = tx.Exec(ctx, `UPDATE synthetic_venue.receipts SET working_partial=false WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3`, v.cfg.Tenant, v.cfg.Portfolio, st.OrderId)

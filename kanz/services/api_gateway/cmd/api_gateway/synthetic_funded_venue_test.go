@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
 	"os"
 	"slices"
 	"sync/atomic"
@@ -24,6 +26,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -103,22 +107,46 @@ func (control *fundedVenueControl) authorize(t *testing.T, ctx context.Context, 
 	if err != nil {
 		t.Fatalf("project %s: %v", c.Op, err)
 	}
+	if err := control.recordProjection(ctx, c, generation, int64(read.OrderVersion), read.State, p, executionHash); err != nil {
+		t.Fatalf("issue %s authority: %v", c.Op, err)
+	}
+}
+
+func (control *fundedVenueControl) recordProjection(ctx context.Context, c syntheticvenue.Command, generation, version int64, state []byte, p syntheticvenue.SettlementProjection, executionHash []byte) error {
+	digest := func(msg proto.Message) ([]byte, error) {
+		if msg == nil || !msg.ProtoReflect().IsValid() {
+			return nil, nil
+		}
+		wire, err := (proto.MarshalOptions{Deterministic: true}).Marshal(msg)
+		return settlementHash(wire), err
+	}
+	next, err := digest(p.Next)
+	if err != nil {
+		return err
+	}
+	fact, err := digest(p.Fact)
+	if err != nil {
+		return err
+	}
 	_, err = control.issuer.Exec(ctx, `INSERT INTO synthetic_oms_settlement_authorizations(tenant_id,principal_id,portfolio_id,order_id,command_sha256,writer_epoch,
 		operation,event_id,effective_seconds,effective_nanos,body_sha256,prior_version,prior_state_sha256,next_state_sha256,fact_payload_sha256,
 		venue_terms_sha256,venue_execution_sha256,expires_at,currencies,executed_debits)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,clock_timestamp()+interval '30 seconds',$18,$19)`,
-		c.Tenant, o.request.Principal, c.Portfolio, c.OrderID, settlementHash(o.request.Command), generation, c.Op, c.EventID, c.EffectiveSeconds, c.EffectiveNanos,
-		settlementHash(p.Body), int64(read.OrderVersion), settlementHash(read.State), settlementProtoHash(t, p.Next), settlementProtoHash(t, p.Fact),
-		settlementHash(p.Terms), executionHash, p.Currencies, p.ExecutedDebits)
-	if err != nil {
-		t.Fatalf("issue %s authority: %v", c.Op, err)
-	}
+		c.Tenant, control.order.request.Principal, c.Portfolio, c.OrderID, settlementHash(control.order.request.Command), generation, c.Op, c.EventID, c.EffectiveSeconds, c.EffectiveNanos,
+		settlementHash(p.Body), version, settlementHash(state), next, fact, settlementHash(p.Terms), executionHash, p.Currencies, p.ExecutedDebits)
+	return err
 }
 
 // The portfolio cash remains known independently of the OMS status. A partial
 // fill alone cannot release the remainder or claim that accounting has booked it.
 func checkVenueCash(t *testing.T, ctx context.Context, pool *pgxpool.Pool, o fundedOrder, usdTotal, usdReserved, usdRequired, bnbRequired, executed, booked int64) {
 	t.Helper()
+	if err := compareVenueCash(ctx, pool, o, usdTotal, usdReserved, usdRequired, bnbRequired, executed, booked); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func compareVenueCash(ctx context.Context, pool *pgxpool.Pool, o fundedOrder, usdTotal, usdReserved, usdRequired, bnbRequired, executed, booked int64) error {
 	for _, leg := range []struct {
 		currency                                    string
 		total, reserved, required, executed, booked int64
@@ -130,15 +158,19 @@ func checkVenueCash(t *testing.T, ctx context.Context, pool *pgxpool.Pool, o fun
 			WHERE b.portfolio_id=$1 AND c.order_id=$2 AND b.currency=$3`, o.request.Portfolio, o.command.OrderId, leg.currency).
 			Scan(&total, &reserved, &required, &ownerExecuted, &ownerBooked, &memberExecuted, &memberBooked)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		for _, amount := range []struct {
 			value string
 			want  int64
 		}{{total, leg.total}, {reserved, leg.reserved}, {required, leg.required}, {ownerExecuted, leg.executed}, {ownerBooked, leg.booked}, {memberExecuted, leg.executed}, {memberBooked, leg.booked}} {
-			exactCapital(t, amount.value, amount.want)
+			got, ok := new(big.Rat).SetString(amount.value)
+			if !ok || got.Cmp(big.NewRat(amount.want, 1)) != 0 {
+				return fmt.Errorf("capital %s value %q, want %d", leg.currency, amount.value, amount.want)
+			}
 		}
 	}
+	return nil
 }
 
 func verifySettlementReplay(t *testing.T, observed map[string][]string, filledOnCancel bool) {
@@ -203,7 +235,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				o := signedFundedOrder(t, ctx, s, fundedFirst, false)
 				o.authorize(t, ctx, o.request.Principal, time.Now().Add(time.Minute))
 				requireNativeReceipt(t, ctx, o.request, "ACCEPTED")
-				terminal := exerciseFundedVenue(t, ctx, s, o, scenario.extra, scenario.fillOnCancel, nil)
+				terminal := exerciseFundedVenue(t, ctx, s, o, scenario.extra, scenario.fillOnCancel, nil, false)
 				if scenario.name == "partial_cancel_and_book" && os.Getenv("SYNTHETIC_BLOTTER_CAPTURE") == "1" {
 					// The runner pipes this synthetic native receipt into the separate read-only probe.
 					body, err := json.Marshal(map[string]any{"tenant": tenant, "portfolio": o.request.Portfolio, "state": terminal.State})
@@ -219,7 +251,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 	t.Run("claim_before_venue_send", testFundedDispatchBeforeSend)
 }
 
-type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope)
+type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope, func(int) string)
 
 func refuseFundedPartialHandback(t *testing.T, ctx context.Context, tenant string) {
 	t.Helper()
@@ -245,7 +277,7 @@ func requireFundedPendingFacts(t *testing.T, ctx context.Context, proof *pgxpool
 	}
 }
 
-func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, extra time.Duration, fillOnCancel bool, successor fundedGoSuccessor) syntheticvenue.Receipt {
+func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, extra time.Duration, fillOnCancel bool, successor fundedGoSuccessor, freshWithdrawal bool) syntheticvenue.Receipt {
 	t.Helper()
 	tenant, portfolio, orderID := o.request.Tenant, o.request.Portfolio, o.command.OrderId
 	proof := syntheticPool(t, ctx, "PROOF", tenant)
@@ -263,6 +295,8 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 	fillTime := time.Now().UTC().Truncate(time.Microsecond).Add(extra)
 	cfg := syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: fillTime, LoseExecuteAck: true, FillOnExecute: !fillOnCancel, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
 	var sends, queries, withdrawals atomic.Int32
+	var withdrawal atomic.Pointer[fundedWithdrawalApproval]
+	var lostWithdrawalAck, terminalApproved atomic.Bool
 	count := grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
 		case venuepb.VenueAdapterService_Execute_FullMethodName:
@@ -271,8 +305,36 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			queries.Add(1)
 		case venuepb.VenueAdapterService_CancelOrder_FullMethodName:
 			withdrawals.Add(1)
+			if approval := withdrawal.Load(); approval != nil {
+				if err := approval.checkClaim(ctx); err != nil {
+					return nil, status.Errorf(codes.FailedPrecondition, "missing durable claim before XSIM withdrawal: %v", err)
+				}
+			}
 		}
-		return handler(ctx, request)
+		reply, err := handler(ctx, request)
+		approval := withdrawal.Load()
+		if err != nil || approval == nil {
+			return reply, err
+		}
+		switch info.FullMethod {
+		case venuepb.VenueAdapterService_CancelOrder_FullMethodName:
+			if withdrawals.Load() == 1 {
+				if err := approval.checkClaim(ctx); err != nil {
+					return nil, status.Errorf(codes.FailedPrecondition, "withdrawal claim before acknowledgement: %v", err)
+				}
+				lostWithdrawalAck.Store(true)
+				return nil, status.Error(codes.DeadlineExceeded, "lost XSIM withdrawal acknowledgement")
+			}
+		case venuepb.VenueAdapterService_QueryOrder_FullMethodName:
+			view := reply.(*venuepb.QueryOrderResponse)
+			if lostWithdrawalAck.Load() && view.GetState() == venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED && !terminalApproved.Load() {
+				if err := approval.recordTerminal(ctx, view); err != nil {
+					return nil, status.Errorf(codes.FailedPrecondition, "terminal settlement approval: %v", err)
+				}
+				terminalApproved.Store(true)
+			}
+		}
+		return reply, nil
 	})
 	venue, addr, identity := startSyntheticVenue(t, ctx, cfg, count)
 	control := fundedVenueControl{order: o, proof: proof, issuer: syntheticPool(t, ctx, "CONTROL", tenant), adapter: syntheticPool(t, ctx, "ADAPTER", tenant), venue: venue}
@@ -376,7 +438,21 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		_, partial := get()
 		requireFundedPendingFacts(t, ctx, proof, orderID, 3, []string{"order.order.partially_filled", "order.order.routed"})
 		queriesBefore := queries.Load()
-		successor(t, ctx, s, partial, addr, identity, control.accepted)
+		var authorizeWithdrawal func(int) string
+		if freshWithdrawal {
+			authorizeWithdrawal = func(generation int) string {
+				approval := control.prepareGoWithdrawal(t, ctx, s, partial, generation)
+				withdrawal.Store(approval)
+				return approval.event.EventId
+			}
+		}
+		successor(t, ctx, s, partial, addr, identity, control.accepted, authorizeWithdrawal)
+		if freshWithdrawal {
+			if !lostWithdrawalAck.Load() || !terminalApproved.Load() || sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != queriesBefore+3 {
+				t.Fatalf("Go withdrawal after ACK loss: sends=%d cancels=%d queries=%d (previously %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
+			}
+			return verifyGoWithdrawalBooking(t, ctx, s, control, partial, withdrawal.Load())
+		}
 		if sends.Load() != 1 || withdrawals.Load() != 0 || queries.Load() != queriesBefore+1 {
 			t.Fatalf("Go working recovery: got %d sends, %d withdrawals, %d queries (was %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
 		}
@@ -482,7 +558,7 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			t.Fatalf("expected only the accounting opening balance before Go startup: %v", err)
 		}
 		queriesBefore := queries.Load()
-		successor(t, ctx, s, terminal, addr, identity, frame.Envelope)
+		successor(t, ctx, s, terminal, addr, identity, frame.Envelope, nil)
 		if sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != queriesBefore {
 			t.Fatalf("Go terminal replay changed XSIM calls: %d sends, %d withdrawals, %d queries (was %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
 		}

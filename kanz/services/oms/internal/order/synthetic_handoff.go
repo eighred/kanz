@@ -34,10 +34,14 @@ func syntheticWriterID(s string) bool {
 // in the isolated XSIM successor. The ordinary Go compensator would otherwise
 // republish the terminal FACT because Rust does not set Go's announcement marker.
 func WithSyntheticHandoffCancellationRecovery(store *Postgres) ServiceOption {
-	return func(s *Service) { s.retainedCancelReplay = store.recoverSyntheticCancellation }
+	return func(s *Service) {
+		s.retainedCancelReplay = func(ctx context.Context, env *envelopepb.Envelope, payload []byte, cmd *orderpb.CancelOrder, st *orderpb.OrderState, version int64) (bool, error) {
+			return s.recoverSyntheticCancellation(ctx, store, env, payload, cmd, st, version)
+		}
+	}
 }
 
-func (p *Postgres) recoverSyntheticCancellation(ctx context.Context, env *envelopepb.Envelope, payload []byte, cmd *orderpb.CancelOrder, st *orderpb.OrderState, version int64) (bool, error) {
+func (s *Service) recoverSyntheticCancellation(ctx context.Context, store *Postgres, env *envelopepb.Envelope, payload []byte, cmd *orderpb.CancelOrder, st *orderpb.OrderState, version int64) (bool, error) {
 	if st.GetVenue() != "XSIM" || st.GetVenueAccountId() != "synthetic-spot" {
 		return false, nil
 	}
@@ -51,13 +55,14 @@ func (p *Postgres) recoverSyntheticCancellation(ctx context.Context, env *envelo
 		return false, missing
 	}
 	digest := sha256.Sum256(payload)
-	var active, published bool
-	err := p.pool.QueryRow(ctx, `SELECT
+	var active, matched, published bool
+	err := store.pool.QueryRow(ctx, `SELECT
 		current_database()='kanz_synthetic_oms'
 		AND pg_has_role(session_user,'kanz_synthetic_oms_go_funded_runtime','MEMBER')
 		AND public.synthetic_oms_assert_writer()>1,
-		EXISTS (
-			SELECT FROM public.synthetic_oms_cancellation_authorizations a
+		count(*)=1, coalesce(bool_and(receipt.published_at IS NOT NULL),false)
+		FROM (
+			SELECT f.published_at FROM public.synthetic_oms_cancellation_authorizations a
 			JOIN public.synthetic_oms_observations claim USING(tenant_id,order_id,event_id)
 			JOIN public.orders o USING(tenant_id,order_id)
 			JOIN public.outbox f ON (f.tenant_id,f.partition_key,f.causation_id)=(a.tenant_id,a.order_id,a.event_id)
@@ -65,14 +70,20 @@ func (p *Postgres) recoverSyntheticCancellation(ctx context.Context, env *envelo
 				=($1,$2,$3,$4,$5,$6,$7)
 			  AND (claim.effective_seconds,claim.effective_nanos)=($8,$9)
 			  AND claim.operation='cancel_pending' AND o.status=$10 AND o.version=$11
-			  AND f.subject=$12 AND f.published_at IS NOT NULL AND f.trace_context=a.trace_context
-		)`, env.GetTenantId(), st.GetOrderId(), env.GetEventId(), st.GetPortfolioId(), meta.GetIssuer(), digest[:], env.GetTraceContext(),
-		at.Seconds, at.Nanos, st.GetStatus(), version, EventTypeCancelled).Scan(&active, &published)
+			  AND f.subject=$12 AND f.trace_context=a.trace_context
+		) receipt`, env.GetTenantId(), st.GetOrderId(), env.GetEventId(), st.GetPortfolioId(), meta.GetIssuer(), digest[:], env.GetTraceContext(),
+		at.Seconds, at.Nanos, st.GetStatus(), version, EventTypeCancelled).Scan(&active, &matched, &published)
 	if err != nil {
 		return false, err
 	}
-	if !active || !published {
+	if !active || !matched {
 		return false, missing
+	}
+	if !published {
+		// Another replica can commit the terminal row between this handler's
+		// initial drain and its load. Publish the matched record before ACK.
+		_, err := s.relay.Flush(ctx, st.GetOrderId())
+		return true, err
 	}
 	return true, nil
 }

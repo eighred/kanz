@@ -203,7 +203,15 @@ DECLARE
     leg integer; reserved numeric[]; approved numeric[]; total numeric[]; zero CONSTANT numeric[]:=ARRAY[0,1]::numeric[];
     observed_ns numeric; oldest_cash_ns numeric; max_age_ns CONSTANT numeric:=60000000000;
 BEGIN
-    IF NOT public.synthetic_oms_settlement_scope(p_order,p_portfolio) THEN RETURN 'HELD'; END IF;
+    -- The optional Go bridge runs as this function's NOLOGIN owner and
+    -- already holds the same per-order lock. Its login cannot execute the
+    -- general settlement entry point, even when it owns the active epoch.
+    IF pg_has_role(session_user,'kanz_synthetic_oms_runtime','USAGE') THEN
+        IF pg_has_role(session_user,to_regrole('kanz_synthetic_oms_go_working_runtime'),'USAGE') IS NOT TRUE
+           OR pg_has_role(session_user,'kanz_synthetic_oms_adapter','MEMBER')
+           OR has_function_privilege(session_user,'public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)','EXECUTE')
+           OR p_op IS NULL OR p_op NOT IN ('cancel_pending','cancelled') THEN RETURN 'HELD'; END IF;
+    ELSIF NOT public.synthetic_oms_settlement_scope(p_order,p_portfolio) THEN RETURN 'HELD'; END IF;
     epoch:=public.synthetic_oms_assert_writer(); checked_at:=clock_timestamp();
     SELECT * INTO auth FROM public.synthetic_oms_settlement_authorizations
         WHERE (tenant_id,order_id,portfolio_id,event_id,writer_epoch,operation,effective_seconds,effective_nanos)=
@@ -357,9 +365,10 @@ ALTER FUNCTION public.synthetic_oms_apply_settlement(text,text,text,text,bigint,
 REVOKE ALL ON FUNCTION public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea) TO kanz_synthetic_oms_adapter;
 \else
--- Permit the original installed body (2fc259e8) or a rerun of these exact
+-- Permit the original or previously qualified settlement body, or these exact
 -- current function bytes. Any other prior definition aborts the replacement.
 SELECT :'previous_settlement_body' IN ('414f66c3f8de0dd4552f7c035aba40df85d5bfca66d330847226f9a50da69e26',
+    'a36fa018f358db83eb127a1f40e9748290d96fe30d0525d13df1a9b06ccc8ecf',
     encode(sha256(convert_to(replace(prosrc,E'\r\n',E'\n'),'UTF8')),'hex')) AS known_settlement
     FROM pg_proc WHERE oid='public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)'::regprocedure \gset
 \if :known_settlement

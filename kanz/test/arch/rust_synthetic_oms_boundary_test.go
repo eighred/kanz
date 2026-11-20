@@ -16,7 +16,7 @@ const syntheticOMSPath = "services/synthetic_oms"
 
 var syntheticOMSFiles = []string{
 	"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "go_admission.sql",
-	"funding.sql", "cancellation.sql", "settlement.sql",
+	"funding.sql", "cancellation.sql", "settlement.sql", "go_cancel.sql",
 }
 
 const syntheticOMSCargo = `[package]
@@ -221,6 +221,28 @@ func checkSyntheticOMS(root string) error {
 			return fmt.Errorf("synthetic OMS settlement boundary changed %s", marker)
 		}
 	}
+	goCancel := rustMigrationCompact(files["go_cancel.sql"])
+	for _, marker := range []string{
+		"epoch:=public.synthetic_oms_assert_writer()",
+		"pg_advisory_xact_lock(hashtextextended(json_build_array(tenant,p_order)::text,1532))",
+		"(a.event_id,a.trace_context,a.command_sha256)=(p_event,p_trace,sha256(p_cancel))",
+		"observed.next_state_sha256=permit.prior_state_sha256",
+		"ISDISTINCTFROM(epoch,p_event,p_seconds,p_nanos,''::bytea)",
+		"IFresult='APPLIED'THENRETURN'SEND'",
+		"(sha256(body),sha256(next_state),sha256(fact))",
+		"public.synthetic_oms_apply_settlement(p_order,p_portfolio,terminal_event,'cancelled'",
+		"REVOKEALLONFUNCTIONpublic.synthetic_oms_go_cancel(boolean,text,text,text,text,text,bigint,integer,bytea,text,bigint,integer,bytea,bytea,bytea)FROMPUBLIC",
+		"GRANTEXECUTEONFUNCTIONpublic.synthetic_oms_go_cancel_claim(text,text,text,text,text,bigint,integer,bytea)TOkanz_synthetic_oms_go_working_runtime",
+		"GRANTEXECUTEONFUNCTIONpublic.synthetic_oms_go_cancel_finish(text,text,text,text,text,bigint,integer,bytea,text,bigint,integer,bytea,bytea,bytea)TOkanz_synthetic_oms_go_working_runtime",
+	} {
+		if !strings.Contains(goCancel, marker) {
+			return fmt.Errorf("synthetic Go cancel boundary changed %s", marker)
+		}
+	}
+	if !strings.Contains(settlement, "ORhas_function_privilege(session_user,'public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)','EXECUTE')") ||
+		!strings.Contains(settlement, "p_opNOTIN('cancel_pending','cancelled')") {
+		return fmt.Errorf("synthetic Go settlement entry widened")
+	}
 	return nil
 }
 
@@ -251,6 +273,12 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"cancellation.sql", "outcome := public.capital_release_unexecuted(", "outcome := public.other_release("},
 		{"cancellation.sql", "AND fact_row_id IS NULL", "AND TRUE"},
 		{"cancellation.sql", "DEFERRABLE INITIALLY DEFERRED", "NOT DEFERRABLE"},
+		{"go_cancel.sql", "sha256(p_cancel)", "NULL"},
+		{"go_cancel.sql", "IS DISTINCT FROM (epoch,p_event,p_seconds,p_nanos,''::bytea)", "IS NULL"},
+		{"go_cancel.sql", "observed.next_state_sha256=permit.prior_state_sha256", "TRUE"},
+		{"go_cancel.sql", "IF result='APPLIED' THEN RETURN 'SEND'", "IF TRUE THEN RETURN 'SEND'"},
+		{"go_cancel.sql", ") TO kanz_synthetic_oms_go_working_runtime", ") TO PUBLIC"},
+		{"settlement.sql", "p_op NOT IN ('cancel_pending','cancelled')", "FALSE"},
 		{"settlement.sql", "f.proowner<>guard", "FALSE"},
 		{"settlement.sql", "a.relowner=writer.relowner", "TRUE"},
 		{"settlement.sql", "pg_get_expr(polwithcheck,polrelid)", "pg_get_expr(polqual,polrelid)"},

@@ -39,6 +39,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	var in struct {
 		Tenant, Endpoint, Socket, Broker string
 		CancelEventID                    string
+		WithdrawalEventID                string
 		State                            []byte
 		Version                          int64
 		Generation                       int
@@ -50,6 +51,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	tenant := in.Tenant
 	terminal := tenant == "synthetic-funded-cancel-fill"
 	working := tenant == "synthetic-go-funded-working"
+	if in.WithdrawalEventID != "" && !working {
+		t.Fatal("a new withdrawal requires the isolated funded working profile")
+	}
 	switch {
 	case in.CancelEventID == "" && tenant == "synthetic-go-handback" && in.Generation == 2:
 	case in.CancelEventID == "" && tenant == "synthetic-go-roundtrip" && in.Generation == 3:
@@ -105,13 +109,14 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if len(venues) != 1 {
 		t.Fatalf("discovered %d venues", len(venues))
 	}
+	venueRouter := execution.NewRouter(venues)
 	if working {
 		var rawFill []byte
 		if err := pool.QueryRow(ctx, "SELECT fill FROM order_executions WHERE order_id=$1", state.OrderId).Scan(&rawFill); err != nil {
 			t.Fatalf("load retained working execution: %v", err)
 		}
 		var fill orderpb.Fill
-		venue, err := execution.NewRouter(venues).Route(&state)
+		venue, err := venueRouter.Route(&state)
 		if err != nil {
 			t.Fatalf("route retained working order: %v", err)
 		}
@@ -119,9 +124,15 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		if proto.Unmarshal(rawFill, &fill) != nil || !ok {
 			t.Fatal("working recovery needs one retained execution and typed venue query")
 		}
-		venues[0] = fundedWorkingRecoveryVenue{Venue: venue, query: querier, fill: &fill}
+		venues = []execution.Venue{fundedWorkingRecoveryVenue{Venue: venue, query: querier, fill: &fill}}
 	}
-	client, e := bus.DialNATS(ctx, bus.NATSConfig{Name: "oms", URL: in.Broker})
+	brokerConfig := bus.NATSConfig{Name: "oms", URL: in.Broker}
+	if in.WithdrawalEventID != "" {
+		// Keep the unresolved withdrawal on its dedicated test durable.
+		// The retained-retry guard requires unlimited broker delivery.
+		brokerConfig.ConsumerTuning = &bus.ConsumerTuning{AckWait: bus.WorkAckWait, MaxDeliver: -1, MaxAckPending: 1}
+	}
+	client, e := bus.DialNATS(ctx, brokerConfig)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -168,6 +179,14 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatalf("unexpected order facts after sweep: %d / %d: %v", facts, unpublished, e)
 	}
 	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept %d working orders and preserved native version %d and %d outbox rows", in.Generation, pending, wantSweep, version, facts)
+	if in.WithdrawalEventID != "" {
+		withdrawal, err := order.NewService(tenant, store, order.NewEmitter(publisher), nil, venueRouter, nil, logger,
+			order.WithHaltGate(halt.NewGate(nil)), order.WithSyntheticHandoffWithdrawal(store))
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumeSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID)
+	}
 }
 
 // This profile has qualified recovery of one retained execution. It does not

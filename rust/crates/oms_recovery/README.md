@@ -208,4 +208,14 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 
 The first send loses its acknowledgement and the transfer is refused while the remote result is unknown. Rust recovers one 0.625-unit fill, leaving 0.625 units working. The dedicated Go recovery role requires an acknowledged working order with the outgoing writer's exact fill and no retained withdrawal claim. It checks the queued routed and partial-fill facts and preserves the 252 USD and 1 BNB holds at transfer.
 
-Go drains the two retained facts and runs its startup sweep against the verified XSIM account. The recovery profile validates the cumulative quantity and complete execution against the journal before adoption can skip the existing fill. It blocks venue mutations and does not start trading subscriptions. Accounting then books 126 USD once, leaving 874 USD total and holds of 126 USD and 1 BNB while the order remains working. New fills or withdrawals after transfer require separate qualification.
+Go drains the two retained facts and runs its startup sweep against the verified XSIM account. The recovery profile validates the cumulative quantity and complete execution against the journal before adoption can skip the existing fill. It blocks venue mutations and does not start trading subscriptions. Accounting then books 126 USD once, leaving 874 USD total and holds of 126 USD and 1 BNB while the order remains working.
+
+### New withdrawal after Go takes ownership
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-withdrawal
+```
+
+After startup a gateway-authorized cancellation runs through the normal OMS JetStream consumer. The dedicated Go login claims the exact authorized command in PostgreSQL before the typed XSIM cancellation. The bridge exposes only claim and finish, reusing the settlement guard and cash transaction. A lost response leaves the original state and both holds intact. Redelivery can query the same venue order but cannot send another cancellation. Only complete history matching the retained execution and an independently authorized terminal observation can release the unfilled remainder and enqueue the cancellation fact.
+
+This isolated profile covers one previously observed partial fill and one subsequent cancellation, including lost acknowledgement and command replay. A confirmed terminal write keeps 126 USD reserved until Accounting books it. After posting, the balance is 874 USD with no remaining reservation. Additional fills, expired attestations, deployment approval, and production capacity still need their respective acceptance evidence.
