@@ -23,7 +23,7 @@ func (p *Postgres) PreviousComparison(ctx context.Context, subject Subject, acco
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	current, err := historicalReceiptSnapshot(ctx, tx, tenant, subject, account, runID)
-	if err != nil || !current.AccountAssignmentVerified || (current.Run.Outcome != OutcomeClean && current.Run.Outcome != OutcomeHistoricalClean) {
+	if err != nil || current.State != "recorded" || !current.AccountAssignmentVerified || !current.Run.Outcome.IsFullComparison() {
 		return unknown, err
 	}
 	rows, err := tx.Query(ctx, `SELECT r.run_id,r.completed_at FROM custody_batch_receipts c
@@ -54,7 +54,8 @@ func (p *Postgres) PreviousComparison(ctx context.Context, subject Subject, acco
 		return unknown, err
 	}
 	previous, err := historicalReceiptSnapshot(ctx, tx, tenant, subject, account, runs[0].runID)
-	if err != nil || !previous.AccountAssignmentVerified || !current.Run.Basis.sameScope(previous.Run.Basis, subject.CustodianID) ||
+	if err != nil || previous.State != "recorded" || !previous.AccountAssignmentVerified || !previous.Run.Outcome.IsFullComparison() ||
+		!current.Run.Basis.sameScope(previous.Run.Basis, subject.CustodianID) ||
 		previous.Run.Basis.JournalPosition > current.Run.Basis.JournalPosition || previous.Run.CompletedAt.After(current.Run.CompletedAt) {
 		return unknown, err
 	}

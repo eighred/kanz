@@ -117,7 +117,7 @@ describe('custody exact review', () => {
         if ('outcome' in result && (result.outcome === 'historical_clean' || result.outcome === 'historical_breaks')) {
           expect(region.get('output').text()).toContain('A later close controls the outstanding break queue.')
           expect(region.get('output').text()).toContain('Custody account assignment verified')
-          expect(region.findAll('button').some(b => b.text() === 'View previous statement comparison')).toBe(result.outcome === 'historical_clean')
+          expect(region.findAll('button').some(b => b.text() === 'View previous statement comparison')).toBe(true)
         }
         expect(region.findAll('button').some(b => b.text() === 'Download comparison receipt')).toBe(result.state === 'recorded')
         if ('journal_position' in result) expect(region.get('output').text()).toContain(result.journal_position)
@@ -127,6 +127,33 @@ describe('custody exact review', () => {
       }
       await fields[1]!.setValue('different')
       expect(region.find('output').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each(['breaks', 'historical_breaks'])('opens the signed predecessor of a correction with outcome %s', async outcome => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
+    const scope = { portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04', tenant_id: 'fixture' }
+    const base = { ...scope, state: 'recorded', account_assignment_verified: true, scope_mode: 'declared', journal_position: '1',
+      completed_at: '2020-02-06T00:00:00Z', transaction_pass: 'balances_only' }
+    const r2 = { ...base, outcome, run_id: 'corrected', statement_id: 'custody-batch.v1.src.r2.' + 'b'.repeat(64) }
+    const r1 = { ...base, outcome: 'breaks', run_id: 'original', statement_id: 'custody-batch.v1.src.r1.' + 'a'.repeat(64),
+      previous_of_statement_id: r2.statement_id, previous_of_run_id: r2.run_id, signed_statement_sha256: 'a'.repeat(64),
+      breaks: [{ break_id: 'PF1|C|quantity|SYN', kind: 'quantity', key: 'SYN', ibor: '11.5', custodian: '9.5', difference: '2', values_state: 'exact' }] }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(r2).mockResolvedValueOnce(r1)
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      const region = wrapper.get('[aria-label="Dated custody result"]')
+      const form = region.get('form')
+      for (const [i, value] of [scope.portfolio_id, scope.custodian_id, scope.business_date].entries()) await form.findAll('input')[i]!.setValue(value)
+      await form.trigger('submit')
+      await flushPromises()
+      expect(region.get('output').text()).toContain(r2.statement_id)
+      await button(wrapper, 'View previous statement comparison').trigger('click')
+      await flushPromises()
+      expect(get.mock.lastCall?.[0]).toBe('/api/v1/portfolios/PF1/custody/comparison?custodian_id=C&business_date=2020-02-04&run_id=corrected&include=previous_comparison')
+      expect(region.get('output').text()).toContain(r1.statement_id)
+      expect(region.get('[aria-label="Differences at comparison"] tbody tr').findAll('td').map(td => td.text())).toEqual(['quantity', 'SYN', '11.5', '9.5', '2'])
+      expect(region.findAll('button').some(b => b.text() === 'View previous statement comparison')).toBe(false)
     } finally { wrapper.unmount() }
   })
 

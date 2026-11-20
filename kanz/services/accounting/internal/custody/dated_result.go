@@ -144,19 +144,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		if err != nil {
 			return DatedResult{}, err
 		}
-		// Revision selection precedes the effective cutoff in the ledger fold.
-		// A later-dated corporate-action revision can displace an earlier leg.
-		var prefixPresent, changed bool
-		err = tx.QueryRow(ctx, `SELECT COALESCE(
-                    (SELECT position FROM ledger_heads WHERE tenant_id=app_current_tenant() AND portfolio_id=$1),
-                    (SELECT count(*) FROM ledger_entries WHERE tenant_id=app_current_tenant() AND portfolio_id=$1)) >= $2,
-            EXISTS(
-            SELECT 1 FROM ledger_append_positions p JOIN ledger_entries e USING (tenant_id,portfolio_id,entry_id)
-            WHERE p.tenant_id=app_current_tenant() AND p.portfolio_id=$1 AND p.position>$2 AND
-                (e.effective_time<$3 OR (e.action->>'action_id' <> '' AND EXISTS(
-                    SELECT 1 FROM ledger_entries earlier WHERE earlier.tenant_id=p.tenant_id AND earlier.portfolio_id=p.portfolio_id
-                      AND earlier.effective_time<$3 AND earlier.action->>'action_id'=e.action->>'action_id'))))`,
-			subject.PortfolioID, run.Basis.JournalPosition, BusinessDay(subject.BusinessDate).AddDate(0, 0, 1)).Scan(&prefixPresent, &changed)
+		prefixPresent, changed, err := journalPrefixAtClose(ctx, tx, subject, run.Basis.JournalPosition)
 		if err != nil {
 			return DatedResult{}, err
 		}
@@ -226,4 +214,20 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		}
 	}
 	return DatedResult{State: "recorded", StatementID: id, Run: run, AccountAssignmentVerified: verifiedAssignment}, nil
+}
+
+// Revision selection precedes the effective cutoff in the ledger fold. A
+// later-dated corporate-action revision can displace an earlier leg.
+func journalPrefixAtClose(ctx context.Context, tx pgx.Tx, subject Subject, position int64) (prefixPresent, changed bool, err error) {
+	err = tx.QueryRow(ctx, `SELECT COALESCE(
+                    (SELECT position FROM ledger_heads WHERE tenant_id=app_current_tenant() AND portfolio_id=$1),
+                    (SELECT count(*) FROM ledger_entries WHERE tenant_id=app_current_tenant() AND portfolio_id=$1)) >= $2,
+            EXISTS(
+            SELECT 1 FROM ledger_append_positions p JOIN ledger_entries e USING (tenant_id,portfolio_id,entry_id)
+            WHERE p.tenant_id=app_current_tenant() AND p.portfolio_id=$1 AND p.position>$2 AND
+                (e.effective_time<$3 OR (e.action->>'action_id' <> '' AND EXISTS(
+                    SELECT 1 FROM ledger_entries earlier WHERE earlier.tenant_id=p.tenant_id AND earlier.portfolio_id=p.portfolio_id
+                      AND earlier.effective_time<$3 AND earlier.action->>'action_id'=e.action->>'action_id'))))`,
+		subject.PortfolioID, position, BusinessDay(subject.BusinessDate).AddDate(0, 0, 1)).Scan(&prefixPresent, &changed)
+	return
 }

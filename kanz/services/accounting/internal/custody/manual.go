@@ -13,7 +13,7 @@ import (
 
 var ErrInvalidManualRequest = errors.New("custody: invalid dated reconciliation request")
 var ErrManualRequestConflict = errors.New("custody: request identity is already bound to different inputs")
-var ErrBookBasisChanged = errors.New("custody: a newer book comparison already controls this date")
+var ErrBookBasisChanged = errors.New("custody: the compared book is no longer current for this date")
 
 // ReconcileManual receives its tenant and actor from the authenticated service
 // boundary. Its date is a completed UTC business day. A fresh request for the

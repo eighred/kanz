@@ -353,6 +353,20 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			!run.Basis.Transactions.matches(*run.compared, run.Outcome, run.Basis.JournalPosition)) {
 			return Run{}, ErrHistoricalLifecycle
 		}
+		if !later && len(signedDigest) > 0 {
+			// The working queue and its completion must describe the effective
+			// book at commit, even if no newer comparison has run yet.
+			if err := lockJournalForComparison(ctx, tx, run.Subject.PortfolioID); err != nil {
+				return Run{}, err
+			}
+			present, changed, err := journalPrefixAtClose(ctx, tx, run.Subject, run.Basis.JournalPosition)
+			if err != nil {
+				return Run{}, err
+			}
+			if !present || changed {
+				return Run{}, ErrBookBasisChanged
+			}
+		}
 		if manualSnapshot {
 			if err := confirmCurrentJournalPosition(ctx, tx, run); err != nil {
 				return Run{}, err
@@ -475,16 +489,24 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	return run, tx.Commit(ctx)
 }
 
-// ledger_prepare_append takes the same portfolio lock before advancing the
-// journal. Read the physical prefix in a fresh statement after locking it.
-func confirmCurrentJournalPosition(ctx context.Context, tx pgx.Tx, run Run) error {
-	var stable bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, run.Subject.PortfolioID).Scan(&stable); err != nil {
+// ledger_prepare_append takes the exclusive form of this portfolio lock.
+// Read the prefix in a fresh READ COMMITTED statement after acquiring it.
+func lockJournalForComparison(ctx context.Context, tx pgx.Tx, portfolio string) error {
+	var locked bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, portfolio).Scan(&locked); err != nil {
 		return err
 	}
-	if !stable {
+	if !locked {
 		return ErrRunBusy
 	}
+	return nil
+}
+
+func confirmCurrentJournalPosition(ctx context.Context, tx pgx.Tx, run Run) error {
+	if err := lockJournalForComparison(ctx, tx, run.Subject.PortfolioID); err != nil {
+		return err
+	}
+	var stable bool
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(
 		(SELECT position FROM ledger_heads WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1),
 		CASE WHEN $3 THEN (SELECT count(*) FROM ledger_entries WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1) END

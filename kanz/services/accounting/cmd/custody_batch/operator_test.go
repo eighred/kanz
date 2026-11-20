@@ -22,6 +22,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/recon"
 	"github.com/eighred/kanz/services/accounting/internal/server"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -173,6 +174,37 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 					t.Fatal("dated read or denied operator action modified accounting or its completion stream")
 				}
 				t.Log("signed customer verified clean, missing and unobserved business dates")
+				if script := os.Getenv("CUSTODY_PILOT_PREVIOUS_SCRIPT"); script != "" {
+					posting := ledger.Event{EntryID: "pilot-late-cash", PortfolioID: subject.PortfolioID, VenueAccountID: "sandbox-account",
+						Type: ledger.EntryCash, Effective: day.Add(time.Hour), Knowledge: time.Now().UTC(),
+						Cash: big.NewRat(-1, 4), CashCurrency: "USD"}
+					if err := journal.Append(ctx, &posting, nil); err != nil {
+						t.Fatal("append same-date cash adjustment", err)
+					}
+					pending, err := store.DatedResult(ctx, subject)
+					if err != nil || pending.State != "pending" || pending.Reason != "journal_changed" {
+						t.Fatal("same-date cash adjustment did not invalidate the current comparison", pending.State, pending.Reason, err)
+					}
+					current, err := r.Reconcile(ctx, subject)
+					if err != nil || current.StatementID != run.StatementID || current.Outcome != custody.OutcomeBreaks ||
+						len(current.Breaks) != 1 || current.Breaks[0].Kind != recon.BreakCash || current.Breaks[0].Diff == nil ||
+						current.Breaks[0].Diff.Cmp(big.NewRat(-1, 4)) != 0 {
+						t.Fatal("same signed correction did not detect the new 0.25 USD cash difference", err)
+					}
+					fact, _ := pilotCompletion(t, ctx, broker, 4)
+					if fact.GetRunId() != current.RunID {
+						t.Fatal("the new comparison has no matching broker completion")
+					}
+					baseline := pilotFinancialSnapshot(t, ctx, pool)
+					provePilotBrowser(t, ctx, site.URL, "TestSignedCustodyOperatorBrowser", script, map[string]any{
+						"date": day.Format(time.DateOnly), "current_run": current.RunID, "current_statement": current.StatementID,
+						"prior": firstDetection,
+					})
+					if baseline != pilotFinancialSnapshot(t, ctx, pool) {
+						t.Fatal("opening the previous comparison modified the book or working queue")
+					}
+					t.Log("signed Chromium discovered the original receipt from a revised comparison with breaks")
+				}
 			}
 			return
 		}

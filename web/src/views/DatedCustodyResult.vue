@@ -125,7 +125,7 @@ const pendingLabels = {
     <button v-if="result?.state === 'recorded' && !result.historical && result.account_assignment_verified && signedStatement(result.statement_id)"
       type="button" @click="openOriginal">View original comparison receipt</button>
     <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
-    <button v-if="result?.state === 'recorded' && cleanComparison(result.outcome) && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
+    <button v-if="result?.state === 'recorded' && fullComparison(result.outcome) && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
       type="button" @click="read(undefined, 'previous')">View previous statement comparison</button>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
