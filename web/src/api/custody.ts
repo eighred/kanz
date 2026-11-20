@@ -1,4 +1,5 @@
-import { api, ApiError } from './client'
+import { api, auth, ApiError } from './client'
+import { users } from './users'
 
 export interface CustodyDetection {
   run_id: string; statement_id: string; business_date: string
@@ -60,16 +61,45 @@ function parseBreak(value: unknown): CustodyBreak {
   return row as unknown as CustodyBreak
 }
 
+export interface CustodyRerunRequest { portfolio_id: string; custodian_id: string; business_date: string; request_id: string }
+export interface CustodyRerunReceipt extends CustodyRerunRequest {
+  actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'no_statement' | 'failed'
+  statement_id?: string; scope_mode?: string; journal_position?: string; failure_code?: string
+}
+
 export const custody = {
-  async breaks(): Promise<CustodyBreak[]> {
-    const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown }>('/api/v1/custody/breaks')
+  async queue(): Promise<{ breaks: CustodyBreak[]; rerunActor?: string }> {
+    const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown; rerun_enabled?: unknown }>('/api/v1/custody/breaks')
     const rows = body?.breaks === null ? [] : body?.breaks
     if (!Array.isArray(rows) || body.count !== rows.length) throw new Error('Invalid custody response.')
     if (body.actions_enabled !== undefined && typeof body.actions_enabled !== 'boolean') throw new Error('Invalid custody response.')
-    return rows.map((value) => {
+    if (body.rerun_enabled !== undefined && typeof body.rerun_enabled !== 'boolean') throw new Error('Invalid custody response.')
+    const breaks = rows.map((value) => {
       const row = parseBreak(value)
       return { ...row, actions_enabled: body.actions_enabled === true && row.values_state === 'exact' && revision(row.revision) && BigInt(row.revision) < 9223372036854775807n && statuses.slice(0, 3).includes(row.status) }
     })
+    if (body.rerun_enabled === true) {
+      try {
+        const identity = await auth.me()
+        const grants = await users.gatewayPermissions(identity)
+        if (grants.routes.some(r => r.Capability === 'custody_rerun' && r.Pattern === 'POST /v1/portfolios/{id}/custody/reruns')) return { breaks, rerunActor: identity.subject }
+      } catch { /* A failure to verify write authority still permits displaying the scoped queue. */ }
+    }
+    return { breaks }
+  },
+  async rerun(request: CustodyRerunRequest, actor: string): Promise<CustodyRerunReceipt> {
+    const { portfolio_id, ...command } = request
+    const receipt = await api.post<CustodyRerunReceipt>('/api/v1/portfolios/' + encodeURIComponent(portfolio_id) + '/custody/reruns', command, 200)
+    if (!receipt || receipt.request_id !== request.request_id || receipt.portfolio_id !== portfolio_id ||
+        receipt.custodian_id !== request.custodian_id || receipt.business_date !== request.business_date || receipt.actor !== actor ||
+        !nonempty(receipt.run_id) || !Number.isFinite(Date.parse(receipt.completed_at)) ||
+        !['clean', 'breaks', 'no_statement', 'failed'].includes(receipt.outcome) ||
+        (receipt.failure_code !== undefined && (receipt.outcome !== 'failed' || !['historical_lifecycle', 'comparison_failed'].includes(receipt.failure_code))) ||
+        (['clean', 'breaks'].includes(receipt.outcome) && !nonempty(receipt.statement_id)) ||
+        (receipt.outcome === 'no_statement' && receipt.statement_id !== undefined) ||
+        (receipt.scope_mode !== undefined && !nonempty(receipt.scope_mode)) ||
+        (receipt.journal_position !== undefined && (typeof receipt.journal_position !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(receipt.journal_position) || BigInt(receipt.journal_position) > 9223372036854775807n))) throw new Error('Comparison receipt could not be verified.')
+    return receipt
   },
   async act(row: CustodyBreak, decision: CustodyDecision): Promise<CustodyEvidence> {
     if (!row.actions_enabled || row.values_state !== 'exact' || !revision(row.revision) || BigInt(row.revision) >= 9223372036854775807n || decision.expected_revision !== row.revision || !decision.request_id || decision.review_contract !== 'exact-v1' || !['claim', 'explain'].includes(decision.action) || (decision.action === 'explain' && !decision.explanation?.trim())) throw new Error('Invalid custody review.')

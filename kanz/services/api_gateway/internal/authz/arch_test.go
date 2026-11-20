@@ -118,7 +118,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// surface that changes what governs a portfolio from the table this test's doc
 	// says covers every /v1 route.
 	proxy.New(nil, proxy.Roles{
-		Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer",
+		CustodyRerun: "custody-reviewer", Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer",
 	}).Routes(m)
 	// THE CONTROL PLANE, AND ITS ABSENCE WAS THIS GUARD'S OWN BLIND SPOT (#573).
 	//
@@ -277,6 +277,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// be: Resolve refuses while the latest run still detects the difference,
 		// so an operator may record what they know and may not silence the
 		// control; SaveBreak refuses to insert, so a break cannot be invented.
+		"POST /v1/portfolios/{id}/custody/reruns":             authz.CustodyRerun,
 		"GET /v1/custody/breaks":                              authz.Fund,
 		"POST /v1/custody/breaks/{id}/assign":                 authz.Fund,
 		"POST /v1/custody/breaks/{id}/explain":                authz.Fund,

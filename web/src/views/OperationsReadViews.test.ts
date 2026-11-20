@@ -36,7 +36,7 @@ describe('operations read screens', () => {
   })
 
   it('does not render a denied custody queue as empty', async () => {
-    vi.spyOn(custody, 'breaks').mockRejectedValue(new ApiError(403, 'private detail'))
+    vi.spyOn(custody, 'queue').mockRejectedValue(new ApiError(403, 'private detail'))
     const wrapper = mount(CustodyBreaksView)
     await flushPromises()
     expect(wrapper.find('[role=alert]').text()).toContain('not permitted')

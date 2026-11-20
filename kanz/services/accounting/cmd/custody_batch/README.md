@@ -44,6 +44,12 @@ JOIN custody_statements s USING (tenant_id, statement_id)
 ORDER BY r.revision;
 ```
 
+## Operator-initiated comparison
+
+The read-only pilot keeps manual reruns disabled. For a separately authorized operator environment, configure the same dedicated custody comparison role in `API_GATEWAY_CUSTODY_RERUN_ROLE` and `ACCOUNTING_CUSTODY_RERUN_ROLE`. The gateway requires it to differ from its other grant roles. The accounting service requires its durable database, broker, and declared custody pairs. `ACCOUNTING_CUSTODY_REVIEW_READ_ONLY=true` keeps the write route closed even when a role is configured.
+
+An operator with both the Fund queue-read role and the comparison role can open **Custody breaks**, enter a portfolio, custodian and completed UTC business date, review them, and run the comparison. The gateway accepts `POST /v1/portfolios/{id}/custody/reruns` with `custodian_id`, `business_date` and a stable lowercase UUID-v4 `request_id`. The session supplies tenant, subject and portfolio grants. Accounting reads the stored statement and journal basis, then returns the committed comparison receipt. Retry the same request ID after an unconfirmed outcome. A new request starts a new comparison.
+
 ## Reproduce the operator workflow
 
 From the repository root, prepare the local generated Go SDK using `schemas/README.md`. Install the Go toolchain from `kanz/go.mod`, Node matching `web/.nvmrc`, npm, Python 3, and a local Docker engine with Linux containers. Then run:

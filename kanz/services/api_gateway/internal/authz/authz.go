@@ -84,6 +84,8 @@ const (
 	//
 	// NOT Read, obviously: reading the ledger is Read, and this writes it.
 	Fund Capability = "fund"
+	// CustodyRerun authorizes a fresh comparison against recorded statements.
+	CustodyRerun Capability = "custody_rerun"
 	// Approve: GIVE THE SECOND SIGNATURE. Sign off an act another person proposed — today a
 	// pricing/compliance override (#410 act one), and by design the order and mandate
 	// approvals that follow (#539).

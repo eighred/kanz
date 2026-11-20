@@ -64,6 +64,9 @@ func (s *Server) custodyRoutes() {
 	if s.breakReviewReadOnly {
 		return
 	}
+	if s.rerunRole != "" && s.rerun != nil && s.custodyScope != nil {
+		s.mux.HandleFunc("POST /v1/portfolios/{id}/custody/reruns", s.handleCustodyRerun)
+	}
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/assign", s.handleAssignBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/explain", s.handleExplainBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/actions", s.handleCustodyAction)
@@ -155,5 +158,5 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, toBreakView(b, now))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "actions_enabled": !s.breakReviewReadOnly && s.breaks.ActionsEnabled()})
+	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "rerun_enabled": !s.breakReviewReadOnly && s.rerun != nil && s.custodyScope != nil && s.rerunRole != "" && principal.HasRole(s.rerunRole), "actions_enabled": !s.breakReviewReadOnly && s.breaks.ActionsEnabled()})
 }

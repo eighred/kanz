@@ -41,6 +41,7 @@ type Store interface {
 	// CommitRun commits the run, its verifying break transitions and completion
 	// FACT together. Failed/no-statement runs leave existing breaks unchanged.
 	CommitRun(context.Context, Run) (Run, error)
+	ManualReceipt(context.Context, Run) (Run, error)
 	Outbox() outbox.Queue
 	// SaveStatement records a custodian statement, idempotent on StatementID. A
 	// restatement for a subject already reconciled REPLACES the latest statement;

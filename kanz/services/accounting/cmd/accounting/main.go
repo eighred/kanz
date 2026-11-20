@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -234,6 +236,20 @@ func run() int {
 		server.WithBreakStore(custodyStore),
 		server.WithCustodyBookScope(custodyCfg.scope),
 	}
+	var activeReconciler atomic.Pointer[custody.Reconciler]
+	if cfg.CustodyRerunRole != "" && !cfg.CustodyReviewReadOnly {
+		if ledgerPool == nil || cfg.NATSURL == "" || len(custodyCfg.pairs) == 0 || strings.ContainsAny(cfg.CustodyRerunRole, " ,\t\n\r") {
+			logger.Error("custody reruns require a dedicated role, durable database, broker and configured pairs")
+			return 2
+		}
+		opts = append(opts, server.WithCustodyReruns(cfg.CustodyRerunRole, func(ctx context.Context, subject custody.Subject, requestID, actor string) (custody.Run, error) {
+			reconciler := activeReconciler.Load()
+			if reconciler == nil {
+				return custody.Run{}, errors.New("custody comparison service unavailable")
+			}
+			return reconciler.ReconcileManual(ctx, subject, requestID, actor)
+		}))
+	}
 	if cfg.CustodyReviewReadOnly {
 		opts = append(opts, server.WithReadOnlyCustodyReview())
 	}
@@ -340,7 +356,7 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, custodyCfg, store, ledgerPool, custodyStore, collateralConsumer, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, custodyCfg, &activeReconciler, store, ledgerPool, custodyStore, collateralConsumer, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
@@ -553,7 +569,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, collateralConsumer *collateralops.Consumer, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, activeReconciler *atomic.Pointer[custody.Reconciler], store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, collateralConsumer *collateralops.Consumer, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 	// Scheduled runs have no inbound delivery. Preserve any resolved context
 	// tenant; use this instance's configured scope only when none is present.
 	ctx = custodyRunContext(ctx, cfg.Tenant)
@@ -671,6 +687,8 @@ func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfi
 	if err != nil {
 		return err
 	}
+	activeReconciler.Store(plane.reconciler)
+	defer activeReconciler.Store(nil)
 	if cfg.CustodyStatementSubject != "" {
 		subscribe(cfg.CustodyStatementSubject, plane.consumer.Handle)
 	}

@@ -60,7 +60,7 @@ export const users = {
     if (!hasPrincipal(body) || typeof body.identity_admin !== 'boolean') throw new Error('Identity permissions are invalid.')
     return { subject: body.subject, tenant: body.tenant, identity_admin: body.identity_admin }
   },
-  async gatewayPermissions(authority: IdentityPermissions): Promise<GatewayPermissions> {
+  async gatewayPermissions(authority: Pick<IdentityPermissions, 'subject' | 'tenant'>): Promise<GatewayPermissions> {
     const body = await api.get<unknown>('/api/v1/permissions')
     if (!hasPrincipal(body) || body.subject !== authority.subject || body.tenant !== authority.tenant ||
         !strings(body.capabilities) || !strings(body.portfolios) || !Array.isArray(body.routes) ||

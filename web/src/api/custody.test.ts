@@ -13,24 +13,35 @@ describe('custody response boundary', () => {
     const get = vi.spyOn(api, 'get')
     for (const source of [detection, { ...detection, journal_position: '0' }, { run_id: 'r', statement_id: 's', business_date: '2024-02-29' }]) {
       get.mockResolvedValueOnce({ breaks: [{ ...scoped, detection: source }], count: 1 })
-      expect((await custody.breaks())[0]?.detection).toEqual(source)
+      expect((await custody.queue()).breaks[0]?.detection).toEqual(source)
     }
   })
   it.each([{ portfolio_id: '' }, { custodian_id: undefined }, { detection: null },
     ...[{ run_id: '' }, { statement_id: '' }, { business_date: '2025-02-29' }, { journal_position: 1 }, { journal_position: '-1' },
       { journal_position: '9223372036854775808' }, { scope_mode: [] }].map(fields => ({ detection: { ...detection, ...fields } }))])('refuses malformed detection and scope %#', async fields => {
     vi.spyOn(api, 'get').mockResolvedValueOnce({ breaks: [{ ...scoped, ...fields }], count: 1 })
-    await expect(custody.breaks()).rejects.toThrow('Invalid custody response.')
+    await expect(custody.queue()).rejects.toThrow('Invalid custody response.')
+  })
+
+  it('rejects an unbound comparison receipt and keeps a ledger position exact', async () => {
+    const request = { portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04', request_id: 'id' }
+    const receipt = { ...request, actor: 'operator', run_id: 'run', completed_at: '2020-02-05T00:00:00Z', outcome: 'clean', statement_id: 'S', journal_position: '9007199254740993' }
+    const post = vi.spyOn(api, 'post').mockResolvedValueOnce(receipt)
+    expect((await custody.rerun(request, 'operator')).journal_position).toBe('9007199254740993')
+    for (const patch of [{ actor: 'other' }, { request_id: 'other' }, { portfolio_id: 'other' }, { business_date: '2020-02-03' }, { outcome: 'no_statement' }, { journal_position: 1 }]) {
+      post.mockResolvedValueOnce({ ...receipt, ...patch })
+      await expect(custody.rerun(request, 'operator')).rejects.toThrow('receipt')
+    }
   })
 
   it('preserves exact decimal text', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [item], count: 1 })
-    expect((await custody.breaks())[0]?.difference).toBe('0.00000001')
+    expect((await custody.queue()).breaks[0]?.difference).toBe('0.00000001')
   })
 
   it.each([{ breaks: [], count: 1 }, { breaks: [{ ...item, difference: 0.1 }], count: 1 }, { breaks: [{ ...item, age_seconds: -1 }], count: 1 }])('rejects an invalid queue rather than reporting success', async (body) => {
     vi.spyOn(api, 'get').mockResolvedValue(body)
-    await expect(custody.breaks()).rejects.toThrow('Invalid custody response')
+    await expect(custody.queue()).rejects.toThrow('Invalid custody response')
   })
 
   it('distinguishes an unavailable control from an empty queue', () => {
@@ -46,10 +57,10 @@ describe('custody response boundary', () => {
       { breaks: [{ ...item, status: 'open', revision: '1', values_state: 'exact' }], count: 1, actions_enabled: false },
     ]) {
       get.mockResolvedValueOnce(body)
-      expect((await custody.breaks())[0]?.actions_enabled).toBe(false)
+      expect((await custody.queue()).breaks[0]?.actions_enabled).toBe(false)
     }
     get.mockResolvedValueOnce({ breaks: [{ ...item, status: 'open', revision: '1', values_state: 'exact' }], count: 1, actions_enabled: true })
-    expect((await custody.breaks())[0]?.actions_enabled).toBe(true)
+    expect((await custody.queue()).breaks[0]?.actions_enabled).toBe(true)
   })
 
   it('encodes the break id and refuses mismatched action evidence', async () => {
