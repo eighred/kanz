@@ -4,8 +4,10 @@ Run DISCOVER → PLAN → IMPLEMENT → TEST → VALIDATE → REVIEW → DELIVER
 Read current main, all open PR heads and the issue inventory before choosing a
 new task. Use the GitHub connector first. The read-only fallback is
 `python -B .agents/plugins/kanz-forge/scripts/collect_validation.py --repo eighred/kanz`.
-It paginates, reconciles counts, binds checks to revisions, and refuses a moving
-main or PR inventory. Failed access is unavailable evidence, never success.
+It paginates, reconciles counts and binds checks to revisions. It refuses a
+snapshot if the default branch, inventory, PR head, target revision, target
+branch or draft status changes between reads. Failed access is unavailable
+evidence, never success.
 Do not paste tokens, ambient configuration or raw logs into a graph.
 
 ## Review the actual dependency contract
@@ -47,6 +49,10 @@ unexpectedly skipped evidence cannot permit delivery. The collector binds a
 node's `subject` (`main` or `pr:N`) only when its reviewed revision still matches.
 The contract must name the current `main_revision`; every PR and every gate
 carrying check validation must have a live subject. A PR binds only to `pr:N`.
+The collector records the live PR target and draft status. A draft, a different
+target branch at the same revision, or a target revision behind the default branch
+blocks PR delivery. Applicable checks and reviewed holds retain their own evidence.
+A gate bound to the same check revision keeps its independent verdict.
 Unbound historical checks cannot survive collection as current evidence. External
 runtime artifacts and holds retain their separately reviewed evidence. The
 collector never invents the expected inventory from observed green checks.
