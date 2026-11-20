@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -122,6 +123,19 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 					}
 				}
 			}
+			if economics := result.Run.ExecutionEconomics; economics != nil && result.AccountAssignmentVerified &&
+				result.Run.Basis != nil && result.Run.Basis.Transactions != nil && result.Run.Basis.Transactions.Pass == "ran" &&
+				(result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
+				response["execution_economics_status"] = executionEconomicsStatus(economics)
+				if historical {
+					encoded, err := (protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}).Marshal(economics)
+					if err != nil {
+						writeJSON(w, 503, map[string]string{"error": "dated comparison unavailable"})
+						return
+					}
+					response["execution_economics"] = json.RawMessage(encoded)
+				}
+			}
 			if historical {
 				if q := result.Run.ExecutionQuantities; q != nil {
 					// Protobuf JSON preserves the signed 64-bit coefficients as decimal strings.
@@ -183,4 +197,21 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		}
 		writeJSON(w, 200, response)
 	}
+}
+
+func executionEconomicsStatus(e *accountingpb.ExecutionEconomicsComparison) string {
+	if e.GetUnassessedReason() != "" || len(e.GetRows()) == 0 {
+		return "unknown"
+	}
+	status := "equal"
+	for _, row := range e.GetRows() {
+		switch row.GetStatus() {
+		case "mismatch":
+			return "mismatch"
+		case "equal":
+		default:
+			status = "unknown"
+		}
+	}
+	return status
 }

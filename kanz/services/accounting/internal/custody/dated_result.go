@@ -202,5 +202,19 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		}
 		return pending, nil
 	}
+	// The current balance result and retained execution evidence must describe
+	// the same signed run, account and database snapshot.
+	if verifiedAssignment && len(binding) == sha256.Size && run.Basis != nil &&
+		run.Basis.Transactions != nil && run.Basis.Transactions.Pass == recon.LegRan.String() {
+		if accounts := run.Basis.Accounts[subject.CustodianID]; len(accounts) == 1 {
+			saved, err := historicalReceiptSnapshot(ctx, tx, tenant, subject, accounts[0], run.RunID)
+			if err != nil {
+				return DatedResult{}, err
+			}
+			if saved.State == "recorded" && saved.AccountAssignmentVerified {
+				run.ExecutionEconomics = saved.Run.ExecutionEconomics
+			}
+		}
+	}
 	return DatedResult{State: "recorded", StatementID: id, Run: run, AccountAssignmentVerified: verifiedAssignment}, nil
 }
