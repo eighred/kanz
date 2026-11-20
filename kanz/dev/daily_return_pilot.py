@@ -103,7 +103,8 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 3 FACTs" not in proof.stdout):
+                or b"real JetStream replay and signed browser read passed with 3 FACTs" not in proof.stdout
+                or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
             location = re.search(rb"\b(?:main_test|operator_test)\.go:\d+: [^\n]{1,160}", proof.stdout)
             # Only print the source location. Runtime errors may carry a DSN.
             raise RuntimeError("return pilot failed" + (" at " + location[0].decode().split(": ", 1)[0] if location else ""))

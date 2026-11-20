@@ -128,6 +128,10 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		t.Fatal("foreign tenant accepted")
 	}
 
+	if repeat, err := put(original, priv); err != nil || repeat != oldDigest {
+		t.Fatal("old source replay changed its receipt after correction", err)
+	}
+
 	read, err := pg.NewTenantPool(ctx, reader, tenant)
 	if err != nil {
 		t.Fatal("open independent reader")
@@ -152,7 +156,7 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		t.Fatal("foreign portfolio appeared")
 	}
 	if os.Getenv("RETURN_PILOT_VERIFY") == "1" {
-		proveDailyReturn(t, scope, store, []returnbasis.Evidence{original, correction, incomplete}, []string{oldDigest, newDigest, unknownDigest})
+		proveDailyReturn(t, scope, read, []returnbasis.Evidence{original, correction, incomplete}, []string{oldDigest, newDigest, unknownDigest})
 	}
 
 }

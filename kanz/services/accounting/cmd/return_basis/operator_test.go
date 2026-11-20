@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -20,7 +21,7 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/return_basis"
 )
 
-func proveDailyReturn(t *testing.T, ctx context.Context, store *returnbasis.Store, editions []returnbasis.Evidence, digests []string) {
+func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, editions []returnbasis.Evidence, digests []string) {
 	t.Helper()
 	runtimeDSN := os.Getenv("TEST_RETURN_BASIS_RUNTIME")
 	if runtimeDSN == "" || os.Getenv("RETURN_PILOT_ACCOUNTING_BIN") == "" || os.Getenv("RETURN_PILOT_GATEWAY_PROBE") == "" {
@@ -78,6 +79,7 @@ func proveDailyReturn(t *testing.T, ctx context.Context, store *returnbasis.Stor
 	}
 
 	first := editions[0]
+	store := returnbasis.NewStore(reader)
 	if _, err := store.ReadObserved(ctx, first.Portfolio, first.Currency, first.CloseDate, first.AsOf); err != returnbasis.ErrNotFound {
 		t.Fatal("unsent evidence appeared in the observed view", err)
 	}
@@ -114,16 +116,31 @@ func proveDailyReturn(t *testing.T, ctx context.Context, store *returnbasis.Stor
 	if err != nil || before.State.Msgs != uint64(len(editions)) {
 		t.Fatal("expected a single JetStream FACT for each signed edition")
 	}
+	payloads := make([][]byte, len(editions))
 	for i := range editions {
 		msg, err := stream.GetMsg(ctx, uint64(i+1))
 		if err != nil || msg.Subject != returnbasis.Subject {
 			t.Fatal("wrong broker completion", err)
 		}
-		envelope, _, err := bus.Unframe(msg.Data)
+		envelope, payload, err := bus.Unframe(msg.Data)
 		if err != nil || envelope.GetCorrelationId() != digests[i] {
 			t.Fatal("broker completion did not bind the signed source")
 		}
+		payloads[i] = payload
 	}
+	assertRetained := func() {
+		t.Helper()
+		for i, edition := range editions {
+			var persisted []byte
+			err := reader.QueryRow(ctx, `SELECT observed_payload FROM return_basis_publications
+				WHERE portfolio_id=$1 AND currency=$2 AND close_date=$3::text::date AND as_of=$4`,
+				edition.Portfolio, edition.Currency, edition.CloseDate, edition.AsOf).Scan(&persisted)
+			if err != nil || !bytes.Equal(persisted, payloads[i]) {
+				t.Fatal("the original observed bytes differ from the broker FACT", err)
+			}
+		}
+	}
+	assertRetained()
 	site, stop := start("return-replay")
 	defer stop()
 	wait("fresh durable did not replay all editions", func(check context.Context) bool {
@@ -141,6 +158,7 @@ func proveDailyReturn(t *testing.T, ctx context.Context, store *returnbasis.Stor
 		t.Fatal("replay produced another completion")
 	}
 
+	assertRetained()
 	values := make([]map[string]string, len(editions))
 	for i, e := range editions {
 		values[i] = map[string]string{"as_of": e.AsOf.Format(time.RFC3339Nano), "digest": digests[i]}
@@ -166,6 +184,7 @@ func proveDailyReturn(t *testing.T, ctx context.Context, store *returnbasis.Stor
 		t.Fatalf("daily return operator probe failed %s", stage)
 	}
 	t.Logf("real JetStream replay and signed browser read passed with %d FACTs", after.State.Msgs)
+	t.Log("observed PostgreSQL bytes matched each original FACT before and after replay")
 	for i, e := range editions {
 		t.Logf("edition horizon=%s source_sha256=%s", e.AsOf.Format(time.RFC3339Nano), digests[i])
 	}
