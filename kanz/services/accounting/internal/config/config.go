@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
@@ -254,6 +255,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	rerunRole := os.Getenv("ACCOUNTING_CUSTODY_RERUN_ROLE")
+	if rerunRole != "" && !readOnlyReview && !signedOnly {
+		return Config{}, errors.New("accounting: custody reruns require ACCOUNTING_CUSTODY_SIGNED_BATCH_ONLY=true")
+	}
 	custodyInterval, err := env.Duration("ACCOUNTING_CUSTODY_INTERVAL", DefaultCustodyInterval)
 	if err != nil {
 		return Config{}, err
@@ -285,7 +290,7 @@ func Load() (Config, error) {
 
 		CustodySignedBatchOnly:  signedOnly,
 		CustodyReviewReadOnly:   readOnlyReview,
-		CustodyRerunRole:        os.Getenv("ACCOUNTING_CUSTODY_RERUN_ROLE"),
+		CustodyRerunRole:        rerunRole,
 		CustodyStatementSubject: env.Or("ACCOUNTING_CUSTODY_STATEMENT_SUBJECT", DefaultCustodyStatementSubject),
 		CustodyPairs:            env.SplitList(os.Getenv("ACCOUNTING_CUSTODY_PAIRS")),
 		CustodyAccounts:         os.Getenv("ACCOUNTING_CUSTODY_ACCOUNTS"),
