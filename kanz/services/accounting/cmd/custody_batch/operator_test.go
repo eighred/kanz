@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -28,18 +29,25 @@ import (
 )
 
 type pilotBreak struct {
-	BreakID     string            `json:"break_id"`
-	PortfolioID string            `json:"portfolio_id"`
-	CustodianID string            `json:"custodian_id"`
-	Key         string            `json:"key"`
-	Kind        string            `json:"kind"`
-	IBOR        string            `json:"ibor"`
-	Custodian   string            `json:"custodian"`
-	Difference  string            `json:"difference"`
-	Detection   custody.Detection `json:"detection"`
+	InstrumentID string            `json:"instrument_id,omitempty"`
+	BreakID      string            `json:"break_id"`
+	PortfolioID  string            `json:"portfolio_id"`
+	CustodianID  string            `json:"custodian_id"`
+	Key          string            `json:"key"`
+	Kind         string            `json:"kind"`
+	IBOR         string            `json:"ibor"`
+	Custodian    string            `json:"custodian"`
+	Difference   string            `json:"difference"`
+	Detection    custody.Detection `json:"detection"`
+}
+
+type pilotQueueExpectation struct {
+	pilotBreak
+	ExecutionQuantity *pilotBreak `json:"execution_quantity,omitempty"`
 }
 
 type pilotObservation struct {
+	RetainedBreaks     int    `json:"retained_breaks"`
 	Revision           int    `json:"revision"`
 	RunID              string `json:"run_id"`
 	StatementID        string `json:"statement_id"`
@@ -67,6 +75,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 	}
 	var observations []pilotObservation
 	var firstDetection pilotBreak
+	quantityProfile := os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1"
 	checkSignedPilotCommand(t, 2*time.Minute, func(ctx context.Context, pool *pgxpool.Pool, statement custody.Statement, revision int, broker pilotBroker) {
 		const tenant = "synthetic-custody-pilot"
 		ctx = bus.WithTenantID(ctx, tenant)
@@ -151,8 +160,15 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 		if list.ActionsEnabled == nil || *list.ActionsEnabled != rerun {
 			t.Fatal("accounting reported a different review configuration")
 		}
+		wantRetained := 0
+		if revision == 1 {
+			wantRetained = 1
+		}
+		if len(run.Breaks) != wantRetained || len(fact.GetBreaks()) != wantRetained {
+			t.Fatal("stored run and delivered completion diverged from the historical break contract")
+		}
 		observations = append(observations, pilotObservation{
-			Revision: revision, RunID: fact.GetRunId(), StatementID: fact.GetStatementId(),
+			RetainedBreaks: len(fact.GetBreaks()), Revision: revision, RunID: fact.GetRunId(), StatementID: fact.GetStatementId(),
 			BusinessDate: day.Format(time.DateOnly), Outcome: run.Outcome.String(),
 			OutstandingBreaks: len(list.Breaks), CompletionSequence: message.Sequence,
 		})
@@ -172,7 +188,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 					"portfolio": subject.PortfolioID, "custodian": subject.CustodianID, "clean_date": day.Format(time.DateOnly),
 					"clean_run": run.RunID, "statement": run.StatementID, "missing_date": missing.BusinessDate.Format(time.DateOnly),
 					"missing_run": absent.RunID, "unobserved_date": day.AddDate(0, 0, 2).Format(time.DateOnly),
-					"prior_detection": firstDetection, "quantity_evidence": os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1",
+					"prior_detection": firstDetection, "quantity_evidence": quantityProfile,
 				})
 				info, err := broker.completions.Info(ctx)
 				if err != nil || info.State.Msgs != 3 || baseline != pilotFinancialSnapshot(t, ctx, pool) {
@@ -182,10 +198,29 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			}
 			return
 		}
-		if run.Outcome != custody.OutcomeBreaks || len(list.Breaks) != 1 {
-			t.Fatalf("expected one source-backed break, got %d", len(list.Breaks))
+		wantOpen := 1
+		if quantityProfile {
+			wantOpen++
 		}
-		b := list.Breaks[0]
+		if run.Outcome != custody.OutcomeBreaks || len(list.Breaks) != wantOpen {
+			t.Fatalf("expected %d outstanding source-backed breaks, got %d", wantOpen, len(list.Breaks))
+		}
+		var b pilotBreak
+		var quantity *pilotBreak
+		for i := range list.Breaks {
+			row := list.Breaks[i]
+			switch row.Kind {
+			case "quantity":
+				b = row
+			case "execution_quantity":
+				quantity = &list.Breaks[i]
+			default:
+				t.Fatalf("unexpected queue kind %q", row.Kind)
+			}
+		}
+		if b.BreakID == "" || (quantity != nil) != quantityProfile {
+			t.Fatal("unexpected queue composition")
+		}
 		t.Run("rollback_action_fence", func(t *testing.T) {
 			checkPilotRollback(t, ctx, pool, b.BreakID)
 		})
@@ -193,22 +228,34 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 		if b.Detection != expected || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Key != "SYN" || b.IBOR != "10.5" || b.Custodian != "9.5" || b.Difference != "1" {
 			t.Fatalf("unexpected accounting evidence: %+v", b)
 		}
+		if quantity != nil {
+			stableID, _ := regexp.MatchString("^q1:[0-9a-f]{64}$", quantity.BreakID)
+			if !stableID || quantity.Detection != expected || quantity.PortfolioID != b.PortfolioID || quantity.CustodianID != b.CustodianID || quantity.Key != "external-7" || quantity.InstrumentID != "SYN" || quantity.IBOR != "10.5" || quantity.Custodian != "9.5" || quantity.Difference != "1" {
+				t.Fatalf("incorrect execution-quantity queue evidence: %+v", quantity)
+			}
+		}
 		firstDetection = b
 		if !rerun {
+			before := pilotFinancialSnapshot(t, ctx, pool)
 			const id = "c9cb9d52-3414-4081-bb01-718183d12647"
 			result, err := r.ReconcileManual(ctx, subject, id, "synthetic-operator")
 			var denied *pgconn.PgError
 			if result.RunID != "" || !errors.As(err, &denied) || denied.Code != "42501" || !strings.Contains(denied.Message, "signed_pilot_read_only_reruns") {
 				t.Fatalf("expected database refusal of operator rerun in the read-only pilot: %v", err)
 			}
-			for _, action := range []string{"actions", "assign", "explain"} {
-				probe := httptest.NewRequest(http.MethodPost, "/v1/custody/breaks/test/"+action, nil)
-				probe.Header = req.Header.Clone()
-				rec := httptest.NewRecorder()
-				site.Config.Handler.ServeHTTP(rec, probe)
-				if rec.Code != http.StatusNotFound {
-					t.Fatalf("read-only %s returned %d", action, rec.Code)
+			for _, target := range list.Breaks {
+				for _, action := range []string{"actions", "assign", "explain"} {
+					probe := httptest.NewRequest(http.MethodPost, "/v1/custody/breaks/"+target.BreakID+"/"+action, nil)
+					probe.Header = req.Header.Clone()
+					rec := httptest.NewRecorder()
+					site.Config.Handler.ServeHTTP(rec, probe)
+					if rec.Code != http.StatusNotFound {
+						t.Fatalf("read-only %s returned %d", action, rec.Code)
+					}
 				}
+			}
+			if before != pilotFinancialSnapshot(t, ctx, pool) {
+				t.Fatal("denied queue actions changed financial evidence")
 			}
 		}
 		if binary := os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"); binary != "" {
@@ -216,7 +263,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			if rerun {
 				testName = "TestSignedCustodyRerunBrowser"
 			}
-			provePilotBrowser(t, ctx, site.URL, testName, os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"), b)
+			provePilotBrowser(t, ctx, site.URL, testName, os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"), pilotQueueExpectation{b, quantity})
 			t.Log("signed gateway and Chromium verified the persisted detection")
 		}
 		if rerun {
@@ -237,7 +284,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			if err != nil || len(stored.Breaks) != 1 || stored.StatementID != statement.StatementID || stored.Outcome != custody.OutcomeBreaks {
 				t.Fatal("manual completion differs from its durable receipt")
 			}
-			observations = append(observations, pilotObservation{Revision: revision, RunID: stored.RunID, StatementID: stored.StatementID,
+			observations = append(observations, pilotObservation{RetainedBreaks: len(stored.Breaks), Revision: revision, RunID: stored.RunID, StatementID: stored.StatementID,
 				BusinessDate: day.Format(time.DateOnly), Outcome: stored.Outcome.String(), OutstandingBreaks: len(stored.Breaks),
 				CompletionSequence: msg.Sequence, Actor: stored.Actor, RequestID: stored.RequestID})
 		}
@@ -279,6 +326,7 @@ func pilotFinancialSnapshot(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	err := pool.QueryRow(ctx, `SELECT jsonb_build_array(
 		(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.run_id) FROM custody_runs r),
 		(SELECT jsonb_agg(to_jsonb(b) ORDER BY b.break_id) FROM custody_breaks b),
+ (SELECT jsonb_agg(to_jsonb(q) ORDER BY q.observation) FROM custody_execution_quantity_observations q),
 		(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.request_id) FROM custody_actions a),
 		(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.entry_id) FROM ledger_entries e),
 		(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM outbox o))::text`).Scan(&snapshot)

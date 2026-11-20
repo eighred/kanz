@@ -47,7 +47,16 @@ async function main() {
         const page = await context.newPage()
         page.setDefaultTimeout(6000)
         stage = name + '-open-response'
+        const queueResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/custody/breaks' && r.request().method() === 'GET')
         await page.goto(base + '/custody-breaks')
+        const queue = await queueResponse
+        assert.equal(queue.status(), name === 'excluded' ? 200 : status)
+        if (name === 'authorized' || name === 'excluded') {
+          const corrected = await queue.json()
+          assert.equal(corrected.count, 0)
+          assert.deepEqual(corrected.breaks, [])
+          await page.getByText('No outstanding custody breaks were returned', { exact: false }).waitFor()
+        }
         if (name !== 'authorized') {
           for (const [date, saved] of [[clean_date], [unobserved_date], [clean_date, oldRun], [clean_date, clean_run]]) {
             const reply = await page.evaluate(async path => {

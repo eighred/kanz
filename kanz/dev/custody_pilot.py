@@ -91,7 +91,7 @@ def local_engine(env):
     return ["docker", "--host", result]
 
 
-def verify_observations(path, fixture, rerun=False):
+def verify_observations(path, fixture, rerun=False, quantity_evidence=False):
     records = json.loads(path.read_bytes())
     revisions = [1, 1, 2] if rerun else [1, 2]
     if not isinstance(records, list) or len(records) != len(revisions):
@@ -99,7 +99,7 @@ def verify_observations(path, fixture, rerun=False):
     runs = set()
     for sequence, (revision, record) in enumerate(zip(revisions, records), 1):
         if not isinstance(record, dict) or not all(type(record.get(key)) is int for key in
-                                                  ("revision", "outstanding_breaks", "completion_sequence")):
+                                                  ("revision", "outstanding_breaks", "retained_breaks", "completion_sequence")):
             raise RuntimeError("Expected an observed revision, break count and completion sequence.")
         raw = (fixture / f"statement-r{revision}.json").read_bytes()
         statement_id = f"custody-batch.v1.synthetic-source.r{revision}." + hashlib.sha256(raw).hexdigest()
@@ -108,7 +108,8 @@ def verify_observations(path, fixture, rerun=False):
             "revision": revision, "statement_id": statement_id, "run_id": run_id,
             "business_date": json.loads(raw)["statement"]["businessDate"].split("T")[0],
             "outcome": "breaks" if revision == 1 else "clean",
-            "outstanding_breaks": 1 if revision == 1 else 0, "completion_sequence": sequence,
+            "outstanding_breaks": (2 if quantity_evidence else 1) if revision == 1 else 0,
+            "retained_breaks": 1 if revision == 1 else 0, "completion_sequence": sequence,
         }
         if rerun and sequence == 2:
             request_id = record.get("request_id", "")
@@ -170,7 +171,8 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
         GRANT SELECT, INSERT ON ledger_entries, ledger_append_positions, custody_runs, custody_actions TO pilot_check;
         GRANT SELECT, INSERT, UPDATE ON ledger_heads, custody_statements, custody_breaks, outbox TO pilot_check;
         GRANT SELECT, INSERT, UPDATE, DELETE ON custody_break_detections TO pilot_check;
-        GRANT USAGE ON SEQUENCE outbox_id_seq TO pilot_check;
+        GRANT SELECT, INSERT ON custody_execution_quantity_observations TO pilot_check;
+        GRANT USAGE ON SEQUENCE outbox_id_seq, custody_execution_quantity_observations_observation_seq TO pilot_check;
     """)
     sql("postgres", (
         "CREATE ROLE pilot_source LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE kanz_custody_batch_pilot "
@@ -210,7 +212,7 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
-    records = verify_observations(observations, fixture, rerun)
+    records = verify_observations(observations, fixture, rerun, quantity_evidence)
     return records, check_withdrawal() if check_withdrawal else None
 
 
@@ -224,6 +226,7 @@ def customer_downloads(observations, records):
     for receipt, record in zip(receipts, records):
         if (not isinstance(receipt, dict) or receipt.get("format") != "kanz.custody-comparison.v1"
                 or receipt.get("lookup") != "retained_run"
+                or not isinstance(receipt.get("breaks"), list) or len(receipt["breaks"]) != record["retained_breaks"]
                 or receipt.get("account_assignment_verified") is not True
                 or receipt.get("run_id") != record["run_id"] or receipt.get("statement_id") != record["statement_id"]
                 or receipt.get("signed_statement_sha256") != record["statement_id"].rsplit(".", 1)[-1]):

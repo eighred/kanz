@@ -22,6 +22,15 @@ async function main() {
   assert.equal(expected.detection.business_date, '2020-02-04')
   assert.match(expected.detection.statement_id, /^custody-batch\.v1\.synthetic-source\.r1\.[0-9a-f]{64}$/)
   assert(expected.detection.run_id)
+  const quantity = expected.execution_quantity
+  if (quantity) {
+    assert.equal(quantity.kind, 'execution_quantity')
+    assert.match(quantity.break_id, /^q1:[0-9a-f]{64}$/)
+    assert.deepEqual([quantity.key, quantity.instrument_id, quantity.ibor, quantity.custodian, quantity.difference],
+      ['external-7', 'SYN', '10.5', '9.5', '1'])
+    assert.deepEqual(quantity.detection, expected.detection)
+  }
+  const queue = quantity ? [expected, quantity] : [expected]
   const endpoint = base + '/api/v1/custody/breaks'
   stage = 'launch'
   const browser = await chromium.launch({ headless: true, timeout: 10_000 })
@@ -52,37 +61,49 @@ async function main() {
               await page.getByRole('alert').waitFor()
               assert.equal(await page.getByRole('table').count(), 0)
             }
-            for (const secret of [expected.break_id, expected.detection.run_id, expected.detection.statement_id]) {
+            for (const secret of [...queue.map(item => item.break_id), expected.detection.run_id, expected.detection.statement_id]) {
               assert(!JSON.stringify(data).includes(secret))
               assert(!(await page.locator('body').innerText()).includes(secret))
             }
             continue
           }
           assert.equal(data.actions_enabled, false)
-          const matches = data.breaks.filter(item => item.break_id === expected.break_id)
-          assert.equal(matches.length, 1)
-          const record = matches[0]
-          for (const field of ['portfolio_id', 'custodian_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(record[field], expected[field])
-          assert.deepEqual(record.detection, expected.detection)
-          assert.equal(record.values_state, 'exact')
-          stage = name + '-' + navigation + '-row'
-          const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: expected.break_id, exact: true }) })
-          await row.waitFor()
-          assert.equal(await row.getByRole('button', { name: /^(Claim|Explain)$/ }).count(), 0)
-          const table = page.getByRole('table')
-          const headers = await table.getByRole('columnheader').allTextContents()
-          const cells = row.locator(':scope > th, :scope > td')
-          for (const [heading, value] of [['IBOR', expected.ibor], ['Custodian', expected.custodian], ['Difference', expected.difference]]) {
-            assert.equal((await cells.nth(headers.indexOf(heading)).innerText()).trim(), value)
+          assert.equal(data.count, queue.length)
+          assert.equal(data.breaks.length, queue.length)
+          for (const item of queue) {
+            const matches = data.breaks.filter(value => value.break_id === item.break_id)
+            assert.equal(matches.length, 1)
+            const record = matches[0]
+            for (const field of ['portfolio_id', 'custodian_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(record[field], item[field])
+            assert.deepEqual(record.detection, item.detection)
+            assert.equal(record.values_state, 'exact')
+            assert.equal(record.kind, item.kind)
+            if (item.kind === 'execution_quantity') {
+              assert.equal(record.instrument_id, item.instrument_id)
+              assert.equal(record.revision, undefined)
+            }
+            stage = name + '-' + navigation + '-row'
+            const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: item.break_id, exact: true }) })
+            await row.waitFor()
+            const identifiers = row.locator('td').filter({ hasText: item.kind })
+            await identifiers.getByText(item.key, { exact: true }).waitFor()
+            if (item.kind === 'execution_quantity') await identifiers.getByText(item.instrument_id, { exact: true }).waitFor()
+            assert.equal(await row.getByRole('button', { name: /^(Claim|Explain)$/ }).count(), 0)
+            const table = page.getByRole('table')
+            const headers = await table.getByRole('columnheader').allTextContents()
+            const cells = row.locator(':scope > th, :scope > td')
+            for (const [heading, value] of [['IBOR', item.ibor], ['Custodian', item.custodian], ['Difference', item.difference]]) {
+              assert.equal((await cells.nth(headers.indexOf(heading)).innerText()).trim(), value)
+            }
+            stage = name + '-' + navigation + '-details'
+            await row.getByText('View detection evidence', { exact: true }).click()
+            const labels = ['Portfolio', 'Custodian ID', 'Business date', 'Reconciliation run', 'Statement', 'Journal position', 'Account scope']
+            const values = [item.portfolio_id, item.custodian_id, item.detection.business_date,
+              item.detection.run_id, item.detection.statement_id, item.detection.journal_position ?? 'Unavailable', item.detection.scope_mode ?? 'Unavailable']
+            const source = row.locator('details[open]')
+            assert.deepEqual(await source.locator('dt').allInnerTexts(), labels)
+            assert.deepEqual(await source.locator('dd').allInnerTexts(), values)
           }
-          stage = name + '-' + navigation + '-details'
-          await row.getByText('View detection evidence', { exact: true }).click()
-          const labels = ['Portfolio', 'Custodian ID', 'Business date', 'Reconciliation run', 'Statement', 'Journal position', 'Account scope']
-          const values = [expected.portfolio_id, expected.custodian_id, expected.detection.business_date,
-            expected.detection.run_id, expected.detection.statement_id, expected.detection.journal_position ?? 'Unavailable', expected.detection.scope_mode ?? 'Unavailable']
-          const source = row.locator('details[open]')
-          assert.deepEqual(await source.locator('dt').allInnerTexts(), labels)
-          assert.deepEqual(await source.locator('dd').allInnerTexts(), values)
           // Read the comparison independently of the outstanding-break queue.
           const dated = page.getByRole('region', { name: 'Dated custody result' })
           await dated.getByLabel('Portfolio ID', { exact: true }).fill(expected.portfolio_id)
