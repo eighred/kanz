@@ -58,6 +58,7 @@ spec:
     app: api-gateway
   ports:
     - { name: http, port: 8080, targetPort: 8080 }
+    - { name: cash-history, port: 8443, targetPort: 8443 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -112,7 +113,9 @@ spec:
           image: ghcr.io/eighred/api-gateway@sha256:8cc6d98ec0a7ba6df3b8eef4302de56a067e07a15e98dd778a9a1be2ac62fb17
           ports:
             - { containerPort: 8080, name: http }
+            - { containerPort: 8443, name: cash-history }
           env:
+            - { name: API_GATEWAY_HISTORY_LISTEN, value: ":8443" }
             # WHICH TENANTS HAVE THEIR OWN INSTANCES (#668). MT-02 renders some
             # services per tenant (internal/tenantgen.Services), each with its own
             # Service, database scope and NATS account. This gateway dials one
@@ -235,18 +238,21 @@ spec:
             # :8083 — that serves /metrics and the filing routes, and the filing
             # routes are deliberately not proxied (they append to the audit chain).
             - { name: API_GATEWAY_REGULATORY_ADDR, value: "http://regulatory.kanz-services.svc:8103" }
-            # WHO MAY MOVE THE FUND'S OWN CAPITAL (#535). NEITHER KEY IS SET HERE, AND
-            # THAT IS THE POSTURE — recorded rather than merely omitted, because a
-            # control nobody can find in the manifest is a control nobody knows exists.
+            # Retained accounting evidence is read-only and separately granted.
+            # The OMS workload role cannot post a cash movement; the Fund routes
+            # stay absent until a human funding role is deliberately configured.
+            - { name: API_GATEWAY_ACCOUNTING_ADDR, value: "http://accounting.kanz-services.svc:8101" }
+            - { name: API_GATEWAY_CASH_HISTORY_ROLE, value: "kanz-oms-cash-history" }
+            # WHO MAY MOVE THE FUND'S OWN CAPITAL (#535). The accounting
+            # upstream is now configured for the narrow cash-history read above.
+            # The Fund role remains UNSET; no cash-write route is registered.
             #
-            #   API_GATEWAY_ACCOUNTING_ADDR  the book of record (accounting-deploy.yaml,
-            #                                allow-gateway-to-accounting in
-            #                                infra/security/runtime/network-policies.yaml)
+            #   API_GATEWAY_ACCOUNTING_ADDR  the book of record, set above for
+            #                                the cash-history evidence route
             #   API_GATEWAY_FUND_ROLE        the role carrying authz.Fund
             #
-            # A PAIR, like the operator plane above. With the ROLE unset, NONE of the
-            # routes carrying authz.Fund is REGISTERED and this gateway answers 404 —
-            # "there is no such surface here", which is true:
+            # With the Fund role unset, NONE of the routes carrying authz.Fund is
+            # registered, even though their upstream is configured:
             #
             #   POST /v1/portfolios/{id}/cash-movements   the fund's own capital (#415)
             #   GET  /v1/custody/breaks                   the break queue (#962)
@@ -257,12 +263,9 @@ spec:
             # ONLY THE FIRST MOVES CAPITAL. The other four are middle-office custody
             # work, and they ride this role deliberately rather than a seventh
             # capability — the argument is written on the routes themselves, in
-            # internal/proxy/proxy.go. With
-            # the ADDRESS set the role becomes REQUIRED and the gateway refuses to start
-            # without it, so the funding surface can never be exposed with nobody able to
-            # reach it. That third state is what #535 found: the route registered,
-            # authz.Fund carried by no role, and a 403 to every principal that exists —
-            # indistinguishable from a control working exactly as intended.
+            # internal/proxy/proxy.go. The configured history role grants only
+            # authz.CashHistory, so the gateway starts with one authenticated
+            # accounting read and no cash-write or custody-command route.
             #
             # The role must DIFFER from all three above, and the trade one is the point:
             # the person who can move money is never the person who trades it. One

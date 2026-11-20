@@ -445,6 +445,32 @@ func (s *Server) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.D
 	return resp, nil
 }
 
+// ReadCapitalEvidence crosses the typed OMS->adapter boundary. It only carries
+// exchange observations; the financial authority that approves a future fee
+// ceiling is deliberately not available from an exchange-rate endpoint.
+func (s *Server) ReadCapitalEvidence(ctx context.Context, req *venuepb.ReadCapitalEvidenceRequest) (*venuepb.ReadCapitalEvidenceResponse, error) {
+	if req == nil || req.GetInstrumentId() == "" || req.GetVenueAccountId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "venue: instrument and account are required")
+	}
+	if req.GetVenueAccountId() != s.venue.Account() || !s.proof.Verified {
+		return nil, status.Error(codes.FailedPrecondition, "venue: exchange account is not verified for capital evidence")
+	}
+	reader, ok := s.venue.(interface {
+		ReadCapitalEvidence(context.Context, string, string) (*venuepb.ReadCapitalEvidenceResponse, error)
+	})
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "venue: capital evidence reader unavailable")
+	}
+	response, err := reader.ReadCapitalEvidence(ctx, req.GetInstrumentId(), req.GetVenueAccountId())
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "venue: capital evidence unavailable: %v", err)
+	}
+	if response == nil || response.GetSettlementSourceVersion().GetContentSha256() == "" || response.GetCurrentFee().GetSourceVersion().GetContentSha256() == "" {
+		return nil, status.Error(codes.FailedPrecondition, "venue: capital evidence lacks exchange provenance")
+	}
+	return response, nil
+}
+
 // InstrumentLister is implemented by a connector that can enumerate the pairs it
 // is configured to trade (#406).
 type InstrumentLister interface {

@@ -471,6 +471,41 @@ spec:
       ports:
         - { protocol: TCP, port: 8080 }
 ---
+# OMS reads retained accounting cash evidence through the gateway's dedicated
+# mTLS listener. Both network directions are scoped; the listener itself accepts
+# only the OMS SVID and only the cash-history route, then checks its bearer role.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-oms-cash-history-egress
+  namespace: kanz-services
+spec:
+  podSelector:
+    matchLabels: { app: oms }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: api-gateway }
+      ports:
+        - { protocol: TCP, port: 8443 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-oms-cash-history-ingress
+  namespace: kanz-services
+spec:
+  podSelector:
+    matchLabels: { app: api-gateway }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: oms }
+      ports:
+        - { protocol: TCP, port: 8443 }
+---
 # EXEC-M15 — the trading loop's entry point. TradingView reaches webhook-ingest
 # through the ingress controller and NOTHING else does. This is the pod-level half
 # of the perimeter: webhook-ingest's own IP allowlist is checked against the

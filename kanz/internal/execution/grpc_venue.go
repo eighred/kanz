@@ -63,6 +63,24 @@ func (v *GRPCVenue) MIC() string { return v.mic }
 // manifest claimed.
 func (v *GRPCVenue) Account() string { return v.account }
 
+// ReadCapitalEvidence carries source-identified settlement and CURRENT fee
+// observations into OMS. It does not supply an approved maximum fee.
+func (v *GRPCVenue) ReadCapitalEvidence(ctx context.Context, instrumentID string) (*venuepb.ReadCapitalEvidenceResponse, error) {
+	if instrumentID == "" || v.account == "" {
+		return nil, fmt.Errorf("execution: capital evidence requires instrument and account")
+	}
+	resp, err := v.client.ReadCapitalEvidence(ctx, &venuepb.ReadCapitalEvidenceRequest{
+		InstrumentId: instrumentID, VenueAccountId: v.account,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("execution: capital evidence at venue %s: %w", v.mic, err)
+	}
+	if resp.GetBaseAsset() == "" || resp.GetQuoteAsset() == "" || resp.GetSettlementSourceVersion().GetContentSha256() == "" || resp.GetCurrentFee().GetSourceVersion().GetContentSha256() == "" {
+		return nil, fmt.Errorf("execution: venue %s supplied incomplete capital evidence", v.mic)
+	}
+	return resp, nil
+}
+
 // Execute works st at the remote venue and returns the fills it produced.
 //
 // Two outcomes are carefully NOT conflated:

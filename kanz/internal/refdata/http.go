@@ -166,14 +166,15 @@ func (s *HTTPSource) Fetch(ctx context.Context, instrumentID string) (Record, bo
 	return rec, true, nil
 }
 
-// securityBody mirrors datamaster's handleSecurity response. Only the
-// classification half is decoded — the identifiers and the provenance are that
-// surface's business, and decoding fields this package does not use would make
-// it break on changes that do not concern it.
+// securityBody projects classification and denomination from the golden record.
+// Pair legs remain separate from the instrument's currency denomination.
 type securityBody struct {
 	InstrumentID string `json:"instrument_id"`
 	AssetClass   string `json:"asset_class"`
 	IssuerID     string `json:"issuer_id"`
+	CurrencyCode string `json:"currency_code"`
+	BaseAsset    string `json:"base_asset"`
+	QuoteAsset   string `json:"quote_asset"`
 	Sector       struct {
 		Taxonomy string `json:"taxonomy"`
 		Code     string `json:"code"`
@@ -196,6 +197,9 @@ func (b securityBody) record(requested string) (Record, error) {
 		InstrumentID: requested,
 		AssetClass:   b.AssetClass,
 		IssuerID:     b.IssuerID,
+		CurrencyCode: b.CurrencyCode,
+		BaseAsset:    b.BaseAsset,
+		QuoteAsset:   b.QuoteAsset,
 		Sector:       Sector{Taxonomy: b.Sector.Taxonomy, Code: b.Sector.Code, Name: b.Sector.Name},
 	}
 	if b.AsOf != "" {

@@ -2,6 +2,8 @@ package binance
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
@@ -155,6 +158,14 @@ func (c *binanceREST) ExchangeAccountID(ctx context.Context) (string, error) {
 // signedGet performs a signed GET and returns the raw body (weight already
 // consumed by the caller).
 func (c *binanceREST) signedGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	req, err := c.signedGetRequest(ctx, path, params)
+	if err != nil {
+		return nil, err
+	}
+	return c.do(req)
+}
+
+func (c *binanceREST) signedGetRequest(ctx context.Context, path string, params url.Values) (*http.Request, error) {
 	params.Set("timestamp", strconv.FormatInt(c.now().UnixMilli(), 10))
 	params.Set("recvWindow", strconv.Itoa(c.recvWindow))
 	query := params.Encode()
@@ -164,7 +175,7 @@ func (c *binanceREST) signedGet(ctx context.Context, path string, params url.Val
 		return nil, fmt.Errorf("binance: create REST request: %w", transporterr.Redact(err))
 	}
 	req.Header.Set("X-MBX-APIKEY", c.apiKey)
-	return c.do(req)
+	return req, nil
 }
 
 // newOrder places a signed order (POST /api/v3/order, weight 1) with
@@ -310,6 +321,47 @@ func (c *binanceREST) tickerPrice(ctx context.Context, symbol string) (string, e
 	return out.Price, nil
 }
 
+// exchangeInstrument reads Binance's own base/quote and trading state. A
+// configured symbol spelling is never authoritative settlement metadata.
+func (c *binanceREST) exchangeInstrument(ctx context.Context, symbol string) (execution.ExchangeInstrument, error) {
+	if !c.bucket.Allow(20) {
+		c.onThrottle()
+		return execution.ExchangeInstrument{}, ErrRateLimited
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/api/v3/exchangeInfo?symbol="+url.QueryEscape(symbol), nil)
+	if err != nil {
+		return execution.ExchangeInstrument{}, transporterr.Redact(err)
+	}
+	raw, err := c.readResponse(req, true)
+	if err != nil {
+		return execution.ExchangeInstrument{}, err
+	}
+	var out struct {
+		Code    int    `json:"code"`
+		Msg     string `json:"msg"`
+		Symbols []struct {
+			Symbol string `json:"symbol"`
+			Base   string `json:"baseAsset"`
+			Quote  string `json:"quoteAsset"`
+			Status string `json:"status"`
+		} `json:"symbols"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return execution.ExchangeInstrument{}, fmt.Errorf("binance: decode exchangeInfo: %w", err)
+	}
+	if out.Code != 0 {
+		return execution.ExchangeInstrument{}, &APIError{Code: out.Code, Msg: out.Msg}
+	}
+	if len(out.Symbols) != 1 || out.Symbols[0].Symbol != symbol {
+		return execution.ExchangeInstrument{}, fmt.Errorf("binance: exchangeInfo did not identify exactly %q", symbol)
+	}
+	in := out.Symbols[0]
+	digest := sha256.Sum256(raw)
+	return execution.ExchangeInstrument{Symbol: in.Symbol, Base: in.Base, Quote: in.Quote, State: in.Status,
+		Digest: hex.EncodeToString(digest[:]), ObservedAtUnixMillis: c.now().UnixMilli()}, nil
+}
+
 func (c *binanceREST) signedOrderCall(ctx context.Context, method, path string, params url.Values, weight int) (*orderResponse, error) {
 	if !c.bucket.Allow(weight) {
 		c.onThrottle()
@@ -345,12 +397,23 @@ func (c *binanceREST) signedOrderCall(ctx context.Context, method, path string, 
 // decodes the typed {code,msg} error. A 5xx is a real transport fault
 // (surfaced), distinct from a 4xx business error (decoded).
 func (c *binanceREST) do(req *http.Request) ([]byte, error) {
+	return c.readResponse(req, false)
+}
+
+// Financial source digests require a successful response in its entirety.
+// Order endpoints retain their existing decoding of typed 4xx business errors.
+func (c *binanceREST) readResponse(req *http.Request, capitalEvidence bool) ([]byte, error) {
 	resp, err := c.httpc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("binance: send REST request: %w", transporterr.Redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	const maxResponse = 1 << 20
+	limit := int64(maxResponse)
+	if capitalEvidence {
+		limit++
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return nil, fmt.Errorf("binance: read REST response: %w", transporterr.Redact(err))
 	}
@@ -362,6 +425,9 @@ func (c *binanceREST) do(req *http.Request) ([]byte, error) {
 	}
 	if resp.StatusCode >= 500 {
 		return nil, fmt.Errorf("binance: %s: status %d", req.URL.Path, resp.StatusCode)
+	}
+	if capitalEvidence && (resp.StatusCode != http.StatusOK || len(body) > maxResponse) {
+		return nil, fmt.Errorf("binance: incomplete or unsuccessful capital evidence response (status %d)", resp.StatusCode)
 	}
 	return body, nil
 }

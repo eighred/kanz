@@ -86,6 +86,8 @@ func (s *FileRefSource) Fetch(ctx context.Context) ([]RefRow, error) {
 			SectorName:      cols.get(rec, "sector_name"),
 			IssuerID:        cols.get(rec, "issuer_id"),
 			Currency:        cols.get(rec, "currency"),
+			BaseAsset:       cols.get(rec, "base_asset"),
+			QuoteAsset:      cols.get(rec, "quote_asset"),
 			Description:     cols.get(rec, "description"),
 		}
 		// A row that keys to no instrument cannot be mastered. ReferenceAdapter

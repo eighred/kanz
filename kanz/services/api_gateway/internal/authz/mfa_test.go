@@ -46,3 +46,38 @@ func TestEveryPrivilegedCapabilityRequiresRecentMFA(t *testing.T) {
 		}
 	}
 }
+
+func TestCashHistoryMFAAndTransportUseTheRecordedGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name, role           string
+		private, fresh, want bool
+	}{
+		{"workload-public", "history", false, false, false}, {"workload-private", "history", true, false, true},
+		{"human-stale", "fund", false, false, false}, {"human-fresh", "fund", false, true, true},
+		{"human-private", "fund", true, true, false}, {"reader", "reader", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &capturingRecorder{}
+			mux := authz.NewMux(authz.Grants{"history": {authz.CashHistory}, "fund": {authz.CashHistory, authz.Fund}, "reader": {authz.Read}}, rec, authz.WithCashHistoryRole("history"), authz.WithMFARequired(true))
+			mux.Handle(authz.CashHistory, "GET /cash", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+			p := &middleware.Principal{Subject: "subject", Tenant: "tenant", Roles: []string{tc.role}}
+			if tc.fresh {
+				p.MFA = auth.MFA{Required: true, VerifiedAt: time.Now().Add(-time.Minute)}
+			}
+			req := httptest.NewRequest(http.MethodGet, "/cash", nil)
+			req = req.WithContext(middleware.WithPrincipal(req.Context(), p))
+			w := httptest.NewRecorder()
+			var route http.Handler = mux
+			if tc.private {
+				route = authz.FromOMSHistoryListener(mux)
+			}
+			route.ServeHTTP(w, req)
+			if tc.want && w.Code != http.StatusNoContent || !tc.want && w.Code != http.StatusForbidden {
+				t.Fatal("unexpected financial history authorization", w.Code)
+			}
+			if (only(t, rec.entries()).GetAttributes()["decision"] == "allow") != tc.want {
+				t.Fatal("incorrect audit decision")
+			}
+		})
+	}
+}

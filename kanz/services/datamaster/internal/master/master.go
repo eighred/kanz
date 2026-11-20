@@ -93,8 +93,11 @@ type VendorRecord struct {
 	// (compliance.unresolvedDimension) rather than bucketing under "".
 	IssuerID     string
 	CurrencyCode string
-	Description  string
-	AsOf         time.Time
+	// Pair legs are an indivisible assertion, matching reference.v1. They must
+	// never be reconstructed from a ticker or combined across vendors.
+	BaseAsset, QuoteAsset string
+	Description           string
+	AsOf                  time.Time
 	// Priority is the vendor's trust rank: LOWER wins (0 = most trusted).
 	Priority int
 }
@@ -109,10 +112,11 @@ type SecurityMaster struct {
 	// is the field this record was MISSING (#640): an issuer-concentration or
 	// issuer-exclusion mandate had nothing on this estate to resolve against,
 	// because the golden record carried sector and asset class and stopped.
-	IssuerID     string
-	CurrencyCode string
-	Description  string
-	AsOf         time.Time
+	IssuerID              string
+	CurrencyCode          string
+	BaseAsset, QuoteAsset string
+	Description           string
+	AsOf                  time.Time
 	// Provenance maps a resolved field name to the vendor that won it.
 	Provenance map[string]string
 }
@@ -183,6 +187,18 @@ func Resolve(records []VendorRecord) (SecurityMaster, []IdentifierConflict) {
 		}
 		if r.AsOf.After(sm.AsOf) {
 			sm.AsOf = r.AsOf
+		}
+	}
+
+	// Resolve the pair only after classification is known. Mixing a base from
+	// one vendor with another vendor's quote fabricates a settlement currency.
+	if sm.AssetClass == "CRYPTO" || sm.AssetClass == "FX" {
+		for _, r := range ranked {
+			if r.AssetClass == sm.AssetClass && r.BaseAsset != "" && r.QuoteAsset != "" && r.BaseAsset != r.QuoteAsset {
+				sm.BaseAsset, sm.QuoteAsset = r.BaseAsset, r.QuoteAsset
+				sm.Provenance["base_asset"], sm.Provenance["quote_asset"] = r.Vendor, r.Vendor
+				break
+			}
 		}
 	}
 

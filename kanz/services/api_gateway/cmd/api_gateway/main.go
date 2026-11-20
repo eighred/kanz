@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -384,13 +385,45 @@ func run() int {
 		return 2
 	}
 	defer bffTLS.close()
+	// All listeners share one fatal latch; losing the private evidence listener
+	// must fail the rollout rather than leave a healthy-looking gateway behind.
+	fatal := lifecycle.NewFatal(stop)
+	var historyServer *http.Server
+	if cfg.HistoryListen != "" {
+		// This is a separate private listener because the public ingress terminates
+		// TLS outside the pod. OMS needs end-to-end confidentiality for its bearer
+		// and retained financial evidence, with its own SVID verified at the peer.
+		source, err := transport.NewSource(ctx, cfg.SPIFFESocket)
+		if err != nil {
+			logger.Error("cash-history mTLS source unavailable", "err", err)
+			return 2
+		}
+		defer func() { _ = source.Close() }()
+		historyServer, err = newOMSHistoryServer(cfg.HistoryListen, router, source)
+		if err != nil {
+			logger.Error("cash-history listener configuration invalid", "err", err)
+			return 2
+		}
+		listener, err := net.Listen("tcp", cfg.HistoryListen)
+		if err != nil {
+			logger.Error("cash-history listener unavailable", "err", err)
+			return 2
+		}
+		tlsListener := tls.NewListener(listener, historyServer.TLSConfig)
+		defer func() { _ = tlsListener.Close() }()
+		go func() {
+			if err := historyServer.Serve(tlsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("cash-history mTLS server failed", "err", err)
+				fatal.Raise(err)
+			}
+		}()
+	}
 
-	// The serve loop is the only thing that can die AFTER startup has completed
+	// A serve loop can die AFTER startup has completed
 	// (rule 6, #266): lifecycle.Fatal lets the goroutine that observes the
 	// failure hand it to run() without an os.Exit of its own, and stop()
 	// cancelling ctx is what makes <-ctx.Done() below the join that guarantees
 	// the write happens-before the read.
-	fatal := lifecycle.NewFatal(stop)
 
 	// READINESS MEANS "THIS GATEWAY CAN AUTHENTICATE SOMEBODY", NOT "THE PORT IS
 	// OPEN" (#457).
@@ -474,8 +507,42 @@ func run() int {
 		}
 		<-bffTLSDone
 	}
+	if historyServer != nil {
+		if err := historyServer.Shutdown(sctx); err != nil {
+			logger.Error("cash-history mTLS shutdown error", "err", err)
+		}
+	}
 
 	return fatal.Code()
+}
+
+func newOMSHistoryServer(addr string, router http.Handler, source transport.Source) (*http.Server, error) {
+	if router == nil || source == nil {
+		return nil, errors.New("cash-history listener requires workload identity and the authenticated gateway router")
+	}
+	omsID, err := transport.ServiceID("kanz-services", "oms")
+	if err != nil {
+		return nil, err
+	}
+	srv := httpserver.New(addr, onlyCashHistory(authz.FromOMSHistoryListener(router)), httpserver.Standard())
+	srv.TLSConfig = transport.ServerTLSConfig(source, transport.AuthorizeServices(omsID))
+	return srv, nil
+}
+
+// onlyCashHistory makes the private mTLS listener a one-route surface even if
+// future gateway grants or routes change. The ordinary router still performs
+// bearer authentication, tenant/portfolio projection and capability checks.
+func onlyCashHistory(next http.Handler) http.Handler {
+	private := http.NewServeMux()
+	private.Handle("GET /v1/portfolios/{id}/cash-commits", next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ServeMux also matches HEAD to GET; this workload is authorized for GET alone.
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		private.ServeHTTP(w, r)
+	})
 }
 
 // buildBus dials the spine and returns the producer the gateway publishes
@@ -826,7 +893,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 // discoverable only by running a gateway with no upstreams and noticing a 404
 // where a 503 belonged.
 func proxyRoles(cfg config.Config) proxy.Roles {
-	return proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
+	return proxy.Roles{Fund: cfg.FundRole, CashHistory: cfg.CashHistoryRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -1100,7 +1167,10 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// It carries Read for the same reason the two above do, and Read is not a
 	// widening: every caller who reaches /v1 at all already holds the baseline role.
 	if cfg.FundRole != "" {
-		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund}
+		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund, authz.CashHistory}
+	}
+	if cfg.CashHistoryRole != "" {
+		grants[cfg.CashHistoryRole] = []authz.Capability{authz.CashHistory}
 	}
 	// THE APPROVER GIVES THE SECOND SIGNATURE (#539, #410 act one) on an act
 	// somebody else proposed. Conditional for the same reason the fund role is —
@@ -1164,7 +1234,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		grants[cfg.LakeSnapshot.CreateRole] = append(grants[cfg.LakeSnapshot.CreateRole], []authz.Capability{authz.LakeSnapshotCreate}...)
 		grants[cfg.LakeSnapshot.ReadRole] = append(grants[cfg.LakeSnapshot.ReadRole], []authz.Capability{authz.LakeSnapshotRead}...)
 	}
-	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired))
+	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired), authz.WithCashHistoryRole(cfg.CashHistoryRole))
 	gwMux.Handle(authz.Read, "GET /v1/permissions", gwMux.Permissions)
 	h.Routes(gwMux)
 	o.Routes(gwMux)

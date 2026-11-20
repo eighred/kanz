@@ -14,6 +14,7 @@
 package authz
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,6 +85,10 @@ const (
 	//
 	// NOT Read, obviously: reading the ledger is Read, and this writes it.
 	Fund Capability = "fund"
+	// CashHistory is the read-only retained accounting evidence OMS needs to
+	// reconcile cash commitments. It is separate from Fund: a service credential
+	// allowed to reconstruct coverage must never be able to post a redemption.
+	CashHistory Capability = "cash-history"
 	// Approve: GIVE THE SECOND SIGNATURE. Sign off an act another person proposed — today a
 	// pricing/compliance override (#410 act one), and by design the order and mandate
 	// approvals that follow (#539).
@@ -257,16 +262,47 @@ type Route struct {
 // handler at registration, so it is not a middleware that a future composition root can
 // leave out of a chain.
 type Mux struct {
-	mfaRequired bool
-	mux         *http.ServeMux
-	grants      Grants
-	routes      []Route
-	recorder    auth.DecisionRecorder
+	cashHistoryRole string
+	mfaRequired     bool
+	mux             *http.ServeMux
+	grants          Grants
+	routes          []Route
+	recorder        auth.DecisionRecorder
 }
 
 type Option func(*Mux)
 
 func WithMFARequired(required bool) Option { return func(m *Mux) { m.mfaRequired = required } }
+
+// WithCashHistoryRole names the dedicated workload bearer. The same token
+// on a public/BFF connection cannot exercise the OMS workload grant.
+func WithCashHistoryRole(role string) Option { return func(m *Mux) { m.cashHistoryRole = role } }
+
+type omsHistoryPeerKey struct{}
+
+// FromOMSHistoryListener marks requests accepted by the listener whose TLS
+// peer policy requires the OMS SVID. No HTTP header sets this context value.
+func FromOMSHistoryListener(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), omsHistoryPeerKey{}, true)))
+	})
+}
+
+func (m *Mux) requestGrant(r *http.Request, p *middleware.Principal, cap Capability) (role string, allowed, workload bool) {
+	if cap != CashHistory {
+		role, allowed = m.grants.grantingRole(p.Roles, cap)
+		return
+	}
+	if r.Context().Value(omsHistoryPeerKey{}) == true {
+		role = m.cashHistoryRole
+		allowed = role != "" && p.HasRole(role) && m.grants.Allows([]string{role}, CashHistory)
+		return role, allowed, allowed
+	}
+	// Human readers reach this financial evidence through their existing Fund
+	// authorization and step-up policy, including on browser workload connections.
+	role, allowed = m.grants.grantingRole(p.Roles, Fund)
+	return role, allowed && m.grants.Allows([]string{role}, CashHistory), false
+}
 
 // NewMux returns a Mux enforcing grants and recording every decision it makes.
 //
@@ -333,8 +369,8 @@ func (m *Mux) require(cap Capability, pattern string, next http.HandlerFunc) htt
 			forbidden(w)
 			return
 		}
-		role, allowed := m.grants.grantingRole(p.Roles, cap)
-		if allowed && cap != Read && (m.mfaRequired || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
+		role, allowed, workload := m.requestGrant(r, p, cap)
+		if allowed && cap != Read && ((m.mfaRequired && !workload) || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
 			m.record(r, p, cap, pattern, auth.Decision{Reason: "recent WebAuthn MFA required"})
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)

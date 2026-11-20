@@ -72,6 +72,42 @@ func cashEntry(id, portfolio, account, ccy string, amount int64) *ledger.Event {
 	}
 }
 
+func TestAnnounce_AccountAndPortfolioUseTheAnnouncedCutoff(t *testing.T) {
+	pub := &capturingPublisher{}
+	a, st := announcerOver(t, pub)
+	ctx := foldCtx()
+	at := a.now()
+	opening := cashEntry("cutoff:opening", "PF1", "account-a", "USD", 250)
+	future := cashEntry("cutoff:future", "PF1", "account-a", "USD", 100)
+	future.Effective = at.Add(time.Hour)
+	for _, e := range []*ledger.Event{opening, future} {
+		if err := st.Append(ctx, e, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		at   time.Time
+		want int64
+	}{{at, 250}, {future.Effective, 350}} {
+		calls := 0
+		a.now = func() time.Time { calls++; return tc.at }
+		if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
+			t.Fatal(err)
+		}
+		msg := pub.last()
+		if calls != 1 || !msg.GetAsOf().AsTime().Equal(tc.at) {
+			t.Fatalf("cash announcement did not freeze its cutoff: calls=%d as_of=%v", calls, msg.GetAsOf())
+		}
+		if got := dec.FromProto(msg.GetTotal()); got.Cmp(big.NewRat(tc.want, 1)) != 0 {
+			t.Fatalf("total=%s want=%d", got, tc.want)
+		}
+		accounts := msg.GetByVenueAccount()
+		if len(accounts) != 1 || dec.FromProto(accounts[0].GetAmount()).Cmp(big.NewRat(tc.want, 1)) != 0 {
+			t.Fatalf("account cash disagrees with total: %v", accounts)
+		}
+	}
+}
+
 func TestAnnounce_PublishesTheSpendableTotal(t *testing.T) {
 	pub := &capturingPublisher{}
 	a, st := announcerOver(t, pub)

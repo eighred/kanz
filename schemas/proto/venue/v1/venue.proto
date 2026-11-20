@@ -139,6 +139,55 @@ service VenueAdapterService {
   // this is a read, and it is the read an operator most needs while the platform
   // is stopped — the same boundary CancelOrder sits on.
   rpc QueryOrder(QueryOrderRequest) returns (QueryOrderResponse);
+
+  // ReadCapitalEvidence reports exchange instrument metadata and the account's
+  // CURRENT fee observation. Neither is an approved maximum for a future fill.
+  // OMS must keep admission closed until a separate approved maximum authority
+  // covers the exact account, symbol, order regime and fee currencies.
+  rpc ReadCapitalEvidence(ReadCapitalEvidenceRequest) returns (ReadCapitalEvidenceResponse);
+}
+
+message ReadCapitalEvidenceRequest {
+  string instrument_id = 1;
+  string venue_account_id = 2;
+}
+
+message SourceVersion {
+  string source = 1;
+  // Content digest of the observed exchange response. A digest identifies an
+  // observation; it is not a promise that rates cannot change after this read.
+  string content_sha256 = 2;
+  int64 observed_at_unix_millis = 3;
+}
+
+message CurrentVenueFee {
+  // Exchange rate components are kept separate: Binance standard, special and
+  // tax rates cannot be represented by a single maker/taker pair.
+  repeated FeeRateComponent components = 1;
+  string fee_currency_mode = 2;
+  string discount_asset = 3;
+  SourceVersion source_version = 4;
+}
+
+message FeeRateComponent {
+  string name = 1;
+  // Exact decimal strings preserve the exchange representation. No component
+  // or sum is an approved ceiling for the life of an outstanding order.
+  string maker_rate = 2;
+  string taker_rate = 3;
+  string buyer_rate = 4;
+  string seller_rate = 5;
+}
+
+message ReadCapitalEvidenceResponse {
+  string venue_symbol = 1;
+  string base_asset = 2;
+  string quote_asset = 3;
+  string trading_state = 4;
+  SourceVersion settlement_source_version = 5;
+  CurrentVenueFee current_fee = 6;
+  // There is deliberately no approved_maximum_fee field here. That is an
+  // independently approved financial policy, never an exchange observation.
 }
 
 message DescribeRequest {}

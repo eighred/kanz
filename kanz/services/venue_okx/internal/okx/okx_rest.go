@@ -3,6 +3,8 @@ package okx
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	transporterr "github.com/eighred/kanz/internal/venueadapter/transport_error"
 )
@@ -407,14 +410,68 @@ func (c *okxREST) tickerPrice(ctx context.Context, instID string) (string, error
 	return out.Data[0].Last, nil
 }
 
+// exchangeInstrument reads OKX's public instrument catalogue for this spot
+// symbol. The adapter refuses to claim a settlement currency from its local map.
+func (c *okxREST) exchangeInstrument(ctx context.Context, instID string) (execution.ExchangeInstrument, error) {
+	if !c.buckets.allow(familyUnverified, 1) {
+		c.onThrottle()
+		return execution.ExchangeInstrument{}, ErrRateLimited
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/api/v5/public/instruments?instType=SPOT&instId="+url.QueryEscape(instID), nil)
+	if err != nil {
+		return execution.ExchangeInstrument{}, transporterr.Redact(err)
+	}
+	raw, err := c.readResponse(req, true)
+	if err != nil {
+		return execution.ExchangeInstrument{}, err
+	}
+	var out struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			InstID   string `json:"instId"`
+			InstType string `json:"instType"`
+			Base     string `json:"baseCcy"`
+			Quote    string `json:"quoteCcy"`
+			State    string `json:"state"`
+			GroupID  string `json:"groupId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return execution.ExchangeInstrument{}, fmt.Errorf("okx: decode instruments: %w", err)
+	}
+	if out.Code != "0" {
+		return execution.ExchangeInstrument{}, &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+	}
+	if len(out.Data) != 1 || out.Data[0].InstID != instID || out.Data[0].InstType != "SPOT" {
+		return execution.ExchangeInstrument{}, fmt.Errorf("okx: instruments did not identify exactly spot %q", instID)
+	}
+	in := out.Data[0]
+	digest := sha256.Sum256(raw)
+	return execution.ExchangeInstrument{Symbol: in.InstID, Base: in.Base, Quote: in.Quote, State: in.State, FeeGroup: in.GroupID,
+		Digest: hex.EncodeToString(digest[:]), ObservedAtUnixMillis: c.now().UnixMilli()}, nil
+}
+
 // do executes a request and returns the body for any <500 status.
 func (c *okxREST) do(req *http.Request) ([]byte, error) {
+	return c.readResponse(req, false)
+}
+
+// Financial source digests require a successful response in its entirety.
+// Order endpoints retain their existing decoding of typed 4xx business errors.
+func (c *okxREST) readResponse(req *http.Request, capitalEvidence bool) ([]byte, error) {
 	resp, err := c.httpc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("okx: send REST request: %w", transporterr.Redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	const maxResponse = 1 << 20
+	limit := int64(maxResponse)
+	if capitalEvidence {
+		limit++
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return nil, fmt.Errorf("okx: read REST response: %w", transporterr.Redact(err))
 	}
@@ -426,6 +483,9 @@ func (c *okxREST) do(req *http.Request) ([]byte, error) {
 	}
 	if resp.StatusCode >= 500 {
 		return nil, fmt.Errorf("okx: %s: status %d", req.URL.Path, resp.StatusCode)
+	}
+	if capitalEvidence && (resp.StatusCode != http.StatusOK || len(raw) > maxResponse) {
+		return nil, fmt.Errorf("okx: incomplete or unsuccessful capital evidence response (status %d)", resp.StatusCode)
 	}
 	return raw, nil
 }
@@ -450,7 +510,7 @@ func (c *okxREST) signedRequest(ctx context.Context, method, requestPath string,
 // rather than repeating the header construction, because a second copy of an
 // HMAC preamble is a second place for the demo-trading header to be forgotten,
 // and an unmarked request at OKX is a LIVE one.
-func (c *okxREST) signedRequestRaw(ctx context.Context, method, requestPath string, bodyBytes []byte) ([]byte, error) {
+func (c *okxREST) newSignedRequest(ctx context.Context, method, requestPath string, bodyBytes []byte) (*http.Request, error) {
 	ts := c.now()
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+requestPath, bytes.NewReader(bodyBytes))
@@ -462,6 +522,14 @@ func (c *okxREST) signedRequestRaw(ctx context.Context, method, requestPath stri
 		// Refuse to send rather than send unmarked. An unmarked request is a LIVE
 		// request at OKX, so "we could not tell which book this was for" must never
 		// resolve to the one that spends real money.
+		return nil, err
+	}
+	return req, nil
+}
+
+func (c *okxREST) signedRequestRaw(ctx context.Context, method, requestPath string, bodyBytes []byte) ([]byte, error) {
+	req, err := c.newSignedRequest(ctx, method, requestPath, bodyBytes)
+	if err != nil {
 		return nil, err
 	}
 

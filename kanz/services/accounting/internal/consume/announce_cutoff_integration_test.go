@@ -16,6 +16,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/consume"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"google.golang.org/protobuf/proto"
 )
 
 type cutoffPublisher struct{}
@@ -43,9 +44,14 @@ func TestPostgresCashAnnouncementSharesTheEffectiveCutoffAndCommit(t *testing.T)
 			Cash: amount, CashCurrency: currency, Effective: effective, Knowledge: at}
 	}
 	ctx = bus.WithTraceContext(bus.WithCausationID(bus.WithCorrelationID(bus.WithTenantID(ctx, "cutoff-acme"), "cutoff-corr"), "cutoff-cause"), "cutoff-trace")
+	// Without an independently attributable fill, this trade will make debit
+	// coverage incomplete only when its economic date enters the balance.
+	futureTrade := entry("tomorrow", "USD", big.NewRat(25, 1), at.Add(24*time.Hour))
+	futureTrade.Type, futureTrade.InstrumentID, futureTrade.SourceRef = ledger.EntryTrade, "SYN", "late-venue-ref"
+	futureTrade.Quantity, futureTrade.Price = big.NewRat(-1, 1), big.NewRat(25, 1)
 	for _, e := range []*ledger.Event{
 		entry("today", "USD", big.NewRat(100, 1), at),
-		entry("tomorrow", "USD", big.NewRat(25, 1), at.Add(24*time.Hour)),
+		futureTrade,
 		entry("future-foreign", "EUR", big.NewRat(-25, 1), at.Add(time.Microsecond)),
 	} {
 		if err := st.Append(ctx, e, nil); err != nil {
@@ -89,6 +95,20 @@ func TestPostgresCashAnnouncementSharesTheEffectiveCutoffAndCommit(t *testing.T)
 		t.Fatalf("metadata or coverage used a different cutoff: %v", msg)
 	}
 
+	coverage := msg.GetCashCommit()
+	if coverage.GetRevision() != 1 || !coverage.GetComplete() || coverage.GetUnattributedEntries() != 0 {
+		t.Fatalf("sealed cash proof used a different cutoff: %v", coverage)
+	}
+	checkHistory := func() {
+		t.Helper()
+		page, err := st.ReadCashCommits(ctx, "PF-cutoff", "USD", 0, 0, 1)
+		var saved accountingpb.PortfolioCashBalance
+		if err != nil || page.Through != 1 || len(page.Records) != 1 || proto.Unmarshal(page.Records[0].Payload, &saved) != nil || !proto.Equal(msg, &saved) {
+			t.Fatalf("retained cash revision differs from committed outbox: %v", err)
+		}
+	}
+	checkHistory()
+
 	// Both readers must be tenant-scoped; a second real tenant cannot discover
 	// either the journal or its derived outbox FACT under the same portfolio id.
 	otherPool, err := pg.NewTenantPool(ctx, dsn, "cutoff-other")
@@ -127,6 +147,7 @@ func TestPostgresCashAnnouncementSharesTheEffectiveCutoffAndCommit(t *testing.T)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("append=%v, want %q refusal", err, tc.want)
 			}
+			checkHistory()
 			journal, err := st.Journal(ctx, "PF-cutoff")
 			if err != nil || len(journal) != 4 {
 				t.Fatalf("refused INSERT committed: journal=%v err=%v", journal, err)

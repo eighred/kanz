@@ -213,6 +213,8 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		"instrument_id": sm.InstrumentID,
 		"asset_class":   sm.AssetClass,
 		"currency_code": sm.CurrencyCode,
+		"base_asset":    sm.BaseAsset,
+		"quote_asset":   sm.QuoteAsset,
 		"description":   sm.Description,
 		"issuer_id":     sm.IssuerID,
 		"sector": map[string]string{
