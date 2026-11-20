@@ -14,11 +14,12 @@ import (
 // DatedResult describes what the recorded comparison establishes for one UTC close.
 // A historical lookup also returns the digest of the specific verified signed revision.
 type DatedResult struct {
-	State                 string
-	Reason                string
-	StatementID           string
-	SignedStatementSHA256 string
-	Run                   Run
+	AccountAssignmentVerified bool
+	State                     string
+	Reason                    string
+	StatementID               string
+	SignedStatementSHA256     string
+	Run                       Run
 }
 
 func (p TransactionComparison) matches(stmt Statement, outcome Outcome, prefix int64) bool {
@@ -93,11 +94,13 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
         SELECT * FROM candidates ORDER BY compared DESC,
             CASE WHEN compared THEN (book_basis->>'journal_position')::bigint END DESC NULLS LAST,
             CASE WHEN compared THEN signed_statement_sha256 IS NOT NULL END DESC,
+            CASE WHEN compared THEN book_basis->'assignments' IS NOT NULL END DESC,
+            CASE WHEN compared AND book_basis->'assignments' IS NOT NULL THEN completed_at END DESC NULLS LAST,
             CASE WHEN NOT compared THEN completed_at END DESC NULLS LAST
         FETCH FIRST 1 ROW WITH TIES
     ) SELECT run_id,outcome,completed_at,book_basis,signed_statement_sha256,
         (SELECT bool_and(values_verified) AND count(DISTINCT (outcome,tolerance,signed_statement_sha256,book_basis->>'mode',book_basis->'accounts'->$2))=1
-          AND count(DISTINCT book_basis->'transactions')<=1 FROM best)
+          AND count(DISTINCT book_basis->'transactions')<=1 AND count(DISTINCT book_basis->'assignments')<=1 FROM best)
         FROM best ORDER BY (book_basis->'transactions' IS NOT NULL) DESC,completed_at DESC,run_id LIMIT 1`
 	var run Run
 	var outcome string
@@ -125,6 +128,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 	if !consistent || run.Outcome == OutcomeUnspecified || (run.Outcome == OutcomeNoStatement && id != "") || run.RunID == "" || run.CompletedAt.IsZero() {
 		return DatedResult{State: "unknown"}, nil
 	}
+	verifiedAssignment := false
 	if verifying(run) {
 		if len(binding) != sha256.Size || run.Basis == nil || run.Basis.JournalPosition < 0 {
 			return DatedResult{State: "unknown"}, nil
@@ -162,7 +166,14 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		if proof := run.Basis.Transactions; proof != nil && !proof.matches(materialized, run.Outcome, run.Basis.JournalPosition) {
 			return DatedResult{State: "unknown"}, nil
 		}
+		verifiedAssignment, err = confirmRunAssignments(ctx, tx, subject, run.Basis, false)
+		if errors.Is(err, ErrUnprovenAssignment) {
+			return DatedResult{State: "pending", Reason: "assignment_changed", StatementID: id}, nil
+		}
+		if err != nil {
+			return DatedResult{}, err
+		}
 		run.compared = nil
 	}
-	return DatedResult{State: "recorded", StatementID: id, Run: run}, nil
+	return DatedResult{State: "recorded", StatementID: id, Run: run, AccountAssignmentVerified: verifiedAssignment}, nil
 }
