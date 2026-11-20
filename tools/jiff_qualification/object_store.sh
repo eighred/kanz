@@ -3,6 +3,8 @@ set -eu
 umask 077
 export HOME=/work/home CARGO_HOME=/work/cargo CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 CARGO_PROFILE_TEST_DEBUG=0
 owner=/work/kanz/rust
+mode=$2
+case "$mode" in upstream|published) ;; *) exit 2 ;; esac
 case "$1" in
 fetch)
     mkdir -p "$HOME" "$CARGO_HOME" /work/source "$owner"
@@ -19,7 +21,7 @@ EOF
     # Seed the consumer from its real lock. Cargo records the new source in this disposable copy.
     cp "$owner/Cargo.lock" /work/kanz.lock
     cargo fetch --manifest-path "$owner/Cargo.toml"
-    python3 -B /inputs/lake_sources.py
+    python3 -B /inputs/lake_sources.py "$mode"
     cargo fetch --manifest-path "$owner/Cargo.toml"
     cargo fetch --manifest-path /work/source/Cargo.toml
     ;;
@@ -40,7 +42,13 @@ test)
     cp /inputs/object_metadata.rs "$owner/services/lake_snapshot/tests/object_metadata.rs"
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test object_metadata \
         > /work/metadata.txt
-    PYTHONPATH=/inputs python3 -B - <<'PY'
+    if test "$mode" = published; then
+        cp /inputs/shared_arrow.rs "$owner/services/lake_snapshot/tests/shared_arrow.rs"
+        cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test shared_arrow \
+            > /work/shared-arrow.txt
+    fi
+    PYTHONPATH=/inputs python3 -B - "$mode" <<'PY'
+import sys
 from lake_sources import verify
 from pathlib import Path
 
@@ -81,7 +89,13 @@ if not expected_duration.issubset(passed_duration):
 
 lines = Path("/work/worker.jsonl").read_text().splitlines()
 check_summary(lines)
-verify(lines)
+mode = sys.argv[1]
+verify(lines, mode)
+if mode == "published":
+    bridge = Path("/work/shared-arrow.txt").read_text().splitlines()
+    check_summary(bridge)
+    if "test both_arrow_versions_share_the_published_temporal_type ... ok" not in bridge:
+        raise ValueError("the cross-version published type test did not run")
 zone = Path("/work/named_zone.txt").read_text().splitlines()
 check_summary(zone)
 if "test named_zone_timestamps ... ok" not in zone:
