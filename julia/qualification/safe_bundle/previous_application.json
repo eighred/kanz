@@ -1,0 +1,32 @@
+{
+  "config": "sha256:b9185b3afd799026f49df5b320a4b1afb2eacf50083dc509c364a8c274e79c73",
+  "image": "sha256:b1b509e2cd382c18ed9b367cc40384c2bc0bd7a3f807f7f1098c42bda731ecd8",
+  "manifest": "sha256:41122f1b949400ed98448ccb462743045f393c94547c04d585893e1ee31eb849",
+  "native": {
+    "bin/curve-worker": "b4a2f6eb57e877245ecec2bcbf9278b0f80d3b9dd390f3c1a19d86ed5550743b",
+    "bin/julia": "6cbeea7d1416fb31952325b75f88c83173d939263767adc43e7b43c6de48ab03",
+    "lib/julia/libLLVM.so.20.1jl": "af9c893f4421a12015a7129fddc9410485b661178598aa5b8be3853e0a1720bc",
+    "lib/julia/libatomic.so.1.2.0": "4f1533a95d6cd0805f45a9f7d5e75f5bd3b36f99b6678acbf9e9bd426f01b64e",
+    "lib/julia/libdSFMT.so": "38ea588f3ad34b56c56f66ca01177da05104cca98a48b14ab102e303f616f9ec",
+    "lib/julia/libgcc_s.so.1": "3245d1a9678ee25261583f1f488451875dfbf68f178f12c865e4b938789a5f7f",
+    "lib/julia/libgfortran.so.5.0.0": "724551496c65670801ec17c0e16df06555204ab3af458044c184f68b520f55ba",
+    "lib/julia/libgmp.so.10.5.0": "1fc3c46e660098636b5ee816cddb41ad2ee5865ec76ff3f8011afe9b8f693376",
+    "lib/julia/libgmpxx.so.4.7.0": "8e380d216e7a53bfb88056e8fbe66d24491f1ca1869844b32cd82a8a479c021c",
+    "lib/julia/libgomp.so.1.0.0": "2f7181aca6d2de9103c2f0e63f667305fa0041b3ed589fd10e555826e3e6b55f",
+    "lib/julia/libjulia-codegen.so.1.13.3": "92c5180315b313c3bac505a4425e69350299e25736c5f058ae5e8f22cc9e4d48",
+    "lib/julia/libjulia-internal.so.1.13.3": "661ae03e0685b66d5f4155bc040cf59986d18bf73dc9175bee92bc311d6c3b03",
+    "lib/julia/libmpfr.so.6.2.2": "6f7f0ab9c643d52a26d4f5ba84b6850ab397f71e32f87e1da46566801d8c99d2",
+    "lib/julia/libopenlibm.so.4.0": "38395d1ab83bf1ef2a42ffd97ea7c00274c3da9a75c5db9f03d6c3003fb17751",
+    "lib/julia/libpcre2-8.so.0.16.1": "041e83a9aa6adee377ec80f12044036b6f53c6082297d8e639a210e3dbfaf262",
+    "lib/julia/libquadmath.so.0.0.0": "93ee7d39f4b08286d721fba2d3732e425df062a1b781c2bd4f2d29cefe23e228",
+    "lib/julia/libssp.so.0.0.0": "354a26354185d9487344b5189b31e9014d5104a38fd084d8ef33457f16a40b47",
+    "lib/julia/libstdc++.so.6.0.34": "a6cdcc137df8cca9baa134d9ea7f06cd8aca070bd029111d6264f86f100005be",
+    "lib/julia/libunwind.so.8.2.0": "25d28f27a294aead743bb2a30abdef445af2550f8b4b2608165b0fd7b86bdcc7",
+    "lib/julia/libuv.so.2.0.0": "d9923e2bf93475010c5c944c19999347c493f606308f75901fa4668be29cdeb4",
+    "lib/julia/libz.so.1.3.2": "d3e3523af664be8ae1c883f3d353fcad2077e16b29a58c9282c57d9262cf680a",
+    "lib/julia/libzstd.so.1.5.7": "0e7561dcc485c2af428021451827a00836cd261b38a76bcfbffe7f7c77cc5993",
+    "lib/julia/sys.so": "5a21e83abc33bf7ec41d34c53611359553092ba942d1544761071a83b0598d82",
+    "lib/libjulia.so.1.13.3": "22e2e6607c29f27077d394f4a33c3594fbe7ea4ccfe6e2705c70a559155b6221"
+  },
+  "source": "311c0d56efaa7a39f4aeee43332ce05478c3646d"
+}

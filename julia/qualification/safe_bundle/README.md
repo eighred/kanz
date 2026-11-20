@@ -1,0 +1,52 @@
+# Safe-trimmed calibration application
+
+This local candidate runs the existing CurveKernel and Worker through a single binary protobuf stdin/stdout exchange. The compiler consumes the prepared application project, including the ProtoBuf sources and the contracts generated from the repository schemas. The Go risk-engine continues to use its configured interpreter transport. This candidate has no deployment, promotion or execution authority.
+
+## Compile
+
+The build-only JuliaC environment is independent of the application environment. Instantiate `tools/Project.toml` using its checked-in manifest. JuliaC 0.3.12 is pinned to registered Git tree `49a147f54e5f9ad46104834de93648dd9ef012f0` from commit `98e82861ff28c05d4eeabbf9de67c08f0bd97e80`. Its build-only ObjectFile 0.5.1, StructIO 0.3.1 and LIEF_Patchelf_jll 1.0.0+1 trees are recorded in that manifest. [Upstream bundling implementation](https://github.com/JuliaLang/JuliaC.jl/blob/98e82861ff28c05d4eeabbf9de67c08f0bd97e80/src/bundling.jl)
+
+Supply a staged Julia 1.13.3 compiler, a prepared worker project with `src/`, generated `gen/` and the selected ProtoBuf path in its manifest, and an unused output directory. The worker project and tool project must both be available to the build machine. The compiler staging owner supplies the reviewed PCRE2 and libstdc++ bytes. Set `JULIA_PKG_OFFLINE=true` and isolate the build after acquiring the pinned build dependencies. From the repository root run:
+
+```sh
+"$JULIA" --startup-file=no --history-file=no --project=julia/qualification/safe_bundle/tools \
+  julia/qualification/safe_bundle/build.jl "$PREPARED_WORKER_PROJECT" "$OUTPUT"
+```
+
+`build.jl` uses JuliaC's upstream compile, link and bundle phases. The compiler must pass `--trim=safe` with the generic CPU target. The upstream bundler selects the shipped libraries. `$OUTPUT/build.toml` records the object archive, linked executable, tool manifest, generated contract and implementation hashes. Preserve this receipt beside the normalized archive of `$OUTPUT/bundle`.
+
+For independent relinking, supply the previous compiler output and the SHA-256 of its trusted build receipt. This mode rechecks the source inputs, retained `worker.o.a` and final executable digest. The fresh compile path uses a stable source mount. Two independent compilations of matching inputs can still emit different object bytes with this Julia release. [Upstream determinism investigation](https://github.com/JuliaLang/julia/issues/63149)
+
+```sh
+"$JULIA" --startup-file=no --history-file=no --project=julia/qualification/safe_bundle/tools \
+  julia/qualification/safe_bundle/build.jl "$PREPARED_WORKER_PROJECT" "$REPLAY" "$OUTPUT" "$TRUSTED_RECEIPT_SHA256"
+```
+
+## Verify the packaged bytes
+
+Use the pinned nonroot base and the local-only [application image recipe](https://github.com/eighred/kanz/blob/0922f9dba4ba37a1a94016c11291803b5741cd83/julia/qualification/application_bundle/Dockerfile). Stage the bundle as `bundle.tar` with ownership 65532:65532, bind the build revision through the OCI revision label and retain the exact image ID. On Linux the archive command is:
+
+```sh
+tar --sort=name --mtime=@0 --owner=65532 --group=65532 --numeric-owner --format=gnu \
+  -C "$OUTPUT/bundle" -cf "$CONTEXT/bundle.tar" .
+docker build --pull=false --network=none --platform=linux/amd64 \
+  --label "org.eighred.calibration.test-bundle-sha256=$(sha256sum "$CONTEXT/bundle.tar" | cut -d' ' -f1)" \
+  --label "org.opencontainers.image.revision=$SOURCE" --iidfile "$RECEIPTS/image.id" "$CONTEXT"
+```
+
+Export the filesystem of an unstarted container created from that immutable image using `docker export`. Remove the owned container after export. On Linux with `readelf`, compare the exported application files and links with the build archive, inspect every application and base ELF, and compare the application against the [previous 24-ELF candidate](https://github.com/eighred/kanz/issues/1536#issuecomment-7023736243). The recorded profile checks the reviewed libstdc++ replacement, removal of the compiler, interpreter and sysimage, and addition of OpenBLAS and its trampoline. Consumer header applicability and remaining native advisory coverage require separate evidence.
+
+```sh
+python3 -B julia/qualification/safe_bundle/inventory.py \
+  "$CONTEXT/bundle.tar" "$RECEIPTS/rootfs.tar" "$RECEIPTS/inventory.json"
+python3 -B -m unittest discover -s julia/qualification/safe_bundle -p test_inventory.py
+```
+
+With the generated Go SDK and local container engine, run the tracked direct wire oracle and real Go supervisor. Pass the image ID produced by `docker image inspect --format '{{.Id}}'` and the revision label on that image. The qualifier checks every base layer against the pinned base, then runs the 13 cases directly and through `shadowprocess.Run`. The supervisor checks the actual launcher SHA-256, deadline, child cleanup and scratch cleanup. The only additional mount for this second pass is the read-only test executable.
+
+```sh
+python3 -B julia/qualification/safe_bundle/qualify.py \
+  "$IMAGE_ID" "$SOURCE" "$RECEIPTS/inventory.json" "$RECEIPTS/runtime.json"
+```
+
+The source for the local upstream base and the pending Eighred mirror are tracked in [#1845](https://github.com/eighred/kanz/pull/1845). Signing, registry publication, deployment, production rollback and regulated model promotion have their own acceptance requirements. [#1536](https://github.com/eighred/kanz/issues/1536)
