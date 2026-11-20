@@ -71,6 +71,16 @@ The runner builds the executables once and starts a second fresh PostgreSQL inst
 
 A third disposable database uses the separately signed fixture pair in `testdata/instrument_units/`. Its public authority applies only to that database. Upgrade the signed importer and accounting readers before issuing statements with the additive `quantityInInstrumentUnits` field. Older strict Protobuf JSON parsers reject that field. Legacy signed files and saved completions keep their original interpretation. The source explicitly identifies each trade quantity as the instrument's natural units. In the first retained comparison the book shows 10.5 SYN and the statement shows 9.5 SYN for `external-7`. The correction shows 10.5 on both sides. The browser downloads both historical receipts. The runner binds them to the database run IDs and statement digests and includes them under `customer_downloads` in the optional receipt file.
 
+### Review an execution quantity discrepancy
+
+Apply accounting migration 0031 before starting the new reader or writer. Grant the accounting writer SELECT and INSERT on `custody_execution_quantity_observations` and USAGE on its identity sequence. A separate accounting reader needs SELECT. Keep the statement source login limited to its existing intake grants.
+
+For a signed single-account scope, **Custody breaks** can show a balance discrepancy and a separate row for the executed trade. The trade row identifies its external reference, instrument, measured book and statement quantities, and the run that detected it. A newer signed revision clears that item only when it measures equality for the same attributed execution in the same instrument units. A missing line or an older balances-only statement leaves it open. A change in account authority requires separate review.
+
+The pilot receipt exposes the working count under `outstanding_breaks` and the original completion count under `retained_breaks`. In the quantity fixture, the original working count is two and the sealed balance comparison contains one break. After the signed correction both counts are zero. The original download still describes the earlier discrepancy.
+
+If a later business day has already closed when a corrective statement arrives, the open trade row identifies the signed revision awaiting historical review. Keep the original and corrective statement IDs with the open item. Applying that late correction safely remains tracked in #1326.
+
 ## Verification
 
 With a fresh provisioned fixture database, set `TEST_CUSTODY_BATCH_DATABASE_URL` to its dedicated source role and `TEST_POSTGRES_URL` to its separate restricted accounting role. In this directory run `go test -p 1 -run TestSignedPilotCommandRestricted -count=1 -v .`. The test starts its own loopback JetStream and reads both retained publications back through the accounting consumer. Run `TestSignedCustodyBatchReconciliationOnRealSpine` in `../../internal/custody` against a **separate disposable migration-test database** and a bootstrapped `TEST_NATS_URL`. That suite resets accounting tables. It covers booking, comparison, immutable revision conflicts, publication recovery and cross-tenant refusal.
