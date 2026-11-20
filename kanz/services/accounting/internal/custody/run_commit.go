@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -303,6 +304,14 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		run.observedMissing = false
 	}
 	if verifying(run) {
+		if run.Basis != nil && run.Basis.Assignments != nil {
+			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended('custody-assignment-tenant:' || app_current_tenant(),0))"); err != nil {
+				return Run{}, err
+			}
+			if _, err := confirmRunAssignments(ctx, tx, run.Subject, run.Basis, false); err != nil {
+				return Run{}, err
+			}
+		}
 		// The transaction already owns the pair lock. A later clean run is as
 		// authoritative as a later break and must prevent historical reopening.
 		var later bool
@@ -340,9 +349,17 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			}
 		}
 		if run.Basis != nil {
+			var assignmentJSON string
+			if run.Basis.Assignments != nil {
+				value, err := json.Marshal(assignmentsForCustodian(run.Basis.Assignments, run.Subject.CustodianID))
+				if err != nil {
+					return Run{}, err
+				}
+				assignmentJSON = string(value)
+			}
 			if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_break_scope',
-				jsonb_build_object('mode',$1::text,'accounts',$2::text[])::text,true)`,
-				run.Basis.Mode, run.Basis.Accounts[run.Subject.CustodianID]); err != nil {
+                jsonb_strip_nulls(jsonb_build_object('mode',$1::text,'accounts',$2::text[],'assignments',NULLIF($3,'')::jsonb))::text,true)`,
+				run.Basis.Mode, run.Basis.Accounts[run.Subject.CustodianID], assignmentJSON); err != nil {
 				return Run{}, err
 			}
 		}

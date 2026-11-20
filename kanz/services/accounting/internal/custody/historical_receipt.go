@@ -83,8 +83,15 @@ func (p *Postgres) HistoricalReceipt(ctx context.Context, subject Subject, accou
 	if !bytes.Equal(digest, binding) || (basis.Transactions != nil && !basis.Transactions.matches(source, run.Outcome, basis.JournalPosition)) || !receiptFiguresMatch(run, source) || !quantityEvidenceMatches(run, source, basis.Transactions) {
 		return unknown, nil
 	}
+	verifiedAssignment, err := confirmRunAssignments(ctx, tx, subject, basis, true)
+	if errors.Is(err, ErrUnprovenAssignment) {
+		return unknown, nil
+	}
+	if err != nil {
+		return DatedResult{}, err
+	}
 	run.Basis = basis
-	return DatedResult{State: "recorded", StatementID: statementID, Run: run, SignedStatementSHA256: hex.EncodeToString(digest)}, nil
+	return DatedResult{State: "recorded", StatementID: statementID, Run: run, SignedStatementSHA256: hex.EncodeToString(digest), AccountAssignmentVerified: verifiedAssignment}, nil
 }
 
 func receiptFiguresMatch(run Run, source Statement) bool {
