@@ -6,11 +6,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func scopedClaimFacts(t *testing.T, st *orderpb.OrderState) []outbox.Record {
@@ -63,7 +65,14 @@ func TestScopedClaimsSeparateAccountsAndProtectRollingWriters(t *testing.T) {
 		if err := proto.Unmarshal(changed[0].Payload, &event); err != nil {
 			t.Fatal(err)
 		}
+		restarted := NewPostgres(pool)
+		if err := restarted.VerifyAppliedFill(ctx, event.Fill); err != nil {
+			t.Fatalf("equal replay rejected after restart: %v", err)
+		}
 		event.Fill.Fee = &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 1}, CurrencyCode: "USD"}
+		if err := restarted.VerifyAppliedFill(ctx, event.Fill); !errors.Is(err, fillfact.ErrExecutionIdentityConflict) {
+			t.Fatalf("conflicting replay before aggregate fold: %v", err)
+		}
 		changed[0].Payload, err = proto.Marshal(&event)
 		if err != nil {
 			t.Fatal(err)
@@ -89,8 +98,9 @@ func TestScopedClaimDoesNotRenameLegacyBookedExecution(t *testing.T) {
 	ctx := context.Background()
 	s := NewPostgres(pool)
 	for _, id := range []string{"legacy-order", "another-order"} {
-		st := state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED)
+		st := state(id, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED)
 		st.VenueAccountId = "account"
+		st.VenueAckAt = timestamppb.Now()
 		if err := s.Create(ctx, st, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -103,11 +113,25 @@ func TestScopedClaimDoesNotRenameLegacyBookedExecution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = s.Save(ctx, st, version, scopedClaimFacts(t, st), "BTCUSDT-7")
-		want := ErrFillApplied
-		if id == "another-order" {
-			want = fillfact.ErrExecutionIdentityConflict
+		records := scopedClaimFacts(t, st)
+		var event orderpb.OrderFilled
+		if err := proto.Unmarshal(records[0].Payload, &event); err != nil {
+			t.Fatal(err)
 		}
+		if err := NewPostgres(pool).VerifyAppliedFill(ctx, event.Fill); !errors.Is(err, fillfact.ErrExecutionIdentityConflict) {
+			t.Fatalf("%s: unproven historical replay before fold: %v", id, err)
+		}
+		if id == "legacy-order" {
+			restarted := &Service{store: NewPostgres(pool)}
+			err := restarted.adopt(ctx, st, version, execution.OrderView{
+				State: execution.OrderViewPartiallyFilled, Fills: []*orderpb.Fill{event.Fill},
+			})
+			if !errors.Is(err, fillfact.ErrExecutionIdentityConflict) {
+				t.Fatalf("reconciliation accepted an alias without account evidence: %v", err)
+			}
+		}
+		err = s.Save(ctx, st, version, records, "BTCUSDT-7")
+		want := fillfact.ErrExecutionIdentityConflict
 		if !errors.Is(err, want) {
 			t.Fatalf("%s: %v want %v", id, err, want)
 		}

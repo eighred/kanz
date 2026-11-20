@@ -446,7 +446,7 @@ func TestRustRepositoryTransactions(t *testing.T) {
 		if _, e := f.pool.Exec(f.ctx, "INSERT INTO order_fills (tenant_id,order_id,fill_id) VALUES (current_setting('app.tenant_id'),'order','alias')"); e != nil {
 			t.Fatal(e)
 		}
-		expect(t, run(t, f.request(f.candidate(s, x), v, x)), "FillApplied")
+		expect(t, run(t, f.request(f.candidate(s, x), v, x)), "IdentityConflict")
 		if _, e := f.pool.Exec(f.ctx, "INSERT INTO order_fills (tenant_id,order_id,fill_id) VALUES (current_setting('app.tenant_id'),'other','other-alias')"); e != nil {
 			t.Fatal(e)
 		}

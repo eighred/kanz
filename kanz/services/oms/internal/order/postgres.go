@@ -174,6 +174,9 @@ func (p *Postgres) save(ctx context.Context, st *orderpb.OrderState, expectedVer
 			err := tx.QueryRow(ctx, `SELECT order_id FROM order_fills WHERE fill_id=$1`, fillID).Scan(&legacyOrder)
 			if err == nil {
 				if legacyOrder == st.GetOrderId() {
+					if err := verifyDuplicateExecution(ctx, tx, fill); err != nil {
+						return err
+					}
 					return ErrFillApplied
 				}
 				return fmt.Errorf("%w: legacy fill alias belongs to another order", fillfact.ErrExecutionIdentityConflict)

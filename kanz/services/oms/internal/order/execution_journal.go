@@ -71,6 +71,15 @@ func announcedExecution(orderID, fillID string, records []outbox.Record) (*order
 	return found, nil
 }
 
+func (p *Postgres) VerifyAppliedFill(ctx context.Context, fill *orderpb.Fill) error {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	return verifyDuplicateExecution(ctx, tx, fill)
+}
+
 func verifyDuplicateExecution(ctx context.Context, tx pgx.Tx, fill *orderpb.Fill) error {
 	if fill == nil {
 		return nil
@@ -85,8 +94,11 @@ func verifyDuplicateExecution(ctx context.Context, tx pgx.Tx, fill *orderpb.Fill
 		err = tx.QueryRow(ctx, `SELECT fill FROM order_executions WHERE order_id=$1 AND fill_id=$2`, fill.GetOrderId(), fill.GetFillId()).Scan(&data)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	} // Legacy claim: recovery still requires independent evidence.
+		if fillfact.ExecutionKey(fill) != fill.GetFillId() {
+			return fmt.Errorf("%w: account-scoped replay has no matching journal evidence", fillfact.ErrExecutionIdentityConflict)
+		}
+		return nil // A historical unscoped claim can only answer the original unscoped contract.
+	}
 	if err != nil {
 		return err
 	}

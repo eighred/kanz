@@ -183,7 +183,13 @@ async fn duplicate(tx: &Transaction<'_>, fill: Option<&Fill>) -> Result<(), Erro
         )
         .await?
     };
-    let Some(row) = row else { return Ok(()) }; // Existing legacy claim without execution proof.
+    let Some(row) = row else {
+        return if execution_key(fill) == fill.fill_id {
+            Ok(())
+        } else {
+            Err(Error::IdentityConflict)
+        };
+    };
     let raw: Vec<u8> = row.get(0);
     if raw.len() > MAX_BYTES {
         return Err(Error::InvalidInput);
@@ -384,11 +390,11 @@ pub async fn save(
                 )
                 .await?
             {
-                return Err(if row.get::<_, String>(0) == st.order_id {
-                    Error::FillApplied
-                } else {
-                    Error::IdentityConflict
-                });
+                if row.get::<_, String>(0) != st.order_id {
+                    return Err(Error::IdentityConflict);
+                }
+                duplicate(&tx, fill.as_ref().map(|f| &f.0)).await?;
+                return Err(Error::FillApplied);
             }
         }
         let count = claim(&tx, &st.order_id, &key, fill_id).await?;

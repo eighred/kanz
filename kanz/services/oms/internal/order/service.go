@@ -25,6 +25,7 @@ import (
 	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/execution/tca"
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
@@ -3373,7 +3374,13 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 	}
 
 	for _, fill := range view.Fills {
+		if fill.GetOrderId() != st.GetOrderId() {
+			return fmt.Errorf("%w: venue history returned a fill for a different order", fillfact.ErrExecutionIdentityConflict)
+		}
 		if applied[fill.GetFillId()] {
+			if err := s.store.VerifyAppliedFill(ctx, fill); err != nil {
+				return err
+			}
 			// Skipped WITHOUT calling ApplyFill: the aggregate already contains this
 			// fill, so its quantity is already spent out of leaves and offering it
 			// again can only over-fill.

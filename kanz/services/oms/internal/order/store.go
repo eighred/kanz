@@ -182,6 +182,8 @@ type Store interface {
 	// migrations/0013_order_fills.sql carries order_fills_order_idx on
 	// (tenant_id, order_id) for exactly this question.
 	AppliedFills(ctx context.Context, orderID string) (map[string]bool, error)
+	// VerifyAppliedFill checks journal evidence before reconciliation skips a previously claimed alias.
+	VerifyAppliedFill(context.Context, *orderpb.Fill) error
 	// Load returns the current state of one order and its version, or
 	// ErrNotFound. The version is opaque to the caller: its only use is to be
 	// handed back to Save.
@@ -450,7 +452,7 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 	if fillID != "" {
 		if key != fillID {
 			if legacy, exists := m.appliedFills[fillID]; exists {
-				if legacy.orderID == st.GetOrderId() {
+				if legacy.orderID == st.GetOrderId() && fillfact.SameExecution(legacy.fill, fill) {
 					return ErrFillApplied
 				}
 				return fillfact.ErrExecutionIdentityConflict
@@ -458,7 +460,7 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 		} else {
 			for heldKey, claim := range m.appliedFills {
 				if heldKey != fillID && claim.rawID == fillID {
-					return ErrFillApplied
+					return fillfact.ErrExecutionIdentityConflict
 				}
 			}
 		}
@@ -510,6 +512,22 @@ func (m *MemoryStore) AppliedFills(_ context.Context, orderID string) (map[strin
 		}
 	}
 	return out, nil
+}
+
+func (m *MemoryStore) VerifyAppliedFill(_ context.Context, fill *orderpb.Fill) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	claim, ok := m.appliedFills[fillfact.ExecutionKey(fill)]
+	if !ok || claim.orderID != fill.GetOrderId() {
+		return fillfact.ErrExecutionIdentityConflict
+	}
+	if claim.fill == nil && fillfact.ExecutionKey(fill) == fill.GetFillId() {
+		return nil
+	}
+	if !fillfact.SameExecution(claim.fill, fill) {
+		return fillfact.ErrExecutionIdentityConflict
+	}
+	return nil
 }
 
 func (m *MemoryStore) Load(_ context.Context, orderID string) (*orderpb.OrderState, int64, error) {
