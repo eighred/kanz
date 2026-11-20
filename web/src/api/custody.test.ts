@@ -109,6 +109,71 @@ describe('custody response boundary', () => {
     await expect(custody.dated(subject, 'tenant')).rejects.toThrow('verified')
   })
 
+  it('only exports measured same-instrument amounts on a bound saved run', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const digest = 'a'.repeat(64)
+    const base = { ...subject, tenant_id: 'fixture', state: 'recorded', outcome: 'clean', run_id: 'R',
+      completed_at: '2020-02-05T01:00:00Z', statement_id: 'custody-batch.v1.src.r1.' + digest,
+      journal_position: '1', scope_mode: 'declared', transaction_pass: 'ran',
+      statement_reference_count: '4', book_reference_count: '3', unreferenced_book_trades: '0' }
+    const wire = { ...base, signed_statement_sha256: digest, breaks: [] }
+    const amount = (coefficient: string, exponent = 0) => ({ coefficient, exponent })
+    const difference = { external_ref: 'ref', instrument_id: 'SYN', ibor: amount('-9007199254740993', -2),
+      custodian: amount('0'), difference: amount('-9007199254740993', -2) }
+    const section = { compared: 1, unassessed: 2, differences: [difference] }
+    const get = vi.spyOn(api, 'get')
+    const read = () => custody.dated(subject, 'fixture', undefined, 'R')
+    get.mockResolvedValueOnce({ ...wire, execution_quantities: { ...section, actor: 'discard', differences: [
+      { ...difference, price: 999, ibor: { ...difference.ibor, account: 'discard' } },
+    ] } })
+    const result = await read()
+    if (result.state !== 'recorded') throw new Error('recorded result required')
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:fixture')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    downloadCustodyComparison(result)
+    const blob = create.mock.calls[0]?.[0]
+    expect(blob).toBeInstanceOf(Blob)
+    const exported = JSON.parse(await (blob as Blob).text())
+    expect(exported.execution_quantities).toEqual(section)
+    expect(exported.transaction_comparison_basis).toBe('external_reference_membership')
+    get.mockResolvedValueOnce(wire)
+    const previous = await read()
+    expect(previous.state === 'recorded' && previous.historical).not.toHaveProperty('execution_quantities')
+    get.mockResolvedValueOnce({ ...wire, execution_quantities: { compared: 0, unassessed: 0, differences: [] } })
+    const zero = await read()
+    expect(zero.state === 'recorded' && zero.historical?.execution_quantities?.compared).toBe(0)
+    // UTF-8 byte order (Go) and JavaScript UTF-16 string order differ on this pair.
+    const unicode = [{ ...difference, external_ref: '\uE000' }, { ...difference, external_ref: '\u{10000}' }]
+    get.mockResolvedValueOnce({ ...wire, execution_quantities: { compared: 2, unassessed: 0, differences: unicode } })
+    expect((await read()).state).toBe('recorded')
+    for (const bad of [null, {}, { ...section, compared: 1.5 }, { ...section, unassessed: -1 },
+      { ...section, compared: 4294967296 }, { ...section, unassessed: 3 }, { ...section, compared: '1' },
+      { ...section, compared: 0 }, { compared: 2, unassessed: 0, differences: [...unicode].reverse() },
+      { compared: 2, unassessed: 0, differences: [difference, difference] },
+      ...[{ instrument_id: '' }, { external_ref: '' }, { ibor: {} }, { ibor: null }, { custodian: { coefficient: '0' } },
+        { ibor: amount('0', -3) }, { ibor: amount('01') }, { ibor: amount('9223372036854775808') },
+        { ibor: amount('-9223372036854775809') }, { ibor: { coefficient: 10, exponent: 0 } },
+        { ibor: amount('-1', -61) }, { custodian: amount('1', 61) }, { ibor: amount('10', -1) }, { difference: amount('0') }].map(
+        patch => ({ ...section, differences: [{ ...difference, ...patch }] }))]) {
+      get.mockResolvedValueOnce({ ...wire, execution_quantities: bad })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce({ ...wire, statement_reference_count: '1048577', book_reference_count: '1048577',
+      execution_quantities: { compared: 1048577, unassessed: 0, differences: [] } })
+    await expect(read()).rejects.toThrow('verified')
+    get.mockResolvedValueOnce({ ...wire, execution_quantities: { ...section, differences: [{ ...difference, external_ref: '長'.repeat(350000) }] } })
+    await expect(read()).rejects.toThrow('verified')
+    for (const fields of [{ ...base }, { ...subject, tenant_id: 'fixture', state: 'unknown' }]) {
+      get.mockResolvedValueOnce({ ...fields, execution_quantities: section })
+      await expect(custody.dated(subject, 'fixture')).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce({ ...wire, tenant_id: 'foreign', execution_quantities: section })
+    await expect(read()).rejects.toThrow('verified')
+    get.mockResolvedValueOnce({ ...wire, transaction_pass: 'balances_only', execution_quantities: section })
+    await expect(read()).rejects.toThrow('verified')
+  })
+
   it('preserves exact decimal text', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [item], count: 1 })
     expect((await custody.queue()).breaks[0]?.difference).toBe('0.00000001')
