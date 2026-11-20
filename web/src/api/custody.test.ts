@@ -259,3 +259,36 @@ describe('custody response boundary', () => {
     await expect(custody.act(row, decision)).rejects.toThrow('evidence could not be verified')
   })
 })
+
+describe('custody queue pages', () => {
+  it('requests a bounded first page and the opaque continuation, and accepts full legacy output', async () => {
+    const get = vi.spyOn(api, 'get')
+    const signal = new AbortController().signal
+    get.mockResolvedValueOnce({ count: 1, breaks: [item], next_cursor: 'AQ-_9' })
+    const first = await custody.queue(signal)
+    expect(first.nextCursor).toBe('AQ-_9')
+    expect(get).toHaveBeenLastCalledWith('/api/v1/custody/breaks?limit=100', { signal })
+    get.mockResolvedValueOnce({ count: 1, breaks: [item] })
+    expect((await custody.queue(signal, first.nextCursor)).nextCursor).toBeUndefined()
+    expect(get).toHaveBeenLastCalledWith('/api/v1/custody/breaks?limit=100&after=AQ-_9', { signal })
+    const legacy = Array.from({ length: 101 }, (_, i) => ({ ...item, break_id: String(i) }))
+    get.mockResolvedValueOnce({ count: legacy.length, breaks: legacy })
+    const complete = await custody.queue()
+    expect(complete.breaks).toHaveLength(101)
+    expect(complete.nextCursor).toBeUndefined()
+  })
+  it('refuses malformed, excessive or non-progressing continuations', async () => {
+    const get = vi.spyOn(api, 'get')
+    for (const cursor of [null, '', 3, 'bad&after', 'x'.repeat(8193), 'again']) {
+      get.mockResolvedValueOnce({ breaks: [item], count: 1, next_cursor: cursor })
+      await expect(custody.queue(undefined, 'again')).rejects.toThrow('Invalid custody response.')
+    }
+    for (const rows of [[], Array.from({ length: 101 }, () => item)]) {
+      get.mockResolvedValueOnce({ breaks: rows, count: rows.length, next_cursor: 'next' })
+      await expect(custody.queue()).rejects.toThrow('Invalid custody response.')
+    }
+    get.mockClear()
+    await expect(custody.queue(undefined, '?after=bad')).rejects.toThrow('Invalid custody response.')
+    expect(get).not.toHaveBeenCalled()
+  })
+})
