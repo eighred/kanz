@@ -32,6 +32,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	var in struct {
 		Tenant, Endpoint, Socket, Broker string
+		CancelEventID                    string
 		State                            []byte
 		Version                          int64
 		Generation                       int
@@ -41,9 +42,11 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatal("invalid synthetic startup input")
 	}
 	tenant := in.Tenant
+	funded := tenant == "synthetic-funded-cancel-fill"
 	switch {
-	case tenant == "synthetic-go-handback" && in.Generation == 2:
-	case tenant == "synthetic-go-roundtrip" && in.Generation == 3:
+	case in.CancelEventID == "" && tenant == "synthetic-go-handback" && in.Generation == 2:
+	case in.CancelEventID == "" && tenant == "synthetic-go-roundtrip" && in.Generation == 3:
+	case in.CancelEventID != "" && funded && in.Generation == 3:
 	default:
 		t.Fatal("expected an isolated handback tenant and generation")
 	}
@@ -56,8 +59,15 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatal("synthetic loopback endpoints required")
 	}
 	var state orderpb.OrderState
-	if proto.Unmarshal(in.State, &state) != nil || state.OrderId == "" || state.Status != orderpb.OrderStatus_ORDER_STATUS_ROUTED || state.Quarantine != nil || state.VenueAckAt == nil || state.Venue != "XSIM" || state.VenueAccountId != "synthetic-spot" {
-		t.Fatal("a verified working XSIM order is required")
+	if proto.Unmarshal(in.State, &state) != nil || state.OrderId == "" || state.Quarantine != nil || state.VenueAckAt == nil || state.Venue != "XSIM" || state.VenueAccountId != "synthetic-spot" {
+		t.Fatal("a verified XSIM order is required")
+	}
+	wantStatus, wantSweep := orderpb.OrderStatus_ORDER_STATUS_ROUTED, 1
+	if funded {
+		wantStatus, wantSweep = orderpb.OrderStatus_ORDER_STATUS_CANCELLED, 0
+	}
+	if state.Status != wantStatus {
+		t.Fatalf("expected %s retained state, got %s", wantStatus, state.Status)
 	}
 	ctx := bus.WithTenantID(t.Context(), tenant)
 	dsn := os.Getenv("SYNTHETIC_OMS_NEXT_RUNTIME_URL")
@@ -103,11 +113,17 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if e = pool.QueryRow(ctx, "SELECT count(*), count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE partition_key=$1", state.OrderId).Scan(&claims, &pending); e != nil || claims < 1 {
 		t.Fatalf("retained outbox: %d / %d: %v", claims, pending, e)
 	}
+	if funded && (claims != 4 || pending != 3) {
+		t.Fatalf("funded recovery requires a retained accepted fact and three pending facts, got %d / %d", claims, pending)
+	}
 	if n, err := svc.Outbox().DrainOnce(ctx); err != nil || n != pending {
 		t.Fatalf("startup outbox drain: got %d, expected %d: %v", n, pending, err)
 	}
-	if n, err := svc.SweepInterrupted(ctx); err != nil || n != 1 {
+	if n, err := svc.SweepInterrupted(ctx); err != nil || n != wantSweep {
 		t.Fatalf("startup sweep: got %d: %v", n, err)
+	}
+	if funded {
+		replaySyntheticFundedCancel(t, ctx, pool, in.Broker, in.CancelEventID, &state)
 	}
 	var wire []byte
 	var version int64
@@ -118,5 +134,5 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if e = pool.QueryRow(ctx, "SELECT count(*), count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE partition_key=$1", state.OrderId).Scan(&facts, &unpublished); e != nil || facts != claims || unpublished != 0 {
 		t.Fatalf("unexpected order facts after sweep: %d / %d: %v", facts, unpublished, e)
 	}
-	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept one verified working order and preserved native version %d and %d outbox rows", in.Generation, pending, version, facts)
+	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept %d working orders and preserved native version %d and %d outbox rows", in.Generation, pending, wantSweep, version, facts)
 }
