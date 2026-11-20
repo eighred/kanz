@@ -98,14 +98,23 @@ async function main() {
         const table = region.getByRole('table', { name: 'Execution quantity resolutions' })
         const cells = await table.locator('tbody tr').first().locator('th,td').allTextContents()
         assert.deepEqual(cells, [e.external_ref, e.instrument_id, e.agreed_quantity, e.entry_id, e.original_run, e.break_id])
+        const originalRun = cells[4]
         const bytes = await comparisonDownload(page, region, corrected)
         retained = JSON.parse(bytes)
         stage = 'correction-recovery'
         await page.reload()
-        const again = await read(e.business_date, e.correction_run)
+        const again = await read(e.business_date, retained.run_id)
         assert((await comparisonDownload(page, region, again)).equals(bytes))
         stage = 'original-and-following'
-        for (const [date, run, source] of [[e.business_date, e.original_run, e.original_statement], [e.following_date, e.following_run, e.following_statement]]) {
+        const latest = await read(e.following_date)
+        assert.equal(latest.state, 'recorded')
+        assert.equal(latest.run_id, e.following_run)
+        assert.equal(latest.outcome, 'clean')
+        assert.equal(latest.statement_id, e.following_statement)
+        assert.equal(latest.historical_quantity_correction_run_id, undefined)
+        const followingRun = await region.locator('output code').last().innerText()
+        assert.equal(followingRun, e.following_run)
+        for (const [date, run, source] of [[e.business_date, originalRun, e.original_statement], [e.following_date, followingRun, e.following_statement]]) {
           const ordinary = await read(date, run)
           assert.equal(ordinary.state, 'recorded')
           assert.equal(ordinary.outcome, run === e.original_run ? 'breaks' : 'clean')
@@ -138,12 +147,6 @@ async function main() {
           else await figures.getByText('The signed statement reports zero execution lines.').waitFor()
           reportedDownloads.push(JSON.parse(await comparisonDownload(page, region, sourceReceipt)))
         }
-        const latest = await read(e.following_date)
-        assert.equal(latest.state, 'recorded')
-        assert.equal(latest.run_id, e.following_run)
-        assert.equal(latest.outcome, 'clean')
-        assert.equal(latest.statement_id, e.following_statement)
-        assert.equal(latest.historical_quantity_correction_run_id, undefined)
       } finally { await context.close() }
     }
   } finally { await browser.close() }
