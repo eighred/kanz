@@ -81,7 +81,7 @@ func withBrokerReads(base []byte) []byte {
 			switch name {
 			case "as_of":
 				s["format"] = "date-time"
-				description = "Knowledge time (RFC 3339). Omit for the current projection. The instant 0001-01-01T00:00:00Z is reserved and returns 400."
+				description = "Knowledge time (RFC 3339). Omit for the current projection. Supply exactly one nonempty value. Repeated values, malformed encoding and the reserved instant 0001-01-01T00:00:00Z return 400."
 				responses["410"] = brokerError("Knowledge time precedes the available retention horizon")
 			case "instrument":
 				description = "Filter executions by instrument."

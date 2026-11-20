@@ -292,7 +292,8 @@ be null when Go encodes a nil slice. State is a bare object. Orders and
 executions include `retainedFrom` only after retention has dropped history. Each list and its horizon come from one projection read lock.
 Positions and state include the retained baseline. All four detail reads accept
 an optional RFC 3339 `as_of` knowledge time and return 410 if the projection
-can no longer answer for that time. An explicit instant equal to the Go zero
+can no longer answer for that time. Supply `as_of` once or omit it. Empty,
+repeated or malformed query values return 400. An explicit instant equal to the Go zero
 time (`0001-01-01T00:00:00Z`) returns 400 because the projection reserves zero
 for a current read. Executions also accept `instrument`.
 

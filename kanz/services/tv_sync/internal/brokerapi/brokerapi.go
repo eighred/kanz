@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/eighred/kanz/pkg/auth"
@@ -288,20 +289,26 @@ func tenantAndAsOf(w http.ResponseWriter, r *http.Request) (string, time.Time, b
 	if !ok {
 		return "", time.Time{}, false
 	}
-	var asOf time.Time
-	if v := r.URL.Query().Get(asOfQuery); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		// The projection uses zero time to select the current fold. An explicit
-		// historical query must never receive the current balance by accident.
-		if err == nil && t.IsZero() {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of: zero time is reserved for the current projection"})
-			return "", time.Time{}, false
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of: want RFC3339"})
-			return "", time.Time{}, false
-		}
-		asOf = t
+	// URL.Query drops malformed pairs. A dropped historical parameter would
+	// select the current fold, so check the original query's decoding error.
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid broker query encoding"})
+		return "", time.Time{}, false
+	}
+	values, present := query[asOfQuery]
+	if !present {
+		return tenant, time.Time{}, true
+	}
+	if len(values) != 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "as_of must occur exactly once"})
+		return "", time.Time{}, false
+	}
+	asOf, err := time.Parse(time.RFC3339, values[0])
+	if err != nil || asOf.IsZero() {
+		// Zero is the projection's sentinel for the current fold.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid as_of: want one nonzero RFC3339 instant"})
+		return "", time.Time{}, false
 	}
 	return tenant, asOf, true
 }

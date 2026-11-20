@@ -588,11 +588,18 @@ func (h *Handler) handle(svc Service, requirePrincipal bool, rewrite func(string
 		ctx, cancel := context.WithTimeout(r.Context(), forwardBudget(svc))
 		defer cancel()
 
+		// URL.Query discards malformed pairs. For a broker history read this
+		// can erase as_of and turn an invalid request into a live account read.
+		query, queryErr := url.ParseQuery(r.URL.RawQuery)
+		if svc == ServiceTVSync && queryErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid broker query encoding")
+			return
+		}
 		resp, err := h.backend.Forward(ctx, Request{
 			Service:   svc,
 			Method:    r.Method,
 			Path:      path,
-			Query:     r.URL.Query(),
+			Query:     query,
 			Body:      body,
 			Principal: p,
 		})

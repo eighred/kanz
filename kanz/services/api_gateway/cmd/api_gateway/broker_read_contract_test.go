@@ -153,6 +153,11 @@ func TestBrokerReadsMatchPublicDiscovery(t *testing.T) {
 			if resp := get("/v1"+url, false); resp.Code != 401 || be.last.Service != "" {
 				t.Fatalf("unauthenticated read: %d", resp.Code)
 			}
+			if tc.name != "accounts" {
+				if resp := get("/v1"+url+"?as_of=%GG", true); resp.Code != 400 || be.last.Service != "" {
+					t.Fatalf("malformed history selector was forwarded: %d", resp.Code)
+				}
+			}
 			query := ""
 			if tc.name != "accounts" {
 				query = "?as_of=2026-01-02T03:04:05.123456789Z"

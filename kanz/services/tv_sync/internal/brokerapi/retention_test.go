@@ -137,13 +137,17 @@ func TestRESTAnAsOfReadBehindTheWindowIs410(t *testing.T) {
 	}
 }
 
-func TestRESTExplicitZeroKnowledgeTimeCannotSelectTheLiveFold(t *testing.T) {
+func TestRESTInvalidKnowledgeTimeCannotSelectTheLiveFold(t *testing.T) {
 	mux, _, _ := windowedHandler(t)
 	for _, endpoint := range []string{"state", "positions", "orders", "executions"} {
 		path := "/broker/accounts/fund-alpha/" + endpoint
-		for _, query := range []string{"0001-01-01T00:00:00Z", "0001-01-01T01:00:00%2B01:00"} {
-			if rec := get(t, mux, path+"?as_of="+query, "acme"); rec.Code != http.StatusBadRequest {
-				t.Errorf("%s?as_of=%s: got %d, want 400", path, query, rec.Code)
+		for _, query := range []string{
+			"as_of", "as_of=", "as_of=%XX", "as_of=invalid", "as_of=0001-01-01T00:00:00Z",
+			"as_of=0001-01-01T01:00:00%2B01:00", "as_of=&as_of=2026-06-01T12:00:00Z",
+			"as_of=2026-06-01T12:00:00Z&as_of=2026-06-01T13:00:00Z",
+		} {
+			if rec := get(t, mux, path+"?"+query, "acme"); rec.Code != http.StatusBadRequest {
+				t.Errorf("%s?%s: got %d, want 400", path, query, rec.Code)
 			}
 		}
 		if rec := get(t, mux, path, "acme"); rec.Code != http.StatusOK {
