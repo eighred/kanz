@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +21,8 @@ import sys
 from pathlib import PurePosixPath
 import tomllib
 from urllib.parse import unquote
+
+import temporal_rust_release_evidence as temporal
 
 # A recipe is an exact image contract; hybrid acceptance additionally requires
 # Go binary/source/SBOM/audit and pinned native-base evidence.
@@ -661,7 +664,11 @@ def main():
     parser.add_argument("--local", action="store_true", help="nonpublishing CI only: immutable Docker image ID")
     parser.add_argument("--sbom", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--builder-evidence", type=Path,
+                        help="direct evidence export from the protected build of this exact lake image")
     args = parser.parse_args()
+    if args.builder_evidence is not None and args.service != "lake-sink":
+        parser.error("temporal build evidence belongs to the lake worker")
     validate_reference(args.service, args.image, args.local)
     recipe = image_recipe(args.service)
     root = Path(__file__).resolve().parents[2]
@@ -697,7 +704,8 @@ def main():
         evidence["binarySHA256"] = digest(binary)
         with (destination / "dependencies.json").open("w", encoding="utf-8") as result:
             run(["rust-audit-info", str(binary), "104857600", str(LIMIT)], stdout=result)
-        counts = validate_inventory(read_json(destination / "dependencies.json"), lock, args.service, sbom)
+        embedded = read_json(destination / "dependencies.json")
+        counts = validate_inventory(embedded, lock, args.service, sbom)
         evidence["embeddedPackages"], evidence["runtimePackages"] = counts
         save_evidence()
         # No project/user audit.toml, Cargo configuration or credential inheritance.
@@ -722,6 +730,23 @@ def main():
         refused = [name for name, receipt in evidence["audits"].items() if not receipt["passed"]]
         if refused:
             raise ValueError("Rust advisory audit refused: " + ", ".join(refused))
+        selected_temporal = any(p["name"] == temporal.TEMPORAL for p in lock["package"])
+        if args.service == "lake-sink" and (selected_temporal or args.builder_evidence is not None):
+            if args.builder_evidence is None:
+                raise ValueError("selected temporal dependency requires protected builder evidence")
+            # The release policy comes from the audited revision, never from the builder export.
+            policy_path = "rust/temporal_sources/manifest.json"
+            blob = evidence["sourceSHA"] + ":" + policy_path
+            if int(output(["git", "cat-file", "-s", blob], cwd=root)) > 1024 * 1024:
+                raise ValueError("oversized temporal source manifest")
+            policy = run(["git", "cat-file", "blob", blob], cwd=root, stdout=subprocess.PIPE).stdout
+            advisories = runpy.run_path(str(root / "tools/jiff_qualification/chrono_advisories.py"))
+            evidence["temporalSources"], current = temporal.verify(
+                args.builder_evidence, policy, evidence["sourceSHA"], evidence["lockSHA256"],
+                evidence["binarySHA256"], lock, embedded, sbom,
+                advisories["collect"], advisories["evaluate"])
+            (destination / "temporal-release-advisories.json").write_bytes(current)
+            save_evidence()
         if recipe.go_path is not None:
             evidence["hybrid"] = verify_hybrid(root, args.image, image, binary, temp, destination, sbom)
             save_evidence()
