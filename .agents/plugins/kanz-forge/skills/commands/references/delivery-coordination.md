@@ -95,7 +95,11 @@ database, scheduler, GitHub writer or inference of safety from file proximity.
   again (for example, `gh issue view URL --json url,state,stateReason`). Supply
   those objects as `issue_states` alongside the collector's current open `issues`
   inventory in the reviewed snapshot. A conflicting open record vetoes a stale
-  closure observation. Count only
+  closure observation. Report `tracker_closed_as_completed` as the observed GitHub
+  closures. For each issue in `tracker_closed_pending_main_acceptance`, retrieve
+  its existing delivery evidence and check the outstanding acceptance on current
+  main. Preserve the issue's recorded disposition while that check is pending.
+  Count only
   `initial_closed_as_completed` toward the request. A reopened issue, closure as
   not planned, PR merge or newly discovered repair cannot fill a slot. Report
   `closures_remaining` even when all selected changes have passed on main.
