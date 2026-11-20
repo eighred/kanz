@@ -52,6 +52,7 @@ async function main() {
             }
             continue
           }
+          assert.equal(data.actions_enabled, false)
           const matches = data.breaks.filter(item => item.break_id === expected.break_id)
           assert.equal(matches.length, 1)
           const record = matches[0]
@@ -60,6 +61,7 @@ async function main() {
           assert.equal(record.values_state, 'exact')
           const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: expected.break_id, exact: true }) })
           await row.waitFor()
+          assert.equal(await row.getByRole('button', { name: /^(Claim|Explain)$/ }).count(), 0)
           const table = page.getByRole('table')
           const headers = await table.getByRole('columnheader').allTextContents()
           const cells = row.locator(':scope > th, :scope > td')
