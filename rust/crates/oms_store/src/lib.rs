@@ -39,6 +39,7 @@ pub enum Error {
     UnsafeRole,
     Conflict,
     FillApplied,
+    FundingReservationRequired,
     IdentityConflict,
     FeeRevision,
     PositionHistoryUnknown,
@@ -290,7 +291,26 @@ pub async fn create(
     commit(tx).await
 }
 async fn insert_order(tx: &Transaction<'_>, st: &OrderState, state: &[u8]) -> Result<(), Error> {
-    let count=tx.execute("INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3,$4,$5) ON CONFLICT (tenant_id,order_id) DO NOTHING",&[&st.order_id,&st.status,&state,&st.portfolio_id,&st.parent_order_id]).await?;
+    let count = tx
+        .execute(
+            "INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id)
+             VALUES (current_setting('app.tenant_id'),$1,$2,$3,$4,$5)
+             ON CONFLICT (tenant_id,order_id) DO NOTHING",
+            &[&st.order_id, &st.status, &state, &st.portfolio_id, &st.parent_order_id],
+        )
+        .await
+        .map_err(|error| {
+            if error.as_db_error().is_some_and(|db| {
+                db.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                    && db.schema() == Some("public")
+                    && db.table() == Some("orders")
+                    && db.constraint() == Some("funded_order_activation")
+            }) {
+                Error::FundingReservationRequired
+            } else {
+                Error::from(error)
+            }
+        })?;
     if count == 0 {
         return Err(Error::Exists);
     }

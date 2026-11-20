@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PG = "postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9"
 RUNTIME = "ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 DB = "kanz_synthetic_oms"
+FUNDING_DIAGNOSTIC = "0026_funded_order_refusal.sql"
 OWNERS = {
     "services/api_gateway/cmd/api_gateway": [
         "TestSyntheticOrderAuthenticatedIngress", "TestSyntheticOrderControlEvidence"],
@@ -84,7 +85,8 @@ def provision_native(container, fixture_env):
     migrations = sorted((ROOT / "kanz/services/oms/migrations").glob("*.sql"))
     if not migrations:
         raise RuntimeError("no canonical OMS migrations")
-    for migration in migrations:
+    diagnostic = next(i for i, path in enumerate(migrations) if path.name == FUNDING_DIAGNOSTIC)
+    for migration in migrations[:diagnostic]:
         sql(container, migration.read_text(encoding="utf-8"), DB)
     owner_schema = (ROOT / "rust/services/synthetic_oms/schema.sql").read_text(encoding="utf-8")
     sql(container, owner_schema, DB)
@@ -163,7 +165,10 @@ def provision_native(container, fixture_env):
     # An activated tenant has known cash but no reservation for its next
     # command. Only the fixture operator seeds this independent estate.
     sql(container, """
-        BEGIN; SET LOCAL app.tenant_id='synthetic-armed';
+        ALTER TABLE orders ADD CONSTRAINT synthetic_refuse_order CHECK (tenant_id<>'synthetic-store-refusal');
+        BEGIN; SET LOCAL app.tenant_id='synthetic-legacy-armed';
+        INSERT INTO capital_activation(enabled,activated_at) VALUES(true,clock_timestamp());
+        SET LOCAL app.tenant_id='synthetic-armed';
         INSERT INTO capital_activation(enabled,activated_at) VALUES(true,clock_timestamp());
         INSERT INTO capital_balances(portfolio_id,currency,revision,coverage_complete,total)
             VALUES('synthetic-portfolio','USD',1,true,'1000');
@@ -200,6 +205,21 @@ def provision_native(container, fixture_env):
           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
           EXECUTE FUNCTION synthetic_reject_first_commit();
     """, DB)
+    return migrations[diagnostic:]
+
+
+def run_fixture_tests(cmd, names, selected_env, password):
+    proc = subprocess.run(cmd + ["-test.run", "^(" + "|".join(names) + ")$"],
+                          env=dict(os.environ, **selected_env),
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=150)
+    log = proc.stdout.replace(password, "[redacted]")
+    for value in selected_env.values():
+        if value.startswith("postgres://"):
+            log = log.replace(value, "[fixture connection]")
+    if proc.returncode:
+        raise RuntimeError(log)
+    require_tests(log, names)
+    return log
 
 
 def run(stage, native):
@@ -243,7 +263,7 @@ def run(stage, native):
         dsn = f"postgres://kanz_synthetic_test:{password}@127.0.0.1:5432/{DB}?sslmode=disable"
         fixture_env = {"TEST_POSTGRES_URL": dsn}
         if native:
-            provision_native(container, fixture_env)
+            pending_migrations = provision_native(container, fixture_env)
             fixture_env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
         for package, names in packages.items():
             base = package.rsplit("/", 1)[-1]
@@ -256,23 +276,28 @@ def run(stage, native):
                    "-v", f"{stage}:/fixture:ro", "-w", "/fixture/" + package,
                    *[arg for name in selected_env for arg in ("-e", name)],
                    "--entrypoint", "/fixture/" + base, RUNTIME if native else PG,
-                   "-test.v", "-test.count=1", "-test.parallel=1", "-test.timeout=2m",
-                   "-test.run", "^(" + "|".join(names) + ")$"]
-            proc = subprocess.run(cmd, env=dict(os.environ, **selected_env),
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=150)
-            log = proc.stdout.replace(password, "[redacted]")
-            for value in fixture_env.values():
-                if value.startswith("postgres://"):
-                    log = log.replace(value, "[fixture connection]")
-            if proc.returncode:
-                raise RuntimeError(log)
+                   "-test.v", "-test.count=1", "-test.parallel=1", "-test.timeout=2m"]
             if native and base == "api_gateway":
-                for name in ("armed_without_reservation", "fenced_restart", "unknown_across_handoff"):
+                run_fixture_tests(cmd, ["TestSyntheticLegacyFundingRefusal"], selected_env, password)
+                print(f"{package}: legacy funding refusal passed without skips", flush=True)
+                for migration in pending_migrations:
+                    sql(container, migration.read_text(encoding="utf-8"), DB)
+            log = run_fixture_tests(cmd, names, selected_env, password)
+            if native and base == "api_gateway":
+                for name in ("armed_without_reservation", "unrelated_order_constraint", "fenced_restart", "unknown_across_handoff"):
                     case = rf"^\s*--- PASS: TestSyntheticOrderCommandLifecycle/{name} "
                     if len(re.findall(case, log, re.MULTILINE)) != 1:
                         raise RuntimeError("missing writer recovery proof: " + name)
                 sql(container, """
                     DO $$ BEGIN
+                        IF NOT EXISTS (SELECT FROM pg_proc
+                                WHERE oid='public.require_funded_order_after_activation()'::regprocedure
+                                  AND proowner='kanz_synthetic_activation_guard'::regrole AND prosecdef
+                                  AND proconfig=ARRAY['search_path=pg_catalog, public, pg_temp'])
+                           OR has_function_privilege('kanz_synthetic_oms_runtime',
+                                'public.require_funded_order_after_activation()', 'EXECUTE') THEN
+                            RAISE EXCEPTION 'funding diagnostic changed trigger authority';
+                        END IF;
                         IF (SELECT count(*) FROM capital_balances WHERE tenant_id='synthetic-armed')<>1
                            OR NOT EXISTS (SELECT FROM capital_balances WHERE tenant_id='synthetic-armed'
                             AND portfolio_id='synthetic-portfolio' AND currency='USD'
@@ -285,8 +310,7 @@ def run(stage, native):
                         END IF;
                     END $$;
                 """, DB)
-            count = require_tests(log, names)
-            print(f"{package}: {count} named tests passed without skips", flush=True)
+            print(f"{package}: {len(names)} named tests passed without skips", flush=True)
     finally:
         subprocess.run(["docker", "stop", "-t", "1", container], stdout=subprocess.DEVNULL, check=True)
 

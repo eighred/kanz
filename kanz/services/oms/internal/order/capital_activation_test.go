@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/services/oms/internal/capital"
@@ -41,8 +43,14 @@ func TestPostgresCapitalActivationRefusesLegacyAndOldWriter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.Create(ctx, &orderpb.OrderState{OrderId: "unfunded", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}, nil); err == nil {
-				t.Fatal("old OMS inserted an unfunded order after activation")
+			var definer bool
+			if err := pool.QueryRow(ctx, `SELECT prosecdef FROM pg_proc WHERE oid='require_funded_order_after_activation()'::regprocedure`).Scan(&definer); err != nil || definer {
+				t.Fatalf("unexpected canonical trigger authority: definer=%t err=%v", definer, err)
+			}
+			err = store.Create(ctx, &orderpb.OrderState{OrderId: "unfunded", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}, nil)
+			var pgerr *pgconn.PgError
+			if !errors.As(err, &pgerr) || pgerr.Code != "23514" || pgerr.ConstraintName != "funded_order_activation" || pgerr.TableName != "orders" || pgerr.SchemaName != testSchema {
+				t.Fatalf("expected canonical unfunded order refusal, got %v", err)
 			}
 			var rows int
 			if err := pool.QueryRow(ctx, `SELECT count(*) FROM orders`).Scan(&rows); err != nil || rows != 1 {

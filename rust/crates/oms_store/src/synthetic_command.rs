@@ -58,6 +58,7 @@ impl Refusal {
 impl From<Error> for Refusal {
     fn from(e: Error) -> Self {
         match e {
+            Error::FundingReservationRequired => Self::Controls("FUNDING_RESERVATION_REQUIRED"),
             Error::UnsafeRole => Self::Unauthorized,
             Error::NotFound => Self::NotFound,
             Error::Conflict | Error::Exists | Error::IdentityConflict => Self::Conflict,

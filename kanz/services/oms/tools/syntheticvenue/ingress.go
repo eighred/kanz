@@ -32,6 +32,7 @@ type Command struct {
 type Receipt struct {
 	OK           bool   `json:"ok"`
 	Code         string `json:"code"`
+	Reason       string `json:"reason,omitempty"`
 	State        []byte `json:"state_b64"`
 	OrderVersion uint64 `json:"order_version"`
 }

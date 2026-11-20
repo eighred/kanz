@@ -141,33 +141,45 @@ func prepareSyntheticOrder(t *testing.T, ctx context.Context, s syntheticSession
 	return &cmd, request
 }
 
-func exerciseArmedOrderRefusal(t *testing.T) {
-	const tenant = "synthetic-armed"
+func exerciseStoreRefusal(t *testing.T, tenant, code, reason, constraint string) {
 	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
 		_, request := prepareSyntheticOrder(t, ctx, s, tenant)
-		requireNativeReceipt(t, ctx, request, "STORE_UNAVAILABLE")
+		receipt := requireNativeReceipt(t, ctx, request, code)
+		if receipt.Reason != reason || len(receipt.State) != 0 || receipt.OrderVersion != 0 {
+			t.Fatalf("unexpected refusal reason or accepted state: %q, version %d", receipt.Reason, receipt.OrderVersion)
+		}
 		pool := syntheticPool(t, ctx, "RUNTIME", tenant)
 		var orders, claims, facts int
 		if err := pool.QueryRow(ctx, `SELECT (SELECT count(order_id) FROM orders),
 			(SELECT count(order_id) FROM synthetic_oms_commands),(SELECT count(producer_service) FROM outbox)`).Scan(&orders, &claims, &facts); err != nil || orders != 0 || claims != 0 || facts != 0 {
-			t.Fatalf("armed refusal left orders=%d claims=%d facts=%d: %v", orders, claims, facts, err)
+			t.Fatalf("refusal left orders=%d claims=%d facts=%d: %v", orders, claims, facts, err)
 		}
-		// The current receipt groups database refusals. Check the canonical
-		// trigger under the same login so a broken grant cannot pass this case.
+		// Independently verify which database refusal the authenticated command observed.
 		_, err := pool.Exec(ctx, `INSERT INTO orders(tenant_id,order_id,status,state,portfolio_id,parent_order_id)
 			VALUES(app_current_tenant(),'armed-direct-probe',1,decode('00','hex'),'synthetic-portfolio','')`)
 		var pgerr *pgconn.PgError
-		if !errors.As(err, &pgerr) || pgerr.Code != "23514" || pgerr.Message != "capital activation refuses an unfunded order" {
-			t.Fatalf("unfunded write lacked the canonical activation refusal: %v", err)
+		if !errors.As(err, &pgerr) || pgerr.Code != "23514" || pgerr.ConstraintName != constraint {
+			t.Fatalf("unexpected database refusal for %s: %v", tenant, err)
 		}
 	})
+}
+
+func TestSyntheticLegacyFundingRefusal(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_OMS_BIN") == "" {
+		t.Skip("requires the pre-diagnostic synthetic OMS fixture")
+	}
+	exerciseStoreRefusal(t, "synthetic-legacy-armed", "STORE_UNAVAILABLE", "", "")
 }
 
 func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_OMS_BIN") == "" {
 		t.Skip("use python kanz/dev/synthetic_orders.py --native <Linux owner>")
 	}
-	if !t.Run("armed_without_reservation", exerciseArmedOrderRefusal) {
+	if !t.Run("armed_without_reservation", func(t *testing.T) {
+		exerciseStoreRefusal(t, "synthetic-armed", "CONTROL_DENIED", "FUNDING_RESERVATION_REQUIRED", "funded_order_activation")
+	}) || !t.Run("unrelated_order_constraint", func(t *testing.T) {
+		exerciseStoreRefusal(t, "synthetic-store-refusal", "STORE_UNAVAILABLE", "", "synthetic_refuse_order")
+	}) {
 		t.FailNow()
 	}
 	exerciseSyntheticSession(t, "synthetic-tenant", func(ctx context.Context, s syntheticSession) {
