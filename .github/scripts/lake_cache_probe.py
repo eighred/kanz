@@ -42,7 +42,7 @@ def progress(raw, source):
         raise ValueError("progress size or termination differs")
     version = digest(("kanz-lake-joint-cache-probe:" + source).encode())[:40]
     commands = (("cook", COOK, True), ("libraries", LIBRARIES, True), ("build", BUILD.replace("$VERSION", version), False))
-    return target_progress(raw, "rust-build", commands)
+    return target_progress(raw, "rust-build", commands, canonical_counter=True)
 
 
 def command_name_matches(name, stage, command, canonical_counter=False):

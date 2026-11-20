@@ -64,6 +64,15 @@ class CacheProbeTests(unittest.TestCase):
     def test_actual_schema_controls_require_cache_and_execution(self):
         expected = {"cook":"sha256:"+"1"*64,"libraries":"sha256:"+"a"*64,"build":"sha256:"+"2"*64}
         self.assertEqual(gate.progress(wire(events()), SOURCE), expected)
+        padded = events()
+        for vertex in padded[0]["vertexes"]:
+            for i in (2, 4, 6):
+                vertex["name"] = vertex["name"].replace(f" {i}/6]", f" {i:2}/11]")
+        self.assertEqual(gate.progress(wire(padded), SOURCE), expected)
+        padded[0]["vertexes"][0]["name"] = padded[0]["vertexes"][0]["name"].replace("  2/11]", " 2/11]")
+        with self.assertRaises(ValueError):
+            gate.progress(wire(padded), SOURCE)
+
         for mutation in ("missing", "uncached", "library-uncached", "library-missing", "bool", "final-cached", "unfinished", "wrong-command", "wrong-version", "duplicate", "error", "unknown"):
             data = events(); vertices = data[0]["vertexes"]
             if mutation == "library-uncached": vertices[2].pop("cached")
