@@ -30,15 +30,22 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_HANDBACK") != "1" {
 		t.Skip("requires disposable Go handback with a retained native order")
 	}
-	const tenant = "synthetic-go-handback"
 	var in struct {
-		Endpoint, Socket, Broker string
-		State                    []byte
-		Version                  int64
+		Tenant, Endpoint, Socket, Broker string
+		State                            []byte
+		Version                          int64
+		Generation                       int
 	}
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
 	if err != nil || len(raw) >= 1<<20 || json.Unmarshal(raw, &in) != nil {
 		t.Fatal("invalid synthetic startup input")
+	}
+	tenant := in.Tenant
+	switch {
+	case tenant == "synthetic-go-handback" && in.Generation == 2:
+	case tenant == "synthetic-go-roundtrip" && in.Generation == 3:
+	default:
+		t.Fatal("expected an isolated handback tenant and generation")
 	}
 	loopback := func(addr string) bool {
 		ip, port, e := net.SplitHostPort(addr)
@@ -55,7 +62,8 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	ctx := bus.WithTenantID(t.Context(), tenant)
 	dsn := os.Getenv("SYNTHETIC_OMS_NEXT_RUNTIME_URL")
 	cfg, e := pgxpool.ParseConfig(dsn)
-	if e != nil || cfg.ConnConfig.Host != "127.0.0.1" || cfg.ConnConfig.Port != 5432 || cfg.ConnConfig.Database != "kanz_synthetic_oms" || cfg.ConnConfig.User != "kanz_synthetic_oms_runtime_g2" || len(cfg.ConnConfig.Fallbacks) > 0 {
+	role := fmt.Sprintf("kanz_synthetic_oms_runtime_g%d", in.Generation)
+	if e != nil || cfg.ConnConfig.Host != "127.0.0.1" || cfg.ConnConfig.Port != 5432 || cfg.ConnConfig.Database != "kanz_synthetic_oms" || cfg.ConnConfig.User != role || len(cfg.ConnConfig.Fallbacks) > 0 {
 		t.Fatal("dedicated loopback successor role required")
 	}
 	pool, e := pg.NewTenantPool(ctx, dsn, tenant)
@@ -64,7 +72,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	defer pool.Close()
 	var active bool
-	if e = pool.QueryRow(ctx, "SELECT synthetic_oms_assert_writer()=2 AND current_user='kanz_synthetic_oms_runtime_g2' AND pg_has_role(current_user,'kanz_synthetic_oms_go_runtime','MEMBER') AND NOT(rolsuper OR rolbypassrls) FROM pg_roles WHERE rolname=current_user").Scan(&active); e != nil || !active {
+	if e = pool.QueryRow(ctx, "SELECT synthetic_oms_assert_writer()=$1 AND current_user=$2 AND pg_has_role(current_user,'kanz_synthetic_oms_go_runtime','MEMBER') AND NOT(rolsuper OR rolbypassrls) FROM pg_roles WHERE rolname=current_user", in.Generation, role).Scan(&active); e != nil || !active {
 		t.Fatalf("successor is not authorized: %v", e)
 	}
 	logger := slog.Default()
@@ -110,5 +118,5 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if e = pool.QueryRow(ctx, "SELECT count(*), count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE partition_key=$1", state.OrderId).Scan(&facts, &unpublished); e != nil || facts != claims || unpublished != 0 {
 		t.Fatalf("unexpected order facts after sweep: %d / %d: %v", facts, unpublished, e)
 	}
-	t.Logf("GO_HANDBACK Go generation 2 drained %d retained FACTs, swept one verified working order and preserved native version %d and %d outbox rows", pending, version, facts)
+	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept one verified working order and preserved native version %d and %d outbox rows", in.Generation, pending, version, facts)
 }
