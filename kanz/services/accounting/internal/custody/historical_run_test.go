@@ -133,4 +133,7 @@ func checkDelayedComparison(t *testing.T, st Store, ctx context.Context) {
 	if err != nil || b.Status != BreakOpen || b.Revision != 1 || !equalFigure(b.Diff, big.NewRat(10, 1)) {
 		t.Fatalf("correction lost: %+v, %v", b, err)
 	}
+	if b.Detection != correction.detection() || b.Detection.StatementID != "statement-corrected" {
+		t.Fatalf("break points to a different comparison: %+v", b.Detection)
+	}
 }

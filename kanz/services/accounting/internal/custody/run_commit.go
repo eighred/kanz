@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,18 @@ func lockCustodyPair(ctx context.Context, tx pgx.Tx, subject Subject) (string, e
 }
 
 func verifying(run Run) bool { return run.Outcome == OutcomeClean || run.Outcome == OutcomeBreaks }
+
+func (run Run) detection() Detection {
+	if run.Outcome != OutcomeBreaks || run.StatementID == "" {
+		return Detection{}
+	}
+	d := Detection{RunID: run.RunID, StatementID: run.StatementID, BusinessDate: BusinessDay(run.Subject.BusinessDate).Format(time.DateOnly)}
+	if run.Basis != nil {
+		d.ScopeMode = run.Basis.Mode
+		d.JournalPosition = strconv.FormatInt(run.Basis.JournalPosition, 10)
+	}
+	return d
+}
 
 func (run *Run) confirmStatement(current Statement, err error) error {
 	if err != nil {
@@ -142,6 +155,7 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if verifying(run) {
 		for i := range run.Breaks {
 			run.Breaks[i].comparison = run.Basis
+			run.Breaks[i].Detection = run.detection()
 		}
 		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
 		if err != nil {
@@ -233,6 +247,11 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		if run.compared != nil {
 			current, err := staged.LatestStatement(ctx, run.Subject)
 			if err := run.confirmStatement(current, err); err != nil {
+				return Run{}, err
+			}
+		}
+		if d := run.detection(); d.RunID != "" {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_detection_run',$1,true)`, d.RunID); err != nil {
 				return Run{}, err
 			}
 		}

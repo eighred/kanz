@@ -2,22 +2,31 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // The checked-in fragment is parsed by the actual broker. Only this disposable
 // loopback test maps the unauthenticated connection to the synthetic publisher.
-func grantBroker(t *testing.T) (string, jetstream.Stream) {
+type pilotBroker struct {
+	address                 string
+	statements, completions jetstream.Stream
+	accounting              bus.NATSConfig
+}
+
+func grantBroker(t *testing.T) pilotBroker {
 	t.Helper()
 	grant, err := os.ReadFile("../../../../infra/nats/custody_batch_permissions.conf")
 	if err != nil {
@@ -36,7 +45,12 @@ func grantBroker(t *testing.T) (string, jetstream.Stream) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := fmt.Sprintf("host: 127.0.0.1\nport: -1\njetstream {store_dir: %q}\nno_auth_user: custody-source\nauthorization {\n users: [\n { user: custody-source\ninclude permissions.conf\n }\n { nkey: %q }\n ]\n}\n", filepath.ToSlash(dir), public)
+	password := rand.Text()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := fmt.Sprintf("host: 127.0.0.1\nport: -1\njetstream {store_dir: %q}\nno_auth_user: custody-source\nauthorization {\n users: [\n { user: custody-source\ninclude permissions.conf\n }\n { nkey: %q }\n { user: accounting, password: %q, permissions: {publish: [%q], subscribe: [\"_INBOX.>\"]} }\n ]\n}\n", filepath.ToSlash(dir), public, string(hash), custody.SubjectRun)
 	conf := filepath.Join(dir, "nats.conf")
 	if err := os.WriteFile(conf, []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
@@ -70,11 +84,16 @@ func grantBroker(t *testing.T) (string, jetstream.Stream) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s.ClientURL(), stream
+	completions, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "COMPARISONS", Subjects: []string{custody.SubjectRun}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pilotBroker{address: s.ClientURL(), statements: stream, completions: completions,
+		accounting: bus.NATSConfig{URL: s.ClientURL(), Name: "pilot-accounting", Username: "accounting", Password: password}}
 }
 
 func TestDedicatedStatementPublisherGrant(t *testing.T) {
-	url, _ := grantBroker(t)
+	url := grantBroker(t).address
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	denied := make(chan error, 4)

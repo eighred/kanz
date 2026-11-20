@@ -262,6 +262,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 			// the operator's work does not. Overwriting status here is the bug
 			// that resets an assignment on every daily run.
 			prior.IBOR, prior.Custodian, prior.Diff = d.IBOR, d.Custodian, d.Diff
+			prior.Detection = d.Detection
 			prior.ValuesVerified = true
 			prior.LastSeenAt = now
 			prior.Revision++

@@ -326,14 +326,20 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 	return p.OutstandingBreaks(ctx)
 }
 
+const selectCustodyBreaks = `
+SELECT b.break_id, b.portfolio_id, b.custodian_id, b.kind, b.break_key, b.ibor, b.custodian, b.difference,
+       b.status, b.assignee, b.explanation, b.first_seen_at, b.last_seen_at, b.status_changed_at,
+       b.revision, b.values_verified, COALESCE(d.run_id,''), COALESCE(d.statement_id,''),
+       COALESCE(to_char(d.business_date,'YYYY-MM-DD'),''), COALESCE(d.book_basis->>'mode',''),
+       COALESCE(d.book_basis->>'journal_position','')
+FROM custody_breaks b LEFT JOIN custody_runs d
+  ON (d.tenant_id,d.run_id,d.portfolio_id,d.custodian_id) =
+     (b.tenant_id,b.detection_run_id,b.portfolio_id,b.custodian_id)
+ AND d.outcome='breaks' AND d.statement_id<>'' `
+
 // OutstandingBreaks implements Store.
 func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
-	const q = `
-SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at, revision, values_verified
-FROM custody_breaks
-WHERE status IN ('open', 'assigned', 'explained')
-ORDER BY break_id`
+	const q = selectCustodyBreaks + `WHERE b.status IN ('open','assigned','explained') ORDER BY b.break_id`
 	var rows pgx.Rows
 	var err error
 	if p.tx != nil {
@@ -350,11 +356,7 @@ ORDER BY break_id`
 
 // LoadBreak implements Store.
 func (p *Postgres) LoadBreak(ctx context.Context, breakID string) (Break, error) {
-	const q = `
-SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at, revision, values_verified
-FROM custody_breaks
-WHERE break_id = $1`
+	const q = selectCustodyBreaks + `WHERE b.break_id = $1`
 	rows, err := p.pool.Query(ctx, q, breakID)
 	if err != nil {
 		return Break{}, fmt.Errorf("custody: load break: %w", err)
@@ -402,7 +404,9 @@ func scanBreaks(rows pgx.Rows) ([]Break, error) {
 			firstSeen, lastSeen, statusChanged time.Time
 		)
 		if err := rows.Scan(&b.BreakID, &b.PortfolioID, &b.CustodianID, &kind, &b.Key, &ibor, &custodian, &difference,
-			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified); err != nil {
+			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified,
+			&b.Detection.RunID, &b.Detection.StatementID, &b.Detection.BusinessDate,
+			&b.Detection.ScopeMode, &b.Detection.JournalPosition); err != nil {
 			return nil, fmt.Errorf("custody: scan break: %w", err)
 		}
 		b.Kind = parseKind(kind)

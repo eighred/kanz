@@ -396,8 +396,18 @@ type Run struct {
 	FailureReason string
 }
 
+// Detection identifies the comparison that last wrote a break's financial figures.
+type Detection struct {
+	RunID           string `json:"run_id"`
+	StatementID     string `json:"statement_id"`
+	BusinessDate    string `json:"business_date"`
+	ScopeMode       string `json:"scope_mode,omitempty"`
+	JournalPosition string `json:"journal_position,omitempty"`
+}
+
 // Break is one discrepancy, carried as a working item rather than a log line.
 type Break struct {
+	Detection Detection
 	// BreakID is stable ACROSS RUNS, derived from (portfolio, custodian, kind,
 	// key) — see BreakID. The age depends on it: a break given a fresh id every
 	// day would be permanently one day old.

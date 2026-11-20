@@ -65,21 +65,24 @@ func (s *Server) custodyRoutes() {
 // and a quantity beyond float's exact range would be shown to the person deciding
 // what to do about it as a different number from the one the book holds.
 type breakView struct {
-	BreakID         string `json:"break_id"`
-	Kind            string `json:"kind"`
-	Key             string `json:"key"`
-	IBOR            string `json:"ibor"`
-	Custodian       string `json:"custodian"`
-	Difference      string `json:"difference"`
-	Status          string `json:"status"`
-	Assignee        string `json:"assignee,omitempty"`
-	Explanation     string `json:"explanation,omitempty"`
-	FirstSeenAt     string `json:"first_seen_at"`
-	LastSeenAt      string `json:"last_seen_at"`
-	StatusChangedAt string `json:"status_changed_at"`
-	AgeSeconds      int64  `json:"age_seconds"`
-	Revision        int64  `json:"revision,string"`
-	ValuesState     string `json:"values_state"`
+	PortfolioID     string             `json:"portfolio_id"`
+	CustodianID     string             `json:"custodian_id"`
+	Detection       *custody.Detection `json:"detection,omitempty"`
+	BreakID         string             `json:"break_id"`
+	Kind            string             `json:"kind"`
+	Key             string             `json:"key"`
+	IBOR            string             `json:"ibor"`
+	Custodian       string             `json:"custodian"`
+	Difference      string             `json:"difference"`
+	Status          string             `json:"status"`
+	Assignee        string             `json:"assignee,omitempty"`
+	Explanation     string             `json:"explanation,omitempty"`
+	FirstSeenAt     string             `json:"first_seen_at"`
+	LastSeenAt      string             `json:"last_seen_at"`
+	StatusChangedAt string             `json:"status_changed_at"`
+	AgeSeconds      int64              `json:"age_seconds"`
+	Revision        int64              `json:"revision,string"`
+	ValuesState     string             `json:"values_state"`
 }
 
 func toBreakView(b custody.Break, now time.Time) breakView {
@@ -95,7 +98,12 @@ func toBreakView(b custody.Break, now time.Time) breakView {
 	if state != "exact" {
 		ibor, custodian, difference = "", "", ""
 	}
+	var source *custody.Detection
+	if b.Detection.RunID != "" {
+		source = &b.Detection
+	}
 	return breakView{
+		PortfolioID: b.PortfolioID, CustodianID: b.CustodianID, Detection: source,
 		ValuesState: state,
 		BreakID:     b.BreakID,
 		Revision:    b.Revision,
