@@ -91,7 +91,7 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
-		TenantID: tenant, EventTime: run.CompletedAt, CorrelationID: run.RunID,
+		TenantID: tenant, EventTime: run.CompletedAt, CorrelationID: run.RunID, CausationID: run.RequestID,
 		PartitionKey:     pairKey(run.Subject.PortfolioID, run.Subject.CustodianID),
 		PayloadSchemaRef: schemaRefRun, Payload: msg})
 }
@@ -139,6 +139,20 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
 	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
 		return Run{}, ErrHistoricalLifecycle
+	}
+	if run.observedMissing {
+		_, err := m.latestStatementLocked(run.Subject)
+		if !errors.Is(err, ErrNoStatement) {
+			return Run{}, ErrStatementChanged
+		}
+		run.observedMissing = false
+	}
+	if verifying(run) && run.Basis != nil {
+		for _, prior := range m.runs[pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)] {
+			if verifying(prior) && prior.Subject.Key() == run.Subject.Key() && prior.Basis != nil && prior.Basis.JournalPosition > run.Basis.JournalPosition {
+				return Run{}, ErrBookBasisChanged
+			}
+		}
 	}
 	if run.compared != nil {
 		current, err := m.latestStatementLocked(run.Subject)
@@ -196,6 +210,9 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, ErrRunBusy
 	}
 	if incoming := bus.TenantIDFromContext(ctx); incoming != "" {
+		if run.RequestID != "" && incoming != tenant {
+			return Run{}, ErrInvalidManualRequest
+		}
 		if err := bus.RequireTenantScope(incoming, tenant); err != nil {
 			return Run{}, err
 		}
@@ -206,6 +223,13 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, err
 	}
 	if exists {
+		if run.RequestID != "" {
+			prior, err := storedManualReceipt(ctx, tx, run)
+			if err != nil {
+				return Run{}, err
+			}
+			return prior, tx.Commit(ctx)
+		}
 		var payload []byte
 		err := tx.QueryRow(ctx, `SELECT payload FROM outbox WHERE producer_service=$1 AND event_type=$2 AND correlation_id=$3 ORDER BY id LIMIT 1`, outbox.ServiceAccounting, SubjectRun, run.RunID).Scan(&payload)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -229,6 +253,16 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
+	if run.observedMissing {
+		_, err := staged.LatestStatement(ctx, run.Subject)
+		if err == nil {
+			return Run{}, ErrStatementChanged
+		}
+		if !errors.Is(err, ErrNoStatement) {
+			return Run{}, err
+		}
+		run.observedMissing = false
+	}
 	if verifying(run) {
 		// The transaction already owns the pair lock. A later clean run is as
 		// authoritative as a later break and must prevent historical reopening.
@@ -243,6 +277,17 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		if later {
 			return Run{}, ErrHistoricalLifecycle
+		}
+		if run.Basis != nil {
+			var newer bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM custody_runs WHERE tenant_id=app_current_tenant()
+				AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3::date AND outcome IN ('clean','breaks')
+				AND (book_basis->>'journal_position')::bigint > $4)`, run.Subject.PortfolioID, run.Subject.CustodianID, BusinessDay(run.Subject.BusinessDate), run.Basis.JournalPosition).Scan(&newer); err != nil {
+				return Run{}, err
+			}
+			if newer {
+				return Run{}, ErrBookBasisChanged
+			}
 		}
 		if run.compared != nil {
 			current, err := staged.LatestStatement(ctx, run.Subject)
@@ -275,6 +320,15 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if err != nil {
 		return Run{}, err
 	}
+	if run.RequestID != "" {
+		tag, err := tx.Exec(ctx, `UPDATE custody_runs SET manual_receipt=$2 WHERE tenant_id=app_current_tenant() AND run_id=$1 AND manual_receipt IS NULL`, run.RunID, record.Payload)
+		if err != nil {
+			return Run{}, err
+		}
+		if tag.RowsAffected() != 1 {
+			return Run{}, ErrManualRequestConflict
+		}
+	}
 	if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, record); err != nil {
 		return Run{}, err
 	}
@@ -288,7 +342,7 @@ func runFromRecord(payload []byte) (Run, error) {
 	if err := proto.Unmarshal(payload, &msg); err != nil {
 		return Run{}, err
 	}
-	run := Run{RunID: msg.GetRunId(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
+	run := Run{RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
 		Outcome: parseOutcome(strings.ToLower(strings.TrimPrefix(msg.GetOutcome().String(), "RECONCILIATION_OUTCOME_"))), StatementID: msg.GetStatementId(), CompletedAt: msg.GetCompletedAt().AsTime(), FailureReason: msg.GetFailureReason()}
 	var ok bool
 	if run.Tolerance, ok = dec.FromProtoChecked(msg.GetTolerance()); !ok {

@@ -822,6 +822,11 @@ message ReconciliationRun {
 
   // failure_reason names why a FAILED run could not complete. Empty otherwise.
   string failure_reason = 10;
+
+  // The authenticated operator request that caused this comparison. Both
+  // fields are absent on scheduled runs and records predating manual reruns.
+  string request_id = 11;
+  string actor = 12;
 }
 
 // CustodyActionState is the lifecycle evidence at one revision. A revision
