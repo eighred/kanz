@@ -61,6 +61,9 @@ func (s *Server) custodyRoutes() {
 		return
 	}
 	s.mux.HandleFunc("GET /v1/custody/breaks", s.handleListBreaks)
+	if reader, ok := s.breaks.(datedCustodyReader); ok && s.custodyScope != nil {
+		s.mux.HandleFunc("GET /v1/portfolios/{id}/custody/comparison", s.datedCustodyResult(reader))
+	}
 	if s.breakReviewReadOnly {
 		return
 	}

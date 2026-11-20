@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError } from './client'
+import { users } from './users'
+import { api, auth, ApiError } from './client'
 import { custody, describeCustody } from './custody'
 
 afterEach(() => vi.restoreAllMocks())
@@ -34,6 +35,22 @@ describe('custody response boundary', () => {
     }
   })
 
+  it('requires the dated subject, exact position and a source for a successful result', async () => {
+    const subject = { portfolio_id: 'PF/1', custodian_id: 'C & A', business_date: '2020-02-04' }
+    const data = { ...subject, state: 'recorded', run_id: 'retained', outcome: 'clean', statement_id: 'r2', completed_at: '2020-02-05T01:00:00Z', journal_position: '9007199254740993', scope_mode: 'declared' }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(data)
+    expect(await custody.dated(subject)).toEqual(data)
+    expect(get.mock.calls[0]?.[0]).toBe('/api/v1/portfolios/PF%2F1/custody/comparison?custodian_id=C+%26+A&business_date=2020-02-04')
+    for (const patch of [{ portfolio_id: 'PF2' }, { statement_id: undefined }, { state: 'not_compared' }, { journal_position: 9007199254740992 }, { journal_position: '-1' }, { journal_position: undefined }, { outcome: 'no_statement' }]) {
+      get.mockResolvedValueOnce({ ...data, ...patch })
+      await expect(custody.dated(subject)).rejects.toThrow('verified')
+    }
+    for (const state of ['not_compared', 'unknown']) {
+      get.mockResolvedValueOnce({ ...subject, state })
+      expect((await custody.dated(subject)).state).toBe(state)
+    }
+  })
+
   it('preserves exact decimal text', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [item], count: 1 })
     expect((await custody.queue()).breaks[0]?.difference).toBe('0.00000001')
@@ -59,8 +76,13 @@ describe('custody response boundary', () => {
       get.mockResolvedValueOnce(body)
       expect((await custody.queue()).breaks[0]?.actions_enabled).toBe(false)
     }
+    vi.spyOn(auth, 'me').mockResolvedValue({ tenant: 'fixture', subject: 'operator', expires_at: '2099-01-01T00:00:00Z' })
+    vi.spyOn(users, 'gatewayPermissions').mockResolvedValue({ tenant: 'fixture', subject: 'operator', portfolios: ['PF1'], capabilities: ['fund'], routes: [{ Pattern: 'POST /v1/custody/breaks/{id}/actions', Capability: 'fund' }] })
     get.mockResolvedValueOnce({ breaks: [{ ...item, status: 'open', revision: '1', values_state: 'exact' }], count: 1, actions_enabled: true })
     expect((await custody.queue()).breaks[0]?.actions_enabled).toBe(true)
+    vi.mocked(users.gatewayPermissions).mockResolvedValue({ tenant: 'fixture', subject: 'operator', portfolios: ['PF1'], capabilities: ['custody_read'], routes: [] })
+    get.mockResolvedValueOnce({ breaks: [{ ...item, status: 'open', revision: '1', values_state: 'exact' }], count: 1, actions_enabled: true })
+    expect((await custody.queue()).breaks[0]?.actions_enabled).toBe(false)
   })
 
   it('encodes the break id and refuses mismatched action evidence', async () => {
@@ -68,7 +90,7 @@ describe('custody response boundary', () => {
     const post = vi.spyOn(api, 'post').mockResolvedValue({ actor: 'someone' })
     const decision = { action: 'claim' as const, request_id: 'request-1', expected_revision: '1', review_contract: 'exact-v1' as const }
     await expect(custody.act(row, decision)).rejects.toThrow('evidence could not be verified')
-    expect(post).toHaveBeenCalledWith('/api/v1/custody/breaks/BTC%2FUSD%3Fx%23y/actions', decision)
+    expect(post).toHaveBeenCalledWith('/api/v1/custody/breaks/BTC%2FUSD%3Fx%23y/actions', decision, undefined, undefined)
   })
 
   it.each(['claim', 'explain'] as const)('requires %s evidence to preserve the untouched field', async action => {

@@ -260,6 +260,16 @@ func TestLoadRefusesATradeRoleThatIsTheBaselineRole(t *testing.T) {
 	}
 }
 
+func TestCustodyReadRequiresIndependentRole(t *testing.T) {
+	c := Config{RequiredRole: "baseline", TradeRole: "trade", OperatorRole: "operate", FundRole: "fund", ApproveRole: "approve", MandateRole: "mandate", AuditRole: "audit", CustodyRerunRole: "rerunner", AccountingAddr: "http://accounting"}
+	for _, role := range []string{"baseline", "trade", "operate", "fund", "approve", "mandate", "audit", "rerunner", "kanz-identity-admin", "one two", "one,two"} {
+		c.CustodyReadRole = role
+		if err := c.validateAuth(); err == nil || !strings.Contains(err.Error(), "custody read") {
+			t.Errorf("unexpected result for %q: %v", role, err)
+		}
+	}
+}
+
 func TestCustodyRerunRequiresIndependentRole(t *testing.T) {
 	c := Config{RequiredRole: "baseline", TradeRole: "trade", OperatorRole: "operate", FundRole: "fund", ApproveRole: "approve", MandateRole: "mandate", AuditRole: "audit", AccountingAddr: "http://accounting"}
 	for _, role := range []string{"baseline", "trade", "operate", "fund", "approve", "mandate", "audit", "kanz-identity-admin", "two roles", "one,two"} {

@@ -1,10 +1,18 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { useSession } from '../stores/session'
+import { setUnauthenticatedHandler } from '../api/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import CustodyBreaksView from './CustodyBreaksView.vue'
 import { custody, type CustodyBreak, type CustodyDecision, type CustodyEvidence } from '../api/custody'
-import { api, ApiError } from '../api/client'
+import { users } from '../api/users'
+import { api, auth, ApiError } from '../api/client'
 
-afterEach(() => vi.restoreAllMocks())
+beforeEach(() => {
+  setActivePinia(createPinia())
+  useSession().identity = { subject: 'operator', tenant: 'fixture', expires_at: '2099-01-01T00:00:00Z' }
+})
+afterEach(() => { setUnauthenticatedHandler(() => {}); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 const row: CustodyBreak = { break_id: 'PF|CUST|quantity|BTC/USD', kind: 'quantity', key: 'BTC/USD', ibor: '1.000000000001', custodian: '1', difference: '0.000000000001', status: 'open', first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-02T00:00:00Z', status_changed_at: '2026-01-01T00:00:00Z', age_seconds: 86400, revision: '1', values_state: 'exact', actions_enabled: true }
 const receipt: CustodyEvidence = { request_id: 'test-request', break_id: row.break_id, actor: 'verified-human', action: 'claim', recorded_at: '2026-01-02T01:00:00Z', before: { status: 'open', assignee: '', explanation: '', revision: '1' }, after: { status: 'assigned', assignee: 'verified-human', explanation: '', revision: '2' }, values: { ibor: row.ibor, custodian: row.custodian, difference: row.difference } }
 
@@ -15,6 +23,58 @@ function button(wrapper: ReturnType<typeof mount>, text: string) {
 }
 
 describe('custody exact review', () => {
+  it.each(['session', 'unmount'])('cancels both dated and queue reads on %s before late 401 responses arrive', async reason => {
+    const replies: ((r: Response) => void)[] = []
+    const signals: AbortSignal[] = []
+    vi.stubGlobal('fetch', vi.fn((_path: string, options: RequestInit) => {
+      signals.push(options.signal!)
+      return new Promise<Response>(resolve => replies.push(resolve))
+    }))
+    const forgotten = vi.fn()
+    setUnauthenticatedHandler(forgotten)
+    const wrapper = mount(CustodyBreaksView)
+    const form = wrapper.get('[aria-label="Dated custody result"] form')
+    for (const [i, value] of ['PF1', 'C', '2020-02-04'].entries()) await form.findAll('input')[i]!.setValue(value)
+    await form.trigger('submit')
+    expect(signals).toHaveLength(2)
+    if (reason === 'session') useSession().identity!.tenant = 'other'
+    else wrapper.unmount()
+    for (const signal of signals.slice(0, 2)) expect(signal.aborted).toBe(true)
+    for (const reply of replies.slice(0, 2)) reply(Response.json({}, { status: 401 }))
+    await flushPromises()
+    expect(forgotten).not.toHaveBeenCalled()
+    if (reason === 'session') {
+      expect(form.get('input').element.value).toBe('')
+      expect(wrapper.find('output').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
+  it('shows the selected date even with an empty queue and clears the last result on subject change', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
+    const select = vi.spyOn(custody, 'dated')
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      const region = wrapper.get('[aria-label="Dated custody result"]')
+      const fields = region.findAll('input')
+      for (const [i, value] of ['PF1', 'C', '2020-02-04'].entries()) await fields[i]!.setValue(value)
+      const subject = { portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04' }
+      const receipt = { ...subject, run_id: 'run-r2', state: 'recorded' as const, completed_at: '2020-02-05T01:00:00Z' }
+      for (const [result, status] of [
+        [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', scope_mode: 'declared', journal_position: '9007199254740993' }, 'Clean comparison'],
+        [{ ...receipt, outcome: 'no_statement' }, 'No statement received'],
+        [{ ...subject, state: 'not_compared' }, 'No comparison recorded'],
+      ] as const) {
+        select.mockResolvedValueOnce(result)
+        await region.get('form').trigger('submit'); await flushPromises()
+        expect(region.get('output').text()).toContain(status)
+        if ('journal_position' in result) expect(region.get('output').text()).toContain(result.journal_position)
+      }
+      await fields[1]!.setValue('different')
+      expect(region.find('output').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
   it('recovers a failed comparison with the same reviewed identity and shows the committed receipt', async () => {
     vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [], rerunActor: 'operator' })
     const compare = vi.spyOn(custody, 'rerun').mockRejectedValueOnce(new ApiError(503, 'pending')).mockImplementationOnce(async req => ({
@@ -32,7 +92,7 @@ describe('custody exact review', () => {
       await flushPromises()
       await button(wrapper, 'Retry same request').trigger('click')
       await flushPromises()
-      expect(compare.mock.calls[0]).toEqual(compare.mock.calls[1])
+      expect(compare.mock.calls[0]?.slice(0, 2)).toEqual(compare.mock.calls[1]?.slice(0, 2))
       expect(wrapper.get('[aria-label="Recorded custody comparison"]').text()).toContain('no_statement')
       expect(wrapper.text()).toContain('retained-run')
     } finally { wrapper.unmount() }
@@ -57,6 +117,8 @@ describe('custody exact review', () => {
 
   it('identifies the selected break from the queue through confirmation and the recorded receipt', async () => {
     const other = { ...row, break_id: 'PF2|CUST|quantity|BTC/USD' }
+    vi.spyOn(auth, 'me').mockResolvedValue({ tenant: 'fixture', subject: 'operator', expires_at: '2099-01-01T00:00:00Z' })
+    vi.spyOn(users, 'gatewayPermissions').mockResolvedValue({ tenant: 'fixture', subject: 'operator', portfolios: ['PF1'], capabilities: ['fund'], routes: [{ Pattern: 'POST /v1/custody/breaks/{id}/actions', Capability: 'fund' }] })
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [row, other], count: 2, actions_enabled: true })
     const post = vi.spyOn(api, 'post').mockImplementation(async (_path, body) => ({
       ...receipt, break_id: other.break_id, request_id: (body as CustodyDecision).request_id,

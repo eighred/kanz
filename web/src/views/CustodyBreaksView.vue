@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useSession } from '../stores/session'
 import { custody, describeCustody, describeCustodyAction, type CustodyBreak, type CustodyDecision, type CustodyEvidence } from '../api/custody'
 import { ApiError } from '../api/client'
 import CustodyRerunForm from './CustodyRerunForm.vue'
+import DatedCustodyResult from './DatedCustodyResult.vue'
 import type { CustodyRerunReceipt } from '../api/custody'
 
+const session = useSession()
+let queueRead: AbortController | undefined
+let command: AbortController | undefined
 const breaks = ref<CustodyBreak[]>([])
 const rerunActor = ref('')
 const reviewingRerun = ref(false)
@@ -34,24 +39,51 @@ function unavailable(item: CustodyBreak): string {
 }
 
 async function reload() {
+  queueRead?.abort()
+  if (!session.signedIn) return
+  const request = new AbortController()
+  queueRead = request
   loading.value = true
   error.value = ''
   breaks.value = []
   rerunActor.value = ''
   rerunReceipt.value = null
   try {
-    const result = await custody.queue()
+    const result = await custody.queue(request.signal)
+    if (request.signal.aborted) return
     breaks.value = result.breaks
     rerunActor.value = result.rerunActor ?? ''
   }
-  catch (e) { error.value = describeCustody(e) }
-  finally { loading.value = false }
+  catch (e) { if (!request.signal.aborted) error.value = describeCustody(e) }
+  finally { if (!request.signal.aborted) loading.value = false }
 }
+function clearSession() {
+  queueRead?.abort()
+  command?.abort()
+  breaks.value = []
+  rerunActor.value = ''
+  rerunReceipt.value = null
+  evidence.value = null
+  selected.value = null
+  decision.value = null
+  explanation.value = ''
+  actionError.value = ''
+  error.value = ''
+  loading.value = false
+  saving.value = false
+  reviewingRerun.value = false
+  actionTrigger = null
+}
+watch(() => session.identity, () => { clearSession(); void reload() }, { deep: true, flush: 'sync' })
 onMounted(reload)
+onUnmounted(clearSession)
 
 async function showRerun(receipt: CustodyRerunReceipt) {
+  const identity = session.identity
+  const subject = identity?.subject
+  const tenant = identity?.tenant
   await reload()
-  if (receipt.actor === rerunActor.value) rerunReceipt.value = receipt
+  if (identity === session.identity && tenant === session.identity?.tenant && subject === session.identity?.subject && receipt.actor === rerunActor.value) rerunReceipt.value = receipt
 }
 
 async function choose(item: CustodyBreak, action: 'claim' | 'explain', event: MouseEvent) {
@@ -84,21 +116,28 @@ async function cancel() {
 }
 async function confirm() {
   if (saving.value || !selected.value || !decision.value) return
+  const request = new AbortController()
+  command = request
   saving.value = true
   actionError.value = ''
   try {
-    evidence.value = await custody.act(selected.value, decision.value)
+    const recorded = await custody.act(selected.value, decision.value, request.signal)
+    if (request.signal.aborted) return
+    evidence.value = recorded
     closeReview()
     await reload()
   } catch (e) {
+    if (request.signal.aborted) return
     actionError.value = describeCustodyAction(e)
     if (e instanceof ApiError && [400, 403, 404, 409].includes(e.status)) { closeReview(); await reload() }
   } finally {
-    saving.value = false
-    await nextTick()
-    const target = selected.value ? confirmButton.value : actionError.value ? errorMessage.value : receiptMessage.value
-    target?.focus()
-    if (!selected.value) actionTrigger = null
+    if (!request.signal.aborted) {
+      saving.value = false
+      await nextTick()
+      const target = selected.value ? confirmButton.value : actionError.value ? errorMessage.value : receiptMessage.value
+      target?.focus()
+      if (!selected.value) actionTrigger = null
+    }
   }
 }
 
@@ -192,6 +231,7 @@ function age(seconds: number): string {
       </tbody>
     </table>
   </div>
+  <DatedCustodyResult />
 </template>
 
 <style scoped>
