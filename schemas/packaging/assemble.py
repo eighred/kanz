@@ -82,6 +82,7 @@ def main():
     parser.add_argument("language", choices=["go", "python"])
     parser.add_argument("--version", required=True)
     parser.add_argument("--generated", required=True, type=Path)
+    parser.add_argument("--descriptors", type=Path, help="canonical FileDescriptorSet for the Go service inventory")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}", args.version):
@@ -100,6 +101,17 @@ def main():
             parser.error(f"generated {suffix} files differ from the canonical schema inventory")
     args.output.mkdir(parents=True, exist_ok=True)
     if args.language == "go":
+        from google.protobuf.descriptor_pb2 import FileDescriptorSet
+
+        if args.descriptors is None:
+            parser.error("Go assembly needs the canonical service descriptors")
+        descriptors = FileDescriptorSet.FromString(args.descriptors.read_bytes()).file
+        if {Path(file.name).with_suffix("").as_posix() for file in descriptors} != protos:
+            parser.error("descriptor file inventory differs from the canonical schemas")
+        stubs = {file.name.removesuffix(".proto") + "_grpc.pb.go" for file in descriptors if file.service}
+        actual = {path.relative_to(args.generated).as_posix() for path in args.generated.rglob("*_grpc.pb.go")}
+        if not stubs or stubs != actual:
+            parser.error("generated Go gRPC stubs differ from the canonical service descriptors")
         epoch = int(os.environ["SOURCE_DATE_EPOCH"])
         package = go_proxy(args.generated, args.version, args.output, epoch)
     else:

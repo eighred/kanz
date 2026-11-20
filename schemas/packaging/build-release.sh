@@ -22,7 +22,6 @@ export PATH="$GOBIN:$PATH"
 export SOURCE_DATE_EPOCH
 SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$source_sha")
 make -C kanz bootstrap generate
-python3 schemas/packaging/assemble.py go --version "$version" --generated schemas/gen/go --output "$scratch/assets"
 
 # The inference image uses the hash-locked grpc_tools generator. This is the exact
 # producer paired with its checked runtime. The Buf-generated Python directory is distinct.
@@ -30,8 +29,10 @@ python3 -m venv "$scratch/codegen"
 "$scratch/codegen/bin/pip" install --quiet --require-hashes --only-binary=:all: -r python/requirements-codegen.txt
 mkdir "$scratch/python"
 mapfile -d '' -t protos < <(find schemas/proto -name '*.proto' -print0 | sort -z)
-"$scratch/codegen/bin/python" -m grpc_tools.protoc -I schemas/proto --python_out="$scratch/python" \
+"$scratch/codegen/bin/python" -m grpc_tools.protoc -I schemas/proto --descriptor_set_out="$scratch/schemas.pb" --python_out="$scratch/python" \
   --pyi_out="$scratch/python" --grpc_python_out="$scratch/python" "${protos[@]}"
+"$scratch/codegen/bin/python" schemas/packaging/assemble.py go --version "$version" --generated schemas/gen/go \
+  --descriptors "$scratch/schemas.pb" --output "$scratch/assets"
 "$scratch/codegen/bin/python" schemas/packaging/assemble.py python --version "$version" \
   --generated "$scratch/python" --output "$scratch/assets"
 cp schemas/packaging/ts/package.json schemas/gen/ts/package.json

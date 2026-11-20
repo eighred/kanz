@@ -29,7 +29,7 @@ export GOWORK=off GOTOOLCHAIN=local
 
   cp go.mod "$scratch/consumer.mod"
   cp go.sum "$scratch/consumer.sum"
-  export GOFLAGS="-modfile=$scratch/consumer.mod" GOMODCACHE="$scratch/empty-modules"
+  export GOFLAGS="-modfile=$scratch/consumer.mod -modcacherw" GOMODCACHE="$scratch/empty-modules"
   export GOPROXY="file://$scratch/proxy" GONOPROXY=none GONOSUMDB="$module"
   python3 -m zipfile -e "$assets/kanz-schemas-go-proxy-$tag.zip" "$scratch/proxy"
   go mod edit -dropreplace="$module" -require="$module@$tag"
@@ -79,5 +79,5 @@ cp schemas/packaging/ts/public-consumer-lock.json "$consumer/package-lock.json"
   npm pkg set "dependencies.@eighred/kanz-schemas=file:$assets/eighred-kanz-schemas-$version.tgz"
   npm install --offline --ignore-scripts --no-audit --no-fund
   npm run build
-  npm test
+  KANZ_REQUIRE_SERIALIZATION_FIXTURES=1 npm test
 )
