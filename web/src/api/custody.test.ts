@@ -81,6 +81,34 @@ describe('custody response boundary', () => {
     }
   })
 
+  it('binds the saved run, signed digest and exact immutable differences to the requested portfolio and date', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const digest = 'a'.repeat(64)
+    const row = { break_id: 'P|C|quantity|F', kind: 'quantity', key: 'ΔF', values_state: 'exact', ibor: '10.5000001', custodian: '9.5', difference: '1.0000001' }
+    const request = 'old+run:1'
+    const wire = { ...subject, tenant_id: 'tenant', state: 'recorded', outcome: 'breaks', run_id: request, completed_at: '2020-02-05T01:00:00Z',
+      statement_id: 'custody-batch.v1.source.r1.' + digest, scope_mode: 'declared', journal_position: '1',
+      transaction_pass: 'unknown', signed_statement_sha256: digest, breaks: [{ ...row, assignee: 'discard' }] }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(wire)
+    const read = () => custody.dated(subject, 'tenant', undefined, request)
+    const result = await read()
+    expect(get.mock.calls[0]?.[0]).toContain('run_id=old%2Brun%3A1')
+    expect(result.state === 'recorded' && result.historical?.breaks).toEqual([row])
+    for (const patch of [{ run_id: 'other' }, { signed_statement_sha256: 'b'.repeat(64) }, { transaction_pass: undefined },
+      { outcome: 'clean' }, { breaks: [] }, { breaks: [row, row] }, { breaks: [{ ...row, ibor: 10.5 }] }, { breaks: [{ ...row, values_state: 'unavailable' }] }]) {
+      get.mockResolvedValueOnce({ ...wire, ...patch })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce({ ...wire, breaks: [{ ...row, values_state: 'unavailable', ibor: '', custodian: '', difference: '' }] })
+    expect((await read()).state).toBe('recorded')
+    get.mockResolvedValueOnce({ ...wire, outcome: 'clean', breaks: [] })
+    expect((await read()).state).toBe('recorded')
+    get.mockResolvedValueOnce({ ...subject, state: 'unknown', tenant_id: 'tenant', breaks: [] })
+    await expect(read()).rejects.toThrow('verified')
+    get.mockResolvedValueOnce(wire)
+    await expect(custody.dated(subject, 'tenant')).rejects.toThrow('verified')
+  })
+
   it('preserves exact decimal text', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [item], count: 1 })
     expect((await custody.queue()).breaks[0]?.difference).toBe('0.00000001')

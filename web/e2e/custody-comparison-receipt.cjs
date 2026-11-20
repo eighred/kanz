@@ -21,6 +21,12 @@ async function comparisonDownload(page, region, response) {
     if (response[key] !== undefined) expected[key] = response[key]
   }
   if (response.transaction_pass === 'ran') expected.transaction_comparison_basis = 'external_reference_membership'
+  if (response.signed_statement_sha256 !== undefined) {
+    expected.lookup = 'retained_run'
+    expected.signed_statement_sha256 = response.signed_statement_sha256
+    expected.breaks = response.breaks.map(({ break_id, kind, key, values_state, ibor, custodian, difference }) =>
+      ({ break_id, kind, key, values_state, ibor, custodian, difference }))
+  }
   assert.deepEqual(JSON.parse(bytes), expected)
   await download.delete()
   return bytes

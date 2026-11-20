@@ -20,8 +20,20 @@ async function main() {
   assert.equal(portfolio, 'PF1')
   assert.equal(custodian, 'CUST-A')
   assert.match(statement, /^custody-batch\.v1\.synthetic-source\.r2\.[0-9a-f]{64}$/)
+  const prior = expected.prior_detection
+  assert.equal(prior.portfolio_id, portfolio)
+  assert.equal(prior.custodian_id, custodian)
+  assert.match(prior.detection.statement_id, /^custody-batch\.v1\.synthetic-source\.r1\.[0-9a-f]{64}$/)
+  assert.equal(prior.detection.business_date, clean_date)
+  assert.deepEqual([prior.ibor, prior.custodian, prior.difference], ['10.5', '9.5', '1'])
+  const oldRun = prior.detection.run_id
+  assert(oldRun && oldRun !== clean_run)
   const endpoint = '/api/v1/portfolios/PF1/custody/comparison'
-  const lookup = date => endpoint + '?' + new URLSearchParams({ custodian_id: custodian, business_date: date })
+  const lookup = (date, saved) => {
+    const query = new URLSearchParams({ custodian_id: custodian, business_date: date })
+    if (saved) query.set('run_id', saved)
+    return endpoint + '?' + query
+  }
   stage = 'launch'
   const browser = await chromium.launch({ headless: true, timeout: 10_000 })
   try {
@@ -35,29 +47,37 @@ async function main() {
         stage = name + '-open-response'
         await page.goto(base + '/custody-breaks')
         if (name !== 'authorized') {
-          for (const date of [clean_date, unobserved_date]) {
+          for (const [date, saved] of [[clean_date], [unobserved_date], [clean_date, oldRun], [clean_date, clean_run]]) {
             const reply = await page.evaluate(async path => {
               const response = await fetch(path)
               return { status: response.status, body: await response.text() }
-            }, lookup(date))
+            }, lookup(date, saved))
             assert.equal(reply.status, status)
-            for (const secret of [clean_run, statement, missing_run]) assert(!reply.body.includes(secret))
+            for (const secret of [clean_run, statement, missing_run, oldRun, prior.detection.statement_id, prior.break_id]) assert(!reply.body.includes(secret))
           }
           assert.equal(await page.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
           continue
         }
-        for (const [date, state, outcome, label, run] of [
+        let downloadedHistory
+        for (const [date, state, outcome, label, run, saved, reload] of [
           [clean_date, 'recorded', 'clean', 'Clean comparison', clean_run],
           [missing_date, 'recorded', 'no_statement', 'No statement received', missing_run],
           [unobserved_date, 'not_compared', undefined, 'No comparison recorded', undefined],
+          [clean_date, 'recorded', 'breaks', 'Differences found', oldRun, oldRun],
+          [clean_date, 'recorded', 'breaks', 'Differences found', oldRun, oldRun, true],
+          [clean_date, 'recorded', 'clean', 'Clean comparison', clean_run, clean_run],
+          [missing_date, 'unknown', undefined, 'Result unknown', undefined, oldRun],
+          [clean_date, 'unknown', undefined, 'Result unknown', undefined, 'synthetic-absent-run'],
         ]) {
+          if (reload) await page.reload()
           const region = page.getByRole('region', { name: 'Dated custody result' })
           await region.getByLabel('Portfolio ID', { exact: true }).fill(portfolio)
           await region.getByLabel('Custodian ID', { exact: true }).fill(custodian)
           await region.getByLabel('Business date', { exact: true }).fill(date)
+          await region.getByLabel('Saved run ID (optional)', { exact: true }).fill(saved || '')
           const pending = page.waitForResponse(response => {
             const url = new URL(response.url())
-            return url.pathname === endpoint && url.searchParams.get('business_date') === date && response.request().method() === 'GET'
+            return url.pathname === endpoint && url.searchParams.get('business_date') === date && url.searchParams.get('run_id') === (saved || null) && response.request().method() === 'GET'
           })
           await region.getByRole('button', { name: 'View dated result' }).click()
           const response = await pending
@@ -71,26 +91,50 @@ async function main() {
           assert.equal(receipt.business_date, date)
           assert.equal(receipt.portfolio_id, portfolio)
           assert.equal(receipt.custodian_id, custodian)
-          assert.equal(receipt.statement_id, outcome === 'clean' ? statement : undefined)
+          assert.equal(receipt.statement_id, outcome === 'clean' ? statement : outcome === 'breaks' ? prior.detection.statement_id : undefined)
           stage = name + '-open-row'
           const result = region.locator('output[data-state="' + state + '"]')
           await region.getByText(label, { exact: false }).first().waitFor()
           await result.waitFor()
           const text = await region.innerText()
           if (run) assert(text.includes(run))
-          if (outcome === 'clean') {
+          if (outcome === 'clean' || outcome === 'breaks') {
             assert.equal(receipt.journal_position, '1')
             assert.equal(receipt.transaction_pass, 'ran')
             assert.equal(receipt.book_reference_count, '1')
             assert.equal(receipt.statement_reference_count, '1')
             assert.equal(receipt.unreferenced_book_trades, '0')
             assert(text.includes('Independent reference comparison'))
-            assert(text.includes(statement))
+            assert(text.includes(receipt.statement_id))
           } else {
             assert.equal(receipt.transaction_pass, undefined)
             assert(!text.includes(statement))
           }
-          if (run) await comparisonDownload(page, region, receipt)
+          if (saved) {
+            assert(text.includes('Historical comparison'))
+            if (run) {
+              assert.equal(receipt.signed_statement_sha256, receipt.statement_id.slice(-64))
+              if (outcome === 'breaks') {
+                assert.equal(receipt.breaks.length, 1)
+                const row = receipt.breaks[0]
+                for (const k of ['break_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(row[k], prior[k])
+                assert.equal(row.values_state, 'exact')
+                const history = region.getByRole('table', { name: 'Differences at comparison' })
+                const values = history.getByRole('row').filter({ has: page.getByRole('rowheader', { name: prior.break_id, exact: true }) })
+                assert.deepEqual(await values.locator('td').allTextContents(), [row.kind, prior.key, prior.ibor, prior.custodian, prior.difference])
+              } else assert.deepEqual(receipt.breaks, [])
+            } else {
+              assert.equal(receipt.signed_statement_sha256, undefined)
+              assert.equal(receipt.breaks, undefined)
+            }
+          }
+          if (run) {
+            const bytes = await comparisonDownload(page, region, receipt)
+            if (saved === oldRun) {
+              if (reload) assert.deepEqual(bytes, downloadedHistory)
+              else downloadedHistory = bytes
+            }
+          }
           else assert.equal(await region.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
         }
         // Even on a gateway with registered financial/action routes, the very
