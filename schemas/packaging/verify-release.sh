@@ -93,7 +93,17 @@ for app in ("accounting", "api_gateway", "web_bff"):
         raise SystemExit(f"{app} did not link the published SDK")
     print(f"{app} linked {sdk['Path']} {sdk['Version']} {sdk['Sum']}")
 PY
-    go test -mod=readonly -p 1 -count=1 ./services/accounting/internal/server -run '^TestBreakQueue(IsServedWithAges|RefusesAnotherTenant)$' -v
+    go test -mod=readonly -p 1 -count=1 ./services/accounting/internal/server -run '^TestBreakQueue(IsServedWithAges|RefusesAnotherTenant)$' -json | tee "$scratch/custody-tests.jsonl"
+    python3 - "$scratch/custody-tests.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+
+expected = {"TestBreakQueueIsServedWithAges", "TestBreakQueueRefusesAnotherTenant"}
+events = (json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines())
+passed = {event["Test"] for event in events if event["Action"] == "pass" and "Test" in event}
+if passed != expected:
+    raise SystemExit(f"Expected both custody HTTP tests to pass, observed {sorted(passed)}")
+PY
   fi
   go mod verify
 )
