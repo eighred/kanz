@@ -150,6 +150,10 @@ func pairKey(portfolioID, custodianID string) string { return portfolioID + "|" 
 
 // SaveStatement implements Store.
 func (m *MemoryStore) SaveStatement(_ context.Context, s Statement) error {
+	if isBatchStatement(s.StatementID) {
+		// Signed intake requires the immutable receipt in the tenant database.
+		return errBatchReceipt
+	}
 	if err := s.Validate(); err != nil {
 		return err
 	}

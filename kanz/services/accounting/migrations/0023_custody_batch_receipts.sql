@@ -15,6 +15,7 @@ CREATE TABLE custody_batch_receipts (
     signed_batch BYTEA NOT NULL CHECK (octet_length(signed_batch) BETWEEN 1 AND 1048576),
     received_at TIMESTAMPTZ NOT NULL,
     statement_id TEXT NOT NULL,
+    wire_sha256 BYTEA NOT NULL CHECK (octet_length(wire_sha256) = 32),
     PRIMARY KEY (tenant_id,portfolio_id,custodian_id,business_date,revision),
     UNIQUE (tenant_id,statement_id),
     CHECK ((revision = 1 AND previous_sha256 = '') OR

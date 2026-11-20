@@ -42,8 +42,11 @@ const natsKeyHeader = "Kanz-Partition-Key"
 var _ Client = (*NATSClient)(nil)
 
 type NATSConfig struct {
-	URL            string        // nats://host:4222 (comma-separated for cluster)
-	Name           string        // client identifier
+	URL  string // nats://host:4222 (comma-separated for cluster)
+	Name string // client identifier
+	// InboxPrefix scopes request acknowledgements to a dedicated broker grant.
+	// Empty uses the NATS client default.
+	InboxPrefix    string
 	ConnectTimeout time.Duration // default 10s
 	ReconnectWait  time.Duration // default 2s
 	MaxReconnects  int           // default -1 (forever); set finite for fail-fast
@@ -219,6 +222,9 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 		nats.Timeout(cfg.ConnectTimeout),
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.MaxReconnects(cfg.MaxReconnects),
+	}
+	if cfg.InboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(cfg.InboxPrefix))
 	}
 	if cfg.DisableReconnect {
 		opts = append(opts, nats.NoReconnect())

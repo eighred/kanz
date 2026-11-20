@@ -13,7 +13,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
@@ -28,7 +31,11 @@ func readFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errors.New("custody batch: bounded regular input file required")
+	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if int64(len(b)) > limit {
 		return nil, errors.New("custody batch: input exceeds size limit")
@@ -66,7 +73,8 @@ func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
 		return errors.New("custody batch: explicit accounting database, tenant and broker required")
 	}
 	broker, err := url.Parse(cfg.NATSURL)
-	if err != nil || broker.User != nil || broker.Hostname() == "" {
+	if err != nil || broker.User != nil || broker.Hostname() == "" || strings.Contains(cfg.NATSURL, ",") ||
+		(broker.Scheme != "nats" && broker.Scheme != "tls") || broker.Path != "" || broker.RawQuery != "" || broker.Fragment != "" {
 		return errors.New("custody batch: use a broker endpoint without embedded credentials")
 	}
 	if cfg.SPIFFESocket == "" && !net.ParseIP(broker.Hostname()).IsLoopback() {
@@ -86,12 +94,14 @@ func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
 	if err = pool.QueryRow(ctx, "SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user").Scan(&restricted); err != nil || !restricted {
 		return errors.New("custody batch: restricted database role required")
 	}
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: custody.BatchProducer, TLSConfig: mesh.Client})
+	metrics := bus.NewBusMetrics(prometheus.NewRegistry())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: custody.BatchProducer,
+		InboxPrefix: custody.BatchInbox, TLSConfig: mesh.Client, Metrics: metrics, Logger: slog.Default()})
 	if err != nil {
 		return errors.New("custody batch: broker unavailable")
 	}
 	defer func() { _ = client.Close() }()
-	pub, err := bus.NewProducer(client, bus.ProducerConfig{Source: custody.BatchProducer, ProducerVersion: version.String(), Tenant: cfg.Tenant})
+	pub, err := bus.NewProducer(client, bus.ProducerConfig{Source: custody.BatchProducer, ProducerVersion: version.String(), Tenant: cfg.Tenant, Metrics: metrics})
 	if err != nil {
 		return err
 	}

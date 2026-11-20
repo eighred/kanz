@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -77,7 +78,19 @@ func (c *StatementConsumer) Handle(ctx context.Context, env *envelopepb.Envelope
 	if err != nil {
 		return err
 	}
-	if err := c.store.SaveStatement(ctx, stmt); err != nil {
+	if isBatchStatement(stmt.StatementID) || env.GetSource() == BatchProducer {
+		writer, ok := c.store.(interface {
+			saveStatement(context.Context, Statement, []byte) error
+		})
+		if !ok || env.GetSource() != BatchProducer || !isBatchStatement(stmt.StatementID) {
+			return errBatchReceipt
+		}
+		digest := sha256.Sum256(payload)
+		err = writer.saveStatement(ctx, stmt, digest[:])
+	} else {
+		err = c.store.SaveStatement(ctx, stmt)
+	}
+	if err != nil {
 		return fmt.Errorf("custody: save statement %s: %w", stmt.StatementID, err)
 	}
 	c.logger.Info("accounting: custodian statement stored",

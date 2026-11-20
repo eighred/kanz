@@ -16,11 +16,13 @@ import (
 
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/outbox"
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/proto"
 )
 
 func signedExample(t *testing.T, a BatchAuthority, key ed25519.PrivateKey, revision int64, previous string, position int) ([]byte, []byte) {
@@ -197,6 +199,27 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 	if err == nil || id == "" {
 		t.Fatal("pending receipt was not returned")
 	}
+	// A corrupted delivery can arrive before the genuine queued FACT. It
+	// must fail against the receipt even when no statement row exists yet.
+	var originalWire []byte
+	if err = pool.QueryRow(ctx, "SELECT payload FROM outbox WHERE producer_service=$1", BatchProducer).Scan(&originalWire); err != nil {
+		t.Fatal(err)
+	}
+	var changed accountingpb.CustodianStatement
+	if err := proto.Unmarshal(originalWire, &changed); err != nil {
+		t.Fatal(err)
+	}
+	changed.Positions[0].Quantity.Coefficient++
+	altered, err := proto.Marshal(&changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: BatchProducer}, altered); !errors.Is(err, errBatchReceipt) {
+		t.Fatalf("accepted altered first delivery: %v", err)
+	}
+	if _, err := st.LatestStatement(ctx, subject); !errors.Is(err, ErrNoStatement) {
+		t.Fatal("a rejected first delivery created a statement")
+	}
 	i := newImporter(pub)
 	again, err := i.Import(ctx, raw, sig)
 	if err != nil || again != id {
@@ -228,6 +251,37 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 	run, err = reconciler.Reconcile(ctx, subject)
 	if err != nil || run.StatementID != corrected || run.Outcome != OutcomeClean {
 		t.Fatalf("correction %+v %v", run, err)
+	}
+	if err := pub.Publish(ctx, bus.Event{Subject: SubjectStatement, EventType: SubjectStatement,
+		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting", TenantID: tenant,
+		EventTime: time.Now(), PartitionKey: a.Portfolio, PayloadSchemaRef: schemaRefStatement, Payload: &changed}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-accepted:
+		if !errors.Is(err, errBatchReceipt) {
+			t.Fatalf("altered replay reached ordinary consumer: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: "another-source"}, originalWire); !errors.Is(err, errBatchReceipt) {
+		t.Fatal("unrelated producer reused reserved source identity")
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: BatchProducer}, originalWire); err != nil {
+		t.Fatalf("identical verified replay failed: %v", err)
+	}
+	var after []byte
+	if err := pool.QueryRow(ctx, "SELECT positions FROM custody_statements WHERE statement_id=$1", id).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	var retained map[string]string
+	if err := json.Unmarshal(after, &retained); err != nil {
+		t.Fatal(err)
+	}
+	quantity, ok := new(big.Rat).SetString(retained["SYN"])
+	if !ok || quantity.Cmp(big.NewRat(19, 2)) != 0 {
+		t.Fatalf("signed statement changed after refusal: %s", after)
 	}
 	other := newCustodyPool(t, tenant+"-other")
 	var count int

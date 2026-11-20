@@ -22,6 +22,13 @@ import (
 const BatchFormat = "kanz.synthetic-custody.v1"
 const BatchLimit = 1 << 20
 const BatchProducer = "custody-batch"
+const BatchInbox = "_INBOX.custody_batch"
+
+const batchStatementPrefix = "custody-batch.v1."
+
+var errBatchReceipt = errors.New("custody batch: canonical statement differs from its authorized receipt")
+
+func isBatchStatement(id string) bool { return strings.HasPrefix(id, batchStatementPrefix) }
 
 var batchID = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
@@ -156,7 +163,7 @@ func (v batchVerifier) verify(raw, signature []byte) (batchInput, error) {
 		}
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
-	msg.StatementId = fmt.Sprintf("%s.r%d.%s", a.Source, h.Revision, digest)
+	msg.StatementId = fmt.Sprintf("%s%s.r%d.%s", batchStatementPrefix, a.Source, h.Revision, digest)
 	return batchInput{h, digest, msg}, nil
 }
 

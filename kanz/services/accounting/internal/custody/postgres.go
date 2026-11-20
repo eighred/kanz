@@ -45,6 +45,13 @@ func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 // on which copy arrived last, and a custodian resending an unchanged statement
 // would look like new information.
 func (p *Postgres) SaveStatement(ctx context.Context, s Statement) error {
+	if isBatchStatement(s.StatementID) {
+		return errBatchReceipt
+	}
+	return p.saveStatement(ctx, s, nil)
+}
+
+func (p *Postgres) saveStatement(ctx context.Context, s Statement, wireDigest []byte) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
@@ -83,6 +90,20 @@ WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if wireDigest != nil {
+		// The signed bytes, platform receipt time and exact outbound protobuf
+		// were bound before publication. This also protects the first delivery.
+		var verified bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM custody_batch_receipts
+			WHERE statement_id = $1 AND wire_sha256 = $2 AND tenant_id = app_current_tenant()
+		)`, s.StatementID, wireDigest).Scan(&verified); err != nil {
+			return err
+		}
+		if !verified {
+			return errBatchReceipt
+		}
+	}
 	result, err := tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())

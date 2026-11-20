@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -114,8 +115,9 @@ func (i *BatchImporter) append(ctx context.Context, tx pgx.Tx, b batchInput, raw
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO custody_batch_receipts (portfolio_id,custodian_id,account_id,source_id,business_date,revision,previous_sha256,sha256,public_key,signature,signed_batch,received_at,statement_id)
-		VALUES($1,$2,$3,$4,$5::text::date,$6,$7,$8,$9,$10,$11,$12,$13)`, a.Portfolio, a.Custodian, a.Account, a.Source, day, b.header.Revision, b.header.Previous, b.digest, []byte(i.verify.key), signature, raw, received, b.statement.StatementId)
+	wireDigest := sha256.Sum256(record.Payload)
+	_, err = tx.Exec(ctx, `INSERT INTO custody_batch_receipts (portfolio_id,custodian_id,account_id,source_id,business_date,revision,previous_sha256,sha256,public_key,signature,signed_batch,received_at,statement_id,wire_sha256)
+		VALUES($1,$2,$3,$4,$5::text::date,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, a.Portfolio, a.Custodian, a.Account, a.Source, day, b.header.Revision, b.header.Previous, b.digest, []byte(i.verify.key), signature, raw, received, b.statement.StatementId, wireDigest[:])
 	if err != nil {
 		return err
 	}
