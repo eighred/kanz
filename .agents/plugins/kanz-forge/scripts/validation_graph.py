@@ -88,6 +88,17 @@ def assess_graph(graph):
         nodes[key] = node
     if len(nodes) > 2000 or len(graph["edges"]) > 10000:
         raise ValueError("validation graph exceeds its bounded scope")
+    workflow_steps = {}
+    if "customer_workflow" in graph:
+        workflow = graph["customer_workflow"]
+        if not isinstance(workflow, dict) or not all(
+                proof(workflow.get(field)) for field in ("actor", "outcome", "acceptance")):
+            raise ValueError("customer workflow needs an actor, observable outcome and acceptance reference")
+        workflow_steps = workflow.get("steps")
+        if not isinstance(workflow_steps, dict) or not workflow_steps or any(
+                key not in nodes or nodes[key]["kind"] != "task" or not proof(evidence)
+                for key, evidence in workflow_steps.items()):
+            raise ValueError("workflow steps must reference existing tasks with dependency evidence")
     required = {key: [] for key in nodes}
     execution = {key: [] for key in nodes}
     recovers = {key: [] for key in nodes}
@@ -216,10 +227,11 @@ def assess_graph(graph):
         # This tie-break cannot outrank critical recovery or repository priority.
         continuation = {"pr": 0, "branch": 1}.get(node.get("continuation", {}).get("kind"), 2)
         candidates.append((not critical, not bool(affected), node.get("priority", 2),
-                           -len(affected), continuation, key))
+                           -len(affected), key not in workflow_steps, continuation, key))
         results[key]["selection_reason"] = (
             "recover critical shared validation prerequisite" if critical else
             "recover shared validation prerequisite" if affected else
+            "advance customer workflow: " + workflow_steps[key] if key in workflow_steps else
             "independent execution; delivery prerequisites remain explicit")
     candidates.sort()
     selected = candidates[0][-1] if candidates else None
