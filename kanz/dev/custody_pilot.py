@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "kanz"
@@ -81,12 +82,13 @@ def local_engine(env):
     return ["docker", "--host", result]
 
 
-def verify_observations(path):
+def verify_observations(path, rerun=False):
     records = json.loads(path.read_bytes())
-    if not isinstance(records, list) or len(records) != 2:
+    revisions = [1, 1, 2] if rerun else [1, 2]
+    if not isinstance(records, list) or len(records) != len(revisions):
         raise RuntimeError("Both signed statement revisions must have a retained comparison.")
     runs = set()
-    for revision, record in enumerate(records, 1):
+    for sequence, (revision, record) in enumerate(zip(revisions, records), 1):
         if not isinstance(record, dict) or not all(type(record.get(key)) is int for key in
                                                   ("revision", "outstanding_breaks", "completion_sequence")):
             raise RuntimeError("Expected an observed revision, break count and completion sequence.")
@@ -97,15 +99,21 @@ def verify_observations(path):
             "revision": revision, "statement_id": statement_id, "run_id": run_id,
             "business_date": json.loads(raw)["statement"]["businessDate"].split("T")[0],
             "outcome": "breaks" if revision == 1 else "clean",
-            "outstanding_breaks": 1 if revision == 1 else 0, "completion_sequence": revision,
+            "outstanding_breaks": 1 if revision == 1 else 0, "completion_sequence": sequence,
         }
+        if rerun and sequence == 2:
+            request_id = record.get("request_id", "")
+            parsed = uuid.UUID(request_id)
+            if parsed.version != 4 or str(parsed) != request_id or run_id != "manual:" + request_id:
+                raise RuntimeError("The operator receipt does not identify its original request.")
+            expected.update(request_id=request_id, actor="custody-pilot-rerun-authorized")
         if not isinstance(run_id, str) or not run_id or run_id in runs or record != expected:
             raise RuntimeError(f"Retained comparison differs from the signed pilot at revision {revision}.")
         runs.add(run_id)
     return records
 
 
-def qualify(docker, container, binaries, node, env, observations):
+def qualify(docker, container, binaries, node, env, observations, rerun):
     owner_password = secrets.token_hex(24)
     source_password = secrets.token_hex(24)
 
@@ -136,7 +144,14 @@ def qualify(docker, container, binaries, node, env, observations):
         except subprocess.CalledProcessError:
             raise RuntimeError(f"Accounting migration failed at {migration.name}.") from None
     authority = json.loads((CMD / "testdata/authority.json").read_bytes())
-    sql(DATABASE, (CMD / "pilot_grants.sql").read_bytes(), "-v", "public_key=" + authority["public_key"])
+    # psql resolves the read-only profile's relative include beside its entrypoint.
+    grants = "signed_fixture_grants.sql" if rerun else "pilot_grants.sql"
+    for filename in {"signed_fixture_grants.sql", grants}:
+        subprocess.run([*docker, "cp", str(CMD / filename), f"{container}:/tmp/{filename}"], check=True, env=env)
+    sql(DATABASE, b"", "-v", "public_key=" + authority["public_key"], "-f", "/tmp/" + grants,
+        *(["--single-transaction"] if rerun else []))
+    if not rerun:
+        sql(DATABASE, b"", "-v", "review_fence_only=on", "-f", "/tmp/pilot_grants.sql")
     sql(DATABASE, b"""
         GRANT USAGE ON SCHEMA public TO pilot_check;
         GRANT SELECT ON custody_batch_receipts, ledger_snapshots TO pilot_check;
@@ -145,6 +160,8 @@ def qualify(docker, container, binaries, node, env, observations):
         GRANT SELECT, INSERT, UPDATE, DELETE ON custody_break_detections TO pilot_check;
         GRANT USAGE ON SEQUENCE outbox_id_seq TO pilot_check;
     """)
+    if rerun:
+        sql(DATABASE, b"GRANT UPDATE(manual_receipt) ON custody_runs TO pilot_check")
     sql("postgres", (
         "CREATE ROLE pilot_source LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE kanz_custody_batch_pilot "
         f"PASSWORD '{source_password}';"
@@ -159,18 +176,19 @@ def qualify(docker, container, binaries, node, env, observations):
         CUSTODY_PILOT_VERIFY="1", CUSTODY_PILOT_GATEWAY_PROBE=str(binaries["gateway"]),
         CUSTODY_PILOT_BFF_PROBE=str(binaries["bff"]), TEST_MFA_NODE=node,
         TEST_MFA_STATIC_DIR=str(WEB / "dist"), TEST_MFA_PLAYWRIGHT=str(WEB / "node_modules/playwright"),
-        CUSTODY_PILOT_BROWSER_SCRIPT=str(WEB / "e2e/custody-detection.cjs"),
+        CUSTODY_PILOT_BROWSER_SCRIPT=str(WEB / "e2e" / ("custody-rerun.cjs" if rerun else "custody-detection.cjs")),
         CUSTODY_PILOT_RECEIPT=str(observations),
     )
-    proof = subprocess.run([binaries["accounting"], "-test.run=^TestSignedCustodyOperatorReadback$",
+    test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
+    proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
                             "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
     output = proof.stdout
-    if (proof.returncode or b"--- SKIP" in output or b"--- PASS: TestSignedCustodyOperatorReadback" not in output
+    if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
             or b"signed gateway and Chromium verified the persisted detection" not in output):
         stage = re.search(rb"custody-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
-        raise RuntimeError("Signed custody operator proof failed" + suffix + ".")
-    return verify_observations(observations)
+        raise RuntimeError(test + " failed" + suffix + ".")
+    return verify_observations(observations, rerun)
 
 
 def main():
@@ -188,27 +206,29 @@ def main():
         subprocess.run([*docker, "pull", IMAGE], check=True, env=env)
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
-        # The image initializes its own secret in tmpfs. Local SQL administration
-        # uses the postgres OS identity (peer); network logins require SCRAM.
-        name = "kanz-custody-pilot-" + secrets.token_hex(8)
-        run = [*docker, "run", "--detach", "--rm", "--pull=never", "--name", name,
-               "--publish", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data",
-               "--tmpfs", "/run/pilot", "--env", "POSTGRES_INITDB_ARGS=--auth-local=peer --auth-host=scram-sha-256",
-               "--env", "POSTGRES_PASSWORD_FILE=/run/pilot/admin", "--entrypoint", "sh", IMAGE, "-ec",
-               "umask 077; head -c 32 /dev/urandom | base64 > /run/pilot/admin; "
-               "chown postgres /run/pilot/admin; exec docker-entrypoint.sh postgres"]
-        # Use the exact returned container ID for cleanup. No shared DB or
-        # external service connection is accepted by the entrypoint.
-        container = subprocess.check_output(run, env=env, text=True).strip()
-        try:
-            records = qualify(docker, container, binaries, node, env, Path(directory) / "observations.json")
-        finally:
-            subprocess.run([*docker, "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
+        results = {"postgres_image": IMAGE}
+        for key, rerun in (("comparisons", False), ("operator_comparisons", True)):
+            # The image initializes its own secret in tmpfs. Local SQL administration
+            # uses the postgres OS identity (peer); network logins require SCRAM.
+            name = "kanz-custody-pilot-" + secrets.token_hex(8)
+            run = [*docker, "run", "--detach", "--rm", "--pull=never", "--name", name,
+                   "--publish", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data",
+                   "--tmpfs", "/run/pilot", "--env", "POSTGRES_INITDB_ARGS=--auth-local=peer --auth-host=scram-sha-256",
+                   "--env", "POSTGRES_PASSWORD_FILE=/run/pilot/admin", "--entrypoint", "sh", IMAGE, "-ec",
+                   "umask 077; head -c 32 /dev/urandom | base64 > /run/pilot/admin; "
+                   "chown postgres /run/pilot/admin; exec docker-entrypoint.sh postgres"]
+            # Use the exact returned container ID for cleanup. No shared DB or
+            # external service connection is accepted by the entrypoint.
+            container = subprocess.check_output(run, env=env, text=True).strip()
+            try:
+                results[key] = qualify(docker, container, binaries, node, env, Path(directory) / (key + ".json"), rerun)
+            finally:
+                subprocess.run([*docker, "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
     if args.receipt:
-        args.receipt.write_text(json.dumps({"postgres_image": IMAGE, "comparisons": records}, indent=2) + "\n",
+        args.receipt.write_text(json.dumps(results, indent=2) + "\n",
                                 encoding="utf-8")
     print("PASS: Chromium verified the retained signed break on load and reload, the three restricted "
-          "sessions, and read-only controls. Accounting confirmed the correction cleared the queue.")
+          "sessions and read-only controls. A separate authorized browser rerun produced one durable receipt and FACT. The correction cleared both queues.")
 
 
 if __name__ == "__main__":

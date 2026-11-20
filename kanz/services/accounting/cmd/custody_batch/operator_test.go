@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/server"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
@@ -43,10 +46,21 @@ type pilotObservation struct {
 	Outcome            string `json:"outcome"`
 	OutstandingBreaks  int    `json:"outstanding_breaks"`
 	CompletionSequence uint64 `json:"completion_sequence"`
+	Actor              string `json:"actor,omitempty"`
+	RequestID          string `json:"request_id,omitempty"`
 }
 
 // Use a fresh instance of the provisioned pilot database for each invocation.
 func TestSignedCustodyOperatorReadback(t *testing.T) {
+	checkPilotReadback(t, false)
+}
+
+func TestSignedCustodyAuthorizedRerun(t *testing.T) {
+	checkPilotReadback(t, true)
+}
+
+func checkPilotReadback(t *testing.T, rerun bool) {
+	t.Helper()
 	if os.Getenv("CUSTODY_PILOT_VERIFY") != "1" {
 		t.Skip("requires a fresh provisioned synthetic custody pilot")
 	}
@@ -87,7 +101,11 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		if err != nil || run.StatementID != statement.StatementID {
 			t.Fatalf("actual comparison %s: %v", run.RunID, err)
 		}
-		message, err := broker.completions.GetMsg(ctx, uint64(revision))
+		sequence := uint64(revision)
+		if rerun && revision == 2 {
+			sequence++ // The browser's one manual completion follows scheduled r1.
+		}
+		message, err := broker.completions.GetMsg(ctx, sequence)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +114,13 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		if proto.Unmarshal(message.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil || frame.GetEnvelope().GetTenantId() != tenant || fact.GetRunId() != run.RunID || fact.GetStatementId() != statement.StatementID {
 			t.Fatal("completion FACT did not identify the committed comparison")
 		}
-		site := httptest.NewServer(server.New(&server.Readiness{}, slog.Default(), journal, "USD", server.WithTenant(tenant), server.WithBreakStore(store), server.WithReadOnlyCustodyReview()))
+		options := []server.Option{server.WithTenant(tenant), server.WithBreakStore(store)}
+		if rerun {
+			options = append(options, server.WithCustodyBookScope(scope), server.WithCustodyReruns("custody-pilot-rerun", r.ReconcileManual))
+		} else {
+			options = append(options, server.WithReadOnlyCustodyReview())
+		}
+		site := httptest.NewServer(server.New(&server.Readiness{}, slog.Default(), journal, "USD", options...))
 		defer site.Close()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, site.URL+"/v1/custody/breaks", nil)
 		if err != nil {
@@ -118,8 +142,8 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&list) != nil {
 			t.Fatalf("accounting read failed: %d", response.StatusCode)
 		}
-		if list.ActionsEnabled == nil || *list.ActionsEnabled {
-			t.Fatal("read-only pilot offered an operator action")
+		if list.ActionsEnabled == nil || *list.ActionsEnabled != rerun {
+			t.Fatal("accounting reported a different review configuration")
 		}
 		observations = append(observations, pilotObservation{
 			Revision: revision, RunID: fact.GetRunId(), StatementID: fact.GetStatementId(),
@@ -143,13 +167,21 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 		if b.Detection != expected || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Key != "SYN" || b.IBOR != "10.5" || b.Custodian != "9.5" || b.Difference != "1" {
 			t.Fatalf("unexpected accounting evidence: %+v", b)
 		}
-		for _, action := range []string{"actions", "assign", "explain"} {
-			probe := httptest.NewRequest(http.MethodPost, "/v1/custody/breaks/test/"+action, nil)
-			probe.Header = req.Header.Clone()
-			rec := httptest.NewRecorder()
-			site.Config.Handler.ServeHTTP(rec, probe)
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("read-only %s returned %d", action, rec.Code)
+		if !rerun {
+			const id = "c9cb9d52-3414-4081-bb01-718183d12647"
+			result, err := r.ReconcileManual(ctx, subject, id, "synthetic-operator")
+			var denied *pgconn.PgError
+			if result.RunID != "" || !errors.As(err, &denied) || denied.Code != "42501" || !strings.Contains(denied.Message, "signed_pilot_read_only_reruns") {
+				t.Fatalf("expected database refusal of operator rerun in the read-only pilot: %v", err)
+			}
+			for _, action := range []string{"actions", "assign", "explain"} {
+				probe := httptest.NewRequest(http.MethodPost, "/v1/custody/breaks/test/"+action, nil)
+				probe.Header = req.Header.Clone()
+				rec := httptest.NewRecorder()
+				site.Config.Handler.ServeHTTP(rec, probe)
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf("read-only %s returned %d", action, rec.Code)
+				}
 			}
 		}
 		if binary := os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"); binary != "" {
@@ -157,7 +189,11 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			probe := exec.CommandContext(ctx, binary, "-test.run=^TestSignedCustodyOperatorBrowser$", "-test.count=1", "-test.v")
+			testName := "TestSignedCustodyOperatorBrowser"
+			if rerun {
+				testName = "TestSignedCustodyRerunBrowser"
+			}
+			probe := exec.CommandContext(ctx, binary, "-test.run=^"+testName+"$", "-test.count=1", "-test.v")
 			probe.Stdin = bytes.NewReader(payload)
 			probe.Env = []string{"CUSTODY_PILOT_ACCOUNTING_URL=" + site.URL}
 			for _, k := range []string{"PATH", "SystemRoot", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR", "CUSTODY_PILOT_BROWSER_SCRIPT"} {
@@ -166,10 +202,32 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 				}
 			}
 			log, err := probe.CombinedOutput()
-			if err != nil || !bytes.Contains(log, []byte("--- PASS: TestSignedCustodyOperatorBrowser")) {
+			if err != nil || !bytes.Contains(log, []byte("--- PASS: "+testName)) {
 				t.Fatalf("signed gateway/browser exercise failed: %v\n%s", err, log)
 			}
 			t.Log("signed gateway and Chromium verified the persisted detection")
+		}
+		if rerun {
+			info, err := broker.completions.Info(ctx)
+			if err != nil || info.State.Msgs != 2 {
+				t.Fatal("browser and its retry must add one completion")
+			}
+			msg, err := broker.completions.GetMsg(ctx, 2)
+			var frame envelopepb.EventFrame
+			var manual accountingpb.ReconciliationRun
+			if err != nil || proto.Unmarshal(msg.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &manual) != nil ||
+				frame.GetEnvelope().GetTenantId() != tenant || manual.GetActor() != "custody-pilot-rerun-authorized" ||
+				manual.GetRequestId() == "" || manual.GetRunId() != "manual:"+manual.GetRequestId() || manual.GetStatementId() != statement.StatementID ||
+				manual.GetOutcome() != fact.GetOutcome() || !manual.GetBusinessDate().AsTime().Equal(day) {
+				t.Fatal("manual broker completion must identify the authorized exact-date comparison")
+			}
+			stored, err := store.ManualReceipt(ctx, custody.Run{RunID: manual.GetRunId(), RequestID: manual.GetRequestId(), Actor: manual.GetActor(), Subject: subject})
+			if err != nil || len(stored.Breaks) != 1 || stored.StatementID != statement.StatementID || stored.Outcome != custody.OutcomeBreaks {
+				t.Fatal("manual completion differs from its durable receipt")
+			}
+			observations = append(observations, pilotObservation{Revision: revision, RunID: stored.RunID, StatementID: stored.StatementID,
+				BusinessDate: day.Format(time.DateOnly), Outcome: stored.Outcome.String(), OutstandingBreaks: len(stored.Breaks),
+				CompletionSequence: msg.Sequence, Actor: stored.Actor, RequestID: stored.RequestID})
 		}
 	})
 	if path := os.Getenv("CUSTODY_PILOT_RECEIPT"); path != "" && !t.Failed() {
