@@ -68,34 +68,46 @@ func assessment(r Receipt) *performancepb.DailyReturnAssessment {
 }
 
 func measure(e Evidence) (float64, string) {
+	exact, reason := exactReturn(e)
+	if reason != "" {
+		return 0, reason
+	}
+	fraction, _ := exact.Float64()
+	if math.IsNaN(fraction) || math.IsInf(fraction, 0) {
+		return 0, "return_out_of_range"
+	}
+	return fraction, ""
+}
+
+func exactReturn(e Evidence) (*big.Rat, string) {
 	switch {
 	case e.Opening == nil || e.Closing == nil:
-		return 0, "nav_missing"
+		return nil, "nav_missing"
 	case e.Flows == nil || e.Flows.EventCount == nil:
-		return 0, "flow_coverage_unknown"
+		return nil, "flow_coverage_unknown"
 	case *e.Flows.EventCount != 0 && e.Flows.Split == nil:
-		return 0, "external_flows_present"
+		return nil, "external_flows_present"
 	}
 	opening, err := e.Opening.Total.Rat()
 	if err != nil || opening.Sign() <= 0 {
-		return 0, "opening_nav_nonpositive"
+		return nil, "opening_nav_nonpositive"
 	}
 	closing, err := e.Closing.Total.Rat()
 	if err != nil {
-		return 0, "nav_missing"
+		return nil, "nav_missing"
 	}
 	var growth *big.Rat
 	if split := e.Flows.Split; split != nil {
 		if split.Before == nil || split.After == nil {
-			return 0, "nav_at_flow_missing"
+			return nil, "nav_at_flow_missing"
 		}
 		before, beforeErr := split.Before.Total.Rat()
 		after, afterErr := split.After.Total.Rat()
 		if beforeErr != nil || afterErr != nil {
-			return 0, "nav_at_flow_missing"
+			return nil, "nav_at_flow_missing"
 		}
 		if after.Sign() <= 0 {
-			return 0, "post_flow_nav_nonpositive"
+			return nil, "post_flow_nav_nonpositive"
 		}
 		// Link the two invested periods around the same-time cash movement.
 		// Convert only the completed statistical fraction to binary64.
@@ -103,18 +115,19 @@ func measure(e Evidence) (float64, string) {
 	} else {
 		growth = new(big.Rat).Quo(closing, opening)
 	}
-	fraction, _ := growth.Sub(growth, big.NewRat(1, 1)).Float64()
-	if math.IsNaN(fraction) || math.IsInf(fraction, 0) {
-		return 0, "return_out_of_range"
-	}
-	return fraction, ""
+	return growth.Sub(growth, big.NewRat(1, 1)), ""
+}
+
+func lockJournal(ctx context.Context, tx pgx.Tx, portfolio string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext(app_current_tenant()),hashtext($1))`, portfolio)
+	return err
 }
 
 func verifyBookedFlow(ctx context.Context, tx pgx.Tx, e Evidence) error {
 	if e.Flows == nil || e.Flows.Split == nil {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext(app_current_tenant()),hashtext($1))`, e.Portfolio); err != nil {
+	if err := lockJournal(ctx, tx, e.Portfolio); err != nil {
 		return err
 	}
 	split := e.Flows.Split
@@ -138,7 +151,11 @@ func enqueue(ctx context.Context, tx pgx.Tx, receipt Receipt) error {
 	if err != nil || tag.RowsAffected() == 0 {
 		return err
 	}
-	payload, err := proto.Marshal(assessment(receipt))
+	report, err := verifiedAssessment(ctx, tx, receipt)
+	if err != nil {
+		return err
+	}
+	payload, err := proto.Marshal(report)
 	if err != nil {
 		return err
 	}
@@ -194,7 +211,11 @@ func (s *Store) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 	if err = verifyBookedFlow(ctx, tx, r.Evidence); err != nil {
 		return err
 	}
-	if !proto.Equal(&incoming, assessment(r)) {
+	report, err := verifiedAssessment(ctx, tx, r)
+	if err != nil {
+		return err
+	}
+	if !proto.Equal(&incoming, report) {
 		return ErrEvidence
 	}
 	_, err = tx.Exec(ctx, `UPDATE return_basis_publications SET observed_payload=$5

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -229,7 +230,7 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 // it is the query that made #229 a request-path liability. Reach for
 // JournalSince instead unless you genuinely need the whole book from empty.
 func (p *Postgres) Journal(ctx context.Context, portfolioID string) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, nil)
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, nil, 0)
 }
 
 // JournalSince seeks the immutable append index, never financial timestamps.
@@ -240,7 +241,7 @@ func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after i
 	if after == 0 {
 		return p.Journal(ctx, portfolioID)
 	}
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, &after)
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, &after, 0)
 }
 
 // JournalAsOf returns replay-ready effects at the two PIT cutoffs. The SQL
@@ -249,7 +250,7 @@ func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after i
 // are derived replay stages, never additional persisted journal records. Replay
 // over this result equals ReplayAsOf over the immutable full journal.
 func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiveAsOf, knowledgeAsOf time.Time) ([]*Event, error) {
-	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, nil)
+	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, nil, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +259,17 @@ func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiv
 		e.journalReadPosition = 0
 	} // PIT effects cannot certify a current checkpoint.
 	return out, nil
+}
+
+// RecordedJournal reads a bounded immutable journal for a retained historical
+// assessment. Both knowledge and the recording timestamp must fit the signed
+// horizon, so a later backdated entry cannot supply evidence to an old edition.
+// The caller holds the portfolio journal lock in the provided tenant transaction.
+func RecordedJournal(ctx context.Context, tx pgx.Tx, portfolioID string, horizon time.Time, limit int) ([]*Event, error) {
+	if horizon.IsZero() || limit <= 0 {
+		return nil, errors.New("ledger: recorded journal requires a horizon and positive limit")
+	}
+	return (&Postgres{q: tx}).journal(ctx, portfolioID, time.Time{}, horizon, nil, limit)
 }
 
 // StalePortfolios also discovers untouched legacy portfolios with no head.
@@ -293,24 +305,33 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 	return out, rows.Err()
 }
 
-func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound time.Time, after *int64) ([]*Event, error) {
-	join, positionBound := "", ""
+func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound time.Time, after *int64, recordedLimit int) ([]*Event, error) {
+	join, extraWhere, limit := "", "", ""
 	args := []any{portfolioID, nullTime(effBound), nullTime(knowBound)}
 	if after != nil {
 		join = ` JOIN ledger_append_positions USING (tenant_id, portfolio_id, entry_id)`
-		positionBound = ` AND position > $4`
+		extraWhere = ` AND position > $4`
 		args = append(args, *after)
+	} else if recordedLimit > 0 {
+		extraWhere = ` AND created_at <= $3`
+		limit = ` LIMIT $4`
+		args = append(args, recordedLimit)
 	}
-	rows, err := p.q.Query(ctx, `
+	query := `
 		SELECT entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
 		       effective_time, knowledge_time, settlement_status, settlement_date, source_ref, execution_evidence
-		FROM ledger_entries `+join+`
+		FROM ledger_entries ` + join + `
 		WHERE portfolio_id = $1
 		  AND ($2::timestamptz IS NULL OR effective_time <= $2)
-		  AND ($3::timestamptz IS NULL OR knowledge_time <= $3) `+positionBound+`
-		ORDER BY effective_time, knowledge_time, entry_id
-	`, args...)
+		  AND ($3::timestamptz IS NULL OR knowledge_time <= $3) ` + extraWhere + `
+		ORDER BY effective_time, knowledge_time, entry_id ` + limit
+	if recordedLimit > 0 {
+		// Keep the shared decoder's column shape without granting the
+		// valuation source access to the raw execution records.
+		query = strings.Replace(query, ", execution_evidence", ", NULL::bytea", 1)
+	}
+	rows, err := p.q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query journal %s: %w", portfolioID, err)
 	}

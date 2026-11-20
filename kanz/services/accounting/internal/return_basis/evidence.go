@@ -67,6 +67,7 @@ type Evidence struct {
 	Closing        *Close             `json:"closing"`
 	Flows          *FlowCompletion    `json:"external_flows"`
 	Benchmark      *BenchmarkEvidence `json:"benchmark,omitempty"`
+	PositionBasis  *PositionBasis     `json:"position_basis,omitempty"`
 }
 
 type authority struct {
@@ -91,7 +92,7 @@ func parse(raw []byte) (Evidence, error) {
 		return Evidence{}, ErrEvidence
 	}
 	marks := []*Close{e.Opening, e.Closing}
-	if !validBenchmark(e) {
+	if !validBenchmark(e) || !validPositionBasis(e) {
 		return Evidence{}, ErrEvidence
 	}
 	if e.Flows != nil {

@@ -45,11 +45,13 @@ async function main() {
               assert(!denied.includes(edition.benchmark_digest))
               assert(!denied.includes('SYNTH-TR'))
             }
+            assert(!denied.includes('SYNTH-A'))
+            assert(!denied.includes('position_contribution'))
           }
           continue
         }
         const [original, corrected, unknown, splitOriginal, splitCorrected, indexCorrected,
-          missingBenchmark, mismatchedBenchmark, splitUnknown] = expected.editions
+          missingBenchmark, mismatchedBenchmark, splitUnknown, missingMarks, badMarks, unsupported] = expected.editions
         async function measured(edition, value, text, flowCount = '0') {
           const body = await check(edition, 200)
           assert.equal(body.source_digest, edition.digest)
@@ -86,6 +88,38 @@ async function main() {
           await section.getByText(activeText, { exact: true }).waitFor()
           await section.getByText(edition.benchmark_digest, { exact: true }).waitFor()
         }
+        const contributionTable = () => section.getByRole('table', { name: 'Position contributions to time-weighted return' })
+        async function contribution(body, reference, rows, total) {
+          const result = body.position_contribution
+          assert.equal(result.method, 'POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS')
+          assert.equal(result.unassessed_reason, undefined)
+          assert.equal(result.opening_price_reference, 'prices-open')
+          assert.equal(result.flow_price_reference, 'prices-flow')
+          assert.equal(result.closing_price_reference, reference)
+          const found = result.measured
+          assert.deepEqual(found.positions.map(p => p.instrument_id), ['SYNTH-A', 'SYNTH-B'])
+          const toNumber = ({ coefficient, exponent = 0 }) => Number(coefficient) * 10 ** exponent
+          const amounts = [...found.positions.map(p => toNumber(p.pnl)), toNumber(found.cash_pnl), toNumber(found.total_pnl)]
+          const returns = [...found.positions.map(p => p.return_contribution), found.cash_return_contribution, found.total_return_contribution]
+          const expectedRows = [...rows, total]
+          assert.deepEqual(amounts, expectedRows.map(p => p[1]))
+          for (const [i, [label, amount, fraction, displayed]] of expectedRows.entries()) {
+            assert(Math.abs(returns[i] - fraction) <= 1e-12)
+            const row = contributionTable().getByRole('row', { name: new RegExp('^' + label) })
+            await row.getByRole('cell', { name: String(amount), exact: true }).waitFor()
+            await row.getByRole('cell', { name: displayed, exact: true }).waitFor()
+          }
+          assert.equal(returns.at(-1), body.measured.return_value)
+          assert.equal(amounts.slice(0, -1).reduce((sum, value) => sum + value, 0), amounts.at(-1))
+          assert(Math.abs(returns.slice(0, -1).reduce((sum, value) => sum + value, 0) - returns.at(-1)) <= 1e-12)
+          await section.getByText('prices-open · prices-flow · ' + reference, { exact: true }).waitFor()
+        }
+        async function unassessedContribution(body, reason, text) {
+          assert.equal(body.position_contribution.measured, undefined)
+          assert.equal(body.position_contribution.unassessed_reason, reason)
+          await section.getByText('Position contribution unassessed. ' + text, { exact: true }).waitFor()
+          assert.equal(await contributionTable().count(), 0)
+        }
         stage = 'authorized-open-payload'
         const originalBody = await measured(original, 0.02, '2%')
         assert.equal(originalBody.benchmark_comparison, undefined)
@@ -100,15 +134,23 @@ async function main() {
         stage = 'authorized-intraday-payload'
         const splitBody = await measured(splitOriginal, 0.21, '21%', '1')
         await comparison(splitBody, splitOriginal, 2 / 25, 13 / 100, '8%', '+13 percentage points')
+        stage = 'authorized-position-contribution'
+        const originalRows = [['SYNTH-A', 24, 53 / 250, '+21.2'], ['SYNTH-B', 4, 9 / 500, '+1.8'],
+          ['Cash and accruals', -3, -1 / 50, '-2']]
+        await contribution(splitBody, 'prices-close-r1', originalRows, ['Total', 25, 21 / 100, '+21'])
         const splitUpdated = await measured(splitCorrected, -0.032, '-3.2%', '1')
         assert.equal(splitUpdated.previous_source_digest, splitOriginal.digest)
         await comparison(splitUpdated, splitCorrected, 2 / 25, -14 / 125, '8%', '-11.2 percentage points')
         assert.equal(splitUpdated.benchmark_comparison.source_digest, splitBody.benchmark_comparison.source_digest)
+        const correctedRows = [['SYNTH-A', 4, 98 / 1875, '+5.2266667'], ['SYNTH-B', -9, -241 / 3750, '-6.4266667'],
+          ['Cash and accruals', -3, -1 / 50, '-2']]
+        await contribution(splitUpdated, 'prices-close-r2', correctedRows, ['Total', -8, -4 / 125, '-3.2'])
         stage = 'authorized-benchmark-restatement'
         const revisedIndex = await measured(indexCorrected, -0.032, '-3.2%', '1')
         assert.equal(revisedIndex.previous_source_digest, splitCorrected.digest)
         assert.notEqual(revisedIndex.benchmark_comparison.source_digest, splitUpdated.benchmark_comparison.source_digest)
         await comparison(revisedIndex, indexCorrected, 1 / 10, -33 / 250, '10%', '-13.2 percentage points')
+        assert.deepEqual(revisedIndex.position_contribution, splitUpdated.position_contribution)
         stage = 'authorized-benchmark-coverage'
         const missingIndex = await measured(missingBenchmark, -0.032, '-3.2%', '1')
         assert.equal(missingIndex.previous_source_digest, indexCorrected.digest)
@@ -132,11 +174,23 @@ async function main() {
         assert.equal(splitUnassessed.benchmark_comparison.measured, undefined)
         assert.equal(splitUnassessed.benchmark_comparison.unassessed_reason, 'portfolio_return_unassessed')
         await section.getByText('Unassessed. A valuation at the cash flow is unavailable.', { exact: false }).waitFor()
+        await unassessedContribution(splitUnassessed, 'portfolio_return_unassessed', 'The portfolio return is unassessed.')
+        stage = 'authorized-position-coverage'
+        const missingPrices = await measured(missingMarks, -0.032, '-3.2%', '1')
+        assert.equal(missingPrices.previous_source_digest, splitUnknown.digest)
+        await unassessedContribution(missingPrices, 'position_marks_missing', 'A dated price is missing for one or more holdings.')
+        const badPrice = await measured(badMarks, -0.032, '-3.2%', '1')
+        assert.equal(badPrice.previous_source_digest, missingMarks.digest)
+        await unassessedContribution(badPrice, 'position_nav_not_reconciled', 'The valued holdings and cash do not reconcile to the signed NAV.')
+        const traded = await measured(unsupported, -0.032, '-3.2%', '1')
+        assert.equal(traded.previous_source_digest, badMarks.digest)
+        await unassessedContribution(traded, 'position_activity_unsupported', 'The holdings or journal activity require a different contribution method.')
         stage = 'authorized-reload-details'
         await page.reload()
         assert.deepEqual(await measured(original, 0.02, '2%'), originalBody)
         await check({ as_of: '2020-02-04T06:00:00Z' }, 404)
         assert.deepEqual(await measured(splitOriginal, 0.21, '21%', '1'), splitBody)
+        await contribution(splitBody, 'prices-close-r1', originalRows, ['Total', 25, 21 / 100, '+21'])
         assert.deepEqual(await measured(splitCorrected, -0.032, '-3.2%', '1'), splitUpdated)
         await comparison(splitUpdated, splitCorrected, 2 / 25, -14 / 125, '8%', '-11.2 percentage points')
         await check({ date: splitOriginal.date, as_of: '2020-02-05T06:00:00Z' }, 404)

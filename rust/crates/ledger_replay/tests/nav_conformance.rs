@@ -385,3 +385,43 @@ fn daily_return_links_nav_at_one_external_flow() {
     }
     assert_eq!(linked("165", "41"), Ok(None));
 }
+
+#[test]
+fn unchanged_positions_and_booked_fee_reconcile_to_linked_return() {
+    for (close, end_values, effects, pnl, want) in [
+        (
+            "165",
+            ["84", "44", "37"],
+            ["53/250", "9/500", "-1/50"],
+            ["24", "4", "-3"],
+            "21/100",
+        ),
+        (
+            "132",
+            ["64", "31", "37"],
+            ["98/1875", "-241/3750", "-1/50"],
+            ["4", "-9", "-3"],
+            "-4/125",
+        ),
+    ] {
+        let total = n(close);
+        let opening = ["60", "40", "0"].map(n);
+        let before = ["72", "38", "0"].map(n);
+        let after = ["72", "38", "40"].map(n);
+        let denominator = n("15000");
+        let closing = end_values.map(n);
+        let exact = std::array::from_fn::<_, 3, _>(|i| {
+            // Use the common denominator 100 * 150 to verify the served
+            // calculation with one exact numerator for each component.
+            ((&before[i] - &opening[i]) * &total + (&closing[i] - &after[i]) * n("100"))
+                / &denominator
+        });
+        let money = std::array::from_fn::<_, 3, _>(|i| {
+            &closing[i] - &opening[i] - (&after[i] - &before[i])
+        });
+        assert_eq!(exact, effects.map(n));
+        assert_eq!(money, pnl.map(n));
+        assert_eq!(money.into_iter().sum::<Rat>(), &total - n("140"));
+        assert_eq!(exact.into_iter().sum::<Rat>(), n(want));
+    }
+}

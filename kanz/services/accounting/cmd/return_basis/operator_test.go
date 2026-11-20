@@ -136,9 +136,12 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		for _, entry := range []*ledger.Event{
 			{EntryID: "fixture-opening-funding", PortfolioID: first.Portfolio, Type: ledger.EntryCash,
 				Cash: big.NewRat(100, 1), CashCurrency: first.Currency, Effective: seedTime, Knowledge: seedTime},
-			{EntryID: "fixture-opening-trade", PortfolioID: first.Portfolio, Type: ledger.EntryTrade, InstrumentID: "SYNTH",
-				Quantity: big.NewRat(10, 1), Price: big.NewRat(10, 1), Cash: big.NewRat(-100, 1),
+			{EntryID: "fixture-opening-trade-a", PortfolioID: first.Portfolio, Type: ledger.EntryTrade, InstrumentID: "SYNTH-A",
+				Quantity: big.NewRat(4, 1), Price: big.NewRat(15, 1), Cash: big.NewRat(-60, 1),
 				CashCurrency: first.Currency, Effective: seedTime.Add(time.Hour), Knowledge: seedTime.Add(time.Hour)},
+			{EntryID: "fixture-opening-trade-b", PortfolioID: first.Portfolio, Type: ledger.EntryTrade, InstrumentID: "SYNTH-B",
+				Quantity: big.NewRat(5, 1), Price: big.NewRat(8, 1), Cash: big.NewRat(-40, 1),
+				CashCurrency: first.Currency, Effective: seedTime.Add(2 * time.Hour), Knowledge: seedTime.Add(2 * time.Hour)},
 		} {
 			if err := journal.Append(ctx, entry, nil); err != nil {
 				t.Fatal("seed opening book", err)
@@ -157,14 +160,42 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 			r, err := commands.Status(check, first.Tenant, first.Portfolio, movement.MovementID)
 			return err == nil && r.Status == "journal_recorded"
 		})
+		fee := command
+		fee.Movement.MovementID = "intraday-fee"
+		fee.Movement.Kind = cashmove.Fee
+		fee.Movement.Amount = big.NewRat(3, 1)
+		fee.Movement.Effective = movement.Effective.Add(time.Hour)
+		fee.Movement.SourceRef = "synthetic-fee-r1"
+		feeDigest, err := cashmove.ReviewDigest(fee)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := commands.Accept(ctx, fee, feeDigest); err != nil {
+			t.Fatal("fee command acceptance failed", err)
+		}
+		wait("Accounting did not book the real fee", func(check context.Context) bool {
+			r, err := commands.Status(check, first.Tenant, first.Portfolio, fee.Movement.MovementID)
+			return err == nil && r.Status == "journal_recorded"
+		})
+		t.Logf("booked fee %s command=%s", fee.Movement.MovementID, feeDigest)
 		events, err := journal.Journal(ctx, first.Portfolio)
 		if err != nil {
 			t.Fatal("read booked valuation inputs", err)
 		}
-		captureNAV := func(ref, quote, want string, at, effectiveCut, known time.Time) *returnbasis.Close {
+		marks := func(ref string, a, b dec.Exact, at, known time.Time) *returnbasis.PositionMarks {
+			return &returnbasis.PositionMarks{
+				Reference: ref, Effective: at, KnownAt: known,
+				Prices: map[string]dec.Exact{"SYNTH-A": a, "SYNTH-B": b},
+			}
+		}
+		captureNAV := func(ref string, marks *returnbasis.PositionMarks, want string, effectiveCut, known time.Time) *returnbasis.Close {
 			t.Helper()
 			book := ledger.ReplayAsOf(first.Portfolio, events, effectiveCut, known)
-			value, err := accounting.ComputeNAV(book, first.Currency, at, map[string]*big.Rat{"SYNTH": dec.Rat(quote)})
+			prices := make(map[string]*big.Rat, len(marks.Prices))
+			for id, price := range marks.Prices {
+				prices[id], _ = price.Rat()
+			}
+			value, err := accounting.ComputeNAV(book, first.Currency, marks.Effective, prices)
 			if err != nil || value.Total.Cmp(dec.Rat(want)) != 0 {
 				t.Fatal("book and price did not produce the expected signed NAV", ref, err)
 			}
@@ -188,12 +219,17 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		intraday := first
 		intraday.CloseDate = end.Format(time.DateOnly)
 		intraday.AsOf = time.Now().UTC().Truncate(time.Microsecond)
-		intraday.Opening = captureNAV("nav-intraday-open", "10", "100", start, start, intraday.AsOf)
-		intraday.Closing = captureNAV("nav-intraday-close", "12.5", "165", end, end, intraday.AsOf)
+		intraday.PositionBasis = &returnbasis.PositionBasis{
+			Opening: marks("prices-open", "15", "8", start, start),
+			AtFlow:  marks("prices-flow", "18", "7.6", movement.Effective, movement.Effective),
+			Closing: marks("prices-close-r1", "21", "8.8", end, end),
+		}
+		intraday.Opening = captureNAV("nav-intraday-open", intraday.PositionBasis.Opening, "100", start, intraday.AsOf)
+		intraday.Closing = captureNAV("nav-intraday-close", intraday.PositionBasis.Closing, "165", end, intraday.AsOf)
 		split := returnbasis.FlowSplit{MovementID: movement.MovementID, CommandDigest: commandDigest, Effective: movement.Effective,
 			SignedAmount: "40",
-			Before:       captureNAV("nav-pre-flow", "11", "110", movement.Effective, movement.Effective.Add(-time.Microsecond), intraday.AsOf),
-			After:        captureNAV("nav-post-flow", "11", "150", movement.Effective, movement.Effective, intraday.AsOf)}
+			Before:       captureNAV("nav-pre-flow", intraday.PositionBasis.AtFlow, "110", movement.Effective.Add(-time.Microsecond), intraday.AsOf),
+			After:        captureNAV("nav-post-flow", intraday.PositionBasis.AtFlow, "150", movement.Effective, intraday.AsOf)}
 		intraday.Flows = &returnbasis.FlowCompletion{Scope: first.Flows.Scope, Reference: "fund-flows-split", EventCount: &count, Split: &split}
 		benchmark := returnbasis.BenchmarkObservation{
 			Format: returnbasis.BenchmarkFormat, Tenant: first.Tenant, Portfolio: first.Portfolio, Currency: first.Currency,
@@ -252,11 +288,21 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		if _, err := admit(wrong); err == nil {
 			t.Fatal("Accounting close signature authorized a changed benchmark")
 		}
+		wrong = intraday
+		futurePrices := *intraday.PositionBasis
+		futurePrices.Closing = marks("prices-future", "21", "8.8", end, wrong.AsOf.Add(time.Hour))
+		wrong.PositionBasis = &futurePrices
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("future position marks became visible under an older knowledge horizon")
+		}
 		splitDigest := appendEdition(intraday)
 		corrected := intraday
 		corrected.PreviousDigest = splitDigest
 		corrected.AsOf = time.Now().UTC().Truncate(time.Microsecond)
-		corrected.Closing = captureNAV("nav-intraday-restated", "9.2", "132", end, end, corrected.AsOf)
+		restatedPrices := *intraday.PositionBasis
+		restatedPrices.Closing = marks("prices-close-r2", "16", "6.2", end, corrected.AsOf)
+		corrected.PositionBasis = &restatedPrices
+		corrected.Closing = captureNAV("nav-intraday-restated", restatedPrices.Closing, "132", end, corrected.AsOf)
 		correctedDigest := appendEdition(corrected)
 		indexCorrected := corrected
 		indexCorrected.PreviousDigest = correctedDigest
@@ -289,7 +335,43 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		partialFlows := *missing.Flows
 		partialFlows.Split = &partial
 		missing.Flows = &partialFlows
-		lastDigest := appendEdition(missing)
+		missingNAVDigest := appendEdition(missing)
+
+		missingMarks := indexCorrected
+		missingMarks.PreviousDigest = missingNAVDigest
+		missingMarks.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		incompletePrices := restatedPrices
+		incompletePrices.Closing = &returnbasis.PositionMarks{
+			Reference: "prices-close-incomplete", Effective: end, KnownAt: missingMarks.AsOf,
+			Prices: map[string]dec.Exact{"SYNTH-A": "16"},
+		}
+		missingMarks.PositionBasis = &incompletePrices
+		missingMarksDigest := appendEdition(missingMarks)
+
+		badMarks := indexCorrected
+		badMarks.PreviousDigest = missingMarksDigest
+		badMarks.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		unreconciledPrices := restatedPrices
+		unreconciledPrices.Closing = marks("prices-close-unreconciled", "16", "6.3", end, badMarks.AsOf)
+		badMarks.PositionBasis = &unreconciledPrices
+		badMarksDigest := appendEdition(badMarks)
+
+		// The same ending positions and cash can conceal real trading. The
+		// unchanged-holdings method must see and refuse the intraday round trip.
+		for i, units := range []int64{1, -1} {
+			at := start.Add(time.Duration(i+1) * time.Hour)
+			entry := &ledger.Event{EntryID: fmt.Sprintf("fixture-intraday-trade-%d", i), PortfolioID: first.Portfolio,
+				Type: ledger.EntryTrade, InstrumentID: "SYNTH-A", Quantity: big.NewRat(units, 1),
+				Price: big.NewRat(15, 1), Cash: big.NewRat(-15*units, 1), CashCurrency: first.Currency,
+				Effective: at, Knowledge: time.Now().UTC().Truncate(time.Microsecond)}
+			if err := journal.Append(ctx, entry, nil); err != nil {
+				t.Fatal("book synthetic intraday round trip", err)
+			}
+		}
+		unsupported := indexCorrected
+		unsupported.PreviousDigest = badMarksDigest
+		unsupported.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		lastDigest := appendEdition(unsupported)
 
 		// A second booking learned after these editions must count even when it
 		// is denominated in another currency. Earlier reports remain immutable.

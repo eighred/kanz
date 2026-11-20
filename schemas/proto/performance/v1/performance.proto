@@ -191,6 +191,7 @@ message DailyReturnAssessment {
   }
   IntradayReturnFlow intraday_flow = 15;
   DailyBenchmarkComparison benchmark_comparison = 16;
+  DailyPositionContribution position_contribution = 17;
 }
 
 // IntradayReturnFlow identifies the verified same-time cash/NAV bridge used to
@@ -224,4 +225,37 @@ message BenchmarkRelativeReturn {
   // is 13 percentage points. Active return is portfolio minus benchmark.
   double benchmark_return = 1;
   double active_return = 2;
+}
+
+enum PositionContributionMethod {
+  POSITION_CONTRIBUTION_METHOD_UNSPECIFIED = 0;
+  // Price changes on unchanged holdings and the booked cash/accrual change
+  // excluding external capital, linked to the portfolio's daily TWR.
+  POSITION_CONTRIBUTION_METHOD_LINKED_UNCHANGED_HOLDINGS = 1;
+}
+
+message DailyPositionContribution {
+  PositionContributionMethod method = 1;
+  string opening_price_reference = 2;
+  string flow_price_reference = 3;
+  string closing_price_reference = 4;
+  oneof result {
+    PositionContributionBreakdown measured = 5;
+    string unassessed_reason = 6;
+  }
+}
+
+message PositionContributionBreakdown {
+  repeated PositionReturnContribution positions = 1;
+  common.v1.Decimal cash_pnl = 2;
+  double cash_return_contribution = 3;
+  common.v1.Decimal total_pnl = 4;
+  double total_return_contribution = 5;
+}
+
+message PositionReturnContribution {
+  string instrument_id = 1;
+  common.v1.Decimal pnl = 2;
+  // Fraction of portfolio return. For example, 0.018 is 1.8 percentage points.
+  double return_contribution = 3;
 }

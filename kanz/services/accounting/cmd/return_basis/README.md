@@ -54,6 +54,34 @@ correction is a new close edition with a later horizon and an updated
 signed observation. This keeps earlier editions and their benchmark versions
 addressable by their original horizon.
 
+The signed `position_basis` object follows the optional `benchmark`. It
+contains `opening`, `at_flow` and `closing` in that order. A price snapshot
+names its `reference`, `effective` time, `known_at` time and a `prices` map
+of instrument IDs to exact reporting-currency price strings. Use the same
+marks for both sides of an intraday cash flow. A null required snapshot or
+an incomplete set of prices leaves position contributions unassessed.
+Known-at times must be within the signed reporting horizon.
+
+Accounting uses the traded journal and standard NAV calculation to verify the
+full held inventory and exact NAV at each snapshot. Grant the source SELECT on
+the journal columns used by the recorded read. The calculation uses journal
+knowledge and recording times within the signed horizon. The pilot covers
+unchanged long holdings, a single reporting currency for cash and accrued
+balances, and at most one verified external cash flow. Fees and booked accruals
+flow into the cash and accrual component. Trades, corporate actions affecting
+the window, unverified cash movements and unstated prices withhold the
+breakdown. The signed format permits up to 32 prices per snapshot. The bounded
+journal read withholds the breakdown above 4,096 entries.
+
+For each subperiod, divide its component P&L by the invested opening NAV.
+With one flow, scale each first-subperiod contribution by the second period's
+growth factor and add its second-subperiod contribution. The two subperiods
+exclude the capital movement from cash and accrual P&L. Accounting verifies
+that the exact P&L sum equals the NAV change net of external capital and that
+linked contributions sum to the signed portfolio TWR. P&L is protobuf Decimal
+and linked fractions are statistical returns. This method measures absolute
+portfolio TWR contribution. Benchmark comparison remains a separate result.
+
 Submit compact canonical JSON in the order shown by the Go Evidence type, with
 a separate raw 64-byte Ed25519 signature. The `as_of` timestamp uses RFC 3339
 UTC with at most microsecond precision. The first edition has
@@ -110,6 +138,15 @@ A benchmark-only correction to 275 gives 10% and −13.2 points, with portfolio
 return remaining −3.2%. Missing and wrong-date editions withhold the comparison
 and retain the portfolio return. The fixture checks foreign scope, altered
 signatures, future knowledge and the enrolled index identity.
+
+The position fixture uses two long holdings and a booked USD 3 fee. The first
+edition has exact P&L of USD 24, USD 4 and USD −3, totaling USD 25 after the
+external capital is excluded. Its linked contributions are +21.2, +1.8 and −2
+percentage points. A closing-price restatement produces exact P&L of USD 4,
+USD −9 and USD −3, with linked contributions of `98/1875`, `−241/3750` and
+`−1/50` of portfolio return, totaling −3.2%. A missing price, unreconciled NAV
+and an intraday round trip with unchanged ending holdings each withhold the
+breakdown while preserving the measured portfolio return.
 
 The first estate needs a governed issuer and complete source scope before
 enrolling real keys. The synthetic fixture owns its signing key for one run.

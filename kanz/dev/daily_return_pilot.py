@@ -87,7 +87,8 @@ def qualify(env):
             GRANT SELECT,INSERT,UPDATE ON outbox TO basis_runtime;
             GRANT USAGE ON SEQUENCE outbox_id_seq TO basis_runtime;
             GRANT SELECT (tenant_id,portfolio_id,entry_id,venue_account_id,entry_type,cash_currency,
-                cash,effective_time,knowledge_time,source_ref,created_at) ON ledger_entries TO basis_source;
+                cash,effective_time,knowledge_time,source_ref,created_at,instrument_id,quantity,price,
+                action,settlement_status,settlement_date) ON ledger_entries TO basis_source;
             GRANT SELECT (tenant_id,portfolio_id,movement_id,digest,payload) ON cash_commands TO basis_source;
             GRANT SELECT,INSERT ON cash_commands TO basis_runtime;
             GRANT INSERT ON ledger_entries,ledger_append_positions,ledger_heads TO basis_runtime;
@@ -110,7 +111,7 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 9 FACTs" not in proof.stdout
+                or b"real JetStream replay and signed browser read passed with 12 FACTs" not in proof.stdout
                 or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
             locations = re.findall(rb"\b(?:main_test|operator_test)\.go:\d+(?=: )", proof.stdout)
             stage = re.search(rb"\breturn-browser-stage=[a-z-]+", proof.stdout)
@@ -144,7 +145,7 @@ def main():
         receipt = qualify(env)
     if args.receipt:
         args.receipt.write_bytes(receipt)
-    print("PASS: Signed daily returns and dated benchmark comparisons, scoped browser and retained replay.")
+    print("PASS: Signed daily returns, benchmark comparisons and reconciled position contributions, scoped browser and retained replay.")
 
 
 if __name__ == "__main__":
