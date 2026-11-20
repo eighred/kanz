@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"math/big"
+	"math"
 	"net"
 	"time"
 
@@ -94,12 +94,30 @@ func (v *Venue) check(tenant string, st *orderpb.OrderState) error {
 	}
 	return nil
 }
+
+// XSIM reports one half-quantity execution on withdrawal. Refuse any order
+// whose fill cannot travel losslessly through the canonical Decimal domain.
+func partialQuantity(q *commonpb.Decimal) (*commonpb.Decimal, bool) {
+	if !dec.InDomain(q) || !dec.IsPositive(q) {
+		return nil, false
+	}
+	if q.Coefficient%2 == 0 {
+		return &commonpb.Decimal{Coefficient: q.Coefficient / 2, Exponent: q.Exponent}, true
+	}
+	if q.Coefficient > math.MaxInt64/5 {
+		return nil, false
+	}
+	half := &commonpb.Decimal{Coefficient: q.Coefficient * 5, Exponent: q.Exponent - 1}
+	return half, dec.InDomain(half)
+}
+
 func terms(st *orderpb.OrderState) ([]byte, error) {
+	_, splittable := partialQuantity(st.GetOrderedQuantity())
 	if st.GetOrderType() != orderpb.OrderType_ORDER_TYPE_LIMIT || st.GetTimeInForce() != orderpb.TimeInForce_TIME_IN_FORCE_GTC ||
 		(st.GetSide() != orderpb.Side_SIDE_BUY && st.GetSide() != orderpb.Side_SIDE_SELL) ||
 		st.GetMarginMode() != orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED || st.GetLeverage() != nil ||
 		st.GetStopPrice() != nil || st.GetExpireAt() != nil || st.GetExecutionSchedule() != nil || st.GetParentOrderId() != "" ||
-		!dec.InDomain(st.GetOrderedQuantity()) || !dec.IsPositive(st.GetOrderedQuantity()) ||
+		!splittable ||
 		!dec.InDomain(st.GetLimitPrice()) || !dec.IsPositive(st.GetLimitPrice()) {
 		return nil, status.Error(codes.InvalidArgument, "only positive unlevered synthetic limit orders are supported")
 	}
@@ -176,13 +194,8 @@ func (v *Venue) CancelOrder(ctx context.Context, r *venuepb.CancelOrderRequest) 
 		if err := proto.Unmarshal(wire, &original); err != nil {
 			return err
 		}
-		qty, ok := dec.FromProtoChecked(original.GetOrderedQuantity())
+		half, ok := partialQuantity(original.GetOrderedQuantity())
 		if !ok {
-			return errors.New("invalid stored quantity")
-		}
-		half, ok := dec.Mul(original.GetOrderedQuantity(), &commonpb.Decimal{Coefficient: 5, Exponent: -1})
-		represented, valid := dec.FromProtoChecked(half)
-		if !ok || !valid || !dec.IsPositive(half) || represented.Cmp(qty.Quo(qty, big.NewRat(2, 1))) != 0 {
 			return status.Error(codes.FailedPrecondition, "half the submitted quantity cannot be represented")
 		}
 		id := sourceID("xsim-partial", v.cfg.Tenant, v.cfg.Portfolio, original.OrderId)
