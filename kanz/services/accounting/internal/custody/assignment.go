@@ -120,7 +120,7 @@ func assignmentSnapshot(ctx context.Context, tx pgx.Tx, subject Subject, account
 			&a.Venue, &a.ExchangeAccountID, &a.ProofID, &a.ProofAuthority, &pf, &pu, &pr, &pd, &pb, &ps, &pk, &aliases, &withdrawn, &identityScope, &assignmentScope); err != nil {
 			return nil, err
 		}
-		if !identityScope || !assignmentScope || (!withdrawn && (af.Before(pf) || au.After(pu))) {
+		if !identityScope || !assignmentScope {
 			return nil, ErrUnprovenAssignment
 		}
 		a.EffectiveFrom, a.EffectiveUntil, a.ProofFrom, a.ProofUntil = af.Format(time.DateOnly), au.Format(time.DateOnly), pf.Format(time.DateOnly), pu.Format(time.DateOnly)
@@ -134,7 +134,9 @@ func assignmentSnapshot(ctx context.Context, tx pgx.Tx, subject Subject, account
 		if withdrawn || !BusinessDay(subject.BusinessDate).Before(au) || a.PortfolioID != subject.PortfolioID || (pairOnly && a.CustodianID != subject.CustodianID) {
 			continue
 		}
-		if expected[a.AccountID] != a.CustodianID || aliases != 1 {
+		// Identity may be attested for a shorter window than the governing approval.
+		// Only their intersection can support the selected accounting date.
+		if !coveredAssignmentDay(subject.BusinessDate, pf, pu, af, au) || expected[a.AccountID] != a.CustodianID || aliases != 1 {
 			return nil, ErrUnprovenAssignment
 		}
 		result = append(result, a)
@@ -179,4 +181,9 @@ func assignmentsForCustodian(all []AccountAssignment, custodian string) []Accoun
 		}
 	}
 	return own
+}
+
+func coveredAssignmentDay(day, identityFrom, identityUntil, approvalFrom, approvalUntil time.Time) bool {
+	day = BusinessDay(day)
+	return !day.Before(identityFrom) && day.Before(identityUntil) && !day.Before(approvalFrom) && day.Before(approvalUntil)
 }
