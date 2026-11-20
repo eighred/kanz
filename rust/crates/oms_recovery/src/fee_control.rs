@@ -3,9 +3,9 @@
 //! grants permission to change economics outside the immutable proposal.
 use crate::Error;
 use kanz_oms_store::fee_subject;
+use kanz_order_core::lowercase_hex;
 use kanz_order_core::{proto::order::v1::ExecutionFeeCorrectionProposed, Canonical};
 use kanz_proto_wire::Schema;
-use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 
 pub(crate) const DEFAULT_TTL_SECONDS: i64 = 24 * 60 * 60;

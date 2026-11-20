@@ -4,12 +4,12 @@
 use super::{
     commit, enqueue, identity, recovery, scoped, validate_batch, Error, Record, MAX_BYTES,
 };
+use kanz_order_core::lowercase_hex;
 use kanz_order_core::proto::order::v1::{
     ExecutionRecoveryHistory, ExecutionRecoveryRecorded, OrderState,
 };
 use kanz_proto_wire::{Budget, Canonical};
 use prost::Message;
-use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use tokio_postgres::{types::Type, Client, Transaction};

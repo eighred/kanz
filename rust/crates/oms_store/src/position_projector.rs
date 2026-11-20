@@ -7,6 +7,7 @@ use crate::{
     relay::{Publisher, Relay, Sessions},
     Error, Record, MAX_BYTES,
 };
+use kanz_order_core::lowercase_hex;
 use kanz_order_core::proto::{
     domain::v1::PositionState,
     envelope::v1::{Envelope, EventClass},
@@ -15,7 +16,6 @@ use kanz_order_core::proto::{
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
-use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, time::SystemTime};
 use tokio_postgres::Client;

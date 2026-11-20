@@ -50,7 +50,10 @@ mod tests {
             crate::lowercase_hex(&digest),
             "00078eb3c539b05ee4452da1634368bb2d554e5237944a566bc6c82896e16d45"
         );
-        assert_eq!(child_id("fixture", 5476), "00078eb3c539b05ee4452da1634368bb");
+        assert_eq!(
+            child_id("fixture", 5476),
+            "00078eb3c539b05ee4452da1634368bb"
+        );
     }
     #[test]
     fn prefix_clone_preserves_long_parent_and_signed_index_bytes() {

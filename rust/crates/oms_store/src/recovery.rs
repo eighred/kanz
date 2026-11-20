@@ -5,11 +5,11 @@ use super::{
     journal, message_field, scoped, validate_batch, Error, Record, MAX_BYTES,
 };
 use kanz_decimal_compat::{in_domain, is_positive};
+use kanz_order_core::lowercase_hex;
 use kanz_order_core::proto::order::v1::{
     ExecutionRecovered, ExecutionRecoveryRecorded, OrderState,
 };
 use prost::Message;
-use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},

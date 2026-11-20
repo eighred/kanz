@@ -1,6 +1,7 @@
 //! Exact fee revision evidence validation. Authentication and dual-control claiming
 //! remain the caller's responsibility; these terms grant no independent authority.
 use super::{fee_subject::normalize, fee_wire::FillWire, identity, Error};
+use kanz_order_core::lowercase_hex;
 use kanz_order_core::proto::{
     common::v1::Decimal,
     order::v1::{Fill, Side},
@@ -8,7 +9,6 @@ use kanz_order_core::proto::{
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::Signed;
-use kanz_order_core::lowercase_hex;
 use sha2::{Digest, Sha256};
 
 fn rational(d: &Decimal) -> Result<BigRational, Error> {
