@@ -99,9 +99,15 @@ type Execution struct {
 // fill this book folds today. The distinction becomes load-bearing the moment a
 // T+n instrument arrives, which is exactly when the settled/traded split does.
 func (e Execution) CustodyDate() time.Time {
-	d := e.SettlementDate
+	return CustodyBusinessDate(e.TradeDate, e.SettlementDate)
+}
+
+// CustodyBusinessDate places a signed statement line and its booked execution
+// in the same UTC close. An absent settlement date uses the trade date.
+func CustodyBusinessDate(tradeDate, settlementDate time.Time) time.Time {
+	d := settlementDate
 	if d.IsZero() {
-		d = e.TradeDate
+		d = tradeDate
 	}
 	u := d.UTC()
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)

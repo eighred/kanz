@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -86,6 +87,43 @@ func TestSignedBatchRefusesIncompleteOrUnauthorizedInput(t *testing.T) {
 		if _, err = v.verify(changed, ed25519.Sign(key, changed)); err == nil {
 			t.Fatal("signed but invalid input accepted")
 		}
+	}
+}
+
+func TestSignedBatchUsesCustodyClose(t *testing.T) {
+	a, key := exampleAuthority(t, "fund-a")
+	v, err := newBatchVerifier(a, a.Tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:sandbox-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := signedExample(t, a, key, 1, "", 95)
+	const dates = `"tradeDate":"2020-02-04T00:00:00Z","settlementDate":"2020-02-04T00:00:00Z"`
+	for _, tc := range []struct {
+		name, fields string
+		accepted     bool
+	}{
+		{"next day settlement reported on settlement day", `"tradeDate":"2020-02-03T15:00:00Z","settlementDate":"2020-02-04T11:30:00Z"`, true},
+		{"next day settlement reported on trade day", `"tradeDate":"2020-02-04T15:00:00Z","settlementDate":"2020-02-05T11:30:00Z"`, false},
+		{"trade date fallback", `"tradeDate":"2020-02-04T23:59:59Z"`, true},
+		{"trade date fallback outside close", `"tradeDate":"2020-02-03T23:59:59Z"`, false},
+		{"settlement before trade day", `"tradeDate":"2020-02-05T00:00:00Z","settlementDate":"2020-02-04T00:00:00Z"`, false},
+		{"missing trade date", `"settlementDate":"2020-02-04T00:00:00Z"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if bytes.Count(raw, []byte(dates)) != 1 {
+				t.Fatal("expected the signed fixture to contain both economic dates")
+			}
+			changed := bytes.Replace(raw, []byte(dates), []byte(tc.fields), 1)
+			input, err := v.verify(changed, ed25519.Sign(key, changed))
+			if (err == nil) != tc.accepted {
+				t.Fatalf("accepted=%t, wanted %t, err=%v", err == nil, tc.accepted, err)
+			}
+			if tc.accepted {
+				if err := input.stamp(time.Date(2020, 2, 5, 0, 0, 0, 0, time.UTC)); err != nil {
+					t.Fatalf("accepted line failed statement admission: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -181,7 +219,7 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 		t.Fatal(err)
 	}
 	journal := ledger.NewPostgres(pool)
-	err = journal.Append(ctx, &ledger.Event{EntryID: "trade7", SourceRef: "external-7", PortfolioID: "PF1", VenueAccountID: "sandbox-account", Type: ledger.EntryTrade, InstrumentID: "SYN", Quantity: big.NewRat(21, 2), Price: big.NewRat(1, 1), Cash: big.NewRat(-21, 2), CashCurrency: "USD", Effective: day, Knowledge: day, SettlementBasis: ledger.SettlementSettled, SettlementDate: day}, nil)
+	err = journal.Append(ctx, &ledger.Event{EntryID: "trade7", SourceRef: "external-7", PortfolioID: "PF1", VenueAccountID: "sandbox-account", Type: ledger.EntryTrade, InstrumentID: "SYN", Quantity: big.NewRat(21, 2), Price: big.NewRat(1, 1), Cash: big.NewRat(-21, 2), CashCurrency: "USD", Effective: day.AddDate(0, 0, -1), Knowledge: day, SettlementBasis: ledger.SettlementSettled, SettlementDate: day}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +231,14 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 	if err != nil || run.Outcome != OutcomeNoStatement {
 		t.Fatalf("missing level %v %v", run, err)
 	}
-	raw, sig := signedExample(t, a, key, 1, "", 95)
+	// Keep the real journal's T+1 close and both independently signed revisions on
+	// the same economic dates, including the revisions replayed after restart.
+	settlementExample := func(revision int64, previous string, position int) ([]byte, []byte) {
+		raw, _ := signedExample(t, a, key, revision, previous, position)
+		raw = bytes.Replace(raw, []byte(`"tradeDate":"2020-02-04`), []byte(`"tradeDate":"2020-02-03`), 1)
+		return raw, ed25519.Sign(key, raw)
+	}
+	raw, sig := settlementExample(1, "", 95)
 	interrupted := newImporter(&capturePublisher{err: errors.New("fixture broker interrupted")})
 	id, err := interrupted.Import(ctx, raw, sig)
 	if err == nil || id == "" {
@@ -234,15 +279,15 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
-	wrong, wrongSig := signedExample(t, a, key, 1, "", 105)
+	wrong, wrongSig := settlementExample(1, "", 105)
 	if _, err = i.Import(ctx, wrong, wrongSig); err == nil {
 		t.Fatal("mutable revision accepted")
 	}
-	gap, gapSig := signedExample(t, a, key, 3, digest, 105)
+	gap, gapSig := settlementExample(3, digest, 105)
 	if _, err = i.Import(ctx, gap, gapSig); err == nil {
 		t.Fatal("missing preceding revision accepted")
 	}
-	correction, cs := signedExample(t, a, key, 2, digest, 105)
+	correction, cs := settlementExample(2, digest, 105)
 	i.retentionLimit = int64(len(raw) + len(correction) - 1)
 	if _, err := i.Import(ctx, correction, cs); err == nil {
 		t.Fatal("signed material retention exceeded")

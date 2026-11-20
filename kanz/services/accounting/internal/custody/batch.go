@@ -15,6 +15,7 @@ import (
 	"time"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -161,8 +162,19 @@ func (v batchVerifier) verify(raw, signature []byte) (batchInput, error) {
 		}
 	}
 	for _, t := range msg.Transactions {
-		if !slices.Contains(a.Instruments, t.GetInstrumentId()) || !slices.Contains(a.Currencies, t.GetCurrencyCode()) || t.GetTradeDate() == nil || t.TradeDate.CheckValid() != nil || !BusinessDay(t.TradeDate.AsTime()).Equal(msg.BusinessDate.AsTime()) || t.GetQuantity() == nil || t.GetPrice() == nil || t.GetCash() == nil || strings.TrimSpace(t.GetExternalRef()) != t.GetExternalRef() {
+		if !slices.Contains(a.Instruments, t.GetInstrumentId()) || !slices.Contains(a.Currencies, t.GetCurrencyCode()) || t.GetTradeDate().CheckValid() != nil || t.GetQuantity() == nil || t.GetPrice() == nil || t.GetCash() == nil || strings.TrimSpace(t.GetExternalRef()) != t.GetExternalRef() {
 			return batchInput{}, errors.New("custody batch: transaction lacks complete in-scope execution evidence")
+		}
+		traded := t.TradeDate.AsTime()
+		var settled time.Time
+		if date := t.GetSettlementDate(); date != nil {
+			if date.CheckValid() != nil || BusinessDay(date.AsTime()).Before(BusinessDay(traded)) {
+				return batchInput{}, errors.New("custody batch: invalid transaction settlement date")
+			}
+			settled = date.AsTime()
+		}
+		if !ledger.CustodyBusinessDate(traded, settled).Equal(msg.BusinessDate.AsTime()) {
+			return batchInput{}, errors.New("custody batch: transaction belongs to a different custody close")
 		}
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
