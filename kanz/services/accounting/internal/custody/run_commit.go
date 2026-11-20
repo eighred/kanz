@@ -379,6 +379,12 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if err := staged.saveRun(ctx, run, signedDigest, record.Payload); err != nil {
 		return Run{}, err
 	}
+	if len(run.measured) > 0 {
+		if err := recordQuantityObservations(ctx, tx, run, signedDigest); err != nil {
+			return Run{}, err
+		}
+		run.measured = nil
+	}
 	if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, record); err != nil {
 		return Run{}, err
 	}

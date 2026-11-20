@@ -86,6 +86,7 @@ type breakView struct {
 	BreakID         string             `json:"break_id"`
 	Kind            string             `json:"kind"`
 	Key             string             `json:"key"`
+	InstrumentID    string             `json:"instrument_id,omitempty"`
 	IBOR            string             `json:"ibor"`
 	Custodian       string             `json:"custodian"`
 	Difference      string             `json:"difference"`
@@ -96,7 +97,7 @@ type breakView struct {
 	LastSeenAt      string             `json:"last_seen_at"`
 	StatusChangedAt string             `json:"status_changed_at"`
 	AgeSeconds      int64              `json:"age_seconds"`
-	Revision        int64              `json:"revision,string"`
+	Revision        int64              `json:"revision,string,omitempty"`
 	ValuesState     string             `json:"values_state"`
 }
 
@@ -123,7 +124,7 @@ func toBreakView(b custody.Break, now time.Time) breakView {
 		BreakID:     b.BreakID,
 		Revision:    b.Revision,
 		Kind:        b.Kind.String(),
-		Key:         b.Key,
+		Key:         b.Key, InstrumentID: b.InstrumentID,
 		IBOR:        ibor,
 		Custodian:   custodian,
 		Difference:  difference,

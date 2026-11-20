@@ -333,7 +333,7 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("custody: commit: %w", err)
 	}
-	return p.OutstandingBreaks(ctx)
+	return p.balanceAndMembershipBreaks(ctx)
 }
 
 const selectCustodyBreaks = `
@@ -349,7 +349,7 @@ LEFT JOIN custody_runs d
  AND d.outcome='breaks' AND d.statement_id<>'' `
 
 // OutstandingBreaks implements Store.
-func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
+func (p *Postgres) balanceAndMembershipBreaks(ctx context.Context) ([]Break, error) {
 	const q = selectCustodyBreaks + `WHERE b.status IN ('open','assigned','explained') ORDER BY b.break_id`
 	var rows pgx.Rows
 	var err error

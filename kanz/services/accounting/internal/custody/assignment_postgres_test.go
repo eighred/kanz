@@ -26,41 +26,7 @@ func TestDeclaredAccountIsProvenByDatedIndependentAuthorities(t *testing.T) {
 	requireRestrictedCustodyRole(t, admin)
 	applyCustodySchema(t, admin)
 	ctx := bus.WithTenantID(t.Context(), tenant)
-	fixture := func(name string) []byte {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join("../../cmd/custody_proof/testdata", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-	exec := func(pool *pgxpool.Pool, q string, args ...any) {
-		t.Helper()
-		if _, err := pool.Exec(ctx, q, args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(admin, `INSERT INTO custody_proof_issuers SELECT (r->>'login_role')::name,r->>'kind',r->>'tenant_id',r->>'authority',decode(r->>'public_key','base64') FROM jsonb_array_elements($1::jsonb) r`, string(fixture("issuers.json")))
-	exec(admin, `INSERT INTO custody_proof_scopes(login_role,tenant_id,venue,account_id,exchange_account_id,portfolio_id,custodian_id) SELECT (r->>'login_role')::name,r->>'tenant_id',r->>'venue',r->>'account_id',r->>'exchange_account_id',r->>'portfolio_id',r->>'custodian_id' FROM jsonb_array_elements($1::jsonb) r`, string(fixture("scopes.json")))
-	exec(admin, `INSERT INTO custody_assignment_readers VALUES('pilot_assignment_reader',$1)`, tenant)
-	exec(admin, `GRANT SELECT ON custody_assignment_readers,custody_proof_scopes,custody_proof_issuers TO pilot_assignment_reader,pilot_venue_proof,pilot_custody_assignment;
- GRANT SELECT ON custody_account_proofs,custody_account_assignments TO pilot_assignment_reader;
- GRANT SELECT,INSERT ON custody_account_proofs TO pilot_venue_proof;
- GRANT SELECT,INSERT ON custody_account_assignments TO pilot_custody_assignment;
- GRANT INSERT ON custody_runs TO pilot_assignment_reader`)
-	role := func(name string) *pgxpool.Pool {
-		t.Helper()
-		cfg := admin.Config().Copy()
-		cfg.ConnConfig.User = name
-		p, err := pgxpool.NewWithConfig(ctx, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(p.Close)
-		requireRestrictedCustodyRole(t, p)
-		return p
-	}
-	reader, venue, governance := role("pilot_assignment_reader"), role("pilot_venue_proof"), role("pilot_custody_assignment")
+	reader, venue, governance, write := assignmentIssuers(t, admin, tenant)
 	st := NewPostgres(reader)
 	sub := subject()
 	sub.BusinessDate = BusinessDay(t0)
@@ -72,24 +38,6 @@ func TestDeclaredAccountIsProvenByDatedIndependentAuthorities(t *testing.T) {
 		}
 	}
 	expectDenied(sub, ids)
-	write := func(p *pgxpool.Pool, name string, alter func(*AccountEvidence)) error {
-		raw, sig := fixture(name+".json"), fixture(name+".sig")
-		e, err := ParseAccountEvidence(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if alter != nil {
-			alter(&e)
-		}
-		digest := sha256.Sum256(raw)
-		args := []any{e.TenantID, e.AccountID, e.ProofID, e.Authority, e.EffectiveFrom, e.EffectiveUntil, raw, sig, digest[:]}
-		if e.Kind == "venue_identity" {
-			_, err = p.Exec(ctx, `INSERT INTO custody_account_proofs(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_payload,signature,evidence_sha256,venue,exchange_account_id) VALUES($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11)`, append(args, e.Venue, e.ExchangeAccountID)...)
-		} else {
-			_, err = p.Exec(ctx, `INSERT INTO custody_account_assignments(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_payload,signature,evidence_sha256,portfolio_id,custodian_id,version,revision,withdrawn) VALUES($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11,$12,$13,$14)`, append(args, e.PortfolioID, e.CustodianID, e.Version, e.Revision, e.Withdrawn)...)
-		}
-		return err
-	}
 	deniedSQL := func(err error) {
 		t.Helper()
 		var db *pgconn.PgError
@@ -217,4 +165,63 @@ func TestDeclaredAccountIsProvenOnlyOnIntersectionOfEffectiveWindows(t *testing.
 			t.Fatal("one-day approval within annual venue identity", offset, got)
 		}
 	}
+}
+
+func assignmentIssuers(t *testing.T, admin *pgxpool.Pool, tenant string) (reader, venue, governance *pgxpool.Pool, write func(*pgxpool.Pool, string, func(*AccountEvidence)) error) {
+	t.Helper()
+	ctx := bus.WithTenantID(t.Context(), tenant)
+	fixture := func(name string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("../../cmd/custody_proof/testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	exec := func(pool *pgxpool.Pool, q string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(admin, `INSERT INTO custody_proof_issuers SELECT (r->>'login_role')::name,r->>'kind',r->>'tenant_id',r->>'authority',decode(r->>'public_key','base64') FROM jsonb_array_elements($1::jsonb) r`, string(fixture("issuers.json")))
+	exec(admin, `INSERT INTO custody_proof_scopes(login_role,tenant_id,venue,account_id,exchange_account_id,portfolio_id,custodian_id) SELECT (r->>'login_role')::name,r->>'tenant_id',r->>'venue',r->>'account_id',r->>'exchange_account_id',r->>'portfolio_id',r->>'custodian_id' FROM jsonb_array_elements($1::jsonb) r`, string(fixture("scopes.json")))
+	exec(admin, `INSERT INTO custody_assignment_readers VALUES('pilot_assignment_reader',$1)`, tenant)
+	exec(admin, `GRANT SELECT ON custody_assignment_readers,custody_proof_scopes,custody_proof_issuers TO pilot_assignment_reader,pilot_venue_proof,pilot_custody_assignment;
+ GRANT SELECT ON custody_account_proofs,custody_account_assignments TO pilot_assignment_reader;
+ GRANT SELECT,INSERT ON custody_account_proofs TO pilot_venue_proof;
+ GRANT SELECT,INSERT ON custody_account_assignments TO pilot_custody_assignment;
+ GRANT INSERT ON custody_runs TO pilot_assignment_reader`)
+	role := func(name string) *pgxpool.Pool {
+		t.Helper()
+		cfg := admin.Config().Copy()
+		cfg.ConnConfig.User = name
+		p, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Close)
+		requireRestrictedCustodyRole(t, p)
+		return p
+	}
+	reader, venue, governance = role("pilot_assignment_reader"), role("pilot_venue_proof"), role("pilot_custody_assignment")
+	write = func(p *pgxpool.Pool, name string, alter func(*AccountEvidence)) error {
+		raw, sig := fixture(name+".json"), fixture(name+".sig")
+		e, err := ParseAccountEvidence(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if alter != nil {
+			alter(&e)
+		}
+		digest := sha256.Sum256(raw)
+		args := []any{e.TenantID, e.AccountID, e.ProofID, e.Authority, e.EffectiveFrom, e.EffectiveUntil, raw, sig, digest[:]}
+		if e.Kind == "venue_identity" {
+			_, err = p.Exec(ctx, `INSERT INTO custody_account_proofs(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_payload,signature,evidence_sha256,venue,exchange_account_id) VALUES($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11)`, append(args, e.Venue, e.ExchangeAccountID)...)
+		} else {
+			_, err = p.Exec(ctx, `INSERT INTO custody_account_assignments(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_payload,signature,evidence_sha256,portfolio_id,custodian_id,version,revision,withdrawn) VALUES($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11,$12,$13,$14)`, append(args, e.PortfolioID, e.CustodianID, e.Version, e.Revision, e.Withdrawn)...)
+		}
+		return err
+	}
+	return
 }

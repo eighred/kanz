@@ -162,6 +162,8 @@ func wireKind(k recon.BreakKind) (accountingpb.ReconciliationBreakKind, bool) {
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_CASH, true
 	case recon.BreakExecutionMissingAtCustodian:
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_AT_CUSTODIAN, true
+	case recon.BreakExecutionQuantity:
+		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_QUANTITY, true
 	case recon.BreakExecutionMissingInIBOR:
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_IN_IBOR, true
 	default:
@@ -386,6 +388,7 @@ type Run struct {
 	// validates it under the pair lock and drops it before retaining the run.
 	compared            *Statement
 	observedMissing     bool
+	measured            []recon.ExecutionQuantityDifference
 	ExecutionQuantities *accountingpb.ExecutionQuantityComparison
 	RunID               string
 	RequestID           string
@@ -411,7 +414,8 @@ type Detection struct {
 
 // Break is one discrepancy, carried as a working item rather than a log line.
 type Break struct {
-	Detection Detection
+	Detection    Detection
+	InstrumentID string
 	// BreakID is stable ACROSS RUNS, derived from (portfolio, custodian, kind,
 	// key) — see BreakID. The age depends on it: a break given a fresh id every
 	// day would be permanently one day old.

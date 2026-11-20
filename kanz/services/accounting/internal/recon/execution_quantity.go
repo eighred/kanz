@@ -13,10 +13,13 @@ import (
 type QuantityAssessment struct {
 	Compared, Unassessed int
 	Differences          []ExecutionQuantityDifference
+	// Measured includes explicit equalities. An omitted reference never closes a working discrepancy.
+	Measured []ExecutionQuantityDifference
 }
 
 type ExecutionQuantityDifference struct {
 	ExternalRef, InstrumentID   string
+	AccountID, EntryID          string
 	Book, Statement, Difference *big.Rat
 }
 
@@ -56,13 +59,13 @@ func AssessExecutionQuantities(executions []ledger.Execution, stmt Statement) (*
 			continue
 		}
 		result.Compared++
-		if entry.Quantity.Cmp(line.Quantity) == 0 {
-			continue
+		measurement := ExecutionQuantityDifference{ExternalRef: line.ExternalRef, InstrumentID: line.InstrumentID,
+			AccountID: entry.VenueAccountID, EntryID: entry.EntryID, Book: new(big.Rat).Set(entry.Quantity),
+			Statement: new(big.Rat).Set(line.Quantity), Difference: new(big.Rat).Sub(entry.Quantity, line.Quantity)}
+		result.Measured = append(result.Measured, measurement)
+		if measurement.Difference.Sign() != 0 {
+			result.Differences = append(result.Differences, measurement)
 		}
-		result.Differences = append(result.Differences, ExecutionQuantityDifference{
-			ExternalRef: line.ExternalRef, InstrumentID: line.InstrumentID, Book: new(big.Rat).Set(entry.Quantity),
-			Statement: new(big.Rat).Set(line.Quantity), Difference: new(big.Rat).Sub(entry.Quantity, line.Quantity),
-		})
 	}
 	sort.Slice(result.Differences, func(i, j int) bool { return result.Differences[i].ExternalRef < result.Differences[j].ExternalRef })
 	return result, nil

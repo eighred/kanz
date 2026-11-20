@@ -687,6 +687,8 @@ enum ReconciliationBreakKind {
   // THAT MEANS A FILL NEVER REACHED THE BOOK, observed rather than inferred from
   // a balance -- which is the whole of #1049.
   RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_IN_IBOR = 6;
+  // An account- and date-bound comparison of signed natural instrument units.
+  RECONCILIATION_BREAK_KIND_EXECUTION_QUANTITY = 7;
 }
 
 // BreakStatus is where a break has got to in the investigation.
