@@ -102,6 +102,19 @@ func syntheticPool(t *testing.T, ctx context.Context, role, tenant string) *pgxp
 
 func prepareSyntheticOrder(t *testing.T, ctx context.Context, s syntheticSession, controlTenant string) (*orderpb.SubmitOrder, nativeSubmit) {
 	t.Helper()
+	return prepareSyntheticOrderFrame(t, ctx, s, controlTenant, nil, time.Now().UTC())
+}
+
+// Capture the exact broker bytes in the independent entitlement decision when
+// the Go-origin writer is enabled. Older fixture schemas use the original fields.
+func prepareSyntheticOrderFrame(t *testing.T, ctx context.Context, s syntheticSession, controlTenant string, brokerWire []byte, evaluatedAt time.Time) (*orderpb.SubmitOrder, nativeSubmit) {
+	t.Helper()
+	if brokerWire != nil {
+		var verified envelopepb.EventFrame
+		if proto.Unmarshal(brokerWire, &verified) != nil || !proto.Equal(&verified, s.frame) {
+			t.Fatal("independent control received a different broker frame")
+		}
+	}
 	env := s.frame.GetEnvelope()
 	var cmd orderpb.SubmitOrder
 	if err := proto.Unmarshal(s.frame.Payload, &cmd); err != nil {
@@ -110,9 +123,8 @@ func prepareSyntheticOrder(t *testing.T, ctx context.Context, s syntheticSession
 	tenant, portfolio, orderID := env.GetTenantId(), cmd.GetPortfolioId(), cmd.GetOrderId()
 	request := nativeSubmit{Version: 1, Op: "submit", Tenant: tenant, Portfolio: portfolio, Principal: cmd.GetMetadata().GetIssuer(), Key: env.GetIdempotencyKey(), Command: s.frame.Payload}
 	requireNativeReceipt(t, ctx, request, "CONTROL_DENIED")
-	now := time.Now().UTC()
-	controls := newSyntheticControls(controlTenant, now)
-	rows, err := controls.evaluate(ctx, s.frame, now)
+	controls := newSyntheticControls(controlTenant, evaluatedAt)
+	rows, err := controls.evaluate(ctx, s.frame, evaluatedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +140,21 @@ func prepareSyntheticOrder(t *testing.T, ctx context.Context, s syntheticSession
 		if r.kind == "entitlement" {
 			traceContext = env.GetTraceContext()
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO synthetic_oms_evidence (tenant_id,principal_id,portfolio_id,order_id,instrument_id,command_sha256,kind,decision,source_id,effective_at,observed_at,expires_at,trace_context) VALUES($1,$2,$3,$4,$5,$6,$7,'ALLOW',$8,$9,$10,$11,$12)`, tenant, request.Principal, portfolio, orderID, cmd.GetInstrumentId(), digest[:], r.kind, r.sourceID, r.effective, r.observed, r.expires, traceContext)
+		cols, vals := "", ""
+		expires := r.expires
+		var receipt []any
+		if r.kind == "entitlement" && brokerWire != nil {
+			cols, vals = ",gateway_frame_sha256,gateway_idempotency_key", ",$13,$14"
+			h := sha256.Sum256(brokerWire)
+			if until := cmd.GetMetadata().GetValidUntil(); until != nil && until.AsTime().Before(expires) {
+				expires = until.AsTime()
+			}
+			receipt = []any{h[:], env.GetIdempotencyKey()}
+		}
+		args := []any{tenant, request.Principal, portfolio, orderID, cmd.GetInstrumentId(), digest[:], r.kind, r.sourceID, r.effective, r.observed, expires, traceContext}
+		args = append(args, receipt...)
+		_, err = tx.Exec(ctx, `INSERT INTO synthetic_oms_evidence (tenant_id,principal_id,portfolio_id,order_id,instrument_id,command_sha256,kind,decision,source_id,effective_at,observed_at,expires_at,trace_context`+cols+`)
+			VALUES($1,$2,$3,$4,$5,$6,$7,'ALLOW',$8,$9,$10,$11,$12`+vals+`)`, args...)
 		if err != nil {
 			t.Fatal(err)
 		}
