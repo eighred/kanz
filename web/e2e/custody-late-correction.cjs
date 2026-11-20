@@ -112,7 +112,7 @@ async function main() {
         assert.equal(latest.outcome, 'clean')
         assert.equal(latest.statement_id, e.following_statement)
         assert.equal(latest.historical_quantity_correction_run_id, undefined)
-        const followingRun = await region.locator('output code').last().innerText()
+        const followingRun = await region.locator('output > code').innerText()
         assert.equal(followingRun, e.following_run)
         for (const [date, run, source] of [[e.business_date, originalRun, e.original_statement], [e.following_date, followingRun, e.following_statement]]) {
           const ordinary = await read(date, run)
