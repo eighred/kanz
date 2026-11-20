@@ -15,7 +15,7 @@ import (
 const syntheticOMSPath = "services/synthetic_oms"
 
 var syntheticOMSFiles = []string{
-	"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql",
+	"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "go_admission.sql",
 	"funding.sql", "cancellation.sql", "settlement.sql",
 }
 
@@ -107,6 +107,20 @@ func checkSyntheticOMS(root string) error {
 		}
 	}
 	funding := rustMigrationCompact(files["funding.sql"])
+	goAdmission := rustMigrationCompact(files["go_admission.sql"])
+	for _, marker := range []string{
+		"current_database()<>'kanz_synthetic_oms'",
+		"NEW.writer_epochISDISTINCTFROMpublic.synthetic_oms_assert_writer()",
+		"gateway_frame_sha256=sha256(NEW.go_gateway_frame)",
+		"cardinality(sources)ISDISTINCTFROM5ORsourcesISDISTINCTFROMNEW.evidence_ids",
+		"NOTenabledANDxmin<>pg_current_xact_id()::xidFORSHARE",
+		"b.xmin=pg_current_xact_id()::xid",
+		"DEFERRABLEINITIALLYDEFERREDFOREACHROW",
+	} {
+		if !strings.Contains(goAdmission, marker) {
+			return fmt.Errorf("synthetic Go admission changed %s", marker)
+		}
+	}
 	goWriter := rustMigrationCompact(files["go_writer.sql"])
 	for _, marker := range []string{
 		"current_database()<>'kanz_synthetic_oms'",
@@ -203,6 +217,9 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"writer.sql", "WHERE singleton FOR SHARE", "WHERE singleton FOR KEY SHARE"},
 		{"writer.sql", "session_user::regrole::oid", "current_user::regrole::oid"},
 		{"writer.sql", "expected IS DISTINCT FROM old_epoch", "FALSE"},
+		{"go_admission.sql", "gateway_frame_sha256=sha256(NEW.go_gateway_frame)", "TRUE"},
+		{"go_admission.sql", "b.xmin=pg_current_xact_id()::xid", "TRUE"},
+		{"go_admission.sql", "DEFERRABLE INITIALLY DEFERRED", "NOT DEFERRABLE"},
 		{"go_writer.sql", "current_setting('transaction_isolation')<>'read committed'", "FALSE"},
 		{"go_writer.sql", "c.phase<>'working' OR o.status<>2", "FALSE"},
 		{"go_writer.sql", "a.observation=convert_to(c.order_id,'UTF8')", "TRUE"},
