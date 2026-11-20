@@ -68,8 +68,11 @@ class TemporalSourceTests(unittest.TestCase):
                    "patchSetSHA256": source.sha256(policy), "advisorySnapshotSHA256": source.sha256(advisory),
                    "packages": package_rows}
         with tempfile.TemporaryDirectory() as temp:
-            folder = Path(temp)
-            for change in ("valid", "source", "binary", "lock", "patch-set", "tree", "missing-compiler", "registry-copy",
+            export = Path(temp)
+            folder = export / "kanz-source-evidence"
+            folder.mkdir()
+            (export / "provenance.json").write_text(json.dumps({"_type": "https://in-toto.io/Statement/v1"}))
+            for change in ("valid", "root-only", "source", "binary", "lock", "patch-set", "tree", "missing-compiler", "registry-copy",
                            "cached-library", "debug-worker", "spdx-source", "elf-source", "new-disclosure", "unreviewed",
                            "extra-compiler-origin", "incomplete", "duplicate-lock", "legacy-package", "target-name", "encoded-spdx-alias"):
                 with self.subTest(change=change):
@@ -95,7 +98,10 @@ class TemporalSourceTests(unittest.TestCase):
                         spdx["packages"].append({"name": "other", "versionInfo": version, "externalRefs": [
                             {"referenceType": "purl", "referenceLocator": "pkg:cargo/%61rrow-array@59.3.2"}]})
                     (folder / "compiler.jsonl").write_text("\n".join(map(json.dumps, build)))
-                    (folder / "provenance.json").write_text(json.dumps(data))
+                    receipt_path = folder / "provenance.json"
+                    receipt_path.write_text(json.dumps(data))
+                    if change == "root-only":
+                        receipt_path.replace(export / "provenance.json")
                     (folder / "chrono-advisories.json").write_bytes(advisory)
                     observed = []
                     def evaluate(s, v, c):
@@ -105,7 +111,7 @@ class TemporalSourceTests(unittest.TestCase):
                     current = {"rustsec_commit": "f" * 40}
                     if change == "new-disclosure": current["new-fork-finding"] = True
                     def check():
-                        return source.verify(folder, policy, source_sha, "d" * 64, "c" * 64, rows, elf, spdx,
+                        return source.verify(export, policy, source_sha, "d" * 64, "c" * 64, rows, elf, spdx,
                                              lambda: current, evaluate)
                     if change == "valid":
                         evidence, saved_snapshot = check()

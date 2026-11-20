@@ -147,6 +147,10 @@ def verify(directory, manifest_bytes, source, lock_sha, binary_sha, lock, embedd
     """Consume the protected builder's sidecar. The extracted image supplies its own ELF digest."""
     if directory is None:
         raise ValueError("temporal sources require same-build compiler and source provenance")
+    # BuildKit writes its SLSA attestation at the export root under provenance.json.
+    directory = directory / "kanz-source-evidence"
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("missing protected builder evidence directory")
     recipe = json.loads(manifest_bytes, object_pairs_hook=unique)
     receipt_bytes = read_input(directory / "provenance.json", 1024 * 1024)
     receipt = json.loads(receipt_bytes, object_pairs_hook=unique)

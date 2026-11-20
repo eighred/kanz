@@ -58,7 +58,7 @@ func lakeHybridImageRecipe(raw string) error {
 		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl`,
 		"ARG SOURCE_REVISION=$VERSION", `RUN python3 -B temporal_sources/produce.py "$SOURCE_REVISION"`,
 	}
-	evidence := []string{"FROM scratch AS rust-source-evidence", "COPY --from=rust-build /kanz-source-evidence/ /"}
+	evidence := []string{"FROM scratch AS rust-source-evidence", "COPY --from=rust-build /kanz-source-evidence/ /kanz-source-evidence/"}
 	runtime := []string{
 		"FROM ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
 		"COPY --from=build /out/lake-sink /lake-sink",
@@ -271,6 +271,7 @@ func TestLakeHybridImageRecipe(t *testing.T) {
 		{"RUN python3 -B temporal_sources/prepare.py --check", "RUN true"},
 		{"ENV CARGO_TARGET_DIR=/src/rust/target-provenance", "ENV CARGO_TARGET_DIR=/src/rust/target"},
 		{"python3 -B temporal_sources/produce.py", "true"},
+		{"COPY --from=rust-build /kanz-source-evidence/ /kanz-source-evidence/", "COPY --from=rust-build /kanz-source-evidence/ /"},
 		{"--chown=0:0", "--chown=65532:65532"},
 		{"--chmod=0555", "--chmod=0755"},
 		{"COPY schemas/proto/ /src/schemas/proto/", ""},
