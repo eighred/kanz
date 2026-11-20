@@ -62,10 +62,24 @@ func vectorClient(t *testing.T, e v1.Engine) querypb.RiskQueryServiceClient {
 func TestDecomposeRiskActualGRPCServesRealEngineDecimalVectors(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Second)
 	ts := timestamppb.New(at)
+	// Unit loading and variance give B^T v = 10^9 + 10^-9 - 10^9 = 10^-9.
+	// A fully covered book must retain the middle position in the public result.
+	positions := []struct {
+		id     string
+		amount *commonpb.Decimal
+	}{
+		{"A", &commonpb.Decimal{Coefficient: 1, Exponent: 9}},
+		{"B", &commonpb.Decimal{Coefficient: 1, Exponent: -9}},
+		{"C", &commonpb.Decimal{Coefficient: -1, Exponent: 9}},
+	}
+	var exposures []*factorpb.FactorExposure
+	for _, pos := range positions {
+		exposures = append(exposures, &factorpb.FactorExposure{ModelId: "owned-wire-fixture", AsOf: ts, InstrumentId: pos.id, Loadings: []float64{1}})
+	}
 	m, err := factormodel.FromSnapshot(&factorpb.FactorModelSnapshot{
 		Model:           &factorpb.FactorModel{ModelId: "owned-wire-fixture", AsOf: ts, Factors: []*factorpb.Factor{{Name: "MKT", Type: factorpb.FactorType_FACTOR_TYPE_STATISTICAL}}},
 		Covariance:      &factorpb.FactorCovariance{ModelId: "owned-wire-fixture", AsOf: ts, Dimension: 1, Values: []float64{1}},
-		Exposures:       []*factorpb.FactorExposure{{ModelId: "owned-wire-fixture", AsOf: ts, InstrumentId: "A", Loadings: []float64{1}}},
+		Exposures:       exposures,
 		InputProvenance: map[string]string{"input_digest": "owned-panel-fixture"},
 	})
 	if err != nil {
@@ -75,8 +89,10 @@ func TestDecomposeRiskActualGRPCServesRealEngineDecimalVectors(t *testing.T) {
 	if err := s.ApplyPortfolioRevalued(context.Background(), &envelopepb.Envelope{EventId: "portfolio", IdempotencyKey: "portfolio"}, &domainpb.PortfolioState{PortfolioId: "PF", BaseCurrency: "USD", AsOf: ts}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ApplyPositionChanged(context.Background(), &envelopepb.Envelope{EventId: "position", IdempotencyKey: "position"}, &domainpb.PositionState{PortfolioId: "PF", InstrumentId: "A", AsOf: ts, MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1, Exponent: -9}}}); err != nil {
-		t.Fatal(err)
+	for _, pos := range positions {
+		if err := s.ApplyPositionChanged(context.Background(), &envelopepb.Envelope{EventId: pos.id, IdempotencyKey: pos.id}, &domainpb.PositionState{PortfolioId: "PF", InstrumentId: pos.id, AsOf: ts, MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: pos.amount}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	e := engine.New(s, nil, risk.NewCache(), risk.NewDetector(), engine.WithFactorModel(vectorModel{m}))
 	client := vectorClient(t, e)
@@ -86,10 +102,17 @@ func TestDecomposeRiskActualGRPCServesRealEngineDecimalVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.GetPortfolioId() != "PF" || r.GetOwnerTenant() != "acme" || r.GetCurrencyCode() != "USD" || !r.GetAsOf().AsTime().Equal(at) || !proto.Equal(r.Total, &commonpb.Decimal{Coefficient: 1, Exponent: -9}) || len(r.ByFactor) != 1 || len(r.ByInstrument) != 1 || r.ByInstrument[0].InstrumentId != "A" {
+	residual := positions[1].amount
+	if r.GetPortfolioId() != "PF" || r.GetOwnerTenant() != "acme" || r.GetCurrencyCode() != "USD" || !r.GetAsOf().AsTime().Equal(at) || !proto.Equal(r.Total, residual) || len(r.ByFactor) != 1 || !proto.Equal(r.ByFactor[0].Exposure, residual) || !proto.Equal(r.ByFactor[0].Component, residual) || len(r.ByInstrument) != len(positions) {
 		t.Fatalf("actual wire decomposition: %v", r)
 	}
-	if r.Coverage == nil || r.Coverage.Contributed != 1 || r.Coverage.ExcludedCount != 0 || r.Provenance == nil || r.Provenance.ModelId != "owned-wire-fixture" || r.Provenance.InputDigest != "owned-panel-fixture" || !r.Provenance.ModelAsOf.AsTime().Equal(at) || r.SourcePosition != nil {
+	for i, pos := range positions {
+		row := r.ByInstrument[i]
+		if row.InstrumentId != pos.id || !proto.Equal(row.Marginal, &commonpb.Decimal{Coefficient: 1}) || !proto.Equal(row.Component, pos.amount) {
+			t.Fatalf("wire Euler contribution for %s: %v", pos.id, row)
+		}
+	}
+	if r.Coverage == nil || int(r.Coverage.Contributed) != len(positions) || r.Coverage.ExcludedCount != 0 || r.Provenance == nil || r.Provenance.ModelId != "owned-wire-fixture" || r.Provenance.InputDigest != "owned-panel-fixture" || !r.Provenance.ModelAsOf.AsTime().Equal(at) || r.SourcePosition != nil {
 		t.Fatalf("wire coverage/provenance/unknown coordinate: %v", r)
 	}
 	for _, req := range []*querypb.DecomposeRiskRequest{{}, {PortfolioId: "PF", AsOf: ts}, {PortfolioId: "PF", AsOf: &timestamppb.Timestamp{Seconds: 253402300800}}} {

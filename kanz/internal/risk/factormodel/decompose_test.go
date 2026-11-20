@@ -17,6 +17,19 @@ func oneFactorModel() *Model {
 	)
 }
 
+func TestFactorExposuresRetainSignedHedgeResidualAcrossUniverseOrders(t *testing.T) {
+	for _, ids := range [][]string{{"large", "small", "hedge"}, {"small", "large", "hedge"}, {"hedge", "large", "small"}} {
+		m := newModel([]Factor{{Name: "F1"}, {Name: "F2"}}, ids, [][]float64{{1, -1}, {1, -1}, {1, -1}}, nil, nil)
+		for _, small := range []float64{-1, 0, 1} {
+			// All operands are exact powers of two or signed units.
+			got := m.FactorExposures(map[string]float64{"large": 1 << 55, "hedge": -(1 << 55), "small": small})
+			if got[0] != small || got[1] != -small {
+				t.Errorf("universe %v, residual %g: got %v", ids, small, got)
+			}
+		}
+	}
+}
+
 // TestRisk_FactorPlusSpecificEqualsTotal: Total² = Systematic² + Specific².
 func TestRisk_FactorPlusSpecificEqualsTotal(t *testing.T) {
 	m := oneFactorModel()
