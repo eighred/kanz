@@ -14,3 +14,5 @@ custody_proof -kind custody_assignment -evidence custody_assignment.json -signat
 The signature file contains the 64 raw Ed25519 signature bytes over the entire JSON file. Exact duplicate imports succeed. A changed document requires a distinct immutable identifier and an approved assignment revision. The stored bytes, projected identifiers, dates and signature can be checked when the comparison is read. Keep private signing keys with their respective issuers.
 
 The public testdata files represent independent synthetic issuers for `synthetic-custody-pilot` and the bounded interval 2020-02-04 through 2029-12-31. Production onboarding requires the genuine venue-identity issuer and custody-governance owner to attest the data. An exchange adapter’s authenticated identity observation can support a venue issuer’s decision. Its existence alone establishes neither a past date range nor the custodian assignment.
+
+Use a higher assignment revision and signed `withdrawn: true` to terminate an active assignment from its effective date. A later positive revision can reinstate it. The fixture includes signed withdrawal and reinstatement documents effective 2026-01-01.
