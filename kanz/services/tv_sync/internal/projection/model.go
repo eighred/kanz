@@ -21,6 +21,7 @@ import (
 // when tv-sync folded the FACT.
 type execution struct {
 	fillID     string
+	source     *orderpb.Fill
 	orderID    string
 	instrument string
 	venue      string
@@ -46,11 +47,12 @@ type orderRev struct {
 
 // account holds one trading account's append-only folded history under a tenant.
 type account struct {
-	tenant    string
-	id        string
-	execs     []execution
-	orders    map[string][]orderRev // order_id -> revisions in fold order
-	seenFills map[string]bool       // fill_id dedup (sync venue path + async ws echo)
+	tenant        string
+	id            string
+	execs         []execution
+	orders        map[string][]orderRev    // order_id -> revisions in fold order
+	seenFills     map[string]*orderpb.Fill // canonical key, or alias for unscoped history
+	scopedAliases map[string]int           // live scoped executions per raw alias
 
 	// live is foldPositions(execs) — the as-of-NOW fold, maintained as each
 	// execution arrives instead of re-derived per read (#995).
@@ -110,10 +112,11 @@ type account struct {
 func newAccount(tenant, id string) *account {
 	return &account{
 		tenant: tenant, id: id,
-		orders:    make(map[string][]orderRev),
-		seenFills: make(map[string]bool),
-		live:      make(map[string]*posState),
-		baseline:  make(map[string]*posState),
+		orders:        make(map[string][]orderRev),
+		seenFills:     make(map[string]*orderpb.Fill),
+		scopedAliases: make(map[string]int),
+		live:          make(map[string]*posState),
+		baseline:      make(map[string]*posState),
 	}
 }
 
@@ -197,15 +200,16 @@ type OrderDTO struct {
 
 // ExecutionDTO is one execution report.
 type ExecutionDTO struct {
-	FillID     string `json:"id"`
-	OrderID    string `json:"orderId"`
-	Instrument string `json:"instrument"`
-	Venue      string `json:"venue"`
-	Side       string `json:"side"`
-	Qty        string `json:"qty" broker:"decimal"`
-	Price      string `json:"price" broker:"decimal"`
-	Fee        string `json:"fee,omitempty" broker:"decimal"`
-	ExecutedAt string `json:"time" broker:"timestamp"`
+	FillID      string `json:"id"`
+	VenueFillID string `json:"venueFillId,omitempty"`
+	OrderID     string `json:"orderId"`
+	Instrument  string `json:"instrument"`
+	Venue       string `json:"venue"`
+	Side        string `json:"side"`
+	Qty         string `json:"qty" broker:"decimal"`
+	Price       string `json:"price" broker:"decimal"`
+	Fee         string `json:"fee,omitempty" broker:"decimal"`
+	ExecutedAt  string `json:"time" broker:"timestamp"`
 }
 
 // StateDTO is the account manager summary (balance/equity/P&L).

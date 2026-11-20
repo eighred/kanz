@@ -43,6 +43,7 @@ export const brokerOrder = {
 
 export const brokerExecution = {
   "id": 'text',
+  "venueFillId": 'text?',
   "orderId": 'text',
   "instrument": 'text',
   "venue": 'text',

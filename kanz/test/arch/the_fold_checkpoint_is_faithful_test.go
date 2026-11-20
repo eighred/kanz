@@ -61,7 +61,7 @@ func TestTheCheckpointCarriesTheFillDedupSet(t *testing.T) {
 	src := readStripped(t, cpFileRel)
 	for _, half := range []struct{ what, needle string }{
 		{"write", "out.SeenFills = append(out.SeenFills"},
-		{"restore", "a.seenFills[fid] = true"},
+		{"restore", "a.seenFills[key] = e.GetSourceFill()"},
 	} {
 		if !strings.Contains(src, half.needle) {
 			t.Fatalf("the checkpoint does not %s the fill dedup set (%q). The schema field alone is "+

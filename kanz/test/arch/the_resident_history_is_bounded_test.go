@@ -181,7 +181,7 @@ func TestEvictedHistoryIsFoldedRatherThanDropped(t *testing.T) {
 			"year-old position simply gone — which is EXEC-M21 (a trader looking at an empty account " +
 			"while the fund's positions sat open at the exchanges) with a shorter horizon (#809).")
 	}
-	if !strings.Contains(ev, "delete(a.seenFills, e.fillID)") {
+	if !strings.Contains(ev, "delete(a.seenFills, key)") {
 		t.Fatal("the fill-id dedup set is no longer evicted IN LOCKSTEP with the execution it " +
 			"belongs to. Dropping it on any other schedule means an id can go before its websocket " +
 			"echo arrives — the fill is folded twice and the position doubles — or never go at all, " +

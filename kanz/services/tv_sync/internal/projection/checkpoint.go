@@ -57,10 +57,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	tvsyncpb "github.com/eighred/kanz/kanz-schemas-go/tvsync/v1"
 
 	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/fillfact"
 )
 
 // Checkpoint records the fold's current state so the next boot can resume from it
@@ -109,6 +111,9 @@ func (p *Projection) snapshotLocked() (*tvsyncpb.Checkpoint, error) {
 		Seq:                  p.seq,
 		TakenAt:              timestamppb.New(p.now().UTC()),
 	}
+	if p.scopedFillHistory {
+		cp.ExactEncodingVersion = 2
+	}
 	for _, a := range p.accounts[p.tenant] {
 		as, err := snapshotAccount(a)
 		if err != nil {
@@ -139,7 +144,7 @@ func snapshotAccount(a *account) (*tvsyncpb.AccountSnapshot, error) {
 			return nil, err
 		}
 		out.Execs = append(out.Execs, &tvsyncpb.Execution{
-			FillId: e.fillID, OrderId: e.orderID, Instrument: e.instrument, Venue: e.venue,
+			SourceFill: e.source, FillId: e.fillID, OrderId: e.orderID, Instrument: e.instrument, Venue: e.venue,
 			Side: e.side, Qty: qty, Price: price, Fee: fee,
 			Effective: timestamppb.New(e.effective), Knowledge: logTime(e.knowledge),
 		})
@@ -208,24 +213,34 @@ func (p *Projection) restore(blob []byte) error {
 	// A legacy checkpoint cannot establish whether digits were already lost.
 	// Refuse before mutating state; rebuilding requires independently verified
 	// complete raw history, never an automatic fallback or marker rewrite.
-	if cp.GetExactEncodingVersion() != 1 {
+	if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 {
 		return ErrCheckpointEncodingVersion
 	}
+	accounts := make(map[string]*account, len(cp.Accounts))
 	for _, as := range cp.GetAccounts() {
-		a, err := restoreAccount(as)
+		if as.GetTenantId() != p.tenant || as.GetAccountId() == "" || accounts[as.GetAccountId()] != nil {
+			return ErrCheckpointTenantMismatch
+		}
+		a, err := restoreAccount(as, cp.GetExactEncodingVersion())
 		if err != nil {
 			return err
 		}
-		if p.accounts[a.tenant] == nil {
-			p.accounts[a.tenant] = map[string]*account{}
-		}
-		p.accounts[a.tenant][a.id] = a
+		accounts[a.id] = a
 	}
+	p.accounts[p.tenant] = accounts
+	p.scopedFillHistory = cp.GetExactEncodingVersion() == 2
 	return nil
 }
 
-func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
+func restoreAccount(as *tvsyncpb.AccountSnapshot, version uint32) (*account, error) {
 	a := newAccount(as.GetTenantId(), as.GetAccountId())
+	for _, fid := range as.GetSeenFills() {
+		if _, duplicate := a.seenFills[fid]; duplicate || fid == "" {
+			return nil, ErrUnresolvedFillAlias
+		}
+		a.seenFills[fid] = nil
+	}
+	keys := make(map[string]bool, len(as.Execs))
 	for _, e := range as.GetExecs() {
 		qty, err := protoToRat(e.GetQty())
 		if err != nil {
@@ -239,8 +254,25 @@ func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
 		if err != nil {
 			return nil, fmt.Errorf("exec %s fee: %w", e.GetFillId(), err)
 		}
+		key := e.GetFillId()
+		if source := e.GetSourceFill(); source != nil {
+			if version != 2 || !validCheckpointFill(e, source) {
+				return nil, fillfact.ErrExecutionIdentityConflict
+			}
+			key = fillfact.ExecutionKey(source)
+			if key != e.GetFillId() {
+				a.scopedAliases[e.GetFillId()]++
+			}
+		}
+		if key != "" {
+			if _, ok := a.seenFills[key]; !ok || keys[key] {
+				return nil, ErrUnresolvedFillAlias
+			}
+			keys[key] = true
+			a.seenFills[key] = e.GetSourceFill()
+		}
 		a.execs = append(a.execs, execution{
-			fillID: e.GetFillId(), orderID: e.GetOrderId(), instrument: e.GetInstrument(),
+			source: e.GetSourceFill(), fillID: e.GetFillId(), orderID: e.GetOrderId(), instrument: e.GetInstrument(),
 			venue: e.GetVenue(), side: e.GetSide(), qty: qty, price: price, fee: fee,
 			effective: e.GetEffective().AsTime(), knowledge: e.GetKnowledge().AsTime(),
 		})
@@ -255,8 +287,13 @@ func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
 		}
 		a.orders[id] = revs
 	}
-	for _, fid := range as.GetSeenFills() {
-		a.seenFills[fid] = true
+	for alias := range a.scopedAliases {
+		if _, unscoped := a.seenFills[alias]; unscoped {
+			return nil, ErrUnresolvedFillAlias
+		}
+	}
+	if len(keys) != len(a.seenFills) {
+		return nil, ErrUnresolvedFillAlias
 	}
 	for inst, l := range as.GetBaseline() {
 		lot, err := protoToLot(l)
@@ -370,6 +407,18 @@ func protoToRat(d *commonpb.Decimal) (*big.Rat, error) {
 		return nil, ErrCheckpointValueOutOfDomain
 	}
 	return r, nil
+}
+
+// The checkpoint carries the original fill to distinguish missing fees and
+// retain the venue account and execution ID that the rendered history omits.
+func validCheckpointFill(e *tvsyncpb.Execution, f *orderpb.Fill) bool {
+	if _, ok := dec.InDomainDeep(f); !ok {
+		return false
+	}
+	return f.FillId != "" && f.FillId == e.FillId && f.OrderId == e.OrderId && f.InstrumentId == e.Instrument && f.Venue == e.Venue &&
+		f.Side == e.Side && f.GetExecutedAt().CheckValid() == nil && f.ExecutedAt.AsTime().Equal(e.GetEffective().AsTime()) &&
+		f.Quantity != nil && e.Qty != nil && dec.Cmp(f.Quantity, e.Qty) == 0 && f.Price != nil && e.Price != nil && dec.Cmp(f.Price, e.Price) == 0 &&
+		e.Fee != nil && feeRat(f).Cmp(dec.FromProto(e.Fee)) == 0
 }
 
 // ErrCheckpointTenantMismatch: a checkpoint row was written under a different

@@ -71,7 +71,7 @@ watch(() => [id.value, session.identity, session.identity?.tenant, session.ident
     <p v-if="data.executionsRetainedFrom" class="state-warn">This is a retained window beginning {{ data.executionsRetainedFrom }}. Earlier executions are not shown.</p>
     <WindowedTable :items="data.executions" :row-key="execution => execution.id" label="Executions in served window" :columns="9" empty="No executions are present in the served window.">
       <template #head><tr><th>Executed</th><th>Fill</th><th>Order</th><th>Instrument</th><th>Venue</th><th>Side</th><th>Quantity</th><th>Price</th><th>Fee</th></tr></template>
-      <template #row="{ item: execution }"><td>{{ execution.time }}</td><td><code>{{ execution.id }}</code></td><td><code>{{ execution.orderId }}</code></td><td>{{ execution.instrument }}</td><td>{{ execution.venue }}</td><td>{{ execution.side }}</td><td>{{ execution.qty }}</td><td>{{ execution.price }}</td><td>{{ execution.fee ?? '—' }}</td></template>
+      <template #row="{ item: execution }"><td>{{ execution.time }}</td><td><code :title="execution.id">{{ execution.venueFillId ?? execution.id }}</code></td><td><code>{{ execution.orderId }}</code></td><td>{{ execution.instrument }}</td><td>{{ execution.venue }}</td><td>{{ execution.side }}</td><td>{{ execution.qty }}</td><td>{{ execution.price }}</td><td>{{ execution.fee ?? '—' }}</td></template>
     </WindowedTable>
   </template>
 </template>

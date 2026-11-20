@@ -62,3 +62,20 @@ it('also invalidates when a session identity field changes in place',async()=>{
  old.resolve(detail('A'));await flushPromises();expect(wrapper.find('dl').exists()).toBe(false)
  next.resolve(detail('A'));await flushPromises();expect(wrapper.find('dl').exists()).toBe(true);wrapper.unmount()
 })
+
+it('keeps separate broker executions visible when two venue accounts reuse a fill alias', async () => {
+  const account = detail('A')
+  const terms = { instrument: 'BTC-USD', venue: 'BINANCE', side: 'buy', qty: '1', price: '100', time: '2026-01-01T00:00:00Z' }
+  account.executions = [
+    { ...terms, id: 'execution:v1:first', orderId: 'order-A', venueFillId: 'BTCUSDT-7' },
+    { ...terms, id: 'execution:v1:second', orderId: 'order-B', venueFillId: 'BTCUSDT-7' },
+    { ...terms, id: 'legacy-visible', orderId: 'order-C' },
+  ]
+  vi.spyOn(broker, 'account').mockResolvedValue(account)
+  const { wrapper } = await setup()
+  await flushPromises()
+  expect(wrapper.get('code[title="execution:v1:first"]').text()).toBe('BTCUSDT-7')
+  expect(wrapper.get('code[title="execution:v1:second"]').text()).toBe('BTCUSDT-7')
+  expect(wrapper.get('code[title="legacy-visible"]').text()).toBe('legacy-visible')
+  wrapper.unmount()
+})

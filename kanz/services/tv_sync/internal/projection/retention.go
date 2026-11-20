@@ -52,6 +52,8 @@ package projection
 import (
 	"errors"
 	"fmt"
+
+	"github.com/eighred/kanz/internal/fillfact"
 	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -164,7 +166,17 @@ func (a *account) evict(cutoff time.Time) (execs, orders, fills int) {
 	if n > 0 {
 		for _, e := range a.execs[:n] {
 			applyExecution(a.baselinePos(e.instrument), e)
-			delete(a.seenFills, e.fillID)
+			key := e.fillID
+			if e.source != nil {
+				key = fillfact.ExecutionKey(e.source)
+			}
+			delete(a.seenFills, key)
+			if key != e.fillID {
+				a.scopedAliases[e.fillID]--
+				if a.scopedAliases[e.fillID] == 0 {
+					delete(a.scopedAliases, e.fillID)
+				}
+			}
 		}
 		// A FRESH BACKING ARRAY, NOT A RESLICE. a.execs[n:] keeps the original
 		// array — and every execution in it — reachable, so the heap this exists

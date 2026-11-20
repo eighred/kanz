@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/eighred/kanz/internal/fillfact"
 	"math/big"
 	"sort"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/fillfact"
 )
 
 // OMS FACT subjects the projection folds (mirrors services/oms/internal/order).
@@ -57,6 +57,7 @@ type Projection struct {
 	// bootedFromCheckpoint records whether Rehydrate restored one, so the
 	// composition root can report the posture rather than infer it from a timing.
 	bootedFromCheckpoint bool
+	scopedFillHistory    bool // v1 readers cannot safely resume an alias-only fold
 	// seq is the log position of the last fact this projection folded — the
 	// watermark a checkpoint is taken at (#809). Guarded by mu, and only ever
 	// advanced by a fold that actually happened.
@@ -154,6 +155,7 @@ func (p *Projection) Rehydrate(ctx context.Context) error {
 			return fmt.Errorf("tv-sync: restore fold checkpoint at seq %d: %w", seq, err)
 		}
 		after = seq
+		p.seq = seq
 		p.bootedFromCheckpoint = true
 	}
 
@@ -166,7 +168,9 @@ func (p *Projection) Rehydrate(ctx context.Context) error {
 	// reaches is the same book either way.
 	folded := 0
 	return p.log.Replay(ctx, after, func(f Fact) error {
-		p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge)
+		if _, err := p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge); err != nil {
+			return err
+		}
 		p.seq = f.Seq
 		folded++
 		if p.retention > 0 && folded%rehydrateEvictEvery == 0 {
@@ -222,7 +226,11 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 				p.mu.Unlock()
 				return errors.New("tv-sync: non-increasing durable fact sequence")
 			}
-			deltas := p.fold(tenant, f.EventType, f.Payload, f.Knowledge)
+			deltas, err := p.fold(tenant, f.EventType, f.Payload, f.Knowledge)
+			if err != nil {
+				p.mu.Unlock()
+				return err
+			}
 			p.seq = f.Seq
 			p.mu.Unlock()
 			for _, d := range deltas {
@@ -233,8 +241,11 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 	}
 
 	p.mu.Lock()
-	deltas := p.fold(tenant, env.GetEventType(), payload, know)
+	deltas, err := p.fold(tenant, env.GetEventType(), payload, know)
 	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
 
 	for _, d := range deltas {
 		p.subs.publish(tenant, d)
@@ -269,54 +280,52 @@ func decodeFact(payload []byte, ev proto.Message) bool {
 }
 
 // fold applies one FACT under p.mu and returns the deltas to stream.
-func (p *Projection) fold(tenant, eventType string, payload []byte, know time.Time) []Delta {
+func (p *Projection) fold(tenant, eventType string, payload []byte, know time.Time) ([]Delta, error) {
 	switch eventType {
 	case evtAccepted:
 		var ev orderpb.OrderAccepted
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		return p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know)
+		return p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know), nil
 	case evtPartiallyFilled:
 		var ev orderpb.OrderPartiallyFilled
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		d := p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know)
-		return append(d, p.appendFill(tenant, ev.GetState().GetPortfolioId(), ev.GetFill(), know)...)
+		return p.foldOrderFill(tenant, ev.GetOrderId(), ev.GetState(), ev.GetFill(), know)
 	case evtFilled:
 		var ev orderpb.OrderFilled
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		d := p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know)
-		return append(d, p.appendFill(tenant, ev.GetState().GetPortfolioId(), ev.GetFill(), know)...)
+		return p.foldOrderFill(tenant, ev.GetOrderId(), ev.GetState(), ev.GetFill(), know)
 	case evtRouted:
 		var ev orderpb.OrderRouted
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_ROUTED, ev.GetVenue(), "", know)
+		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_ROUTED, ev.GetVenue(), "", know), nil
 	case evtRejected:
 		var ev orderpb.OrderRejected
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_REJECTED, "", ev.GetReason(), know)
+		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_REJECTED, "", ev.GetReason(), know), nil
 	case evtCancelled:
 		var ev orderpb.OrderCancelled
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_CANCELLED, "", "", know)
+		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_CANCELLED, "", "", know), nil
 	case evtExpired:
 		var ev orderpb.OrderExpired
 		if !decodeFact(payload, &ev) {
-			return nil
+			return nil, nil
 		}
-		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_EXPIRED, "", "", know)
+		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_EXPIRED, "", "", know), nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -375,22 +384,66 @@ func (p *Projection) transition(tenant, orderID string, status orderpb.OrderStat
 	return nil
 }
 
-func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know time.Time) []Delta {
+// A historical fill may use the account carried by its own OMS order FACT
+// only when the order, instrument, side and venue explicitly bind that account.
+func (p *Projection) foldOrderFill(tenant, orderID string, st *orderpb.OrderState, fill *orderpb.Fill, know time.Time) ([]Delta, error) {
+	if fill != nil && (fill.VenueExecutionId != "" || fill.VenueAccountId != "") {
+		if err := fillfact.Validate(fill); err != nil {
+			return nil, err
+		}
+		if fill.Price == nil || fill.GetExecutedAt().CheckValid() != nil || fill.InstrumentId == "" || fill.OrderId == "" || fill.OrderId != orderID || st.GetOrderId() != orderID || st.GetPortfolioId() == "" ||
+			(st.InstrumentId != "" && fill.InstrumentId != st.InstrumentId) || (st.Venue != "" && fill.Venue != st.Venue) ||
+			(st.Side != orderpb.Side_SIDE_UNSPECIFIED && fill.Side != st.Side) || (st.VenueAccountId != "" && fill.VenueAccountId != "" && fill.VenueAccountId != st.VenueAccountId) {
+			return nil, fillfact.ErrExecutionIdentityConflict
+		}
+		if fill.VenueAccountId == "" && st.VenueAccountId != "" && st.Venue != "" && st.InstrumentId != "" && st.Side != orderpb.Side_SIDE_UNSPECIFIED {
+			fill = proto.Clone(fill).(*orderpb.Fill)
+			fill.VenueAccountId = st.VenueAccountId
+		}
+	}
+	d, err := p.appendFill(tenant, st.GetPortfolioId(), fill, know)
+	if err != nil {
+		return nil, err
+	}
+	return append(p.upsertOrder(tenant, st, st.GetStatus(), "", know), d...), nil
+}
+
+var ErrUnresolvedFillAlias = errors.New("tv-sync: execution alias has incomplete venue-account evidence; verified source history required")
+
+func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know time.Time) ([]Delta, error) {
 	if f == nil || accountID == "" {
-		return nil
+		return nil, nil
 	}
 	a := p.acct(tenant, accountID, true)
-	// Idempotent fold: a fill arrives twice — once from the synchronous venue
-	// placement path, once as the async user-data websocket echo — under the same
-	// deterministic fill_id. Fold it once, never double-ledger (M3.7).
+	var source *orderpb.Fill
+	if f.VenueExecutionId != "" || f.VenueAccountId != "" {
+		source = f
+	}
 	if fid := f.GetFillId(); fid != "" {
-		if a.seenFills[fid] {
-			return nil
+		key := fillfact.ExecutionKey(f)
+		_, legacy := a.seenFills[fid]
+		if (key != fid && legacy) || (key == fid && a.scopedAliases[fid] > 0) {
+			return nil, ErrUnresolvedFillAlias
 		}
-		a.seenFills[fid] = true
+		if previous, seen := a.seenFills[key]; seen {
+			if previous != nil && !fillfact.SameExecution(previous, f) {
+				return nil, fillfact.ErrExecutionIdentityConflict
+			}
+			if previous == nil && source != nil {
+				return nil, ErrUnresolvedFillAlias
+			}
+			return nil, nil
+		}
+		if source != nil {
+			p.scopedFillHistory = true
+		}
+		a.seenFills[key] = source
+		if key != fid {
+			a.scopedAliases[fid]++
+		}
 	}
 	ex := execution{
-		fillID: f.GetFillId(), orderID: f.GetOrderId(), instrument: f.GetInstrumentId(),
+		source: source, fillID: f.GetFillId(), orderID: f.GetOrderId(), instrument: f.GetInstrumentId(),
 		venue: f.GetVenue(), side: f.GetSide(),
 		qty: dec.FromProto(f.GetQuantity()), price: dec.FromProto(f.GetPrice()),
 		fee: feeRat(f), effective: f.GetExecutedAt().AsTime(), knowledge: know,
@@ -404,7 +457,7 @@ func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know 
 		{Kind: "execution", Account: a.id, Payload: executionDTO(ex)},
 		{Kind: "position", Account: a.id, Payload: p.positionsLocked(a, time.Time{})},
 		{Kind: "state", Account: a.id, Payload: p.stateLocked(a, time.Time{})},
-	}
+	}, nil
 }
 
 // --- reads (tenant-scoped, bitemporal) ---
@@ -673,6 +726,12 @@ func executionDTO(e execution) ExecutionDTO {
 		FillID: e.fillID, OrderID: e.orderID, Instrument: e.instrument, Venue: e.venue,
 		Side: sideString(e.side), Qty: dec.Str(e.qty), Price: dec.Str(e.price),
 		ExecutedAt: e.effective.UTC().Format(time.RFC3339Nano),
+	}
+	if e.source != nil {
+		dto.FillID = fillfact.ExecutionKey(e.source)
+		if dto.FillID != e.fillID {
+			dto.VenueFillID = e.fillID
+		}
 	}
 	if e.fee != nil && e.fee.Sign() != 0 {
 		dto.Fee = dec.Str(e.fee)

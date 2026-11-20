@@ -121,7 +121,12 @@ verified image. No activation manifest is changed by this prerequisite.
 
 ### Exact checkpoint encoding and controlled upgrade
 
-New checkpoints use `tvsync.v1.Checkpoint.exact_encoding_version = 1`.
+Checkpoints use encoding version 1 for alias-only books and version 2 once the
+fold has received venue execution identity evidence. Version 2 retains the fill
+terms used to deduplicate across venue, account, instrument and execution ID.
+A version 1 reader refuses a version 2 checkpoint. A scoped broker execution
+returns its stable ID and the original venue alias in `venueFillId`.
+
 Retained execution quantities, prices and fees are encoded through
 `dec.ToProtoExact`: every digit survives or checkpoint creation fails before
 writing. Nil remains missing; zero remains present. The existing exact converter
@@ -129,6 +134,13 @@ accepts exponents within ±60 and an int64 coefficient, so some valid incoming
 Decimals at ±61..64 cannot be checkpointed. They are not rounded or replaced;
 checkpoint failure leaves the prior durable checkpoint unchanged. Baseline
 rational strings, order revisions and their ordering are unchanged.
+
+An older raw fill may lack a venue account. Its own recorded OMS order state
+can supply it when the order, portfolio, venue, instrument and side agree.
+If a retained alias overlaps a scoped fill and the original identity cannot
+be established, the fold refuses the event before advancing the watermark.
+A verified full replay can use the original order and fill terms that a version
+1 checkpoint omitted.
 
 Version 0 checkpoints may already have lost precision through the former
 scale-eight conversion. Version 0 and unknown versions now refuse startup before

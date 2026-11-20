@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	tvsyncpb "github.com/eighred/kanz/kanz-schemas-go/tvsync/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -293,6 +294,9 @@ func hashReplayPart(h hash.Hash, data []byte) {
 	_, _ = h.Write(data)
 }
 func classifyReplayError(err error) error {
+	if errors.Is(err, ErrUnresolvedFillAlias) || errors.Is(err, fillfact.ErrExecutionIdentityConflict) {
+		return ErrReplayInput
+	}
 	for _, known := range []error{ErrReplayInput, ErrReplayLimit, ErrReplayMismatch, ErrReplayDatabase} {
 		if errors.Is(err, known) {
 			return known

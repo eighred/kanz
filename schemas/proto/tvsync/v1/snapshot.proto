@@ -57,6 +57,9 @@ message Execution {
   common.v1.Decimal fee = 8;
   google.protobuf.Timestamp effective = 9;
   google.protobuf.Timestamp knowledge = 10;
+  // Exact immutable terms for the retained execution identity. Older snapshots
+  // carry only an alias and cannot establish the venue account or fee currency.
+  order.v1.Fill source_fill = 11;
 }
 
 // OrderRevision is one revision of an order's materialized state.
@@ -167,6 +170,8 @@ message Checkpoint {
   google.protobuf.Timestamp taken_at = 3;
   repeated AccountSnapshot accounts = 4;
   // 1 preserves retained execution decimals exactly or refuses the checkpoint.
+  // 2 additionally retains scoped execution identities. A v1 reader must
+  // refuse v2 before folding the tail using its alias-only deduplication.
   // 0 is legacy encoding, which may have rounded values. Never relabel or
   // restore it without independently establishing complete source history.
   uint32 exact_encoding_version = 5;
