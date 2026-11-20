@@ -74,7 +74,7 @@ func (p *Postgres) CheckPlacement(ctx context.Context, clientID string, r Placem
 	err := p.pool.QueryRow(ctx, `SELECT
     EXISTS(SELECT 1 FROM venue_orders WHERE order_id=$1 AND placement_ack_at IS NOT NULL
         AND (placement_account_uid,placement_symbol,placement_order_id) IS DISTINCT FROM ($2::text,$3::text,$4::bigint))
-    OR EXISTS(SELECT 1 FROM venue_orders WHERE placement_account_uid=$2 AND placement_symbol=$3
+    OR EXISTS(SELECT 1 FROM venue_orders WHERE placement_ack_at IS NOT NULL AND placement_account_uid=$2 AND placement_symbol=$3
         AND placement_order_id=$4 AND order_id<>$1)`, clientID, r.AccountUID, r.Symbol, r.OrderID).Scan(&conflict)
 	if err != nil {
 		return err

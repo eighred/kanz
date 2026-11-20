@@ -36,8 +36,8 @@ tables are explicitly included in the onboarding script's unverified inventory.
 
 ### Binance placement acknowledgement
 
-Apply Binance migration `0004_placement_ack.sql` before starting the new
-connector. It checks the runtime role's read and update access at startup.
+Apply the shared migration `0004_placement_ack.sql` to both adapter databases
+before the rollout. Binance records acknowledgements in these columns and checks the runtime role's read and update access at startup.
 Quiesce older Binance adapter replicas during rollout so every writer and
 reconciler enforces the exchange-order binding. A rollback requires holding
 placement and reconciliation before starting an older binary. Keep the columns
