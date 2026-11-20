@@ -18,6 +18,10 @@ type historicalCustodyReader interface {
 	HistoricalReceipt(context.Context, custody.Subject, string, string) (custody.DatedResult, error)
 }
 
+type previousCustodyReader interface {
+	PreviousComparison(context.Context, custody.Subject, string, string) (custody.DatedResult, error)
+}
+
 type datedCustodyReader interface {
 	DatedResult(context.Context, custody.Subject) (custody.DatedResult, error)
 }
@@ -35,7 +39,11 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		delete(query, "run_id")
 		includes, requested := query["include"]
 		delete(query, "include")
-		validInclude := !requested || historical && len(includes) == 1 && includes[0] == "reported_execution_figures"
+		include := ""
+		if len(includes) == 1 {
+			include = includes[0]
+		}
+		validInclude := !requested || historical && (include == "reported_execution_figures" || include == "previous_comparison")
 		validID := !historical || len(ids) == 1 && custody.ValidReceiptID(ids[0])
 		if err != nil || !validID || !validInclude || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
 			writeJSON(w, 400, map[string]string{"error": "one custodian and business date required"})
@@ -55,7 +63,13 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		ctx := bus.WithTenantID(r.Context(), principal.Tenant)
 		configured, _ := s.custodyScope.For(portfolio, custodian)
 		result := custody.DatedResult{State: "unknown"}
-		if historical {
+		if include == "previous_comparison" {
+			if prior, supported := reader.(previousCustodyReader); supported && len(configured) == 1 {
+				for account := range configured {
+					result, err = prior.PreviousComparison(ctx, subject, account, ids[0])
+				}
+			}
+		} else if historical {
 			if prior, supported := reader.(historicalCustodyReader); supported && len(configured) == 1 {
 				for account := range configured {
 					result, err = prior.HistoricalReceipt(ctx, subject, account, ids[0])
@@ -145,7 +159,11 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 				response["journal_position"] = strconv.FormatInt(b.JournalPosition, 10)
 			}
 		}
-		if requested && result.State == "recorded" {
+		if include == "previous_comparison" && result.State == "recorded" {
+			response["previous_of_run_id"] = ids[0]
+			response["previous_of_statement_id"] = result.PreviousOfStatementID
+		}
+		if include == "reported_execution_figures" && result.State == "recorded" {
 			rows, ok := result.ReportedExecutionFigures()
 			if !ok {
 				writeJSON(w, 422, map[string]string{"error": "signed execution figures unavailable for this receipt"})

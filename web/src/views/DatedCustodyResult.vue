@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onUnmounted, reactive, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
-import { custody, downloadCustodyComparison, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
+import { custody, downloadCustodyComparison, previousStatementPrefix, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
 import { ApiError } from '../api/client'
 import { formatDecimal } from '../api/decimal'
 
@@ -23,22 +23,28 @@ watch(subject, clear, { flush: 'sync' })
 watch(savedRun, clear, { flush: 'sync' })
 watch(() => session.identity, () => { clear(); savedRun.value = ''; Object.assign(subject, { portfolio_id: '', custodian_id: '', business_date: '' }) }, { deep: true, flush: 'sync' })
 onUnmounted(clear)
-async function read(correctionStatement?: string, reportedFigures = false) {
+async function read(correctionStatement?: string, projection: boolean | 'previous' = false) {
   if (pending.value || !session.identity) return
   const request = new AbortController()
   active = request
   const previous = result.value
+  const reportedFigures = projection === true
   const previousDigest = previous?.state === 'recorded' && previous.account_assignment_verified ? previous.historical?.signed_statement_sha256 : undefined
   result.value = undefined
   error.value = ''
   pending.value = true
   try {
-    const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal, savedRun.value, reportedFigures)
+    const priorLookup = projection === 'previous' && previous?.state === 'recorded' && previous.statement_id
+    const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal,
+      priorLookup ? previous.run_id : savedRun.value, priorLookup ? { previousOf: priorLookup } : reportedFigures)
     if (correctionStatement && (dated.state !== 'recorded' || dated.outcome !== 'historical_quantity_correction' ||
         dated.statement_id !== correctionStatement)) throw new Error('Correction source changed.')
     if (reportedFigures && (!previousDigest || dated.state !== 'recorded' ||
         previousDigest !== dated.historical?.signed_statement_sha256 || !dated.historical?.reported_execution_figures)) throw new Error('Unverified source.')
-    if (!request.signal.aborted) result.value = dated
+    if (!request.signal.aborted) {
+      if (priorLookup && dated.state === 'recorded') savedRun.value = dated.run_id
+      result.value = dated
+    }
   } catch (e) {
     const unavailable = (e instanceof ApiError && e.status === 422) ||
       (e instanceof ReportedFiguresExportLimit && e.signedStatementSHA256 === previousDigest)
@@ -104,6 +110,8 @@ const pendingLabels = {
       </template>
     </output>
     <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
+    <button v-if="result?.state === 'recorded' && result.outcome === 'clean' && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
+      type="button" @click="read(undefined, 'previous')">View previous statement comparison</button>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
       <button v-if="result.account_assignment_verified && result.transactions?.transaction_pass === 'ran' && !result.historical.reported_execution_figures"
