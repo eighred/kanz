@@ -106,7 +106,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
 BEGIN
  IF EXISTS(SELECT FROM public.custody_assignment_readers r WHERE r.login_role=session_user AND r.tenant_id=NEW.tenant_id)
  AND NEW.outcome IN ('clean','breaks') AND
- CASE WHEN jsonb_typeof(NEW.book_basis->'assignments')='array' THEN jsonb_array_length(NEW.book_basis->'assignments')=0 ELSE true END
+ (CASE WHEN jsonb_typeof(NEW.book_basis->'assignments')='array' THEN jsonb_array_length(NEW.book_basis->'assignments')=0 ELSE true END)
  THEN RAISE EXCEPTION 'enrolled accounting requires effective custody assignment evidence'; END IF;
  RETURN NEW;
 END;
