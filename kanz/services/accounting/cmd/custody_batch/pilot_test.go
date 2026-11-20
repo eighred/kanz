@@ -25,6 +25,26 @@ func TestSignedPilotCommandRestricted(t *testing.T) {
 
 func checkSignedPilotCommand(t *testing.T, limit time.Duration, afterReceipt func(context.Context, *pgxpool.Pool, custody.Statement, int, pilotBroker)) {
 	t.Helper()
+	fixture := "testdata"
+	if os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1" {
+		fixture = filepath.Join(fixture, "instrument_units")
+	}
+	checkPilotSeries(t, limit, fixture, []pilotStatementFile{
+		{name: "statement-r1", revision: 1, position: big.NewRat(19, 2), trade: true},
+		{name: "statement-r2", revision: 2, position: big.NewRat(21, 2), trade: true},
+	}, afterReceipt)
+}
+
+type pilotStatementFile struct {
+	name      string
+	revision  int
+	dayOffset int
+	position  *big.Rat
+	trade     bool
+}
+
+func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, files []pilotStatementFile, afterReceipt func(context.Context, *pgxpool.Pool, custody.Statement, int, pilotBroker)) {
+	t.Helper()
 	source, owner := os.Getenv("TEST_CUSTODY_BATCH_DATABASE_URL"), os.Getenv("TEST_POSTGRES_URL")
 	if source == "" || owner == "" {
 		t.Skip("requires isolated provisioned pilot source and owner")
@@ -53,27 +73,23 @@ func checkSignedPilotCommand(t *testing.T, limit time.Duration, afterReceipt fun
 	if err != nil {
 		t.Fatal(err)
 	}
-	day := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
-	subject := custody.Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: day}
-	fixture := "testdata"
-	if os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1" {
-		fixture = filepath.Join(fixture, "instrument_units")
-	}
-	for revision, expected := range []*big.Rat{big.NewRat(19, 2), big.NewRat(21, 2)} {
-		name := fmt.Sprintf("statement-r%d", revision+1)
-		batch := filepath.Join(fixture, name+".json")
-		sig := filepath.Join(fixture, name+".sig")
+	firstDay := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
+	for index, file := range files {
+		sequence := uint64(index + 1)
+		subject := custody.Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: firstDay.AddDate(0, 0, file.dayOffset)}
+		batch := filepath.Join(fixture, file.name+".json")
+		sig := filepath.Join(fixture, file.name+".sig")
 		policy := filepath.Join(fixture, "authority.json")
 		for attempt := 0; attempt < 2; attempt++ {
 			if err := run(ctx, policy, batch, sig); err != nil {
-				t.Fatalf("revision %d attempt %d: %v", revision+1, attempt+1, err)
+				t.Fatalf("revision %d attempt %d: %v", file.revision, attempt+1, err)
 			}
 		}
 		info, err := broker.statements.Info(ctx)
-		if err != nil || info.State.Msgs != uint64(revision+1) {
-			t.Fatalf("unexpected publication count at revision %d", revision+1)
+		if err != nil || info.State.Msgs != sequence {
+			t.Fatalf("unexpected publication count at revision %d", file.revision)
 		}
-		msg, err := broker.statements.GetMsg(ctx, uint64(revision+1))
+		msg, err := broker.statements.GetMsg(ctx, sequence)
 		if err != nil || msg.Subject != custody.SubjectStatement {
 			t.Fatal("canonical statement missing")
 		}
@@ -95,14 +111,22 @@ func checkSignedPilotCommand(t *testing.T, limit time.Duration, afterReceipt fun
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantID := fmt.Sprintf("custody-batch.v1.synthetic-source.r%d.%x", revision+1, sha256.Sum256(raw))
+		wantID := fmt.Sprintf("custody-batch.v1.synthetic-source.r%d.%x", file.revision, sha256.Sum256(raw))
 		position := stored.Positions["SYN"]
-		if stored.StatementID != wantID || position == nil || position.Cmp(expected) != 0 || len(stored.Transactions) != 1 || stored.Transactions[0].ExternalRef != "external-7" || stored.Cash["USD"] == nil || stored.Cash["USD"].Cmp(big.NewRat(-21, 2)) != 0 {
+		if stored.StatementID != wantID || position == nil || position.Cmp(file.position) != 0 ||
+			stored.Cash["USD"] == nil || stored.Cash["USD"].Cmp(big.NewRat(-21, 2)) != 0 {
 			t.Fatal("statement, revision or lineage differs on accounting readback")
 		}
-		t.Logf("revision %d stored %s at %s", revision+1, wantID, stored.ReceivedAt.UTC().Format(time.RFC3339Nano))
+		if file.trade {
+			if len(stored.Transactions) != 1 || stored.Transactions[0].ExternalRef != "external-7" {
+				t.Fatal("expected the original external execution in the dated statement")
+			}
+		} else if len(stored.Transactions) != 0 {
+			t.Fatal("the following close contains an unexpected trade")
+		}
+		t.Logf("revision %d stored %s at %s", file.revision, wantID, stored.ReceivedAt.UTC().Format(time.RFC3339Nano))
 		if afterReceipt != nil {
-			afterReceipt(ctx, pool, stored, revision+1, broker)
+			afterReceipt(ctx, pool, stored, index+1, broker)
 		}
 	}
 }

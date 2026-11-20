@@ -123,7 +123,42 @@ def verify_observations(path, fixture, rerun=False, quantity_evidence=False):
     return records
 
 
-def qualify(docker, container, binaries, node, env, observations, rerun, quantity_evidence):
+def verify_late_correction(path, fixture):
+    observed = json.loads(path.read_bytes())
+    download_path = path.with_suffix(".downloads.json")
+    if download_path.stat().st_size > 128 * 1024:
+        raise RuntimeError("Historical correction exceeds the pilot receipt bound.")
+    download = json.loads(download_path.read_bytes())
+    expected = {"tenant": "synthetic-custody-pilot", "portfolio": "PF1", "custodian": "CUST-A",
+                "business_date": "2020-02-04", "following_date": "2020-02-05",
+                "entry_id": "pilot-trade-7", "external_ref": "external-7", "instrument_id": "SYN", "agreed_quantity": "10.5"}
+    for key, name, revision in (("original_statement", "statement-r1", 1), ("following_statement", "following-r1", 1),
+                                ("corrected_statement", "statement-r2", 2)):
+        digest = hashlib.sha256((fixture / (name + ".json")).read_bytes()).hexdigest()
+        expected[key] = f"custody-batch.v1.synthetic-source.r{revision}.{digest}"
+    runs = [observed.get(key) for key in ("original_run", "following_run", "correction_run")]
+    if (any(observed.get(key) != value for key, value in expected.items())
+            or not all(isinstance(run, str) and run for run in runs) or len(set(runs)) != 3
+            or not re.fullmatch(r"q1:[0-9a-f]{64}", observed.get("break_id", ""))):
+        raise RuntimeError("The three accounting observations do not identify the signed pilot history.")
+    resolution = {"break_id": observed["break_id"], "detection_run_id": runs[0],
+                  "entry_id": expected["entry_id"], "external_ref": expected["external_ref"],
+                  "instrument_id": expected["instrument_id"], "agreed_quantity": {"coefficient": "105", "exponent": -1}}
+    if (not isinstance(download, dict) or download.get("format") != "kanz.custody-comparison.v1"
+            or download.get("lookup") != "retained_run" or download.get("outcome") != "historical_quantity_correction"
+            or download.get("run_id") != runs[2] or download.get("statement_id") != expected["corrected_statement"]
+            or download.get("signed_statement_sha256") != expected["corrected_statement"].rsplit(".", 1)[-1]
+            or download.get("account_assignment_verified") is not True
+            or download.get("historical_quantity_resolutions") != [resolution]
+            or any(key in download for key in ("breaks", "execution_quantities", "transaction_pass"))):
+        raise RuntimeError("Customer download does not match the applied historical quantity correction.")
+    return {"evidence": observed, "customer_download": download}
+
+
+def qualify(docker, container, binaries, node, env, observations, profile):
+    rerun = profile == "operator_comparisons"
+    quantity_evidence = profile == "quantity_comparisons"
+    late = profile == "historical_quantity_correction"
     owner_password = secrets.token_hex(24)
     source_password = secrets.token_hex(24)
 
@@ -156,6 +191,8 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
     fixture = CMD / "testdata"
     if quantity_evidence:
         fixture = fixture / "instrument_units"
+    elif late:
+        fixture = fixture / "late_quantity"
     authority = json.loads((fixture / "authority.json").read_bytes())
     # psql resolves the read-only profile's relative include beside its entrypoint.
     grants = "signed_fixture_grants.sql" if rerun else "pilot_grants.sql"
@@ -185,7 +222,7 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
     reader_url = f"postgres://pilot_check:{owner_password}@{endpoint}/{DATABASE}?sslmode=disable"
     check_withdrawal = enroll_accounts(sql, DATABASE, endpoint, reader_url, binaries, env,
                                        CMD.parent / "custody_proof" / "testdata",
-                                       check_startup=not (rerun or quantity_evidence))
+                                       check_startup=profile == "comparisons")
     pilot_env = dict(env,
         TEST_POSTGRES_URL=reader_url,
         TEST_CUSTODY_BATCH_DATABASE_URL=f"postgres://pilot_source:{source_password}@{endpoint}/{DATABASE}?sslmode=disable",
@@ -197,22 +234,31 @@ def qualify(docker, container, binaries, node, env, observations, rerun, quantit
     )
     if quantity_evidence:
         pilot_env["CUSTODY_PILOT_QUANTITY_FIXTURE"] = "1"
+    if late:
+        pilot_env["CUSTODY_PILOT_LATE_QUANTITY"] = "1"
+        pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-late-correction.cjs")
+    if late or quantity_evidence:
         pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.with_suffix(".downloads.json"))
     test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
     proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
                             "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
     output = proof.stdout
+    markers = [b"signed customer recovered the applied historical quantity correction"] if late else [
+        b"signed gateway and Chromium verified the persisted detection"]
+    if not (late or rerun):
+        markers.append(b"signed customer verified clean, missing and unobserved business dates")
     if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
-            or b"signed gateway and Chromium verified the persisted detection" not in output
-            or (not rerun and b"signed customer verified clean, missing and unobserved business dates" not in output)):
+            or not all(marker in output for marker in markers)):
         stage = re.search(rb"custody-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))", output)
+        if late:
+            stage = re.search(rb"custody-late-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|tenant-portfolio-permission)|pending-corrected-source|correction-discovery|correction-recovery|original-and-following|retain-corrective-download)\b", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
         if not stage:
-            location = re.search(rb"\b(operator_test|pilot_test|rollback_test)\.go:([0-9]+):", output)
+            location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test)\.go:([0-9]+):", output)
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
-    records = verify_observations(observations, fixture, rerun, quantity_evidence)
+    records = verify_late_correction(observations, fixture) if late else verify_observations(observations, fixture, rerun, quantity_evidence)
     return records, check_withdrawal() if check_withdrawal else None
 
 
@@ -250,9 +296,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
         results = {"postgres_image": IMAGE}
-        for key, rerun, quantity_evidence in (("comparisons", False, False),
-                                             ("operator_comparisons", True, False),
-                                             ("quantity_comparisons", False, True)):
+        for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction"):
             # The image initializes its own secret in tmpfs. Local SQL administration
             # uses the postgres OS identity (peer); network logins require SCRAM.
             name = "kanz-custody-pilot-" + secrets.token_hex(8)
@@ -268,10 +312,10 @@ def main():
             try:
                 observations = Path(directory) / (key + ".json")
                 results[key], onboarding = qualify(docker, container, binaries, node, env,
-                                                   observations, rerun, quantity_evidence)
+                                                   observations, key)
                 if onboarding:
                     results["account_onboarding"] = onboarding
-                if quantity_evidence:
+                if key == "quantity_comparisons":
                     results["customer_downloads"] = customer_downloads(observations, results[key])
             finally:
                 subprocess.run([*docker, "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
@@ -280,7 +324,8 @@ def main():
                                 encoding="utf-8")
     print("PASS: The signed customer read the discrepancy, corrected clean date, missing statement and "
           "unobserved date in Chromium. The customer could not post cash, change the break or start a rerun. "
-          "A separate operator replayed one request with one durable receipt and completion FACT.")
+          "A separate operator replayed one request with one durable receipt and completion FACT. "
+          "After a later close, the customer downloaded the quantity correction against the original execution.")
 
 
 if __name__ == "__main__":

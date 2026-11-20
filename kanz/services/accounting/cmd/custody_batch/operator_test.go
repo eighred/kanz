@@ -61,6 +61,10 @@ type pilotObservation struct {
 
 // Use a fresh instance of the provisioned pilot database for each invocation.
 func TestSignedCustodyOperatorReadback(t *testing.T) {
+	if os.Getenv("CUSTODY_PILOT_LATE_QUANTITY") == "1" {
+		checkLateQuantityPilot(t)
+		return
+	}
 	checkPilotReadback(t, false)
 }
 
@@ -82,36 +86,10 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 		day := statement.BusinessDate
 		journal := ledger.NewPostgres(pool)
 		if revision == 1 {
-			trade := ledger.Event{EntryID: "pilot-trade-7", SourceRef: "external-7", PortfolioID: "PF1", VenueAccountID: "sandbox-account",
-				Type: ledger.EntryTrade, InstrumentID: "SYN", Quantity: big.NewRat(21, 2), Price: big.NewRat(1, 1), Cash: big.NewRat(-21, 2),
-				CashCurrency: "USD", Effective: day, Knowledge: day, SettlementBasis: ledger.SettlementSettled, SettlementDate: day}
-			if err := journal.Append(ctx, &trade, nil); err != nil {
-				t.Fatal(err)
-			}
+			appendPilotTrade(t, ctx, journal, day)
 		}
 		subject := statement.Subject()
-		scope, err := custody.NewBookScope([]custody.Subject{subject}, map[string]map[string][]string{"PF1": {"CUST-A": {"sandbox-account"}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		client, err := bus.DialNATS(ctx, broker.accounting)
-		if err != nil {
-			t.Fatal("pilot accounting broker unavailable")
-		}
-		defer client.Close()
-		publisher, err := bus.NewProducer(client, bus.ProducerConfig{Source: "accounting", ProducerVersion: "pilot", Tenant: tenant})
-		if err != nil {
-			t.Fatal(err)
-		}
-		store := custody.NewPostgres(pool)
-		scope, err = scope.AdmitAssignments(ctx, time.Now().UTC(), store)
-		if err != nil {
-			t.Fatalf("independent custody account assignment was not admitted: %v", err)
-		}
-		r, err := custody.NewReconciler(store, custody.LedgerBookLoader(journal, scope, slog.Default()), publisher, new(big.Rat), nil, slog.Default(), time.Now)
-		if err != nil {
-			t.Fatal(err)
-		}
+		store, scope, r := pilotComparison(t, ctx, pool, journal, subject, broker)
 		run, err := r.Reconcile(ctx, subject)
 		if err != nil || run.StatementID != statement.StatementID {
 			t.Fatalf("actual comparison %s: %v", run.RunID, err)
@@ -298,6 +276,44 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func appendPilotTrade(t *testing.T, ctx context.Context, journal ledger.Store, day time.Time) {
+	t.Helper()
+	trade := ledger.Event{EntryID: "pilot-trade-7", SourceRef: "external-7", PortfolioID: "PF1", VenueAccountID: "sandbox-account",
+		Type: ledger.EntryTrade, InstrumentID: "SYN", Quantity: big.NewRat(21, 2), Price: big.NewRat(1, 1), Cash: big.NewRat(-21, 2),
+		CashCurrency: "USD", Effective: day, Knowledge: day, SettlementBasis: ledger.SettlementSettled, SettlementDate: day}
+	if err := journal.Append(ctx, &trade, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func pilotComparison(t *testing.T, ctx context.Context, pool *pgxpool.Pool, journal ledger.Store, subject custody.Subject, broker pilotBroker) (*custody.Postgres, *custody.BookScope, *custody.Reconciler) {
+	t.Helper()
+	const tenant = "synthetic-custody-pilot"
+	scope, err := custody.NewBookScope([]custody.Subject{subject}, map[string]map[string][]string{"PF1": {"CUST-A": {"sandbox-account"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := bus.DialNATS(ctx, broker.accounting)
+	if err != nil {
+		t.Fatal("pilot accounting broker unavailable")
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	publisher, err := bus.NewProducer(client, bus.ProducerConfig{Source: "accounting", ProducerVersion: "pilot", Tenant: tenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := custody.NewPostgres(pool)
+	scope, err = scope.AdmitAssignments(ctx, time.Now().UTC(), store)
+	if err != nil {
+		t.Fatalf("independent custody account assignment was not admitted: %v", err)
+	}
+	r, err := custody.NewReconciler(store, custody.LedgerBookLoader(journal, scope, slog.Default()), publisher, new(big.Rat), nil, slog.Default(), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, scope, r
 }
 
 func provePilotBrowser(t *testing.T, ctx context.Context, endpoint, testName, script string, expected any) {
