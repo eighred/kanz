@@ -527,6 +527,7 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 	}
 	out := &accountingpb.ReconciliationRun{
 		ExecutionQuantities:           run.ExecutionQuantities,
+		ExecutionEconomics:            run.ExecutionEconomics,
 		RunId:                         run.RunID,
 		RequestId:                     run.RequestID,
 		Actor:                         run.Actor,

@@ -528,6 +528,8 @@ type storedTransaction struct {
 	SettlementDate            string `json:"settlement_date,omitempty"`
 	InstrumentID              string `json:"instrument_id,omitempty"`
 	QuantityInInstrumentUnits bool   `json:"quantity_in_instrument_units,omitempty"`
+	EconomicsConvention       string `json:"economics_convention,omitempty"`
+	Commission                string `json:"commission,omitempty"`
 	Quantity                  string `json:"quantity,omitempty"`
 	Price                     string `json:"price,omitempty"`
 	Cash                      string `json:"cash,omitempty"`
@@ -537,7 +539,7 @@ type storedTransaction struct {
 func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
 	out := make([]storedTransaction, 0, len(in))
 	for _, tx := range in {
-		for _, r := range []*big.Rat{tx.Quantity, tx.Price, tx.Cash} {
+		for _, r := range []*big.Rat{tx.Quantity, tx.Price, tx.Cash, tx.Commission} {
 			if r != nil && !boundedRat(r) {
 				return nil, ErrUnverifiedPrecision
 			}
@@ -551,6 +553,8 @@ func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
 			SettlementDate:            formatTime(tx.SettlementDate),
 			InstrumentID:              tx.InstrumentID,
 			QuantityInInstrumentUnits: tx.QuantityInInstrumentUnits,
+			EconomicsConvention:       tx.EconomicsConvention,
+			Commission:                ratText(tx.Commission),
 			Quantity:                  ratText(tx.Quantity),
 			Price:                     ratText(tx.Price),
 			Cash:                      ratText(tx.Cash),
@@ -576,6 +580,7 @@ func jsonToTransactions(raw []byte) ([]recon.Transaction, error) {
 		tx := recon.Transaction{
 			ExternalRef:               st.ExternalRef,
 			QuantityInInstrumentUnits: st.QuantityInInstrumentUnits,
+			EconomicsConvention:       st.EconomicsConvention,
 			InstrumentID:              st.InstrumentID,
 			CurrencyCode:              st.CurrencyCode,
 		}
@@ -589,6 +594,9 @@ func jsonToTransactions(raw []byte) ([]recon.Transaction, error) {
 		}
 		if tx.Price, err = parseRatText(st.Price); err != nil {
 			return nil, fmt.Errorf("%q price: %w", st.ExternalRef, err)
+		}
+		if tx.Commission, err = parseRatText(st.Commission); err != nil {
+			return nil, fmt.Errorf("%q commission: %w", st.ExternalRef, err)
 		}
 		if tx.Cash, err = parseRatText(st.Cash); err != nil {
 			return nil, fmt.Errorf("%q cash: %w", st.ExternalRef, err)

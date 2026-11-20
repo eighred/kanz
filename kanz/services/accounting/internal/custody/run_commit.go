@@ -90,7 +90,7 @@ func equalFigure(a, b *big.Rat) bool {
 
 func equalTransaction(a, b recon.Transaction) bool {
 	return a.ExternalRef == b.ExternalRef && a.InstrumentID == b.InstrumentID && a.QuantityInInstrumentUnits == b.QuantityInInstrumentUnits &&
-		a.CurrencyCode == b.CurrencyCode && a.TradeDate.Equal(b.TradeDate) &&
+		a.EconomicsConvention == b.EconomicsConvention && equalFigure(a.Commission, b.Commission) && a.CurrencyCode == b.CurrencyCode && a.TradeDate.Equal(b.TradeDate) &&
 		a.SettlementDate.Equal(b.SettlementDate) && equalFigure(a.Quantity, b.Quantity) &&
 		equalFigure(a.Price, b.Price) && equalFigure(a.Cash, b.Cash)
 }
@@ -102,7 +102,7 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	}
 	// The immutable lookup bounds both the full payload and the working breaks.
 	// Refuse before the queue transaction commits an unreadable completion.
-	if (run.ExecutionQuantities != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
+	if (run.ExecutionQuantities != nil || run.ExecutionEconomics != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
 		return outbox.Record{}, errQuantityReceiptLimit
 	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
@@ -116,6 +116,7 @@ func cloneRun(run Run) Run {
 	run.Tolerance = cloneRat(run.Tolerance)
 	run.Basis = run.Basis.clone()
 	run.ExecutionQuantities = proto.CloneOf(run.ExecutionQuantities)
+	run.ExecutionEconomics = proto.CloneOf(run.ExecutionEconomics)
 	run.Breaks = append([]Break(nil), run.Breaks...)
 	for i := range run.Breaks {
 		b := &run.Breaks[i]
@@ -160,7 +161,7 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if run.Basis != nil && run.Basis.Assignments != nil {
 		return Run{}, ErrUnprovenAssignment
 	}
-	if run.ExecutionQuantities != nil {
+	if run.ExecutionQuantities != nil || run.ExecutionEconomics != nil {
 		return Run{}, errBatchReceipt
 	}
 	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
@@ -282,7 +283,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		prior.Basis = basis
 		return prior, tx.Commit(ctx)
 	}
-	if run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 || (run.Basis != nil && run.Basis.HistoricalDetections != nil) {
+	if run.ExecutionEconomics != nil || run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 || (run.Basis != nil && run.Basis.HistoricalDetections != nil) {
 		return Run{}, ErrUnverifiedPrecision
 	}
 	// Existing store operations open SAVEPOINTs on this handle. Their local
@@ -357,6 +358,12 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			current, err := staged.LatestStatement(ctx, run.Subject)
 			if err := run.confirmStatement(current, err); err != nil {
 				return Run{}, err
+			}
+			if !later && len(signedDigest) > 0 {
+				run.ExecutionEconomics, err = compareExecutionEconomics(ctx, tx, run, current)
+				if err != nil {
+					return Run{}, err
+				}
 			}
 		}
 		if later {
@@ -472,7 +479,7 @@ func runFromRecord(payload []byte) (Run, error) {
 	if err := proto.Unmarshal(payload, &msg); err != nil {
 		return Run{}, err
 	}
-	run := Run{HistoricalQuantityResolutions: msg.GetHistoricalQuantityResolutions(), ExecutionQuantities: msg.GetExecutionQuantities(), RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
+	run := Run{ExecutionEconomics: msg.GetExecutionEconomics(), HistoricalQuantityResolutions: msg.GetHistoricalQuantityResolutions(), ExecutionQuantities: msg.GetExecutionQuantities(), RunID: msg.GetRunId(), RequestID: msg.GetRequestId(), Actor: msg.GetActor(), Subject: Subject{PortfolioID: msg.GetPortfolioId(), CustodianID: msg.GetCustodianId(), BusinessDate: msg.GetBusinessDate().AsTime()},
 		Outcome: parseOutcome(strings.ToLower(strings.TrimPrefix(msg.GetOutcome().String(), "RECONCILIATION_OUTCOME_"))), StatementID: msg.GetStatementId(), CompletedAt: msg.GetCompletedAt().AsTime(), FailureReason: msg.GetFailureReason()}
 	var ok bool
 	if run.Tolerance, ok = dec.FromProtoChecked(msg.GetTolerance()); !ok {

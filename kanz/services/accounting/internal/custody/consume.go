@@ -204,11 +204,14 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 		qty, qok := optionalStatementDecimal(tx.GetQuantity())
 		price, pok := optionalStatementDecimal(tx.GetPrice())
 		cash, cok := optionalStatementDecimal(tx.GetCash())
-		if !qok || !pok || !cok {
+		commission, feeOK := optionalStatementDecimal(tx.GetExecutionEconomics().GetCommission())
+		if !qok || !pok || !cok || !feeOK {
 			return Statement{}, fmt.Errorf("custody: statement %s: transaction %s carries a figure that is not a valid Decimal", stmt.StatementID, ref)
 		}
 		out := recon.Transaction{
 			ExternalRef:               ref,
+			EconomicsConvention:       tx.GetExecutionEconomics().GetConvention(),
+			Commission:                commission,
 			QuantityInInstrumentUnits: tx.GetQuantityInInstrumentUnits(),
 			InstrumentID:              tx.GetInstrumentId(),
 			Quantity:                  qty,
