@@ -1,6 +1,7 @@
 """Run the OMS checks against disposable Linux processes with no network egress."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -13,6 +14,10 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 PG = "postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9"
 RUNTIME = "ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
+# Official Microsoft Playwright v1.65.1-noble, Linux amd64.
+BROWSER_IMAGE = "mcr.microsoft.com/playwright@sha256:766137e2d9caad4744187e53cdc89320ba6f2eb57cff097374020944b44dd0a9"
+BROWSER_VERSION = "1.65.1"
+BLOTTER = "TestPersistedNativeOrderBlotter"
 DB = "kanz_synthetic_oms"
 BOOK_DB = "kanz_synthetic_accounting"
 BOOK_ROLE = "kanz_synthetic_accounting"
@@ -252,7 +257,7 @@ def run_fixture_tests(cmd, names, selected_env, password):
         if value.startswith("postgres://"):
             log = log.replace(value, "[fixture connection]")
     if proc.returncode:
-        raise RuntimeError(log)
+        raise RuntimeError(re.sub(r"FUNDED_BLOTTER_RECEIPT [^\n]*", "[synthetic receipt withheld]", log))
     require_tests(log, names)
     return log
 
@@ -282,7 +287,61 @@ def provision_upgrade(container, env):
     env["SYNTHETIC_PRIOR_BOOK_BIN"] = "/fixture/prior-accounting"
 
 
-def run(stage, native, prior_accounting=None):
+def prepare_browser():
+    web = ROOT / "web"
+    for package in ("playwright", "playwright-core"):
+        manifest = web / "node_modules" / package / "package.json"
+        if not manifest.is_file() or json.loads(manifest.read_text(encoding="utf-8"))["version"] != BROWSER_VERSION:
+            raise RuntimeError("Install the locked web dependencies with npm ci before using --browser.")
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not npm:
+        raise RuntimeError("The Node toolchain in web/.nvmrc is required.")
+    subprocess.run([npm, "run", "build"], cwd=web, check=True)
+    if subprocess.run(["docker", "image", "inspect", BROWSER_IMAGE],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        subprocess.run(["docker", "pull", BROWSER_IMAGE], check=True)
+
+
+def funded_browser(stage, container, read_url, venue_log):
+    receipts = re.findall(r"FUNDED_BLOTTER_RECEIPT (.+)$", venue_log, flags=re.MULTILINE)
+    if len(receipts) != 1 or len(receipts[0]) >= 512 * 1024:
+        raise RuntimeError("Expected one bounded terminal receipt from partial_cancel_and_book.")
+    web = ROOT / "web"
+    mounts = [(stage / "api_gateway", "/probe/gateway"), (stage / "server", "/probe/bff"),
+              (web / "dist", "/probe/dist"), (web / "e2e/native-blotter.cjs", "/probe/blotter.cjs")]
+    for package in ("playwright", "playwright-core"):
+        mounts.append(((web / "node_modules" / package).resolve(), "/probe/node_modules/" + package))
+    # Only the read-role DSN enters this disposable container. The signed gateway
+    # fixture strips it before launching the BFF, which privately supplies the two browser sessions.
+    name = "kanz-funded-blotter-" + secrets.token_hex(8)
+    cmd = ["docker", "run", "--name", name, "--rm", "-i", "--init", "--pull=never", "--platform", "linux/amd64",
+           "--network", "container:" + container, "--read-only", "--cap-drop", "ALL",
+           "--security-opt", "no-new-privileges", "--user", "65532:65532", "--tmpfs", "/tmp:mode=1777",
+           "--env", "HOME=/tmp", "--env", "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
+           "--env", "SYNTHETIC_OMS_READ_URL", "--env", "SYNTHETIC_BLOTTER_RECEIPT_STDIN=1",
+           "--env", "SYNTHETIC_BLOTTER_BROWSER_PROBE=/probe/bff", "--env", "TEST_MFA_NODE=node",
+           "--env", "TEST_MFA_PLAYWRIGHT=/probe/node_modules/playwright", "--env", "TEST_MFA_STATIC_DIR=/probe/dist",
+           "--env", "TEST_NATIVE_BLOTTER_SCRIPT=/probe/blotter.cjs"]
+    for source, destination in mounts:
+        cmd.extend(["-v", f"{source}:{destination}:ro"])
+    try:
+        proc = subprocess.run([*cmd, "--entrypoint", "/probe/gateway", BROWSER_IMAGE,
+                               "-test.run", "^" + BLOTTER + "$", "-test.v", "-test.count=1", "-test.timeout=2m"],
+                              input=receipts[0], env=dict(os.environ, SYNTHETIC_OMS_READ_URL=read_url),
+                              capture_output=True, text=True, timeout=150)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        # The attached CLI may exit while its Chromium container is still alive.
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20)
+        raise
+    if proc.returncode:
+        raise RuntimeError("Funded signed gateway/BFF/Chromium verification failed: " +
+                           (proc.stdout + proc.stderr).replace(read_url, "[fixture connection]"))
+    require_tests(proc.stdout, [BLOTTER])
+    print("Chromium: confirmed XSIM cancellation, filled 0.625 and unfilled 0.625 of 1.25; "
+          "authorized read, stale/refresh and foreign tenant refusal passed", flush=True)
+
+
+def run(stage, native, prior_accounting=None, browser=False):
     packages = {path: list(names) for path, names in OWNERS.items()}
     if native:
         packages["services/api_gateway/cmd/api_gateway"].append("TestSyntheticOrderCommandLifecycle")
@@ -298,6 +357,9 @@ def run(stage, native, prior_accounting=None):
     targets = list(packages)
     if native:
         targets.append("services/accounting/internal/consume")
+    if browser:
+        prepare_browser()
+        targets.append("services/web_bff/internal/server")
     build(stage, targets)
     # Local peer auth is for migration setup only. All other local users and
     # all remote administrators are refused. Only the test user gets a SCRAM DSN.
@@ -338,6 +400,8 @@ def run(stage, native, prior_accounting=None):
             if prior_accounting:
                 provision_upgrade(container, fixture_env)
             fixture_env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
+        if browser:
+            fixture_env["SYNTHETIC_BLOTTER_CAPTURE"] = "1"
         for package, names in packages.items():
             base = package.rsplit("/", 1)[-1]
             selected_env = fixture_env if base == "api_gateway" else {"TEST_POSTGRES_URL": dsn}
@@ -419,6 +483,8 @@ def run(stage, native, prior_accounting=None):
                 venue = "TestSyntheticFundedVenueLifecycle"
                 venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
                 require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair", "claim_before_venue_send"))
+                if browser:
+                    funded_browser(stage, container, fixture_env["SYNTHETIC_OMS_READ_URL"], venue_log)
                 for line in venue_log.splitlines():
                     if "XSIM " in line and "synthetic_" in line:
                         print(line[line.index("XSIM "):], flush=True)
@@ -460,8 +526,11 @@ if __name__ == "__main__":
     mode.add_argument("--native", type=Path, help="run the complete slice with this checkout's Linux amd64 kanz-synthetic-oms")
     mode.add_argument("--owners-only", action="store_true", help="run existing component checks without native integration")
     parser.add_argument("--prior-accounting", type=Path, help="also use a Linux accounting test binary built from 7077c75b for the historical tenant")
+    parser.add_argument("--browser", action="store_true", help="read the actual funded terminal order through signed gateway, BFF and isolated Chromium")
     args = parser.parse_args()
+    if args.browser and not args.native:
+        parser.error("--browser requires --native")
     if args.prior_accounting and not args.native:
         parser.error("--prior-accounting requires --native")
     with tempfile.TemporaryDirectory(prefix="kanz-synthetic-orders-") as directory:
-        run(Path(directory), args.native, args.prior_accounting)
+        run(Path(directory), args.native, args.prior_accounting, args.browser)

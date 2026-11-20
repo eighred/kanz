@@ -94,22 +94,15 @@ The terminal fact carries the signed cancellation as its cause and the independe
 
 ## Read the same order in Chromium
 
-The browser probe requires the pinned Node and Playwright installation from `web/`, Chromium, a production web build, and a Go test binary for `./services/web_bff/internal/server`. Run it in the same loopback namespace as the disposable database. The read role needs scoped SELECT access to `orders`. Provide a receipt from the native owner, and keep the test DSN in the process environment.
+Install the locked dependencies from `web/` with `npm ci`. Put the Node major from `web/.nvmrc` and the repository's Rust/WASM build toolchain on PATH. With the generated Go SDK and the Linux native executable from the build instructions above, run from the repository root:
 
 ```sh
-(cd web && npm ci && npm run build)
-(cd kanz && go test -p 1 -c -o /tmp/kanz-synthetic-bff ./services/web_bff/internal/server)
-(cd kanz && go test -p 1 -c -o /tmp/kanz-synthetic-gateway ./services/api_gateway/cmd/api_gateway)
-export SYNTHETIC_BLOTTER_BROWSER_PROBE=/tmp/kanz-synthetic-bff
-export TEST_MFA_NODE="$(command -v node)"
-export TEST_MFA_PLAYWRIGHT="$PWD/web/node_modules/playwright"
-export TEST_MFA_STATIC_DIR="$PWD/web/dist"
-export TEST_NATIVE_BLOTTER_SCRIPT="$PWD/web/e2e/native-blotter.cjs"
-export SYNTHETIC_BLOTTER_RECEIPT_STDIN=1
-/tmp/kanz-synthetic-gateway -test.run='^TestPersistedNativeOrderBlotter$' -test.count=1 < native-receipt.json
+python3 -B kanz/dev/synthetic_orders.py --native rust/target/debug/kanz-synthetic-oms --browser
 ```
 
-The probe expects a JSON object with `tenant`, `portfolio`, and `state`. The last field contains the base64 protobuf bytes returned in the Rust receipt's `state_b64`. The probe creates short-lived synthetic login sessions. It compares the complete protobuf on the HTTP read and checks exact values, freshness, refresh and tenant isolation in Chromium.
+This builds the Vue bundle and both Go probes. During the funded run, it passes the confirmed XSIM terminal receipt from `partial_cancel_and_book` directly to the signed gateway probe. While the same database is alive, the portfolio query uses the dedicated read-only role and checks the returned protobuf against the Rust bytes. Playwright then opens the built blotter through the real BFF, checks the recorded 0.625 filled and 0.625 unfilled out of 1.25, advances the page clock to observe a stale snapshot, refreshes, and checks the second tenant's refusal.
+
+The runner obtains the pinned Microsoft Playwright Linux/amd64 image on first use. Chromium, gateway, BFF and PostgreSQL share the disposable loopback namespace. The fixture publishes no host ports. Temporary sessions stay between the probe processes, and the runner removes its database and staging directory on exit.
 
 ## Decisions and diagnostics
 

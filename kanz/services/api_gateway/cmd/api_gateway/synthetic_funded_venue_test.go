@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"os"
 	"slices"
@@ -325,7 +326,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 						}
 					}
 				}
-				_, terminal := get()
+				terminalState, terminal := get()
 				if e := ingress.Cancel(ctx, fundedFirst, frame.Envelope.EventId, frame.Envelope.EventTime.AsTime()); e != nil {
 					t.Fatal(e)
 				}
@@ -342,6 +343,10 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				if err != nil || proto.Unmarshal(payload, &terminalFact) != nil || terminalFact.OrderId != fundedFirst || dec.FromProto(terminalFact.CancelledQuantity).RatString() != "5/8" ||
 					cause != frame.Envelope.EventId || trace != frame.Envelope.TraceContext || root != control.accepted.CorrelationId || confirmedAt.Before(frame.Envelope.EventTime.AsTime().Truncate(time.Microsecond)) {
 					t.Fatalf("terminal FACT lost signed cancellation, confirmation time or actual remainder: %v", err)
+				}
+				if !proto.Equal(terminalState.LeavesQuantity, terminalFact.CancelledQuantity) ||
+					dec.FromProto(terminalState.FilledQuantity).RatString() != "5/8" {
+					t.Fatal("terminal OMS quantities differ from the confirmed fill and cancellation")
 				}
 				checkVenueCash(t, ctx, proof, o, 1000, 126, 126, 0, 126, 0)
 				if n, e := relay.Flush(ctx, fundedFirst); e != nil || n != 3 {
@@ -382,6 +387,14 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				later.authorize(t, ctx, later.request.Principal, time.Now().Add(time.Minute))
 				requireFundedReason(t, ctx, later, "FUNDING_UNKNOWN")
 				checkVenueCash(t, ctx, proof, o, 874, 126-booked, 126, 0, 126, booked)
+				if scenario.name == "partial_cancel_and_book" && os.Getenv("SYNTHETIC_BLOTTER_CAPTURE") == "1" {
+					// The runner pipes this synthetic native receipt into the separate read-only probe.
+					body, err := json.Marshal(map[string]any{"tenant": tenant, "portfolio": portfolio, "state": terminal.State})
+					if err != nil {
+						t.Fatal("cannot encode funded terminal receipt")
+					}
+					t.Logf("FUNDED_BLOTTER_RECEIPT %s", body)
+				}
 				t.Logf("XSIM cash result tenant=%s total_USD=874 reserved_USD=%d booked_USD=%d reserved_BNB=0", tenant, 126-booked, booked)
 			})
 		})
