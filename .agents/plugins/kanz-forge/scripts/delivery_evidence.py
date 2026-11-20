@@ -202,7 +202,7 @@ def assess(snapshot):
     if "period" in snapshot:
         result["daily_progress"] = daily_progress(snapshot["period"], result["blockers"])
     if "backlog" in snapshot:
-        result["issue_backlog"] = summarize_backlog(snapshot["backlog"])
+        result["issue_backlog"] = summarize_backlog(snapshot["backlog"], result["main"])
     if "validation_graph" in snapshot:
         result["validation"] = assess_graph(snapshot["validation_graph"])
         validation = result["validation"]
