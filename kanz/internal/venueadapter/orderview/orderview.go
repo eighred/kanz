@@ -1034,6 +1034,20 @@ func carryVenueObserved(dst, src *orderpb.OrderState) {
 // this adapter has no record of leaves its fills unenrichable and invisible to
 // the reconciler, which is the trade Execute already took for a failed Record.
 func Dispatch(ctx context.Context, store Store, requested *orderpb.OrderState) error {
+	return dispatch(ctx, store, requested, false)
+}
+
+// ErrPendingDispatch means a previous placement may already be in flight.
+var ErrPendingDispatch = errors.New("orderview: placement already recorded and awaiting venue evidence")
+
+// DispatchAfterEvidence fences concurrent or repeated placement while the prior
+// dispatch still has no venue acknowledgement or fill. The decision runs again
+// on a contended insert, before either caller is permitted to place the order.
+func DispatchAfterEvidence(ctx context.Context, store Store, requested *orderpb.OrderState) error {
+	return dispatch(ctx, store, requested, true)
+}
+
+func dispatch(ctx context.Context, store Store, requested *orderpb.OrderState, requireEvidence bool) error {
 	id := requested.GetOrderId()
 	if id == "" {
 		return errors.New("orderview: cannot record a dispatch for an order with empty order_id")
@@ -1050,6 +1064,9 @@ func Dispatch(ctx context.Context, store Store, requested *orderpb.OrderState) e
 		if found && cur.GetQuarantine() != nil {
 			return nil, fmt.Errorf("%w: %s was frozen — %s", ErrQuarantinedNotRedispatched, id,
 				cur.GetQuarantine().GetReason())
+		}
+		if found && requireEvidence && cur.GetVenueAckAt() == nil && cur.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED {
+			return nil, ErrPendingDispatch
 		}
 		next, ok := proto.Clone(requested).(*orderpb.OrderState)
 		if !ok {

@@ -6,7 +6,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/platform/halt"
@@ -14,7 +17,9 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/test/backing"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -29,7 +34,7 @@ func TestMissingOrderAfterAdapterRestartCannotAuthorizeASecondPlacement(t *testi
 			Symbols: map[string]string{"BTC-USD": "BTCUSDT"}}, "", view)
 		lis := bufconn.Listen(1 << 20)
 		rpc := grpc.NewServer()
-		venuepb.RegisterVenueAdapterServiceServer(rpc, server.New(connector.Venue(), view, view,
+		venuepb.RegisterVenueAdapterServiceServer(rpc, server.NewWithDispatchEvidence(connector.Venue(), view, view,
 			execution.AccountProof{Verified: true, ExchangeAccountID: "fixture"}, halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil))))
 		go func() { _ = rpc.Serve(lis) }()
 		cc, err := grpc.NewClient("passthrough:///fixture", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -46,10 +51,39 @@ func TestMissingOrderAfterAdapterRestartCannotAuthorizeASecondPlacement(t *testi
 	f.newOrderStatus, f.queryStatus = http.StatusGatewayTimeout, http.StatusServiceUnavailable
 	first, stop := start()
 	order := omsRedispatch("sent")
-	fills, err := first.Execute(ctx, order)
+	// A second RPC arrives after the first placement has reached the exchange
+	// but before the first caller receives its lost acknowledgement.
+	posted, release := make(chan struct{}), make(chan struct{})
+	var unblock sync.Once
+	resume := func() { unblock.Do(func() { close(release) }) }
+	defer resume()
+	var sent atomic.Bool
+	f.onPost = func() {
+		if sent.CompareAndSwap(false, true) {
+			close(posted)
+			<-release
+		}
+	}
+	placed := make(chan error, 1)
+	go func() { _, err := first.Execute(ctx, order); placed <- err }()
+	select {
+	case <-posted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first placement did not reach the venue")
+	}
+	concurrent, closeConcurrent := start()
+	timeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, duplicateErr := concurrent.Execute(timeout, order)
+	closeConcurrent()
+	resume()
+	err := <-placed
 	stop()
-	if err == nil || len(fills) != 0 || f.posts != 1 || f.gets != 1 {
-		t.Fatalf("placement interruption: fills=%d err=%v placements=%d lookups=%d", len(fills), err, f.posts, f.gets)
+	if status.Code(duplicateErr) != codes.FailedPrecondition {
+		t.Fatalf("concurrent placement returned %v", duplicateErr)
+	}
+	if err == nil || f.posts != 1 || f.gets != 1 {
+		t.Fatalf("placement interruption: err=%v placements=%d lookups=%d", err, f.posts, f.gets)
 	}
 	restarted, stop := start()
 	defer stop()
@@ -57,6 +91,9 @@ func TestMissingOrderAfterAdapterRestartCannotAuthorizeASecondPlacement(t *testi
 	view, err := restarted.QueryOrder(ctx, order)
 	if err != nil || view.State != execution.OrderViewIndeterminate || view.Reason == "" || len(view.Fills) != 0 {
 		t.Fatalf("lost response followed by a venue miss: %+v %v", view, err)
+	}
+	if _, err := restarted.Execute(ctx, order); status.Code(err) != codes.FailedPrecondition || f.posts != 1 {
+		t.Fatalf("repeated placement after restart: %v, placements=%d", err, f.posts)
 	}
 	// A different order never reached the adapter. Both independent reads agree.
 	view, err = restarted.QueryOrder(ctx, omsRedispatch("never-dispatched"))

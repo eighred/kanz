@@ -552,7 +552,7 @@ func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue
 		logger.Warn("VENUE.V1 IS PLAINTEXT — no SPIFFE_ENDPOINT_SOCKET. Anyone who can reach this port can submit orders to a live exchange")
 	}
 	srv := grpc.NewServer(opts...)
-	venuepb.RegisterVenueAdapterServiceServer(srv, server.New(venue, view, closes, proof, gate, logger))
+	venuepb.RegisterVenueAdapterServiceServer(srv, server.NewWithDispatchEvidence(venue, view, closes, proof, gate, logger))
 	return srv, nil
 }
 

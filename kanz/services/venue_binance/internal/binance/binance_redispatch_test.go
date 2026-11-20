@@ -57,7 +57,7 @@ func TestRedispatch_AFilledOrderIsNeitherReplacedNorReopened(t *testing.T) {
 	//    connector.
 	f := newFakeBinance(t)
 	f.newOrderBody = fullFill("o1")
-	srv := server.New(venueOverFake(f), view.store, execution.NewCloseRegistry(),
+	srv := server.NewWithDispatchEvidence(venueOverFake(f), view.store, execution.NewCloseRegistry(),
 		execution.AccountProof{Verified: true, ExchangeAccountID: "12345678"},
 		halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -123,7 +123,7 @@ func TestRedispatch_APartiallyFilledOrderStillReachesTheExchange(t *testing.T) {
 
 	f := newFakeBinance(t)
 	f.newOrderBody = fullFill("o1")
-	srv := server.New(venueOverFake(f), view.store, execution.NewCloseRegistry(),
+	srv := server.NewWithDispatchEvidence(venueOverFake(f), view.store, execution.NewCloseRegistry(),
 		execution.AccountProof{Verified: true, ExchangeAccountID: "12345678"},
 		halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
 

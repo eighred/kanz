@@ -56,12 +56,13 @@ func requireDecimalDomain(req proto.Message) error {
 type Server struct {
 	venuepb.UnimplementedVenueAdapterServiceServer
 
-	venue  execution.Venue
-	closer execution.Closer
-	view   orderview.Store
-	closes execution.CloseTracker
-	proof  execution.AccountProof
-	logger *slog.Logger
+	venue          execution.Venue
+	closer         execution.Closer
+	view           orderview.Store
+	recordDispatch func(context.Context, orderview.Store, *orderpb.OrderState) error
+	closes         execution.CloseTracker
+	proof          execution.AccountProof
+	logger         *slog.Logger
 	// halted is the platform kill-switch (#635). THIS IS THE LAST LINE: everything
 	// upstream of it — the gateway's 423, the OMS refusing admission — can be
 	// bypassed by a path that does not go through them, and this cannot, because
@@ -85,13 +86,21 @@ type Server struct {
 // is: its zero value is the honest one. A nil gate answers halted, so an adapter
 // wired without one refuses to place orders rather than placing them unbraked.
 func New(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, gate *halt.Gate, logger *slog.Logger) *Server {
-	s := &Server{venue: venue, view: view, closes: closes, proof: proof, halted: gate, logger: logger}
+	s := &Server{venue: venue, view: view, recordDispatch: orderview.Dispatch, closes: closes, proof: proof, halted: gate, logger: logger}
 	// A venue that cannot cancel AT the exchange would silently downgrade every
 	// cancel to a ledger-only entry while the order stays live. BinanceVenue is a
 	// Closer; assert it rather than discover otherwise in production.
 	if c, ok := venue.(execution.Closer); ok {
 		s.closer = c
 	}
+	return s
+}
+
+// NewWithDispatchEvidence prevents a second placement while an earlier caller
+// may already have sent the order and the adapter has received no acknowledgement.
+func NewWithDispatchEvidence(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, gate *halt.Gate, logger *slog.Logger) *Server {
+	s := New(venue, view, closes, proof, gate, logger)
+	s.recordDispatch = orderview.DispatchAfterEvidence
 	return s
 }
 
@@ -216,7 +225,10 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 	// placement. They differ only in what an operator is told, and that
 	// difference is worth its branch: "the exchange already finished this order"
 	// and "this adapter cannot read its own view" demand different actions.
-	if err := orderview.Dispatch(ctx, s.view, st); err != nil {
+	if err := s.recordDispatch(ctx, s.view, st); err != nil {
+		if errors.Is(err, orderview.ErrPendingDispatch) {
+			return nil, status.Error(codes.FailedPrecondition, "venue: prior dispatch pending acknowledgement; reconcile order before placement")
+		}
 		if errors.Is(err, orderview.ErrTerminalNotRedispatched) {
 			// AlreadyExists, not the halt gate's FailedPrecondition: an operator
 			// reading a refusal has to be able to tell "the platform is stopped"
