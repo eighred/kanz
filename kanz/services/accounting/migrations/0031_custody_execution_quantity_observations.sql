@@ -33,13 +33,13 @@ CREATE POLICY custody_quantity_tenant ON custody_execution_quantity_observations
 -- A generated working identity includes both independent authorities' signed
 -- versions and the statement signer. JSON array framing preserves opaque UTF-8 refs.
 CREATE OR REPLACE FUNCTION custody_quantity_key(text[]) RETURNS text
-LANGUAGE sql IMMUTABLE STRICT AS $$
+LANGUAGE sql IMMUTABLE STRICT SET search_path=pg_catalog AS $$
     SELECT 'q1:' || encode(sha256(convert_to(array_to_json($1)::text,'UTF8')),'hex')
 $$;
 
 -- Verify each statement's exact signed line and the actual journal entry before
 -- accepting working observations. Parse a batch once for its set of matched rows.
-CREATE OR REPLACE FUNCTION custody_quantity_observation_origin() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION custody_quantity_observation_origin() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
 BEGIN
     IF EXISTS (
         WITH signed_lines AS MATERIALIZED (
