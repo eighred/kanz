@@ -58,6 +58,11 @@ HTTP-only. Credential, token and challenge handling is defined by the linked han
 upstream authorities. The generic gateway delegate describes its transport contract. Each
 downstream operation has its own payload and authorization at the gateway.
 
+The preflight client checks each named control and the required workload images before displaying
+a completed verdict. After changing the BFF requirements, run
+`go generate ./services/web_bff/internal/server` from the Go module to refresh the browser's
+control list and the example response shared by the two test suites.
+
 [router]: internal/server/server.go
 [mfa]: ../../internal/identity/mfa.go
 [mfa-bff]: internal/server/mfa.go
