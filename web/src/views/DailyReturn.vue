@@ -37,6 +37,19 @@ type PositionContribution = {
 }
 type ContributionRow = { label: string; pnl: string; points: string }
 type ContributionDisplay = { rows: ContributionRow[]; references: string[]; total: ContributionRow; tradeReference?: string }
+type SectorAttribution = {
+  classification_reference: string
+  classification_known_at?: string
+  benchmark_composition_reference: string
+  unassessed_reason?: string
+  measured?: {
+    portfolio_id: string; benchmark_id: string; start: string; end: string; as_of: string
+    sectors: { sector: string; allocation: number; selection: number; interaction: number }[]
+    total_allocation: number; total_selection: number; total_interaction: number; active_return: number
+  }
+}
+type SectorRow = { label: string; effects: string[] }
+type SectorDisplay = { rows: SectorRow[]; total: SectorRow; classification: string; composition: string }
 
 const props = defineProps<{ portfolio: string }>()
 const session = useSession()
@@ -48,6 +61,7 @@ const error = ref('')
 const result = ref<{
   value?: number; reason?: string; digest: string; flow?: { time: string; amount: string }; benchmark: BenchmarkDisplay
   contribution?: ContributionDisplay | string
+  sectors?: SectorDisplay | string
 }>()
 let active: AbortController | undefined
 
@@ -81,6 +95,15 @@ const contributionReasons: Record<string, string> = {
   trade_timing_unverified: 'A booked trade could not be placed in the signed return subperiod.',
   trade_economics_unverified: 'A fill is missing verified execution details or costs.',
   trade_fee_revision_unsupported: 'An execution fee revision requires a different contribution method.',
+}
+const sectorReasons: Record<string, string> = {
+  sector_portfolio_unassessed: 'The portfolio inputs are unassessed.',
+  sector_regime_unsupported: 'This method requires a fully invested day without cash flows or trades.',
+  sector_benchmark_coverage_missing: 'The dated benchmark constituent weights or returns are incomplete.',
+  sector_benchmark_not_reconciled: 'Constituent returns do not reconcile to the signed benchmark return.',
+  sector_classification_missing: 'A required instrument has no dated sector classification.',
+  sector_coverage_mismatch: 'A sector is absent from one side of the comparison.',
+  sector_effects_not_reconciled: 'The sector effects do not reconcile to active return.',
 }
 
 function horizonKey(value: string) {
@@ -145,6 +168,35 @@ function contributionDisplay(contribution: PositionContribution | undefined, ret
   }
 }
 
+function sectorDisplay(attribution: SectorAttribution | undefined, benchmark: BenchmarkDisplay, report: {
+  portfolio_id: string; start: string; end: string; as_of: string
+}): SectorDisplay | string | undefined {
+  if (!attribution) return undefined
+  const value = attribution.measured
+  const reason = attribution.unassessed_reason
+  if (!value) {
+    if (reason && Object.hasOwn(sectorReasons, reason)) return sectorReasons[reason]
+    throw new Error()
+  }
+  const known = horizonKey(attribution.classification_known_at ?? '')
+  const horizon = horizonKey(report.as_of)
+  if (reason !== undefined || !attribution.classification_reference || !attribution.benchmark_composition_reference ||
+      !known || !horizon || known > horizon || !benchmark.measured || value.benchmark_id !== benchmark.id ||
+      value.portfolio_id !== report.portfolio_id || value.start !== report.start || value.end !== report.end ||
+      value.as_of !== report.as_of || !(Math.abs(value.active_return - benchmark.measured.active_return) <= 1e-12) ||
+      value.sectors.length === 0) throw new Error()
+  const row = (label: string, effects: number[]): SectorRow => {
+    if (!label || !effects.every(Number.isFinite)) throw new Error()
+    return { label, effects: effects.map(e => percentagePoints.format(e * 100)) }
+  }
+  return {
+    rows: value.sectors.map(s => row(s.sector, [s.allocation, s.selection, s.interaction, s.allocation + s.selection + s.interaction])),
+    total: row('Total', [value.total_allocation, value.total_selection, value.total_interaction, value.active_return]),
+    classification: attribution.classification_reference,
+    composition: attribution.benchmark_composition_reference,
+  }
+}
+
 function clear() {
   active?.abort()
   active = undefined
@@ -169,6 +221,7 @@ async function read() {
       intraday_flow?: { effective_time: string; signed_amount: Decimal; pre_flow_nav_reference: string; post_flow_nav_reference: string }
       benchmark_comparison?: BenchmarkComparison
       position_contribution?: PositionContribution
+      sector_attribution?: SectorAttribution
     }>('/api/v1/portfolios/' + encodeURIComponent(props.portfolio) + '/daily-return?' + query, { signal: request.signal })
     const end = closeDate.value + 'T00:00:00Z'
     // Compare instants while allowing the Protobuf JSON serializer to use its
@@ -177,6 +230,7 @@ async function read() {
         !horizonKey(report.as_of) || horizonKey(report.as_of) !== horizonKey(asOf.value) || !/^[0-9a-f]{64}$/.test(report.source_digest)) throw new Error()
     const benchmark = benchmarkDisplay(report.benchmark_comparison, report)
     const contribution = contributionDisplay(report.position_contribution, report.measured?.return_value)
+    const sectors = sectorDisplay(report.sector_attribution, benchmark, report)
     if (report.measured) {
       const measured = report.measured
       const split = report.intraday_flow
@@ -191,9 +245,9 @@ async function read() {
       if (report.unassessed_reason !== undefined || !covered || measured.portfolio_id !== props.portfolio ||
           measured.method !== 'RETURN_METHOD_TIME_WEIGHTED' || measured.as_of !== report.as_of ||
           measured.start !== report.start || measured.end !== report.end || !Number.isFinite(measured.return_value)) throw new Error()
-      result.value = { value: measured.return_value, digest: report.source_digest, flow, benchmark, contribution }
+      result.value = { value: measured.return_value, digest: report.source_digest, flow, benchmark, contribution, sectors }
     } else if (report.unassessed_reason && Object.hasOwn(reasons, report.unassessed_reason)) {
-      result.value = { reason: reasons[report.unassessed_reason], digest: report.source_digest, benchmark, contribution }
+      result.value = { reason: reasons[report.unassessed_reason], digest: report.source_digest, benchmark, contribution, sectors }
     } else throw new Error()
   } catch (e) {
     if (!request.signal.aborted) error.value = e instanceof ApiError && [403, 404].includes(e.status)
@@ -241,6 +295,21 @@ async function read() {
         </table>
         <p>Price sources <code>{{ result.contribution.references.join(' · ') }}</code></p>
         <p v-if="result.contribution.tradeReference">Trade coverage <code>{{ result.contribution.tradeReference }}</code></p>
+      </template>
+      <p v-if="typeof result.sectors === 'string'">Sector attribution unassessed. {{ result.sectors }}</p>
+      <template v-else-if="result.sectors">
+        <table class="position-contribution">
+          <caption>Brinson sector attribution (percentage points)</caption>
+          <thead><tr><th scope="col">Sector</th><th scope="col">Allocation</th><th scope="col">Selection</th><th scope="col">Interaction</th><th scope="col">Total</th></tr></thead>
+          <tbody>
+            <tr v-for="row in result.sectors.rows" :key="row.label">
+              <th scope="row">{{ row.label }}</th><td v-for="(effect, index) in row.effects" :key="index">{{ effect }}</td>
+            </tr>
+          </tbody>
+          <tfoot><tr><th scope="row">Total</th><td v-for="(effect, index) in result.sectors.total.effects" :key="index">{{ effect }}</td></tr></tfoot>
+        </table>
+        <p>Classification source <code>{{ result.sectors.classification }}</code></p>
+        <p>Benchmark constituents <code>{{ result.sectors.composition }}</code></p>
       </template>
       <p>Signed source <code>{{ result.digest }}</code></p>
       <p v-if="result.benchmark.digest">Benchmark source <code>{{ result.benchmark.digest }}</code></p>

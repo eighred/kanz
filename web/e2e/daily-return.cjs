@@ -37,7 +37,7 @@ async function main() {
           return response.json()
         }
         if (role !== 'authorized') {
-          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5], expected.editions[12]]) {
+          for (const edition of [expected.editions[0], expected.editions[3], expected.editions[5], expected.editions[12], expected.editions[18]]) {
             const body = await check(edition, status)
             const denied = JSON.stringify(body)
             assert(!denied.includes(edition.digest))
@@ -47,12 +47,16 @@ async function main() {
             }
             assert(!denied.includes('SYNTH-A'))
             assert(!denied.includes('position_contribution'))
+            assert(!denied.includes('sector_attribution'))
+            assert(!denied.includes('sector-snapshot'))
           }
           continue
         }
         const [original, corrected, unknown, splitOriginal, splitCorrected, indexCorrected,
           missingBenchmark, mismatchedBenchmark, splitUnknown, missingMarks, badMarks, unsupported,
-          traded, tradeRestated, unknownTrades, omittedTrade, wrongTradeTime, missingTradePrices] = expected.editions
+          traded, tradeRestated, unknownTrades, omittedTrade, wrongTradeTime, missingTradePrices,
+          sectorOriginal, sectorRestated, unknownSector, missingComposition, incompleteComposition,
+          benchmarkDisagreement, unsupportedSector] = expected.editions
         async function measured(edition, value, text, flowCount = '0') {
           const body = await check(edition, 200)
           assert.equal(body.source_digest, edition.digest)
@@ -132,6 +136,43 @@ async function main() {
           assert.equal(body.position_contribution.unassessed_reason, reason)
           await section.getByText('Position contribution unassessed. ' + text, { exact: true }).waitFor()
           assert.equal(await contributionTable().count(), 0)
+        }
+        const sectorTable = () => section.getByRole('table', { name: 'Brinson sector attribution (percentage points)' })
+        const closeTo = (a, b) => assert(Math.abs(a - b) <= 1e-12)
+        async function sectorEffects(body, ref, expected, totals, displayTotals) {
+          const result = body.sector_attribution
+          const value = result.measured
+          assert.equal(result.classification_reference, ref)
+          assert.equal(result.benchmark_composition_reference, 'sector-index-members-r1')
+          assert(Date.parse(result.classification_known_at) <= Date.parse(body.as_of))
+          assert.equal(result.unassessed_reason, undefined)
+          assert.equal(value.benchmark_id, 'SYNTH-TR')
+          assert.equal(value.portfolio_id, portfolio)
+          for (const field of ['start', 'end', 'as_of']) assert.equal(value[field], body[field])
+          assert.deepEqual(value.sectors.map(s => s.sector), ['SYNTH:GROWTH', 'SYNTH:VALUE'])
+          for (const [i, row] of value.sectors.entries()) {
+            const [pw, bw, pr, br, allocation, selection, interaction, display] = expected[i]
+            for (const [a, b] of [
+              [row.portfolio_weight, pw], [row.benchmark_weight, bw], [row.portfolio_return, pr], [row.benchmark_return, br],
+              [row.allocation, allocation], [row.selection, selection], [row.interaction, interaction],
+            ]) closeTo(a, b)
+            const cells = sectorTable().getByRole('row', { name: new RegExp('^' + row.sector) }).getByRole('cell')
+            await cells.first().waitFor()
+            assert.deepEqual(await cells.allTextContents(), display)
+          }
+          const actual = [value.total_allocation, value.total_selection, value.total_interaction]
+          totals.forEach((t, i) => closeTo(t, actual[i]))
+          closeTo(value.active_return, 17 / 200)
+          closeTo(actual.reduce((a, b) => a + b, 0), value.active_return)
+          const totalCells = sectorTable().getByRole('row', { name: /^Total/ }).getByRole('cell')
+          assert.deepEqual(await totalCells.allTextContents(), displayTotals)
+          await section.getByText(ref, { exact: true }).waitFor()
+        }
+        async function unassessedSector(body, reason, text) {
+          assert.equal(body.sector_attribution.measured, undefined)
+          assert.equal(body.sector_attribution.unassessed_reason, reason)
+          await section.getByText('Sector attribution unassessed. ' + text, { exact: true }).waitFor()
+          assert.equal(await sectorTable().count(), 0)
         }
         stage = 'authorized-open-payload'
         const originalBody = await measured(original, 0.02, '2%')
@@ -221,6 +262,34 @@ async function main() {
         ]) {
           await unassessedContribution(await measured(edition, 119 / 750, '15.866667%', '1'), reason, text)
         }
+        stage = 'authorized-sector-effects'
+        const attribution = await measured(sectorOriginal, 29 / 200, '14.5%')
+        await comparison(attribution, sectorOriginal, 3 / 50, 17 / 200, '6%', '+8.5 percentage points')
+        await sectorEffects(attribution, 'sector-snapshot-r1', [
+          [3 / 5, 1 / 2, 1 / 5, 1 / 10, 1 / 100, 1 / 20, 1 / 100, ['+1', '+5', '+1', '+7']],
+          [2 / 5, 1 / 2, 1 / 16, 1 / 50, -1 / 500, 17 / 800, -17 / 4000, ['-0.2', '+2.125', '-0.425', '+1.5']],
+        ], [1 / 125, 57 / 800, 23 / 4000], ['+0.8', '+7.125', '+0.575', '+8.5'])
+        const revisedAttribution = await measured(sectorRestated, 29 / 200, '14.5%')
+        assert.equal(revisedAttribution.previous_source_digest, sectorOriginal.digest)
+        assert.equal(revisedAttribution.benchmark_comparison.source_digest, attribution.benchmark_comparison.source_digest)
+        await sectorEffects(revisedAttribution, 'sector-snapshot-r2', [
+          [3 / 5, 1 / 5, 1 / 5, 1 / 10, 1 / 25, 1 / 50, 1 / 25, ['+4', '+2', '+4', '+10']],
+          [2 / 5, 4 / 5, 1 / 16, 1 / 20, -1 / 50, 1 / 100, -1 / 200, ['-2', '+1', '-0.5', '-1.5']],
+        ], [1 / 50, 3 / 100, 7 / 200], ['+2', '+3', '+3.5', '+8.5'])
+        stage = 'authorized-sector-coverage'
+        for (const [edition, reason, description] of [
+          [unknownSector, 'sector_classification_missing', 'A required instrument has no dated sector classification.'],
+          [missingComposition, 'sector_benchmark_coverage_missing', 'The dated benchmark constituent weights or returns are incomplete.'],
+          [incompleteComposition, 'sector_benchmark_coverage_missing', 'The dated benchmark constituent weights or returns are incomplete.'],
+          [benchmarkDisagreement, 'sector_benchmark_not_reconciled', 'Constituent returns do not reconcile to the signed benchmark return.'],
+        ]) {
+          const body = await measured(edition, 29 / 200, '14.5%')
+          closeTo(body.benchmark_comparison.measured.active_return, 17 / 200)
+          await unassessedSector(body, reason, description)
+        }
+        const intraday = await measured(unsupportedSector, 119 / 750, '15.866667%', '1')
+        assert.deepEqual(intraday.position_contribution, tradeRestatedBody.position_contribution)
+        await unassessedSector(intraday, 'sector_regime_unsupported', 'This method requires a fully invested day without cash flows or trades.')
         stage = 'authorized-reload-details'
         await page.reload()
         assert.deepEqual(await measured(original, 0.02, '2%'), originalBody)
@@ -230,6 +299,8 @@ async function main() {
         assert.deepEqual(await measured(splitCorrected, -0.032, '-3.2%', '1'), splitUpdated)
         await comparison(splitUpdated, splitCorrected, 2 / 25, -14 / 125, '8%', '-11.2 percentage points')
         assert.deepEqual(await measured(traded, 163 / 750, '21.733333%', '1'), tradeBody)
+        assert.deepEqual(await measured(sectorOriginal, 29 / 200, '14.5%'), attribution)
+        assert.deepEqual(await measured(sectorRestated, 29 / 200, '14.5%'), revisedAttribution)
         await check({ date: splitOriginal.date, as_of: '2020-02-05T06:00:00Z' }, 404)
       } finally {
         await context.close()

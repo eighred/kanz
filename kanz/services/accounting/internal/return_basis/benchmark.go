@@ -28,18 +28,32 @@ type BenchmarkEvidence struct {
 // BenchmarkObservation is signed as compact JSON. The digest of these
 // canonical bytes identifies the immutable source version.
 type BenchmarkObservation struct {
-	Format              string    `json:"format"`
-	Tenant              string    `json:"tenant"`
-	Portfolio           string    `json:"portfolio"`
-	Currency            string    `json:"currency"`
-	BenchmarkID         string    `json:"benchmark_id"`
-	Issuer              string    `json:"issuer"`
-	DefinitionEffective time.Time `json:"definition_effective"`
-	Start               time.Time `json:"start"`
-	End                 time.Time `json:"end"`
-	KnownAt             time.Time `json:"known_at"`
-	OpeningLevel        dec.Exact `json:"opening_level"`
-	ClosingLevel        dec.Exact `json:"closing_level"`
+	Format              string                `json:"format"`
+	Tenant              string                `json:"tenant"`
+	Portfolio           string                `json:"portfolio"`
+	Currency            string                `json:"currency"`
+	BenchmarkID         string                `json:"benchmark_id"`
+	Issuer              string                `json:"issuer"`
+	DefinitionEffective time.Time             `json:"definition_effective"`
+	Start               time.Time             `json:"start"`
+	End                 time.Time             `json:"end"`
+	KnownAt             time.Time             `json:"known_at"`
+	OpeningLevel        dec.Exact             `json:"opening_level"`
+	ClosingLevel        dec.Exact             `json:"closing_level"`
+	Composition         *BenchmarkComposition `json:"composition,omitempty"`
+}
+
+// BenchmarkComposition is part of the independently signed observation.
+// Constituent classifications come from the server's dated source.
+type BenchmarkComposition struct {
+	Reference    string            `json:"reference"`
+	Constituents []BenchmarkMember `json:"constituents"`
+}
+
+type BenchmarkMember struct {
+	InstrumentID string    `json:"instrument_id"`
+	Weight       dec.Exact `json:"weight"`
+	Return       dec.Exact `json:"return"`
 }
 
 func validBenchmark(e Evidence) bool {
@@ -74,7 +88,38 @@ func validBenchmark(e Evidence) bool {
 			return false
 		}
 	}
+	return validBenchmarkComposition(o.Composition)
+}
+
+func validBenchmarkComposition(comp *BenchmarkComposition) bool {
+	if comp == nil {
+		return true
+	}
+	if !identifier.MatchString(comp.Reference) || len(comp.Constituents) > 32 {
+		return false
+	}
+	seen := make(map[string]bool, len(comp.Constituents))
+	for _, member := range comp.Constituents {
+		if !identifier.MatchString(member.InstrumentID) || seen[member.InstrumentID] {
+			return false
+		}
+		seen[member.InstrumentID] = true
+		weight, werr := member.Weight.Rat()
+		rate, rerr := member.Return.Rat()
+		if werr != nil || rerr != nil || weight.Sign() <= 0 || weight.Cmp(big.NewRat(1, 1)) > 0 || rate.Cmp(big.NewRat(-1, 1)) < 0 {
+			return false
+		}
+		if _, ok := dec.ToProtoExact(rate); !ok {
+			return false
+		}
+	}
 	return true
+}
+
+func benchmarkFraction(o *BenchmarkObservation) *big.Rat {
+	open, _ := o.OpeningLevel.Rat()
+	close, _ := o.ClosingLevel.Rat()
+	return new(big.Rat).Quo(new(big.Rat).Sub(close, open), open)
 }
 
 func verifyBenchmark(ctx context.Context, tx pgx.Tx, e Evidence) (string, error) {
@@ -124,9 +169,7 @@ func compareBenchmark(r Receipt, assessment *performancepb.DailyReturnAssessment
 	if portfolio == nil {
 		return reason("portfolio_return_unassessed")
 	}
-	open, _ := o.OpeningLevel.Rat()
-	close, _ := o.ClosingLevel.Rat()
-	indexReturn, _ := new(big.Rat).Quo(new(big.Rat).Sub(close, open), open).Float64()
+	indexReturn, _ := benchmarkFraction(o).Float64()
 	active := performance.ActiveReturn(portfolio.ReturnValue, indexReturn)
 	if math.IsInf(active, 0) || math.IsNaN(active) {
 		return reason("benchmark_comparison_out_of_range")

@@ -62,6 +62,11 @@ func validPositionBasis(e Evidence) bool {
 
 func verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performancepb.DailyReturnAssessment, error) {
 	report := assessment(r)
+	if r.Evidence.SectorAttribution {
+		report.SectorAttribution = &performancepb.DailySectorAttribution{
+			Result: &performancepb.DailySectorAttribution_UnassessedReason{UnassessedReason: "sector_portfolio_unassessed"},
+		}
+	}
 	b := r.Evidence.PositionBasis
 	if b == nil {
 		return report, nil
@@ -190,7 +195,13 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 			{from: after, to: closing, link: big.NewRat(1, 1), trading: secondTrading},
 		}
 	}
-	return contributionBreakdown(e, periods)
+	result, reason, err := contributionBreakdown(e, periods)
+	if err == nil && reason == "" && report.SectorAttribution != nil {
+		if err := attributeSectors(ctx, tx, e, report, periods, entries); err != nil {
+			return nil, "", err
+		}
+	}
+	return result, reason, err
 }
 
 func positionQuantities(book *ledger.Book) map[string]*big.Rat {

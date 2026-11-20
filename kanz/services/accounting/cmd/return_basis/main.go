@@ -59,6 +59,8 @@ func run(ctx context.Context, bodyPath, signaturePath string) (string, error) {
 		AND NOT has_any_column_privilege(current_user,'cash_commands','INSERT, UPDATE')
 		AND NOT has_table_privilege(current_user,'return_basis_benchmark_authorities','DELETE, TRUNCATE')
 		AND NOT has_any_column_privilege(current_user,'return_basis_benchmark_authorities','INSERT, UPDATE')
+		AND NOT has_table_privilege(current_user,'return_basis_sector_classifications','DELETE, TRUNCATE')
+		AND NOT has_any_column_privilege(current_user,'return_basis_sector_classifications','INSERT, UPDATE')
 		AND NOT has_column_privilege(current_user,'return_basis_publications','observed_payload','INSERT, UPDATE')
 		FROM pg_roles WHERE rolname=current_user`).Scan(&limited)
 	if err != nil || !limited {

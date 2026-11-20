@@ -103,6 +103,37 @@ the NAV boundary. An execution at the same instant as that flow, intraday
 short holdings or a separate fee correction withholds this pilot breakdown.
 The original unchanged-holdings method keeps its existing eligibility.
 
+Set the signed top-level `sector_attribution` flag to request a daily
+Brinson–Hood–Beebower breakdown. This method covers a single UTC day with
+fully invested unchanged long holdings, no flows or other in-window activity,
+and a measured benchmark in the same currency and window. Intraday absolute
+contribution uses its existing method and remains available.
+
+The benchmark signer can append `composition` to the signed observation.
+This object contains a `reference` and complete `constituents` list. Each item
+contains `instrument_id`, exact opening `weight` and exact period `return`.
+Accounting checks the weights sum to one and their weighted return equals
+the signed overall index return. Portfolio weights and returns come from the
+dated reconciled journal valuation.
+
+The reporting reference-data steward records one immutable classification
+snapshot for an exact `close_date` in
+`return_basis_sector_classifications`. Each row identifies a single `taxonomy`
+and maps instrument IDs to sector codes in `sectors`. Accounting chooses the
+latest snapshot with both `known_at` and `recorded_at` within the report's
+knowledge horizon. Source and Accounting consumer roles need SELECT, with
+write access limited to the steward. The snapshot certifies the whole day.
+A missing instrument in the selected snapshot, missing benchmark constituents
+or a sector without exposure on both sides leaves the result unassessed.
+
+The authorized Exposure screen shows allocation, selection, interaction and
+total relative effects in percentage points. The pilot uses two synthetic
+sectors and a benchmark-only constituent whose historical classification
+changes. Portfolio return is 14.5% and index return is 6%. The first
+classification yields +0.8, +7.125 and +0.575 points. Its restatement yields
++2, +3 and +3.5 points. Both sum to the same +8.5-point active return and the
+earlier knowledge horizon reopens the earlier distribution.
+
 Submit compact canonical JSON in the order shown by the Go Evidence type, with
 a separate raw 64-byte Ed25519 signature. The `as_of` timestamp uses RFC 3339
 UTC with at most microsecond precision. The first edition has

@@ -55,19 +55,20 @@ type FlowSplit struct {
 }
 
 type Evidence struct {
-	Format         string             `json:"format"`
-	Tenant         string             `json:"tenant"`
-	Portfolio      string             `json:"portfolio"`
-	Currency       string             `json:"currency"`
-	CloseDate      string             `json:"close_date"`
-	AsOf           time.Time          `json:"as_of"`
-	Issuer         string             `json:"issuer"`
-	PreviousDigest string             `json:"previous_digest"`
-	Opening        *Close             `json:"opening"`
-	Closing        *Close             `json:"closing"`
-	Flows          *FlowCompletion    `json:"external_flows"`
-	Benchmark      *BenchmarkEvidence `json:"benchmark,omitempty"`
-	PositionBasis  *PositionBasis     `json:"position_basis,omitempty"`
+	Format            string             `json:"format"`
+	Tenant            string             `json:"tenant"`
+	Portfolio         string             `json:"portfolio"`
+	Currency          string             `json:"currency"`
+	CloseDate         string             `json:"close_date"`
+	AsOf              time.Time          `json:"as_of"`
+	Issuer            string             `json:"issuer"`
+	PreviousDigest    string             `json:"previous_digest"`
+	Opening           *Close             `json:"opening"`
+	Closing           *Close             `json:"closing"`
+	Flows             *FlowCompletion    `json:"external_flows"`
+	Benchmark         *BenchmarkEvidence `json:"benchmark,omitempty"`
+	PositionBasis     *PositionBasis     `json:"position_basis,omitempty"`
+	SectorAttribution bool               `json:"sector_attribution,omitempty"`
 }
 
 type authority struct {

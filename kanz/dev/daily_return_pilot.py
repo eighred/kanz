@@ -80,6 +80,7 @@ def qualify(env):
         sql("basis", """
             GRANT SELECT ON return_basis_authorities, return_basis_receipts, return_basis_publications, return_basis_benchmark_authorities
                 TO basis_source,basis_reader,basis_runtime;
+            GRANT SELECT ON return_basis_sector_classifications TO basis_source,basis_reader,basis_runtime;
             GRANT INSERT ON return_basis_receipts TO basis_source;
             GRANT INSERT (portfolio_id,currency,close_date,as_of) ON return_basis_publications TO basis_source;
             GRANT SELECT,INSERT ON outbox TO basis_source;
@@ -112,7 +113,7 @@ def qualify(env):
         names = [r.get("Test") for r in records if r["Action"] == "pass"]
         if (proof.returncode or "TestSignedReturnBasisAdmissionAndReplay" not in names
                 or any(r["Action"] in {"fail", "skip"} for r in records)
-                or b"real JetStream replay and signed browser read passed with 18 FACTs" not in proof.stdout
+                or b"real JetStream replay and signed browser read passed with 25 FACTs" not in proof.stdout
                 or b"observed PostgreSQL bytes matched each original FACT before and after replay" not in proof.stdout):
             locations = re.findall(rb"\b(?:main_test|operator_test)\.go:\d+(?=: )", proof.stdout)
             stage = re.search(rb"\breturn-browser-stage=[a-z-]+", proof.stdout)

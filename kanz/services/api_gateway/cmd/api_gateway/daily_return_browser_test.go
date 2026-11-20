@@ -103,7 +103,7 @@ func TestDailyReturnGatewayBrowser(t *testing.T) {
 	output, err := cmd.Output()
 	if err != nil || !bytes.Contains(output, []byte("daily return browser passed")) {
 		// Emit only bounded stage labels; never forward a child's raw logs or credentials.
-		if marker := regexp.MustCompile("return-browser-stage=(?:input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))").Find(output); marker != nil {
+		if marker := regexp.MustCompile("return-browser-stage=(?:input|launch|authorized-sector-(?:effects|coverage)|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))").Find(output); marker != nil {
 			t.Fatal(string(marker))
 		}
 		for _, stage := range []string{"invalid fixture input", "loopback fixture required", "Vue distribution and actual BFF required", "fixture identity refused", "fixture identity scope refused", "fixture identity signature refused", "fixture identity claims refused", "synthetic BFF session failed", "cannot encode synthetic browser input", "Chromium probe could not start"} {

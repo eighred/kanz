@@ -92,7 +92,7 @@ func TestDailyReturnBFFBrowser(t *testing.T) {
 	cmd.Stdin = bytes.NewReader(wire)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if marker := regexp.MustCompile("return-browser-stage=(?:input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))").Find(output); marker != nil {
+		if marker := regexp.MustCompile("return-browser-stage=(?:input|launch|authorized-sector-(?:effects|coverage)|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))").Find(output); marker != nil {
 			t.Fatal(string(marker))
 		}
 		t.Fatal("Chromium probe could not start")

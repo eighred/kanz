@@ -192,6 +192,19 @@ message DailyReturnAssessment {
   IntradayReturnFlow intraday_flow = 15;
   DailyBenchmarkComparison benchmark_comparison = 16;
   DailyPositionContribution position_contribution = 17;
+  DailySectorAttribution sector_attribution = 18;
+}
+
+// DailySectorAttribution is one-day Brinson-Hood-Beebower attribution over
+// a fully invested, unchanged reporting-currency portfolio and benchmark.
+message DailySectorAttribution {
+  string classification_reference = 1;
+  google.protobuf.Timestamp classification_known_at = 2;
+  string benchmark_composition_reference = 3;
+  oneof result {
+    AttributionResult measured = 4;
+    string unassessed_reason = 5;
+  }
 }
 
 // IntradayReturnFlow identifies the verified same-time cash/NAV bridge used to

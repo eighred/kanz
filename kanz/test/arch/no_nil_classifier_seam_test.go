@@ -110,35 +110,8 @@ var nilClassifierExempt = map[string]string{
 	// lifecycle.v1.ConfigChanged FACTs the OMS consumes, and calls Propose. The
 	// dead-entry check below removed both entries.
 	//
-	// THE REMAINING ENTRY NAMES #1028. #640 is closed — its own three seams are
-	// wired and proven against a running datamaster. #1028 owns the parked
-	// performance surface decision; #1072 owns the wire output if it ships.
-	//
-	// THERE WERE FIVE. internal/risk/compute/factor.SectorExposure left by being
-	// FIXED rather than exempted: it was never an unfilled seam, only one this
-	// guard could not see, because its caller factor.ComputeExposure is in its own
-	// package. The rule now resolves a same-package caller that is itself wired
-	// (see 2b), so the seam reports what it always was, and the dead-entry check
-	// below is what removed the entry.
-	"internal/performance.BucketBySector": "#1028 — Brinson sector attribution. DARK FOR WANT OF " +
-		"SOMETHING DOWNSTREAM, and the retirement condition this entry used to give was the wrong " +
-		"one. Two things are missing and only one is reference data: performance.Classifier has NO " +
-		"implementation anywhere in the module, not even a StaticClassifier; and services/performance " +
-		"sidesteps the question entirely — attributionRequest carries already-bucketed " +
-		"[]perf.SectorData straight off the wire and hands it to perf.SingleAttribution, so nothing " +
-		"ever converts instrument-level returns into sector buckets. The client is the classifier. " +
-		"BUT BUILDING THOSE TWO IS THE OBVIOUS WRONG FIX: services/performance is PARKED by a " +
-		"decision deployability_test.go already records (ANALYTICS PLANE, PARKED) — no Dockerfile, " +
-		"no CI build-matrix entry, no deploy manifest, no gateway route, no NetworkPolicy — so they " +
-		"would give this seam an importer inside a service nobody runs and delete this entry while " +
-		"changing nothing an operator can observe, which is the failure internal/alpha/barview's " +
-		"entry names in the same words. RETIRED BY the analytics surface shipping with a consumer; " +
-		"the request shape and a refdata-backed Classifier are then the work that makes it useful, " +
-		"copying the compliance.Classifier wired into regulatory in #767. " +
-		"THE UNRESOLVABLE CASE REFUSES, which is this map's condition for holding an entry at all: " +
-		"BucketBySector returns performance.ErrNoClassifier on a non-empty book rather than " +
-		"bucketing the whole of it as UNCLASSIFIED and returning a decomposition that reconciles " +
-		"(#751). An empty book still returns empty — nothing held, nothing hidden.",
+	// Accounting's daily return pilot wires BucketBySector with the dated
+	// reporting classification and verifies the served result under #1028/#1072.
 }
 
 // classifierSeam is one composition-root seam: an exported function taking a

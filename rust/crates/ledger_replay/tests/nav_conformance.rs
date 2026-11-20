@@ -490,3 +490,51 @@ fn booked_buy_and_sell_conserve_nav_and_link_each_component() {
         assert_eq!(linked.into_iter().sum::<Rat>(), n(total));
     }
 }
+
+#[test]
+fn two_sector_brinson_effects_match_active_return_across_reclassification() {
+    let portfolio_weights = ["3/5", "2/5"].map(n);
+    let portfolio_returns = ["1/5", "1/16"].map(n);
+    let benchmark_weights = ["1/5", "1/2", "3/10"].map(n);
+    let benchmark_returns = ["1/10", "1/50", "1/10"].map(n);
+    let portfolio: Rat = (0..2)
+        .map(|i| &portfolio_weights[i] * &portfolio_returns[i])
+        .sum();
+    let benchmark: Rat = (0..3)
+        .map(|i| &benchmark_weights[i] * &benchmark_returns[i])
+        .sum();
+    assert_eq!(portfolio, n("29/200"));
+    assert_eq!(benchmark, n("3/50"));
+
+    for (classification, exact_rows) in [
+        (
+            [0, 1, 0],
+            [["1/100", "1/20", "1/100"], ["-1/500", "17/800", "-17/4000"]],
+        ),
+        (
+            [0, 1, 1],
+            [["1/25", "1/50", "1/25"], ["-1/50", "1/100", "-1/200"]],
+        ),
+    ] {
+        let mut sum = n("0");
+        for sector in 0..2 {
+            let members = (0..3).filter(|&i| classification[i] == sector);
+            let bw: Rat = members.clone().map(|i| benchmark_weights[i].clone()).sum();
+            let weighted_benchmark: Rat = members
+                .map(|i| &benchmark_weights[i] * &benchmark_returns[i])
+                .sum();
+            // Rebuild the three counterfactual weighted returns directly.
+            let mixed_weight = &portfolio_weights[sector] * &weighted_benchmark / &bw;
+            let mixed_return = &bw * &portfolio_returns[sector];
+            let actual = &portfolio_weights[sector] * &portfolio_returns[sector];
+            let allocation = &mixed_weight - &weighted_benchmark;
+            let selection = &mixed_return - &weighted_benchmark;
+            let interaction = &actual - mixed_weight - mixed_return + &weighted_benchmark;
+            let effects = [allocation, selection, interaction];
+            assert_eq!(effects, exact_rows[sector].map(n));
+            sum += effects.into_iter().sum::<Rat>();
+        }
+        assert_eq!(sum, &portfolio - &benchmark);
+        assert_eq!(sum, n("17/200"));
+    }
+}

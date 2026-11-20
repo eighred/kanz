@@ -39,7 +39,7 @@ import (
 const fixtureBenchmarkID = "SYNTH-TR"
 const fixtureBenchmarkIssuer = "synthetic-index-publisher"
 
-func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, benchmarkSigner ed25519.PrivateKey, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
+func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxpool.Pool, benchmarkSigner ed25519.PrivateKey, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
 	t.Helper()
 	runtimeDSN := os.Getenv("TEST_RETURN_BASIS_RUNTIME")
 	if runtimeDSN == "" || os.Getenv("RETURN_PILOT_ACCOUNTING_BIN") == "" || os.Getenv("RETURN_PILOT_GATEWAY_PROBE") == "" {
@@ -450,6 +450,75 @@ func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, b
 		unpricedTrade.PositionBasis = &unpricedBasis
 		lastDigest = appendEdition(unpricedTrade)
 		t.Logf("ordinary booked fills sell=%s buy=%s", sell.EntryID, buy.EntryID)
+
+		sectorReport := first
+		sectorReport.SectorAttribution = true
+		sectorReport.PreviousDigest = digests[2]
+		sectorOpen, sectorClose := start.AddDate(0, 0, -1), start
+		sectorReport.PositionBasis = &returnbasis.PositionBasis{
+			Opening: marks("sector-prices-open", "15", "8", sectorOpen, sectorOpen),
+			Closing: marks("sector-prices-close", "18", "8.5", sectorClose, sectorClose),
+		}
+		sectorIndex := benchmark
+		sectorIndex.Start, sectorIndex.End, sectorIndex.KnownAt = sectorOpen, sectorClose, sectorClose.Add(time.Hour)
+		sectorIndex.ClosingLevel = "265"
+		composition := returnbasis.BenchmarkComposition{Reference: "sector-index-members-r1",
+			Constituents: []returnbasis.BenchmarkMember{
+				{InstrumentID: "SYNTH-A", Weight: "0.2", Return: "0.1"},
+				{InstrumentID: "SYNTH-B", Weight: "0.5", Return: "0.02"},
+				{InstrumentID: "SYNTH-C", Weight: "0.3", Return: "0.1"},
+			}}
+		sectorIndex.Composition = &composition
+		sectorReport.Benchmark = signIndex(sectorIndex)
+		recordClassification := func(ref string, codes map[string]string) {
+			t.Helper()
+			var recorded time.Time
+			if err := authority.QueryRow(ctx, `INSERT INTO return_basis_sector_classifications
+				(portfolio_id,currency,close_date,known_at,reference,taxonomy,sectors)
+				VALUES ($1,$2,$3::text::date,clock_timestamp(),$4,'SYNTH', $5) RETURNING recorded_at`,
+				sectorReport.Portfolio, sectorReport.Currency, sectorReport.CloseDate, ref, codes).Scan(&recorded); err != nil {
+				t.Fatal("record steward-owned sector snapshot", err)
+			}
+			wait("steward snapshot is ahead of the reporting clock", func(context.Context) bool {
+				return !time.Now().UTC().Truncate(time.Microsecond).Before(recorded)
+			})
+		}
+		recordClassification("sector-snapshot-r1", map[string]string{"SYNTH-A": "GROWTH", "SYNTH-B": "VALUE", "SYNTH-C": "GROWTH"})
+		sectorReport.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		sectorReport.Opening = captureNAV("sector-nav-open", sectorReport.PositionBasis.Opening, "100", sectorOpen, sectorReport.AsOf)
+		sectorReport.Closing = captureNAV("sector-nav-close", sectorReport.PositionBasis.Closing, "114.5", sectorClose, sectorReport.AsOf)
+		sectorDigest := appendEdition(sectorReport)
+		recordClassification("sector-snapshot-r2", map[string]string{"SYNTH-A": "GROWTH", "SYNTH-B": "VALUE", "SYNTH-C": "VALUE"})
+		sectorRestatement := sectorReport
+		sectorRestatement.PreviousDigest = sectorDigest
+		sectorRestatement.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		sectorRestatedDigest := appendEdition(sectorRestatement)
+		recordClassification("sector-snapshot-r3", map[string]string{"SYNTH-A": "GROWTH", "SYNTH-B": "VALUE"})
+		unknownSector := sectorRestatement
+		unknownSector.PreviousDigest = sectorRestatedDigest
+		unknownSector.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		sectorLastDigest := appendEdition(unknownSector)
+		for _, comp := range []*returnbasis.BenchmarkComposition{
+			nil,
+			{Reference: "sector-index-incomplete", Constituents: composition.Constituents[:2]},
+			{Reference: "sector-index-disagrees", Constituents: []returnbasis.BenchmarkMember{
+				composition.Constituents[0], composition.Constituents[1],
+				{InstrumentID: "SYNTH-C", Weight: "0.3", Return: "0.11"},
+			}},
+		} {
+			next := sectorReport
+			next.PreviousDigest = sectorLastDigest
+			next.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+			index := sectorIndex
+			index.Composition = comp
+			next.Benchmark = signIndex(index)
+			sectorLastDigest = appendEdition(next)
+		}
+		unsupportedSector := tradeRestated
+		unsupportedSector.SectorAttribution = true
+		unsupportedSector.PreviousDigest = lastDigest
+		unsupportedSector.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		lastDigest = appendEdition(unsupportedSector)
 
 		// A second booking learned after these editions must count even when it
 		// is denominated in another currency. Earlier reports remain immutable.

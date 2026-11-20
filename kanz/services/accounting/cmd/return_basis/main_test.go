@@ -174,8 +174,14 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		if err := foreignPool.QueryRow(ctx, `SELECT count(*) FROM return_basis_benchmark_authorities`).Scan(&visible); err != nil || visible != 0 {
 			t.Fatal("benchmark authority was visible to a foreign tenant")
 		}
-		proveDailyReturn(t, scope, read, benchmarkSigner, []returnbasis.Evidence{original, correction, incomplete},
+		proveDailyReturn(t, scope, authorities, read, benchmarkSigner, []returnbasis.Evidence{original, correction, incomplete},
 			[]string{oldDigest, newDigest, unknownDigest}, func(e returnbasis.Evidence) (string, error) { return put(e, priv) })
+		if err := read.QueryRow(ctx, `SELECT count(*) FROM return_basis_sector_classifications`).Scan(&visible); err != nil || visible != 3 {
+			t.Fatal("authorized reader did not observe all stored classification vintages")
+		}
+		if err := foreignPool.QueryRow(ctx, `SELECT count(*) FROM return_basis_sector_classifications`).Scan(&visible); err != nil || visible != 0 {
+			t.Fatal("classification vintages crossed the tenant boundary")
+		}
 	}
 
 }
