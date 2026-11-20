@@ -368,6 +368,29 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 				return Run{}, err
 			}
 			if len(resolutions) == 0 {
+				// Scheduled redelivery has no operator request identity. A fully
+				// retained correction for this exact source and prefix is its original
+				// result; repeating it must not emit a second completion or false failure.
+				if run.RequestID == "" && len(run.measured) > 0 && run.Basis != nil && len(run.Basis.Accounts[run.Subject.CustodianID]) == 1 {
+					var id string
+					err := tx.QueryRow(ctx, `SELECT run_id FROM custody_runs
+                        WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3
+                          AND outcome='historical_quantity_correction' AND statement_id=$4 AND signed_statement_sha256=$5
+                          AND (book_basis->>'journal_position')::bigint=$6
+                        ORDER BY completed_at DESC,run_id LIMIT 1`, run.Subject.PortfolioID, run.Subject.CustodianID, run.Subject.BusinessDate, run.StatementID, signedDigest, run.Basis.JournalPosition).Scan(&id)
+					if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+						return Run{}, err
+					}
+					if err == nil {
+						prior, err := historicalReceiptSnapshot(ctx, tx, tenant, run.Subject, run.Basis.Accounts[run.Subject.CustodianID][0], id)
+						if err != nil {
+							return Run{}, err
+						}
+						if prior.State == "recorded" && run.Basis.sameScope(prior.Run.Basis, run.Subject.CustodianID) {
+							return prior.Run, tx.Commit(ctx)
+						}
+					}
+				}
 				return Run{}, ErrHistoricalLifecycle
 			}
 			// ledger_prepare_append takes this portfolio lock before advancing the
