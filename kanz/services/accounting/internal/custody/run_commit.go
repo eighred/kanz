@@ -310,7 +310,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	}
 	if verifying(run) {
 		if run.Basis != nil && run.Basis.Assignments != nil {
-			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended('custody-assignment-tenant:' || app_current_tenant(),0))"); err != nil {
+			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtextextended('custody-assignment-tenant:' || public.app_current_tenant(),0))"); err != nil {
 				return Run{}, err
 			}
 			if _, err := confirmRunAssignments(ctx, tx, run.Subject, run.Basis, false); err != nil {
