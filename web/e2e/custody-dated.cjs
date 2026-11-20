@@ -62,7 +62,7 @@ async function main() {
             const reply = await page.evaluate(async path => {
               const response = await fetch(path)
               return { status: response.status, body: await response.text() }
-            }, lookup(date, saved))
+            }, lookup(date, saved) + (saved === clean_run ? '&include=previous_comparison' : ''))
             assert.equal(reply.status, status)
             assert(!reply.body.includes('execution_quantities'))
             for (const secret of [clean_run, statement, missing_run, oldRun, prior.detection.statement_id, prior.break_id]) assert(!reply.body.includes(secret))
@@ -70,7 +70,7 @@ async function main() {
           assert.equal(await page.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
           continue
         }
-        let downloadedHistory
+        let downloadedHistory, discoveredHistory
         for (const [date, state, outcome, label, run, saved, reload] of [
           [clean_date, 'recorded', 'clean', 'Balances and transaction references agree', clean_run],
           [missing_date, 'recorded', 'no_statement', 'No statement received', missing_run],
@@ -167,11 +167,28 @@ async function main() {
             const bytes = await comparisonDownload(page, region, receipt)
             if (quantityEvidence && (saved === oldRun || saved === clean_run) && !reload) retainedDownloads.push(JSON.parse(bytes))
             if (saved === oldRun) {
+              assert.deepEqual(bytes, discoveredHistory)
               if (reload) assert.deepEqual(bytes, downloadedHistory)
               else downloadedHistory = bytes
             }
           }
           else assert.equal(await region.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
+          if (run === clean_run && !saved) {
+            stage = name + '-discover-previous-comparison'
+            const target = base + lookup(date, run) + '&include=previous_comparison'
+            const pendingPrior = page.waitForResponse(res => res.url() === target && res.request().method() === 'GET')
+            await region.getByRole('button', { name: 'View previous statement comparison' }).click()
+            const response = await pendingPrior
+            assert.equal(response.status(), 200)
+            const previous = await response.json()
+            assert.equal(previous.previous_of_run_id, run)
+            assert.equal(previous.previous_of_statement_id, statement)
+            assert.equal(previous.run_id, oldRun)
+            assert.equal(previous.statement_id, prior.detection.statement_id)
+            await region.getByRole('table', { name: 'Differences at comparison' }).waitFor()
+            assert.equal(await region.getByLabel('Saved run ID (optional)', { exact: true }).inputValue(), oldRun)
+            discoveredHistory = await comparisonDownload(page, region, previous)
+          }
         }
         // Even on a gateway with registered financial/action routes, the very
         // same customer session must be refused before entering those handlers.

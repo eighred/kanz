@@ -267,6 +267,17 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 			t.Fatalf("historical revision %d: %+v %v", i, result, err)
 		}
 		verifyExecutionQuantityRevision(t, []int{0, 1, 0, 2}[i], result.Run.ExecutionQuantities)
+		previous, err := st.PreviousComparison(ctx, sub, source.Account, run.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if enrolled && i > 0 {
+			if previous.State != "recorded" || previous.Run.RunID != retained[i-1].RunID || previous.PreviousOfStatementID != run.StatementID {
+				t.Fatalf("wrong predecessor on signed revision %d: %+v", i+1, previous)
+			}
+		} else if previous.State != "unknown" || previous.Run.RunID != "" || previous.StatementID != "" {
+			t.Fatal("disclosed a predecessor without a signed revision and verified assignment")
+		}
 		reported, ok := result.ReportedExecutionFigures()
 		if ok != enrolled {
 			t.Fatalf("source details available without original account proof: %t", ok)

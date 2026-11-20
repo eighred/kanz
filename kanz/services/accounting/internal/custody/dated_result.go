@@ -20,6 +20,7 @@ type DatedResult struct {
 	Reason                            string
 	StatementID                       string
 	SignedStatementSHA256             string
+	PreviousOfStatementID             string
 	reportedTransactions              []recon.Transaction
 	Run                               Run
 }

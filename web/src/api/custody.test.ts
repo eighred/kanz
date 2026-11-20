@@ -159,6 +159,30 @@ describe('custody response boundary', () => {
     await expect(custody.dated(subject, 'T')).rejects.toThrow('verified')
   })
 
+  it('binds a previous comparison to the selected close, later receipt and immediately preceding source revision', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const prefix = 'custody-batch.v1.source.with.r1.segments'
+    const digest = 'a'.repeat(64), anchor = prefix + '.r2.' + 'b'.repeat(64)
+    const receipt = { ...subject, tenant_id: 'T', state: 'recorded', outcome: 'clean', run_id: 'first',
+      completed_at: '2020-02-05T01:00:00Z', scope_mode: 'declared', account_assignment_verified: true,
+      statement_id: prefix + '.r1.' + digest, signed_statement_sha256: digest, journal_position: '1',
+      transaction_pass: 'balances_only', breaks: [], previous_of_run_id: 'second', previous_of_statement_id: anchor }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(receipt)
+    const read = () => custody.dated(subject, 'T', undefined, 'second', { previousOf: anchor })
+    expect(await read()).toMatchObject({ run_id: 'first', historical: { signed_statement_sha256: digest } })
+    expect(get.mock.calls[0]?.[0]).toContain('run_id=second&include=previous_comparison')
+    for (const change of [{ run_id: 'second' }, { previous_of_run_id: 'third' }, { previous_of_statement_id: undefined },
+      { statement_id: prefix + '.r2.' + digest }, { statement_id: prefix + '.r1.other.r1.' + digest },
+      { account_assignment_verified: undefined }, { state: 'unknown' }, { tenant_id: 'other' }]) {
+      get.mockResolvedValueOnce({ ...receipt, ...change })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce(receipt)
+    await expect(custody.dated(subject, 'T', undefined, 'first')).rejects.toThrow('verified')
+    get.mockResolvedValueOnce({ ...subject, tenant_id: 'T', state: 'unknown' })
+    expect(await read()).toMatchObject({ state: 'unknown' })
+  })
+
   it('reads source figures only on the explicitly requested, proven signed revision', async () => {
     const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
     const digest = 'a'.repeat(64)

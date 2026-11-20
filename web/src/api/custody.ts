@@ -89,6 +89,14 @@ function signedStatement(value: unknown): value is string {
   return typeof value === 'string' && /^custody-batch\.v1\.[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.r[1-9]\d{0,18}\.[a-f0-9]{64}$/.test(value)
 }
 
+export function previousStatementPrefix(statement: unknown): string | undefined {
+  if (!signedStatement(statement)) return
+  const end = statement.lastIndexOf('.')
+  const start = statement.lastIndexOf('.r', end)
+  const revision = BigInt(statement.slice(start + 2, end))
+  if (revision > 1n) return statement.slice(0, start) + '.r' + (revision - 1n) + '.'
+}
+
 function retainedBreak(value: unknown): RetainedBreak {
   const invalid = () => new Error('Historical difference could not be verified.')
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid()
@@ -139,7 +147,9 @@ function validQueueCursor(value: unknown): value is string {
 }
 
 export const custody = {
-  async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = '', reportedFigures = false): Promise<DatedCustodyResult> {
+  async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = '', projection: boolean | { previousOf: string } = false): Promise<DatedCustodyResult> {
+    const reportedFigures = projection === true
+    const anchor = typeof projection === 'object' ? projection.previousOf : undefined
     const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
     if (runID) {
       if (!validCustodyRunID(runID)) throw new Error('Invalid saved run ID.')
@@ -148,6 +158,10 @@ export const custody = {
     if (reportedFigures) {
       if (!runID) throw new Error('A saved run is required for source figures.')
       query.set('include', 'reported_execution_figures')
+    }
+    if (anchor !== undefined) {
+      if (!runID || !previousStatementPrefix(anchor)) throw new Error('A later signed comparison is required.')
+      query.set('include', 'previous_comparison')
     }
     const result = await api.get<Record<string, unknown>>('/api/v1/portfolios/' + encodeURIComponent(subject.portfolio_id) + '/custody/comparison?' + query, { expectedStatus: 200, signal })
     const invalid = () => new Error('Dated result could not be verified.')
@@ -159,6 +173,11 @@ export const custody = {
     const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
     const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
     const correction = result.state === 'recorded' && result.outcome === 'historical_quantity_correction'
+    if (anchor !== undefined && result.state === 'recorded') {
+      if (!verified || result.account_assignment_verified !== true || result.previous_of_run_id !== runID || result.previous_of_statement_id !== anchor ||
+          !validCustodyRunID(result.run_id) || result.run_id === runID || !signedStatement(result.statement_id) ||
+          result.statement_id.slice(0, -64) !== previousStatementPrefix(anchor)) throw invalid()
+    } else if (result.previous_of_run_id !== undefined || result.previous_of_statement_id !== undefined) throw invalid()
     if ((!reportedFigures || !verified) && result.reported_execution_figures !== undefined) throw invalid()
     const correctionID = result.historical_quantity_correction_run_id
     if (correctionID !== undefined && (runID || result.state !== 'pending' || !signedStatement(result.statement_id) || !validCustodyRunID(correctionID))) throw invalid()
@@ -169,7 +188,7 @@ export const custody = {
     let historical: HistoricalComparison | undefined
     if (runID && result.state === 'recorded') {
       const digest = result.signed_statement_sha256
-      if ((!verified && !correction) || result.run_id !== runID || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
+      if ((!verified && !correction) || (anchor === undefined && result.run_id !== runID) || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
           !signedStatement(result.statement_id) || !result.statement_id.endsWith('.' + digest)) throw invalid()
       if (correction) {
         historical = { signed_statement_sha256: digest, historical_quantity_resolutions: readQuantityResolutions(result.historical_quantity_resolutions) }
