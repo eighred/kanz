@@ -12,12 +12,13 @@ import (
 )
 
 // DatedResult describes what the recorded comparison establishes for one UTC close.
-// Run is populated only when the receipt can be bound to the current source.
+// A historical lookup also returns the digest of the specific verified signed revision.
 type DatedResult struct {
-	State       string
-	Reason      string
-	StatementID string
-	Run         Run
+	State                 string
+	Reason                string
+	StatementID           string
+	SignedStatementSHA256 string
+	Run                   Run
 }
 
 func (p TransactionComparison) matches(stmt Statement) bool {
