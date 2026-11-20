@@ -50,6 +50,43 @@ describe('custody exact review', () => {
     }
   })
 
+  it('opens only the discovered signed correction and clears its exact quantities on session change', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
+    const scope = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04', tenant_id: 'fixture' }
+    const statement = 'custody-batch.v1.src.r2.' + 'a'.repeat(64)
+    const pending = { ...scope, state: 'pending' as const, statement_id: statement, historical_quantity_correction_run_id: 'correction' }
+    const saved = { ...scope, state: 'recorded' as const, outcome: 'historical_quantity_correction' as const,
+      run_id: 'correction', completed_at: '2020-02-07T00:00:00Z', scope_mode: 'declared', journal_position: '2', statement_id: statement,
+      historical: { signed_statement_sha256: 'a'.repeat(64), historical_quantity_resolutions: [
+        { break_id: 'q1:' + 'b'.repeat(64), detection_run_id: 'detection', entry_id: 'entry', external_ref: 'external',
+          instrument_id: 'SYN', agreed_quantity: { coefficient: '0', exponent: 0 } }] } }
+    const get = vi.spyOn(custody, 'dated').mockResolvedValueOnce(pending).mockResolvedValueOnce({ ...saved, statement_id: 'another-source' })
+      .mockResolvedValueOnce(pending).mockResolvedValueOnce(saved)
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      const form = wrapper.get('[aria-label="Dated custody result"] form')
+      for (const [i, value] of ['P', 'C', scope.business_date].entries()) await form.findAll('input')[i]!.setValue(value)
+      for (const success of [false, true]) {
+        await form.findAll('input')[3]!.setValue('')
+        await form.trigger('submit')
+        await flushPromises()
+        await button(wrapper, 'View corrected execution quantities').trigger('click')
+        await flushPromises()
+        expect(get.mock.lastCall?.[3]).toBe('correction')
+        if (!success) {
+          expect(wrapper.text()).toContain('Unable to verify')
+          expect(wrapper.find('[aria-label="Execution quantity resolutions"]').exists()).toBe(false)
+        }
+      }
+      expect(wrapper.get('[aria-label="Execution quantity resolutions"] tbody tr').findAll('td').map(cell => cell.text())).toContain('0')
+      expect(wrapper.text()).toContain('Historical execution quantities corrected')
+      useSession().identity!.tenant = 'other'
+      await flushPromises()
+      expect(wrapper.find('[aria-label="Execution quantity resolutions"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Download comparison receipt')
+    } finally { wrapper.unmount() }
+  })
+
   it('shows the selected date even with an empty queue and clears the last result on subject change', async () => {
     vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
     const select = vi.spyOn(custody, 'dated')

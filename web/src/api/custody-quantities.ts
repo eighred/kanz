@@ -29,6 +29,34 @@ function measured(value: unknown): Required<Decimal> {
   return { coefficient, exponent }
 }
 
+export interface QuantityResolution {
+  break_id: string; detection_run_id: string; entry_id: string; external_ref: string; instrument_id: string
+  agreed_quantity: Required<Decimal>
+}
+
+export function validCustodyRunID(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 && value.trim() === value &&
+    !/\p{Cc}|\p{Cs}/u.test(value) && new TextEncoder().encode(value).length <= 512
+}
+
+export function readQuantityResolutions(value: unknown): QuantityResolution[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > receiptByteLimit / 64) return invalid()
+  let previous = ''
+  let bytes = 0
+  const utf8 = new TextEncoder()
+  return value.map(item => {
+    const { break_id, detection_run_id, entry_id, external_ref, instrument_id, agreed_quantity } = record(item)
+    if (typeof break_id !== 'string' || !/^q1:[a-f0-9]{64}$/.test(break_id) || previous >= break_id ||
+        !validCustodyRunID(detection_run_id) || typeof entry_id !== 'string' || !entry_id || /\p{Cs}/u.test(entry_id) ||
+        typeof external_ref !== 'string' || !external_ref || /^\p{White_Space}|\p{White_Space}$|\p{Cs}/u.test(external_ref) ||
+        typeof instrument_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(instrument_id)) return invalid()
+    bytes += break_id.length + utf8.encode(detection_run_id).length + utf8.encode(entry_id).length + utf8.encode(external_ref).length + instrument_id.length
+    if (bytes > receiptByteLimit) return invalid()
+    previous = break_id
+    return { break_id, detection_run_id, entry_id, external_ref, instrument_id, agreed_quantity: measured(agreed_quantity) }
+  })
+}
+
 function count(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffffffff) return invalid()
   return value

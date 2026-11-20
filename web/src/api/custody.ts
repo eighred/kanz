@@ -1,7 +1,7 @@
 import { api, auth, ApiError } from './client'
 import { users } from './users'
 import { downloadJson } from './evidence'
-import { readExecutionQuantities, type ExecutionQuantities } from './custody-quantities'
+import { readExecutionQuantities, readQuantityResolutions, validCustodyRunID, type ExecutionQuantities, type QuantityResolution } from './custody-quantities'
 
 export interface CustodyDetection {
   run_id: string; statement_id: string; business_date: string
@@ -68,7 +68,7 @@ function parseBreak(value: unknown): CustodyBreak {
 
 export interface CustodyRerunRequest { portfolio_id: string; custodian_id: string; business_date: string; request_id: string }
 export interface CustodyRerunReceipt extends CustodyRerunRequest {
-  actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'no_statement' | 'failed'
+  actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'no_statement' | 'failed' | 'historical_quantity_correction'
   statement_id?: string; scope_mode?: string; journal_position?: string; failure_code?: string
 }
 
@@ -80,7 +80,14 @@ interface RetainedBreak {
   break_id: string; kind: string; key: string; values_state: 'exact' | 'unavailable'
   ibor: string; custodian: string; difference: string
 }
-interface HistoricalComparison { signed_statement_sha256: string; breaks: RetainedBreak[]; execution_quantities?: ExecutionQuantities }
+type HistoricalComparison = { signed_statement_sha256: string } & (
+  | { breaks: RetainedBreak[]; execution_quantities?: ExecutionQuantities; historical_quantity_resolutions?: never }
+  | { historical_quantity_resolutions: QuantityResolution[]; breaks?: never; execution_quantities?: never }
+)
+
+function signedStatement(value: unknown): value is string {
+  return typeof value === 'string' && /^custody-batch\.v1\.[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.r[1-9]\d{0,18}\.[a-f0-9]{64}$/.test(value)
+}
 
 function retainedBreak(value: unknown): RetainedBreak {
   const invalid = () => new Error('Historical difference could not be verified.')
@@ -102,7 +109,7 @@ function isPendingReason(reason: unknown): reason is PendingReason {
 }
 
 export type DatedCustodyResult = CustodySubject & { tenant_id: string } & (
-  | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: PendingReason }
+  | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: PendingReason; historical_quantity_correction_run_id?: string }
   | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; account_assignment_verified?: true; transactions?: TransactionComparison; historical?: HistoricalComparison }
 )
 
@@ -125,7 +132,7 @@ export const custody = {
   async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = ''): Promise<DatedCustodyResult> {
     const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
     if (runID) {
-      if (runID !== runID.trim() || /\p{Cc}/u.test(runID) || new TextEncoder().encode(runID).length > 512) throw new Error('Invalid saved run ID.')
+      if (!validCustodyRunID(runID)) throw new Error('Invalid saved run ID.')
       query.set('run_id', runID)
     }
     const result = await api.get<Record<string, unknown>>('/api/v1/portfolios/' + encodeURIComponent(subject.portfolio_id) + '/custody/comparison?' + query, { expectedStatus: 200, signal })
@@ -137,18 +144,26 @@ export const custody = {
     const scope = { tenant_id: tenant, portfolio_id: subject.portfolio_id, custodian_id: subject.custodian_id, business_date: subject.business_date }
     const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
     const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
+    const correction = result.state === 'recorded' && result.outcome === 'historical_quantity_correction'
+    const correctionID = result.historical_quantity_correction_run_id
+    if (correctionID !== undefined && (runID || result.state !== 'pending' || !signedStatement(result.statement_id) || !validCustodyRunID(correctionID))) throw invalid()
+    if (correction && (!runID || result.account_assignment_verified !== true || result.scope_mode !== 'declared' || result.breaks !== undefined)) throw invalid()
+    if (!correction && result.historical_quantity_resolutions !== undefined) throw invalid()
     if (result.account_assignment_verified !== undefined &&
-        (result.account_assignment_verified !== true || !verified || result.scope_mode !== 'declared')) throw invalid()
+        (result.account_assignment_verified !== true || (!verified && !correction) || result.scope_mode !== 'declared')) throw invalid()
     let historical: HistoricalComparison | undefined
     if (runID && result.state === 'recorded') {
       const digest = result.signed_statement_sha256
-      if (!verified || result.run_id !== runID || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
-          typeof result.statement_id !== 'string' || !/^custody-batch\.v1\.[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.r[1-9]\d{0,18}\.[a-f0-9]{64}$/.test(result.statement_id) ||
-          !result.statement_id.endsWith('.' + digest) || !Array.isArray(result.breaks) ||
-          result.breaks.length > 4096 || (result.outcome === 'clean') !== (result.breaks.length === 0)) throw invalid()
-      const breaks = result.breaks.map(retainedBreak)
-      if (new Set(breaks.map(row => row.break_id)).size !== breaks.length) throw invalid()
-      historical = { signed_statement_sha256: digest, breaks }
+      if ((!verified && !correction) || result.run_id !== runID || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
+          !signedStatement(result.statement_id) || !result.statement_id.endsWith('.' + digest)) throw invalid()
+      if (correction) {
+        historical = { signed_statement_sha256: digest, historical_quantity_resolutions: readQuantityResolutions(result.historical_quantity_resolutions) }
+      } else {
+        if (!Array.isArray(result.breaks) || result.breaks.length > 4096 || (result.outcome === 'clean') !== (result.breaks.length === 0)) throw invalid()
+        const breaks = result.breaks.map(retainedBreak)
+        if (new Set(breaks.map(row => row.break_id)).size !== breaks.length) throw invalid()
+        historical = { signed_statement_sha256: digest, breaks }
+      }
     } else if ((runID && result.state !== 'unknown') || result.breaks !== undefined || result.signed_statement_sha256 !== undefined) throw invalid()
     let transactions: TransactionComparison | undefined
     if (verified) {
@@ -171,7 +186,7 @@ export const custody = {
     }
     if (result.state === 'recorded') {
       if (!nonempty(result.run_id) || !nonempty(result.completed_at) || !Number.isFinite(Date.parse(result.completed_at)) ||
-          !['clean', 'breaks', 'no_statement', 'failed'].some(value => value === result.outcome)) throw invalid()
+          !['clean', 'breaks', 'no_statement', 'failed', 'historical_quantity_correction'].some(value => value === result.outcome)) throw invalid()
       if (result.outcome === 'no_statement' && result.statement_id !== undefined) throw invalid()
       const scoped = result.journal_position !== undefined || result.scope_mode !== undefined
       if (scoped && (!['declared', 'derived'].some(value => value === result.scope_mode) || typeof result.journal_position !== 'string' ||
@@ -185,7 +200,7 @@ export const custody = {
         (result.state === 'pending' && !result.statement_id) || (result.state === 'unknown' && result.statement_id !== undefined) ||
         ['run_id', 'outcome', 'completed_at', 'scope_mode', 'journal_position'].some(key => result[key] !== undefined)) throw invalid()
     return { ...scope, state: result.state as 'not_compared' | 'pending' | 'unknown',
-      statement_id: result.statement_id as string | undefined, reason }
+      statement_id: result.statement_id as string | undefined, reason, ...(correctionID !== undefined && { historical_quantity_correction_run_id: correctionID }) }
   },
   async queue(signal?: AbortSignal, after?: string): Promise<{ breaks: CustodyBreak[]; nextCursor?: string; rerunActor?: string }> {
     const limit = 100
@@ -227,7 +242,9 @@ export const custody = {
     if (!receipt || receipt.request_id !== request.request_id || receipt.portfolio_id !== portfolio_id ||
         receipt.custodian_id !== request.custodian_id || receipt.business_date !== request.business_date || receipt.actor !== actor ||
         !nonempty(receipt.run_id) || !Number.isFinite(Date.parse(receipt.completed_at)) ||
-        !['clean', 'breaks', 'no_statement', 'failed'].includes(receipt.outcome) ||
+        !['clean', 'breaks', 'no_statement', 'failed', 'historical_quantity_correction'].includes(receipt.outcome) ||
+        (receipt.outcome === 'historical_quantity_correction' && (!validCustodyRunID(receipt.run_id) || !signedStatement(receipt.statement_id) ||
+          receipt.scope_mode !== 'declared' || receipt.journal_position === undefined)) ||
         (receipt.failure_code !== undefined && (receipt.outcome !== 'failed' || !['historical_lifecycle', 'comparison_failed'].includes(receipt.failure_code))) ||
         (['clean', 'breaks'].includes(receipt.outcome) && !nonempty(receipt.statement_id)) ||
         (receipt.outcome === 'no_statement' && receipt.statement_id !== undefined) ||

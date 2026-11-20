@@ -197,7 +197,7 @@ function age(seconds: number): string {
   <section v-if="rerunReceipt" aria-label="Recorded custody comparison" role="status">
     <h2>Recorded comparison</h2>
     <p>{{ rerunReceipt.portfolio_id }} · {{ rerunReceipt.custodian_id }} · {{ rerunReceipt.business_date }}</p>
-    <p>Outcome <strong>{{ rerunReceipt.outcome }}</strong> · {{ rerunReceipt.completed_at }}</p>
+    <p>Outcome <strong>{{ rerunReceipt.outcome === 'historical_quantity_correction' ? 'Historical execution quantities corrected' : rerunReceipt.outcome }}</strong> · {{ rerunReceipt.completed_at }}</p>
     <p v-if="rerunReceipt.failure_code === 'historical_lifecycle'">A newer comparison controls the break queue.</p>
     <p v-else-if="rerunReceipt.outcome === 'failed'">Accounting recorded a failed comparison. Use its run ID to investigate.</p>
     <p>Run <code>{{ rerunReceipt.run_id }}</code> · Request <code>{{ rerunReceipt.request_id }}</code></p>

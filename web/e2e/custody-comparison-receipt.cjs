@@ -32,7 +32,12 @@ async function comparisonDownload(page, region, response) {
     }
     expected.lookup = 'retained_run'
     expected.signed_statement_sha256 = response.signed_statement_sha256
-    expected.breaks = response.breaks.map(({ break_id, kind, key, values_state, ibor, custodian, difference }) =>
+    if (response.outcome === 'historical_quantity_correction') {
+      assert(!('breaks' in response) && !('execution_quantities' in response) && !('transaction_pass' in response))
+      expected.historical_quantity_resolutions = response.historical_quantity_resolutions.map(
+        ({ break_id, detection_run_id, entry_id, external_ref, instrument_id, agreed_quantity: { coefficient, exponent } }) =>
+          ({ break_id, detection_run_id, entry_id, external_ref, instrument_id, agreed_quantity: { coefficient, exponent } }))
+    } else expected.breaks = response.breaks.map(({ break_id, kind, key, values_state, ibor, custodian, difference }) =>
       ({ break_id, kind, key, values_state, ibor, custodian, difference }))
   }
   assert.deepEqual(JSON.parse(bytes), expected)

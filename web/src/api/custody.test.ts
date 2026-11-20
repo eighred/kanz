@@ -126,6 +126,39 @@ describe('custody response boundary', () => {
     await expect(custody.dated(subject, 'tenant')).rejects.toThrow('verified')
   })
 
+  it('binds a historical quantity correction to its own signed saved run and admits scoped discovery', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const digest = 'd'.repeat(64)
+    const current = { ...subject, tenant_id: 'T', state: 'pending', statement_id: 'custody-batch.v1.src.r2.' + digest,
+      historical_quantity_correction_run_id: 'later:2' }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(current)
+    expect(await custody.dated(subject, 'T')).toMatchObject(current)
+    for (const change of [{ state: 'unknown' }, { statement_id: 'unsigned' }, { historical_quantity_correction_run_id: ' bad' }, { tenant_id: 'other' }]) {
+      get.mockResolvedValueOnce({ ...current, ...change })
+      await expect(custody.dated(subject, 'T')).rejects.toThrow('verified')
+    }
+    const row = { break_id: 'q1:' + digest, detection_run_id: 'first', entry_id: 'entry', external_ref: 'ref',
+      instrument_id: 'SYN', agreed_quantity: { coefficient: '0', exponent: 0 } }
+    const saved = { ...subject, tenant_id: 'T', state: 'recorded', outcome: 'historical_quantity_correction', run_id: 'later:2',
+      statement_id: current.statement_id, signed_statement_sha256: digest, completed_at: '2020-02-07T01:02:03Z',
+      account_assignment_verified: true, scope_mode: 'declared', journal_position: '12', historical_quantity_resolutions: [row] }
+    const read = () => custody.dated(subject, 'T', undefined, saved.run_id)
+    get.mockResolvedValueOnce(saved)
+    expect(await read()).toMatchObject({ historical: { historical_quantity_resolutions: [row], signed_statement_sha256: digest } })
+    for (const change of [{ run_id: 'other' }, { tenant_id: 'foreign' }, { signed_statement_sha256: 'e'.repeat(64) },
+      { scope_mode: 'derived' }, { journal_position: undefined }, { account_assignment_verified: undefined }, { breaks: [] },
+      { execution_quantities: {} }, { transaction_pass: 'unknown' }, { book_reference_count: '0' }, { outcome: 'clean' },
+      { historical_quantity_resolutions: [] }, { historical_quantity_resolutions: [row, row] },
+      { historical_quantity_resolutions: [row, { ...row, break_id: 'q1:' + 'a'.repeat(64) }] },
+      ...[{ break_id: 'arb' }, { detection_run_id: ' ' }, { entry_id: '' }, { external_ref: ' ' }, { instrument_id: '' },
+        { agreed_quantity: null }, { agreed_quantity: { coefficient: 0, exponent: 0 } }].map(fields => ({ historical_quantity_resolutions: [{ ...row, ...fields }] }))]) {
+      get.mockResolvedValueOnce({ ...saved, ...change })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce(saved)
+    await expect(custody.dated(subject, 'T')).rejects.toThrow('verified')
+  })
+
   it('only exports measured same-instrument amounts on a bound saved run', async () => {
     const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
     const digest = 'a'.repeat(64)
