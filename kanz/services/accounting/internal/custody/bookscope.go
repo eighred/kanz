@@ -58,9 +58,19 @@ type BookScope struct {
 // It describes the comparison, without certifying that a declared account exists.
 // The run's subject supplies the portfolio and inclusive UTC business-day close.
 type RunBasis struct {
-	Mode            string              `json:"mode"`
-	Accounts        map[string][]string `json:"accounts"`
-	JournalPosition int64               `json:"journal_position"`
+	Mode            string                 `json:"mode"`
+	Accounts        map[string][]string    `json:"accounts"`
+	JournalPosition int64                  `json:"journal_position"`
+	Transactions    *TransactionComparison `json:"transactions,omitempty"`
+}
+
+// TransactionComparison records reference membership only. A missing count has
+// no measured value. The signed, complete statement may explicitly have zero.
+type TransactionComparison struct {
+	Pass                   string `json:"pass"`
+	StatementReferences    *int   `json:"statement_references,omitempty"`
+	BookReferences         *int   `json:"book_references,omitempty"`
+	UnreferencedBookTrades *int   `json:"unreferenced_book_trades,omitempty"`
 }
 
 func (s *BookScope) runBasis(subject Subject, mode string, fold ledger.CustodyBasis) *RunBasis {
@@ -74,7 +84,8 @@ func (s *BookScope) runBasis(subject Subject, mode string, fold ledger.CustodyBa
 			accounts[custodian] = slices.Sorted(maps.Keys(scope))
 		}
 	}
-	return &RunBasis{Mode: mode, Accounts: accounts, JournalPosition: fold.JournalPosition}
+	return &RunBasis{Mode: mode, Accounts: accounts, JournalPosition: fold.JournalPosition,
+		Transactions: &TransactionComparison{BookReferences: new(fold.DayReferenced), UnreferencedBookTrades: new(fold.DayUnreferenced)}}
 }
 
 func (b *RunBasis) clone() *RunBasis {
@@ -82,6 +93,19 @@ func (b *RunBasis) clone() *RunBasis {
 		return nil
 	}
 	out := *b
+	if b.Transactions != nil {
+		tx := *b.Transactions
+		if tx.StatementReferences != nil {
+			tx.StatementReferences = new(*tx.StatementReferences)
+		}
+		if tx.BookReferences != nil {
+			tx.BookReferences = new(*tx.BookReferences)
+		}
+		if tx.UnreferencedBookTrades != nil {
+			tx.UnreferencedBookTrades = new(*tx.UnreferencedBookTrades)
+		}
+		out.Transactions = &tx
+	}
 	out.Accounts = make(map[string][]string, len(b.Accounts))
 	for custodian, accounts := range b.Accounts {
 		out.Accounts[custodian] = slices.Clone(accounts)

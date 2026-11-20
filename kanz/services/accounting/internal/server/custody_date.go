@@ -54,7 +54,7 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 				result = custody.DatedResult{State: "unknown"}
 			}
 		}
-		response := map[string]string{"state": result.State, "portfolio_id": portfolio, "custodian_id": custodian, "business_date": date.Format(time.DateOnly)}
+		response := map[string]string{"tenant_id": principal.Tenant, "state": result.State, "portfolio_id": portfolio, "custodian_id": custodian, "business_date": date.Format(time.DateOnly)}
 		if result.Reason != "" {
 			response["reason"] = result.Reason
 		}
@@ -65,6 +65,17 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			response["run_id"] = result.Run.RunID
 			response["outcome"] = result.Run.Outcome.String()
 			response["completed_at"] = result.Run.CompletedAt.UTC().Format(time.RFC3339Nano)
+			if result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks {
+				response["transaction_pass"] = "unknown"
+				if proof := result.Run.Basis.Transactions; proof != nil {
+					response["transaction_pass"] = proof.Pass
+					if proof.StatementReferences != nil && proof.BookReferences != nil && proof.UnreferencedBookTrades != nil {
+						response["statement_reference_count"] = strconv.Itoa(*proof.StatementReferences)
+						response["book_reference_count"] = strconv.Itoa(*proof.BookReferences)
+						response["unreferenced_book_trades"] = strconv.Itoa(*proof.UnreferencedBookTrades)
+					}
+				}
+			}
 			if b := result.Run.Basis; b != nil {
 				response["scope_mode"] = b.Mode
 				response["journal_position"] = strconv.FormatInt(b.JournalPosition, 10)

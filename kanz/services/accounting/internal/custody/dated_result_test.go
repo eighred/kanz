@@ -1,6 +1,9 @@
 package custody
 
 import (
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -123,4 +126,100 @@ func TestPostgresDatedCustodyEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("unknown", "", "", "")
+}
+
+func TestSignedDatedReferenceCoverage(t *testing.T) {
+	const tenant = "reference-coverage"
+	pool := newCustodyPool(t, tenant)
+	requireRestrictedCustodyRole(t, pool)
+	applyCustodySchema(t, pool)
+	ctx := bus.WithTenantID(t.Context(), tenant)
+	st, journal := NewPostgres(pool), ledger.NewPostgres(pool)
+	sub := subject()
+	sub.BusinessDate = BusinessDay(t0)
+	now := t0.AddDate(0, 0, 3)
+	r, err := NewReconciler(st, LedgerBookLoader(journal, closeScope(t, true), testLogger()), &capturePublisher{}, nil, nil, testLogger(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := signedStatementFeed(t, ctx, st)
+	date := sub.BusinessDate.Format(time.RFC3339)
+	feed := func(grain, trades string) string {
+		t.Helper()
+		return write(json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":%q,"positions":[],"cash":[],"transactions":%s,"grain":"STATEMENT_GRAIN_%s"}`, date, trades, grain)))
+	}
+	check := func(source string, outcome Outcome, want *TransactionComparison) Run {
+		t.Helper()
+		now = now.Add(time.Minute)
+		run, err := r.Reconcile(ctx, sub)
+		if err != nil || run.Outcome != outcome {
+			t.Fatalf("reconcile %s: %+v, %v", source, run, err)
+		}
+		got, err := NewPostgres(pool).DatedResult(ctx, sub)
+		if err != nil || got.State != "recorded" || got.StatementID != source || got.Run.RunID != run.RunID || got.Run.Basis == nil || !reflect.DeepEqual(got.Run.Basis.Transactions, want) {
+			t.Fatalf("dated reference coverage: %+v, want %+v, err=%v", got, want, err)
+		}
+		return run
+	}
+	ran := func(statement, book, missing int) *TransactionComparison {
+		return &TransactionComparison{Pass: "ran", StatementReferences: &statement, BookReferences: &book, UnreferencedBookTrades: &missing}
+	}
+	zero := feed("BALANCES_ONLY", "[]")
+	check(zero, OutcomeClean, &TransactionComparison{Pass: "balances_only"})
+	full := feed("TRANSACTIONS", "[]")
+	measured := check(full, OutcomeClean, ran(0, 0, 0))
+	// A retained run written before reference evidence existed can still
+	// establish its signed balances. Its historical transaction scope is unknown.
+	if _, err := pool.Exec(ctx, "UPDATE custody_runs SET book_basis=book_basis-'transactions' WHERE run_id=$1", measured.RunID); err != nil {
+		t.Fatal(err)
+	}
+	old, err := st.DatedResult(ctx, sub)
+	if err != nil || old.State != "recorded" || old.Run.Basis == nil || old.Run.Basis.Transactions != nil {
+		t.Fatal("legacy run invented reference coverage", old, err)
+	}
+	check(full, OutcomeClean, ran(0, 0, 0))
+	post := func(id, ref string, qty int64, day time.Time) {
+		t.Helper()
+		entry := closeTrade(id, qty, -10*qty, day)
+		entry.SourceRef = ref
+		if err := journal.Append(ctx, entry, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both dates net to zero. Only two of these four unreferenced trades
+	// settle on the compared date.
+	post("earlier-buy", "", 1, t0.AddDate(0, 0, -1))
+	post("earlier-sell", "", -1, t0.AddDate(0, 0, -1))
+	post("today-buy", "", 1, t0)
+	post("today-sell", "", -1, t0)
+	check(full, OutcomeClean, ran(0, 0, 2))
+	post("book-entry-one", "independent-buy", 1, t0)
+	post("book-entry-two", "independent-sell", -1, t0)
+	trades := func(buyReference string) string {
+		line := func(ref string, qty int) string {
+			return fmt.Sprintf(`{"externalRef":%q,"instrumentId":"AAPL","currencyCode":"USD","tradeDate":%q,"quantity":{"coefficient":"%d"},"price":{"coefficient":"10"},"cash":{"coefficient":"%d"}}`, ref, date, qty, -10*qty)
+		}
+		return "[" + line(buyReference, 1) + "," + line("independent-sell", -1) + "]"
+	}
+	disputed := feed("TRANSACTIONS", trades("different-buy"))
+	check(disputed, OutcomeBreaks, ran(2, 2, 2))
+	matching := feed("TRANSACTIONS", trades("independent-buy"))
+	last := check(matching, OutcomeClean, ran(2, 2, 2))
+	// Retained counts must fit the actual prefix, the signed inventory, and
+	// the membership result. None of these changes can describe the measured run.
+	for _, counts := range []string{
+		`{"pass":"ran","book_references":2,"unreferenced_book_trades":2}`,
+		`{"pass":"ran","statement_references":1,"book_references":2,"unreferenced_book_trades":2}`,
+		`{"pass":"ran","statement_references":2,"book_references":1,"unreferenced_book_trades":2}`,
+		`{"pass":"ran","statement_references":2,"book_references":2,"unreferenced_book_trades":5}`,
+		`{"pass":"balances_only"}`,
+	} {
+		if _, err := pool.Exec(ctx, "UPDATE custody_runs SET book_basis=jsonb_set(book_basis,'{transactions}',$2::jsonb) WHERE run_id=$1", last.RunID, counts); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.DatedResult(ctx, sub)
+		if err != nil || got.State != "unknown" || got.Run.RunID != "" {
+			t.Fatalf("inconsistent coverage exposed: %+v, %v", got, err)
+		}
+	}
 }
