@@ -23,6 +23,10 @@ import (
 )
 
 var ErrPublicationPending = errors.New("custody: run committed; completion FACT publication pending")
+var errQuantityReceiptLimit = errors.New("custody: execution quantity completion exceeds the retained receipt limit")
+
+const historicalBreakLimit = 4096
+
 var ErrRunBusy = errors.New("custody: reconciliation pair is being committed")
 var ErrRunCompletionMissing = errors.New("custody: existing run has no immutable completion FACT")
 var ErrRunIdentityConflict = errors.New("custody: run ID belongs to another subject")
@@ -94,6 +98,11 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	msg, err := runToProto(run)
 	if err != nil {
 		return outbox.Record{}, err
+	}
+	// The immutable lookup bounds both the full payload and the working breaks.
+	// Refuse before the queue transaction commits an unreadable completion.
+	if run.ExecutionQuantities != nil && (len(msg.Breaks) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
+		return outbox.Record{}, errQuantityReceiptLimit
 	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
@@ -346,9 +355,6 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	record, err := runRecord(ctx, tenant, run)
 	if err != nil {
 		return Run{}, err
-	}
-	if run.ExecutionQuantities != nil && len(record.Payload) > BatchLimit {
-		return Run{}, ErrUnverifiedPrecision
 	}
 	if err := staged.saveRun(ctx, run, signedDigest, record.Payload); err != nil {
 		return Run{}, err

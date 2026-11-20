@@ -211,3 +211,26 @@ func TestOldQuantitySweepCannotClearReservedBreak(t *testing.T) {
 		t.Fatal("legacy sweep cleared the evidence", status, diff, err)
 	}
 }
+
+func TestQuantityReceiptRefusesOversizedSerializedCompletion(t *testing.T) {
+	ctx := bus.WithTenantID(t.Context(), "quantity-size")
+	q := &accountingpb.ExecutionQuantityComparison{}
+	run := Run{Subject: subject(), RunID: "sized", StatementID: "independent", CompletedAt: t0, Outcome: OutcomeClean, ExecutionQuantities: q}
+	one, _ := exactProto(big.NewRat(1, 1))
+	two, _ := exactProto(big.NewRat(2, 1))
+	minusOne, _ := exactProto(big.NewRat(-1, 1))
+	// All individual rows fit. Only the completed receipt crosses the bound.
+	for i := 0; i < 3000; i++ {
+		q.Differences = append(q.Differences, &accountingpb.ExecutionQuantityDifference{ExternalRef: fmt.Sprintf("%04d-%s", i, strings.Repeat("r", 470)), InstrumentId: "A", Ibor: one, Custodian: two, Difference: minusOne})
+	}
+	q.Compared = uint32(len(q.Differences))
+	if _, err := runRecord(ctx, "quantity-size", run); !errors.Is(err, errQuantityReceiptLimit) {
+		t.Fatal("oversized serialized completion", err)
+	}
+	q.Differences = q.Differences[:1900]
+	q.Compared = uint32(len(q.Differences))
+	record, err := runRecord(ctx, "quantity-size", run)
+	if err != nil || len(record.Payload) > BatchLimit || len(record.Payload) < BatchLimit/2 {
+		t.Fatal("bounded serialized completion", len(record.Payload), err)
+	}
+}
