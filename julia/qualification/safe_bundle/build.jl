@@ -7,6 +7,14 @@ include(joinpath(@__DIR__, "protobuf", "verified_source.jl"))
 
 file_digest(path) = bytes2hex(open(sha256, path))
 
+function verify_runtime(root, libraries)
+    for (relative, expected) in libraries
+        path = joinpath(root, relative)
+        isfile(path) && !islink(path) && file_digest(path) == expected ||
+            error("rebuilt runtime differs: $relative")
+    end
+end
+
 function source_digests(project)
     files = ["Project.toml", "Manifest.toml"]
     for part in ("src", "gen")
@@ -31,6 +39,8 @@ function build(project, destination, replay...)
     isfile(joinpath(project, "src", "Worker.jl")) || error("missing worker source")
     initial = source_digests(project)
     tools = joinpath(@__DIR__, "tools", "Manifest.toml")
+    libraries = TOML.parsefile(joinpath(@__DIR__, "rebuilt_runtime.toml"))
+    verify_runtime(dirname(Sys.BINDIR), libraries)
     # Record the path dependency actually selected by the prepared candidate.
     protobuf = only(TOML.parsefile(joinpath(project, "Manifest.toml"))["deps"]["ProtoBuf"])
     package = realpath(joinpath(project, protobuf["path"]))
@@ -44,6 +54,7 @@ function build(project, destination, replay...)
         "juliaExecutableSHA256" => file_digest(joinpath(Sys.BINDIR, "julia")),
         "sysimageSHA256" => file_digest(joinpath(Sys.BINDIR, "../lib/julia/sys.so")),
         "buildManifestSHA256" => file_digest(tools), "workerSources" => initial,
+        "rebuiltLibraries" => libraries,
         "protobufTree" => tree, "protobufSources" => codec, "entrypointSHA256" => file_digest(entrypoint),
     )
     mktempdir(dirname(destination)) do temporary
@@ -74,6 +85,7 @@ function build(project, destination, replay...)
         output = mkdir(joinpath(temporary, "output"))
         bundle = joinpath(output, "bundle")
         bundle_products(BundleRecipe(link_recipe=link, output_dir=bundle))
+        verify_runtime(bundle, libraries)
         source_digests(project) == initial || error("worker source changed during build")
         VerifiedProtoBuf.verify(package) == tree || error("ProtoBuf source changed during build")
         report = merge(inputs, Dict(

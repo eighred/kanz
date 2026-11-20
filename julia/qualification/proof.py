@@ -38,7 +38,8 @@ def isolation_stage(raw):
     return stages[-1] if stages and stages[-1] in ISOLATION_STAGES else 'unclassified'
 
 
-def command(args, data=b'', timeout=120, limit=1 << 20, env=None, cwd=ROOT, diagnostic=None):
+def command(args, data=b'', timeout=120, limit=1 << 20, env=None, cwd=ROOT, diagnostic=None,
+            expected_stderr_line=None):
     process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, cwd=cwd, env=env)
     outputs = [bytearray(), bytearray()]
@@ -87,6 +88,8 @@ def command(args, data=b'', timeout=120, limit=1 << 20, env=None, cwd=ROOT, diag
         raise RuntimeError('bounded command output exceeded')
     if diagnostic is not None:
         diagnostic.update(exitCode=code, isolationStage=isolation_stage(bytes(outputs[1])))
+        if expected_stderr_line is not None:
+            diagnostic['stderrLineMatched'] = expected_stderr_line in outputs[1].splitlines()
     return code, bytes(outputs[0])
 
 
@@ -97,14 +100,14 @@ def required(args, **kwargs):
     return output
 
 
-def container_boundary(item, image, source):
+def container_boundary(item, image, source, *, single_pid=False):
     host, config = item['HostConfig'], item['Config']
     if (item['Image'] != image or config['User'] != '65532:65532'
             or config['Labels'].get('kanz.julia-proof') != source
             or host['NetworkMode'] != 'none' or not host['ReadonlyRootfs']
             or host['Privileged'] or host.get('Binds') or host.get('Devices')
             or host['Memory'] != 1 << 30 or host['MemorySwap'] != 1 << 30
-            or host['NanoCpus'] != 1000000000 or host['PidsLimit'] != 64
+            or host['NanoCpus'] != 1000000000 or host['PidsLimit'] != (1 if single_pid else 64)
             or host['CapDrop'] != ['ALL'] or host.get('CapAdd')
             or 'no-new-privileges' not in host['SecurityOpt']
             or host['Tmpfs'] != {'/tmp': 'rw,noexec,nosuid,size=16777216,mode=1777'}):

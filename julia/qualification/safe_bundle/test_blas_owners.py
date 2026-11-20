@@ -6,7 +6,7 @@ import tarfile
 import tempfile
 import unittest
 
-from blas_owners import blob, exact_file, scan_results, BLAS
+from blas_owners import blob, exact_file, map_native, scan_results, BLAS, JULIA_INTERNAL
 import advisory
 import jll_advisory
 
@@ -23,6 +23,11 @@ def packed(files):
 
 
 class OwnerEvidence(unittest.TestCase):
+    def test_legacy_private_runtime_cannot_be_attributed_to_the_rebuilt_image(self):
+        previous = json.loads(Path(__file__).with_name("previous_application.json").read_bytes())
+        with self.assertRaisesRegex(ValueError, "private Julia runtime differs"):
+            map_native({JULIA_INTERNAL: previous["native"][JULIA_INTERNAL]}, None, [])
+
     def test_verified_blob_rejects_wrong_size_and_bytes(self):
         raw = b"benign metadata"
         sha = hashlib.sha256(raw).hexdigest()

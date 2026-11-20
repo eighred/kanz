@@ -8,12 +8,14 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 
 
 FORBIDDEN = ("libllvm", "libjulia-codegen")
 LAUNCHER = "bin/curve-worker"
+REBUILT = tomllib.loads(Path(__file__).with_name("rebuilt_runtime.toml").read_text())
 GCC_LIBRARY = "lib/julia/libstdc++.so.6.0.34"
-GCC_SHA256 = "18c8d1e340b784387ca1fdda0d1b90c5fe94842517a6b5151dc71387cbf409b1"
+GCC_SHA256 = REBUILT[GCC_LIBRARY]
 REMOVED = {"bin/julia", "lib/julia/sys.so", "lib/julia/libLLVM.so.20.1jl",
            "lib/julia/libjulia-codegen.so.1.13.3"}
 ADDED = {"lib/julia/libblastrampoline.so.5", "lib/julia/libopenblas64_.0.3.30.so"}
@@ -90,6 +92,18 @@ def inspect_tar(archive, temporary, rootfs=False):
     return application, native
 
 
+def native_changes(before, previous):
+    for path, digest in REBUILT.items():
+        if before.get(path, {}).get("sha256") != digest:
+            raise ValueError(f"rebuilt runtime differs: {path}")
+    added = sorted(before.keys() - previous.keys())
+    removed = sorted(previous.keys() - before.keys())
+    changed = sorted(k for k in before.keys() & previous.keys() if before[k]["sha256"] != previous[k])
+    if set(added) != ADDED or set(removed) != REMOVED or set(changed) != {LAUNCHER, *REBUILT}:
+        raise ValueError("unreviewed change from the recorded native profile")
+    return added, removed, changed
+
+
 def compare(bundle, filesystem, legacy):
     with tempfile.TemporaryDirectory() as scratch:
         tmp = Path(scratch) / "native"
@@ -98,14 +112,9 @@ def compare(bundle, filesystem, legacy):
     if expected != actual:
         raise ValueError("final application differs from the build bundle")
     app_native = {k.removeprefix("opt/kanz/"): v for k, v in after.items() if k.startswith("opt/kanz/")}
-    if app_native != before or before.get(GCC_LIBRARY, {}).get("sha256") != GCC_SHA256:
-        raise ValueError("final native inventory or selected GCC runtime differs")
-    previous = legacy["native"]
-    added = sorted(before.keys() - previous.keys())
-    removed = sorted(previous.keys() - before.keys())
-    changed = sorted(k for k in before.keys() & previous.keys() if before[k]["sha256"] != previous[k])
-    if set(added) != ADDED or set(removed) != REMOVED or set(changed) != {LAUNCHER, GCC_LIBRARY}:
-        raise ValueError("unreviewed change from the recorded native profile")
+    if app_native != before:
+        raise ValueError("final native inventory differs")
+    added, removed, changed = native_changes(before, legacy["native"])
     return {"application": app_native, "baseELFs": {k: v for k, v in after.items() if not k.startswith("opt/kanz/")},
             "previousImage": legacy["image"], "added": added, "removed": removed, "changed": changed,
             "bundleSHA256": file_digest(bundle), "filesystemSHA256": file_digest(filesystem)}

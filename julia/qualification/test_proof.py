@@ -24,6 +24,13 @@ class QualificationTests(unittest.TestCase):
     def test_actual_container_configuration_refuses_weakened_boundary(self):
         item = self.item()
         proof.container_boundary(item, item['Image'], 'b' * 40)
+        with self.assertRaises(ValueError):
+            proof.container_boundary(item, item['Image'], 'b' * 40, single_pid=True)
+        exhausted = copy.deepcopy(item)
+        exhausted['HostConfig']['PidsLimit'] = 1
+        proof.container_boundary(exhausted, item['Image'], 'b' * 40, single_pid=True)
+        with self.assertRaises(ValueError):
+            proof.container_boundary(exhausted, item['Image'], 'b' * 40)
         mutations = [('NetworkMode', 'host'), ('ReadonlyRootfs', False), ('Privileged', True),
                      ('Binds', ['/host:/target']), ('Devices', ['device']), ('Memory', 0),
                      ('MemorySwap', -1), ('NanoCpus', 0), ('PidsLimit', 0), ('CapDrop', []),

@@ -1,14 +1,26 @@
 import io
+import json
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import unittest
 
-from inventory import inspect_tar
+from inventory import ADDED, LAUNCHER, REBUILT, REMOVED, inspect_tar, native_changes
 
 
 class BundleInventoryTests(unittest.TestCase):
+    def test_prebuilt_runtime_cannot_replace_either_rebuilt_library(self):
+        self.assertEqual(set(REBUILT), {"lib/julia/libstdc++.so.6.0.34", "lib/julia/libjulia-internal.so.1.13.3"})
+        previous = json.loads(Path(__file__).with_name("previous_application.json").read_bytes())["native"]
+        selected = {k: {"sha256": v} for k, v in previous.items() if k not in REMOVED}
+        selected.update({k: {"sha256": "fixture"} for k in ADDED | {LAUNCHER}})
+        selected.update({k: {"sha256": v} for k, v in REBUILT.items()})
+        self.assertEqual(set(native_changes(selected, previous)[2]), {LAUNCHER, *REBUILT})
+        for path in REBUILT:
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "rebuilt runtime differs"):
+                native_changes({**selected, path: {"sha256": previous[path]}}, previous)
+
     def inventory(self, entries):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

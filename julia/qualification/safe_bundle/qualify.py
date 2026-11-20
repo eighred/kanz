@@ -38,13 +38,13 @@ def inspect_image(image, source, bundle):
 
 
 @contextlib.contextmanager
-def worker(image, source, supervisor=None):
+def worker(image, source, supervisor=None, *, single_pid=False):
     label = "kanz.julia-proof=" + source
     name = "kanz-safe-bundle-" + uuid.uuid4().hex
     args = ["docker", "create", "--pull=never", "--name", name, "--label", label, "-i",
             "--platform", "linux/amd64", "--network", "none", "--read-only", "--user", "65532:65532",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--cpus", "1",
-            "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "64",
+            "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "1" if single_pid else "64",
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=16777216,mode=1777"]
     if supervisor:
         binary, launcher_digest = supervisor
@@ -59,7 +59,7 @@ def worker(image, source, supervisor=None):
         raise ValueError("invalid container ID")
     try:
         info, = json.loads(required(["docker", "inspect", cid]))
-        container_boundary(info, image, source)
+        container_boundary(info, image, source, single_pid=single_pid)
         mounts = [(m["Type"], m["Destination"], m["RW"]) for m in info["Mounts"] if m["Type"] != "tmpfs"]
         if mounts != ([("bind", "/bounded-parent", False)] if supervisor else []):
             raise ValueError("unexpected external mounts")
@@ -83,6 +83,16 @@ def qualify(image, source, inventory):
         cases = json.loads((directory / "cases.json").read_bytes())
         if len(cases) != len(CASES) or {item["name"] for item in cases} != CASES:
             raise ValueError("incomplete oracle corpus")
+        # Use a normal request. The signal listener needs a thread beyond PID 1.
+        deposit = (directory / "deposit.input").read_bytes()
+        with worker(image, source, single_pid=True) as cid:
+            diagnostic = {}
+            code, wire = command(["docker", "start", "--attach", "--interactive", cid], data=deposit, timeout=30,
+                                 diagnostic=diagnostic, expected_stderr_line=b"ERROR: pthread_create(signal_listener) failed")
+            info, = json.loads(required(["docker", "inspect", cid]))
+            if (code != 1 or wire or info["State"]["ExitCode"] != code or info["State"]["OOMKilled"]
+                    or not diagnostic["stderrLineMatched"]):
+                raise ValueError("worker did not refuse the exhausted PID quota")
         for item in cases:
             key = item["name"]
             with worker(image, source) as cid:
@@ -109,7 +119,9 @@ def qualify(image, source, inventory):
             raise ValueError("incomplete supervised corpus")
         supervisor = hashlib.sha256(executable.read_bytes()).hexdigest()
     return {"image": image, "source": source, "base": BASE, "applicationLayerDiffID": layer,
-            "launcherSHA256": launcher, "supervisorSHA256": supervisor, "cases": sorted(CASES)}
+            "launcherSHA256": launcher, "supervisorSHA256": supervisor, "cases": sorted(CASES),
+            "pidQuota": {"refusedLimit": 1, "recoveredLimit": 64,
+                         "requestSHA256": hashlib.sha256(deposit).hexdigest()}}
 
 
 if __name__ == "__main__":

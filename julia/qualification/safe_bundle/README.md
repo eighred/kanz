@@ -8,7 +8,11 @@ Prepare the [worker-specific ProtoBuf project](protobuf/README.md) in a disposab
 
 The build-only JuliaC environment is independent of the application environment. Instantiate `tools/Project.toml` using its checked-in manifest. JuliaC 0.3.12 is pinned to registered Git tree `49a147f54e5f9ad46104834de93648dd9ef012f0` from commit `98e82861ff28c05d4eeabbf9de67c08f0bd97e80`. Its build-only ObjectFile 0.5.1, StructIO 0.3.1 and LIEF_Patchelf_jll 1.0.0+1 trees are recorded in that manifest. [Upstream bundling implementation](https://github.com/JuliaLang/JuliaC.jl/blob/98e82861ff28c05d4eeabbf9de67c08f0bd97e80/src/bundling.jl)
 
-Supply a staged Julia 1.13.3 compiler, a prepared worker project with `src/`, generated `gen/` and the selected ProtoBuf path in its manifest, and an unused output directory. The worker project and tool project must both be available to the build machine. The compiler staging owner supplies the reviewed PCRE2 and libstdc++ bytes. Set `JULIA_PKG_OFFLINE=true` and isolate the build after acquiring the pinned build dependencies. From the repository root run:
+Supply a disposable Julia 1.13.3 compiler staged with the reviewed PCRE2 and libstdc++ builds. Rebuild the private Julia runtime and check its ABI against the original runtime and target libc. The source recipe pins the compiler, headers, static libraries and signed Julia inputs. [Native build and ABI qualification](https://github.com/eighred/kanz/tree/8fd830a93266adc03787672560eb4104f491aa9f/julia/qualification/application_bundle)
+
+In the staged compiler copy, install the verified regular file as `lib/julia/libjulia-internal.so.1.13.3`. Preserve the existing symlinks. The build checks the [two rebuilt libraries](rebuilt_runtime.toml) in the compiler directory and in the final bundle. The replay receipt includes both digests.
+
+Prepare `src/`, generated `gen/` and the selected ProtoBuf path in the worker manifest. Use an unused output directory. Set `JULIA_PKG_OFFLINE=true` and isolate the build after acquiring the pinned dependencies. From the repository root run:
 
 ```sh
 "$JULIA" --startup-file=no --history-file=no --project=julia/qualification/safe_bundle/tools \
@@ -46,12 +50,15 @@ python3 -B -m unittest discover -s julia/qualification/safe_bundle -p test_inven
 
 With the generated Go SDK and local container engine, run the tracked direct wire oracle and real Go supervisor. Pass the image ID produced by `docker image inspect --format '{{.Id}}'` and the revision label on that image. The qualifier checks every base layer against the pinned base, then runs the 13 cases directly and through `shadowprocess.Run`. The supervisor checks the actual launcher SHA-256, deadline, child cleanup and scratch cleanup. The only additional mount for this second pass is the read-only test executable.
 
+The quota control first submits the ordinary deposit fixture with one PID available. It checks the signal-listener startup refusal, exit code and empty response. The same image and request then run at the normal 64-PID limit, and the Go oracle verifies the resulting curve.
+
 ```sh
 python3 -B julia/qualification/safe_bundle/qualify.py \
   "$IMAGE_ID" "$SOURCE" "$RECEIPTS/inventory.json" "$RECEIPTS/runtime.json"
 ```
 
 The source for the local upstream base and the pending Eighred mirror are tracked in [#1845](https://github.com/eighred/kanz/pull/1845). Signing, registry publication, deployment, production rollback and regulated model promotion have their own acceptance requirements. [#1536](https://github.com/eighred/kanz/issues/1536)
+
 ## Attribute the compiler-free native libraries
 
 Use the Linux tooling and advisory database specified in `qualification/advisory.py`. Run in the disposable, network-disabled scanner container with the OCI, publisher inputs, General registry snapshot and tool binaries mounted read-only. `TOOLS` holds each executable and its pinned release archive; `CACHE/db` holds the fresh Trivy database. Both commands accept filesystem paths.

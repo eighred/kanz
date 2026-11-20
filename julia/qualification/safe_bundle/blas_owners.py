@@ -11,7 +11,7 @@ import tarfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import advisory
 import jll_advisory
-from inventory import GCC_LIBRARY, GCC_SHA256, LAUNCHER, REMOVED
+from inventory import GCC_LIBRARY, GCC_SHA256, LAUNCHER, REBUILT, REMOVED
 
 BASE_MANIFEST = "8e80c746dfbb1aa5891456d3414e5f7fafed1ecc62a6e1579f8ba4311b016d83"
 PRIOR_RECEIPT = "2fff5c1128761fc78aeb275d20fb91cff669c28b9eb749d2be24ff8fea071a44"
@@ -100,6 +100,8 @@ def retained_packages(previous):
 
 
 def map_native(native, previous, publishers):
+    if native.get(JULIA_INTERNAL) != REBUILT[JULIA_INTERNAL]:
+        raise ValueError("private Julia runtime differs from the rebuilt library")
     prior = prior_receipt(previous)
     mapped = {}
     for owner, row in prior["wrapperMetadata"].items():
