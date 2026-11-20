@@ -136,7 +136,7 @@ func (s *Scheduler) Tick(ctx context.Context) {
 			return
 		}
 		subject := Subject{PortfolioID: pair.PortfolioID, CustodianID: pair.CustodianID, BusinessDate: date}
-		run, err := s.reconciler.Reconcile(ctx, subject)
+		run, err := s.comparePair(ctx, subject)
 		if err != nil {
 			s.logger.Error("accounting: custody reconciliation failed",
 				"portfolio", subject.PortfolioID, "custodian", subject.CustodianID,
@@ -161,6 +161,23 @@ func (s *Scheduler) Tick(ctx context.Context) {
 			s.logger.Info("accounting: custody reconciliation complete",
 				"portfolio", subject.PortfolioID, "custodian", subject.CustodianID,
 				"business_date", date.Format("2006-01-02"), "outcome", run.Outcome.String())
+		}
+	}
+}
+
+// Startup can overlap a statement redelivery that holds the pair lock. Each
+// busy attempt has rolled back. Try again on fresh inputs without leaving the
+// pair unchecked until the next scheduled close.
+func (s *Scheduler) comparePair(ctx context.Context, subject Subject) (Run, error) {
+	for delay := 50 * time.Millisecond; ; delay *= 2 {
+		run, err := s.reconciler.Reconcile(ctx, subject)
+		if run.RunID != "" || !errors.Is(err, ErrRunBusy) || delay > 200*time.Millisecond {
+			return run, err
+		}
+		select {
+		case <-ctx.Done():
+			return Run{}, ctx.Err()
+		case <-time.After(delay):
 		}
 	}
 }

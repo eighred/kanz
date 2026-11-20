@@ -311,7 +311,7 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	return &NATSClient{cfg: cfg, conn: conn, js: js}, nil
 }
 
-func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
+func natsMessage(msg Message) *nats.Msg {
 	nm := &nats.Msg{
 		Subject: msg.Subject,
 		Data:    msg.Body,
@@ -323,6 +323,11 @@ func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
 	if len(msg.Key) > 0 {
 		nm.Header.Set(natsKeyHeader, string(msg.Key))
 	}
+	return nm
+}
+
+func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
+	nm := natsMessage(msg)
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.PublishTimeout)
 	defer cancel()
 	if _, err := c.js.PublishMsg(ctx, nm); err != nil {

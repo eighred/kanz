@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
@@ -40,8 +41,9 @@ var ErrStatementIdentityConflict = errors.New("custody: statement ID belongs to 
 // regenerates the exact "list nobody reads" this control was built to prevent.
 type Store interface {
 	// CommitRun commits the run, its verifying break transitions and completion
-	// FACT together. Failed/no-statement runs leave existing breaks unchanged.
-	CommitRun(context.Context, Run) (Run, error)
+	// FACT together. Checks receive the final event while the lifecycle
+	// remains rollbackable. Failed/no-statement runs leave breaks unchanged.
+	CommitRun(context.Context, Run, ...func(context.Context, bus.Event) error) (Run, error)
 	ManualReceipt(context.Context, Run) (Run, error)
 	Outbox() outbox.Queue
 	// SaveStatement records a custodian statement, idempotent on StatementID. A

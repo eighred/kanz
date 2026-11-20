@@ -132,6 +132,15 @@ breaks and 1 MiB of serialized completion data. Accounting records a failed
 comparison if either limit is exceeded. The previous receipts and working
 queue stay in place.
 
+The importer and reconciler check the serialized FACT, stamped envelope and
+NATS headers against the connection's advertised payload limit before recording
+a new receipt. A source file that cannot be published leaves no intake receipt.
+A comparison that cannot be published retains the existing queue and records a
+compact failure when the failure FACT fits. If the connection has no current
+capacity, retry the same operator request after it reconnects. Previously
+committed receipts are replayed from the outbox. Broker acknowledgement records
+actual publication.
+
 
 An enrolled account’s current comparison becomes pending when its assignment has changed or the original run lacks assignment evidence. A saved run keeps the assignment version that governed the comparison. The verified indicator in its download means that accounting rechecked both issuers’ signatures, their authorized scopes and the effective business date. Earlier receipts keep their original evidence fields.
 

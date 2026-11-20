@@ -301,10 +301,11 @@ func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error
 		return 0, nil, err
 	}
 	sent := 0
+	publishCtx := publicationContext(ctx)
 	for _, p := range pending {
 		event, err := p.Record.Event()
 		if err == nil {
-			err = r.pub.Publish(ctx, event)
+			err = r.pub.Publish(publishCtx, event)
 		}
 		if err != nil {
 			if merr := r.q.MarkFailed(ctx, p.ID, err); merr != nil {

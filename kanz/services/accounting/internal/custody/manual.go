@@ -46,6 +46,8 @@ func (r *Reconciler) ReconcileManual(ctx context.Context, subject Subject, reque
 			return prior, ErrHistoricalLifecycle
 		case errBatchReceipt.Error():
 			return prior, errBatchReceipt
+		case bus.ErrPublishFrameTooLarge.Error():
+			return prior, bus.ErrPublishFrameTooLarge
 		}
 		return prior, errors.New(prior.FailureReason)
 	}

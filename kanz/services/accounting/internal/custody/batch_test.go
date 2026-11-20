@@ -239,6 +239,26 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 		return raw, ed25519.Sign(key, raw)
 	}
 	raw, sig := settlementExample(1, "", 95)
+	i := newImporter(pub)
+	checks := 0
+	i.preflight = func(_ context.Context, event bus.Event) error {
+		checks++
+		statement, ok := event.Payload.(*accountingpb.CustodianStatement)
+		if !ok || event.Subject != SubjectStatement || event.TenantID != tenant ||
+			event.PartitionKey != subject.PortfolioID || statement.GetReceivedAt() == nil ||
+			!isBatchStatement(statement.GetStatementId()) {
+			t.Fatal("preflight did not receive the final stamped statement")
+		}
+		return bus.ErrPublishFrameTooLarge
+	}
+	if id, err := i.Import(ctx, raw, sig); id != "" || !errors.Is(err, bus.ErrPublishFrameTooLarge) {
+		t.Fatal("a refused new delivery obtained a statement receipt", id, err)
+	}
+	var receipts, pending int
+	if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM custody_batch_receipts), (SELECT count(*) FROM outbox WHERE producer_service=$1)", BatchProducer).
+		Scan(&receipts, &pending); err != nil || receipts != 0 || pending != 0 {
+		t.Fatal("statement preflight left durable intake or publication behind", receipts, pending, err)
+	}
 	interrupted := newImporter(&capturePublisher{err: errors.New("fixture broker interrupted")})
 	id, err := interrupted.Import(ctx, raw, sig)
 	if err == nil || id == "" {
@@ -265,12 +285,12 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 	if _, err := st.LatestStatement(ctx, subject); !errors.Is(err, ErrNoStatement) {
 		t.Fatal("a rejected first delivery created a statement")
 	}
-	i := newImporter(pub)
 	again, err := i.Import(ctx, raw, sig)
-	if err != nil || again != id {
-		t.Fatalf("restart lost receipt: %v", err)
+	if err != nil || again != id || checks != 1 {
+		t.Fatalf("restart lost receipt or reapplied new-intake admission: %v", err)
 	}
 	waitAccepted()
+	i.preflight = custodyPublicationCheck(pub)
 	run, err = reconciler.Reconcile(ctx, subject)
 	if err != nil || run.StatementID != id || run.Outcome != OutcomeBreaks || len(run.Breaks) != 1 || run.Breaks[0].Key != "SYN" || run.Breaks[0].Diff.Cmp(big.NewRat(1, 1)) != 0 {
 		t.Fatalf("want only the one-unit position discrepancy; got %+v %v", run, err)
