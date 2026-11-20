@@ -47,7 +47,7 @@ def verify_startup(binary, env, reader_url, admitted):
                 service.communicate()
 
 
-def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture, *, check_startup):
+def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture, *, check_startup, schema):
     # The fixture administrator provisions independent public trust anchors. Only
     # the two issuer logins submit signed evidence through the actual command.
     sql(database, b"""
@@ -80,10 +80,10 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
             "-v", "venue=" + scope["venue"], "-v", "account=" + scope["account_id"],
             "-v", "exchange_id=" + scope["exchange_account_id"], "-v", "portfolio=" + scope["portfolio_id"],
             "-v", "custodian=" + scope["custodian_id"])
-        sql(database, f"""GRANT USAGE ON SCHEMA public TO {role};
+        sql(database, f"""GRANT USAGE ON SCHEMA :"accounting_schema" TO {role};
             GRANT SELECT ON custody_assignment_readers,custody_proof_issuers,custody_proof_scopes,
                 custody_account_proofs,custody_account_assignments TO {role};
-            GRANT INSERT ON {table} TO {role};""".encode())
+            GRANT INSERT ON {table} TO {role};""".encode(), "-v", "accounting_schema=" + schema)
         issuer_env = dict(env, ACCOUNTING_DATABASE_URL=f"postgres://{role}:{password}@{endpoint}/{database}?sslmode=disable",
                           ACCOUNTING_TENANT=issuer["tenant_id"])
         for _ in range(2):
@@ -91,7 +91,7 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
         if check_startup:
             verify_startup(binaries["service"], env, reader_url, kind == "custody_assignment")
         if kind == "custody_assignment" and check_startup:
-            verify_dated_store(sql, endpoint, binaries["assignment_test"], fixture, env, passwords)
+            verify_dated_store(sql, endpoint, binaries, fixture, env, passwords, schema=schema)
             def check_withdrawal():
                 for name, admitted in (("custody_assignment_withdrawn", False),
                                        ("custody_assignment_reinstated", True)):
@@ -103,7 +103,7 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
     return None
 
 
-def verify_dated_store(sql, endpoint, binary, fixture, env, passwords):
+def verify_dated_store(sql, endpoint, binaries, fixture, env, passwords, *, schema):
     # The store test applies migrations and resets tables. Its schema owner has
     # no grants on the database serving the customer workflow.
     owner_password = secrets.token_hex(24)
@@ -113,15 +113,30 @@ def verify_dated_store(sql, endpoint, binary, fixture, env, passwords):
         f"CREATE ROLE pilot_assignment_reader LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{reader_password}';\n"
         "CREATE DATABASE pilot_dated_store OWNER pilot_assignment_owner;"
     ).encode())
+    if schema != "public":
+        sql("pilot_dated_store", b"""
+            CREATE SCHEMA :"accounting_schema" AUTHORIZATION pilot_assignment_owner;
+            ALTER DATABASE pilot_dated_store SET search_path TO :"accounting_schema";
+            GRANT USAGE ON SCHEMA :"accounting_schema" TO
+                pilot_assignment_reader, pilot_venue_proof, pilot_custody_assignment;
+        """, "-v", "accounting_schema=" + schema)
     names = ("TestDeclaredAccountIsProvenByDatedIndependentAuthorities",
              "TestDeclaredAccountIsProvenAgainAfterConcurrentAccountEnrollment",
              "TestDeclaredAccountIsProvenOnlyOnIntersectionOfEffectiveWindows")
-    store_env = dict(env, TEST_CUSTODY_ASSIGNMENT_FIXTURE="1",
-                     TEST_POSTGRES_URL=f"postgres://pilot_assignment_owner:{owner_password}@{endpoint}/pilot_dated_store?sslmode=disable",
+    store_url = f"postgres://pilot_assignment_owner:{owner_password}@{endpoint}/pilot_dated_store?sslmode=disable"
+    issuer_test = "TestProofIssuerPinsOnlyAnUnambiguousRestrictedAccountingSchema"
+    issuer_env = dict(env, TEST_ACCOUNTING_MIGRATION_POSTGRES_URL=store_url,
+                      TEST_CUSTODY_VENUE_PROOF_PASSWORD=passwords["pilot_venue_proof"])
+    proof = subprocess.run([binaries["proof_test"], f"-test.run=^{issuer_test}$", "-test.count=1", "-test.v"],
+                           env=issuer_env, capture_output=True, timeout=30)
+    if (proof.returncode or b"--- SKIP" in proof.stdout
+            or f"--- PASS: {issuer_test} (".encode() not in proof.stdout):
+        raise RuntimeError("Restricted custody proof issuer schema verification failed.")
+    store_env = dict(env, TEST_CUSTODY_ASSIGNMENT_FIXTURE="1", TEST_POSTGRES_URL=store_url,
                      TEST_CUSTODY_ASSIGNMENT_READER_PASSWORD=reader_password,
                      TEST_CUSTODY_VENUE_PROOF_PASSWORD=passwords["pilot_venue_proof"],
                      TEST_CUSTODY_ASSIGNMENT_ISSUER_PASSWORD=passwords["pilot_custody_assignment"])
-    result = subprocess.run([binary, "-test.run=^(" + "|".join(names) + ")$", "-test.count=1", "-test.v"],
+    result = subprocess.run([binaries["assignment_test"], "-test.run=^(" + "|".join(names) + ")$", "-test.count=1", "-test.v"],
                             cwd=fixture.parents[2] / "internal/custody", env=store_env,
                             capture_output=True, timeout=60)
     if (result.returncode or b"--- SKIP" in result.stdout or

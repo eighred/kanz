@@ -263,7 +263,7 @@ func historicalResolutionsMatch(ctx context.Context, tx pgx.Tx, run Run, source 
       AND original.account_id=curr.account_id AND original.revision=prior.source_revision AND source.revision=curr.source_revision
       AND bound->>'account_id'=curr.account_id AND bound->>'custodian_id'=curr.custodian_id
       AND old.book_basis->'assignments' @> jsonb_build_array(bound)
-      AND curr.break_id=public.custody_quantity_key(ARRAY[curr.tenant_id,curr.portfolio_id,curr.custodian_id,to_char(curr.business_date,'YYYY-MM-DD'),
+      AND curr.break_id=custody_quantity_key(ARRAY[curr.tenant_id,curr.portfolio_id,curr.custodian_id,to_char(curr.business_date,'YYYY-MM-DD'),
           curr.account_id,bound->>'proof_sha256',bound->>'assignment_sha256',source.source_id,encode(source.public_key,'hex'),curr.external_ref,curr.instrument_id])
       AND prior.difference<>'0' AND prior.source_revision<curr.source_revision
       AND (prior.entry_id,prior.account_id,prior.instrument_id,prior.external_ref,prior.ibor,prior.first_seen_at)=

@@ -24,8 +24,12 @@ ALTER TABLE custody_runs DROP CONSTRAINT custody_run_signed_source_scope,
 -- The accounting writer verifies both independent signatures and the
 -- canonical completion bytes. Bind the relational provenance too, including
 -- the precise version of the single account on the signed source for the day.
-CREATE OR REPLACE FUNCTION custody_historical_comparison_origin() RETURNS trigger LANGUAGE plpgsql
-SET search_path=pg_catalog,public,pg_temp AS $$
+DO $install$
+DECLARE owning_schema name := pg_catalog.current_schema();
+BEGIN
+ EXECUTE pg_catalog.format($ddl$CREATE OR REPLACE FUNCTION %1$I.custody_historical_comparison_origin() RETURNS trigger LANGUAGE plpgsql
+SET search_path=pg_catalog,%1$I,pg_temp AS %2$L$ddl$,
+     owning_schema, $body$
 BEGIN
     IF NOT EXISTS (
         SELECT FROM custody_batch_receipts s
@@ -57,7 +61,9 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$;
+$body$);
+END;
+$install$;
 CREATE TRIGGER custody_historical_comparison_origin BEFORE INSERT OR UPDATE ON custody_runs
 FOR EACH ROW WHEN (NEW.outcome IN ('historical_clean','historical_breaks'))
 EXECUTE FUNCTION custody_historical_comparison_origin();

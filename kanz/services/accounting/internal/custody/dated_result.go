@@ -160,7 +160,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		}
 		if run.Basis.Assignments == nil {
 			var enrolled bool
-			if err := tx.QueryRow(ctx, "SELECT public.custody_assignment_reader_enrolled()").Scan(&enrolled); err != nil {
+			if err := tx.QueryRow(ctx, "SELECT custody_assignment_reader_enrolled()").Scan(&enrolled); err != nil {
 				return DatedResult{}, err
 			}
 			if enrolled {

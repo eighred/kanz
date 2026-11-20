@@ -22,7 +22,9 @@ CREATE POLICY signed_pilot_read_only_actions ON custody_actions AS RESTRICTIVE
 \if :review_fence_only
 \else
 CREATE ROLE kanz_custody_batch_pilot NOLOGIN NOSUPERUSER NOBYPASSRLS;
-GRANT USAGE ON SCHEMA public TO kanz_custody_batch_pilot;
+SELECT pg_catalog.format(
+    'GRANT USAGE ON SCHEMA %I TO kanz_custody_batch_pilot', pg_catalog.current_schema()
+) \gexec
 GRANT SELECT, INSERT ON custody_batch_receipts TO kanz_custody_batch_pilot;
 CREATE POLICY signed_pilot_receipts ON custody_batch_receipts AS RESTRICTIVE
     TO kanz_custody_batch_pilot

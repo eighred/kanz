@@ -74,8 +74,12 @@ CREATE POLICY custody_assignment_issue ON custody_account_assignments FOR INSERT
  WHERE i.login_role=session_user AND i.kind='custody_assignment' AND i.tenant_id=custody_account_assignments.tenant_id
  AND i.authority=custody_account_assignments.authority AND (s.portfolio_id,s.custodian_id,s.account_id) =
  (custody_account_assignments.portfolio_id,custody_account_assignments.custodian_id,custody_account_assignments.account_id)));
-CREATE OR REPLACE FUNCTION custody_record_assignment_knowledge() RETURNS trigger LANGUAGE plpgsql
-SET search_path=pg_catalog,public,pg_temp AS $$
+DO $install$
+DECLARE owning_schema name := pg_catalog.current_schema();
+BEGIN
+ EXECUTE pg_catalog.format($ddl$CREATE OR REPLACE FUNCTION %1$I.custody_record_assignment_knowledge() RETURNS trigger LANGUAGE plpgsql
+SET search_path=pg_catalog,%1$I,pg_temp AS %2$L$ddl$,
+     owning_schema, $body$
 BEGIN
  -- Comparing a complete portfolio set must serialize with newly added accounts too.
  PERFORM pg_advisory_xact_lock(hashtextextended('custody-assignment-tenant:' || NEW.tenant_id,0));
@@ -88,7 +92,9 @@ BEGIN
  END IF;
  NEW.recorded_at := clock_timestamp(); RETURN NEW;
 END;
-$$;
+$body$);
+END;
+$install$;
 CREATE TRIGGER custody_proof_knowledge BEFORE INSERT ON custody_account_proofs FOR EACH ROW EXECUTE FUNCTION custody_record_assignment_knowledge();
 CREATE TRIGGER custody_assignment_knowledge BEFORE INSERT ON custody_account_assignments FOR EACH ROW EXECUTE FUNCTION custody_record_assignment_knowledge();
 DO $$
@@ -102,23 +108,35 @@ END;
 $$;
 -- The caller can discover only its own enrollment. Existing deployments need
 -- no grants on the proof tables merely to read their pre-enrollment history.
-CREATE OR REPLACE FUNCTION custody_assignment_reader_enrolled() RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
- SELECT EXISTS(SELECT FROM public.custody_assignment_readers
- WHERE login_role=session_user AND tenant_id=public.app_current_tenant())
-$$;
+DO $install$
+DECLARE owning_schema name := pg_catalog.current_schema();
+BEGIN
+ EXECUTE pg_catalog.format($ddl$CREATE OR REPLACE FUNCTION %1$I.custody_assignment_reader_enrolled() RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS %2$L$ddl$,
+     owning_schema, pg_catalog.format($body$
+ SELECT EXISTS(SELECT FROM %1$I.custody_assignment_readers
+ WHERE login_role=session_user AND tenant_id=%1$I.app_current_tenant())
+$body$, owning_schema));
+END;
+$install$;
 
 -- During a rolling upgrade, previously deployed accounting binaries must fail
 -- closed for a newly enrolled login. Legacy deployments have no enrollment.
-CREATE OR REPLACE FUNCTION custody_require_proven_run() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DO $install$
+DECLARE owning_schema name := pg_catalog.current_schema();
 BEGIN
- IF EXISTS(SELECT FROM public.custody_assignment_readers r WHERE r.login_role=session_user AND r.tenant_id=NEW.tenant_id)
+ EXECUTE pg_catalog.format($ddl$CREATE OR REPLACE FUNCTION %1$I.custody_require_proven_run() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS %2$L$ddl$,
+     owning_schema, pg_catalog.format($body$
+BEGIN
+ IF EXISTS(SELECT FROM %1$I.custody_assignment_readers r WHERE r.login_role=session_user AND r.tenant_id=NEW.tenant_id)
  AND NEW.outcome IN ('clean','breaks') AND
  (CASE WHEN jsonb_typeof(NEW.book_basis->'assignments')='array' THEN jsonb_array_length(NEW.book_basis->'assignments')=0 ELSE true END)
  THEN RAISE EXCEPTION 'enrolled accounting requires effective custody assignment evidence'; END IF;
  RETURN NEW;
 END;
-$$;
+$body$, owning_schema));
+END;
+$install$;
 REVOKE ALL ON FUNCTION custody_require_proven_run() FROM PUBLIC;
 CREATE TRIGGER custody_run_requires_assignment BEFORE INSERT ON custody_runs FOR EACH ROW EXECUTE FUNCTION custody_require_proven_run();
