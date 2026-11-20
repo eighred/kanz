@@ -49,7 +49,7 @@ func checkSyntheticOMS(root string) error {
 			return nil
 		}
 		switch rel {
-		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql", "cancellation.sql", "settlement.sql":
+		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "funding.sql", "cancellation.sql", "settlement.sql":
 		default:
 			return fmt.Errorf("unexpected synthetic OMS input %s", rel)
 		}
@@ -63,7 +63,7 @@ func checkSyntheticOMS(root string) error {
 	if err != nil {
 		return err
 	}
-	if len(files) != 7 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
+	if len(files) != 8 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
 		return fmt.Errorf("synthetic OMS workspace recipe changed")
 	}
 	source, err := rustMigrationWithoutComments(files["src/main.rs"])
@@ -102,6 +102,23 @@ func checkSyntheticOMS(root string) error {
 		}
 	}
 	funding := rustMigrationCompact(files["funding.sql"])
+	goWriter := rustMigrationCompact(files["go_writer.sql"])
+	for _, marker := range []string{
+		"current_database()<>'kanz_synthetic_oms'",
+		"CREATEROLEkanz_synthetic_oms_go_runtimeNOLOGINNOINHERITNOSUPERUSERNOBYPASSRLS",
+		"pg_has_role(NEW.runtime_oid,'kanz_synthetic_oms_go_runtime','MEMBER')",
+		"current_setting('transaction_isolation')<>'readcommitted'",
+		"c.phase<>'working'ORo.status<>2",
+		"a.operation='ack'ANDa.observation=convert_to(c.order_id,'UTF8')",
+		"d.operation='dispatch'ANDd.observation=''::bytea",
+		"FROMpublic.capital_commitments",
+		"BEFOREUPDATEOFruntime_oidONpublic.synthetic_oms_writer",
+		"REVOKEALLONFUNCTIONpublic.synthetic_oms_check_go_handback()FROMPUBLIC",
+	} {
+		if !strings.Contains(goWriter, marker) {
+			return fmt.Errorf("synthetic Go handback changed %s", marker)
+		}
+	}
 	for _, marker := range []string{
 		"current_database()<>'kanz_synthetic_oms'",
 		"ALTERTABLEpublic.synthetic_oms_funding_authorizationsFORCEROWLEVELSECURITY",
@@ -181,6 +198,9 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"writer.sql", "WHERE singleton FOR SHARE", "WHERE singleton FOR KEY SHARE"},
 		{"writer.sql", "session_user::regrole::oid", "current_user::regrole::oid"},
 		{"writer.sql", "expected IS DISTINCT FROM old_epoch", "FALSE"},
+		{"go_writer.sql", "current_setting('transaction_isolation')<>'read committed'", "FALSE"},
+		{"go_writer.sql", "c.phase<>'working' OR o.status<>2", "FALSE"},
+		{"go_writer.sql", "a.observation=convert_to(c.order_id,'UTF8')", "TRUE"},
 		{"funding.sql", "TO kanz_synthetic_oms_funding;", "TO kanz_synthetic_oms_runtime;"},
 		{"funding.sql", "NEW.command_sha256 <> sha256(NEW.command)", "FALSE"},
 		{"funding.sql", "outcome := public.capital_reserve(", "outcome := public.other_reserve("},
@@ -208,7 +228,7 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "src"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "funding.sql", "cancellation.sql", "settlement.sql"} {
+			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "funding.sql", "cancellation.sql", "settlement.sql"} {
 				raw, err := os.ReadFile(filepath.Join(root, syntheticOMSPath, name))
 				if err != nil {
 					t.Fatal(err)
