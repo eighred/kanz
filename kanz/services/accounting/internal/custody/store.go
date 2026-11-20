@@ -177,6 +177,10 @@ func (m *MemoryStore) SaveStatement(_ context.Context, s Statement) error {
 func (m *MemoryStore) LatestStatement(_ context.Context, subject Subject) (Statement, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.latestStatementLocked(subject)
+}
+
+func (m *MemoryStore) latestStatementLocked(subject Subject) (Statement, error) {
 	list := m.statements[subject.Key()]
 	if len(list) == 0 {
 		return Statement{}, ErrNoStatement

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 func TestCustodyRunBusinessDateOrdering(t *testing.T) {
@@ -79,4 +80,57 @@ func checkCustodyRunDates(t *testing.T, st Store, ctx context.Context) {
 	independent := first
 	independent.RunID, independent.Subject.CustodianID = "independent-clean", "CUST-B"
 	commit(independent)
+}
+
+func TestLateComparatorKeepsCorrectedCustodyStatement(t *testing.T) {
+	t.Run("memory", func(t *testing.T) {
+		checkDelayedComparison(t, NewMemoryStore(), testRunContext(t.Context()))
+	})
+	t.Run("postgres", func(t *testing.T) {
+		pool := newCustodyPool(t, "custody-correction")
+		requireRestrictedCustodyRole(t, pool)
+		applyCustodySchema(t, pool)
+		checkDelayedComparison(t, NewPostgres(pool), bus.WithTenantID(t.Context(), "custody-correction"))
+	})
+}
+
+func checkDelayedComparison(t *testing.T, st Store, ctx context.Context) {
+	t.Helper()
+	observed := statement("statement-original", map[string]int64{"AAPL": 100}, nil)
+	if err := st.SaveStatement(ctx, observed); err != nil {
+		t.Fatal(err)
+	}
+	book := bookWith(map[string]int64{"AAPL": 100}, nil)
+	makeReconciler := func(load BookLoader, now time.Time) *Reconciler {
+		t.Helper()
+		r, err := NewReconciler(st, load, &capturePublisher{}, nil, nil, testLogger(), func() time.Time { return now })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	// Let the correction complete inside the first run's book load. This
+	// establishes the exact interleaving without relying on sleep or scheduling.
+	var correction Run
+	older := makeReconciler(func(ctx context.Context, s Subject) (*ledger.Book, []ledger.Execution, error) {
+		replacement := statement("statement-corrected", map[string]int64{"AAPL": 90}, nil)
+		replacement.ReceivedAt = observed.ReceivedAt.Add(time.Minute)
+		if err := st.SaveStatement(ctx, replacement); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		correction, err = makeReconciler(loaderFor(book), t0.Add(2*time.Minute)).Reconcile(ctx, s)
+		if err != nil || correction.Outcome != OutcomeBreaks || len(correction.Breaks) != 1 {
+			t.Fatalf("correction: %+v, %v", correction, err)
+		}
+		return book, nil, nil
+	}, t0)
+	failed, err := older.Reconcile(ctx, observed.Subject())
+	if !errors.Is(err, ErrStatementChanged) || failed.Outcome != OutcomeFailed {
+		t.Fatalf("stale comparison: %+v, %v", failed, err)
+	}
+	b, err := st.LoadBreak(ctx, correction.Breaks[0].BreakID)
+	if err != nil || b.Status != BreakOpen || b.Revision != 1 || !equalFigure(b.Diff, big.NewRat(10, 1)) {
+		t.Fatalf("correction lost: %+v, %v", b, err)
+	}
 }

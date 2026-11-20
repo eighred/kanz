@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +26,48 @@ var ErrRunBusy = errors.New("custody: reconciliation pair is being committed")
 var ErrRunCompletionMissing = errors.New("custody: existing run has no immutable completion FACT")
 var ErrRunIdentityConflict = errors.New("custody: run ID belongs to another subject")
 var ErrHistoricalLifecycle = errors.New("custody: a later business date already controls outstanding breaks")
+var ErrStatementChanged = errors.New("custody: the authoritative statement changed during comparison")
+
+func lockCustodyPair(ctx context.Context, tx pgx.Tx, subject Subject) (string, error) {
+	var tenant string
+	var locked bool
+	err := tx.QueryRow(ctx, `SELECT app_current_tenant(), pg_try_advisory_xact_lock(hashtextextended(app_current_tenant() || ':custody-run:' || $1,0))`, pairKey(subject.PortfolioID, subject.CustodianID)).Scan(&tenant, &locked)
+	if err == nil && !locked {
+		err = ErrRunBusy
+	}
+	return tenant, err
+}
 
 func verifying(run Run) bool { return run.Outcome == OutcomeClean || run.Outcome == OutcomeBreaks }
+
+func (run *Run) confirmStatement(current Statement, err error) error {
+	if err != nil {
+		return err
+	}
+	prior := run.compared
+	run.compared = nil
+	if current.StatementID != prior.StatementID || !current.ReceivedAt.Equal(prior.ReceivedAt) ||
+		current.Grain != prior.Grain || !maps.EqualFunc(current.Positions, prior.Positions, equalFigure) ||
+		!maps.EqualFunc(current.Cash, prior.Cash, equalFigure) ||
+		!slices.EqualFunc(current.Transactions, prior.Transactions, equalTransaction) {
+		return ErrStatementChanged
+	}
+	return nil
+}
+
+func equalFigure(a, b *big.Rat) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Cmp(b) == 0
+}
+
+func equalTransaction(a, b recon.Transaction) bool {
+	return a.ExternalRef == b.ExternalRef && a.InstrumentID == b.InstrumentID &&
+		a.CurrencyCode == b.CurrencyCode && a.TradeDate.Equal(b.TradeDate) &&
+		a.SettlementDate.Equal(b.SettlementDate) && equalFigure(a.Quantity, b.Quantity) &&
+		equalFigure(a.Price, b.Price) && equalFigure(a.Cash, b.Cash)
+}
 
 func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, error) {
 	msg, err := runToProto(run)
@@ -82,6 +124,12 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
 		return Run{}, ErrHistoricalLifecycle
 	}
+	if run.compared != nil {
+		current, err := m.latestStatementLocked(run.Subject)
+		if err := run.confirmStatement(current, err); err != nil {
+			return Run{}, err
+		}
+	}
 	// Stage into a detached map. Encoding/tenant/outbox refusal must leave the
 	// original lifecycle intact, just as a PostgreSQL rollback does.
 	staged := NewMemoryStore()
@@ -115,15 +163,12 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var tenant string
-	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT app_current_tenant(), pg_try_advisory_xact_lock(hashtextextended(app_current_tenant() || ':custody-run:' || $1,0))`, pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)).Scan(&tenant, &locked); err != nil {
+	tenant, err := lockCustodyPair(ctx, tx, run.Subject)
+	if err != nil {
 		return Run{}, err
 	}
-	if !locked {
-		return Run{}, ErrRunBusy
-	}
 	// Run IDs are tenant-wide even if an erroneous caller changes the pair.
+	var locked bool
 	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended(app_current_tenant() || ':custody-run-id:' || $1,0))`, run.RunID).Scan(&locked); err != nil {
 		return Run{}, err
 	}
@@ -175,6 +220,12 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		if later {
 			return Run{}, ErrHistoricalLifecycle
+		}
+		if run.compared != nil {
+			current, err := staged.LatestStatement(ctx, run.Subject)
+			if err := run.confirmStatement(current, err); err != nil {
+				return Run{}, err
+			}
 		}
 		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
 		if err != nil {

@@ -382,6 +382,9 @@ func (s Statement) Subject() Subject {
 // event. The age of the newest run per (portfolio, custodian) is what the
 // staleness alert reads.
 type Run struct {
+	// compared holds the statement read before loading the book. CommitRun
+	// validates it under the pair lock and drops it before retaining the run.
+	compared      *Statement
 	RunID         string
 	Subject       Subject
 	Outcome       Outcome

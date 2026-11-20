@@ -83,6 +83,9 @@ WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := lockCustodyPair(ctx, tx, s.Subject()); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
@@ -118,7 +121,11 @@ LIMIT 1`
 		newest             int64
 		businessDate, recv time.Time
 	)
-	err := p.pool.QueryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
+	queryRow := p.pool.QueryRow
+	if p.tx != nil {
+		queryRow = p.tx.QueryRow
+	}
+	err := queryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
 		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv,
 			&transactions, &grain, &verified, &newest)
 	if errors.Is(err, pgx.ErrNoRows) {

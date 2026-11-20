@@ -349,6 +349,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	// freshly built ones would announce every break as OPEN and one run old, so
 	// any consumer of the FACT would see an aging problem reset to zero daily.
 	run, err := r.record(ctx, Run{
+		compared:    &stmt,
 		RunID:       runID(subject, now),
 		Subject:     subject,
 		Outcome:     outcome,
