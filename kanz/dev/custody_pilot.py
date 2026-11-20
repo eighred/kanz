@@ -25,6 +25,7 @@ IMAGE = "postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200
 DATABASE = "kanz_custody_pilot"
 PACKAGES = {
     "accounting": "./services/accounting/cmd/custody_batch",
+    "assignment_test": "./services/accounting/internal/custody",
     "gateway": "./services/api_gateway/cmd/api_gateway",
     "bff": "./services/web_bff/internal/server",
 }

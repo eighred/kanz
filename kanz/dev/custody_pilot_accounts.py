@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import re
 import secrets
 import socket
 import subprocess
@@ -59,6 +60,7 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
         verify_startup(binaries["service"], env, reader_url, False)
     issuers = {row["kind"]: row for row in json.loads((fixture / "issuers.json").read_bytes())}
     scopes = {row["login_role"]: row for row in json.loads((fixture / "scopes.json").read_bytes())}
+    passwords = {}
     for kind, role, table in (("venue_identity", "pilot_venue_proof", "custody_account_proofs"),
                               ("custody_assignment", "pilot_custody_assignment", "custody_account_assignments")):
         issuer = issuers[kind]
@@ -66,6 +68,7 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
             raise RuntimeError("Unexpected issuer identity in the synthetic custody fixture.")
         scope = scopes[role]
         password = secrets.token_hex(24)
+        passwords[role] = password
         sql("postgres", f"CREATE ROLE {role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{password}'".encode())
         sql(database, b"""
             INSERT INTO custody_proof_issuers (login_role,kind,tenant_id,authority,public_key)
@@ -88,15 +91,44 @@ def enroll_accounts(sql, database, endpoint, reader_url, binaries, env, fixture,
         if check_startup:
             verify_startup(binaries["service"], env, reader_url, kind == "custody_assignment")
         if kind == "custody_assignment" and check_startup:
+            verify_dated_store(sql, endpoint, binaries["assignment_test"], fixture, env, passwords)
             def check_withdrawal():
                 for name, admitted in (("custody_assignment_withdrawn", False),
                                        ("custody_assignment_reinstated", True)):
                     import_evidence(binaries["proof"], issuer_env, fixture, "custody_assignment", name)
                     verify_startup(binaries["service"], env, reader_url, admitted)
                 return {"without_evidence": "refused", "identity_only": "refused", "assigned": "ready",
-                        "withdrawn": "refused", "reinstated": "ready"}
+                        "withdrawn": "refused", "reinstated": "ready", "dated_store": "verified"}
             return check_withdrawal
     return None
+
+
+def verify_dated_store(sql, endpoint, binary, fixture, env, passwords):
+    # The store test applies migrations and resets tables. Its schema owner has
+    # no grants on the database serving the customer workflow.
+    owner_password = secrets.token_hex(24)
+    reader_password = secrets.token_hex(24)
+    sql("postgres", (
+        f"CREATE ROLE pilot_assignment_owner LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{owner_password}';\n"
+        f"CREATE ROLE pilot_assignment_reader LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{reader_password}';\n"
+        "CREATE DATABASE pilot_dated_store OWNER pilot_assignment_owner;"
+    ).encode())
+    names = ("TestDeclaredAccountIsProvenByDatedIndependentAuthorities",
+             "TestDeclaredAccountIsProvenAgainAfterConcurrentAccountEnrollment",
+             "TestDeclaredAccountIsProvenOnlyOnIntersectionOfEffectiveWindows")
+    store_env = dict(env, TEST_CUSTODY_ASSIGNMENT_FIXTURE="1",
+                     TEST_POSTGRES_URL=f"postgres://pilot_assignment_owner:{owner_password}@{endpoint}/pilot_dated_store?sslmode=disable",
+                     TEST_CUSTODY_ASSIGNMENT_READER_PASSWORD=reader_password,
+                     TEST_CUSTODY_VENUE_PROOF_PASSWORD=passwords["pilot_venue_proof"],
+                     TEST_CUSTODY_ASSIGNMENT_ISSUER_PASSWORD=passwords["pilot_custody_assignment"])
+    result = subprocess.run([binary, "-test.run=^(" + "|".join(names) + ")$", "-test.count=1", "-test.v"],
+                            cwd=fixture.parents[2] / "internal/custody", env=store_env,
+                            capture_output=True, timeout=60)
+    if (result.returncode or b"--- SKIP" in result.stdout or
+            any(("--- PASS: " + name + " (").encode() not in result.stdout for name in names)):
+        location = re.search(rb"\b(assignment_postgres_test|postgres_test)\.go:(\d+):", result.stdout)
+        stage = " at " + location.group(0).decode().rstrip(":") if location else ""
+        raise RuntimeError("Dated custody assignment verification failed" + stage + ".")
 
 
 def import_evidence(binary, env, fixture, kind, name):
