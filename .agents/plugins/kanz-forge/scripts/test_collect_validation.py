@@ -36,6 +36,22 @@ class CollectorTests(unittest.TestCase):
         return dict(main_revision=MAIN, nodes=[node, task("repair"), task("feature")],
                     edges=[edge("feature", "julia"), edge("repair", "julia", "recovers")])
 
+    def test_collected_workflow_keeps_direct_holds_and_live_gate_dependencies(self):
+        contract = self.contract()
+        hold = dict(reason="repair awaits owner", evidence="issue/decision")
+        contract["nodes"][1]["holds"] = [hold]
+        contract["customer_workflow"] = dict(actor="reviewer", outcome="read the result",
+                                             acceptance="issue/acceptance", steps={"repair": "issue/repair", "feature": "issue/feature"})
+        assessment = collect("eighred/kanz", self.api, contract)["assessment"]
+        self.assertIsNone(assessment["next_actionable"])
+        report = assessment["customer_workflow"]
+        self.assertEqual(report["validated_steps"], [])
+        self.assertEqual({step["id"]: step["root_blockers"] for step in report["remaining_steps"]},
+                         {"repair": ["repair"], "feature": ["julia"]})
+        self.assertEqual(report["blockers"]["repair"]["holds"], [hold])
+        self.assertEqual(report["blockers"]["julia"]["state"], "VALIDATION_FAILED")
+        self.assertEqual(report["unmet_dependencies"], [contract["edges"][0]])
+
     def inventory_api(self, *, issues=None, prs=None, total=None):
         def api(path):
             result = self.api(path)
