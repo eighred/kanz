@@ -272,13 +272,15 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 	// consumer receives its original, unmodified execution evidence.
 	fillTime := time.Now().UTC().Truncate(time.Microsecond).Add(extra)
 	cfg := syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: fillTime, LoseExecuteAck: true, FillOnExecute: !fillOnCancel, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
-	var sends, queries atomic.Int32
+	var sends, queries, withdrawals atomic.Int32
 	count := grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
 		case venuepb.VenueAdapterService_Execute_FullMethodName:
 			sends.Add(1)
 		case venuepb.VenueAdapterService_QueryOrder_FullMethodName:
 			queries.Add(1)
+		case venuepb.VenueAdapterService_CancelOrder_FullMethodName:
+			withdrawals.Add(1)
 		}
 		return handler(ctx, request)
 	})
@@ -472,7 +474,11 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		if err != nil || opening.State.Msgs != 1 {
 			t.Fatalf("expected only the accounting opening balance before Go startup: %v", err)
 		}
+		queriesBefore := queries.Load()
 		successor(t, ctx, s, terminal, addr, identity, frame)
+		if sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != queriesBefore {
+			t.Fatalf("Go terminal replay changed XSIM calls: %d sends, %d withdrawals, %d queries (was %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
+		}
 		requireFundedPendingFacts(t, ctx, proof, orderID, nil)
 	} else if n, e := relay.Flush(ctx, orderID); e != nil || n != 3 {
 		t.Fatalf("publish routed, partially filled, cancelled FACTs: %d %v", n, e)

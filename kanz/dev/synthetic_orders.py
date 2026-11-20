@@ -54,11 +54,12 @@ def sql(container, statement, database="postgres"):
                    input=statement.encode("utf-8"), check=True, stdout=subprocess.DEVNULL)
 
 
-def build(stage, packages):
+def build(stage, packages, *, tags=None):
     env = dict(os.environ, GOOS="linux", GOARCH="amd64", CGO_ENABLED="0", GOWORK="off")
     for package in packages:
         name = package.rsplit("/", 1)[-1]
-        subprocess.run(["go", "test", "-mod=readonly", "-p", "1", "-c", "-o",
+        flags = [] if tags is None else ["-tags", tags]
+        subprocess.run(["go", "test", "-mod=readonly", "-p", "1", *flags, "-c", "-o",
                         stage / name, "./" + package], cwd=ROOT / "kanz", env=env, check=True)
         (stage / package).mkdir(parents=True)
     shutil.copytree(ROOT / "kanz/services/oms/migrations", stage / "services/oms/migrations")

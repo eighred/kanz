@@ -59,7 +59,7 @@ def run(stage, native, mode):
         targets.append("services/oms/cmd/oms")
         if funded:
             targets.append("services/accounting/internal/consume")
-    fixture.build(stage, targets)
+    fixture.build(stage, targets, tags="synthetic_handoff" if roundtrip else None)
     roles = ROLES
     if mode != "lineage":
         roles += ("CONTROL", "NEXT_ADAPTER")

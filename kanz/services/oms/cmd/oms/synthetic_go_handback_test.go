@@ -1,3 +1,5 @@
+//go:build synthetic_handoff
+
 package main
 
 import (
@@ -105,7 +107,11 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatal(e)
 	}
 	store := order.NewPostgres(pool)
-	svc, e := order.NewService(tenant, store, order.NewEmitter(publisher), nil, execution.NewRouter(venues), nil, logger, order.WithHaltGate(halt.NewGate(nil)))
+	opts := []order.ServiceOption{order.WithHaltGate(halt.NewGate(nil))}
+	if funded {
+		opts = append(opts, order.WithSyntheticHandoffCancellationRecovery(store))
+	}
+	svc, e := order.NewService(tenant, store, order.NewEmitter(publisher), nil, execution.NewRouter(venues), nil, logger, opts...)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -123,7 +129,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatalf("startup sweep: got %d: %v", n, err)
 	}
 	if funded {
-		replaySyntheticFundedCancel(t, ctx, pool, in.Broker, in.CancelEventID, &state)
+		replaySyntheticFundedCancel(t, ctx, client, svc, in.Broker, in.CancelEventID)
 	}
 	var wire []byte
 	var version int64

@@ -5,6 +5,7 @@ package order
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"slices"
 	"strings"
@@ -27,6 +28,53 @@ func syntheticWriterID(s string) bool {
 	return len(s) > 0 && len(s) <= 256 && strings.IndexFunc(s, func(r rune) bool {
 		return r < '!' || r > '~'
 	}) == -1
+}
+
+// WithSyntheticHandoffCancellationRecovery recognizes terminal Rust receipts
+// in the isolated XSIM successor. The ordinary Go compensator would otherwise
+// republish the terminal FACT because Rust does not set Go's announcement marker.
+func WithSyntheticHandoffCancellationRecovery(store *Postgres) ServiceOption {
+	return func(s *Service) { s.retainedCancelReplay = store.recoverSyntheticCancellation }
+}
+
+func (p *Postgres) recoverSyntheticCancellation(ctx context.Context, env *envelopepb.Envelope, payload []byte, cmd *orderpb.CancelOrder, st *orderpb.OrderState, version int64) (bool, error) {
+	if st.GetVenue() != "XSIM" || st.GetVenueAccountId() != "synthetic-spot" {
+		return false, nil
+	}
+	missing := bus.Terminal(errors.New("oms: synthetic cancellation has no matching published receipt"))
+	meta := cmd.GetMetadata()
+	at := env.GetEventTime()
+	if env.GetSource() != "api-gateway" || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_COMMAND ||
+		env.GetEventType() != SubjectCancel || env.GetTenantId() != bus.TenantIDFromContext(ctx) ||
+		env.GetPartitionKey() != st.GetOrderId() || meta.GetTargetId() != st.GetOrderId() ||
+		at.CheckValid() != nil {
+		return false, missing
+	}
+	digest := sha256.Sum256(payload)
+	var active, published bool
+	err := p.pool.QueryRow(ctx, `SELECT
+		current_database()='kanz_synthetic_oms'
+		AND pg_has_role(session_user,'kanz_synthetic_oms_go_funded_runtime','MEMBER')
+		AND public.synthetic_oms_assert_writer()>1,
+		EXISTS (
+			SELECT FROM public.synthetic_oms_cancellation_authorizations a
+			JOIN public.synthetic_oms_observations claim USING(tenant_id,order_id,event_id)
+			JOIN public.orders o USING(tenant_id,order_id)
+			JOIN public.outbox f ON (f.tenant_id,f.partition_key,f.causation_id)=(a.tenant_id,a.order_id,a.event_id)
+			WHERE (a.tenant_id,a.order_id,a.event_id,a.portfolio_id,a.principal_id,a.command_sha256,a.trace_context)
+				=($1,$2,$3,$4,$5,$6,$7)
+			  AND (claim.effective_seconds,claim.effective_nanos)=($8,$9)
+			  AND claim.operation='cancel_pending' AND o.status=$10 AND o.version=$11
+			  AND f.subject=$12 AND f.published_at IS NOT NULL AND f.trace_context=a.trace_context
+		)`, env.GetTenantId(), st.GetOrderId(), env.GetEventId(), st.GetPortfolioId(), meta.GetIssuer(), digest[:], env.GetTraceContext(),
+		at.Seconds, at.Nanos, st.GetStatus(), version, EventTypeCancelled).Scan(&active, &published)
+	if err != nil {
+		return false, err
+	}
+	if !active || !published {
+		return false, missing
+	}
+	return true, nil
 }
 
 // CreateSyntheticHandoff admits one direct unfunded XSIM buy into the Go store.

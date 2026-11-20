@@ -60,6 +60,8 @@ type Service struct {
 	now     func() time.Time
 	logger  *slog.Logger
 
+	retainedCancelReplay func(context.Context, *envelopepb.Envelope, []byte, *orderpb.CancelOrder, *orderpb.OrderState, int64) (bool, error)
+
 	// accounts binds each portfolio to the exchange account it may execute against.
 	// Empty ⇒ nothing is bound, and every portfolio trades whatever account its
 	// venue adapter happens to hold — one collateral pool, shared. See noteShared.
@@ -401,7 +403,7 @@ func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	case SubjectSubmit:
 		return s.handleSubmit(ctx, env, payload)
 	case SubjectCancel:
-		return s.handleCancel(ctx, payload)
+		return s.handleCancellation(ctx, env, payload)
 	case SubjectAmend:
 		return s.handleAmend(ctx, env, payload)
 	case SubjectApprove:
@@ -1552,6 +1554,10 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 // than no brake. The same reasoning holds one layer down: the venue adapters
 // refuse Execute while halted and still serve CancelOrder.
 func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
+	return s.handleCancellation(ctx, nil, payload)
+}
+
+func (s *Service) handleCancellation(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var cmd orderpb.CancelOrder
 	if err := proto.Unmarshal(payload, &cmd); err != nil {
 		s.logger.Error("oms: malformed CancelOrder", "err", err)
@@ -1684,6 +1690,12 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// see aggregate.go), so the announcement carries the same cancelled
 	// quantity the interrupted delivery would have.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_CANCELLED && st.GetCancelAnnouncedAt() == nil {
+		if s.retainedCancelReplay != nil {
+			replayed, err := s.retainedCancelReplay(ctx, env, payload, &cmd, st, ver)
+			if err != nil || replayed {
+				return err
+			}
+		}
 		return s.completeCancelAnnouncement(ctx, st, ver, st.GetLeavesQuantity(), now)
 	}
 
