@@ -139,6 +139,35 @@ func TestFundingProjectsOnlyAttestedPartialExecution(t *testing.T) {
 	}
 }
 
+func TestFundedWorkingAcknowledgementRequiresMeasuredZero(t *testing.T) {
+	state := fixtureOrder()
+	state.Status = orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW
+	at := time.Now()
+	c := Command{Op: "ack", Principal: OMSIdentity, Portfolio: state.PortfolioId, OrderID: state.OrderId,
+		VenueOrderID: state.OrderId, EffectiveSeconds: at.Unix(), EffectiveNanos: int32(at.Nanosecond())}
+	for _, tc := range []struct {
+		name string
+		view *venuepb.QueryOrderResponse
+		ok   bool
+	}{
+		{"working_zero", &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING, ExecutedQuantity: &commonpb.Decimal{}}, true},
+		{"unknown", &venuepb.QueryOrderResponse{ExecutedQuantity: &commonpb.Decimal{}}, false},
+		{"missing", &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING}, false},
+		{"unexplained_execution", &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING, ExecutedQuantity: &commonpb.Decimal{Coefficient: 1}}, false},
+		{"unexplained_fill", &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING, ExecutedQuantity: &commonpb.Decimal{}, Fills: []*orderpb.Fill{{}}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := ProjectSettlement(state, c, tc.view, []string{"BNB", "USD"})
+			if (err == nil) != tc.ok {
+				t.Fatalf("unexpected funded acknowledgement: %v", err)
+			}
+			if tc.ok && (p.Next.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_ROUTED || p.Next.VenueAckAt == nil || p.Fact == nil || len(p.ExecutedDebits) != 0) {
+				t.Fatal("working acknowledgement changed settlement or lost the routed order")
+			}
+		})
+	}
+}
+
 func TestReceiptReplayAcrossBrokerAndVenueRestart(t *testing.T) {
 	dsn, url := os.Getenv("TEST_SYNTHETIC_VENUE_POSTGRES_URL"), os.Getenv("TEST_SYNTHETIC_VENUE_NATS_URL")
 	if dsn == "" || url == "" {

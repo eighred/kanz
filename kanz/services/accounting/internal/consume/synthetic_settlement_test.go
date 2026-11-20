@@ -33,7 +33,10 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	}
 	const portfolio = "synthetic-portfolio"
 	tenant := os.Getenv("SYNTHETIC_BOOK_TENANT")
-	if tenant != "synthetic-funded-venue" && tenant != "synthetic-funded-venue-nanos" && tenant != "synthetic-funded-venue-pair" && tenant != "synthetic-cash-clock-mismatch" && tenant != "synthetic-cash-clock" {
+	switch tenant {
+	case "synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair",
+		"synthetic-funded-cancel-fill", "synthetic-cash-clock-mismatch", "synthetic-cash-clock":
+	default:
 		t.Fatal("expected a funded XSIM fixture tenant")
 	}
 	dsn, broker := os.Getenv("SYNTHETIC_BOOK_URL"), os.Getenv("SYNTHETIC_BOOK_NATS")

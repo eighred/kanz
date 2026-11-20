@@ -133,7 +133,7 @@ func checkVenueCash(t *testing.T, ctx context.Context, pool *pgxpool.Pool, o fun
 	}
 }
 
-func verifySettlementReplay(t *testing.T, observed map[string][]string) {
+func verifySettlementReplay(t *testing.T, observed map[string][]string, filledOnCancel bool) {
 	t.Helper()
 	want := map[string][]string{
 		"dispatch":       {"DISPATCH_ONCE", "RECONCILE_REQUIRED"},
@@ -142,6 +142,9 @@ func verifySettlementReplay(t *testing.T, observed map[string][]string) {
 		"cancel_pending": {"CANCEL_ONCE", "RECONCILE_REQUIRED", "RECONCILE_REQUIRED"},
 		"fill":           {"APPLIED", "DUPLICATE", "DUPLICATE", "DUPLICATE"},
 		"cancelled":      {"APPLIED", "DUPLICATE"},
+	}
+	if filledOnCancel {
+		want["fill"] = []string{"APPLIED", "DUPLICATE", "DUPLICATE"}
 	}
 	if len(observed) != len(want) {
 		t.Fatalf("unexpected observation counts: %v", observed)
@@ -179,9 +182,11 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 	for _, scenario := range []struct {
 		name, tenant string
 		extra        time.Duration
+		fillOnCancel bool
 	}{
-		{"partial_cancel_and_book", "synthetic-funded-venue", 0},
-		{"submicrosecond_receipt", "synthetic-funded-venue-nanos", 321 * time.Nanosecond},
+		{"partial_cancel_and_book", "synthetic-funded-venue", 0, false},
+		{"submicrosecond_receipt", "synthetic-funded-venue-nanos", 321 * time.Nanosecond, false},
+		{"first_fill_during_cancel", "synthetic-funded-cancel-fill", 0, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			tenant := scenario.tenant
@@ -204,11 +209,12 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				// Select XSIM's clock value before execution. Every subsequent
 				// consumer receives its original, unmodified execution evidence.
 				fillTime := time.Now().UTC().Truncate(time.Microsecond).Add(scenario.extra)
-				venue := syntheticVenueClient(t, ctx, syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: fillTime, LoseExecuteAck: true, FillOnExecute: true, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}})
+				cfg := syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: fillTime, LoseExecuteAck: true, FillOnExecute: !scenario.fillOnCancel, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
+				venue := syntheticVenueClient(t, ctx, cfg)
 				control := fundedVenueControl{order: o, proof: proof, issuer: syntheticPool(t, ctx, "CONTROL", tenant), venue: venue}
 				interrupted := false
 				observed := make(map[string][]string)
-				ingress, err := syntheticvenue.NewWorkingPartialIngress(tenant, portfolio, venue, func(ctx context.Context, c syntheticvenue.Command) (syntheticvenue.Receipt, error) {
+				owner := func(ctx context.Context, c syntheticvenue.Command) (syntheticvenue.Receipt, error) {
 					// Simulate process loss after the fill commit and before the terminal
 					// observation. A new delivery must query XSIM and replay its fill.
 					if c.Op == "cancelled" && !interrupted {
@@ -225,7 +231,8 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 					}
 					observed[c.Op] = append(observed[c.Op], r.Code)
 					return r, e
-				})
+				}
+				ingress, err := syntheticvenue.NewWorkingPartialIngress(tenant, portfolio, venue, owner)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -277,18 +284,45 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 						}
 						checkVenueCash(t, ctx, proof, o, 1000, 252, 252, 1, 0, 0)
 					} else {
-						if e != nil || st.Quarantine != nil || st.Status != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED || dec.FromProto(st.FilledQuantity).RatString() != "5/8" {
+						if e != nil || st.Quarantine != nil || st.VenueAckAt == nil {
 							t.Fatalf("XSIM reconciliation: %v", e)
 						}
 						if e = msg.DoubleAck(ctx); e != nil {
 							t.Fatal(e)
 						}
-						checkVenueCash(t, ctx, proof, o, 1000, 252, 252, 1, 126, 0)
-						verifyWorkingFill(t, ctx, venue, syntheticPool(t, ctx, "ADAPTER", tenant), tenant, st, fillTime)
-						checkFundedExecutionFactClaims(t, ctx, proof, tenant, fundedFirst)
+						if scenario.fillOnCancel {
+							if st.Status != orderpb.OrderStatus_ORDER_STATUS_ROUTED || dec.FromProto(st.FilledQuantity).Sign() != 0 {
+								t.Fatal("working acknowledgement invented an execution")
+							}
+							checkVenueCash(t, ctx, proof, o, 1000, 252, 252, 1, 0, 0)
+						} else {
+							if st.Status != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED || dec.FromProto(st.FilledQuantity).RatString() != "5/8" {
+								t.Fatal("working fill absent after venue reconciliation")
+							}
+							checkVenueCash(t, ctx, proof, o, 1000, 252, 252, 1, 126, 0)
+							verifyWorkingFill(t, ctx, venue, syntheticPool(t, ctx, "ADAPTER", tenant), tenant, st, fillTime)
+							checkFundedExecutionFactClaims(t, ctx, proof, tenant, fundedFirst)
+						}
 					}
 				}
 				frame := s.cancelOrder(fundedFirst, "cancel-remote", "synthetic-trader", portfolio)
+				cancelFrom := orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
+				if scenario.fillOnCancel {
+					cancelFrom = orderpb.OrderStatus_ORDER_STATUS_ROUTED
+					// A fresh XSIM process reads the already working order. Its fill
+					// on withdrawal occurs after the signed cancellation was published.
+					fillTime = time.Now().UTC()
+					if !fillTime.After(frame.Envelope.EventTime.AsTime()) {
+						t.Fatal("XSIM clock precedes the signed cancellation")
+					}
+					cfg.FillTime = fillTime
+					venue = syntheticVenueClient(t, ctx, cfg)
+					control.venue = venue
+					ingress, err = syntheticvenue.NewWorkingPartialIngress(tenant, portfolio, venue, owner)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
 				cancels, err := s.js.CreateConsumer(ctx, "SYNTHETIC_ORDERS", jetstream.ConsumerConfig{Durable: "funded-remote-cancel", FilterSubject: bus.TenantRoutedSubject(tenant, "order.order.cancel"), AckPolicy: jetstream.AckExplicitPolicy})
 				if err != nil {
 					t.Fatal(err)
@@ -299,7 +333,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 					if attempt == 1 {
 						req := cancellationRequest(t, delivered, portfolio)
 						st, _ := get()
-						if st.Status != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED || st.OrderId != fundedFirst || st.PortfolioId != req.Portfolio || req.Principal != o.request.Principal {
+						if st.Status != cancelFrom || st.OrderId != fundedFirst || st.PortfolioId != req.Portfolio || req.Principal != o.request.Principal {
 							t.Fatal("signed working cancellation does not match admitted order")
 						}
 						recordCancellationAuthority(t, ctx, req, delivered.Envelope, time.Now().Add(30*time.Second), nil, nil)
@@ -334,7 +368,10 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				if !bytes.Equal(terminal.State, replayed.State) || terminal.OrderVersion != replayed.OrderVersion {
 					t.Fatal("duplicate terminal receipt changed the order")
 				}
-				verifySettlementReplay(t, observed)
+				verifySettlementReplay(t, observed, scenario.fillOnCancel)
+				if terminalState.GetAsOf().AsTime().Before(fillTime) {
+					t.Fatal("terminal state predates the execution included in it")
+				}
 				var cause, trace, root string
 				var confirmedAt time.Time
 				var payload []byte

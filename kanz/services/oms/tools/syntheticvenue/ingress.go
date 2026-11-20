@@ -182,7 +182,10 @@ func (i *Ingress) route(ctx context.Context, c Command) error {
 			if st.Status == orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
 				effective = st.GetAsOf().AsTime()
 			} else if c.Op == "cancel_pending" {
-				effective = time.Unix(c.EffectiveSeconds, int64(c.EffectiveNanos))
+				requested := time.Unix(c.EffectiveSeconds, int64(c.EffectiveNanos))
+				if requested.After(effective) {
+					effective = requested
+				}
 			} else {
 				return errors.New("confirmed funded withdrawal requires its signed cancel delivery")
 			}

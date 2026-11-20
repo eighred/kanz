@@ -210,9 +210,9 @@ BEGIN
         IF prior_phase NOT IN ('dispatch_claimed','unknown_execute') OR old_status<>1 OR p_body<>convert_to(p_order,'UTF8') THEN RETURN 'STATE'; END IF;
         next_phase:='working'; next_status:=2; fact_name:='OrderRouted'; subject:='order.order.routed';
       WHEN 'cancel_pending' THEN
-        IF prior_phase<>'working' OR old_status<>3 OR p_body<>''::bytea OR NOT EXISTS (
+        IF prior_phase<>'working' OR old_status NOT IN (2,3) OR p_body<>''::bytea OR (old_status=3 AND NOT EXISTS (
             SELECT FROM public.synthetic_oms_observations o WHERE (o.tenant_id,o.order_id,o.operation)=(tenant,p_order,'fill')
-                AND (o.effective_seconds,o.effective_nanos)<=(p_seconds,p_nanos)) THEN RETURN 'STATE'; END IF;
+                AND (o.effective_seconds,o.effective_nanos)<=(p_seconds,p_nanos))) THEN RETURN 'STATE'; END IF;
         SELECT least(deadline,expires_at) INTO deadline FROM public.synthetic_oms_cancellation_authorizations
           WHERE (tenant_id,order_id,principal_id,portfolio_id,event_id)=(tenant,p_order,auth.principal_id,p_portfolio,p_event)
             AND effective_at=event_at AND observed_at<=checked_at AND expires_at>checked_at;
@@ -224,7 +224,7 @@ BEGIN
       WHEN 'fill','cancelled' THEN
         IF auth.currencies IS DISTINCT FROM funding.currencies THEN RETURN 'STATE'; END IF;
         IF p_op='fill' THEN
-            IF prior_phase<>'working' OR old_status<>2 OR auth.venue_execution_sha256<>sha256(p_body)
+            IF prior_phase NOT IN ('working','cancel_pending','unknown_cancel') OR old_status<>2 OR auth.venue_execution_sha256<>sha256(p_body)
                OR p_event!~'^xsim-partial/[0-9a-f]{64}$'
                OR EXISTS (SELECT FROM public.order_executions WHERE (tenant_id,order_id)=(tenant,p_order)) THEN RETURN 'STATE'; END IF;
             next_status:=3; next_phase:=prior_phase; fact_name:='OrderPartiallyFilled'; subject:='order.order.partially_filled';
@@ -237,8 +237,11 @@ BEGIN
             ) THEN RETURN 'STATE'; END IF;
             SELECT o.event_id,a.trace_context INTO cause,trace FROM public.synthetic_oms_observations o
               JOIN public.synthetic_oms_cancellation_authorizations a USING(tenant_id,order_id,event_id)
-              WHERE (o.tenant_id,o.order_id,o.operation,o.effective_seconds,o.effective_nanos)=
-                (tenant,p_order,'cancel_pending',p_seconds,p_nanos) AND (a.principal_id,a.portfolio_id)=(auth.principal_id,p_portfolio);
+              JOIN public.synthetic_oms_observations f ON (f.tenant_id,f.order_id,f.operation)=(o.tenant_id,o.order_id,'fill')
+              WHERE (o.tenant_id,o.order_id,o.operation)=(tenant,p_order,'cancel_pending')
+                AND p_event=f.event_id||'/cancelled'
+                AND greatest((o.effective_seconds,o.effective_nanos),(f.effective_seconds,f.effective_nanos))=(p_seconds,p_nanos)
+                AND (a.principal_id,a.portfolio_id)=(auth.principal_id,p_portfolio);
             IF NOT FOUND THEN RETURN 'HELD'; END IF;
             -- Effective command time and actual knowledge time are distinct.
             -- Only the latter is evidence that XSIM confirmed the withdrawal.

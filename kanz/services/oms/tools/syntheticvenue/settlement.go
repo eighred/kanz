@@ -46,11 +46,23 @@ func ProjectSettlement(prior *orderpb.OrderState, c Command, view *venuepb.Query
 		}
 		return p, nil
 	case "ack":
-		if c.VenueOrderID != c.OrderID || view.GetState() != venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED || view.GetExecutedQuantity() == nil || !dec.IsPositive(view.ExecutedQuantity) || len(view.GetFills()) != 1 {
+		if c.VenueOrderID != c.OrderID || view.GetExecutedQuantity() == nil || !dec.InDomain(view.ExecutedQuantity) {
 			return p, refused
 		}
-		fill := view.Fills[0]
-		if fill.GetOrderId() != c.OrderID || fill.GetInstrumentId() != Instrument || fill.GetVenue() != MIC || fill.GetVenueAccountId() != Account || fill.GetSide() != prior.Side || fill.GetFillId() == "" || fill.GetFillId() != fill.GetVenueExecutionId() || !proto.Equal(fill.GetQuantity(), view.ExecutedQuantity) {
+		switch view.GetState() {
+		case venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING:
+			if view.ExecutedQuantity.Coefficient != 0 || len(view.Fills) != 0 {
+				return p, refused
+			}
+		case venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED:
+			if !dec.IsPositive(view.ExecutedQuantity) || len(view.Fills) != 1 {
+				return p, refused
+			}
+			fill := view.Fills[0]
+			if fill.GetOrderId() != c.OrderID || fill.GetInstrumentId() != Instrument || fill.GetVenue() != MIC || fill.GetVenueAccountId() != Account || fill.GetSide() != prior.Side || fill.GetFillId() == "" || fill.GetFillId() != fill.GetVenueExecutionId() || !proto.Equal(fill.GetQuantity(), view.ExecutedQuantity) {
+				return p, refused
+			}
+		default:
 			return p, refused
 		}
 		p.Body = []byte(c.VenueOrderID)
@@ -66,11 +78,11 @@ func ProjectSettlement(prior *orderpb.OrderState, c Command, view *venuepb.Query
 	default:
 		return p, refused
 	}
-	expect := venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED
-	if c.Op == "cancelled" {
-		expect = venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED
-	}
-	if view.GetState() != expect || len(view.GetFills()) != 1 {
+	// A terminal query can be the first observation of a real execution.
+	// Account for the verified fill before releasing the remaining order.
+	cancelled := view.GetState() == venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED
+	workingFill := c.Op == "fill" && view.GetState() == venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED
+	if (!cancelled && !workingFill) || len(view.GetFills()) != 1 {
 		return p, refused
 	}
 	fill := view.Fills[0]

@@ -468,7 +468,7 @@ def run(stage, native, prior_accounting=None, browser=False):
                 settlement = ROOT / "rust/services/synthetic_oms/settlement.sql"
                 sql(container, settlement.read_text(encoding="utf-8"), DB)
                 for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair",
-                               "synthetic-funded-before-send"):
+                               "synthetic-funded-before-send", "synthetic-funded-cancel-fill"):
                     sql(container, f"""
                         BEGIN;
                         SET LOCAL app.tenant_id='{tenant}';
@@ -482,7 +482,8 @@ def run(stage, native, prior_accounting=None, browser=False):
                 grant_cash_projection(container, DB)
                 venue = "TestSyntheticFundedVenueLifecycle"
                 venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
-                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair", "claim_before_venue_send"))
+                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair",
+                                                "claim_before_venue_send", "first_fill_during_cancel"))
                 if browser:
                     funded_browser(stage, container, fixture_env["SYNTHETIC_OMS_READ_URL"], venue_log)
                 for line in venue_log.splitlines():
