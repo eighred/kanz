@@ -125,3 +125,30 @@ python3 -B "$q/core_runtime.py" verify-abi "$original_core" "$out/build/libjulia
 Use an empty build output directory writable by UID 65532. The preparer verifies Julia's release signature, four GCC 9.1 header preimages and postimages, the five utf8proc source blobs and all archive hashes. The producer rebuilds utf8proc, flisp, support, the generated boot image and Julia's canonical release target. The original GCC 9 bitset predates the changed extractor. The checked link map identifies the corrected static C++ allocator and 50 prebuilt LLVM objects from Support, TargetParser and Demangle. The publisher compiled those objects with GCC 10.2.0. Their absence of debug-line metadata limits statements about optimized transitive header uses. No LLVM IR object is selected.
 
 The ELF check compares all 1,698 exported names and types, the 11 direct dependencies, SONAME and RUNPATH. The new private DSO requires `secure_getenv@GLIBC_2.17`. The pinned base provides that symbol, and the same application already requires it in libstdc++. This check covers the pinned amd64 image. Rebuild a fresh safe bundle with this core, compare its full OCI file inventory, and run the direct corpus, bounded Go supervisor and actual-image advisory checks before assessing a release.
+
+### Identify the LLVM objects linked into Julia
+
+The Julia link map selects 50 members from the LLVM_full release. Its build log identifies the exact GCC 10.2 target tree `eaafa83c8c4758dc2d5a6b28b145e59d6d751626` and GNU platform tree `0a4fcd057d87f56cd0a41a9e860a8a3ee80498a2`. Use the root and platform shards above with the [GCC 10.2.0 target shard](https://github.com/JuliaPackaging/Yggdrasil/releases/download/GCCBootstrap-v10.2.0%2B0/GCCBootstrap-x86_64-linux-gnu.v10.2.0.x86_64-linux-musl.unpacked.tar.gz) under the bootstrap target filename. The preparer verifies all three, replays the Red Hat production delta against the actual GCC 10.2 header and stages the selected LLVM production sources. The CMake inputs come from the same LLVM_full archive and its [pinned source fork](https://github.com/JuliaLang/llvm-project/tree/9cba7d4b7efbbc8d3755144e3deb741de8011b41).
+
+```sh
+python3 -B "$q/llvm_core_inputs.py" collect "$out/llvm-sources"
+python3 -B "$q/llvm_core_inputs.py" prepare "$out/llvm-sources" "$inputs/full-parent.tar.gz" \
+  "$gcc10_bootstrap" "$inputs/gcc8-vector.production.diff" "$out/llvm-inputs"
+docker build --platform linux/amd64 --network none --iidfile "$out/llvm-bootstrap.id" \
+  -f "$q/core_runtime.Dockerfile" "$gcc10_bootstrap"
+```
+
+Use the same unprivileged, read-only and network-disabled container settings as the core build above. Run `configure_llvm_core.sh` with the new `source.tar` at `/source.tar`, the Zlib and Zstd wrapper archives at `/zlib.tar.gz` and `/zstd.tar.gz`, and an empty writable `/out`. The script checks both generated header hashes and preserves CMake's actual exit code. The restricted source selection contains the inputs to the header producer. Whole-project configuration exits 1 when it subsequently reaches other target directories. The two generated headers and the complete configuration log are retained. The public header is byte-identical to the publisher copy. A whole LLVM build requires the full producer source.
+
+Run `python3 -B /verify/llvm_core_objects.py` inside the same immutable compiler with three CPUs, 2.8 GB of memory, a 650 MB executable temporary filesystem and these mounts. Mount all inputs read-only.
+
+| Container path | Host input |
+| --- | --- |
+| `/verify` | This qualification directory |
+| `/original-inputs.tar` | The core producer's `prepared/native-relink-inputs.tar` |
+| `/source.tar` | The LLVM preparer's `source.tar` |
+| `/fixed` | The LLVM preparer's `headers/libstdc++-v3/include` |
+| `/config` | The saved generated header output |
+| `/out` | Fresh writable results directory for UID 65532 |
+
+The compiler determines the real source dependencies and builds each member twice with GCC 10.2, before and after correcting its vector header. All 50 independently rebuilt object pairs must be byte-identical. For 49 members the corrected rebuild matches the entire published object. The 50th member, Triple.cpp, differs in two bytes belonging to the private switch table's section and symbol names. Both complete object hashes, the two label digits and all remaining bytes are checked. The switch table has one local symbol and 40 data bytes. All 2,758 executable sections across the 50 objects match. This comparison covers the five named GCC header cases in these linked LLVM members. New advisories, another member selection or a different published compiler require their own assessment.
