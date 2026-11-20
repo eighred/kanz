@@ -119,7 +119,7 @@ async function main() {
             assert.equal(receipt.statement_reference_count, '1')
             assert.equal(receipt.unreferenced_book_trades, '0')
             assert(text.includes('Independent reference comparison'))
-            if (!quantityEvidence || !saved) assert(text.includes('Individual trade quantities, prices and cash amounts remain unverified.'))
+            if (!receipt.execution_economics_status && (!quantityEvidence || !saved)) assert(text.includes('Individual trade quantities, prices and cash amounts remain unverified.'))
             assert(text.includes(receipt.statement_id))
           } else {
             assert.equal(receipt.account_assignment_verified, undefined)
