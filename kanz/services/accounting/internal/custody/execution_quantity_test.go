@@ -402,9 +402,12 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 	if err != nil || len(remaining) != 1 || remaining[0].Detection.RunID != original.RunID || remaining[0].Key != "independent-buy" || remaining[0].LateCorrectionStatementID != partialID {
 		t.Fatal("unmeasured reference was cleared", remaining, err)
 	}
+	current, err := st.DatedResult(ctx, sub)
+	if err != nil || current.State != "pending" || current.HistoricalQuantityCorrectionRunID != partial.RunID {
+		t.Fatal("scheduled partial correction discovery", current, err)
+	}
 	late, lateDigest := deliver(levelAt(4), 8, partialDigest)
-	// Separate reconcilers/pools emulate simultaneous delivery, using the
-	// original authenticated command identity for replay after contention.
+	// Concurrent retries share the authenticated request and its dated snapshot.
 	const request = "e8b0a101-bdbd-431f-8390-5413c6a28bde"
 	type reply struct {
 		run Run
@@ -425,7 +428,7 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 		got := <-done
 		if got.err == nil {
 			accepted = true
-			if got.run.Outcome != OutcomeHistoricalQuantityCorrection {
+			if got.run.Outcome != OutcomeHistoricalClean {
 				t.Fatal(got.run)
 			}
 		} else if !errors.Is(got.err, ErrRunBusy) {
@@ -435,7 +438,16 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 	if !accepted {
 		t.Fatal("both contenders refused")
 	}
-	receipt, err := r.ReconcileManual(ctx, sub, request, "operator:quantity")
+	snapshot, err := r.ReconcileManual(ctx, sub, request, "operator:quantity")
+	if err != nil || snapshot.RunID != "manual:"+request || snapshot.Outcome != OutcomeHistoricalClean || snapshot.StatementID != late ||
+		snapshot.ExecutionQuantities == nil || len(snapshot.HistoricalQuantityResolutions) != 0 {
+		t.Fatal("manual historical snapshot", snapshot, err)
+	}
+	remaining, err = st.OutstandingBreaks(ctx, sub.PortfolioID)
+	if err != nil || len(remaining) != 1 || remaining[0].Detection.RunID != original.RunID || remaining[0].Key != "independent-buy" {
+		t.Fatal("manual snapshot changed the remaining working item", remaining, err)
+	}
+	receipt, err := r.Reconcile(ctx, sub)
 	if err != nil || receipt.Outcome != OutcomeHistoricalQuantityCorrection || receipt.StatementID != late || len(receipt.HistoricalQuantityResolutions) != 1 || len(receipt.Breaks) != 0 {
 		t.Fatalf("unexpected late receipt: %+v %v", receipt, err)
 	}
@@ -465,7 +477,7 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 		t.Fatal(err)
 	}
 	restart := NewPostgres(pool)
-	for _, want := range []Run{original, future, partial, receipt} {
+	for _, want := range []Run{original, future, partial, snapshot, receipt} {
 		saved, err := restart.HistoricalReceipt(ctx, want.Subject, source.Account, want.RunID)
 		if err != nil || saved.State != "recorded" || saved.Run.Outcome != want.Outcome || saved.StatementID != want.StatementID || len(saved.Run.HistoricalQuantityResolutions) != len(want.HistoricalQuantityResolutions) {
 			t.Fatalf("prior/saved independent receipt: %s %s %+v %v", want.RunID, want.Outcome, saved, err)
@@ -480,8 +492,8 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE tenant_id=app_current_tenant()").Scan(&count); err != nil || count != 0 {
 		t.Fatal("scheduled replay enqueued another completion", count, err)
 	}
-	current, err := restart.DatedResult(ctx, sub)
-	if err != nil || current.State != "pending" || current.HistoricalQuantityCorrectionRunID != receipt.RunID {
+	current, err = restart.DatedResult(ctx, sub)
+	if err != nil || current.State != "recorded" || current.Run.RunID != snapshot.RunID || current.Run.Outcome != OutcomeHistoricalClean {
 		t.Fatalf("current historical discovery: %+v %v", current, err)
 	}
 	nextRead, err := restart.DatedResult(ctx, next)

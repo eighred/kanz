@@ -102,7 +102,7 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	}
 	// The immutable lookup bounds both the full payload and the working breaks.
 	// Refuse before the queue transaction commits an unreadable completion.
-	if (run.ExecutionQuantities != nil || run.ExecutionEconomics != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
+	if (run.Outcome.IsHistoricalComparison() || run.ExecutionQuantities != nil || run.ExecutionEconomics != nil || len(run.HistoricalQuantityResolutions) > 0) && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
 		return outbox.Record{}, errQuantityReceiptLimit
 	}
 	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
@@ -153,7 +153,7 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		return cloneRun(prior), nil
 	}
-	if run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 {
+	if run.Outcome.IsHistoricalComparison() || run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 {
 		return Run{}, ErrDurableActionStore
 	}
 	run = cloneRun(run)
@@ -283,7 +283,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		prior.Basis = basis
 		return prior, tx.Commit(ctx)
 	}
-	if run.ExecutionEconomics != nil || run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 || (run.Basis != nil && run.Basis.HistoricalDetections != nil) {
+	if run.ExecutionEconomics != nil || run.Outcome.IsHistoricalComparison() || run.Outcome == OutcomeHistoricalQuantityCorrection || len(run.HistoricalQuantityResolutions) > 0 || (run.Basis != nil && run.Basis.HistoricalDetections != nil) {
 		return Run{}, ErrUnverifiedPrecision
 	}
 	// Existing store operations open SAVEPOINTs on this handle. Their local
@@ -315,11 +315,13 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		run.observedMissing = false
 	}
 	if verifying(run) {
+		var verifiedAssignment bool
 		if run.Basis != nil && run.Basis.Assignments != nil {
 			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtextextended('custody-assignment-tenant:' || public.app_current_tenant(),0))"); err != nil {
 				return Run{}, err
 			}
-			if _, err := confirmRunAssignments(ctx, tx, run.Subject, run.Basis, false); err != nil {
+			verifiedAssignment, err = confirmRunAssignments(ctx, tx, run.Subject, run.Basis, false)
+			if err != nil {
 				return Run{}, err
 			}
 		}
@@ -345,19 +347,42 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 				return Run{}, ErrBookBasisChanged
 			}
 		}
+		manualSnapshot := later && run.RequestID != ""
+		if manualSnapshot && (!verifiedAssignment || run.Actor == "" || run.RunID != "manual:"+run.RequestID ||
+			len(signedDigest) == 0 || run.compared == nil || run.Basis.Transactions == nil ||
+			!run.Basis.Transactions.matches(*run.compared, run.Outcome, run.Basis.JournalPosition)) {
+			return Run{}, ErrHistoricalLifecycle
+		}
+		if manualSnapshot {
+			if err := confirmCurrentJournalPosition(ctx, tx, run); err != nil {
+				return Run{}, err
+			}
+		}
 		if run.compared != nil {
 			current, err := staged.LatestStatement(ctx, run.Subject)
 			if err := run.confirmStatement(current, err); err != nil {
 				return Run{}, err
 			}
-			if !later && len(signedDigest) > 0 {
+			if (!later || manualSnapshot) && len(signedDigest) > 0 {
 				run.ExecutionEconomics, err = compareExecutionEconomics(ctx, tx, run, current)
 				if err != nil {
 					return Run{}, err
 				}
 			}
 		}
-		if later {
+		switch {
+		case manualSnapshot:
+			// The detected rows describe this comparison. Only the later close
+			// owns the working queue, including its execution observations.
+			run.Outcome = OutcomeHistoricalClean
+			if len(run.Breaks) != 0 {
+				run.Outcome = OutcomeHistoricalBreaks
+			}
+			for i := range run.Breaks {
+				run.Breaks[i].ValuesVerified = true
+			}
+			run.measured = nil
+		case later:
 			// Never sweep another date's working set. Only a newer independently signed
 			// equality for a still-open item can yield this narrower completion.
 
@@ -369,7 +394,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 				// Scheduled redelivery has no operator request identity. A fully
 				// retained correction for this exact source and prefix is its original
 				// result; repeating it must not emit a second completion or false failure.
-				if run.RequestID == "" && len(run.measured) > 0 && run.Basis != nil && len(run.Basis.Accounts[run.Subject.CustodianID]) == 1 {
+				if len(run.measured) > 0 && run.Basis != nil && len(run.Basis.Accounts[run.Subject.CustodianID]) == 1 {
 					var id string
 					err := tx.QueryRow(ctx, `SELECT run_id FROM custody_runs
                         WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3
@@ -391,21 +416,8 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 				}
 				return Run{}, ErrHistoricalLifecycle
 			}
-			// ledger_prepare_append takes this portfolio lock before advancing the
-			// canonical head. A booking arriving after materialization requires an
-			// actual re-read before an open historical item can be cleared.
-			var stable bool
-			if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, run.Subject.PortfolioID).Scan(&stable); err != nil {
+			if err := confirmCurrentJournalPosition(ctx, tx, run); err != nil {
 				return Run{}, err
-			}
-			if !stable {
-				return Run{}, ErrRunBusy
-			}
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT FROM ledger_heads WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND position=$2)`, run.Subject.PortfolioID, run.Basis.JournalPosition).Scan(&stable); err != nil {
-				return Run{}, err
-			}
-			if !stable {
-				return Run{}, ErrBookBasisChanged
 			}
 			run.Outcome = OutcomeHistoricalQuantityCorrection
 			run.HistoricalQuantityResolutions = resolutions
@@ -416,7 +428,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			}
 			run.ExecutionQuantities = nil
 			run.Breaks = nil
-		} else {
+		default:
 			if d := run.detection(); d.RunID != "" {
 				if _, err := tx.Exec(ctx, `SELECT set_config('app.custody_detection_run',$1,true)`, d.RunID); err != nil {
 					return Run{}, err
@@ -461,6 +473,28 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return Run{}, err
 	}
 	return run, tx.Commit(ctx)
+}
+
+// ledger_prepare_append takes the same portfolio lock before advancing the
+// journal. Read the physical prefix in a fresh statement after locking it.
+func confirmCurrentJournalPosition(ctx context.Context, tx pgx.Tx, run Run) error {
+	var stable bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, run.Subject.PortfolioID).Scan(&stable); err != nil {
+		return err
+	}
+	if !stable {
+		return ErrRunBusy
+	}
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(
+		(SELECT position FROM ledger_heads WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1),
+		CASE WHEN $3 THEN (SELECT count(*) FROM ledger_entries WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1) END
+	) IS NOT DISTINCT FROM $2::bigint`, run.Subject.PortfolioID, run.Basis.JournalPosition, run.RequestID != "").Scan(&stable); err != nil {
+		return err
+	}
+	if !stable {
+		return ErrBookBasisChanged
+	}
+	return nil
 }
 
 // Duplicate completion returns the original immutable FACT, not today's break

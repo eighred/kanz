@@ -28,11 +28,11 @@ const comparison = { unassessed_reason: '', rows: [assessed, unknown] }
 const wire = { ...original, breaks: [], signed_statement_sha256: digest, execution_economics_status: 'mismatch', execution_economics: comparison }
 const read = () => custody.dated(subject, 'pilot', undefined, original.run_id)
 
-it('displays and downloads the sealed comparison with exact units, separate statuses and settled cash', async () => {
-  vi.spyOn(api, 'get').mockResolvedValue(wire)
+it.each(['clean', 'historical_clean'])('displays and downloads the sealed %s comparison with exact units, separate statuses and settled cash', async outcome => {
+  vi.spyOn(api, 'get').mockResolvedValue({ ...wire, outcome })
   const result = await read()
   if (result.state !== 'recorded' || !result.historical?.execution_economics) throw new Error('missing original')
-  expect(result.outcome).toBe('clean')
+  expect(result.outcome).toBe(outcome)
   expect(result.execution_economics_status).toBe('mismatch')
   const section = mount(CustodyExecutionEconomics, { props: { comparison: result.historical.execution_economics } })
   try {
@@ -50,6 +50,7 @@ it('displays and downloads the sealed comparison with exact units, separate stat
   downloadCustodyComparison(result)
   const artifact = JSON.parse(await (create.mock.calls[0]![0] as Blob).text())
   expect(artifact.execution_economics).toEqual(comparison)
+  expect(artifact.outcome).toBe(outcome)
   expect(artifact.signed_statement_sha256).toBe(digest)
 })
 

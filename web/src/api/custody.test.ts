@@ -47,6 +47,36 @@ describe('custody response boundary', () => {
     }
   })
 
+  it.each(['historical_clean', 'historical_breaks'])('verifies the signed source and journal basis for %s on dated, saved and manual paths', async outcome => {
+    const subject = { portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04' }
+    const request = { ...subject, request_id: 'manual-1' }
+    const digest = 'a'.repeat(64)
+    const run = { ...subject, outcome, run_id: 'backdated', completed_at: '2020-02-09T00:00:00Z',
+      scope_mode: 'declared', journal_position: '9007199254740993', statement_id: 'custody-batch.v1.source.r2.' + digest }
+    const current = { ...run, tenant_id: 'tenant', state: 'recorded', account_assignment_verified: true, transaction_pass: 'balances_only' }
+    const row = { break_id: 'saved-difference', kind: 'quantity', key: 'SYN', values_state: 'exact', ibor: '2', custodian: '1', difference: '1' }
+    const breaks = outcome === 'historical_clean' ? [] : [row]
+    const saved = { ...current, signed_statement_sha256: digest, breaks }
+    const ack = { ...run, actor: 'operator', request_id: request.request_id }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(current).mockResolvedValueOnce(saved)
+    const post = vi.spyOn(api, 'post').mockResolvedValueOnce(ack)
+    expect(await custody.dated(subject, 'tenant')).toMatchObject({ outcome, transactions: { transaction_pass: 'balances_only' } })
+    const reopen = () => custody.dated(subject, 'tenant', undefined, run.run_id)
+    expect(await reopen()).toMatchObject({ outcome, historical: { signed_statement_sha256: digest, breaks } })
+    expect(await custody.rerun(request, 'operator')).toEqual(ack)
+    for (const patch of [{ journal_position: undefined }, { scope_mode: 'derived' }, { statement_id: 'unsigned' }]) {
+      get.mockResolvedValueOnce({ ...current, ...patch })
+      await expect(custody.dated(subject, 'tenant')).rejects.toThrow('verified')
+      post.mockResolvedValueOnce({ ...ack, ...patch })
+      await expect(custody.rerun(request, 'operator')).rejects.toThrow('verified')
+    }
+    for (const patch of [{ breaks: breaks.length ? [] : [row] }, { account_assignment_verified: undefined },
+      { transaction_pass: undefined }, { signed_statement_sha256: 'b'.repeat(64) }]) {
+      get.mockResolvedValueOnce({ ...saved, ...patch })
+      await expect(reopen()).rejects.toThrow('verified')
+    }
+  })
+
   it('requires the dated subject, exact position and a source for a successful result', async () => {
     const subject = { portfolio_id: 'PF/1', custodian_id: 'C & A', business_date: '2020-02-04' }
     const data = { ...subject, tenant_id: 'tenant', transaction_pass: 'balances_only', state: 'recorded', run_id: 'retained', outcome: 'clean', statement_id: 'r2', completed_at: '2020-02-05T01:00:00Z', journal_position: '9007199254740993', scope_mode: 'declared' }
@@ -173,11 +203,11 @@ describe('custody response boundary', () => {
     await expect(custody.dated(subject, 'T')).rejects.toThrow('verified')
   })
 
-  it('binds a previous comparison to the selected close, later receipt and immediately preceding source revision', async () => {
+  it.each(['clean', 'historical_clean'])('binds a previous %s comparison to the selected close, later receipt and immediately preceding source revision', async outcome => {
     const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
     const prefix = 'custody-batch.v1.source.with.r1.segments'
     const digest = 'a'.repeat(64), anchor = prefix + '.r2.' + 'b'.repeat(64)
-    const receipt = { ...subject, tenant_id: 'T', state: 'recorded', outcome: 'clean', run_id: 'first',
+    const receipt = { ...subject, tenant_id: 'T', state: 'recorded', outcome, run_id: 'first',
       completed_at: '2020-02-05T01:00:00Z', scope_mode: 'declared', account_assignment_verified: true,
       statement_id: prefix + '.r1.' + digest, signed_statement_sha256: digest, journal_position: '1',
       transaction_pass: 'balances_only', breaks: [], previous_of_run_id: 'second', previous_of_statement_id: anchor }

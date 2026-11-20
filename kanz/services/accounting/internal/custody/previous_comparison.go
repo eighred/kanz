@@ -23,7 +23,7 @@ func (p *Postgres) PreviousComparison(ctx context.Context, subject Subject, acco
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	current, err := historicalReceiptSnapshot(ctx, tx, tenant, subject, account, runID)
-	if err != nil || !current.AccountAssignmentVerified || current.Run.Outcome != OutcomeClean {
+	if err != nil || !current.AccountAssignmentVerified || (current.Run.Outcome != OutcomeClean && current.Run.Outcome != OutcomeHistoricalClean) {
 		return unknown, err
 	}
 	rows, err := tx.Query(ctx, `SELECT r.run_id,r.completed_at FROM custody_batch_receipts c
@@ -35,7 +35,7 @@ func (p *Postgres) PreviousComparison(ctx context.Context, subject Subject, acco
 		WHERE c.tenant_id=app_current_tenant() AND c.portfolio_id=$1 AND c.custodian_id=$2 AND c.business_date=$3
 			AND c.account_id=$4 AND c.statement_id=$5 AND c.sha256=$6
 			AND r.signed_statement_sha256=decode(p.sha256,'hex')
-			AND r.outcome IN ('clean','breaks') AND r.values_verified AND r.failure_reason=''
+			AND r.outcome IN ('clean','breaks','historical_clean','historical_breaks') AND r.values_verified AND r.failure_reason=''
 		ORDER BY r.completed_at,r.run_id LIMIT 2`, subject.PortfolioID, subject.CustodianID, subject.BusinessDate,
 		account, current.StatementID, current.SignedStatementSHA256)
 	if err != nil {

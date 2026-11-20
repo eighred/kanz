@@ -102,6 +102,10 @@ describe('custody exact review', () => {
           transactions: { transaction_pass: 'ran', statement_reference_count: '1', book_reference_count: '1', unreferenced_book_trades: '0' } }, 'Balances and transaction references agree'],
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'balances_only' } }, 'Transactions were not compared'],
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'unknown' } }, 'Transaction coverage unknown'],
+        [{ ...receipt, outcome: 'historical_clean', account_assignment_verified: true, statement_id: 'custody-batch.v1.source.r2.' + 'a'.repeat(64),
+          transactions: { transaction_pass: 'balances_only' } }, 'Historical close comparison · Balances agree'],
+        [{ ...receipt, outcome: 'historical_breaks', account_assignment_verified: true, statement_id: 'custody-batch.v1.source.r2.' + 'a'.repeat(64),
+          transactions: { transaction_pass: 'unknown' } }, 'Historical close comparison · Differences found'],
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'ran', statement_reference_count: '0',
           book_reference_count: '0', unreferenced_book_trades: '2' } }, 'Incomplete coverage'],
         [{ ...receipt, outcome: 'no_statement' }, 'No statement received'],
@@ -110,6 +114,11 @@ describe('custody exact review', () => {
         select.mockResolvedValueOnce(result)
         await region.get('form').trigger('submit'); await flushPromises()
         expect(region.get('output').text()).toContain(status)
+        if ('outcome' in result && (result.outcome === 'historical_clean' || result.outcome === 'historical_breaks')) {
+          expect(region.get('output').text()).toContain('A later close controls the outstanding break queue.')
+          expect(region.get('output').text()).toContain('Custody account assignment verified')
+          expect(region.findAll('button').some(b => b.text() === 'View previous statement comparison')).toBe(result.outcome === 'historical_clean')
+        }
         expect(region.findAll('button').some(b => b.text() === 'Download comparison receipt')).toBe(result.state === 'recorded')
         if ('journal_position' in result) expect(region.get('output').text()).toContain(result.journal_position)
         if ('transactions' in result && (result.transactions.transaction_pass !== 'ran' || result.transactions.unreferenced_book_trades !== '0')) {
@@ -231,10 +240,15 @@ describe('custody exact review', () => {
     } finally { wrapper.unmount() }
   })
 
-  it('recovers a failed comparison with the same reviewed identity and shows the committed receipt', async () => {
+  it.each([
+    ['no_statement', 'no_statement'],
+    ['historical_clean', 'Balances agree at the historical close'],
+    ['historical_breaks', 'Differences found at the historical close'],
+  ] as const)('recovers a failed comparison with the same reviewed identity and shows the committed %s receipt', async (outcome, label) => {
     vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [], rerunActor: 'operator' })
     const compare = vi.spyOn(custody, 'rerun').mockRejectedValueOnce(new ApiError(503, 'pending')).mockImplementationOnce(async req => ({
-      ...req, actor: 'operator', run_id: 'retained-run', completed_at: '2020-02-05T10:00:00Z', outcome: 'no_statement',
+      ...req, actor: 'operator', run_id: 'retained-run', completed_at: '2020-02-05T10:00:00Z', outcome,
+      ...(outcome !== 'no_statement' && { statement_id: 'custody-batch.v1.source.r2.' + 'a'.repeat(64), journal_position: '1', scope_mode: 'declared' }),
     }))
     const wrapper = mount(CustodyBreaksView)
     try {
@@ -249,7 +263,7 @@ describe('custody exact review', () => {
       await button(wrapper, 'Retry same request').trigger('click')
       await flushPromises()
       expect(compare.mock.calls[0]?.slice(0, 2)).toEqual(compare.mock.calls[1]?.slice(0, 2))
-      expect(wrapper.get('[aria-label="Recorded custody comparison"]').text()).toContain('no_statement')
+      expect(wrapper.get('[aria-label="Recorded custody comparison"]').text()).toContain(label)
       expect(wrapper.text()).toContain('retained-run')
     } finally { wrapper.unmount() }
   })

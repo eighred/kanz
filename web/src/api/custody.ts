@@ -68,8 +68,20 @@ function parseBreak(value: unknown): CustodyBreak {
 
 export interface CustodyRerunRequest { portfolio_id: string; custodian_id: string; business_date: string; request_id: string }
 export interface CustodyRerunReceipt extends CustodyRerunRequest {
-  actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'no_statement' | 'failed' | 'historical_quantity_correction'
+  actor: string; run_id: string; completed_at: string; outcome: 'clean' | 'breaks' | 'historical_clean' | 'historical_breaks' | 'no_statement' | 'failed' | 'historical_quantity_correction'
   statement_id?: string; scope_mode?: string; journal_position?: string; failure_code?: string
+}
+
+export function historicalClose(outcome: unknown): outcome is 'historical_clean' | 'historical_breaks' {
+  return outcome === 'historical_clean' || outcome === 'historical_breaks'
+}
+
+export function cleanComparison(outcome: unknown): outcome is 'clean' | 'historical_clean' {
+  return outcome === 'clean' || outcome === 'historical_clean'
+}
+
+export function fullComparison(outcome: unknown): boolean {
+  return cleanComparison(outcome) || outcome === 'breaks' || outcome === 'historical_breaks'
 }
 
 export interface CustodySubject { portfolio_id: string; custodian_id: string; business_date: string }
@@ -171,7 +183,8 @@ export const custody = {
     if (reason !== undefined && (result.state !== 'pending' || !isPendingReason(reason))) throw invalid()
     const scope = { tenant_id: tenant, portfolio_id: subject.portfolio_id, custodian_id: subject.custodian_id, business_date: subject.business_date }
     const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
-    const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
+    const verified = result.state === 'recorded' && fullComparison(result.outcome)
+    if (historicalClose(result.outcome) && (result.account_assignment_verified !== true || !signedStatement(result.statement_id))) throw invalid()
     const correction = result.state === 'recorded' && result.outcome === 'historical_quantity_correction'
     if (anchor !== undefined && result.state === 'recorded') {
       if (!verified || result.account_assignment_verified !== true || result.previous_of_run_id !== runID || result.previous_of_statement_id !== anchor ||
@@ -196,7 +209,7 @@ export const custody = {
       if (correction) {
         historical = { signed_statement_sha256: digest, historical_quantity_resolutions: readQuantityResolutions(result.historical_quantity_resolutions) }
       } else {
-        if (!Array.isArray(result.breaks) || result.breaks.length > 4096 || (result.outcome === 'clean') !== (result.breaks.length === 0)) throw invalid()
+        if (!Array.isArray(result.breaks) || result.breaks.length > 4096 || cleanComparison(result.outcome) !== (result.breaks.length === 0)) throw invalid()
         const breaks = result.breaks.map(retainedBreak)
         if (new Set(breaks.map(row => row.break_id)).size !== breaks.length) throw invalid()
         historical = { signed_statement_sha256: digest, breaks }
@@ -230,12 +243,12 @@ export const custody = {
     }
     if (result.state === 'recorded') {
       if (!nonempty(result.run_id) || !nonempty(result.completed_at) || !Number.isFinite(Date.parse(result.completed_at)) ||
-          !['clean', 'breaks', 'no_statement', 'failed', 'historical_quantity_correction'].some(value => value === result.outcome)) throw invalid()
+          (!verified && !['no_statement', 'failed', 'historical_quantity_correction'].some(value => value === result.outcome))) throw invalid()
       if (result.outcome === 'no_statement' && result.statement_id !== undefined) throw invalid()
       const scoped = result.journal_position !== undefined || result.scope_mode !== undefined
       if (scoped && (!['declared', 'derived'].some(value => value === result.scope_mode) || typeof result.journal_position !== 'string' ||
           !/^(0|[1-9]\d{0,18})$/.test(result.journal_position) || BigInt(result.journal_position) > 9223372036854775807n)) throw invalid()
-      if ((result.outcome === 'clean' || result.outcome === 'breaks') && (!result.statement_id || !scoped)) throw invalid()
+      if (verified && (!result.statement_id || !scoped)) throw invalid()
       if (reportedFigures) {
         if (!historical || correction || result.account_assignment_verified !== true || transactions?.transaction_pass !== 'ran') throw invalid()
         historical.reported_execution_figures = readReportedFigures(result.reported_execution_figures, historical.signed_statement_sha256, transactions.statement_reference_count)
@@ -294,11 +307,11 @@ export const custody = {
     if (!receipt || receipt.request_id !== request.request_id || receipt.portfolio_id !== portfolio_id ||
         receipt.custodian_id !== request.custodian_id || receipt.business_date !== request.business_date || receipt.actor !== actor ||
         !nonempty(receipt.run_id) || !Number.isFinite(Date.parse(receipt.completed_at)) ||
-        !['clean', 'breaks', 'no_statement', 'failed', 'historical_quantity_correction'].includes(receipt.outcome) ||
-        (receipt.outcome === 'historical_quantity_correction' && (!validCustodyRunID(receipt.run_id) || !signedStatement(receipt.statement_id) ||
+        (!fullComparison(receipt.outcome) && !['no_statement', 'failed', 'historical_quantity_correction'].includes(receipt.outcome)) ||
+        ((historicalClose(receipt.outcome) || receipt.outcome === 'historical_quantity_correction') && (!validCustodyRunID(receipt.run_id) || !signedStatement(receipt.statement_id) ||
           receipt.scope_mode !== 'declared' || receipt.journal_position === undefined)) ||
         (receipt.failure_code !== undefined && (receipt.outcome !== 'failed' || !['historical_lifecycle', 'comparison_failed'].includes(receipt.failure_code))) ||
-        (['clean', 'breaks'].includes(receipt.outcome) && !nonempty(receipt.statement_id)) ||
+        (fullComparison(receipt.outcome) && !nonempty(receipt.statement_id)) ||
         (receipt.outcome === 'no_statement' && receipt.statement_id !== undefined) ||
         (receipt.scope_mode !== undefined && !nonempty(receipt.scope_mode)) ||
         (receipt.journal_position !== undefined && (typeof receipt.journal_position !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(receipt.journal_position) || BigInt(receipt.journal_position) > 9223372036854775807n))) throw new Error('Comparison receipt could not be verified.')

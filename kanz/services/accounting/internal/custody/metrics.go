@@ -112,7 +112,8 @@ func (m *Metrics) SeedPair(portfolioID, custodianID string) {
 // not establish that the book agrees with anything, so treating it as recent
 // evidence of a working control would be the false green the whole issue is
 // about. The same holds for NO_STATEMENT: the control ran, and it reconciled
-// nothing.
+// nothing. A full historical snapshot is counted separately and leaves the
+// freshness of the later working close unchanged.
 func (m *Metrics) observeRun(run Run) {
 	if m == nil {
 		return

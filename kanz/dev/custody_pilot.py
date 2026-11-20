@@ -221,9 +221,38 @@ def verify_execution_economics(path, fixture):
     return records
 
 
+def verify_historical_comparison(path, fixture):
+    if path.stat().st_size > 8192:
+        raise RuntimeError("Historical comparison receipt exceeds its pilot bound.")
+    record = json.loads(path.read_bytes())
+    if not isinstance(record, dict) or record.keys() != {
+        "portfolio_id", "custodian_id", "date", "original_run", "original_statement",
+        "following_date", "following_run", "following_statement", "break_id", "statement_id", "run_id",
+    } or not all(isinstance(value, str) and value for value in record.values()):
+        raise RuntimeError("Historical comparison receipt is incomplete.")
+    for name, revision, statement, day in (
+        ("statement-r1", 1, "original_statement", "date"),
+        ("following-r1", 1, "following_statement", "following_date"),
+        ("statement-r2", 2, "statement_id", "date"),
+    ):
+        raw = (fixture / (name + ".json")).read_bytes()
+        statement_id = f"custody-batch.v1.synthetic-source.r{revision}.{hashlib.sha256(raw).hexdigest()}"
+        if record[statement] != statement_id or record[day] != json.loads(raw)["statement"]["businessDate"].split("T")[0]:
+            raise RuntimeError("Historical comparison differs from its signed source.")
+    if (record["portfolio_id"] != "PF1" or record["custodian_id"] != "CUST-A"
+            or not re.fullmatch(r"q1:[0-9a-f]{64}", record["break_id"])
+            or len({record["original_run"], record["following_run"], record["run_id"]}) != 3):
+        raise RuntimeError("Historical comparison was not independently retained.")
+    request = uuid.UUID(record["run_id"].removeprefix("manual:"))
+    if record["run_id"] != "manual:" + str(request) or request.version != 4:
+        raise RuntimeError("Historical comparison has no manual request identity.")
+    return record
+
+
 def qualify(docker, container, binaries, node, env, observations, profile):
     economics = profile == "execution_economics"
-    rerun = profile == "operator_comparisons"
+    historical = profile == "historical_comparison"
+    rerun = profile == "operator_comparisons" or historical
     quantity_evidence = profile == "quantity_comparisons"
     late = profile == "historical_quantity_correction"
     owner_password = secrets.token_hex(24)
@@ -258,7 +287,7 @@ def qualify(docker, container, binaries, node, env, observations, profile):
     fixture = CMD / "testdata"
     if quantity_evidence:
         fixture = fixture / "instrument_units"
-    elif late:
+    elif late or historical:
         fixture = fixture / "late_quantity"
     elif economics:
         fixture = fixture / "execution_economics"
@@ -306,6 +335,8 @@ def qualify(docker, container, binaries, node, env, observations, profile):
     if late:
         pilot_env["CUSTODY_PILOT_LATE_QUANTITY"] = "1"
         pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-late-correction.cjs")
+    if historical:
+        pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-historical-comparison.cjs")
     if economics:
         pilot_env["CUSTODY_PILOT_IMPORTER"] = str(binaries["source"])
         pilot_env["CUSTODY_PILOT_SERVICE"] = str(binaries["service"])
@@ -313,6 +344,8 @@ def qualify(docker, container, binaries, node, env, observations, profile):
     if late or quantity_evidence or economics:
         pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.with_suffix(".downloads.json"))
     test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
+    if historical:
+        test = "TestSignedHistoricalComparisonPilot"
     if economics:
         test = "TestSignedExecutionEconomicsPilot"
     proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
@@ -324,6 +357,8 @@ def qualify(docker, container, binaries, node, env, observations, profile):
         markers = [b"scheduled missing statement displayed and downloaded through Chromium"]
         markers.extend(f"signed economics revision {revision} retained and reopened through Chromium".encode()
                        for revision in range(1, 5))
+    if historical:
+        markers = [b"signed historical comparison preserved the later close and live queue through Chromium"]
     if not (late or rerun or economics):
         markers.append(b"signed customer verified clean, missing and unobserved business dates")
     if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
@@ -333,10 +368,12 @@ def qualify(docker, container, binaries, node, env, observations, profile):
             stage = re.search(rb"custody-late-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|tenant-portfolio-permission)|pending-corrected-source|correction-discovery|correction-recovery|original-and-following|retain-corrective-download)\b", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
         if not stage:
-            location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test|execution_economics_pilot_test)\.go:([0-9]+):", output)
+            location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test|historical_comparison_pilot_test|execution_economics_pilot_test)\.go:([0-9]+):", output)
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
+    if historical:
+        return verify_historical_comparison(observations, fixture), None
     if economics:
         return verify_execution_economics(observations, fixture), None
     records = verify_late_correction(observations, fixture) if late else verify_observations(observations, fixture, rerun, quantity_evidence)
@@ -377,7 +414,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
         results = {"postgres_image": IMAGE}
-        for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction", "execution_economics"):
+        for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction",
+                    "execution_economics", "historical_comparison"):
             # The image initializes its own secret in tmpfs. Local SQL administration
             # uses the postgres OS identity (peer); network logins require SCRAM.
             name = "kanz-custody-pilot-" + secrets.token_hex(8)
@@ -413,7 +451,8 @@ def main():
           "A separate operator replayed one request with one durable receipt and completion FACT. "
           "After a later close, the customer downloaded the quantity correction against the original execution. "
           "Four signed execution revisions showed a mismatch, agreement, inconsistent cash and a missing convention. "
-          "The original execution receipt reopened unchanged after correction. The first late statement replaced the scheduled missing result, and both receipts reopened unchanged.")
+          "The original execution receipt reopened unchanged after correction. The first late statement replaced the scheduled missing result, and both receipts reopened unchanged. "
+          "A full historical comparison reopened in Chromium and preserved the later close and live queue.")
 
 
 if __name__ == "__main__":

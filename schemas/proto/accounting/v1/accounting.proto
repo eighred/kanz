@@ -686,6 +686,11 @@ enum ReconciliationOutcome {
   RECONCILIATION_OUTCOME_FAILED = 4;
   // Only previously open historical execution quantities were corrected.
   RECONCILIATION_OUTCOME_HISTORICAL_QUANTITY_CORRECTION = 5;
+  // Manual comparison at a dated close after a later close owns the working queue.
+  // CLEAN and BREAKS describe the balance and reference differences in this
+  // snapshot. Separate measured execution evidence retains its own scope.
+  RECONCILIATION_OUTCOME_HISTORICAL_CLEAN = 6;
+  RECONCILIATION_OUTCOME_HISTORICAL_BREAKS = 7;
 }
 
 // ReconciliationBreakKind classifies a discrepancy. The values mirror
