@@ -15,7 +15,9 @@ def verify_startup(binary, env, reader_url, admitted):
     service_env = dict(env, ACCOUNTING_DATABASE_URL=reader_url, ACCOUNTING_TENANT="synthetic-custody-pilot",
                        ACCOUNTING_CUSTODY_PAIRS="PF1:CUST-A", ACCOUNTING_CUSTODY_ACCOUNTS="PF1:CUST-A:sandbox-account",
                        ACCOUNTING_LISTEN=f"127.0.0.1:{port}", ACCOUNTING_METRICS_LISTEN="127.0.0.1:0")
-    with subprocess.Popen([binary], env=service_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as service:
+    # A running service can fill an unread pipe before binding its HTTP listener.
+    output_stream = subprocess.DEVNULL if admitted else subprocess.PIPE
+    with subprocess.Popen([binary], env=service_env, stdout=output_stream, stderr=subprocess.STDOUT) as service:
         try:
             if not admitted:
                 output, _ = service.communicate(timeout=10)
@@ -26,14 +28,14 @@ def verify_startup(binary, env, reader_url, admitted):
             while service.poll() is None and time.monotonic() < deadline:
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
                 try:
-                    connection.request("GET", "/healthz")
+                    connection.request("GET", "/readyz")
                     if connection.getresponse().status == 200 and service.poll() is None:
                         return
                 except (OSError, http.client.HTTPException):
                     time.sleep(0.1)
                 finally:
                     connection.close()
-            raise RuntimeError("Accounting did not become ready with the proven synthetic assignment.")
+            raise RuntimeError(f"Accounting did not become ready with the proven synthetic assignment (exit {service.poll()}).")
         finally:
             if service.poll() is None:
                 service.terminate()
