@@ -31,7 +31,7 @@ func (r *Reconciler) ReconcileManual(ctx context.Context, subject Subject, reque
 	prior, err := r.store.ManualReceipt(ctx, request)
 	switch {
 	case errors.Is(err, ErrNoRun):
-		prior, err = r.reconcile(ctx, request)
+		prior, err = r.reconcile(ctx, request, subject)
 	case err != nil:
 		return Run{}, err
 	default:
@@ -41,8 +41,11 @@ func (r *Reconciler) ReconcileManual(ctx context.Context, subject Subject, reque
 		return prior, err
 	}
 	if prior.Outcome == OutcomeFailed {
-		if prior.FailureReason == ErrHistoricalLifecycle.Error() {
+		switch prior.FailureReason {
+		case ErrHistoricalLifecycle.Error():
 			return prior, ErrHistoricalLifecycle
+		case errBatchReceipt.Error():
+			return prior, errBatchReceipt
 		}
 		return prior, errors.New(prior.FailureReason)
 	}

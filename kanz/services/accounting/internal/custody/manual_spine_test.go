@@ -60,9 +60,7 @@ func TestManualCompletionRetainsOperatorOnJetStream(t *testing.T) {
 	store := NewPostgres(pool)
 	sub := subject()
 	sub.BusinessDate = BusinessDay(t0)
-	if err := store.SaveStatement(ctx, statement("independent", nil, nil)); err != nil {
-		t.Fatal(err)
-	}
+	statementID := manualSignedFeed(t, ctx, store)(0, 0)
 	r := manualReconciler(t, store, LedgerBookLoader(ledger.NewPostgres(pool), closeScope(t, true), testLogger()), producer)
 	got, err := r.ReconcileManual(ctx, sub, key, "operator")
 	if err != nil {
@@ -87,7 +85,7 @@ func TestManualCompletionRetainsOperatorOnJetStream(t *testing.T) {
 		if proto.Unmarshal(payload, &fact) != nil || env.GetCausationId() != key || env.GetCorrelationId() != got.RunID ||
 			env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT || env.GetEventType() != SubjectRun ||
 			fact.GetRequestId() != key || fact.GetActor() != "operator" || fact.GetRunId() != got.RunID ||
-			fact.GetStatementId() != "independent" || fact.GetBusinessDate().AsTime() != sub.BusinessDate ||
+			fact.GetStatementId() != statementID || fact.GetBusinessDate().AsTime() != sub.BusinessDate ||
 			fact.GetOutcome() != accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_CLEAN {
 			t.Fatal("published completion lost verified operator, dated statement or run attribution")
 		}

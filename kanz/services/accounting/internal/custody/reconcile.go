@@ -294,11 +294,10 @@ func NewReconciler(store Store, book BookLoader, publisher Publisher, tolerance 
 // evidence, and returning only the run would let a caller treat a failure as a
 // verdict about the book.
 func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error) {
-	return r.reconcile(ctx, Run{Subject: subject})
+	return r.reconcile(ctx, Run{}, subject)
 }
 
-func (r *Reconciler) reconcile(ctx context.Context, run Run) (Run, error) {
-	subject := run.Subject
+func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (Run, error) {
 	if err := subject.Validate(); err != nil {
 		return Run{}, err
 	}
@@ -358,7 +357,7 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run) (Run, error) {
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
 		// Transient contention or invalidated observations must not consume an
 		// operator's idempotency key as a permanently failed comparison.
-		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) {
+		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) && !errors.Is(err, errBatchReceipt) {
 			return Run{}, err
 		}
 		return r.recordFailure(ctx, run, fmt.Errorf("commit reconciliation: %w", err))
@@ -406,6 +405,8 @@ func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (
 		run.StatementID, run.Basis = "", nil
 	} else if errors.Is(reason, ErrHistoricalLifecycle) {
 		run.FailureReason = ErrHistoricalLifecycle.Error()
+	} else if errors.Is(reason, errBatchReceipt) {
+		run.FailureReason = errBatchReceipt.Error()
 	}
 	run, err := r.record(ctx, run)
 	if err != nil {

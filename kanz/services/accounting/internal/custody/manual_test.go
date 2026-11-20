@@ -47,23 +47,17 @@ func TestManualDatedReceiptSurvivesCorrectionAndRestart(t *testing.T) {
 	if err := journal.Append(ctx, closeTrade("next-midnight", 25, -250, sub.BusinessDate.AddDate(0, 0, 1)), nil); err != nil {
 		t.Fatal(err)
 	}
-	first := statement("original", map[string]int64{"AAPL": 8}, map[string]int64{"USD": -100})
-	if err := store.SaveStatement(ctx, first); err != nil {
-		t.Fatal(err)
-	}
+	signed := manualSignedFeed(t, ctx, store)
+	firstID := signed(8, -100)
 	originalKey := uuid.NewString()
 	original, err := r.ReconcileManual(ctx, sub, originalKey, actor)
 	if err != nil || original.Outcome != OutcomeBreaks || len(original.Breaks) != 1 || original.Breaks[0].Diff.Cmp(big.NewRat(2, 1)) != 0 ||
 		original.Basis == nil || original.Basis.Mode != BasisDeclared || original.Basis.JournalPosition != 2 {
 		t.Fatalf("original dated basis: %+v %v", original, err)
 	}
-	fixed := statement("corrected", map[string]int64{"AAPL": 10}, map[string]int64{"USD": -100})
-	fixed.ReceivedAt = t0.Add(time.Minute)
-	if err := store.SaveStatement(ctx, fixed); err != nil {
-		t.Fatal(err)
-	}
+	fixedID := signed(10, -100)
 	corrected, err := r.ReconcileManual(ctx, sub, uuid.NewString(), actor)
-	if err != nil || corrected.Outcome != OutcomeClean || corrected.StatementID != "corrected" {
+	if err != nil || corrected.Outcome != OutcomeClean || corrected.StatementID != fixedID {
 		t.Fatalf("correction: %+v %v", corrected, err)
 	}
 	if b, err := store.LoadBreak(ctx, original.Breaks[0].BreakID); err != nil || b.Status != BreakResolved {
@@ -76,7 +70,7 @@ func TestManualDatedReceiptSurvivesCorrectionAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fact accountingpb.ReconciliationRun
-	if err := proto.Unmarshal(payload, &fact); err != nil || cause != originalKey || fact.Actor != actor || fact.RequestId != cause || fact.StatementId != first.StatementID {
+	if err := proto.Unmarshal(payload, &fact); err != nil || cause != originalKey || fact.Actor != actor || fact.RequestId != cause || fact.StatementId != firstID {
 		t.Fatalf("manual FACT attribution: %v %v", fact.RequestId, err)
 	}
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM custody_runs").Scan(&count); err != nil || count != 3 {
@@ -115,8 +109,7 @@ func TestManualDatedReceiptSurvivesCorrectionAndRestart(t *testing.T) {
 	}
 	later := sub
 	later.BusinessDate = later.BusinessDate.AddDate(0, 0, 1)
-	laterSt := fixed
-	laterSt.StatementID = "later-break"
+	laterSt := statement("later-break", map[string]int64{"AAPL": 10}, map[string]int64{"USD": -100})
 	laterSt.BusinessDate = later.BusinessDate
 	laterSt.ReceivedAt = t0.AddDate(0, 0, 1)
 	if err := store.SaveStatement(ctx, laterSt); err != nil {
@@ -129,7 +122,7 @@ func TestManualDatedReceiptSurvivesCorrectionAndRestart(t *testing.T) {
 	staleKey := uuid.NewString()
 	for range 2 {
 		refused, err := r.ReconcileManual(ctx, sub, staleKey, actor)
-		if !errors.Is(err, ErrHistoricalLifecycle) || refused.Outcome != OutcomeFailed || refused.StatementID != "corrected" {
+		if !errors.Is(err, ErrHistoricalLifecycle) || refused.Outcome != OutcomeFailed || refused.StatementID != fixedID {
 			t.Fatalf("historical receipt: %+v %v", refused, err)
 		}
 		if b, err := store.LoadBreak(ctx, scheduled.Breaks[0].BreakID); err != nil || b.Status == BreakResolved {
@@ -152,9 +145,7 @@ func TestManualScheduledRaceUsesNewestJournalBasis(t *testing.T) {
 	if err := journal.Append(ctx, closeTrade("initial", 10, -100, t0), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveStatement(ctx, statement("statement", map[string]int64{"AAPL": 10}, map[string]int64{"USD": -100})); err != nil {
-		t.Fatal(err)
-	}
+	manualSignedFeed(t, ctx, store)(10, -100)
 	load := LedgerBookLoader(journal, closeScope(t, true), testLogger())
 	loaded, resume := make(chan struct{}), make(chan struct{})
 	slow := manualReconciler(t, store, func(ctx context.Context, s Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error) {
