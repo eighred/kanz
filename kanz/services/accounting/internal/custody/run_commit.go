@@ -370,6 +370,22 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			if len(resolutions) == 0 {
 				return Run{}, ErrHistoricalLifecycle
 			}
+			// ledger_prepare_append takes this portfolio lock before advancing the
+			// canonical head. A booking arriving after materialization requires an
+			// actual re-read before an open historical item can be cleared.
+			var stable bool
+			if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, run.Subject.PortfolioID).Scan(&stable); err != nil {
+				return Run{}, err
+			}
+			if !stable {
+				return Run{}, ErrRunBusy
+			}
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT FROM ledger_heads WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND position=$2)`, run.Subject.PortfolioID, run.Basis.JournalPosition).Scan(&stable); err != nil {
+				return Run{}, err
+			}
+			if !stable {
+				return Run{}, ErrBookBasisChanged
+			}
 			run.Outcome = OutcomeHistoricalQuantityCorrection
 			run.HistoricalQuantityResolutions = resolutions
 			run.Basis = run.Basis.clone()

@@ -345,6 +345,28 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 	// open with its original detection despite the successful partial correction.
 	partialLevel := strings.Replace(string(levelAt(4)), `"quantityInInstrumentUnits":true`, `"quantityInInstrumentUnits":false`, 1)
 	partialID, partialDigest := deliver(json.RawMessage(partialLevel), 7, nextDigest)
+	stale, err := NewReconciler(st, func(ctx context.Context, s Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error) {
+		book, entries, basis, err := LedgerBookLoader(journal, scope, testLogger())(ctx, s)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		lateEntry := closeTrade("source-arrived-during-compare", 1, -10, s.BusinessDate.AddDate(0, 0, 2))
+		lateEntry.VenueAccountID = source.Account
+		if err := journal.Append(ctx, lateEntry, nil); err != nil {
+			return nil, nil, nil, err
+		}
+		return book, entries, basis, nil
+	}, publisher("accounting"), nil, nil, testLogger(), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.ReconcileManual(ctx, sub, "00482737-9c5f-4c07-b6dc-051d6509240e", "operator:quantity"); !errors.Is(err, ErrBookBasisChanged) {
+		t.Fatal("stale book acquired working item", err)
+	}
+	stillOpen, err := st.OutstandingBreaks(ctx, sub.PortfolioID)
+	if err != nil || len(stillOpen) != 2 {
+		t.Fatal("stale correction changed items", stillOpen, err)
+	}
 	partial, err := r.Reconcile(ctx, sub)
 	if err != nil || partial.Outcome != OutcomeHistoricalQuantityCorrection || len(partial.HistoricalQuantityResolutions) != 1 {
 		t.Fatal("partial signed correction", partial, err)
