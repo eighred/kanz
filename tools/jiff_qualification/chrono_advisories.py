@@ -1,15 +1,26 @@
 """Check the published sad-chrono candidate against its own and inherited advisories."""
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
+import tarfile
 import urllib.parse
 import urllib.request
 
 PACKAGE = "sad-chrono"
 VERSION = "0.5.1"
 CHECKSUM = "59944182ae44e540eb6a61059eefb6d437b4bb3a7eff26e75149ed35601b7c5f"
+SOURCE_REPO = "repos/sadco-io/sad-chrono"
+TAG = "a08d6c968494735736103d37db2154b59b6a0392"
+COMMIT = "14e7c8e1501e708496798b69e44b3e8bf82cc6c9"
+TREE = "bdf81f38c966963a64951c63ffe49e7a17d67906"
+REVIEWED_RELEASE = {
+    "tag": TAG, "tag_signature": "valid", "commit": COMMIT, "commit_signature": "valid",
+    "tree": TREE, "source_files": 53,
+    "source_blobs_sha256": "a13f774026f2323358754ad653fba2bbac5ffacbecedaacfeb0bef134d978831",
+}
 PUBLISHER = "repos/sadco-io/sad-chrono/security-advisories"
 UPSTREAM = "repos/chronotope/chrono/security-advisories"
 RUSTSEC = "repos/rustsec/advisory-db"
@@ -80,6 +91,8 @@ def evaluate(snapshot, version, checksum):
         raise ValueError("unqualified published sad-chrono archive")
     if snapshot["repository"] != REVIEWED_PUBLISHER:
         raise ValueError("publisher identity, project status or security policy needs review")
+    if snapshot.get("release_source") != REVIEWED_RELEASE:
+        raise ValueError("signed release source or registry package contents need review")
     registry = {"name": PACKAGE, "version": VERSION, "checksum": CHECKSUM, "yanked": False,
                 "rust_version": "1.85.0", "publisher": 365806, "owners": [REGISTRY_OWNER]}
     if snapshot["registry"] != registry:
@@ -114,21 +127,85 @@ def evaluate(snapshot, version, checksum):
         raise ValueError(f"published fork affected by {sorted(findings)}")
 
 
-def retrieve(url):
+def read_response(url, limit):
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                               "User-Agent": "kanz-temporal-qualification"})
     with urllib.request.urlopen(req, timeout=30) as response:
         if response.url != url:
             raise ValueError("public evidence source redirected; review the new identity")
-        raw = response.read(4 * 1024 * 1024 + 1)
+        raw = response.read(limit + 1)
         link = response.headers.get("Link", "")
-    if len(raw) > 4 * 1024 * 1024:
+    if len(raw) > limit:
         raise ValueError("advisory source exceeded response bound")
+    return raw, link
+
+
+def retrieve(url):
+    raw, link = read_response(url, 4 * 1024 * 1024)
     return json.loads(raw), link
 
 
 def request(path):
     return retrieve("https://api.github.com/" + path)[0]
+
+
+def checked_source_blobs(tree, archive):
+    # The immutable registry digest is verified before the tar parser sees
+    # the package. Read regular files into memory without extracting paths.
+    if hashlib.sha256(archive).hexdigest() != CHECKSUM or tree["sha"] != TREE or tree["truncated"] is not False:
+        raise ValueError("registry archive or signed Git tree differs from the reviewed release")
+    files = {r["path"]: r["sha"] for r in tree["tree"] if r["type"] == "blob" and r["mode"] in {"100644", "100755"}}
+    source = {}
+    generated = set()
+    prefix = f"{PACKAGE}-{VERSION}/"
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as package:
+        for member in package:
+            if not member.isfile() or not member.name.startswith(prefix):
+                raise ValueError("unexpected member in registry package")
+            name = member.name[len(prefix):]
+            content = package.extractfile(member).read()
+            if name in {".cargo_vcs_info.json", "Cargo.lock", "Cargo.toml"}:
+                if name in generated:
+                    raise ValueError("duplicate generated Cargo file")
+                generated.add(name)
+                if name == ".cargo_vcs_info.json" and json.loads(content) != {"git": {"sha1": COMMIT}, "path_in_vcs": ""}:
+                    raise ValueError("registry package records another source commit")
+                continue
+            if name == "Cargo.toml.orig":
+                name = "Cargo.toml"
+            blob = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+            if name in source or files.get(name) != blob:
+                raise ValueError(f"packaged file differs from signed Git tree: {name}")
+            source[name] = blob
+    if generated != {".cargo_vcs_info.json", "Cargo.lock", "Cargo.toml"}:
+        raise ValueError("missing generated Cargo metadata")
+    mandatory = {p for p in files if p.startswith("src/") or p in {"build.rs", "Cargo.toml", "LICENSE.txt", "NOTICE"}}
+    if not mandatory <= source.keys():
+        raise ValueError("registry package omits signed source or licensing")
+    return source
+
+
+def release_source():
+    ref = request(f"{SOURCE_REPO}/git/ref/tags/v{VERSION}")
+    if ref["ref"] != f"refs/tags/v{VERSION}" or (ref["object"]["type"], ref["object"]["sha"]) != ("tag", TAG):
+        raise ValueError("publisher tag moved or is no longer annotated")
+    tag = request(f"{SOURCE_REPO}/git/tags/{TAG}")
+    commit = request(f"{SOURCE_REPO}/git/commits/{COMMIT}")
+    if (tag["sha"], tag["tag"], tag["object"]["type"], tag["object"]["sha"], commit["sha"], commit["tree"]["sha"]) != (
+            TAG, f"v{VERSION}", "commit", COMMIT, COMMIT, TREE):
+        raise ValueError("release tag, commit or source tree changed")
+    for obj in (tag, commit):
+        signature = obj["verification"]
+        if signature["verified"] is not True or signature["reason"] != "valid":
+            raise ValueError("publisher tag or commit lacks verified signing evidence")
+    tree = request(f"{SOURCE_REPO}/git/trees/{TREE}?recursive=1")
+    archive, _ = read_response(f"https://static.crates.io/crates/{PACKAGE}/{PACKAGE}-{VERSION}.crate", 1024 * 1024)
+    files = checked_source_blobs(tree, archive)
+    inventory = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    return {"tag": tag["sha"], "tag_signature": tag["verification"]["reason"],
+            "commit": commit["sha"], "commit_signature": commit["verification"]["reason"],
+            "tree": tree["sha"], "source_files": len(files),
+            "source_blobs_sha256": hashlib.sha256(inventory).hexdigest()}
 
 
 def next_page(header, start):
@@ -215,7 +292,7 @@ def collect():
         return {kind: projection(rows(f"advisories?ecosystem=rust&affects={name}&type={kind}"))
                 for kind in GLOBAL_TYPES}
 
-    return {"repository": publisher, "registry": registry, "publisher_global": global_feeds(PACKAGE),
+    return {"repository": publisher, "registry": registry, "release_source": release_source(), "publisher_global": global_feeds(PACKAGE),
             "rustsec_commit": revision, "rustsec_chrono": {f["name"]: f["sha"] for f in files},
             "publisher": projection(rows(PUBLISHER)), "upstream_publisher": projection(rows(UPSTREAM)),
             "upstream_global": global_feeds("chrono")}
