@@ -16,7 +16,7 @@ package binance
 // order. order.Reconcile turns it into ActionRedrive when the OMS holds no venue
 // ack, and ActionRedrive PLACES THE ORDER AT A REAL EXCHANGE. So the only thing
 // in this file that may produce it is Binance's own -2013 "Order does not
-// exist", decoded off a response Binance actually sent.
+// exist" together with an absent order in the tenant's durable adapter view.
 //
 // A timeout, a DNS failure, a 5xx, an unreadable body and an exhausted weight
 // budget are all returned as ERRORS — "the question could not be asked" — and
@@ -86,8 +86,19 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		}
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Code == binanceOrderDoesNotExist {
-			// Binance ANSWERED, and its answer is that it has never held this
-			// client order id. This is the one branch that authorizes a re-drive.
+			// A lost placement response and a later venue miss can coexist.
+			// The adapter's durable row precedes placement, so its presence
+			// means the order may already have been sent.
+			if v.durableOrders == nil {
+				return OrderView{State: OrderViewIndeterminate, Reason: "Binance reports no such order; durable adapter dispatch history is unavailable"}, nil
+			}
+			_, _, recorded, err := v.durableOrders.Get(ctx, st.GetOrderId())
+			if err != nil {
+				return OrderView{}, fmt.Errorf("binance: read durable dispatch history: %w", err)
+			}
+			if recorded {
+				return OrderView{State: OrderViewIndeterminate, Reason: "Binance reports no such order after the adapter recorded it for dispatch"}, nil
+			}
 			return OrderView{State: OrderViewUnknown}, nil
 		}
 		// Any other exchange error, any transport fault, any undecodable body:

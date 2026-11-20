@@ -109,11 +109,7 @@ func TestBinanceQuery_NewIsWorking(t *testing.T) {
 	}
 }
 
-// -2013 "Order does not exist." IS THE ONE AFFIRMATIVE MISS. Binance answered,
-// and its answer is that it has never held this client order id. This is the
-// only input in this file that may produce UNKNOWN, and UNKNOWN is what lets the
-// OMS place the order.
-func TestBinanceQuery_OrderDoesNotExistIsUnknown(t *testing.T) {
+func TestBinanceQuery_MissingOrderWithoutDurableDispatchHistoryIsIndeterminate(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryStatus = 400
 	f.queryBody = `{"code":-2013,"msg":"Order does not exist."}`
@@ -122,9 +118,8 @@ func TestBinanceQuery_OrderDoesNotExistIsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryOrder: %v", err)
 	}
-	if view.State != OrderViewUnknown {
-		t.Fatalf("state = %v, want UNKNOWN — an order Binance has never held is the one case "+
-			"the OMS may re-drive, and freezing it means every interrupted order needs a human", view.State)
+	if view.State != OrderViewIndeterminate || view.Reason == "" {
+		t.Fatalf("venue miss without durable local history: %+v", view)
 	}
 }
 

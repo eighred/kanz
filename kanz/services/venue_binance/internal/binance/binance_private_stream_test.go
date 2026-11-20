@@ -96,7 +96,7 @@ func TestPrivateStreamRequiresAccountProofBeforeStart(t *testing.T) {
 		_, _, _ = conn.Read(ctx)
 	})
 	wsBase := "wss" + strings.TrimPrefix(rest.baseURL, "https")
-	connector := NewBinanceConnector(VenueSettings{BaseURL: rest.baseURL, Account: "fixture-account", APIKey: rest.apiKey, APISecret: string(rest.apiSecret)}, wsBase)
+	connector := NewBinanceConnector(VenueSettings{BaseURL: rest.baseURL, Account: "fixture-account", APIKey: rest.apiKey, APISecret: string(rest.apiSecret)}, wsBase, nil)
 	connector.rest.httpc, connector.rest.now = rest.httpc, rest.now
 	deps := WorkerDeps{Orders: newFakeOrders(), TickerInterval: time.Hour}
 	for _, tc := range []struct {
@@ -364,7 +364,7 @@ func TestPrivateStreamOriginAndRedirect(t *testing.T) {
 	if _, err := privateStreamEndpoint("https://api.binance.com:443", "wss://ws-api.binance.com:443"); err != nil {
 		t.Fatal("explicit default port refused")
 	}
-	connector := NewBinanceConnector(VenueSettings{BaseURL: testREST}, "wss://ws-api.binance.com")
+	connector := NewBinanceConnector(VenueSettings{BaseURL: testREST}, "wss://ws-api.binance.com", nil)
 	if _, err := connector.Start(t.Context(), "123", WorkerDeps{Orders: newFakeOrders()}); err == nil {
 		t.Fatal("connector started with a private stream in a different environment")
 	}

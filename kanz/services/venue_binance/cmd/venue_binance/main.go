@@ -346,7 +346,7 @@ func serve(cfg config.Config) error {
 		OnThrottle: func() {
 			logger.Error("binance: REST weight budget exhausted — backing off (structural alert)")
 		},
-	}, cfg.WSBase)
+	}, cfg.WSBase, view)
 
 	seam := orderview.NewObservedSeam(view, viewObs, cfg.MIC, logger)
 	// WithDLQ EVEN THOUGH THE BROADCAST PATH NEVER CONSULTS IT. The exemption in

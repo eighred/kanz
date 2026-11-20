@@ -9,6 +9,7 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venuemargin"
 )
 
@@ -38,8 +39,9 @@ type BinanceConnector struct {
 
 // NewBinanceConnector assembles the venue + shared REST client from settings.
 // wsBase is the private WebSocket API origin.
-func NewBinanceConnector(settings VenueSettings, wsBase string) *BinanceConnector {
+func NewBinanceConnector(settings VenueSettings, wsBase string, orders orderview.Store) *BinanceConnector {
 	venue := NewBinanceVenueFromSettings(settings)
+	venue.durableOrders, _ = orders.(*orderview.Postgres)
 	endpoint, err := privateStreamEndpoint(settings.BaseURL, wsBase)
 	c := &BinanceConnector{settings: settings, rest: venue.rest, venue: venue, streamConfigErr: err}
 	c.dialUserData = func(ctx context.Context) (UserDataStream, func(), error) {

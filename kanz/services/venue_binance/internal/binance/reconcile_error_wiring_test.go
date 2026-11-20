@@ -12,7 +12,7 @@ import (
 func TestStartForwardsReconcileErrorObserver(t *testing.T) {
 	f := newFakeBinance(t)
 	f.accountBody = `{"uid":123,"balances":[{"asset":"USD","free":"invalid","locked":"0"}]}`
-	c := NewBinanceConnector(VenueSettings{MIC: "BINANCE", BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Symbols: map[string]string{"BTC-USD": "BTCUSDT"}, WeightBudget: 1200}, "")
+	c := NewBinanceConnector(VenueSettings{MIC: "BINANCE", BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Symbols: map[string]string{"BTC-USD": "BTCUSDT"}, WeightBudget: 1200}, "", nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	seen := make(chan error, 1)
