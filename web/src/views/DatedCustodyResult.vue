@@ -112,7 +112,7 @@ const pendingLabels = {
         <span v-if="result.transactions?.transaction_pass === 'ran'">
           · Independent reference comparison · Statement references {{ result.transactions.statement_reference_count }}
           · Book references {{ result.transactions.book_reference_count }}
-          <template v-if="!result.historical?.execution_quantities"> · Individual trade quantities, prices and cash amounts remain unverified.</template>
+          <template v-if="!result.execution_economics_status && !result.historical?.execution_quantities"> · Individual trade quantities, prices and cash amounts remain unverified.</template>
           <strong v-if="result.transactions.unreferenced_book_trades !== '0'"> · Incomplete coverage · {{ result.transactions.unreferenced_book_trades }} book trades without independent references</strong>
         </span>
         <span v-else-if="result.transactions?.transaction_pass === 'balances_only'"> · Balances only · Transactions were not compared</span>

@@ -17,11 +17,20 @@ async function comparisonDownload(page, region, response) {
   const expected = { format: 'kanz.custody-comparison.v1' }
   for (const key of ['tenant_id', 'portfolio_id', 'custodian_id', 'business_date', 'state', 'outcome',
     'run_id', 'completed_at', 'statement_id', 'journal_position', 'scope_mode', 'account_assignment_verified', 'transaction_pass',
-    'statement_reference_count', 'book_reference_count', 'unreferenced_book_trades']) {
+    'statement_reference_count', 'book_reference_count', 'unreferenced_book_trades', 'execution_economics_status']) {
     if (response[key] !== undefined) expected[key] = response[key]
   }
   if (response.transaction_pass === 'ran') expected.transaction_comparison_basis = 'external_reference_membership'
   if (response.signed_statement_sha256 !== undefined) {
+    if (response.execution_economics !== undefined) {
+      // These older pilot statements have no signed commission convention.
+      assert.equal(response.execution_economics_status, 'unknown')
+      for (const row of response.execution_economics.rows) {
+        assert.equal(row.status, 'unknown')
+        assert(row.reason && !row.book && !row.custodian && !row.difference)
+      }
+      expected.execution_economics = response.execution_economics
+    }
     if (response.execution_quantities !== undefined) {
       const { compared, unassessed, differences } = response.execution_quantities
       const amount = ({ coefficient, exponent }) => ({ coefficient, exponent })

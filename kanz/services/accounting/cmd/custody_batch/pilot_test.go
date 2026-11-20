@@ -40,6 +40,7 @@ type pilotStatementFile struct {
 	revision  int
 	dayOffset int
 	position  *big.Rat
+	cash      *big.Rat
 	trade     bool
 }
 
@@ -112,9 +113,13 @@ func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, files [
 			t.Fatal(err)
 		}
 		wantID := fmt.Sprintf("custody-batch.v1.synthetic-source.r%d.%x", file.revision, sha256.Sum256(raw))
+		wantCash := file.cash
+		if wantCash == nil {
+			wantCash = big.NewRat(-21, 2)
+		}
 		position := stored.Positions["SYN"]
 		if stored.StatementID != wantID || position == nil || position.Cmp(file.position) != 0 ||
-			stored.Cash["USD"] == nil || stored.Cash["USD"].Cmp(big.NewRat(-21, 2)) != 0 {
+			stored.Cash["USD"] == nil || stored.Cash["USD"].Cmp(wantCash) != 0 {
 			t.Fatal("statement, revision or lineage differs on accounting readback")
 		}
 		if file.trade {

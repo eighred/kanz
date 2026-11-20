@@ -2,6 +2,7 @@
 """Run the synthetic signed-custody operator workflow on a private local fixture."""
 
 import argparse
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -167,7 +168,61 @@ def verify_late_correction(path, fixture):
     return {"evidence": observed, "customer_download": download, "reported_execution_downloads": reported}
 
 
+def verify_execution_economics(path, fixture):
+    # Use the independently known booked fill and the bytes signed by the
+    # synthetic custodian. Browser downloads are the observations under test.
+    def amount(field):
+        return Decimal(field["coefficient"]).scaleb(field.get("exponent", 0))
+
+    downloads = path.with_suffix(".downloads.json")
+    if downloads.stat().st_size > 256 * 1024:
+        raise RuntimeError("Execution comparison downloads exceed the pilot bound.")
+    records = json.loads(downloads.read_bytes())
+    if len(records) != 4:
+        raise RuntimeError("Four signed execution revisions must be recoverable.")
+    runs = set()
+    book = {"quantity": Decimal("10.5"), "price": Decimal("1"), "commission": Decimal("0.25"),
+            "gross_cash": Decimal("-10.5"), "net_cash": Decimal("-10.75"), "settled_cash": Decimal("-10.75")}
+    for revision, capture in enumerate(records, 1):
+        signed = (fixture / f"statement-r{revision}.json").read_bytes()
+        digest = hashlib.sha256(signed).hexdigest()
+        receipt = capture["receipt"]
+        if (receipt.get("signed_statement_sha256") != digest or receipt.get("statement_id") !=
+                f"custody-batch.v1.synthetic-source.r{revision}.{digest}" or receipt.get("lookup") != "retained_run"
+                or receipt.get("account_assignment_verified") is not True or not receipt.get("run_id")
+                or receipt["run_id"] in runs or not re.fullmatch(r"[0-9a-f]{64}", capture["sha256"])):
+            raise RuntimeError("Execution receipt does not identify its original authorized statement.")
+        runs.add(receipt["run_id"])
+        tx = json.loads(signed)["statement"]["transactions"][0]
+        row, = receipt["execution_economics"]["rows"]
+        if row["external_ref"] != tx["externalRef"] or row["instrument_id"] != tx["instrumentId"]:
+            raise RuntimeError("Execution reference does not match the signed transaction.")
+        if revision >= 3:
+            reason = "source_cash_inconsistent" if revision == 3 else "convention_missing"
+            if (row["status"] != "unknown" or row.get("reason") != reason
+                    or any(k in row for k in ("book", "custodian", "difference"))):
+                raise RuntimeError("Missing or inconsistent economics produced an assessed amount.")
+            continue
+        fee = amount(tx["executionEconomics"]["commission"])
+        qty, price = amount(tx["quantity"]), amount(tx["price"])
+        gross = -qty * price
+        source = dict(quantity=qty, price=price, commission=fee, gross_cash=gross,
+                      net_cash=gross - fee, settled_cash=gross - fee)
+        if amount(tx["cash"]) != source["settled_cash"]:
+            raise RuntimeError("Invalid synthetic settled cash oracle.")
+        difference = {key: book[key] - value for key, value in source.items()}
+        if (row["status"] != ("mismatch" if any(difference.values()) else "equal") or
+                row["book_settlement_date"] != "2020-02-04" or row["custodian_settlement_date"] != "2020-02-04" or
+                row["currency_code"] != "USD"):
+            raise RuntimeError("Incorrect settlement status, date or units.")
+        for group, expected in (("book", book), ("custodian", source), ("difference", difference)):
+            if {key: amount(row[group][key]) for key in expected} != expected:
+                raise RuntimeError("Execution economics differed from the independent decimal oracle.")
+    return records
+
+
 def qualify(docker, container, binaries, node, env, observations, profile):
+    economics = profile == "execution_economics"
     rerun = profile == "operator_comparisons"
     quantity_evidence = profile == "quantity_comparisons"
     late = profile == "historical_quantity_correction"
@@ -205,6 +260,8 @@ def qualify(docker, container, binaries, node, env, observations, profile):
         fixture = fixture / "instrument_units"
     elif late:
         fixture = fixture / "late_quantity"
+    elif economics:
+        fixture = fixture / "execution_economics"
     authority = json.loads((fixture / "authority.json").read_bytes())
     # psql resolves the read-only profile's relative include beside its entrypoint.
     grants = "signed_fixture_grants.sql" if rerun else "pilot_grants.sql"
@@ -249,15 +306,21 @@ def qualify(docker, container, binaries, node, env, observations, profile):
     if late:
         pilot_env["CUSTODY_PILOT_LATE_QUANTITY"] = "1"
         pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-late-correction.cjs")
-    if late or quantity_evidence:
+    if economics:
+        pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-execution-economics.cjs")
+    if late or quantity_evidence or economics:
         pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.with_suffix(".downloads.json"))
     test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
+    if economics:
+        test = "TestSignedExecutionEconomicsPilot"
     proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
                             "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
     output = proof.stdout
     markers = [b"signed customer recovered the applied historical quantity correction"] if late else [
         b"signed gateway and Chromium verified the persisted detection"]
-    if not (late or rerun):
+    if economics:
+        markers = [f"signed economics revision {revision} retained and reopened through Chromium".encode() for revision in range(1, 5)]
+    if not (late or rerun or economics):
         markers.append(b"signed customer verified clean, missing and unobserved business dates")
     if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
             or not all(marker in output for marker in markers)):
@@ -266,10 +329,12 @@ def qualify(docker, container, binaries, node, env, observations, profile):
             stage = re.search(rb"custody-late-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|tenant-portfolio-permission)|pending-corrected-source|correction-discovery|correction-recovery|original-and-following|retain-corrective-download)\b", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
         if not stage:
-            location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test)\.go:([0-9]+):", output)
+            location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test|execution_economics_pilot_test)\.go:([0-9]+):", output)
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
+    if economics:
+        return verify_execution_economics(observations, fixture), None
     records = verify_late_correction(observations, fixture) if late else verify_observations(observations, fixture, rerun, quantity_evidence)
     return records, check_withdrawal() if check_withdrawal else None
 
@@ -308,7 +373,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
         results = {"postgres_image": IMAGE}
-        for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction"):
+        for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction", "execution_economics"):
             # The image initializes its own secret in tmpfs. Local SQL administration
             # uses the postgres OS identity (peer); network logins require SCRAM.
             name = "kanz-custody-pilot-" + secrets.token_hex(8)
@@ -337,7 +402,9 @@ def main():
     print("PASS: The signed customer read the discrepancy, corrected clean date, missing statement and "
           "unobserved date in Chromium. The customer could not post cash, change the break or start a rerun. "
           "A separate operator replayed one request with one durable receipt and completion FACT. "
-          "After a later close, the customer downloaded the quantity correction against the original execution.")
+          "After a later close, the customer downloaded the quantity correction against the original execution. "
+          "Four signed execution revisions showed a mismatch, agreement, inconsistent cash and a missing convention. "
+          "The original execution receipt reopened unchanged after correction.")
 
 
 if __name__ == "__main__":
