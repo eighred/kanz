@@ -108,9 +108,9 @@ func TestOverfillReachesNoBroker(t *testing.T) {
 		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{
 			[]byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE",`+
-				`"X":"FILLED","l":"10","L":"50000","z":"10","q":"10","t":11,"T":1700000000000}`, okOrder)),
+				`"X":"FILLED","l":"10","L":"50000","z":"10","q":"10","n":"0","N":"USDT","t":11,"T":1700000000000}`, okOrder)),
 			[]byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE",`+
-				`"X":"FILLED","l":"4","L":"50000","z":"14","q":"10","t":12,"T":1700000000000}`, badOrder)),
+				`"X":"FILLED","l":"4","L":"50000","z":"14","q":"10","n":"0","N":"USDT","t":12,"T":1700000000000}`, badOrder)),
 		}},
 		Orders: view, Pub: prod, Venue: "BINANCE", Tenant: "fund-alpha",
 		OnRefused: func(string, string, string) { refused++ },

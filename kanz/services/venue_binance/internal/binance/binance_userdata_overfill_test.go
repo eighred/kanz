@@ -51,7 +51,7 @@ func TestUserData_OverfillReportIsRefusedAndQuarantined(t *testing.T) {
 		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
-				`"l":"4","L":"50000","z":"14","q":"10","t":7,"T":1700000000000}`)}},
+				`"l":"4","L":"50000","z":"14","q":"10","n":"0","N":"USDT","t":7,"T":1700000000000}`)}},
 		Orders: view, Pub: cap, Venue: "BINANCE", Tenant: "fund-alpha",
 		OnRefused: func(mic, orderID, reason string) {
 			refusals = append(refusals, mic+"/"+orderID+"/"+reason)
@@ -111,7 +111,7 @@ func TestUserData_OverfillOnAPartialReportIsAlsoRefused(t *testing.T) {
 		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED",` +
-				`"l":"1","L":"50000","z":"10.5","q":"10","t":8,"T":1700000000000}`)}},
+				`"l":"1","L":"50000","z":"10.5","q":"10","n":"0","N":"USDT","t":8,"T":1700000000000}`)}},
 		Orders: view, Pub: cap, Venue: "BINANCE", Tenant: "fund-alpha",
 		OnRefused: func(string, string, string) { refused++ },
 	})
@@ -144,7 +144,7 @@ func TestUserData_AnExactFillIsNotMistakenForAnOverfill(t *testing.T) {
 		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
-				`"l":"10","L":"50000","z":"10","q":"10","t":9,"T":1700000000000}`)}},
+				`"l":"10","L":"50000","z":"10","q":"10","n":"0","N":"USDT","t":9,"T":1700000000000}`)}},
 		Orders: view, Pub: cap, Venue: "BINANCE", Tenant: "fund-alpha",
 		OnRefused: func(string, string, string) { refused++ },
 	})

@@ -105,7 +105,7 @@ func checkEnvelope(t *testing.T, m bus.Message, wantType, wantSchemaRef, wantKey
 func TestUserDataFillEmitsAValidEnvelope(t *testing.T) {
 	prod, cc := realVenueProducer(t)
 	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
-		`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
+		`"l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`
 
 	ing := fixtureUserDataIngester(UserDataConfig{
 		Symbols: fixtureTradeSymbols(),

@@ -294,7 +294,7 @@ func TestPrivateStreamCancellationAndMalformedExecution(t *testing.T) {
 }
 
 func TestPrivateStreamExecutionRequiresWireIdentity(t *testing.T) {
-	const trade = `{"e":"executionReport","x":"TRADE","s":"BTCUSDT","c":"o1","S":"BUY","X":"FILLED","l":"1","L":"2","z":"1","t":0,"T":1700000000000}`
+	const trade = `{"e":"executionReport","x":"TRADE","s":"BTCUSDT","c":"o1","S":"BUY","X":"FILLED","l":"1","L":"2","z":"1","n":"0","N":"USDT","t":0,"T":1700000000000}`
 	for _, field := range []string{`"x":"TRADE",`, `"s":"BTCUSDT",`, `"c":"o1",`, `"X":"FILLED",`, `"t":0,`, `,"T":1700000000000`} {
 		ing := newUserDataIngester(UserDataConfig{})
 		if err := ing.handle(t.Context(), []byte(strings.Replace(trade, field, "", 1))); err == nil || err.Error() != "binance: malformed private execution report" {
@@ -336,7 +336,7 @@ func TestPrivateTradeRequiresKnownInstrumentAndSide(t *testing.T) {
 			}
 			capture := &reconCapture{}
 			ing := fixtureUserDataIngester(UserDataConfig{Orders: view, Symbols: tc.symbols, Pub: capture})
-			frame := fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":%q,"x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","t":1,"T":1700000000000}`, tc.reported)
+			frame := fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":%q,"x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","n":"0","N":"USDT","t":1,"T":1700000000000}`, tc.reported)
 			if err := ing.handle(t.Context(), []byte(frame)); err != nil {
 				t.Fatal(err)
 			}

@@ -40,8 +40,8 @@ import (
 func TestUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives(t *testing.T) {
 	cap := &reconCapture{}
 	frames := [][]byte{
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.4","L":"50000","z":"0.4","q":"1","t":11,"T":1700000001000,"E":1700000001000}`),
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"0.6","L":"50100","z":"1","q":"1","t":12,"T":1700000002000,"E":1700000002000}`),
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.4","L":"50000","z":"0.4","q":"1","n":"0","N":"USDT","t":11,"T":1700000001000,"E":1700000001000}`),
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"0.6","L":"50100","z":"1","q":"1","n":"0","N":"USDT","t":12,"T":1700000002000,"E":1700000002000}`),
 	}
 	_ = ingesterOver(frames, cap).Run(context.Background()) // io.EOF at the end of the frames
 
@@ -98,7 +98,7 @@ func TestUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives(t *testin
 func TestUserData_AsOfCarriesTheEventTimeNotTheTransactTime(t *testing.T) {
 	cap := &reconCapture{}
 	view := newFakeOrders("o1")
-	frame := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":21,"T":1700000001000,"E":1700000009000}`
+	frame := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":21,"T":1700000001000,"E":1700000009000}`
 	_ = ingesterOverView([][]byte{[]byte(frame)}, cap, view).Run(context.Background())
 
 	held := view.get(t, "o1")
@@ -128,7 +128,7 @@ func TestUserData_AsOfCarriesTheEventTimeNotTheTransactTime(t *testing.T) {
 func TestUserData_AsOfFallsBackToTheTransactTimeWhenNoEventTime(t *testing.T) {
 	cap := &reconCapture{}
 	view := newFakeOrders("o1")
-	frame := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":31,"T":1700000001000}`
+	frame := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":31,"T":1700000001000}`
 	_ = ingesterOverView([][]byte{[]byte(frame)}, cap, view).Run(context.Background())
 
 	if got := view.get(t, "o1").GetAsOf().AsTime().UnixMilli(); got != 1700000001000 {
@@ -145,8 +145,8 @@ func TestUserData_AsOfFallsBackToTheTransactTimeWhenNoEventTime(t *testing.T) {
 func TestUserData_AReplayedReportDoesNotRunTheViewBackwards(t *testing.T) {
 	cap := &reconCapture{}
 	view := newFakeOrders("o1")
-	first := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.4","L":"50000","z":"0.4","q":"1","t":41,"T":1700000001000,"E":1700000001000}`
-	second := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50100","z":"0.9","q":"1","t":42,"T":1700000002000,"E":1700000002000}`
+	first := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.4","L":"50000","z":"0.4","q":"1","n":"0","N":"USDT","t":41,"T":1700000001000,"E":1700000001000}`
+	second := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50100","z":"0.9","q":"1","n":"0","N":"USDT","t":42,"T":1700000002000,"E":1700000002000}`
 	_ = ingesterOverView([][]byte{[]byte(first), []byte(second), []byte(first)}, cap, view).Run(context.Background())
 
 	held := view.get(t, "o1")

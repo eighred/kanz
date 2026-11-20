@@ -292,6 +292,12 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	if !feeOK {
 		return errors.New("binance: fill commission is not representable as a Decimal")
 	}
+	// A missing fee on a Fill is booked as zero. A trade report must supply
+	// the amount and its asset before the account's books can use the match.
+	if feeMoney.GetAmount() == nil || strings.TrimSpace(feeMoney.GetCurrencyCode()) == "" {
+		i.refusal.Refuse(rep.ClientOrderID, errors.New("binance: private trade commission amount or asset is missing"))
+		return nil
+	}
 	healed, herr := applyFillToState(st, rep)
 	if herr != nil {
 		// A REFUSED REPORT IS FROZEN AND COUNTED, NEVER JUST DROPPED (#1045).

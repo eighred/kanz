@@ -19,7 +19,7 @@ import (
 )
 
 func priceDomainReport(id, status, price string) []byte {
-	return []byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE","X":%q,"l":"1","L":%q,"z":"1","t":7,"T":1700000000000}`, id, status, price))
+	return []byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE","X":%q,"l":"1","L":%q,"z":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`, id, status, price))
 }
 
 func TestExecutedPriceUserDataRefusesBeforeEffects(t *testing.T) {

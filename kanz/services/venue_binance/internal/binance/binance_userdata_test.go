@@ -98,7 +98,7 @@ func ingesterOverView(frames [][]byte, cap *reconCapture, view *fakeOrders) *Use
 
 func TestUserData_FilledReportBecomesOrderFilled(t *testing.T) {
 	cap := &reconCapture{}
-	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
+	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`
 	_ = ingesterOver([][]byte{[]byte(report)}, cap).Run(context.Background()) // returns io.EOF at end
 
 	var ev *orderpb.OrderFilled
@@ -127,7 +127,7 @@ func TestUserData_PartialAndNoiseHandling(t *testing.T) {
 		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"NEW","X":"NEW"}`),                                                           // not a fill
 		[]byte(`{"e":"outboundAccountPosition"}`),                                                                                              // unrelated event
 		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"unknown","x":"TRADE","X":"FILLED","l":"1","L":"1","z":"1","t":9,"T":1700000000000}`), // unknown order
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50000","z":"0.5","q":"1","t":8,"T":1700000000001}`),
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50000","z":"0.5","q":"1","n":"0","N":"USDT","t":8,"T":1700000000001}`),
 	}
 	_ = ingesterOver(frames, cap).Run(context.Background())
 

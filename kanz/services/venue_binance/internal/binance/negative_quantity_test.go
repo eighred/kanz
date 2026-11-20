@@ -32,7 +32,7 @@ func TestUserData_NegativeCumulativeIsRefusedAndQuarantined(t *testing.T) {
 			ing := fixtureUserDataIngester(UserDataConfig{
 				Symbols: fixtureTradeSymbols(),
 				Stream: &fakeStream{frames: [][]byte{[]byte(fmt.Sprintf(
-					`{"e":"executionReport","s":"BTCUSDT","c":"negative1620","S":"BUY","x":"TRADE","X":%q,"l":"1","L":"1","z":"-1","t":7,"T":1700000000000}`, status))}},
+					`{"e":"executionReport","s":"BTCUSDT","c":"negative1620","S":"BUY","x":"TRADE","X":%q,"l":"1","L":"1","z":"-1","n":"0","N":"USDT","t":7,"T":1700000000000}`, status))}},
 				Orders: view, Pub: capture, Venue: "BINANCE", Tenant: "fund-alpha",
 				OnRefused: func(mic, id, reason string) {
 					refused++
@@ -115,7 +115,7 @@ func TestNegativeCumulativeReachesNoBroker(t *testing.T) {
 			t.Fatal(err)
 		}
 		frames = append(frames, []byte(fmt.Sprintf(
-			`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"1","L":"1","z":%q,"t":%d,"T":1700000000000}`,
+			`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED","l":"1","L":"1","z":%q,"n":"0","N":"USDT","t":%d,"T":1700000000000}`,
 			report.id, report.cumulative, identity+int64(i))))
 	}
 	refused := 0

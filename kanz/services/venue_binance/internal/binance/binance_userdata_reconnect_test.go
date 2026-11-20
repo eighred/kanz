@@ -31,7 +31,7 @@ func (endlessFills) Recv(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	return []byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
-		`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`), nil
+		`"l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`), nil
 }
 
 // A STORE OUTAGE MUST NOT BECOME AN EXCHANGE BAN (#1047).
@@ -109,7 +109,7 @@ func TestUserDataReconnect_IsRateLimitedWhileTheOrderViewIsDown(t *testing.T) {
 // did before — is what made the bound above unreachable.
 func TestUserDataReconnect_OnlyAResolvedReportCountsAsProgress(t *testing.T) {
 	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
-		`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
+		`"l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`
 
 	healthy := ingesterOverView([][]byte{[]byte(report)}, &reconCapture{}, newFakeOrders("o1"))
 	_ = healthy.Run(context.Background())

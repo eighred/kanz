@@ -23,10 +23,10 @@ import (
 // PARTIALLY_FILLED one must NOT, because it is still live at the exchange.
 
 const filledReport = `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
-	`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
+	`"l":"1","L":"50000","z":"1","q":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`
 
 const partialReport = `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED",` +
-	`"l":"0.4","L":"50000","z":"0.4","q":"1","t":7,"T":1700000000000}`
+	`"l":"0.4","L":"50000","z":"0.4","q":"1","n":"0","N":"USDT","t":7,"T":1700000000000}`
 
 func TestUserData_AFilledReportMarksTheOrderTerminalInTheView(t *testing.T) {
 	view := newFakeOrders("o1")
