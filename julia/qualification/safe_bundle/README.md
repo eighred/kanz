@@ -52,3 +52,23 @@ python3 -B julia/qualification/safe_bundle/qualify.py \
 ```
 
 The source for the local upstream base and the pending Eighred mirror are tracked in [#1845](https://github.com/eighred/kanz/pull/1845). Signing, registry publication, deployment, production rollback and regulated model promotion have their own acceptance requirements. [#1536](https://github.com/eighred/kanz/issues/1536)
+## Attribute the compiler-free native libraries
+
+Use the Linux tooling and advisory database specified in `qualification/advisory.py`. Run in the disposable, network-disabled scanner container with the OCI, publisher inputs, General registry snapshot and tool binaries mounted read-only. `TOOLS` holds each executable and its pinned release archive; `CACHE/db` holds the fresh Trivy database. Both commands accept filesystem paths.
+
+```sh
+python3 -B julia/qualification/safe_bundle/scan_blas.py \
+  "$OCI" "$TOOLS" "$CACHE" "$GENERAL_REGISTRY_TOML" "$PREVIOUS_PUBLISHER_RECEIPT" "$NEW_SCAN_DIRECTORY"
+python3 -B julia/qualification/safe_bundle/blas_owners.py \
+  "$OCI" "$DISTROLESS_AMD64_MANIFEST" "$PREVIOUS_PUBLISHER_RECEIPT" \
+  "$OPENBLAS_ARCHIVE" "$TRAMPOLINE_ARCHIVE" "$NEW_SCAN_DIRECTORY"
+```
+
+The second command verifies the immutable Debian base manifest and layer blobs, selects the linux/amd64 image and reads the actual application ELF bytes. Its preceding publisher receipt comes from the [24-ELF compiled image](https://github.com/eighred/kanz/issues/1536#issuecomment-7023736243); the verified sixteen retained publisher files and rebuilt GCC runtime have independent owner records. The Julia runtime and first-party executable remain under their own runtime qualification. These component checks do not approve the release.
+
+| Shipped owner | Selected binary and build provenance |
+| --- | --- |
+| OpenBLAS_jll 0.3.30+0 | [x86_64 glibc / libgfortran5 artifact](https://github.com/JuliaBinaryWrappers/OpenBLAS_jll.jl/blob/ec1bca51ecf2a5d5a556073fbacedeae26b9d7a7/Artifacts.toml), [Yggdrasil recipe](https://github.com/JuliaPackaging/Yggdrasil/blob/32d6c14d4a0eb04133420df0903f3b46b6a1f931/O/OpenBLAS/common.jl). The official [OpenBLAS 0.3.30 source archive](https://github.com/OpenMathLib/OpenBLAS/releases/tag/v0.3.30) hashes to `27342cff518646afb4c2b976d809102e368957974c250a25ccc965e53063c95d`. Its bundled LAPACK `INSTALL/ilaver.f` reports 3.12.0. |
+| libblastrampoline_jll 5.15.0+0 | [x86_64 glibc artifact](https://github.com/JuliaBinaryWrappers/libblastrampoline_jll.jl/blob/8e76ae53eb42716ae1ad732a48a67392b5a562e8/Artifacts.toml), [Yggdrasil recipe](https://github.com/JuliaPackaging/Yggdrasil/blob/f0d8e131bedfec88a99c3e51722e0e7c1d6f45d2/L/libblastrampoline/common.jl) and its [upstream source commit](https://github.com/JuliaLinearAlgebra/libblastrampoline/commit/072b5f67895bec0b92f8c83194567c1c48e9833d). |
+
+The actual image scanner and Syft inventory are accompanied by a byte-bound JLL metadata scan. Ten retained JLL identities are rescanned against the same database. A metadata-only positive control for the same OpenBLAS UUID at 0.3.13+0 must report CVE-2021-4048. The Julia advisory lists the JLL fix at 0.3.20+0; the upstream fix precedes the selected OpenBLAS source commit. The HTTP and OpenSSL controls run independently. A zero-finding JLL result covers the selected scanner database and identities. Native advisory sources can have different product coverage. [Julia advisory](https://osv.dev/vulnerability/JLSEC-2025-6) Â· [Upstream fix ancestry](https://github.com/OpenMathLib/OpenBLAS/compare/fe497efa0510466fd93578aaf9da1ad8ed4edbe7...993fad6aebbce34a97d3f8c34d6d79d35b64cc48)
