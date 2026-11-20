@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { preflight, type PreflightCheck, type PreflightState, type PreflightStatus } from '../api/preflight'
+import { preflight, type PreflightState, type PreflightStatus } from '../api/preflight'
 
 const result = ref<PreflightStatus | null>(null)
 const loading = ref(true)
@@ -9,35 +9,13 @@ let timer: ReturnType<typeof setInterval> | undefined
 let latestRequest = 0
 const REFRESH_MS = 30_000
 
-function knownState(value: unknown): value is PreflightState {
-  return value === 'PASS' || value === 'FAIL' || value === 'UNKNOWN'
-}
-
-function normalize(value: PreflightStatus): PreflightStatus {
-  if (!knownState(value.status) || !Array.isArray(value.checks)) {
-    return { status: 'UNKNOWN', reason: 'preflight response is incomplete', max_age_seconds: 0, checks: [] }
-  }
-  const checks = value.checks.map((check): PreflightCheck => ({
-    name: typeof check?.name === 'string' ? check.name : 'unnamed control',
-    status: knownState(check?.status) ? check.status : 'UNKNOWN',
-    observed: check?.observed,
-  }))
-  if (value.status === 'PASS' && !checks.length) {
-    return { ...value, status: 'UNKNOWN', reason: 'preflight evidence contains no controls', checks }
-  }
-  if (value.status === 'PASS' && checks.some((check) => check.status !== 'PASS')) {
-    return { ...value, status: 'UNKNOWN', reason: 'preflight verdict disagrees with its controls', checks }
-  }
-  return { ...value, checks }
-}
-
 async function load(initial = false) {
   const request = ++latestRequest
   if (initial) loading.value = true
   try {
     const response = await preflight.status()
     if (request !== latestRequest) return
-    result.value = normalize(response)
+    result.value = response
     transportError.value = ''
   } catch {
     if (request !== latestRequest) return

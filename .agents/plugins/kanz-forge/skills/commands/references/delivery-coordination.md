@@ -95,7 +95,11 @@ database, scheduler, GitHub writer or inference of safety from file proximity.
   again (for example, `gh issue view URL --json url,state,stateReason`). Supply
   those objects as `issue_states` alongside the collector's current open `issues`
   inventory in the reviewed snapshot. A conflicting open record vetoes a stale
-  closure observation. Count only
+  closure observation. Report `tracker_closed_as_completed` as the observed GitHub
+  closures. For each issue in `tracker_closed_pending_main_acceptance`, retrieve
+  its existing delivery evidence and check the outstanding acceptance on current
+  main. Preserve the issue's recorded disposition while that check is pending.
+  Count only
   `initial_closed_as_completed` toward the request. A reopened issue, closure as
   not planned, PR merge or newly discovered repair cannot fill a slot. Report
   `closures_remaining` even when all selected changes have passed on main.
@@ -209,7 +213,8 @@ For unscoped `/work`, select and complete the highest-priority feasible task
 from source, existing branches, PRs and Issues:
 
 1. Reconcile current main, source gaps, branch ownership, issue acceptance,
-   active PRs, and dependencies. Rank by repository priority and impact.
+   active PRs, and dependencies. [Resolve delegated engineering decisions](repository-engine.md#resolve-engineering-decisions-during-work-selection)
+   before ranking feasible work by repository priority and impact.
    Within comparable priority, prefer
    completing an existing change with a clear path to verified main.
 2. Name the selected task and its acceptance, then act. Fill in discoverable

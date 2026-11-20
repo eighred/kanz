@@ -1,0 +1,111 @@
+{
+  "status": "PASS",
+  "observed_at": "2026-09-13T12:00:00.123456789Z",
+  "max_age_seconds": 900,
+  "verifier_commit": "1111111111111111111111111111111111111111",
+  "deployed_commit": "2222222222222222222222222222222222222222",
+  "command_id": "command-1",
+  "checks": [
+    {
+      "name": "deployed_release_identity",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "mandate_enforcement",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "mandate_change_surface",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "mandate_distinct_signatory_pairs",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "portfolio_inventory",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "mandate_inventory",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "venue_account_enforcement",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "portfolio_account_binding_coverage",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "exchange_account_proof_enforcement",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "exchange_account_proof_sources",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "exchange_accounts_observed_verified",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "okx_margin_observation_current",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "okx_margin_observation_complete",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "dual_control_enforcement",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "dual_control_threshold",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "order_approval_surface",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "distinct_maker_checker_pairs",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "oms_singleton_ready",
+      "status": "PASS",
+      "observed": 0
+    },
+    {
+      "name": "recent_control_posture",
+      "status": "PASS",
+      "observed": 0
+    }
+  ],
+  "workload_images": {
+    "api_gateway": "gateway@sha256:x",
+    "oms": "oms@sha256:x",
+    "venue_binance": "binance@sha256:x",
+    "venue_okx": "okx@sha256:x"
+  }
+}

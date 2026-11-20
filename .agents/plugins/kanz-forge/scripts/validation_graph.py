@@ -73,6 +73,33 @@ def validation(node):
     return "DELIVERABLE", [], rows
 
 
+def customer_workflow_report(workflow, nodes, results, edges):
+    report = {field: workflow[field] for field in ("actor", "outcome", "acceptance")}
+    validated, remaining = [], []
+    roots = set()
+    for key, evidence in workflow["steps"].items():
+        row = results[key]
+        step = {"id": key, "evidence": evidence, "state": row["state"]}
+        if row["state"] == "DELIVERABLE":
+            step.update(revision=nodes[key]["revision"], review_evidence=nodes[key]["review"]["evidence"])
+            validated.append(step)
+        else:
+            step["root_blockers"] = row["root_blockers"]
+            roots.update(row["root_blockers"])
+            remaining.append(step)
+    # Keep the reviewed edge and hold citations visible even when no task can start.
+    dependencies = [{field: edge[field] for field in ("from", "to", "kind", "evidence")}
+                    for edge in edges if edge["from"] in workflow["steps"]
+                    and edge["kind"] in {"requires", "execution-requires"}
+                    and results[edge["to"]]["state"] != "DELIVERABLE"]
+    blockers = {key: {"state": results[key]["state"], "reasons": results[key]["reasons"],
+                      "holds": [{"reason": item["reason"], "evidence": item["evidence"]}
+                                for item in nodes[key].get("holds", [])]}
+                for key in sorted(roots)}
+    return {**report, "validated_steps": validated, "remaining_steps": remaining,
+            "unmet_dependencies": dependencies, "blockers": blockers}
+
+
 def assess_graph(graph):
     nodes = {}
     for node in graph["nodes"]:
@@ -88,6 +115,17 @@ def assess_graph(graph):
         nodes[key] = node
     if len(nodes) > 2000 or len(graph["edges"]) > 10000:
         raise ValueError("validation graph exceeds its bounded scope")
+    workflow_steps = {}
+    if "customer_workflow" in graph:
+        workflow = graph["customer_workflow"]
+        if not isinstance(workflow, dict) or not all(
+                proof(workflow.get(field)) for field in ("actor", "outcome", "acceptance")):
+            raise ValueError("customer workflow needs an actor, observable outcome and acceptance reference")
+        workflow_steps = workflow.get("steps")
+        if not isinstance(workflow_steps, dict) or not workflow_steps or any(
+                key not in nodes or nodes[key]["kind"] != "task" or not proof(evidence)
+                for key, evidence in workflow_steps.items()):
+            raise ValueError("workflow steps must reference existing tasks with dependency evidence")
     required = {key: [] for key in nodes}
     execution = {key: [] for key in nodes}
     recovers = {key: [] for key in nodes}
@@ -216,10 +254,11 @@ def assess_graph(graph):
         # This tie-break cannot outrank critical recovery or repository priority.
         continuation = {"pr": 0, "branch": 1}.get(node.get("continuation", {}).get("kind"), 2)
         candidates.append((not critical, not bool(affected), node.get("priority", 2),
-                           -len(affected), continuation, key))
+                           -len(affected), key not in workflow_steps, continuation, key))
         results[key]["selection_reason"] = (
             "recover critical shared validation prerequisite" if critical else
             "recover shared validation prerequisite" if affected else
+            "advance customer workflow: " + workflow_steps[key] if key in workflow_steps else
             "independent execution; delivery prerequisites remain explicit")
     candidates.sort()
     selected = candidates[0][-1] if candidates else None
@@ -229,6 +268,10 @@ def assess_graph(graph):
                    for key, row in results.items() if key in previous and previous[key] != row["state"]]
     if any(value not in STATES for value in previous.values()):
         raise ValueError("invalid previous delivery state")
-    return {"nodes": results, "failure_groups": failures, "next_actionable": selected,
-            "execution_candidates": [row[-1] for row in candidates], "execution_only": sorted(execution_only), "transitions": transitions,
-            "reassessment_required": bool(transitions), "authority": "advisory; never merge or production permission"}
+    result = {"nodes": results, "failure_groups": failures, "next_actionable": selected,
+              "execution_candidates": [row[-1] for row in candidates], "execution_only": sorted(execution_only),
+              "transitions": transitions, "reassessment_required": bool(transitions),
+              "authority": "advisory; never merge or production permission"}
+    if workflow_steps:
+        result["customer_workflow"] = customer_workflow_report(graph["customer_workflow"], nodes, results, graph["edges"])
+    return result

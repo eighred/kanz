@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/marketdata/marketdatatest"
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/marketedge/coverage"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
@@ -15,7 +16,7 @@ import (
 
 type payloadTimeCase struct {
 	name, eventType string
-	payload         proto.Message
+	payload         marketdatatest.InstrumentPayload
 }
 
 // The +/- one-billion encodings normalize to the exact same valid instant.
