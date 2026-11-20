@@ -568,6 +568,19 @@ jobs:
           python3 -B kanz/dev/custody_pilot.py --pull-image --receipt "$RUNNER_TEMP/custody-pilot/comparisons.json"
           git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/custody-pilot/source.txt"
 
+      - name: Reconcile signed custody statements in the named Accounting schema
+        if: matrix.kind == 'quality'
+        timeout-minutes: 12
+        run: python3 -B kanz/dev/custody_pilot.py --named-schema --receipt "$RUNNER_TEMP/custody-pilot/named-comparisons.json"
+
+      - name: Recover signed custody comparisons in both Accounting layouts
+        if: matrix.kind == 'quality'
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          python3 -B kanz/dev/custody_pilot.py --pitr --receipt "$RUNNER_TEMP/custody-pilot/recovery.json"
+          python3 -B kanz/dev/custody_pilot.py --pitr --named-schema --receipt "$RUNNER_TEMP/custody-pilot/named-recovery.json"
+
       - name: Preserve signed custody comparison evidence
         if: success() && matrix.kind == 'quality'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
