@@ -380,7 +380,7 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
 		// Transient contention or invalidated observations must not consume an
 		// operator's idempotency key as a permanently failed comparison.
-		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) && !errors.Is(err, errBatchReceipt) {
+		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) && !errors.Is(err, errBatchReceipt) && !errors.Is(err, errQuantityReceiptLimit) {
 			return Run{}, err
 		}
 		return r.recordFailure(ctx, run, fmt.Errorf("commit reconciliation: %w", err))

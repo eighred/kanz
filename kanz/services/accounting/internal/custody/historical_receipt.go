@@ -59,7 +59,7 @@ func (p *Postgres) HistoricalReceipt(ctx context.Context, subject Subject, accou
 		run.Subject.CustodianID != subject.CustodianID || !run.Subject.BusinessDate.Equal(subject.BusinessDate) ||
 		run.RunID != id || run.Outcome.String() != outcome || run.StatementID != statementID ||
 		run.FailureReason != "" || !run.CompletedAt.Truncate(time.Microsecond).Equal(completed) ||
-		!isBatchStatement(statementID) || len(run.Breaks) > 4096 || (run.Outcome == OutcomeClean) != (len(run.Breaks) == 0) {
+		!isBatchStatement(statementID) || len(run.Breaks) > historicalBreakLimit || (run.Outcome == OutcomeClean) != (len(run.Breaks) == 0) {
 		return unknown, nil
 	}
 	storedTolerance, err := parseRatText(tolerance)

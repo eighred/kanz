@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"google.golang.org/protobuf/encoding/protojson"
 	"net/http"
 	"net/url"
 	"slices"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type historicalCustodyReader interface {
