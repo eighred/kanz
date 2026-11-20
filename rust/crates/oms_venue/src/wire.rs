@@ -371,8 +371,21 @@ mod tests {
                 "CancelOrder",
                 "Describe",
                 "ListInstruments",
-                "QueryOrder"
+                "QueryOrder",
+                "ReadCapitalEvidence"
             ]
         );
+        for method in service.methods() {
+            let name = method.name();
+            assert_eq!(
+                method.input().full_name(),
+                format!("venue.v1.{name}Request")
+            );
+            assert_eq!(
+                method.output().full_name(),
+                format!("venue.v1.{name}Response")
+            );
+            assert!(!method.is_client_streaming() && !method.is_server_streaming());
+        }
     }
 }
