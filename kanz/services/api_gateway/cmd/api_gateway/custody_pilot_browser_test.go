@@ -118,7 +118,7 @@ func custodyBrowser(t *testing.T, rerun bool) {
 	}
 	cmd := exec.CommandContext(ctx, os.Getenv("CUSTODY_PILOT_BFF_PROBE"), "-test.run=^TestCustodyPilotBFFBrowser$", "-test.count=1", "-test.v")
 	cmd.Env = []string{"CUSTODY_PILOT_BFF_CHILD=1"}
-	for _, key := range []string{"TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR", "CUSTODY_PILOT_BROWSER_SCRIPT", "PATH", "SystemRoot", "SystemDrive", "USERPROFILE", "LOCALAPPDATA", "TEMP", "TMP", "HOME", "PLAYWRIGHT_BROWSERS_PATH"} {
+	for _, key := range []string{"CUSTODY_PILOT_RETAINED_DOWNLOADS", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR", "CUSTODY_PILOT_BROWSER_SCRIPT", "PATH", "SystemRoot", "SystemDrive", "USERPROFILE", "LOCALAPPDATA", "TEMP", "TMP", "HOME", "PLAYWRIGHT_BROWSERS_PATH"} {
 		if value, ok := os.LookupEnv(key); ok {
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}

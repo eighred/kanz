@@ -55,11 +55,15 @@ func checkSignedPilotCommand(t *testing.T, limit time.Duration, afterReceipt fun
 	}
 	day := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
 	subject := custody.Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: day}
+	fixture := "testdata"
+	if os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1" {
+		fixture = filepath.Join(fixture, "instrument_units")
+	}
 	for revision, expected := range []*big.Rat{big.NewRat(19, 2), big.NewRat(21, 2)} {
 		name := fmt.Sprintf("statement-r%d", revision+1)
-		batch := filepath.Join("testdata", name+".json")
-		sig := filepath.Join("testdata", name+".sig")
-		policy := filepath.Join("testdata", "authority.json")
+		batch := filepath.Join(fixture, name+".json")
+		sig := filepath.Join(fixture, name+".sig")
+		policy := filepath.Join(fixture, "authority.json")
 		for attempt := 0; attempt < 2; attempt++ {
 			if err := run(ctx, policy, batch, sig); err != nil {
 				t.Fatalf("revision %d attempt %d: %v", revision+1, attempt+1, err)

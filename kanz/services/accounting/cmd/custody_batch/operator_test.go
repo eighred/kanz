@@ -168,7 +168,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 					"portfolio": subject.PortfolioID, "custodian": subject.CustodianID, "clean_date": day.Format(time.DateOnly),
 					"clean_run": run.RunID, "statement": run.StatementID, "missing_date": missing.BusinessDate.Format(time.DateOnly),
 					"missing_run": absent.RunID, "unobserved_date": day.AddDate(0, 0, 2).Format(time.DateOnly),
-					"prior_detection": firstDetection,
+					"prior_detection": firstDetection, "quantity_evidence": os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1",
 				})
 				info, err := broker.completions.Info(ctx)
 				if err != nil || info.State.Msgs != 3 || baseline != pilotFinancialSnapshot(t, ctx, pool) {
@@ -258,7 +258,7 @@ func provePilotBrowser(t *testing.T, ctx context.Context, endpoint, testName, sc
 	probe := exec.CommandContext(ctx, os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"), "-test.run=^"+testName+"$", "-test.count=1", "-test.v")
 	probe.Stdin = bytes.NewReader(payload)
 	probe.Env = []string{"CUSTODY_PILOT_ACCOUNTING_URL=" + endpoint, "CUSTODY_PILOT_BROWSER_SCRIPT=" + script}
-	for _, k := range []string{"PATH", "SystemRoot", "SystemDrive", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR"} {
+	for _, k := range []string{"PATH", "SystemRoot", "SystemDrive", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "CUSTODY_PILOT_RETAINED_DOWNLOADS", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR"} {
 		if v, ok := os.LookupEnv(k); ok {
 			probe.Env = append(probe.Env, k+"="+v)
 		}

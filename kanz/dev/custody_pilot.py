@@ -82,7 +82,7 @@ def local_engine(env):
     return ["docker", "--host", result]
 
 
-def verify_observations(path, rerun=False):
+def verify_observations(path, fixture, rerun=False):
     records = json.loads(path.read_bytes())
     revisions = [1, 1, 2] if rerun else [1, 2]
     if not isinstance(records, list) or len(records) != len(revisions):
@@ -92,7 +92,7 @@ def verify_observations(path, rerun=False):
         if not isinstance(record, dict) or not all(type(record.get(key)) is int for key in
                                                   ("revision", "outstanding_breaks", "completion_sequence")):
             raise RuntimeError("Expected an observed revision, break count and completion sequence.")
-        raw = (CMD / "testdata" / f"statement-r{revision}.json").read_bytes()
+        raw = (fixture / f"statement-r{revision}.json").read_bytes()
         statement_id = f"custody-batch.v1.synthetic-source.r{revision}." + hashlib.sha256(raw).hexdigest()
         run_id = record.get("run_id")
         expected = {
@@ -113,7 +113,7 @@ def verify_observations(path, rerun=False):
     return records
 
 
-def qualify(docker, container, binaries, node, env, observations, rerun):
+def qualify(docker, container, binaries, node, env, observations, rerun, quantity_evidence):
     owner_password = secrets.token_hex(24)
     source_password = secrets.token_hex(24)
 
@@ -143,7 +143,10 @@ def qualify(docker, container, binaries, node, env, observations, rerun):
             sql(DATABASE, b"SET ROLE pilot_migrator;\n" + migration.read_bytes())
         except subprocess.CalledProcessError:
             raise RuntimeError(f"Accounting migration failed at {migration.name}.") from None
-    authority = json.loads((CMD / "testdata/authority.json").read_bytes())
+    fixture = CMD / "testdata"
+    if quantity_evidence:
+        fixture = fixture / "instrument_units"
+    authority = json.loads((fixture / "authority.json").read_bytes())
     # psql resolves the read-only profile's relative include beside its entrypoint.
     grants = "signed_fixture_grants.sql" if rerun else "pilot_grants.sql"
     for filename in {"signed_fixture_grants.sql", grants}:
@@ -177,6 +180,9 @@ def qualify(docker, container, binaries, node, env, observations, rerun):
         CUSTODY_PILOT_BROWSER_SCRIPT=str(WEB / "e2e" / ("custody-rerun.cjs" if rerun else "custody-detection.cjs")),
         CUSTODY_PILOT_DATED_SCRIPT=str(WEB / "e2e/custody-dated.cjs"), CUSTODY_PILOT_RECEIPT=str(observations),
     )
+    if quantity_evidence:
+        pilot_env["CUSTODY_PILOT_QUANTITY_FIXTURE"] = "1"
+        pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.with_suffix(".downloads.json"))
     test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
     proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
                             "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
@@ -191,7 +197,23 @@ def qualify(docker, container, binaries, node, env, observations, rerun):
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
-    return verify_observations(observations, rerun)
+    return verify_observations(observations, fixture, rerun)
+
+
+def customer_downloads(observations, records):
+    path = observations.with_suffix(".downloads.json")
+    if path.stat().st_size > 128 * 1024:
+        raise RuntimeError("The synthetic browser receipt exceeds its export limit.")
+    receipts = json.loads(path.read_bytes())
+    if not isinstance(receipts, list) or len(receipts) != len(records):
+        raise RuntimeError("Expected a customer download for both signed revisions.")
+    for receipt, record in zip(receipts, records):
+        if (not isinstance(receipt, dict) or receipt.get("format") != "kanz.custody-comparison.v1"
+                or receipt.get("lookup") != "retained_run"
+                or receipt.get("run_id") != record["run_id"] or receipt.get("statement_id") != record["statement_id"]
+                or receipt.get("signed_statement_sha256") != record["statement_id"].rsplit(".", 1)[-1]):
+            raise RuntimeError("Browser download does not match the independently stored comparison.")
+    return receipts
 
 
 def main():
@@ -210,7 +232,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
         results = {"postgres_image": IMAGE}
-        for key, rerun in (("comparisons", False), ("operator_comparisons", True)):
+        for key, rerun, quantity_evidence in (("comparisons", False, False),
+                                             ("operator_comparisons", True, False),
+                                             ("quantity_comparisons", False, True)):
             # The image initializes its own secret in tmpfs. Local SQL administration
             # uses the postgres OS identity (peer); network logins require SCRAM.
             name = "kanz-custody-pilot-" + secrets.token_hex(8)
@@ -224,7 +248,10 @@ def main():
             # external service connection is accepted by the entrypoint.
             container = subprocess.check_output(run, env=env, text=True).strip()
             try:
-                results[key] = qualify(docker, container, binaries, node, env, Path(directory) / (key + ".json"), rerun)
+                observations = Path(directory) / (key + ".json")
+                results[key] = qualify(docker, container, binaries, node, env, observations, rerun, quantity_evidence)
+                if quantity_evidence:
+                    results["customer_downloads"] = customer_downloads(observations, results[key])
             finally:
                 subprocess.run([*docker, "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
     if args.receipt:
