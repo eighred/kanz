@@ -185,7 +185,7 @@ func (p *Postgres) outstandingBreaks(ctx context.Context, portfolios []string, a
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	out, err := (&Postgres{pool: p.pool, tx: tx}).outstandingInSnapshot(ctx, portfolios, after, limit)
 	if err != nil {
 		return nil, err

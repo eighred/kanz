@@ -3,7 +3,7 @@ package order
 import (
 	"bytes"
 	"context"
-	"github.com/eighred/kanz/internal/dec"
+	"errors"
 	"math/big"
 	"os"
 	"os/exec"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/refdata"
@@ -117,7 +118,12 @@ func TestFundedWebhookFanout(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	defer func() { stop(); <-done }()
+	defer func() {
+		stop()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("submit subscription shutdown: %v", err)
+		}
+	}()
 	cmd := exec.CommandContext(ctx, probe, "-test.run=^TestIntegration_LoopOverNATS$", "-test.count=1", "-test.v")
 	cmd.Env = []string{"TEST_FUNDED_WEBHOOK_NATS_URL=" + broker.ClientURL()}
 	for _, key := range []string{"SystemRoot", "TEMP", "TMP", "TMPDIR"} {

@@ -176,6 +176,7 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 	}
 	ready, done, accepted := make(chan struct{}), make(chan error, 1), make(chan error, 4)
 	subCtx, stop := context.WithCancel(ctx)
+	defer stop()
 	go func() {
 		done <- consumer.SubscribeReady(subCtx, SubjectStatement, tenant, func(c context.Context, e *envelopepb.Envelope, payload []byte) error {
 			if e.GetTenantId() != tenant {
@@ -186,14 +187,6 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 			return err
 		}, func() { close(ready) })
 	}()
-	defer func() {
-		stop()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("consumer did not join")
-		}
-	}()
 	select {
 	case <-ready:
 	case err := <-done:
@@ -201,6 +194,17 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	defer func() {
+		stop()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("consumer shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("consumer did not join")
+		}
+	}()
 	waitAccepted := func() {
 		t.Helper()
 		select {
