@@ -22,6 +22,14 @@ async function comparisonDownload(page, region, response) {
   }
   if (response.transaction_pass === 'ran') expected.transaction_comparison_basis = 'external_reference_membership'
   if (response.signed_statement_sha256 !== undefined) {
+    if (response.execution_quantities !== undefined) {
+      const { compared, unassessed, differences } = response.execution_quantities
+      const amount = ({ coefficient, exponent }) => ({ coefficient, exponent })
+      expected.execution_quantities = { compared, unassessed, differences: differences.map(row => ({
+        external_ref: row.external_ref, instrument_id: row.instrument_id,
+        ibor: amount(row.ibor), custodian: amount(row.custodian), difference: amount(row.difference),
+      })) }
+    }
     expected.lookup = 'retained_run'
     expected.signed_statement_sha256 = response.signed_statement_sha256
     expected.breaks = response.breaks.map(({ break_id, kind, key, values_state, ibor, custodian, difference }) =>

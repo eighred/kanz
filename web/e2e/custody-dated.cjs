@@ -26,6 +26,8 @@ async function main() {
   assert.match(prior.detection.statement_id, /^custody-batch\.v1\.synthetic-source\.r1\.[0-9a-f]{64}$/)
   assert.equal(prior.detection.business_date, clean_date)
   assert.deepEqual([prior.ibor, prior.custodian, prior.difference], ['10.5', '9.5', '1'])
+  const quantityEvidence = expected.quantity_evidence === true
+  const retainedDownloads = []
   const oldRun = prior.detection.run_id
   assert(oldRun && oldRun !== clean_run)
   const endpoint = '/api/v1/portfolios/PF1/custody/comparison'
@@ -53,6 +55,7 @@ async function main() {
               return { status: response.status, body: await response.text() }
             }, lookup(date, saved))
             assert.equal(reply.status, status)
+            assert(!reply.body.includes('execution_quantities'))
             for (const secret of [clean_run, statement, missing_run, oldRun, prior.detection.statement_id, prior.break_id]) assert(!reply.body.includes(secret))
           }
           assert.equal(await page.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
@@ -105,11 +108,30 @@ async function main() {
             assert.equal(receipt.statement_reference_count, '1')
             assert.equal(receipt.unreferenced_book_trades, '0')
             assert(text.includes('Independent reference comparison'))
-            assert(text.includes('Individual trade quantities, prices and cash amounts remain unverified.'))
+            if (!quantityEvidence || !saved) assert(text.includes('Individual trade quantities, prices and cash amounts remain unverified.'))
             assert(text.includes(receipt.statement_id))
           } else {
             assert.equal(receipt.transaction_pass, undefined)
             assert(!text.includes(statement))
+          }
+          const quantities = region.getByRole('region', { name: 'Execution quantities' })
+          if (quantityEvidence && saved && run) {
+            stage = name + '-quantity-evidence'
+            const diffs = saved === oldRun ? [{ external_ref: 'external-7', instrument_id: 'SYN',
+              ibor: { coefficient: '105', exponent: -1 }, custodian: { coefficient: '95', exponent: -1 },
+              difference: { coefficient: '1', exponent: 0 } }] : []
+            assert.deepEqual(receipt.execution_quantities, { compared: 1, unassessed: 0, differences: diffs })
+            assert((await quantities.innerText()).includes('Matched references compared: 1 · Unassessed: 0.'))
+            const table = quantities.getByRole('table', { name: 'Execution quantity differences' })
+            if (saved === oldRun) {
+              assert.deepEqual(await table.getByRole('row').nth(1).locator('th,td').allTextContents(), ['external-7', 'SYN', '10.5', '9.5', '1'])
+            } else {
+              assert.equal(await table.count(), 0)
+              assert((await quantities.innerText()).includes('Compared quantities agree.'))
+            }
+          } else {
+            assert.equal(receipt.execution_quantities, undefined)
+            assert.equal(await quantities.count(), 0)
           }
           if (saved) {
             assert(text.includes('Historical comparison'))
@@ -131,6 +153,7 @@ async function main() {
           }
           if (run) {
             const bytes = await comparisonDownload(page, region, receipt)
+            if (quantityEvidence && (saved === oldRun || saved === clean_run) && !reload) retainedDownloads.push(JSON.parse(bytes))
             if (saved === oldRun) {
               if (reload) assert.deepEqual(bytes, downloadedHistory)
               else downloadedHistory = bytes
@@ -152,6 +175,11 @@ async function main() {
       } finally { await context.close() }
     }
   } finally { await browser.close() }
+  if (quantityEvidence && process.env.CUSTODY_PILOT_RETAINED_DOWNLOADS) {
+    stage = 'retain-quantity-downloads'
+    assert.deepEqual(retainedDownloads.map(row => row.run_id), [oldRun, clean_run])
+    await require('node:fs/promises').writeFile(process.env.CUSTODY_PILOT_RETAINED_DOWNLOADS, JSON.stringify(retainedDownloads), { flag: 'wx', mode: 0o600 })
+  }
 }
 
 main().catch(() => { process.stderr.write('custody-browser-stage=' + stage + '\n'); process.exitCode = 1 })

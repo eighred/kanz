@@ -1,6 +1,7 @@
 import { api, auth, ApiError } from './client'
 import { users } from './users'
 import { downloadJson } from './evidence'
+import { readExecutionQuantities, type ExecutionQuantities } from './custody-quantities'
 
 export interface CustodyDetection {
   run_id: string; statement_id: string; business_date: string
@@ -76,7 +77,7 @@ interface RetainedBreak {
   break_id: string; kind: string; key: string; values_state: 'exact' | 'unavailable'
   ibor: string; custodian: string; difference: string
 }
-interface HistoricalComparison { signed_statement_sha256: string; breaks: RetainedBreak[] }
+interface HistoricalComparison { signed_statement_sha256: string; breaks: RetainedBreak[]; execution_quantities?: ExecutionQuantities }
 
 function retainedBreak(value: unknown): RetainedBreak {
   const invalid = () => new Error('Historical difference could not be verified.')
@@ -148,6 +149,10 @@ export const custody = {
       } else throw invalid()
     } else if (result.transaction_pass !== undefined) throw invalid()
     if (transactions?.transaction_pass !== 'ran' && referenceCounts.some(key => result[key] !== undefined)) throw invalid()
+    if (result.execution_quantities !== undefined) {
+      if (!historical || transactions?.transaction_pass !== 'ran') throw invalid()
+      historical.execution_quantities = readExecutionQuantities(result.execution_quantities, transactions.statement_reference_count, transactions.book_reference_count)
+    }
     if (result.state === 'recorded') {
       if (!nonempty(result.run_id) || !nonempty(result.completed_at) || !Number.isFinite(Date.parse(result.completed_at)) ||
           !['clean', 'breaks', 'no_statement', 'failed'].some(value => value === result.outcome)) throw invalid()

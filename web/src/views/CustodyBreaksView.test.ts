@@ -84,6 +84,49 @@ describe('custody exact review', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('shows signed execution units separately and clears them when a later saved lookup fails', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
+    const get = vi.spyOn(api, 'get')
+    const digest = 'a'.repeat(64)
+    const base = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04', tenant_id: 'fixture',
+      state: 'recorded', outcome: 'clean', run_id: 'run', completed_at: '2020-02-05T01:00:00Z', statement_id: 'custody-batch.v1.src.r1.' + digest,
+      journal_position: '1', scope_mode: 'declared', transaction_pass: 'ran', statement_reference_count: '2',
+      book_reference_count: '2', unreferenced_book_trades: '0', signed_statement_sha256: digest, breaks: [] }
+    const negative = { coefficient: '-9007199254740993', exponent: -2 }
+    const section = { compared: 1, unassessed: 1, differences: [{ external_ref: '独立-7', instrument_id: 'SYN',
+      ibor: negative, custodian: { coefficient: '0', exponent: 0 }, difference: negative }] }
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      const region = wrapper.get('[aria-label="Dated custody result"]')
+      const form = region.get('form')
+      for (const [i, value] of ['P', 'C', base.business_date, 'run'].entries()) await form.findAll('input')[i]!.setValue(value)
+      async function load(response: unknown) {
+        get.mockResolvedValueOnce(response)
+        await form.trigger('submit'); await flushPromises()
+      }
+      await load({ ...base, execution_quantities: section })
+      expect(region.get('output').text()).toContain('Balances and transaction references agree · Execution quantity differences found')
+      const table = region.get('table[aria-label="Execution quantity differences"]')
+      expect(table.findAll('tbody tr > *').map(cell => cell.text())).toEqual(['独立-7', 'SYN', '-90071992547409.93', '0', '-90071992547409.93'])
+      expect(region.text()).toContain('Matched references compared: 1 · Unassessed: 1')
+      expect(region.text()).toContain('Some matched references lack comparable quantity evidence.')
+      expect(region.text()).toContain('Trade prices and cash amounts remain unverified.')
+      await load({ ...base, execution_quantities: { compared: 0, unassessed: 2, differences: [] } })
+      expect(region.text()).toContain('Matched references compared: 0 · Unassessed: 2')
+      expect(region.text()).not.toContain('Compared quantities agree.')
+      await load(base)
+      expect(region.text()).toContain('Individual trade quantities, prices and cash amounts remain unverified.')
+      expect(region.find('[aria-label="Execution quantities"]').exists()).toBe(false)
+      await load({ ...base, execution_quantities: section })
+      get.mockRejectedValueOnce(new ApiError(404, 'unavailable'))
+      await form.trigger('submit'); await flushPromises()
+      expect(region.text()).toContain('Access to this dated result is unavailable.')
+      expect(region.find('output').exists()).toBe(false)
+      expect(region.text()).not.toContain('独立-7')
+      expect(region.text()).not.toContain('Download comparison receipt')
+    } finally { wrapper.unmount() }
+  })
+
   it('recovers a failed comparison with the same reviewed identity and shows the committed receipt', async () => {
     vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [], rerunActor: 'operator' })
     const compare = vi.spyOn(custody, 'rerun').mockRejectedValueOnce(new ApiError(503, 'pending')).mockImplementationOnce(async req => ({

@@ -3,6 +3,7 @@ import { onUnmounted, reactive, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
 import { custody, downloadCustodyComparison, type DatedCustodyResult } from '../api/custody'
 import { ApiError } from '../api/client'
+import { formatDecimal } from '../api/decimal'
 
 const session = useSession()
 const subject = reactive({ portfolio_id: '', custodian_id: '', business_date: '' })
@@ -59,6 +60,7 @@ const states = { not_compared: 'No comparison recorded', pending: 'Statement awa
     <output v-if="result" :data-state="result.state">
       <span v-if="savedRun">Historical comparison · </span>
       <strong>{{ result.state === 'recorded' ? recordedLabel(result) : result.reason === 'journal_changed' ? 'Journal changes awaiting comparison' : states[result.state] }}</strong>
+      <strong v-if="result.state === 'recorded' && result.historical?.execution_quantities?.differences.length"> · Execution quantity differences found</strong>
       · {{ result.portfolio_id }} · {{ result.custodian_id }} · {{ result.business_date }}
       <span v-if="result.statement_id"> · Statement <code>{{ result.statement_id }}</code></span>
       <template v-if="result.state === 'recorded'">
@@ -67,7 +69,7 @@ const states = { not_compared: 'No comparison recorded', pending: 'Statement awa
         <span v-if="result.transactions?.transaction_pass === 'ran'">
           · Independent reference comparison · Statement references {{ result.transactions.statement_reference_count }}
           · Book references {{ result.transactions.book_reference_count }}
-          · Individual trade quantities, prices and cash amounts remain unverified.
+          <template v-if="!result.historical?.execution_quantities"> · Individual trade quantities, prices and cash amounts remain unverified.</template>
           <strong v-if="result.transactions.unreferenced_book_trades !== '0'"> · Incomplete coverage · {{ result.transactions.unreferenced_book_trades }} book trades without independent references</strong>
         </span>
         <span v-else-if="result.transactions?.transaction_pass === 'balances_only'"> · Balances only · Transactions were not compared</span>
@@ -76,6 +78,21 @@ const states = { not_compared: 'No comparison recorded', pending: 'Statement awa
     </output>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
+      <section v-if="result.historical.execution_quantities" aria-label="Execution quantities">
+        <h3>Execution quantities</h3>
+        <p>Matched references compared: {{ result.historical.execution_quantities.compared }} · Unassessed: {{ result.historical.execution_quantities.unassessed }}.</p>
+        <p v-if="result.historical.execution_quantities.unassessed">Some matched references lack comparable quantity evidence.</p>
+        <p>Quantities use each instrument’s natural units. Trade prices and cash amounts remain unverified.</p>
+        <table v-if="result.historical.execution_quantities.differences.length" aria-label="Execution quantity differences">
+          <thead><tr><th scope="col">Execution reference</th><th scope="col">Instrument</th><th scope="col">Book</th>
+            <th scope="col">Custodian</th><th scope="col">Book minus custodian</th></tr></thead>
+          <tbody><tr v-for="row in result.historical.execution_quantities.differences" :key="row.external_ref">
+            <th scope="row">{{ row.external_ref }}</th><td>{{ row.instrument_id }}</td><td>{{ formatDecimal(row.ibor) }}</td>
+            <td>{{ formatDecimal(row.custodian) }}</td><td>{{ formatDecimal(row.difference) }}</td>
+          </tr></tbody>
+        </table>
+        <p v-else-if="result.historical.execution_quantities.compared">Compared quantities agree.</p>
+      </section>
       <table v-if="result.historical.breaks.length" aria-label="Differences at comparison">
         <thead><tr><th scope="col">Discrepancy</th><th scope="col">Kind</th><th scope="col">Key</th>
           <th scope="col">IBOR</th><th scope="col">Custodian</th><th scope="col">Difference</th></tr></thead>
