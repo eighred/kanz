@@ -95,6 +95,9 @@ type VendorRecord struct {
 	CurrencyCode string
 	Description  string
 	AsOf         time.Time
+	// SectorEffectiveDate marks a dated sector-only revision, separate from the
+	// undated inputs that feed the current golden record.
+	SectorEffectiveDate string
 	// Priority is the vendor's trust rank: LOWER wins (0 = most trusted).
 	Priority int
 }

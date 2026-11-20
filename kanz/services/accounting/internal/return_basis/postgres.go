@@ -6,14 +6,20 @@ import (
 	"errors"
 	"time"
 
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool          *pgxpool.Pool
+	sectorHistory *refdata.SectorHistory
+}
 
-func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func NewStore(pool *pgxpool.Pool, history *refdata.SectorHistory) *Store {
+	return &Store{pool: pool, sectorHistory: history}
+}
 
 type Receipt struct {
 	Evidence        Evidence
@@ -58,7 +64,7 @@ func (s *Store) Accept(ctx context.Context, raw, signature []byte) (Receipt, err
 		if existing != receipt.Digest || !bytes.Equal(saved, raw) || !bytes.Equal(savedSignature, signature) {
 			return Receipt{}, ErrConflict
 		}
-		if err := enqueue(ctx, tx, receipt); err != nil {
+		if err := s.enqueue(ctx, tx, receipt); err != nil {
 			return Receipt{}, err
 		}
 		return receipt, tx.Commit(ctx)
@@ -85,7 +91,7 @@ func (s *Store) Accept(ctx context.Context, raw, signature []byte) (Receipt, err
 	if err != nil {
 		return Receipt{}, err
 	}
-	if err := enqueue(ctx, tx, receipt); err != nil {
+	if err := s.enqueue(ctx, tx, receipt); err != nil {
 		return Receipt{}, err
 	}
 	return receipt, tx.Commit(ctx)

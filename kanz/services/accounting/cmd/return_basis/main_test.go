@@ -58,6 +58,9 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 			cmd := exec.CommandContext(ctx, binary, "-evidence", inputPath, "-signature", sigPath)
 			cmd.Env = []string{"ACCOUNTING_DATABASE_URL=" + source, "ACCOUNTING_TENANT=" + tenant,
 				"ACCOUNTING_DAILY_RETURN_ENABLED=true"}
+			if master := os.Getenv("ACCOUNTING_DATAMASTER_HISTORY_URL"); master != "" {
+				cmd.Env = append(cmd.Env, "ACCOUNTING_DATAMASTER_HISTORY_URL="+master)
+			}
 			for _, k := range []string{"SystemRoot", "TEMP", "TMP", "TMPDIR"} {
 				if value, ok := os.LookupEnv(k); ok {
 					cmd.Env = append(cmd.Env, k+"="+value)
@@ -142,7 +145,7 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		t.Fatal("require restricted reader")
 	}
 	scope := bus.WithTenantID(ctx, tenant)
-	store := returnbasis.NewStore(read)
+	store := returnbasis.NewStore(read, nil)
 	for _, edition := range []returnbasis.Evidence{original, correction, incomplete} {
 		got, err := store.Read(scope, portfolio, ccy, edition.CloseDate, edition.AsOf)
 		if err != nil || got.Evidence.Closing.Total != edition.Closing.Total || (got.Evidence.Flows == nil) != (edition.Flows == nil) {
@@ -174,14 +177,8 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		if err := foreignPool.QueryRow(ctx, `SELECT count(*) FROM return_basis_benchmark_authorities`).Scan(&visible); err != nil || visible != 0 {
 			t.Fatal("benchmark authority was visible to a foreign tenant")
 		}
-		proveDailyReturn(t, scope, authorities, read, benchmarkSigner, []returnbasis.Evidence{original, correction, incomplete},
+		proveDailyReturn(t, scope, read, benchmarkSigner, []returnbasis.Evidence{original, correction, incomplete},
 			[]string{oldDigest, newDigest, unknownDigest}, func(e returnbasis.Evidence) (string, error) { return put(e, priv) })
-		if err := read.QueryRow(ctx, `SELECT count(*) FROM return_basis_sector_classifications`).Scan(&visible); err != nil || visible != 3 {
-			t.Fatal("authorized reader did not observe all stored classification vintages")
-		}
-		if err := foreignPool.QueryRow(ctx, `SELECT count(*) FROM return_basis_sector_classifications`).Scan(&visible); err != nil || visible != 0 {
-			t.Fatal("classification vintages crossed the tenant boundary")
-		}
 	}
 
 }

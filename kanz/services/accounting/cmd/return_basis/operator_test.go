@@ -39,12 +39,16 @@ import (
 const fixtureBenchmarkID = "SYNTH-TR"
 const fixtureBenchmarkIssuer = "synthetic-index-publisher"
 
-func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxpool.Pool, benchmarkSigner ed25519.PrivateKey, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
+func proveDailyReturn(t *testing.T, ctx context.Context, reader *pgxpool.Pool, benchmarkSigner ed25519.PrivateKey, editions []returnbasis.Evidence, digests []string, admit func(returnbasis.Evidence) (string, error)) {
 	t.Helper()
 	runtimeDSN := os.Getenv("TEST_RETURN_BASIS_RUNTIME")
 	if runtimeDSN == "" || os.Getenv("RETURN_PILOT_ACCOUNTING_BIN") == "" || os.Getenv("RETURN_PILOT_GATEWAY_PROBE") == "" {
 		t.Fatal("operator qualification requires Accounting and browser probes")
 	}
+	master := startMasterPilot(t, ctx)
+	historyURL := "http://" + master.historyAddr
+	t.Setenv("ACCOUNTING_DATAMASTER_HISTORY_URL", historyURL)
+	classificationReferences := map[string]string{}
 	broker, err := natsserver.NewServer(&natsserver.Options{
 		Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir(), NoSigs: true,
 	})
@@ -87,6 +91,7 @@ func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxp
 		cmd := exec.CommandContext(worker, os.Getenv("RETURN_PILOT_ACCOUNTING_BIN"))
 		cmd.Env = []string{"ACCOUNTING_DAILY_RETURN_ENABLED=true", "ACCOUNTING_DATABASE_URL=" + runtimeDSN,
 			"ACCOUNTING_TENANT=basis-test", "ACCOUNTING_NATS_URL=" + broker.ClientURL(),
+			"ACCOUNTING_DATAMASTER_HISTORY_URL=" + historyURL,
 			"ACCOUNTING_LISTEN=" + address, "ACCOUNTING_METRICS_LISTEN=127.0.0.1:0",
 			"ACCOUNTING_CONSUMER_GROUP=" + group, "ACCOUNTING_SNAPSHOT_INTERVAL=0s"}
 		for _, k := range []string{"SystemRoot", "TEMP", "TMP", "TMPDIR"} {
@@ -102,7 +107,7 @@ func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxp
 	}
 
 	first := editions[0]
-	store := returnbasis.NewStore(reader)
+	store := returnbasis.NewStore(reader, nil)
 	if _, err := store.ReadObserved(ctx, first.Portfolio, first.Currency, first.CloseDate, first.AsOf); err != returnbasis.ErrNotFound {
 		t.Fatal("unsent evidence appeared in the observed view", err)
 	}
@@ -470,33 +475,31 @@ func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxp
 			}}
 		sectorIndex.Composition = &composition
 		sectorReport.Benchmark = signIndex(sectorIndex)
-		recordClassification := func(ref string, codes map[string]string) {
-			t.Helper()
-			var recorded time.Time
-			if err := authority.QueryRow(ctx, `INSERT INTO return_basis_sector_classifications
-				(portfolio_id,currency,close_date,known_at,reference,taxonomy,sectors)
-				VALUES ($1,$2,$3::text::date,clock_timestamp(),$4,'SYNTH', $5) RETURNING recorded_at`,
-				sectorReport.Portfolio, sectorReport.Currency, sectorReport.CloseDate, ref, codes).Scan(&recorded); err != nil {
-				t.Fatal("record steward-owned sector snapshot", err)
-			}
-			wait("steward snapshot is ahead of the reporting clock", func(context.Context) bool {
-				return !time.Now().UTC().Truncate(time.Microsecond).Before(recorded)
-			})
+		firstHorizon, originalClasses := master.awaitEdition(t, wait, "GROWTH")
+		sectorReport.AsOf = firstHorizon
+		nextDate, err := master.source.At(ctx, sectorTenant, nextSectorDay, firstHorizon, sectorInstruments)
+		if err != nil || len(nextDate) != 1 || nextDate[0].Code != "FINANCE" {
+			t.Fatal("Datamaster did not isolate the second effective date")
 		}
-		recordClassification("sector-snapshot-r1", map[string]string{"SYNTH-A": "GROWTH", "SYNTH-B": "VALUE", "SYNTH-C": "GROWTH"})
-		sectorReport.AsOf = time.Now().UTC().Truncate(time.Microsecond)
 		sectorReport.Opening = captureNAV("sector-nav-open", sectorReport.PositionBasis.Opening, "100", sectorOpen, sectorReport.AsOf)
 		sectorReport.Closing = captureNAV("sector-nav-close", sectorReport.PositionBasis.Closing, "114.5", sectorClose, sectorReport.AsOf)
 		sectorDigest := appendEdition(sectorReport)
-		recordClassification("sector-snapshot-r2", map[string]string{"SYNTH-A": "GROWTH", "SYNTH-B": "VALUE", "SYNTH-C": "VALUE"})
+		classificationReferences[sectorDigest] = classReference(t, originalClasses)
+		master.write(t, 2, "CURRENT")
+		correctedHorizon, correctedClasses := master.awaitEdition(t, wait, "VALUE")
+		if !correctedClasses[2].KnownAt.After(firstHorizon) {
+			t.Fatal("Datamaster allowed the sector correction to leak into the original knowledge horizon")
+		}
 		sectorRestatement := sectorReport
 		sectorRestatement.PreviousDigest = sectorDigest
-		sectorRestatement.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		sectorRestatement.AsOf = correctedHorizon
 		sectorRestatedDigest := appendEdition(sectorRestatement)
-		recordClassification("sector-snapshot-r3", map[string]string{"SYNTH-A": "GROWTH", "SYNTH-B": "VALUE"})
+		classificationReferences[sectorRestatedDigest] = classReference(t, correctedClasses)
+		master.write(t, 3, "CURRENT")
+		unknownHorizon, _ := master.awaitEdition(t, wait, "")
 		unknownSector := sectorRestatement
 		unknownSector.PreviousDigest = sectorRestatedDigest
-		unknownSector.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		unknownSector.AsOf = unknownHorizon
 		sectorLastDigest := appendEdition(unknownSector)
 		for _, comp := range []*returnbasis.BenchmarkComposition{
 			nil,
@@ -519,6 +522,15 @@ func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxp
 		unsupportedSector.PreviousDigest = lastDigest
 		unsupportedSector.AsOf = time.Now().UTC().Truncate(time.Microsecond)
 		lastDigest = appendEdition(unsupportedSector)
+		master.verifyRetained(t, ctx, wait, firstHorizon, correctedHorizon, originalClasses, correctedClasses, nextDate)
+		master.shutdown()
+		wrong = sectorReport
+		wrong.PreviousDigest = sectorLastDigest
+		wrong.AsOf = time.Now().UTC().Truncate(time.Microsecond)
+		if _, err := admit(wrong); err == nil {
+			t.Fatal("unavailable Datamaster published a new classification result")
+		}
+		t.Log("Datamaster was stopped for the fresh Accounting replay")
 
 		// A second booking learned after these editions must count even when it
 		// is denominated in another currency. Earlier reports remain immutable.
@@ -624,6 +636,9 @@ func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxp
 	values := make([]map[string]string, len(editions))
 	for i, e := range editions {
 		values[i] = map[string]string{"as_of": e.AsOf.Format(time.RFC3339Nano), "digest": digests[i], "date": e.CloseDate}
+		if reference := classificationReferences[digests[i]]; reference != "" {
+			values[i]["classification_reference"] = reference
+		}
 		if e.Flows != nil && e.Flows.Split != nil {
 			values[i]["movement_id"] = e.Flows.Split.MovementID
 			values[i]["command_digest"] = e.Flows.Split.CommandDigest
@@ -665,7 +680,7 @@ func proveDailyReturn(t *testing.T, ctx context.Context, authority, reader *pgxp
 	t.Logf("real JetStream replay and signed browser read passed with %d FACTs", after.State.Msgs)
 	t.Log("observed PostgreSQL bytes matched each original FACT before and after replay")
 	for i, e := range editions {
-		t.Logf("edition close=%s horizon=%s source_sha256=%s benchmark_sha256=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i], values[i]["benchmark_digest"])
+		t.Logf("edition close=%s horizon=%s source_sha256=%s benchmark_sha256=%s classification=%s", e.CloseDate, e.AsOf.Format(time.RFC3339Nano), digests[i], values[i]["benchmark_digest"], values[i]["classification_reference"])
 	}
 }
 

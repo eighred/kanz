@@ -24,6 +24,7 @@ import (
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -235,12 +236,22 @@ func run() int {
 		server.WithBreakStore(custodyStore),
 		server.WithCustodyBookScope(custodyCfg.scope),
 	}
+	var dailyReturn *returnbasis.Store
 	if cfg.DailyReturnEnabled {
 		if ledgerPool == nil || cfg.NATSURL == "" || cfg.Source != "accounting" || cfg.Tenant == "__system__" {
 			logger.Error("daily return requires tenant Accounting with PostgreSQL and JetStream")
 			return 2
 		}
-		opts = append(opts, server.WithReturnBasis(returnbasis.NewStore(ledgerPool)))
+		var history *refdata.SectorHistory
+		if cfg.DatamasterHistoryURL != "" {
+			history, err = refdata.NewSectorHistory(cfg.DatamasterHistoryURL, cfg.Tenant, mesh)
+			if err != nil {
+				logger.Error("daily return Datamaster history unavailable", "err", err)
+				return 2
+			}
+		}
+		dailyReturn = returnbasis.NewStore(ledgerPool, history)
+		opts = append(opts, server.WithReturnBasis(dailyReturn))
 	}
 	var collateralConsumer *collateralops.Consumer
 	if cfg.CollateralInputSource != "" || cfg.CollateralCustodySources != "" {
@@ -345,7 +356,7 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, custodyCfg, store, ledgerPool, custodyStore, collateralConsumer, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, custodyCfg, store, ledgerPool, custodyStore, collateralConsumer, dailyReturn, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
@@ -558,7 +569,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, collateralConsumer *collateralops.Consumer, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, collateralConsumer *collateralops.Consumer, dailyReturn *returnbasis.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 	// Scheduled runs have no inbound delivery. Preserve any resolved context
 	// tenant; use this instance's configured scope only when none is present.
 	ctx = custodyRunContext(ctx, cfg.Tenant)
@@ -650,8 +661,8 @@ func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfi
 	for _, subject := range cfg.CashSubjects {
 		subscribe(subject, folder.HandleCash)
 	}
-	if cfg.DailyReturnEnabled {
-		subscribe(returnbasis.Subject, returnbasis.NewStore(ledgerPool).Handle)
+	if dailyReturn != nil {
+		subscribe(returnbasis.Subject, dailyReturn.Handle)
 	}
 	if collateralConsumer != nil {
 		subscribe(collateralops.SubjectSnapshot, collateralConsumer.HandleSnapshot)

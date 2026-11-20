@@ -73,20 +73,21 @@ func (s *FileRefSource) Fetch(ctx context.Context) ([]RefRow, error) {
 	for i, rec := range recs {
 		line := i + 2 // 1-based, past the header
 		row := RefRow{
-			Symbol:          cols.get(rec, "symbol"),
-			ISIN:            cols.get(rec, "isin"),
-			CUSIP:           cols.get(rec, "cusip"),
-			SEDOL:           cols.get(rec, "sedol"),
-			FIGI:            cols.get(rec, "figi"),
-			RIC:             cols.get(rec, "ric"),
-			BloombergTicker: cols.get(rec, "bloomberg_ticker"),
-			AssetClass:      cols.get(rec, "asset_class"),
-			SectorTaxonomy:  cols.get(rec, "sector_taxonomy"),
-			SectorCode:      cols.get(rec, "sector_code"),
-			SectorName:      cols.get(rec, "sector_name"),
-			IssuerID:        cols.get(rec, "issuer_id"),
-			Currency:        cols.get(rec, "currency"),
-			Description:     cols.get(rec, "description"),
+			Symbol:              cols.get(rec, "symbol"),
+			ISIN:                cols.get(rec, "isin"),
+			CUSIP:               cols.get(rec, "cusip"),
+			SEDOL:               cols.get(rec, "sedol"),
+			FIGI:                cols.get(rec, "figi"),
+			RIC:                 cols.get(rec, "ric"),
+			BloombergTicker:     cols.get(rec, "bloomberg_ticker"),
+			AssetClass:          cols.get(rec, "asset_class"),
+			SectorTaxonomy:      cols.get(rec, "sector_taxonomy"),
+			SectorCode:          cols.get(rec, "sector_code"),
+			SectorName:          cols.get(rec, "sector_name"),
+			IssuerID:            cols.get(rec, "issuer_id"),
+			Currency:            cols.get(rec, "currency"),
+			Description:         cols.get(rec, "description"),
+			SectorEffectiveDate: cols.get(rec, "sector_effective_date"),
 		}
 		// A row that keys to no instrument cannot be mastered. ReferenceAdapter
 		// would silently skip it; here, at the file boundary, we can name the exact
@@ -97,6 +98,13 @@ func (s *FileRefSource) Fetch(ctx context.Context) ([]RefRow, error) {
 		}
 		if row.AsOf, err = optionalTime(cols.get(rec, "as_of")); err != nil {
 			return nil, fmt.Errorf("vendor %s: %s line %d: as_of: %w", s.vendor, s.path, line, err)
+		}
+		if row.SectorEffectiveDate != "" {
+			day, err := time.Parse(time.DateOnly, row.SectorEffectiveDate)
+			if err != nil || day.Format(time.DateOnly) != row.SectorEffectiveDate || row.AsOf.IsZero() ||
+				row.AsOf.Nanosecond()%1000 != 0 || (row.SectorTaxonomy == "") != (row.SectorCode == "") {
+				return nil, fmt.Errorf("vendor %s line %d: dated sector requires an exact UTC day, source revision and complete sector key", s.vendor, line)
+			}
 		}
 		out = append(out, row)
 	}

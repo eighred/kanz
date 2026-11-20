@@ -146,6 +146,28 @@ func (p *Projector) refresh(ctx context.Context) error {
 		return err
 	}
 	now := p.now()
+	// Dated sector-only rows go to the same owner's immutable history. They
+	// are excluded from current golden records and price exception detection.
+	dated := make(map[string][]master.VendorRecord)
+	for id, group := range records {
+		current := group[:0]
+		for _, row := range group {
+			if row.SectorEffectiveDate == "" {
+				current = append(current, row)
+				continue
+			}
+			key := row.SectorEffectiveDate + "\x00" + id
+			dated[key] = append(dated[key], row)
+		}
+		if len(current) == 0 {
+			delete(records, id)
+		} else {
+			records[id] = current
+		}
+	}
+	if err := p.persistSectorHistory(ctx, dated); err != nil {
+		return err
+	}
 
 	for _, id := range sortedKeys(records) {
 		golden, conflicts := master.Resolve(records[id])

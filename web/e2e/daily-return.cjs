@@ -48,7 +48,7 @@ async function main() {
             assert(!denied.includes('SYNTH-A'))
             assert(!denied.includes('position_contribution'))
             assert(!denied.includes('sector_attribution'))
-            assert(!denied.includes('sector-snapshot'))
+            assert(!denied.includes('datamaster:'))
           }
           continue
         }
@@ -265,14 +265,16 @@ async function main() {
         stage = 'authorized-sector-effects'
         const attribution = await measured(sectorOriginal, 29 / 200, '14.5%')
         await comparison(attribution, sectorOriginal, 3 / 50, 17 / 200, '6%', '+8.5 percentage points')
-        await sectorEffects(attribution, 'sector-snapshot-r1', [
+        assert.match(sectorOriginal.classification_reference, /^datamaster:[0-9a-f]{64}$/)
+        await sectorEffects(attribution, sectorOriginal.classification_reference, [
           [3 / 5, 1 / 2, 1 / 5, 1 / 10, 1 / 100, 1 / 20, 1 / 100, ['+1', '+5', '+1', '+7']],
           [2 / 5, 1 / 2, 1 / 16, 1 / 50, -1 / 500, 17 / 800, -17 / 4000, ['-0.2', '+2.125', '-0.425', '+1.5']],
         ], [1 / 125, 57 / 800, 23 / 4000], ['+0.8', '+7.125', '+0.575', '+8.5'])
         const revisedAttribution = await measured(sectorRestated, 29 / 200, '14.5%')
         assert.equal(revisedAttribution.previous_source_digest, sectorOriginal.digest)
         assert.equal(revisedAttribution.benchmark_comparison.source_digest, attribution.benchmark_comparison.source_digest)
-        await sectorEffects(revisedAttribution, 'sector-snapshot-r2', [
+        assert.notEqual(sectorOriginal.classification_reference, sectorRestated.classification_reference)
+        await sectorEffects(revisedAttribution, sectorRestated.classification_reference, [
           [3 / 5, 1 / 5, 1 / 5, 1 / 10, 1 / 25, 1 / 50, 1 / 25, ['+4', '+2', '+4', '+10']],
           [2 / 5, 4 / 5, 1 / 16, 1 / 20, -1 / 50, 1 / 100, -1 / 200, ['-2', '+1', '-0.5', '-1.5']],
         ], [1 / 50, 3 / 100, 7 / 200], ['+2', '+3', '+3.5', '+8.5'])

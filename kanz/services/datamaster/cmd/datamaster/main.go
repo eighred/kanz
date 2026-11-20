@@ -145,6 +145,24 @@ func run() int {
 	var loops sync.WaitGroup
 	defer joinThenClose(cancelLoops, &loops, closeStores)
 
+	var mesh *transport.Mesh
+	if cfg.SectorHistoryListen != "" || (outboxQueue != nil && cfg.NATSURL != "") {
+		mesh, err = transport.NewMesh(ctx, cfg.SPIFFESocket)
+		if err != nil {
+			logger.Error("mesh init failed", "err", err)
+			return 2
+		}
+		defer func() { _ = mesh.Close() }()
+	}
+	stopHistory, err := startSectorHistory(cfg, golden, mesh, fatal.Raise)
+	if err != nil {
+		logger.Error("sector history listener unavailable", "err", err)
+		return 2
+	}
+	if stopHistory != nil {
+		defer stopHistory()
+	}
+
 	// THE OVERRIDE FACT REACHES THE ESTATE (#410).
 	//
 	// The FACT is committed to the outbox in the SAME transaction as the override,
@@ -162,12 +180,6 @@ func run() int {
 				"trail will not contain them until a relay runs",
 				"gauge", "kanz_datamaster_outbox_oldest_pending_seconds")
 		} else {
-			mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
-			if err != nil {
-				logger.Error("mesh init failed", "err", err)
-				return 2
-			}
-			defer func() { _ = mesh.Close() }()
 			// ONE BusMetrics, CREATED BEFORE THE DIAL (#636). The connection's state and
 			// its transitions are only exported when DialNATS is given this; a service
 			// that publishes and never consumes contributes no kanz_bus_consume_total,

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/accounting/internal/return_basis"
 )
 
@@ -66,7 +68,19 @@ func run(ctx context.Context, bodyPath, signaturePath string) (string, error) {
 	if err != nil || !limited {
 		return "", errors.New("return basis: restricted source login required")
 	}
-	receipt, err := returnbasis.NewStore(pool).Accept(bus.WithTenantID(ctx, tenant), raw, sig)
+	var history *refdata.SectorHistory
+	if endpoint := os.Getenv("ACCOUNTING_DATAMASTER_HISTORY_URL"); endpoint != "" {
+		mesh, err := transport.NewMesh(ctx, os.Getenv("SPIFFE_ENDPOINT_SOCKET"))
+		if err != nil {
+			return "", errors.New("return basis: Datamaster workload identity unavailable")
+		}
+		defer func() { _ = mesh.Close() }()
+		history, err = refdata.NewSectorHistory(endpoint, tenant, mesh)
+		if err != nil {
+			return "", err
+		}
+	}
+	receipt, err := returnbasis.NewStore(pool, history).Accept(bus.WithTenantID(ctx, tenant), raw, sig)
 	if err != nil {
 		return "", errors.New("return basis: admission failed; verify issuer, scope, horizon and predecessor")
 	}

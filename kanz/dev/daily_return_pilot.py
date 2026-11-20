@@ -27,6 +27,7 @@ def build(node, directory, env):
     subprocess.run([node, cli, "run", "build"], cwd=WEB, env=env, check=True)
     packages = {"ACCOUNTING_BIN": ("build", "./services/accounting/cmd/accounting"),
                 "IMPORTER_BIN": ("build", "./services/accounting/cmd/return_basis"),
+                "DATAMASTER_BIN": ("build", "./services/datamaster/cmd/datamaster"),
                 "GATEWAY_PROBE": ("test", "./services/api_gateway/cmd/api_gateway"),
                 "BFF_PROBE": ("test", "./services/web_bff/internal/server")}
     binaries = {}
@@ -69,18 +70,30 @@ def qualify(env):
             time.sleep(0.25)
         else:
             raise RuntimeError("disposable PostgreSQL unavailable")
-        passwords = {role: secrets.token_hex(24) for role in ("owner", "source", "reader", "runtime")}
+        passwords = {role: secrets.token_hex(24) for role in ("owner", "source", "reader", "runtime", "datamaster")}
         sql("postgres", "\n".join(f"CREATE ROLE basis_{role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{pw}';"
-                                 for role, pw in passwords.items()) + "\nCREATE DATABASE basis OWNER basis_owner;")
+                                 for role, pw in passwords.items()) + "\nCREATE DATABASE basis OWNER basis_owner;\n"
+                                 "CREATE DATABASE basis_master OWNER basis_owner;")
         for path in sorted((MODULE / "services/accounting/migrations").glob("*.sql")):
             try:
                 sql("basis", "SET ROLE basis_owner;\n" + path.read_text(encoding="utf8"))
             except RuntimeError:
                 raise RuntimeError("Accounting migration failed: " + path.name) from None
+        for path in sorted((MODULE / "services/datamaster/migrations").glob("*.sql")):
+            try:
+                sql("basis_master", "SET ROLE basis_owner;\n" + path.read_text(encoding="utf8"))
+            except RuntimeError:
+                raise RuntimeError("Datamaster migration failed: " + path.name) from None
+        sql("basis_master", """
+            GRANT SELECT,INSERT,UPDATE ON golden_records TO basis_datamaster;
+            GRANT SELECT,INSERT ON exceptions TO basis_datamaster;
+            GRANT SELECT ON sector_classification_history TO basis_datamaster;
+            GRANT INSERT(instrument_id,effective_date,source_as_of,taxonomy,code,name,vendor)
+                ON sector_classification_history TO basis_datamaster;
+        """)
         sql("basis", """
             GRANT SELECT ON return_basis_authorities, return_basis_receipts, return_basis_publications, return_basis_benchmark_authorities
                 TO basis_source,basis_reader,basis_runtime;
-            GRANT SELECT ON return_basis_sector_classifications TO basis_source,basis_reader,basis_runtime;
             GRANT INSERT ON return_basis_receipts TO basis_source;
             GRANT INSERT (portfolio_id,currency,close_date,as_of) ON return_basis_publications TO basis_source;
             GRANT SELECT,INSERT ON outbox TO basis_source;
@@ -105,7 +118,8 @@ def qualify(env):
             raise RuntimeError("require exactly one loopback PostgreSQL port")
         test_env = dict(env, RETURN_PILOT_VERIFY="1")
         for role, pw in passwords.items():
-            test_env["TEST_RETURN_BASIS_" + role.upper()] = f"postgres://basis_{role}:{pw}@{endpoint}/basis?sslmode=disable"
+            database = "basis_master" if role == "datamaster" else "basis"
+            test_env["TEST_RETURN_BASIS_" + role.upper()] = f"postgres://basis_{role}:{pw}@{endpoint}/{database}?sslmode=disable"
         proof = subprocess.run(["go", "test", "-p", "1", "-count=1", "-json", "./services/accounting/cmd/return_basis",
                                 "-run", "^TestSignedReturnBasisAdmissionAndReplay$"], cwd=MODULE, env=test_env,
                                capture_output=True, timeout=120)

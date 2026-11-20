@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/refdata"
 	performancepb "github.com/eighred/kanz/kanz-schemas-go/performance/v1"
 	"github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
@@ -60,7 +61,7 @@ func validPositionBasis(e Evidence) bool {
 	return validTradeCoverage(b.TradeCoverage)
 }
 
-func verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performancepb.DailyReturnAssessment, error) {
+func (s *Store) verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performancepb.DailyReturnAssessment, error) {
 	report := assessment(r)
 	if r.Evidence.SectorAttribution {
 		report.SectorAttribution = &performancepb.DailySectorAttribution{
@@ -88,7 +89,10 @@ func verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performance
 	if b.Closing != nil {
 		positions.ClosingPriceReference = b.Closing.Reference
 	}
-	result, reason, err := positionContribution(ctx, tx, r.Evidence, report)
+	// The signed price list bounds the reference-data query before we acquire
+	// the journal lock. Valuation verifies that list against the actual book.
+	classifications, classErr := s.readSectorClassifications(ctx, r.Evidence, report)
+	result, reason, err := positionContribution(ctx, tx, r.Evidence, report, classifications, classErr)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +104,9 @@ func verifiedAssessment(ctx context.Context, tx pgx.Tx, r Receipt) (*performance
 	return report, nil
 }
 
-func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *performancepb.DailyReturnAssessment) (*performancepb.PositionContributionBreakdown, string, error) {
+func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *performancepb.DailyReturnAssessment,
+	classifications []refdata.DatedSector, classErr error,
+) (*performancepb.PositionContributionBreakdown, string, error) {
 	if report.GetMeasured() == nil {
 		return nil, "portfolio_return_unassessed", nil
 	}
@@ -197,7 +203,7 @@ func positionContribution(ctx context.Context, tx pgx.Tx, e Evidence, report *pe
 	}
 	result, reason, err := contributionBreakdown(e, periods)
 	if err == nil && reason == "" && report.SectorAttribution != nil {
-		if err := attributeSectors(ctx, tx, e, report, periods, entries); err != nil {
+		if err := attributeSectors(ctx, e, report, periods, entries, classifications, classErr); err != nil {
 			return nil, "", err
 		}
 	}

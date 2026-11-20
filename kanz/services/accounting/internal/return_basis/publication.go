@@ -144,14 +144,14 @@ func verifyBookedFlow(ctx context.Context, tx pgx.Tx, e Evidence) error {
 	return nil
 }
 
-func enqueue(ctx context.Context, tx pgx.Tx, receipt Receipt) error {
+func (s *Store) enqueue(ctx context.Context, tx pgx.Tx, receipt Receipt) error {
 	e := receipt.Evidence
 	tag, err := tx.Exec(ctx, `INSERT INTO return_basis_publications (portfolio_id,currency,close_date,as_of)
 		VALUES ($1,$2,$3::text::date,$4) ON CONFLICT DO NOTHING`, e.Portfolio, e.Currency, e.CloseDate, e.AsOf)
 	if err != nil || tag.RowsAffected() == 0 {
 		return err
 	}
-	report, err := verifiedAssessment(ctx, tx, receipt)
+	report, err := s.verifiedAssessment(ctx, tx, receipt)
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func (s *Store) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 	if err = verifyBookedFlow(ctx, tx, r.Evidence); err != nil {
 		return err
 	}
-	report, err := verifiedAssessment(ctx, tx, r)
+	report, err := s.verifiedAssessment(ctx, tx, r)
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,6 @@ package returnbasis
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"math"
 	"math/big"
 	"regexp"
@@ -14,7 +13,6 @@ import (
 	"github.com/eighred/kanz/internal/refdata"
 	performancepb "github.com/eighred/kanz/kanz-schemas-go/performance/v1"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -34,8 +32,33 @@ func (c datedSectors) Sector(_ context.Context, id string, horizon time.Time) (s
 	return (refdata.Sector{Taxonomy: c.taxonomy, Code: code}).Key(), true
 }
 
-func attributeSectors(ctx context.Context, tx pgx.Tx, e Evidence, report *performancepb.DailyReturnAssessment,
-	periods []contributionPeriod, events []*ledger.Event,
+func (s *Store) readSectorClassifications(ctx context.Context, e Evidence, report *performancepb.DailyReturnAssessment) ([]refdata.DatedSector, error) {
+	if s.sectorHistory == nil || report.SectorAttribution == nil || report.GetMeasured() == nil ||
+		report.GetBenchmarkComparison().GetMeasured() == nil || e.Flows.Split != nil ||
+		e.PositionBasis.TradeCoverage != nil || e.PositionBasis.Opening == nil {
+		return nil, nil
+	}
+	composition := e.Benchmark.Observation.Composition
+	if composition == nil || len(composition.Constituents) == 0 {
+		return nil, nil
+	}
+	ids := make(map[string]struct{}, len(e.PositionBasis.Opening.Prices)+len(composition.Constituents))
+	for id := range e.PositionBasis.Opening.Prices {
+		ids[id] = struct{}{}
+	}
+	for _, member := range composition.Constituents {
+		ids[member.InstrumentID] = struct{}{}
+	}
+	instruments := make([]string, 0, len(ids))
+	for id := range ids {
+		instruments = append(instruments, id)
+	}
+	sort.Strings(instruments)
+	return s.sectorHistory.At(ctx, e.Tenant, report.Start.AsTime().Format(time.DateOnly), e.AsOf, instruments)
+}
+
+func attributeSectors(ctx context.Context, e Evidence, report *performancepb.DailyReturnAssessment,
+	periods []contributionPeriod, events []*ledger.Event, rows []refdata.DatedSector, classErr error,
 ) error {
 	out := report.SectorAttribution
 	unassessed := func(reason string) error {
@@ -76,29 +99,31 @@ func attributeSectors(ctx context.Context, tx pgx.Tx, e Evidence, report *perfor
 	if len(portfolio) == 0 || portfolioReturn.Cmp(wantPortfolio) != 0 {
 		return unassessed("sector_portfolio_unassessed")
 	}
-	classifier := datedSectors{horizon: e.AsOf}
-	var known time.Time
-	var sectorsJSON []byte
-	err := tx.QueryRow(ctx, `SELECT reference, known_at, taxonomy, sectors
-		FROM return_basis_sector_classifications
-		WHERE tenant_id=public.app_current_tenant() AND tenant_id=$1 AND portfolio_id=$2 AND currency=$3
-		  AND close_date=$4::text::date AND known_at <= $5 AND recorded_at <= $5
-		ORDER BY known_at DESC LIMIT 1`, e.Tenant, e.Portfolio, e.Currency, e.CloseDate, e.AsOf).
-		Scan(&out.ClassificationReference, &known, &classifier.taxonomy, &sectorsJSON)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if classErr != nil {
+		// An unavailable dependency is retryable. It cannot enter the outbox
+		// as a different result once the same immutable horizon is readable.
+		return classErr
+	}
+	if len(rows) == 0 {
 		return unassessed("sector_classification_missing")
 	}
+	classifier := datedSectors{horizon: e.AsOf, taxonomy: rows[0].Taxonomy, codes: make(map[string]string, len(rows))}
+	var known time.Time
+	for _, row := range rows {
+		if row.Taxonomy != classifier.taxonomy {
+			return unassessed("sector_classification_missing")
+		}
+		classifier.codes[row.InstrumentID] = row.Code
+		if row.KnownAt.After(known) {
+			known = row.KnownAt
+		}
+	}
+	canonical, err := json.Marshal(rows)
 	if err != nil {
 		return err
 	}
-	if !identifier.MatchString(out.ClassificationReference) {
-		out.ClassificationReference = ""
-		return unassessed("sector_classification_missing")
-	}
+	out.ClassificationReference = "datamaster:" + digest(canonical)
 	out.ClassificationKnownAt = timestamppb.New(known)
-	if json.Unmarshal(sectorsJSON, &classifier.codes) != nil {
-		return unassessed("sector_classification_missing")
-	}
 	// The existing bucketer reports its unknown bucket for other callers.
 	// This governed report requires every instrument on both sides to resolve.
 	sectors, err := performance.BucketBySector(ctx, classifier, e.AsOf, portfolio, benchmark)

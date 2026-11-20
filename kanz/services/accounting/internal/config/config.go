@@ -5,6 +5,7 @@ import (
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/eighred/kanz/pkg/secret"
@@ -18,7 +19,8 @@ import (
 // bus consumer that feeds the journal is wired there too, so the default boot
 // serves the read/reconcile endpoints without a broker.
 type Config struct {
-	DailyReturnEnabled bool
+	DailyReturnEnabled   bool
+	DatamasterHistoryURL string
 	// Listen is the API port — the tenant-scoped routes that MOVE MONEY
 	// (cash-movements, nav, reconcile). It is deliberately NOT the scraped port
 	// (#447): allow-observability-scrape must admit whatever port serves
@@ -260,6 +262,7 @@ func Load() (Config, error) {
 
 	return Config{
 		DailyReturnEnabled:       dailyReturn,
+		DatamasterHistoryURL:     strings.TrimSpace(os.Getenv("ACCOUNTING_DATAMASTER_HISTORY_URL")),
 		Listen:                   env.Or("ACCOUNTING_LISTEN", ":8101"),
 		MetricsListen:            env.Or("ACCOUNTING_METRICS_LISTEN", ":8080"),
 		LogLevel:                 env.ParseLevelOr(os.Getenv("ACCOUNTING_LOG_LEVEL"), slog.LevelInfo),

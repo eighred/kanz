@@ -116,15 +116,34 @@ Accounting checks the weights sum to one and their weighted return equals
 the signed overall index return. Portfolio weights and returns come from the
 dated reconciled journal valuation.
 
-The reporting reference-data steward records one immutable classification
-snapshot for an exact `close_date` in
-`return_basis_sector_classifications`. Each row identifies a single `taxonomy`
-and maps instrument IDs to sector codes in `sectors`. Accounting chooses the
-latest snapshot with both `known_at` and `recorded_at` within the report's
-knowledge horizon. Source and Accounting consumer roles need SELECT, with
-write access limited to the steward. The snapshot certifies the whole day.
-A missing instrument in the selected snapshot, missing benchmark constituents
-or a sector without exposure on both sides leaves the result unassessed.
+Datamaster owns the classification. Its mounted reference CSV accepts optional
+`sector_effective_date` for a sector-only row. The date covers one exact UTC
+valuation day and `as_of` identifies the source revision. Both sector taxonomy
+and code are required for a known classification. A dated row with both fields
+empty records an explicitly unknown sector. These rows use the existing
+survivorship engine for that day and do not change the current golden projection.
+The Datamaster projector appends a batch transaction to
+`sector_classification_history` with a PostgreSQL-assigned knowledge time.
+It rejects conflicting contents under the same source revision and re-reading
+an older drop leaves the newest known revision intact.
+
+Set `DATAMASTER_SECTOR_HISTORY_LISTEN` on the Datamaster process and
+`ACCOUNTING_DATAMASTER_HISTORY_URL` on both the importer and Accounting
+consumer. The private endpoint uses an Accounting-only workload certificate
+allow-list with SPIFFE configured. Plaintext is limited to literal loopback.
+It is separate from the ordinary Datamaster listener. The Datamaster runtime
+requires SELECT and column-level INSERT with no write privilege on `known_at`.
+Accounting uses HTTP, with no Datamaster database credentials.
+
+Accounting queries the exact UTC start day and signed knowledge horizon.
+The result references the digest of the Datamaster observations used. It
+evaluates missing dates, missing or unresolved instruments, incomplete
+benchmark composition and a sector absent on either side as unassessed.
+A transport failure leaves a new report retryable. Observed reports and
+redeliveries use retained bytes, including reports originally published from
+the earlier synthetic snapshot. Drain any pending editions from that earlier
+writer before switching the report consumer. The legacy Accounting snapshot
+table remains in the migration history for already published editions.
 
 The authorized Exposure screen shows allocation, selection, interaction and
 total relative effects in percentage points. The pilot uses two synthetic
@@ -168,10 +187,12 @@ and signed benchmark digest when a comparison is supported.
 
 For the isolated acceptance, generate the Go schema SDK and install the
 locked Web dependencies and Chromium. From the repository root run
-`python -B kanz/dev/daily_return_pilot.py`. It applies the Accounting
-migrations to a disposable PostgreSQL container, builds the normal importer
-and Accounting service and exercises a real JetStream consumer and authenticated
-gateway/BFF in Chromium.
+`python -B kanz/dev/daily_return_pilot.py`. It applies Accounting and Datamaster
+migrations to separate disposable databases, builds the normal Datamaster,
+importer and Accounting binaries, and exercises real JetStream redelivery and
+the authenticated gateway/BFF in Chromium. The Datamaster fixture loads two
+effective dates, corrects the earlier one, verifies persisted revisions after
+restart and stops Datamaster before the broker replay.
 
 The fixture books a USD 40 subscription and values the PostgreSQL book through
 Accounting using synthetic prices. With opening NAV 100, pre-flow NAV 110,
