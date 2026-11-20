@@ -71,6 +71,7 @@ func (f *fixture) service(t *testing.T, tr *transport) *order.Service {
 	}
 	return svc
 }
+
 const futureStateField protowire.Number = 50_000
 
 func initial() *orderpb.OrderState {
