@@ -44,6 +44,8 @@ The candidate exercises the dependency and feature surface used by the finite wo
 
 ## Published Chrono API bridge
 
+The retained snapshot binds the registry archive to the publisher's verified annotated tag and signed commit. The qualifier compares all 53 packaged repository files, including the original manifest and licenses, against the tagged Git tree. Cargo's three generated files are covered by the pinned archive checksum. A moved tag, a missing runtime source or a changed blob requires a new review.
+
 ```sh
 python -B -m unittest discover -s tools/jiff_qualification -p test_chrono_advisories.py
 python -B tools/jiff_qualification/object_store.py --published-bridge chrono-advisories.json

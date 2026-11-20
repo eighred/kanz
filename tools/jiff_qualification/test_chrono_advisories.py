@@ -1,9 +1,14 @@
 import copy
+import hashlib
+import io
+import json
+import tarfile
 import unittest
 from unittest.mock import patch
 
 from chrono_advisories import CHECKSUM, FIXED_IN_047, FIXED_IN_051, REVIEWED_RUSTSEC, UPSTREAM_GLOBAL
 from chrono_advisories import GLOBAL_TYPES, PACKAGE, PUBLISHER, REGISTRY_OWNER, REVIEWED_PUBLISHER, VERSION, evaluate, rows
+from chrono_advisories import COMMIT, TAG, TREE, REVIEWED_RELEASE, checked_source_blobs, release_source
 
 
 def advisory(ghsa, ranges):
@@ -18,7 +23,8 @@ def fixture():
     rows = [advisory(key, [">= 0.4.46, < 0.4.47"]) for key in FIXED_IN_047]
     rows.extend(advisory(key, [">= 0.4.46, < 0.4.48", ">= 0.5.0, < 0.5.1"]) for key in FIXED_IN_051)
     return {
-        "repository": dict(REVIEWED_PUBLISHER), "publisher_global": {k: [] for k in GLOBAL_TYPES},
+        "repository": dict(REVIEWED_PUBLISHER), "release_source": dict(REVIEWED_RELEASE),
+        "publisher_global": {k: [] for k in GLOBAL_TYPES},
         "registry": {"name": PACKAGE, "version": VERSION, "checksum": CHECKSUM, "yanked": False,
                      "rust_version": "1.85.0", "publisher": 365806, "owners": [dict(REGISTRY_OWNER)]},
         "rustsec_commit": "a" * 40, "rustsec_chrono": dict(REVIEWED_RUSTSEC),
@@ -30,6 +36,57 @@ def fixture():
 
 
 class ChronoAdvisoriesTest(unittest.TestCase):
+    def test_retained_release_source_is_required_for_replay(self):
+        for field in REVIEWED_RELEASE:
+            snapshot = fixture()
+            del snapshot["release_source"][field]
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                evaluate(snapshot, VERSION, CHECKSUM)
+        snapshot = fixture()
+        del snapshot["release_source"]
+        with self.assertRaises(ValueError):
+            evaluate(snapshot, VERSION, CHECKSUM)
+
+    def test_refuses_moved_tag_unverified_tag_commit_and_wrong_tree(self):
+        ref = {"ref": f"refs/tags/v{VERSION}", "object": {"type": "tag", "sha": TAG}}
+        valid = {"verified": True, "reason": "valid"}
+        tag = {"tag": f"v{VERSION}", "sha": TAG, "object": {"type": "commit", "sha": COMMIT}, "verification": valid}
+        commit = {"sha": COMMIT, "tree": {"sha": TREE}, "verification": valid}
+        for inputs in ([ref | {"object": {"type": "tag", "sha": "1" * 40}}],
+                       [ref, tag | {"verification": valid | {"verified": False}}, commit],
+                       [ref, tag, commit | {"verification": valid | {"reason": "unsigned"}}],
+                       [ref, tag, commit | {"tree": {"sha": "0" * 40}}]):
+            with patch("chrono_advisories.request", side_effect=inputs), self.assertRaises(ValueError):
+                release_source()
+
+    def test_packaged_sources_match_signed_git_objects(self):
+        contents = {"src/lib.rs": b"pub fn value() {}", "Cargo.toml.orig": b"[package]", "Cargo.toml": b"normalized",
+                    "Cargo.lock": b"generated", ".cargo_vcs_info.json": json.dumps({"git":{"sha1":COMMIT},"path_in_vcs":""}).encode()}
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode="w:gz") as tf:
+            for path, data in contents.items():
+                info = tarfile.TarInfo(f"{PACKAGE}-{VERSION}/{path}")
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        archive = out.getvalue()
+        # Use actual Git blob identities, including the canonical object header.
+        def blob(path):
+            data = contents[path]
+            return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+        signed = {"src/lib.rs": blob("src/lib.rs"), "Cargo.toml": blob("Cargo.toml.orig")}
+        tree = {"sha": TREE, "truncated": False,
+                "tree": [{"mode": "100644", "type": "blob", "path": p, "sha": v} for p,v in signed.items()]}
+        with patch("chrono_advisories.CHECKSUM", hashlib.sha256(archive).hexdigest()):
+            self.assertEqual(checked_source_blobs(tree, archive), signed)
+            unknown = dict(tree["tree"][0], path="src/extra.rs")
+            for altered in (tree | {"tree": tree["tree"]+[unknown]}, tree | {"tree":tree["tree"][:1]},
+                            tree | {"tree":[tree["tree"][0] | {"sha":"0"*40}, tree["tree"][1]]},
+                            tree | {"truncated":True}):
+                with self.subTest(altered=altered), self.assertRaises(ValueError):
+                    checked_source_blobs(altered, archive)
+            with self.assertRaises(ValueError):
+                checked_source_blobs(tree, archive + b"unreviewed")
+
     def test_publisher_changes_require_review(self):
         for key, changed in [("owner", 7), ("archived", True), ("disabled", True), ("policy", "c" * 40)]:
             snapshot = fixture()
