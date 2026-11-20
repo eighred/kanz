@@ -341,6 +341,18 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 		return r.recordFailure(ctx, run, fmt.Errorf("compare executions: %w", err))
 	}
 	r.stateLeg(subject, stmt, leg, len(executions))
+	if basis != nil {
+		basis = basis.clone()
+		switch {
+		case leg == recon.LegBalancesOnly:
+			basis.Transactions = &TransactionComparison{Pass: leg.String()}
+		case leg.Ran() && basis.Transactions != nil:
+			basis.Transactions.Pass = leg.String()
+			basis.Transactions.StatementReferences = new(len(stmt.Transactions))
+		default:
+			basis.Transactions = nil
+		}
+	}
 
 	outcome := OutcomeClean
 	if len(detected) > 0 {
