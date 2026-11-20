@@ -1,7 +1,7 @@
 //! Isolated OMS command owner for the disposable XSIM venue.
 use super::{
     cas, claim, commit, enqueue, execution_key, insert_order, journal, load_in, recovery,
-    same_execution, scoped, Error, Loaded, Record,
+    same_execution, scope_existing, Error, Loaded, Record,
 };
 use kanz_decimal_compat::{compare, in_domain, is_positive};
 use kanz_order_core::proto::{common::v1::Decimal, order::v1::*};
@@ -26,13 +26,14 @@ pub struct Scope<'a> {
 pub struct Receipt {
     pub code: &'static str,
     pub order: Loaded,
+    pub lineage: Lineage,
 }
 
 #[derive(Debug)]
 pub enum Refusal {
     Invalid,
     Unauthorized,
-    Controls,
+    Controls(&'static str),
     Conflict,
     NotFound,
     State,
@@ -43,7 +44,7 @@ impl Refusal {
         match self {
             Self::Invalid => "INVALID",
             Self::Unauthorized => "UNAUTHORIZED",
-            Self::Controls => "CONTROL_DENIED",
+            Self::Controls(_) => "CONTROL_DENIED",
             Self::Conflict => "CONFLICT",
             Self::NotFound => "NOT_FOUND",
             Self::State => "INVALID_STATE",
@@ -92,13 +93,14 @@ async fn begin<'a>(
     {
         return Err(Refusal::Invalid);
     }
-    let tx = scoped(client, s.tenant).await?;
+    let tx = client.transaction().await?;
+    // Resolve all canonical relations in reviewed schemas, including the RLS preflight.
+    tx.batch_execute("SET LOCAL search_path=pg_catalog,public,pg_temp; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='3s'").await?;
+    scope_existing(&tx, s.tenant).await?;
     let row=tx.query_one("SELECT current_user::text, current_database()='kanz_synthetic_oms' AND current_user=session_user AND NOT has_table_privilege(current_user,'synthetic_oms_evidence','INSERT,UPDATE,DELETE,TRUNCATE') AND NOT has_any_column_privilege(current_user,'synthetic_oms_evidence','INSERT,UPDATE') AND (SELECT count(*)=3 FROM pg_class WHERE oid IN ('synthetic_oms_evidence'::regclass,'synthetic_oms_commands'::regclass,'synthetic_oms_observations'::regclass) AND relrowsecurity AND relforcerowsecurity AND NOT pg_has_role(current_user,relowner,'MEMBER'))", &[]).await?;
     if !row.get::<_, bool>(1) || !roles.contains(&row.get::<_, String>(0).as_str()) {
         return Err(Refusal::Unauthorized);
     }
-    tx.batch_execute("SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='3s'")
-        .await?;
     Ok(tx)
 }
 
@@ -106,31 +108,76 @@ async fn observed_now(tx: &Transaction<'_>) -> Result<Timestamp> {
     let at: SystemTime = tx.query_one("SELECT clock_timestamp()", &[]).await?.get(0);
     Ok(Timestamp::from(at))
 }
-fn source_fact(
-    scope: &Scope<'_>,
-    id: &str,
-    event: &str,
-    name: &str,
-    at: &Timestamp,
-    cause: &str,
-    payload: Vec<u8>,
-) -> Result<Record> {
-    let subject = format!("order.order.{event}");
-    Ok(Record {
-        tenant: scope.tenant.into(),
-        partition_key: id.into(),
-        subject: subject.clone(),
-        event_type: subject,
-        event_class: 1,
-        schema_version: 1,
-        domain: "order".into(),
-        payload_schema_ref: format!("order.v1.{name}:1"),
-        event_time: recovery::time(at)?,
-        correlation_id: id.into(),
-        causation_id: cause.into(),
-        trace_context: String::new(),
-        payload,
-    })
+pub struct Lineage {
+    pub event_id: String,
+    pub trace_context: String,
+}
+// The entitlement producer captures the gateway's root envelope here. The
+// idempotency key is caller-controlled and never an event or trace identity.
+impl Lineage {
+    async fn load(tx: &Transaction<'_>, id: &str) -> Result<Self> {
+        let row=tx.query_opt(
+            "SELECT e.source_id,e.trace_context FROM synthetic_oms_commands c
+             JOIN synthetic_oms_evidence e USING(tenant_id,principal_id,portfolio_id,order_id,command_sha256)
+             WHERE c.order_id=$1 AND e.kind='entitlement' AND e.source_id=ANY(c.evidence_ids)", &[&id]
+        ).await?.ok_or(Refusal::Controls("MISSING_GATEWAY_LINEAGE"))?;
+        let event_id: String = row.get(0);
+        let trace_context: String = row.get(1);
+        if !identifier(&event_id) || !traceparent(&trace_context) {
+            return Err(Refusal::Controls("INVALID_GATEWAY_LINEAGE"));
+        }
+        Ok(Self {
+            event_id,
+            trace_context,
+        })
+    }
+    fn fact(
+        &self,
+        scope: &Scope<'_>,
+        id: &str,
+        event: &str,
+        name: &str,
+        at: &Timestamp,
+        cause: &str,
+        payload: Vec<u8>,
+    ) -> Result<Record> {
+        let subject = format!("order.order.{event}");
+        Ok(Record {
+            tenant: scope.tenant.into(),
+            partition_key: id.into(),
+            subject: subject.clone(),
+            event_type: subject,
+            event_class: 1,
+            schema_version: 1,
+            domain: "order".into(),
+            payload_schema_ref: format!("order.v1.{name}:1"),
+            event_time: recovery::time(at)?,
+            correlation_id: self.event_id.clone(),
+            causation_id: cause.into(),
+            trace_context: self.trace_context.clone(),
+            payload,
+        })
+    }
+}
+
+fn traceparent(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    fn hex(s: &[u8]) -> bool {
+        s.iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    }
+    let b = value.as_bytes();
+    b.len() == 55
+        && &b[..3] == b"00-"
+        && b[35] == b'-'
+        && b[52] == b'-'
+        && hex(&b[3..35])
+        && b[3..35].iter().any(|c| *c != b'0')
+        && hex(&b[36..52])
+        && b[36..52].iter().any(|c| *c != b'0')
+        && hex(&b[53..55])
 }
 async fn controls(
     tx: &Transaction<'_>,
@@ -138,9 +185,36 @@ async fn controls(
     id: &str,
     hash: &[u8],
 ) -> Result<Vec<String>> {
-    let rows=tx.query("SELECT source_id FROM synthetic_oms_evidence WHERE principal_id=$1 AND portfolio_id=$2 AND order_id=$3 AND command_sha256=$4 AND instrument_id='SYNTH-USD' AND decision='ALLOW' AND effective_at<=observed_at AND observed_at<=statement_timestamp() AND expires_at>statement_timestamp() AND (kind<>'market' OR effective_at>=statement_timestamp()-interval '30 seconds') ORDER BY kind",&[&scope.principal,&scope.portfolio,&id,&hash]).await?;
+    let rows = tx
+        .query(
+            "SELECT source_id,kind,decision,
+                effective_at<=observed_at AND observed_at<=statement_timestamp() AS observed,
+                expires_at>statement_timestamp() AS valid,
+                effective_at>=statement_timestamp()-interval '30 seconds' AS fresh
+         FROM synthetic_oms_evidence
+         WHERE principal_id=$1 AND portfolio_id=$2 AND order_id=$3 AND command_sha256=$4
+           AND instrument_id='SYNTH-USD' ORDER BY kind",
+            &[&scope.principal, &scope.portfolio, &id, &hash],
+        )
+        .await?;
     if rows.len() != 5 {
-        return Err(Refusal::Controls);
+        return Err(Refusal::Controls("MISSING_CONTROL_EVIDENCE"));
+    }
+    for row in &rows {
+        match row.get::<_, &str>(2) {
+            "ALLOW" => {}
+            "DENY" => return Err(Refusal::Controls("POLICY_DENIED")),
+            _ => return Err(Refusal::Controls("POLICY_UNKNOWN")),
+        }
+        if !row.get::<_, bool>(3) {
+            return Err(Refusal::Controls("INVALID_EVIDENCE_TIME"));
+        }
+        if !row.get::<_, bool>(4) {
+            return Err(Refusal::Controls("EXPIRED_CONTROL_EVIDENCE"));
+        }
+        if row.get::<_, &str>(1) == "market" && !row.get::<_, bool>(5) {
+            return Err(Refusal::Controls("STALE_MARKET"));
+        }
     }
     Ok(rows.iter().map(|r| r.get(0)).collect())
 }
@@ -160,7 +234,7 @@ fn admitted_command(scope: &Scope<'_>, cmd: &SubmitOrder, now: &Timestamp) -> Re
     }
     if let Some(deadline) = meta.valid_until {
         if recovery::time(&deadline)? <= recovery::time(now)? {
-            return Err(Refusal::Controls);
+            return Err(Refusal::Controls("COMMAND_EXPIRED"));
         }
     }
     if !order_id(&cmd.order_id)
@@ -209,6 +283,7 @@ async fn replay(
     }
     Ok(Some(Receipt {
         code: "DUPLICATE",
+        lineage: Lineage::load(tx, id).await?,
         order: load_in(tx, id).await?,
     }))
 }
@@ -241,13 +316,14 @@ pub async fn submit(client: &mut Client, s: &Scope<'_>, key: &str, wire: &[u8]) 
         .value()
         .clone();
     st.venue_account_id = ACCOUNT.into();
-    let record = source_fact(
+    let lineage = Lineage::load(&tx, id).await?;
+    let record = lineage.fact(
         s,
         id,
         "accepted",
         "OrderAccepted",
         &now,
-        key,
+        &lineage.event_id,
         OrderAccepted {
             order_id: id.clone(),
             state: Some(st.clone()),
@@ -260,6 +336,7 @@ pub async fn submit(client: &mut Client, s: &Scope<'_>, key: &str, wire: &[u8]) 
     commit(tx).await?;
     Ok(Receipt {
         code: "ACCEPTED",
+        lineage,
         order,
     })
 }
@@ -271,6 +348,7 @@ pub async fn get(client: &mut Client, s: &Scope<'_>, id: &str) -> Result<Receipt
     if tx.query_opt("SELECT 1 FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 AND (principal_id=$3 OR (current_user='kanz_synthetic_oms_adapter' AND $3='spiffe://kanz.internal/ns/kanz-services/sa/oms'))",&[&id,&s.portfolio,&s.principal]).await?.is_none(){return Err(Refusal::NotFound)}
     Ok(Receipt {
         code: "FOUND",
+        lineage: Lineage::load(&tx, id).await?,
         order: load_in(&tx, id).await?,
     })
 }
@@ -317,6 +395,7 @@ impl Reduction {
     }
 }
 async fn fill(
+    lineage: &Lineage,
     tx: &Transaction<'_>,
     s: &Scope<'_>,
     st: &Canonical<OrderState>,
@@ -380,7 +459,7 @@ async fn fill(
     }
     let id = &order.order_id;
     let record = if complete {
-        source_fact(
+        lineage.fact(
             s,
             id,
             "filled",
@@ -395,7 +474,7 @@ async fn fill(
             .encode_to_vec(),
         )?
     } else {
-        source_fact(
+        lineage.fact(
             s,
             id,
             "partially_filled",
@@ -434,6 +513,7 @@ pub async fn observe(
     let tx = begin(client, s, &[ADAPTER]).await?;
     let row=tx.query_opt("SELECT phase,principal_id,command_sha256,command FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 FOR UPDATE",&[&id,&s.portfolio]).await?.ok_or(Refusal::NotFound)?;
     let phase: String = row.get(0);
+    let lineage = Lineage::load(&tx, id).await?;
     let order = load_in(&tx, id).await?;
     let digest = event.digest();
     let recorded=tx.query_opt("SELECT operation,digest FROM synthetic_oms_observations WHERE order_id=$1 AND event_id=$2",&[&id,&event.id]).await?;
@@ -444,6 +524,7 @@ pub async fn observe(
             return Err(Refusal::Conflict);
         }
         return Ok(Receipt {
+            lineage,
             code: if event.is_claim() {
                 "RECONCILE_REQUIRED"
             } else {
@@ -501,7 +582,7 @@ pub async fn observe(
                 .clone();
             state.venue_ack_at = Some(at);
             state.quarantine = None;
-            let record = source_fact(
+            let record = lineage.fact(
                 s,
                 id,
                 "routed",
@@ -548,7 +629,7 @@ pub async fn observe(
             }
             result
         }
-        "fill" => fill(&tx, s, &st, &phase, event, at, now).await?,
+        "fill" => fill(&lineage, &tx, s, &st, &phase, event, at, now).await?,
         "cancelled"
             if matches!(
                 phase.as_str(),
@@ -571,7 +652,7 @@ pub async fn observe(
                     .value()
                     .clone();
                 state.quarantine = None;
-                let record = source_fact(
+                let record = lineage.fact(
                     s,
                     id,
                     "cancelled",
@@ -610,6 +691,34 @@ pub async fn observe(
     commit(tx).await?;
     Ok(Receipt {
         code: result.code,
+        lineage,
         order,
     })
+}
+
+#[cfg(test)]
+mod synthetic_tests {
+    use super::traceparent;
+
+    #[test]
+    fn gateway_trace_is_bounded_version_zero_with_nonzero_identifiers() {
+        let good = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        assert!(traceparent(good));
+        assert!(traceparent(""));
+        for invalid in [
+            good.to_uppercase(),
+            good.replace("00-4", "ff-4"),
+            good.replace("-01", "-zz"),
+            good.replace("00f067aa0ba902b7", "0000000000000000"),
+            good.replace(
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00000000000000000000000000000000",
+            ),
+            format!("{good}\n"),
+            format!("{good}extra"),
+            good.replace("-", "/"),
+        ] {
+            assert!(!traceparent(&invalid));
+        }
+    }
 }

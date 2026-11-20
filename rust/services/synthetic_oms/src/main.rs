@@ -63,7 +63,7 @@ async fn execute(r: Request) -> Result<Value, &'static str> {
         principal: &r.principal,
         portfolio: &r.portfolio,
     };
-    let receipt = match r.op.as_str() {
+    let outcome = match r.op.as_str() {
         "submit" => {
             owner::submit(
                 &mut client,
@@ -102,13 +102,20 @@ async fn execute(r: Request) -> Result<Value, &'static str> {
             .await
         }
         _ => return Err("INVALID"),
-    }
-    .map_err(|e| e.code())?;
+    };
+    let receipt = match outcome {
+        Ok(receipt) => receipt,
+        Err(owner::Refusal::Controls(reason)) => {
+            return Ok(json!({"ok":false,"code":"CONTROL_DENIED","reason":reason}))
+        }
+        Err(e) => return Err(e.code()),
+    };
     Ok(
-        json!({"ok":true,"code":receipt.code,"state_b64":STANDARD.encode(receipt.order.state),"order_version":receipt.order.version}),
+        json!({"ok":true,"code":receipt.code,"state_b64":STANDARD.encode(receipt.order.state),"order_version":receipt.order.version,"source_event_id":receipt.lineage.event_id,"trace_context":receipt.lineage.trace_context}),
     )
 }
 fn main() {
+    let started = std::time::Instant::now();
     let result = (|| {
         let mut raw = Vec::new();
         std::io::stdin()
@@ -129,8 +136,10 @@ fn main() {
                     .map_err(|_| "COMMIT_UNCONFIRMED")?
             })
     })();
-    println!(
+    let reply = result.unwrap_or_else(|code| json!({"ok":false,"code":code}));
+    eprintln!(
         "{}",
-        result.unwrap_or_else(|code| json!({"ok":false,"code":code}))
+        json!({"service":"synthetic_oms","event":"command_result","code":reply["code"],"ok":reply["ok"],"elapsed_ms":started.elapsed().as_millis() as u64})
     );
+    println!("{}", reply);
 }

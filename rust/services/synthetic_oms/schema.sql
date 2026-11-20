@@ -16,6 +16,7 @@ CREATE TABLE synthetic_oms_evidence (
   kind text NOT NULL CHECK (kind IN ('entitlement','risk','compliance','mandate','market')),
   decision text NOT NULL CHECK (decision IN ('ALLOW','DENY','UNKNOWN')),
   source_id text NOT NULL CHECK (length(source_id) BETWEEN 1 AND 256),
+  trace_context text NOT NULL DEFAULT '' CHECK (octet_length(trace_context)<=55 AND (kind='entitlement' OR trace_context='')),
   effective_at timestamptz NOT NULL,
   observed_at timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
