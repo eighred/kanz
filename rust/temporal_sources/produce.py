@@ -12,6 +12,7 @@ ROOT = Path("/src/rust")
 OUT = Path("/kanz-source-evidence")
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 FORK = "sad-chrono"
+MAX_COMPILER_LOG = 16 * 1024 * 1024
 
 
 def main():
@@ -56,7 +57,12 @@ def main():
     archives, binaries, finished = {}, [], []
     root_id = "path+file:///src/rust/services/lake_snapshot#kanz-lake-snapshot@0.1.0"
     binary = ROOT / "target-provenance/release/kanz-lake-snapshot"
-    for line in log.read_bytes().splitlines():
+    with log.open("rb") as stream:
+        raw = stream.read(MAX_COMPILER_LOG + 1)
+    if len(raw) > MAX_COMPILER_LOG:
+        raise ValueError("release compiler log exceeds the evidence bound")
+    expected_fresh = not args.seal_libraries
+    for line in raw.splitlines():
         message = json.loads(line)
         if message["reason"] == "build-finished":
             finished.append(message["success"])
@@ -65,7 +71,7 @@ def main():
         identity, kind = message["package_id"], message["target"]["kind"]
         if identity in expected and kind == ["lib"]:
             row = expected[identity]
-            if (identity in archives or message["fresh"] is args.seal_libraries
+            if (identity in archives or message["fresh"] is not expected_fresh
                     or message["profile"]["test"] or message["profile"]["opt_level"] != "3"):
                 raise ValueError(f"unexpected fresh/reused release compilation: {identity}")
             if "manifestPath" in row and message["manifest_path"] != "/src/" + row["manifestPath"]:

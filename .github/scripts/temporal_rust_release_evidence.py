@@ -36,6 +36,7 @@ def compiler_artifacts(raw, expected, *, library_build):
     coordinates = {i.rsplit("#", 1)[1] for i in expected}
     finished = False
     worker = []
+    expected_fresh = not library_build
     for line in raw.splitlines():
         if not line.startswith(b"{") or finished:
             raise ValueError("unexpected output from release Cargo build")
@@ -53,7 +54,7 @@ def compiler_artifacts(raw, expected, *, library_build):
                 or coordinate.startswith("path+file:///src/rust/temporal_sources/generated/")) and coordinate not in expected:
             raise ValueError("unreviewed compiler package source")
         if coordinate in expected and kinds == ["lib"]:
-            if (coordinate in artifacts or event["fresh"] is not (not library_build)
+            if (coordinate in artifacts or event["fresh"] is not expected_fresh
                     or event["profile"]["test"] is not False or event["profile"]["opt_level"] != "3"):
                 raise ValueError("ambiguous, cached or test-only selected compilation")
             artifacts[coordinate] = event
