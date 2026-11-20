@@ -9,6 +9,13 @@ BEGIN
     END IF;
 END $$;
 
+-- Older accounting replicas still accept operator actions. Every supported
+-- claim or explanation inserts its receipt in the same transaction as the
+-- break revision and FACT. Enforce the pilot's read-only boundary on all
+-- runtime roles while allowing reconciliation and other tenants to continue.
+CREATE POLICY signed_pilot_read_only_actions ON custody_actions AS RESTRICTIVE
+    FOR INSERT TO PUBLIC WITH CHECK (tenant_id <> 'synthetic-custody-pilot');
+
 CREATE ROLE kanz_custody_batch_pilot NOLOGIN NOSUPERUSER NOBYPASSRLS;
 GRANT USAGE ON SCHEMA public TO kanz_custody_batch_pilot;
 GRANT SELECT, INSERT ON custody_batch_receipts TO kanz_custody_batch_pilot;
