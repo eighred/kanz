@@ -84,6 +84,16 @@ The runner builds the executables once and starts a second fresh PostgreSQL inst
 
 A third disposable database uses the separately signed fixture pair in `testdata/instrument_units/`. Its public authority applies only to that database. Upgrade the signed importer and accounting readers before issuing statements with the additive `quantityInInstrumentUnits` field. Older strict Protobuf JSON parsers reject that field. Legacy signed files and saved completions keep their original interpretation. The source explicitly identifies each trade quantity as the instrument's natural units. In the first retained comparison the book shows 10.5 SYN and the statement shows 9.5 SYN for `external-7`. The correction shows 10.5 on both sides. The browser downloads both historical receipts. The runner binds them to the database run IDs and statement digests and includes them under `customer_downloads` in the optional receipt file.
 
+### Restore the signed pilot to an earlier point
+
+From the repository root, use the same local prerequisites as the operator workflow.
+
+```sh
+python3 -B kanz/dev/custody_pilot.py --pitr --receipt custody-recovery.json
+```
+
+The drill takes and verifies a physical PostgreSQL base backup before the synthetic book is populated. It archives a named WAL restore point after the first two signed closes, then records a signed correction and archives its later WAL segment. It removes the disposable primary and restores into an independent PostgreSQL container, paused read-only at the named target. The customer opens the original receipt through the signed Gateway, BFF and Chromium. The runner compares its downloaded bytes with the source and checks that the later signed correction is absent at the target. It reports the backup bounds, archived segments, replay LSN and local duration. This drill is for the synthetic Accounting estate. Approved estate recovery is tracked under #106 and #1100.
+
 ### Review an execution quantity discrepancy
 
 Apply accounting migration 0031 before starting the new reader or writer. Grant the accounting writer SELECT and INSERT on `custody_execution_quantity_observations` and USAGE on its identity sequence. A separate accounting reader needs SELECT. Keep the statement source login limited to its existing intake grants.
