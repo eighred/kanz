@@ -85,6 +85,30 @@ def prepare_datafusion(row, pins):
                 return Err(err("failed to parse timezone"));
             }
             let tz = timezone_name.parse::<Tz>().map_err(|_| err("failed to parse timezone"))?;""")
+    if name in {"datafusion-datasource", "datafusion-common"}:
+        dependency = {"version": "=1.0.1", "default-features": False}
+        expected["dependencies"]["jiff"] = dependency
+        with manifest.open("a") as out:
+            out.write('\n[dependencies.jiff]\nversion = "=1.0.1"\ndefault-features = false\n')
+    if name == "datafusion":
+        replace(folder / "src/test/object_store.rs", "metadata.modified().map(chrono::DateTime::from).unwrap()",
+                'metadata.modified().unwrap().try_into().expect("fixture mtime fits Jiff")')
+    if name == "datafusion-datasource":
+        module = folder / "src/mod.rs"
+        replace(module, "use chrono::TimeZone;\n", "")
+        for constructor in ("Path::from(path.into())", "Path::from(path)"):
+            replace(module, f"location: {constructor},\n                last_modified: chrono::Utc.timestamp_nanos(0)",
+                    f"location: {constructor},\n                last_modified: jiff::Timestamp::UNIX_EPOCH")
+        replace(module, "last_modified: chrono::Utc::now()", "last_modified: jiff::Timestamp::now()")
+    if name == "datafusion-common":
+        heap = folder / "src/heap_size.rs"
+        replace(heap, "impl DFHeapSize for DateTime<Utc> {", """impl DFHeapSize for jiff::Timestamp {
+    fn heap_size(&self, _: &mut DFHeapSizeCtx) -> usize {
+        0 // The timestamp stores the signed instant inline.
+    }
+}
+
+impl DFHeapSize for DateTime<Utc> {""")
     if tomllib.loads(manifest.read_text()) != expected:
         raise ValueError(f"unrelated TOML change in {name}")
     return folder

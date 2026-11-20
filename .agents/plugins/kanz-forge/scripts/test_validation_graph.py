@@ -47,6 +47,21 @@ class GraphTests(unittest.TestCase):
         data["nodes"][3]["holds"] = [dict(reason="missing approval", evidence="issue decision")]
         self.assertIsNone(assess_graph(data)["next_actionable"])
 
+    def test_customer_workflow_orders_equivalent_tasks_and_preserves_holds(self):
+        data = dict(nodes=[task("other", priority=1), task("pilot", priority=1)], edges=[])
+        data["customer_workflow"] = dict(actor="custody operator", outcome="review the first break",
+                                        acceptance="UAT issue", steps={"pilot": "statement intake is missing"})
+        self.assertEqual(assess_graph(data)["next_actionable"], "pilot")
+        data["nodes"][0]["priority"] = 0
+        self.assertEqual(assess_graph(data)["next_actionable"], "other")
+        data["nodes"][0]["priority"] = 1
+        data["nodes"][1]["holds"] = [dict(reason="missing statement permission", evidence="intake issue")]
+        self.assertEqual(assess_graph(data)["next_actionable"], "other")
+        for invalid in ({"absent": "ticket"}, {"pilot": " "}, {}):
+            data["customer_workflow"]["steps"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                assess_graph(data)
+
     def test_continuation_requires_supported_kind_and_evidence_on_a_task(self):
         for value in (None, True, "pr", {}, dict(kind="issue", evidence="reviewed"),
                       dict(kind="pr"), dict(kind="branch", evidence=" ")):
