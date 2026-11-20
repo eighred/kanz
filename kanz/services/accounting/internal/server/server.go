@@ -23,6 +23,7 @@ import (
 
 	"github.com/eighred/kanz/internal/requestbody"
 	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/bus"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
 	"github.com/eighred/kanz/services/accounting/internal/collateralops"
@@ -382,7 +383,8 @@ type reconcileRequest struct {
 // frequent read and still counts; this route is operator-triggered and rare. If
 // that changes, the fix is a reason on the loader, not a second materialize here.
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.portfolioReader(w, r, r.PathValue("id")); !ok {
+	principal, ok := s.portfolioReader(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -434,7 +436,12 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// it is not a statement date and nothing here persists a statement or run.
 	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
 	now := time.Now().UTC()
-	book, executions, _, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger, custody.EffectiveCutoff{AsOf: now})(r.Context(), subject)
+	ctx := bus.WithTenantID(r.Context(), principal.Tenant)
+	book, executions, _, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger, custody.EffectiveCutoff{AsOf: now})(ctx, subject)
+	if errors.Is(err, custody.ErrUnprovenAssignment) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "custody account assignment could not be verified"})
+		return
+	}
 	if err != nil {
 		// The loader refuses rather than returning a partial book — an exchange
 		// account no custodian claims, most often. Surface the reason: it names

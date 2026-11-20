@@ -48,6 +48,7 @@ const accountPlaceholderPrefix = "<accounts-held-at-"
 // custodian holds what — and never about whether the comparison is scoped. Every
 // comparison is.
 type BookScope struct {
+	admission *assignmentAdmission
 	// custodians is portfolio -> the custodians configured for it, sorted.
 	custodians map[string][]string
 	// accounts is portfolio -> custodian -> the exchange accounts it holds.
@@ -83,9 +84,7 @@ func (s *BookScope) runBasis(subject Subject, mode string, fold ledger.CustodyBa
 	}
 	accounts := map[string][]string{subject.CustodianID: ids}
 	if mode == BasisDeclared {
-		for custodian, scope := range s.accounts[subject.PortfolioID] {
-			accounts[custodian] = slices.Sorted(maps.Keys(scope))
-		}
+		accounts = s.declaredAccounts(subject.PortfolioID)
 	}
 	return &RunBasis{Mode: mode, Accounts: accounts, JournalPosition: fold.JournalPosition,
 		Transactions: &TransactionComparison{BookReferences: new(fold.DayReferenced), UnreferencedBookTrades: new(fold.DayUnreferenced)}}
