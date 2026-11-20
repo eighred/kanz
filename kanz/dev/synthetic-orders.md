@@ -94,6 +94,8 @@ The historical process commits an unattributed 126 USD trade at cash revision 2.
 
 The terminal fact carries the signed cancellation as its cause and the independently observed confirmation time. A separate cash revision acknowledges the amount attributable to this order. The USD announcement excludes BNB, so new admission that requires complete portfolio coverage still refuses with unknown funding. Go retains production write authority. [Funded OMS](https://github.com/eighred/kanz/issues/1532) · [Cash reservations](https://github.com/eighred/kanz/issues/1316) · [Writer replay](https://github.com/eighred/kanz/issues/1533) · [Accounting](https://github.com/eighred/kanz/issues/1535)
 
+To exercise a retained settlement database, add `--upgrade-settlement` to the native command. The checkout must contain the original settlement Git blob from 2fc259e8. The fixture uses it to install the earlier schema, then interrupts a funded dispatch before the venue send. It applies the current installer to that retained database, checks the original order, holds, outbox, privileges and function OID, and exercises the first fill observed during cancellation. An operator can apply the same transactional installer to an established disposable database with `psql -X -v ON_ERROR_STOP=1 -f rust/services/synthetic_oms/settlement.sql`. The normal `--native` invocation covers fresh installation.
+
 ## Read the same order in Chromium
 
 Install the locked dependencies from `web/` with `npm ci`. Put the Node major from `web/.nvmrc` and the repository's Rust/WASM build toolchain on PATH. With the generated Go SDK and the Linux native executable from the build instructions above, run from the repository root:

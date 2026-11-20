@@ -248,8 +248,11 @@ def provision_native(container, fixture_env):
     return migrations[diagnostic:]
 
 
-def run_fixture_tests(cmd, names, selected_env, password):
-    proc = subprocess.run(cmd + ["-test.run", "^(" + "|".join(names) + ")$"],
+def run_fixture_tests(cmd, names, selected_env, password, cases=()):
+    selector = "^(" + "|".join(names) + ")$"
+    if cases:
+        selector += "/^(" + "|".join(cases) + ")$"
+    proc = subprocess.run(cmd + ["-test.run", selector],
                           env=dict(os.environ, **selected_env),
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=150)
     log = proc.stdout.replace(password, "[redacted]")
@@ -341,7 +344,59 @@ def funded_browser(stage, container, read_url, venue_log):
           "authorized read, stale/refresh and foreign tenant refusal passed", flush=True)
 
 
-def run(stage, native, prior_accounting=None, browser=False):
+def previous_settlement_sql():
+    # Execute only the original committed installation, including all its grants.
+    previous = subprocess.check_output(["git", "cat-file", "blob", "a926c062a54385e3cf4a34b9fecba22df4ef80eb"],
+                                       cwd=ROOT, env=dict(os.environ, GIT_NO_LAZY_FETCH="1"))
+    if hashlib.sha256(previous).hexdigest() != "407c3ca5997def815c84da5918262cbeb57fef6be88e2efce5e4cc465291717e":
+        raise RuntimeError("unexpected prior settlement migration")
+    return previous.decode("utf-8")
+
+
+def upgrade_retained_settlement(container, current):
+    # The first early-dispatch crash left an unresolved order and actual held
+    # cash in this database. Compare all retained rows, including evidence and
+    # unpublished facts, as well as the SQL function identity and permissions.
+    signature = "public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)"
+    controls = (
+        (f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC", "incomplete synthetic settlement authority"),
+        ("GRANT INSERT ON public.synthetic_oms_settlement_authorizations TO kanz_synthetic_oms_adapter",
+         "incomplete synthetic settlement authority"),
+        ("ALTER TABLE public.orders DISABLE TRIGGER hold_synthetic_funded_lifecycle",
+         "incomplete synthetic settlement mutation guards"),
+        (f"DO $$ BEGIN EXECUTE replace(pg_get_functiondef('{signature}'::regprocedure),"
+         "'RETURN ''APPLIED'';', 'RETURN ''UNKNOWN'';'); END $$", "unknown installed synthetic settlement function"),
+    )
+    for mutation, expected in controls:
+        # The failed installer transaction rolls back the injected drift too.
+        result = subprocess.run(["docker", "exec", "-i", "--user", "postgres", container, "psql",
+                                 "-Xq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", DB],
+                                input="BEGIN; " + mutation + ";\n" + current, text=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if result.returncode != 3 or expected not in result.stderr:
+            raise RuntimeError(f"retained settlement failed to refuse {expected}")
+    tables = ("orders", "outbox", "order_fills", "order_executions", "synthetic_oms_commands",
+              "synthetic_oms_observations", "synthetic_oms_settlement_authorizations",
+              "synthetic_oms_funding_authorizations", "synthetic_oms_cancellation_authorizations",
+              "capital_balances", "capital_commitments", "capital_members")
+    state = " UNION ALL ".join(
+        f"SELECT '{table}' AS name, coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)), '[]'::jsonb) AS rows "
+        f"FROM public.{table} r" for table in tables)
+    state += """ UNION ALL SELECT 'function', jsonb_build_array(oid,proowner,proacl,prosecdef,proconfig)
+        FROM pg_proc WHERE oid='public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)'::regprocedure"""
+    sql(container, f"CREATE TEMP VIEW observed AS {state}; CREATE TEMP TABLE original AS TABLE observed;\n" +
+        current + """
+        DO $$ BEGIN
+          IF EXISTS(SELECT * FROM original EXCEPT SELECT * FROM observed) OR
+             EXISTS(SELECT * FROM observed EXCEPT SELECT * FROM original) THEN
+            RAISE EXCEPTION 'settlement upgrade changed retained evidence or authority';
+          END IF;
+        END $$;""", DB)
+    print("Prior settlement upgraded with all retained rows, function OID, owner and privileges preserved", flush=True)
+
+
+def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=False):
+    prior_sql = previous_settlement_sql() if upgrade_settlement else None
     packages = {path: list(names) for path, names in OWNERS.items()}
     if native:
         packages["services/api_gateway/cmd/api_gateway"].append("TestSyntheticOrderCommandLifecycle")
@@ -465,8 +520,8 @@ def run(stage, native, prior_accounting=None, browser=False):
                 terminal_cases = ("ok", "race", "rollback", "scope")
                 require_cases(terminal_log, terminal, terminal_cases)
                 print(f"{package}: funded cancellation passed ({', '.join(terminal_cases)}) without skips", flush=True)
-                settlement = ROOT / "rust/services/synthetic_oms/settlement.sql"
-                sql(container, settlement.read_text(encoding="utf-8"), DB)
+                settlement = (ROOT / "rust/services/synthetic_oms/settlement.sql").read_text(encoding="utf-8")
+                sql(container, prior_sql or settlement, DB)
                 for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair",
                                "synthetic-funded-before-send", "synthetic-funded-cancel-fill"):
                     sql(container, f"""
@@ -481,9 +536,18 @@ def run(stage, native, prior_accounting=None, browser=False):
                     """, DB)
                 grant_cash_projection(container, DB)
                 venue = "TestSyntheticFundedVenueLifecycle"
-                venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
-                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair",
-                                                "claim_before_venue_send", "first_fill_during_cancel"))
+                cases = ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair",
+                         "claim_before_venue_send", "first_fill_during_cancel")
+                if upgrade_settlement:
+                    legacy_case = "claim_before_venue_send"
+                    venue_log = run_fixture_tests(cmd, [venue], selected_env, password, [legacy_case])
+                    require_cases(venue_log, venue, [legacy_case])
+                    upgrade_retained_settlement(container, settlement)
+                    venue_log += run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password,
+                                                   [case for case in cases if case != legacy_case])
+                else:
+                    venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
+                require_cases(venue_log, venue, cases)
                 if browser:
                     funded_browser(stage, container, fixture_env["SYNTHETIC_OMS_READ_URL"], venue_log)
                 for line in venue_log.splitlines():
@@ -528,10 +592,14 @@ if __name__ == "__main__":
     mode.add_argument("--owners-only", action="store_true", help="run existing component checks without native integration")
     parser.add_argument("--prior-accounting", type=Path, help="also use a Linux accounting test binary built from 7077c75b for the historical tenant")
     parser.add_argument("--browser", action="store_true", help="read the actual funded terminal order through signed gateway, BFF and isolated Chromium")
+    parser.add_argument("--upgrade-settlement", action="store_true",
+                        help="start with the committed prior settlement SQL and upgrade an existing funded estate")
     args = parser.parse_args()
+    if args.upgrade_settlement and not args.native:
+        parser.error("--upgrade-settlement requires --native")
     if args.browser and not args.native:
         parser.error("--browser requires --native")
     if args.prior_accounting and not args.native:
         parser.error("--prior-accounting requires --native")
     with tempfile.TemporaryDirectory(prefix="kanz-synthetic-orders-") as directory:
-        run(Path(directory), args.native, args.prior_accounting, args.browser)
+        run(Path(directory), args.native, args.prior_accounting, args.browser, args.upgrade_settlement)

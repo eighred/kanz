@@ -145,6 +145,11 @@ func checkSyntheticOMS(root string) error {
 	}
 	settlement := rustMigrationCompact(files["settlement.sql"])
 	for _, marker := range []string{
+		"CREATEORREPLACEFUNCTIONpublic.synthetic_oms_apply_settlement(",
+		"f.proowner<>guardORNOTf.prosecdefORf.proconfigISDISTINCTFROM",
+		"a.granteeNOTIN(guard,adapter)",
+		"tgfoid=to_regprocedure(",
+		"unknowninstalledsyntheticsettlementfunction",
 		"CREATEROLEkanz_synthetic_settlement_guardNOLOGINNOINHERITNOSUPERUSERNOBYPASSRLS",
 		"ALTERTABLEpublic.synthetic_oms_settlement_authorizationsFORCEROWLEVELSECURITY",
 		"GRANTINSERTONpublic.synthetic_oms_settlement_authorizationsTOkanz_synthetic_oms_control",
@@ -181,6 +186,9 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 		{"cancellation.sql", "outcome := public.capital_release_unexecuted(", "outcome := public.other_release("},
 		{"cancellation.sql", "AND fact_row_id IS NULL", "AND TRUE"},
 		{"cancellation.sql", "DEFERRABLE INITIALLY DEFERRED", "NOT DEFERRABLE"},
+		{"settlement.sql", "f.proowner<>guard", "FALSE"},
+		{"settlement.sql", "a.grantee NOT IN (guard,adapter)", "FALSE"},
+		{"settlement.sql", "tgfoid=to_regprocedure(", "tgfoid<>to_regprocedure("},
 		{"settlement.sql", "b.coverage_complete AND NOT b.conflicted", "TRUE"},
 		{"settlement.sql", "NEW.envelope_tenant_id IS DISTINCT FROM NEW.tenant_id", "FALSE"},
 		{"settlement.sql", "NOLOGIN NOINHERIT", "LOGIN NOINHERIT"},

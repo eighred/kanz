@@ -1,9 +1,14 @@
--- Install only in the disposable OMS database after funding, cancellation and 0029.
+-- Install or upgrade only in the disposable OMS database after funding, cancellation and 0029.
+\set ON_ERROR_STOP on
 BEGIN;
 SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $$ BEGIN
     IF current_database()<>'kanz_synthetic_oms' THEN RAISE EXCEPTION 'synthetic settlement requires its disposable database'; END IF;
 END $$;
+-- Fresh installs create the complete schema atomically. An existing installation
+-- may replace the economic function only, retaining its OID, owner and ACL.
+SELECT to_regclass('public.synthetic_oms_settlement_authorizations') IS NULL AS settlement_fresh \gset
+\if :settlement_fresh
 -- The independent verifier binds each step to the original funded command,
 -- the signed or typed delivery, and the exact canonical aggregate and FACT.
 CREATE TABLE public.synthetic_oms_settlement_authorizations (
@@ -128,7 +133,53 @@ ALTER FUNCTION public.synthetic_oms_settlement_scope(text,text) OWNER TO kanz_sy
 REVOKE ALL ON FUNCTION public.synthetic_oms_settlement_scope(text,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.synthetic_oms_settlement_scope(text,text) TO kanz_synthetic_oms_adapter;
 
-CREATE FUNCTION public.synthetic_oms_apply_settlement(p_order text,p_portfolio text,p_event text,p_op text,
+\else
+DO $upgrade$
+DECLARE f pg_proc%ROWTYPE; guard regrole := 'kanz_synthetic_settlement_guard'; adapter regrole := 'kanz_synthetic_oms_adapter';
+BEGIN
+    SELECT * INTO STRICT f FROM pg_proc WHERE oid=
+      'public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)'::regprocedure;
+    IF f.proowner<>guard OR NOT f.prosecdef OR f.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public, pg_temp']
+       OR NOT has_function_privilege(adapter,f.oid,'EXECUTE') OR EXISTS (
+          SELECT FROM aclexplode(coalesce(f.proacl,acldefault('f',f.proowner))) a
+          WHERE a.grantee NOT IN (guard,adapter) OR (a.grantee=adapter AND a.is_grantable))
+       OR NOT EXISTS (SELECT FROM pg_roles WHERE oid=guard AND NOT
+          (rolcanlogin OR rolinherit OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))
+       OR NOT EXISTS (SELECT FROM pg_class WHERE oid='public.synthetic_oms_settlement_authorizations'::regclass AND relrowsecurity AND relforcerowsecurity)
+       OR EXISTS (SELECT FROM pg_auth_members WHERE roleid=guard OR member=guard)
+       OR EXISTS (SELECT FROM pg_class c, LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+                  WHERE c.oid='public.synthetic_oms_settlement_authorizations'::regclass AND a.grantee<>c.relowner
+                    AND (a.is_grantable OR NOT (
+                      (a.grantee='kanz_synthetic_oms_control'::regrole AND a.privilege_type='INSERT') OR
+                      (a.grantee=guard AND a.privilege_type='SELECT'))))
+       OR EXISTS (SELECT FROM pg_attribute WHERE attrelid='public.synthetic_oms_settlement_authorizations'::regclass
+                    AND attacl IS NOT NULL)
+       OR NOT has_table_privilege(guard,'public.synthetic_oms_settlement_authorizations','SELECT')
+       OR NOT has_table_privilege('kanz_synthetic_oms_control','public.synthetic_oms_settlement_authorizations','INSERT')
+       OR NOT has_function_privilege(guard,'public.capital_settle_direct(text,text,text[],text[],text[],boolean)','EXECUTE')
+       OR NOT has_function_privilege(adapter,'public.synthetic_oms_settlement_scope(text,text)','EXECUTE') THEN
+        RAISE EXCEPTION 'incomplete synthetic settlement authority';
+    END IF;
+    IF EXISTS (SELECT FROM (VALUES
+          ('synthetic_oms_commands','hold_synthetic_funded_lifecycle','synthetic_oms_hold_funded_lifecycle'),
+          ('synthetic_oms_observations','hold_synthetic_funded_lifecycle','synthetic_oms_hold_funded_lifecycle'),
+          ('orders','hold_synthetic_funded_lifecycle','synthetic_oms_hold_funded_lifecycle'),
+          ('order_fills','hold_synthetic_funded_lifecycle','synthetic_oms_hold_funded_lifecycle'),
+          ('order_executions','hold_synthetic_funded_lifecycle','synthetic_oms_hold_funded_lifecycle'),
+          ('outbox','hold_synthetic_funded_lifecycle','synthetic_oms_hold_funded_lifecycle'),
+          ('outbox','require_withdrawal_fact_slot','synthetic_oms_claim_withdrawal_fact'),
+          ('outbox','enforce_execution_fact_owner','synthetic_oms_require_execution_fact_owner')
+        ) AS required(tab,trig,callee) WHERE NOT EXISTS (
+          SELECT FROM pg_trigger WHERE tgrelid=to_regclass('public.'||tab) AND tgname=trig AND tgenabled='O'
+            AND tgfoid=to_regprocedure('public.'||callee||'()'))) THEN
+        RAISE EXCEPTION 'incomplete synthetic settlement mutation guards';
+    END IF;
+END $upgrade$;
+SELECT encode(sha256(convert_to(replace(prosrc,E'\r\n',E'\n'),'UTF8')),'hex') AS previous_settlement_body
+    FROM pg_proc WHERE oid='public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)'::regprocedure \gset
+\endif
+
+CREATE OR REPLACE FUNCTION public.synthetic_oms_apply_settlement(p_order text,p_portfolio text,p_event text,p_op text,
     p_seconds bigint,p_nanos integer,p_body bytea,p_state bytea,p_fact bytea) RETURNS text LANGUAGE plpgsql SECURITY DEFINER
     SET search_path=pg_catalog,public,pg_temp AS $$
 DECLARE
@@ -289,7 +340,19 @@ BEGIN
     END IF;
     RETURN 'APPLIED';
 END $$;
+\if :settlement_fresh
 ALTER FUNCTION public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea) OWNER TO kanz_synthetic_settlement_guard;
 REVOKE ALL ON FUNCTION public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea) TO kanz_synthetic_oms_adapter;
+\else
+-- Permit the original installed body (2fc259e8) or a rerun of these exact
+-- current function bytes. Any other prior definition aborts the replacement.
+SELECT :'previous_settlement_body' IN ('414f66c3f8de0dd4552f7c035aba40df85d5bfca66d330847226f9a50da69e26',
+    encode(sha256(convert_to(replace(prosrc,E'\r\n',E'\n'),'UTF8')),'hex')) AS known_settlement
+    FROM pg_proc WHERE oid='public.synthetic_oms_apply_settlement(text,text,text,text,bigint,integer,bytea,bytea,bytea)'::regprocedure \gset
+\if :known_settlement
+\else
+DO $$ BEGIN RAISE EXCEPTION 'unknown installed synthetic settlement function'; END $$;
+\endif
+\endif
 COMMIT;
