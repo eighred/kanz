@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
@@ -288,7 +287,8 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		i.refusal.Refuse(rep.ClientOrderID, err)
 		return nil
 	}
-	feeMoney, feeOK := reportFee(rep)
+	// Keep an explicit zero and its currency identical to signed trade history.
+	feeMoney, feeOK := fee(orderFill{Commission: rep.Commission, CommissionAsset: rep.CommissionAst})
 	if !feeOK {
 		return errors.New("binance: fill commission is not representable as a Decimal")
 	}
@@ -421,20 +421,6 @@ func reportAsOf(rep executionReport) time.Time {
 		ms = rep.TransactTime
 	}
 	return time.UnixMilli(ms).UTC()
-}
-
-// reportFee reads the commission off a fill report. nil Money means NO FEE, so
-// ok=false is a separate answer for "there is a commission and it could not be
-// read" (#94) — collapsing them would silently drop a real cost.
-func reportFee(rep executionReport) (*commonpb.Money, bool) {
-	if rep.Commission == "" || rep.Commission == "0" {
-		return nil, true
-	}
-	amt, ok := parseDec(rep.Commission)
-	if !ok {
-		return nil, false
-	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: rep.CommissionAst}, true
 }
 
 // --- concrete Binance user-data websocket transport (coder/websocket) ---
