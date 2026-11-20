@@ -52,3 +52,15 @@ jobs:
         run: python -B tools/jiff_qualification/run.py
       - name: Exercise combined duration and timezone backports in the lake worker
         run: python -B tools/jiff_qualification/object_store.py
+      - name: Test published temporal package advisory refusals
+        run: python -B -m unittest discover -s tools/jiff_qualification -p test_chrono_advisories.py
+      - name: Exercise the published temporal package across both Arrow versions
+        id: bridge
+        run: python -B tools/jiff_qualification/object_store.py --published-bridge "$RUNNER_TEMP/chrono-advisories.json"
+      - name: Retain the advisory inputs used for the published package
+        if: always() && steps.bridge.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: published-temporal-advisories
+          path: ${{ runner.temp }}/chrono-advisories.json
+          if-no-files-found: error

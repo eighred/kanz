@@ -1,4 +1,7 @@
 """Exercise the object_store duration and timestamp backports in the Kanz lake worker."""
+import argparse
+import hashlib
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -55,17 +58,30 @@ def prepare(work, inputs):
         (inputs / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     # Do not mount either repository or its Git configuration inside the compiler.
     (inputs / "verify.sh").write_bytes(Path(__file__).with_name("object_store.sh").read_bytes())
-    for path in inputs.iterdir():
-        path.chmod(0o644)
-    inputs.chmod(0o755)
 
 
-def qualify():
+def qualify(advisory_output=None):
     with tempfile.TemporaryDirectory(prefix="kanz-object-store-") as temp:
         root = Path(temp).resolve()
         inputs = root / "inputs"
         inputs.mkdir()
         prepare(root, inputs)
+        mode = "upstream"
+        if advisory_output is not None:
+            from chrono_advisories import CHECKSUM, VERSION, collect, evaluate
+
+            snapshot = collect()
+            raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+            advisory_output.write_bytes(raw)
+            evaluate(snapshot, VERSION, CHECKSUM)
+            (inputs / "chrono-advisories.json").write_bytes(raw)
+            for name in ("chrono_advisories.py", "published_bridge.py", "shared_arrow.rs"):
+                (inputs / name).write_bytes(Path(__file__).with_name(name).read_bytes())
+            print(f"Publisher and inherited advisory snapshot SHA-256 {hashlib.sha256(raw).hexdigest()}", flush=True)
+            mode = "published"
+        for path in inputs.iterdir():
+            path.chmod(0o644)
+        inputs.chmod(0o755)
         volume = "kanz-object-store-" + uuid.uuid4().hex
         mount = "type=volume,source=" + volume + ",target=/work"
         args = ["docker", "create", "--pull", "never", "--read-only", "--platform", "linux/amd64",
@@ -81,7 +97,7 @@ def qualify():
             for phase, network in (("fetch", "bridge"), ("test", "none")):
                 run_container([*args, "--network", network, "--user", "65532:65532",
                                "--mount", f"type=bind,src={inputs},dst=/inputs,readonly",
-                               IMAGE, "sh", "/inputs/verify.sh", phase], timeout=1200)
+                               IMAGE, "sh", "/inputs/verify.sh", phase, mode], timeout=1200)
         finally:
             label = subprocess.check_output(["docker", "volume", "inspect", "--format",
                                              '{{index .Labels "kanz.jiff"}}', volume], text=True).strip()
@@ -101,4 +117,7 @@ def run_container(args, *, timeout):
 
 
 if __name__ == "__main__":
-    qualify()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--published-bridge", metavar="ADVISORY_OUTPUT", type=Path,
+                        help="qualify the published fork and save the fresh public advisory inputs")
+    qualify(parser.parse_args().published_bridge)
