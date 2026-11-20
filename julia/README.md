@@ -218,8 +218,9 @@ information command and records the original `p7zip_jll` 17.8.3+0 metadata.
 The separate Julia build revision identifies the replacement package.
 [Julia 26.06 build pin](https://github.com/JuliaLang/julia/commit/3c3663cbe7b5193db8c7254536d61c68b8277a1b) · [Publisher artifact](https://github.com/JuliaBinaryWrappers/p7zip_jll.jl/releases/tag/p7zip-v17.8.6%2B0)
 
-The raw CVE-2026-58052 wrapper finding remains in the scanner report. Its
-bounded NVD response must identify the 26.03 fix and the 26.02 affected control.
+When the registry reports CVE-2026-58052 for the original wrapper, the report
+retains that finding. In every run the bounded NVD response must identify the
+26.03 fix and the 26.02 affected control.
 A separate published CNA record must classify 26.05 as affected by CVE-2026-125742
 and the installed 26.06 as outside that range. The qualifier verifies both
 upstream source hashes, the advisory identities and the observed executable.
