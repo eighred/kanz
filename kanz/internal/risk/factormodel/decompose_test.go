@@ -17,6 +17,19 @@ func oneFactorModel() *Model {
 	)
 }
 
+func TestFactorExposuresRetainSignedHedgeResidualAcrossUniverseOrders(t *testing.T) {
+	for _, ids := range [][]string{{"large", "small", "hedge"}, {"small", "large", "hedge"}, {"hedge", "large", "small"}} {
+		m := newModel([]Factor{{Name: "F1"}, {Name: "F2"}}, ids, [][]float64{{1, -1}, {1, -1}, {1, -1}}, nil, nil)
+		for _, small := range []float64{-1, 0, 1} {
+			// All operands are exact powers of two or signed units.
+			got := m.FactorExposures(map[string]float64{"large": 1 << 55, "hedge": -(1 << 55), "small": small})
+			if got[0] != small || got[1] != -small {
+				t.Errorf("universe %v, residual %g: got %v", ids, small, got)
+			}
+		}
+	}
+}
+
 // TestRisk_FactorPlusSpecificEqualsTotal: Total² = Systematic² + Specific².
 func TestRisk_FactorPlusSpecificEqualsTotal(t *testing.T) {
 	m := oneFactorModel()
@@ -72,5 +85,24 @@ func TestTrackingError(t *testing.T) {
 	bench := map[string]float64{"A": 50, "B": 50}
 	if te := m.TrackingError(port, bench); te <= 0 {
 		t.Fatalf("TE vs a different benchmark must be positive, got %.6f", te)
+	}
+}
+
+func TestDecomposeMarginalsAgainstIndependentFiniteDifference(t *testing.T) {
+	d := oneFactorModel().Decompose(map[string]float64{"A": 100, "B": -50})
+	// Direct instrument-space covariance, independently expanded from BFB^T+D.
+	// This oracle does not call Model.Risk or any production covariance helper.
+	risk := func(a, b float64) float64 { return math.Sqrt(.05*a*a + .08*a*b + .05*b*b) }
+	const h = .001
+	for _, check := range []struct {
+		id   string
+		want float64
+	}{
+		{"A", (risk(100+h, -50) - risk(100-h, -50)) / (2 * h)},
+		{"B", (risk(100, -50+h) - risk(100, -50-h)) / (2 * h)},
+	} {
+		if math.Abs(d.MarginalRisk[check.id]-check.want) > 1e-9 {
+			t.Fatalf("%s marginal %.17g vs independent finite difference %.17g", check.id, d.MarginalRisk[check.id], check.want)
+		}
 	}
 }

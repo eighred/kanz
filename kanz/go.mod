@@ -19,6 +19,7 @@ require (
 	github.com/nats-io/nats.go v1.55.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
+	github.com/prometheus/common v0.72.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/spiffe/go-spiffe/v2 v2.9.0
@@ -86,7 +87,6 @@ require (
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
-	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

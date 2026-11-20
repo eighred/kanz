@@ -48,6 +48,11 @@ service RiskQueryService {
   // MeasuresRequest.measures filter narrows the set; empty ⇒ all.
   rpc Measures(MeasuresRequest) returns (MeasuresResponse);
 
+  // DecomposeRisk serves complete factor/instrument vectors over one live book
+  // snapshot and the same fitted model as the scalar factor measures. It refuses
+  // oversized responses rather than truncating or inventing a residual.
+  rpc DecomposeRisk(DecomposeRiskRequest) returns (DecomposeRiskResponse);
+
   // EvaluateScenario applies the request's shocks to a transient copy of
   // the current state and returns the projected measures. State is never
   // mutated — a scenario is a pure function of (state, shocks).
@@ -67,6 +72,54 @@ service RiskQueryService {
   // engine can then answer about. A caller wanting the fund's book of record is
   // asking a different service a different question.
   rpc ListPortfolios(ListPortfoliosRequest) returns (ListPortfoliosResponse);
+}
+
+message DecomposeRiskRequest {
+  string portfolio_id = 1;
+  // Only unset is currently supported. A historical cutoff is INVALID_ARGUMENT;
+  // retained scalar evaluations cannot reconstruct this vector's complete inputs.
+  google.protobuf.Timestamp as_of = 2;
+}
+
+message FactorRiskContribution {
+  string key = 1;
+  // B^T v, in portfolio base-currency exposure units.
+  common.v1.Decimal exposure = 2;
+  common.v1.Decimal component = 3;
+}
+
+message InstrumentRiskContribution {
+  string instrument_id = 1;
+  // Risk units per unit of signed base-currency market value.
+  common.v1.Decimal marginal = 2;
+  common.v1.Decimal component = 3;
+}
+
+// Vectors are sorted by key, at most 1024 instruments and 64 factors, with
+// 256-byte UTF-8 keys/metadata values, at most 32 provenance parameters, and the
+// existing 32-entry coverage sample. Any exceeded
+// bound is RESOURCE_EXHAUSTED, never successful truncation. Every number is the
+// exact canonical Decimal of the computed float's shortest round-trip decimal;
+// an unrepresentable/nonfinite result is FAILED_PRECONDITION. Components have no
+// balancing plug. They reconcile within floating-point arithmetic error, not an
+// invented fixed-scale rounding tolerance. These are model risk units, not VaR.
+message DecomposeRiskResponse {
+  string portfolio_id = 1;
+  google.protobuf.Timestamp as_of = 2;
+  string currency_code = 3;
+  common.v1.Decimal total = 4;
+  common.v1.Decimal systematic = 5;
+  common.v1.Decimal specific = 6;
+  common.v1.Decimal specific_component = 7;
+  repeated FactorRiskContribution by_factor = 8;
+  repeated InstrumentRiskContribution by_instrument = 9;
+  // Always present; exclusions mean incomplete inputs, never a clean zero.
+  domain.v1.InputCoverage coverage = 10;
+  domain.v1.MeasureProvenance provenance = 11;
+  repeated QualityFlag quality_flags = 12;
+  // Same owner-tenant trust contract as MeasuresResponse; no new grant.
+  string owner_tenant = 13;
+  common.v1.LogPosition source_position = 14;
 }
 
 // Mode is the engine's operational mode (mirrors api/v1.Mode).

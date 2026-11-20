@@ -63,7 +63,7 @@ func (m *Model) Decompose(values map[string]float64) Decomposition {
 	for id, v := range values {
 		sigmaV := perInstrument[id]
 		d.MarginalRisk[id] = sigmaV / total
-		d.ComponentRisk[id] = v * sigmaV / total
+		d.ComponentRisk[id] = v * d.MarginalRisk[id]
 	}
 	return d
 }

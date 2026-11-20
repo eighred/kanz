@@ -243,8 +243,8 @@ func ToProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb
 			Value:          m.Value,
 			UncertaintyAbs: m.UncertaintyAbs,
 			SourceEventIds: sourceEventIDs,
-			Coverage:       toProtoInputCoverage(m.Coverage),
-			Provenance:     toProtoProvenance(m.Provenance),
+			Coverage:       ToProtoInputCoverage(m.Coverage),
+			Provenance:     ToProtoProvenance(m.Provenance),
 		})
 	}
 	return &domainpb.RiskMeasureSet{
@@ -254,7 +254,7 @@ func ToProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb
 	}
 }
 
-// toProtoInputCoverage carries one measure's coverage record onto the
+// ToProtoInputCoverage carries one measure's coverage record onto the
 // wire, or nil when the measure does not report one.
 //
 // THE NIL IS THE WHOLE POINT, and it is why domain.v1.InputCoverage is
@@ -269,7 +269,7 @@ func ToProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb
 // An empty portfolio therefore reports absent rather than covered:
 // nothing was assessed, and saying "covered everything" of a book with
 // no positions is the flattering reading of the same silence.
-func toProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
+func ToProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
 	if c.Contributed == 0 && c.ExcludedCount == 0 && len(c.Exclusions) == 0 {
 		return nil
 	}
@@ -287,7 +287,7 @@ func toProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
 	}
 }
 
-// toProtoProvenance carries the model behind one measure onto the wire,
+// ToProtoProvenance carries the model behind one measure onto the wire,
 // or nil when the producer declared none.
 //
 // THE NIL IS LOAD-BEARING FOR THE SAME REASON IT IS ON COVERAGE, and it
@@ -301,7 +301,7 @@ func toProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
 // THE METHOD IS THE ONLY REQUIRED FIELD. A provenance with an empty
 // method says less than no provenance at all, because it looks like a
 // declaration; it is dropped rather than published.
-func toProtoProvenance(p v1.MeasureProvenance) *domainpb.MeasureProvenance {
+func ToProtoProvenance(p v1.MeasureProvenance) *domainpb.MeasureProvenance {
 	if !p.Declared() {
 		return nil
 	}

@@ -55,6 +55,18 @@ import (
 // would report a posture no client experiences, which is the failure this
 // function exists to end rather than reproduce.
 func MeasurePosture(reg prometheus.Registerer, logger *slog.Logger, registry *compute.Registry) {
+	NewMeasureRegistryPosture(reg).State(logger, registry)
+}
+
+// MeasureRegistryPosture separates collector registration from the final runtime
+// registry. Zero live names at startup cannot be mistaken for an evaluated empty
+// registry: ready stays zero until State receives the registry used by queries.
+type MeasureRegistryPosture struct {
+	g     *prometheus.GaugeVec
+	ready prometheus.Gauge
+}
+
+func NewMeasureRegistryPosture(reg prometheus.Registerer) *MeasureRegistryPosture {
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "kanz_risk_measure_live",
 		Help: "1 when this engine's registry serves the measure, 0 when the measure is implemented " +
@@ -66,9 +78,25 @@ func MeasurePosture(reg prometheus.Registerer, logger *slog.Logger, registry *co
 			"placeholder, and VaR99 reads 1 whether it is historical simulation or 1%×gross. " +
 			"WHICH ONE IS kanz_risk_measure_method's question, and it is the one that decides " +
 			"whether the number may gate an order (#1037). Read family coverage from the family's " +
-			"OTHER members.",
+			"OTHER members. Read the registry claim only when kanz_risk_measure_registry_ready is 1; " +
+			"before runtime registry wiring the finite catalogue is initialized at zero.",
 	}, []string{"measure", "family"})
-	reg.MustRegister(g)
+	ready := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kanz_risk_measure_registry_ready",
+		Help: "1 after posture is stated from this engine's final query/recompute registry, 0 while no runtime registry has been wired. Does not assert measured risk or model validity.",
+	})
+	reg.MustRegister(g, ready)
+	for _, measure := range compute.Catalogue() {
+		g.WithLabelValues(string(measure.Name), string(measure.Family)).Set(0)
+	}
+	return &MeasureRegistryPosture{g: g, ready: ready}
+}
+
+func (p *MeasureRegistryPosture) State(logger *slog.Logger, registry *compute.Registry) {
+	if p == nil || registry == nil {
+		return
+	}
+	g := p.g
 
 	// WHICH ARE DARK IS ASKED OF compute.Dark, not recomputed here. The first
 	// draft of this function rebuilt the served-set and did the subtraction
@@ -95,6 +123,7 @@ func MeasurePosture(reg prometheus.Registerer, logger *slog.Logger, registry *co
 		g.WithLabelValues(string(m.Name), string(m.Family)).Set(1)
 		live++
 	}
+	p.ready.Set(1)
 
 	total := len(compute.Catalogue())
 	if len(darkByFamily) == 0 {
@@ -177,6 +206,10 @@ type MeasureMethodPosture struct {
 // it, which an absent series would have left invisible.
 const MethodUnobserved = "unobserved"
 
+// MethodUnconfigured means startup has not supplied the runtime registry. It
+// does not describe an announced model, a measured zero, or a healthy engine.
+const MethodUnconfigured = "unconfigured"
+
 // MethodUndeclared labels a measure whose producer named no model. Distinct from
 // unobserved: something WAS announced and it said nothing about how it was
 // computed. Every measure this platform published before #1037 is in that state,
@@ -194,7 +227,8 @@ func NewMeasureMethodPosture(reg prometheus.Registerer) *MeasureMethodPosture {
 				"method=\"net_exposure_placeholder\" means the number is an ILLUSTRATIVE CONSTANT rather " +
 				"than a calibrated risk figure, and the OMS admission gate refuses to fold it — a " +
 				"mandate naming that measure REFUSES orders. method=\"undeclared\" means the producer " +
-				"named no model, which is not a claim that the number is real. method=\"unobserved\" " +
+				"named no model, which is not a claim that the number is real. method=\"unconfigured\" " +
+				"means startup has not supplied the runtime registry and is not an announced model. method=\"unobserved\" " +
 				"means the measure is registered and nothing has been computed for it yet. " +
 				"kanz_risk_measure_live answers whether the NAME is registered; this answers what " +
 				"serves it, which is what decides whether the number may gate an order (#1037).",
@@ -203,6 +237,21 @@ func NewMeasureMethodPosture(reg prometheus.Registerer) *MeasureMethodPosture {
 	}
 	reg.MustRegister(p.g)
 	return p
+}
+
+// Unconfigured makes the pre-registry state explicit for the finite catalogue.
+// Call once at startup, before Seed and before any publisher can announce facts.
+func (p *MeasureMethodPosture) Unconfigured() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, measure := range compute.Catalogue() {
+		name := string(measure.Name)
+		p.g.WithLabelValues(name, MethodUnconfigured).Set(1)
+		p.last[name] = MethodUnconfigured
+	}
 }
 
 // Seed gives every measure the registry serves a series before the first
@@ -215,6 +264,12 @@ func (p *MeasureMethodPosture) Seed(registry *compute.Registry) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	for name, previous := range p.last {
+		if previous == MethodUnconfigured {
+			p.g.WithLabelValues(name, previous).Set(0)
+			delete(p.last, name)
+		}
+	}
 	for _, name := range registry.Names() {
 		p.g.WithLabelValues(string(name), MethodUnobserved).Set(1)
 		p.last[string(name)] = MethodUnobserved

@@ -1,0 +1,127 @@
+# Expression controls for absent, explicitly unconfigured and configured-idle
+# startup. These fixtures declare no production alert policy.
+rule_files: []
+evaluation_interval: 1m
+tests:
+  - name: omitted startup series is missing rather than healthy idle
+    interval: 1m
+    input_series: []
+    promql_expr_test:
+      - expr: absent(kanz_bus_configured{client="risk-engine"})
+        eval_time: 0m
+        exp_samples:
+          - labels: '{client="risk-engine"}'
+            value: 1
+      - expr: kanz_bus_connection_events_total{client="risk-engine"} == 0
+        eval_time: 0m
+        exp_samples: []
+      - expr: absent(kanz_risk_measure_registry_ready)
+        eval_time: 0m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+      - expr: absent(kanz_risk_measure_method{measure="VaR99"})
+        eval_time: 0m
+        exp_samples:
+          - labels: '{measure="VaR99"}'
+            value: 1
+  - name: unconfigured startup is explicit without measured backlog
+    interval: 1m
+    input_series:
+      - series: 'kanz_bus_configured{client="risk-engine"}'
+        values: '0'
+      - series: 'kanz_bus_connected{client="risk-engine"}'
+        values: '0'
+      - series: 'kanz_risk_measure_registry_ready'
+        values: '0'
+      - series: 'kanz_risk_measure_method{measure="VaR99",method="unconfigured"}'
+        values: '1'
+    promql_expr_test:
+      - expr: kanz_bus_configured{client="risk-engine"} == 0
+        eval_time: 0m
+        exp_samples:
+          - labels: 'kanz_bus_configured{client="risk-engine"}'
+            value: 0
+      - expr: kanz_risk_measure_method{measure="VaR99",method="unconfigured"} == 1
+        eval_time: 0m
+        exp_samples:
+          - labels: 'kanz_risk_measure_method{measure="VaR99",method="unconfigured"}'
+            value: 1
+      - expr: absent(kanz_bus_pending_messages)
+        eval_time: 0m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+      - expr: kanz_bus_configured{client="risk-engine"} == 1 and on(client) kanz_bus_connected{client="risk-engine"} == 0
+        eval_time: 0m
+        exp_samples: []
+  - name: configured before connection differs from unconfigured
+    interval: 1m
+    input_series:
+      - series: 'kanz_bus_configured{client="risk-engine"}'
+        values: '1'
+      - series: 'kanz_bus_connected{client="risk-engine"}'
+        values: '0'
+      - series: 'kanz_risk_measure_registry_ready'
+        values: '0'
+      - series: 'kanz_risk_measure_method{measure="VaR99",method="unconfigured"}'
+        values: '1'
+    promql_expr_test:
+      - expr: kanz_bus_configured{client="risk-engine"} == 1 and on(client) kanz_bus_connected{client="risk-engine"} == 0
+        eval_time: 0m
+        exp_samples:
+          - labels: 'kanz_bus_configured{client="risk-engine"}'
+            value: 1
+      - expr: kanz_risk_measure_registry_ready == 0
+        eval_time: 0m
+        exp_samples:
+          - labels: 'kanz_risk_measure_registry_ready'
+            value: 0
+  - name: configured idle counters are present zero and not missing
+    interval: 1m
+    input_series:
+      - series: 'kanz_bus_configured{client="risk-engine"}'
+        values: '1'
+      - series: 'kanz_bus_connected{client="risk-engine"}'
+        values: '1'
+      - series: 'kanz_bus_connection_events_total{client="risk-engine",event="disconnected"}'
+        values: '0'
+      - series: 'kanz_bus_connection_events_total{client="risk-engine",event="reconnected"}'
+        values: '0'
+      - series: 'kanz_bus_connection_events_total{client="risk-engine",event="closed"}'
+        values: '0'
+      - series: 'kanz_risk_recompute_total{status="ok"}'
+        values: '0'
+      - series: 'kanz_risk_recompute_total{status="error"}'
+        values: '0'
+      - series: 'kanz_risk_measure_registry_ready'
+        values: '1'
+      - series: 'kanz_risk_measure_method{measure="VaR99",method="unobserved"}'
+        values: '1'
+    promql_expr_test:
+      - expr: count(kanz_bus_connection_events_total{client="risk-engine"} == 0)
+        eval_time: 0m
+        exp_samples:
+          - labels: '{}'
+            value: 3
+      - expr: count(kanz_risk_recompute_total == 0)
+        eval_time: 0m
+        exp_samples:
+          - labels: '{}'
+            value: 2
+      - expr: absent(kanz_bus_configured{client="risk-engine"})
+        eval_time: 0m
+        exp_samples: []
+      - expr: kanz_risk_measure_registry_ready == 1
+        eval_time: 0m
+        exp_samples:
+          - labels: 'kanz_risk_measure_registry_ready'
+            value: 1
+      - expr: kanz_risk_measure_method{measure="VaR99",method="unobserved"} == 1
+        eval_time: 0m
+        exp_samples:
+          - labels: 'kanz_risk_measure_method{measure="VaR99",method="unobserved"}'
+            value: 1
+      - expr: kanz_bus_configured{client="risk-engine"} == 1 and on(client) kanz_bus_connected{client="risk-engine"} == 0
+        eval_time: 0m
+        exp_samples: []
