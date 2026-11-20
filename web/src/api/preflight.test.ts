@@ -24,6 +24,8 @@ it.each([
   ['invalid deployed identity', { deployed_commit: 'next-version' }],
   ['missing command identity', { command_id: '' }],
   ['impossible observation date', { observed_at: '2026-02-30T12:00:00Z' }],
+  ['the Go zero observation instant', { observed_at: '0001-01-01T00:00:00Z' }],
+  ['the zero instant at an offset', { observed_at: '0001-01-01T01:30:00.000000000+01:30' }],
   ['missing workload', { workload_images: { oms: 'fixture' } }],
   ['empty required workload', { workload_images: { ...served.workload_images, venue_okx: '' } }],
   ['inconsistent FAIL', { status: 'FAIL' }],
@@ -33,6 +35,12 @@ it.each([
 ])('refuses a verified verdict with %s', async (_, changes) => {
   vi.spyOn(api, 'get').mockResolvedValue({ ...served, ...changes })
   expect(await preflight.status()).toMatchObject({ status: 'UNKNOWN', checks: [] })
+})
+
+it('preserves a nonzero nanosecond at the Go epoch', async () => {
+  const response = { ...served, observed_at: '0001-01-01T00:00:00.000000001Z' }
+  vi.spyOn(api, 'get').mockResolvedValue(response)
+  expect(await preflight.status()).toEqual(response)
 })
 
 it('retains the last whole evidence behind the stale server verdict at the rounded age boundary', async () => {

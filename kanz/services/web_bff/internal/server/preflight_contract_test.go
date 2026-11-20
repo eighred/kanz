@@ -12,6 +12,25 @@ import (
 
 var updatePreflightContract = flag.Bool("update-preflight-contract", false, "write the browser preflight contract and response fixture")
 
+func TestPreflightObservationUsesGoZeroInstant(t *testing.T) {
+	for _, tc := range []struct {
+		wire  string
+		valid bool
+	}{
+		{"0001-01-01T00:00:00Z", false},
+		{"0001-01-01T01:30:00.000000000+01:30", false},
+		{"0001-01-01T00:00:00.000000001Z", true},
+	} {
+		instant, err := time.Parse(time.RFC3339Nano, tc.wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if valid := validatePreflightArtifact(artifactAt(instant, true)) == nil; valid != tc.valid {
+			t.Errorf("observed_at %s: valid = %t, want %t", tc.wire, valid, tc.valid)
+		}
+	}
+}
+
 // Generate the public control vocabulary from the same lists used to admit an
 // artifact. Keep the example response separate so it never enters the browser bundle.
 func TestPreflightBrowserContract(t *testing.T) {

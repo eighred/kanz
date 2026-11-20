@@ -25,6 +25,7 @@ export interface PreflightStatus {
 
 const knownChecks = new Set<string>(preflightChecks)
 const commit = /^[a-f0-9]{40}$/
+const zeroInstant = Date.parse('0001-01-01T00:00:00Z')
 const invalid = (reason: string): PreflightStatus => ({
   status: 'UNKNOWN', reason, max_age_seconds: 0, checks: [],
 })
@@ -35,6 +36,12 @@ function object(value: unknown): value is Record<string, unknown> {
 
 function seconds(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function observedInstant(value: unknown): value is string {
+  if (!isTimestamp(value)) return false
+  // Date.parse normalizes offsets but truncates the fractional second to milliseconds.
+  return Date.parse(value) !== zeroInstant || /\.\d*[1-9]/.test(value)
 }
 
 function workloadImages(value: unknown): value is Record<string, string> {
@@ -79,7 +86,7 @@ function readStatus(value: unknown): PreflightStatus {
   const { verifier_commit, deployed_commit, command_id, observed_at, age_seconds, workload_images } = value
   if (typeof verifier_commit !== 'string' || !commit.test(verifier_commit) ||
       typeof deployed_commit !== 'string' || !commit.test(deployed_commit) ||
-      typeof command_id !== 'string' || command_id === '' || !isTimestamp(observed_at) || !workloadImages(workload_images)) {
+      typeof command_id !== 'string' || command_id === '' || !observedInstant(observed_at) || !workloadImages(workload_images)) {
     return invalid('preflight evidence identity is incomplete')
   }
   if (age_seconds !== undefined && !seconds(age_seconds)) return invalid('preflight evidence age is invalid')
