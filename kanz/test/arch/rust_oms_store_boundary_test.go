@@ -144,6 +144,17 @@ func checkRustOMSStoreBoundary(root string) error {
 			return fmt.Errorf("repository lifecycle missing %s", marker)
 		}
 	}
+	for _, marker := range []string{
+		`ifletErr(error)=lock_working_parent(tx,st).await`,
+		`FROMordersWHEREorder_id=$1FORUPDATE`,
+		`r.event_type=="order.order.routed"){lock_working_parent(&tx,&st).await?`,
+		`WHEREorders.version=$4ANDorders.parent_order_id=''`,
+		`WHEREorder_id=$1ANDversion=$4ANDportfolio_id=$5ANDparent_order_id=$6`,
+	} {
+		if !strings.Contains(found["src/lib.rs"], marker) {
+			return fmt.Errorf("scheduled child barrier missing %s", marker)
+		}
+	}
 	if strings.Count(found["src/queries.rs"], `scoped(client,tenant).await?`) != 4 {
 		return fmt.Errorf("query owners must reuse scope")
 	}
@@ -218,7 +229,7 @@ func TestRustOMSStoreBoundary(t *testing.T) {
 }
 
 func checkRustOMSStoreEvidence(workflow, checker string) error {
-	for _, marker := range []string{"TestRustRecoveryAcknowledgements/", "go-differential-both-books-restart", "concurrent-last-ack-one-fact", "target-and-record-binding", "outbox-and-commit-rollback", "tenant-same-case-positive", "missing-corrupt-and-unsafe-storage", "corrupt-counts-refuse-before-claim", "TestRustRecoveryTransactions/", "go-differential-terminal-restart", "zero-history-corrected", "approved-fee-go-differential", "mandatory-facts-and-provenance", "case-cas-rollback-all-owners", "fee-and-claims-rollback", "order-cas-rollback", "unsafe-recovery-rls", "order-cas-and-push-race", "concurrent-recovery-one-checkpoint", "target-outbox-commit-rollback", "tenant-same-case-and-execution", "TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility", "TestRustFeeJournalTransactions/", "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision", "explicit-rollback", "outbox-failure-atomic", "deferred-commit-atomic", "tenant-same-execution-case", "other-book-not-oms-head", "corrupt-bounded-head", "scope-and-order-refusal", "TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
+	for _, marker := range []string{"TestRustScheduledChild/", "create-cancel-commit", "dispatch-cancel-rollback", "TestRustRecoveryAcknowledgements/", "go-differential-both-books-restart", "concurrent-last-ack-one-fact", "target-and-record-binding", "outbox-and-commit-rollback", "tenant-same-case-positive", "missing-corrupt-and-unsafe-storage", "corrupt-counts-refuse-before-claim", "TestRustRecoveryTransactions/", "go-differential-terminal-restart", "zero-history-corrected", "approved-fee-go-differential", "mandatory-facts-and-provenance", "case-cas-rollback-all-owners", "fee-and-claims-rollback", "order-cas-rollback", "unsafe-recovery-rls", "order-cas-and-push-race", "concurrent-recovery-one-checkpoint", "target-outbox-commit-rollback", "tenant-same-case-and-execution", "TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility", "TestRustFeeJournalTransactions/", "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision", "explicit-rollback", "outbox-failure-atomic", "deferred-commit-atomic", "tenant-same-execution-case", "other-book-not-oms-head", "corrupt-bounded-head", "scope-and-order-refusal", "TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
 		if !strings.Contains(checker, marker) {
 			return fmt.Errorf("missing lifecycle proof %s", marker)
 		}
@@ -307,6 +318,9 @@ func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 		{"src/lib.rs", "octet_length(state)::bigint<=$2", "true"},
 		{"src/lib.rs", "sum(octet_length(id)) OVER ()<=$2", "true"},
 		{"src/lib.rs", ".try_get::<_, Option<String>>(0)?", ".try_get::<_, Option<String>>(1)?"},
+		{"src/lib.rs", "FROM orders WHERE order_id=$1 FOR UPDATE", "FROM orders WHERE order_id=$1"},
+		{"src/lib.rs", "lock_working_parent(&tx, &st).await?", "()"},
+		{"src/lib.rs", "AND parent_order_id=$6", ""},
 		{"src/lib.rs", "tenant.is_empty()", "false"}, {"src/lib.rs", "set_config('app.tenant_id',$1,true)", "set_config('app.tenant_id',$1,false)"},
 		{"src/lib.rs", "relrowsecurity AND relforcerowsecurity", "relrowsecurity"}, {"src/lib.rs", "WHERE orders.version=$4", "WHERE true"},
 		{"src/lib.rs", "Error::CommitUnconfirmed", "Error::Database"}, {"src/fee_journal.rs", "identity::same_except_fee(original.value(), revised.value())", "true"},

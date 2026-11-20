@@ -17,13 +17,18 @@ accepted by Go's protobuf decoder.
 
 Every save uses a transaction-local tenant. Connections with SUPERUSER or
 BYPASSRLS, or missing FORCE RLS on any of the five durable tables, refuse.
-The claim, execution journal, CAS and outbox commit together. Missing rows retain
+The claim, execution journal, CAS and outbox commit together. Missing root orders retain
 the existing tenant-local insert-at-version-zero behavior; an expected version
 does not turn an absent row into a cross-tenant identity check. Storage tenant
 and envelope tenant remain distinct, as in the Go repository.
 
 `Create` inserts once and commits its prepared FACTs atomically. Duplicate
 creation returns `Exists` without changing the row or adding announcements.
+For a scheduled child, create and a save announcing a routed FACT lock the
+tenant-visible parent before the child. Its canonical state must be working
+in the same portfolio with no quarantine or pending cancellation. Child saves
+require an existing row with the admitted parent and portfolio. Other child
+transitions, including withdrawal after the parent stops, can still proceed.
 This is storage admission atomicity, not risk/compliance/mandate permission.
 `Load` returns original state bytes and version from one SQL row; `NotFound`
 is distinct from unavailable/corrupt data. `AppliedFills` returns the complete
@@ -351,7 +356,7 @@ absent. It is neither evidence of financial genesis nor a complete bootstrap
 snapshot. Missing price retains the legacy store conversion semantics; upstream
 fill/admission validation is not replaced by this compatibility owner.
 
-The bounded domain accepts canonical Decimal exponents through ±64 and refuses
+The bounded domain accepts canonical Decimal exponents through Â±64 and refuses
 unrepresentable output. Stored rational text must be Go RatString integer or
 numerator/positive-denominator form, at most 4096 bytes per field; arithmetic
 intermediates are limited to 16384 bits. Rows/replay are capped at 10000, with

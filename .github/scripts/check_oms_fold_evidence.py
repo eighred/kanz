@@ -313,6 +313,11 @@ REQUIRED = {
         )},
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
+        "TestRustScheduledChild",
+        *{"TestRustScheduledChild/" + case for case in (
+            "missing", "other-tenant", "other-portfolio", "terminal", "quarantine", "cancelling", "working",
+            "create-cancel-commit", "create-cancel-rollback", "dispatch-cancel-commit", "dispatch-cancel-rollback",
+        )},
         "TestRustRepositoryLifecycle",
         "TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility",
         *{"TestRustFeeEconomicCompatibility/" + case for case in (

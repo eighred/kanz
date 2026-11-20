@@ -24,7 +24,9 @@ mod relay_wire;
 #[cfg(feature = "synthetic-command")]
 pub mod synthetic_command;
 use identity::{execution_key, same_execution};
-use kanz_order_core::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
+use kanz_order_core::proto::order::v1::{
+    Fill, OrderFilled, OrderPartiallyFilled, OrderState, OrderStatus,
+};
 use prost::Message;
 use std::time::SystemTime;
 use tokio_postgres::{types::Type, Client, Transaction};
@@ -39,6 +41,7 @@ pub enum Error {
     UnsafeRole,
     Conflict,
     FillApplied,
+    ParentStopped,
     FundingReservationRequired,
     IdentityConflict,
     FeeRevision,
@@ -290,7 +293,51 @@ pub async fn create(
     enqueue(&tx, records).await?;
     commit(tx).await
 }
+// Forced tenant RLS selects the parent. Its canonical state, not the index
+// columns, decides admission. Keep the row locked through the child and FACT.
+async fn lock_working_parent(tx: &Transaction<'_>, child: &OrderState) -> Result<(), Error> {
+    if child.parent_order_id.is_empty() {
+        return Ok(());
+    }
+    let row = tx
+        .query_opt(
+            "SELECT CASE WHEN octet_length(state)::bigint <= $2 THEN state END
+             FROM orders WHERE order_id=$1 FOR UPDATE",
+            &[&child.parent_order_id, &(MAX_BYTES as i64)],
+        )
+        .await?
+        .ok_or(Error::ParentStopped)?;
+    let raw: Vec<u8> = row
+        .try_get::<_, Option<Vec<u8>>>(0)?
+        .ok_or(Error::Capacity)?;
+    let parent = OrderState::decode(raw.as_slice()).map_err(|_| Error::InvalidInput)?;
+    if parent.order_id != child.parent_order_id
+        || parent.order_id == child.order_id
+        || parent.status != OrderStatus::WorkingScheduled as i32
+        || parent.portfolio_id != child.portfolio_id
+        || parent.quarantine.is_some()
+        || parent.cancellation_request.is_some()
+    {
+        return Err(Error::ParentStopped);
+    }
+    Ok(())
+}
 async fn insert_order(tx: &Transaction<'_>, st: &OrderState, state: &[u8]) -> Result<(), Error> {
+    if let Err(error) = lock_working_parent(tx, st).await {
+        if error == Error::ParentStopped {
+            // A redelivery of a previously admitted child still reports Exists.
+            let row = tx
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM orders WHERE order_id=$1)",
+                    &[&st.order_id],
+                )
+                .await?;
+            if row.try_get::<_, bool>(0)? {
+                return Err(Error::Exists);
+            }
+        }
+        return Err(error);
+    }
     let count = tx
         .execute(
             "INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id)
@@ -397,6 +444,9 @@ pub async fn save(
     }
     let st = validate_write(state, records)?;
     let tx = scoped(client, tenant).await?;
+    if records.iter().any(|r| r.event_type == "order.order.routed") {
+        lock_working_parent(&tx, &st).await?;
+    }
     if !fill_id.is_empty() {
         let fill = announced(&st.order_id, fill_id, records)?;
         let key = fill
@@ -436,7 +486,34 @@ async fn cas(
     state: &[u8],
     expected_version: i64,
 ) -> Result<(), Error> {
-    let count=tx.execute("INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3,$5,$6) ON CONFLICT (tenant_id,order_id) DO UPDATE SET status=EXCLUDED.status,state=EXCLUDED.state,portfolio_id=EXCLUDED.portfolio_id,parent_order_id=EXCLUDED.parent_order_id,version=orders.version+1,updated_at=now() WHERE orders.version=$4",&[&st.order_id,&st.status,&state,&expected_version,&st.portfolio_id,&st.parent_order_id]).await?;
+    // A scheduled child must already have passed create. Updating its immutable
+    // parent/portfolio identity would make dispatch check a different parent.
+    let count = if st.parent_order_id.is_empty() {
+        tx.execute(
+            "INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id)
+             VALUES (current_setting('app.tenant_id'),$1,$2,$3,$5,'')
+             ON CONFLICT (tenant_id,order_id) DO UPDATE SET status=EXCLUDED.status,
+                 state=EXCLUDED.state,portfolio_id=EXCLUDED.portfolio_id,
+                 version=orders.version+1,updated_at=now()
+             WHERE orders.version=$4 AND orders.parent_order_id=''",
+            &[&st.order_id, &st.status, &state, &expected_version, &st.portfolio_id],
+        )
+        .await?
+    } else {
+        tx.execute(
+            "UPDATE orders SET status=$2,state=$3,version=version+1,updated_at=now()
+             WHERE order_id=$1 AND version=$4 AND portfolio_id=$5 AND parent_order_id=$6",
+            &[
+                &st.order_id,
+                &st.status,
+                &state,
+                &expected_version,
+                &st.portfolio_id,
+                &st.parent_order_id,
+            ],
+        )
+        .await?
+    };
     if count == 0 {
         return Err(Error::Conflict);
     }
