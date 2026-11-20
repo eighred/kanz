@@ -120,6 +120,9 @@ func TestSignedCustodyOperatorReadback(t *testing.T) {
 			t.Fatalf("expected one source-backed break, got %d", len(list.Breaks))
 		}
 		b := list.Breaks[0]
+		t.Run("rollback_action_fence", func(t *testing.T) {
+			checkPilotRollback(t, ctx, pool, b.BreakID)
+		})
 		expected := custody.Detection{RunID: run.RunID, StatementID: statement.StatementID, BusinessDate: "2020-02-04", ScopeMode: custody.BasisDeclared, JournalPosition: "1"}
 		if b.Detection != expected || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Key != "SYN" || b.IBOR != "10.5" || b.Custodian != "9.5" || b.Difference != "1" {
 			t.Fatalf("unexpected accounting evidence: %+v", b)
