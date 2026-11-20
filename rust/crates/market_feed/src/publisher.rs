@@ -9,7 +9,7 @@ use prost_types::Timestamp;
 use std::{
     cmp::Ordering,
     error::Error,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use uuid::Uuid;
 
@@ -18,13 +18,7 @@ pub const QUOTE_SUBJECT: &str = "market.crypto.quote";
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 pub fn now() -> Timestamp {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    Timestamp {
-        seconds: duration.as_secs() as i64,
-        nanos: duration.subsec_nanos() as i32,
-    }
+    SystemTime::now().into()
 }
 
 pub fn quote(snapshot: &OrderBookSnapshot) -> Option<MarketDataEvent> {
