@@ -174,15 +174,28 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run, checks ...func(con
 		return Run{}, ErrDurableActionStore
 	}
 	run = cloneRun(run)
-	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
 	if run.Basis != nil && run.Basis.Assignments != nil {
 		return Run{}, ErrUnprovenAssignment
 	}
 	if run.ExecutionQuantities != nil || run.ExecutionEconomics != nil {
 		return Run{}, errBatchReceipt
 	}
-	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
-		return Run{}, ErrHistoricalLifecycle
+	var olderBookBasis bool
+	if verifying(run) {
+		date := BusinessDay(run.Subject.BusinessDate)
+		history := m.runs[pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)]
+		for _, prior := range slices.Backward(history) {
+			if !verifying(prior) || prior.Subject.PortfolioID != run.Subject.PortfolioID || prior.Subject.CustodianID != run.Subject.CustodianID {
+				continue
+			}
+			priorDate := BusinessDay(prior.Subject.BusinessDate)
+			if priorDate.After(date) {
+				return Run{}, ErrHistoricalLifecycle
+			}
+			if priorDate.Equal(date) && run.Basis != nil && prior.Basis != nil && prior.Basis.JournalPosition > run.Basis.JournalPosition {
+				olderBookBasis = true
+			}
+		}
 	}
 	if run.observedMissing {
 		_, err := m.latestStatementLocked(run.Subject)
@@ -191,12 +204,8 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run, checks ...func(con
 		}
 		run.observedMissing = false
 	}
-	if verifying(run) && run.Basis != nil {
-		for _, prior := range m.runs[pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)] {
-			if verifying(prior) && prior.Subject.Key() == run.Subject.Key() && prior.Basis != nil && prior.Basis.JournalPosition > run.Basis.JournalPosition {
-				return Run{}, ErrBookBasisChanged
-			}
-		}
+	if olderBookBasis {
+		return Run{}, ErrBookBasisChanged
 	}
 	if run.compared != nil {
 		current, err := m.latestStatementLocked(run.Subject)

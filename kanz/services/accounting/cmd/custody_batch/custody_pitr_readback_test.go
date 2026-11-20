@@ -89,19 +89,10 @@ func pilotPITRCut(t *testing.T, ctx context.Context, directory string, pool *pgx
 }
 
 func TestSignedCustodyPITRReadback(t *testing.T) {
-	path := os.Getenv("CUSTODY_PILOT_PITR_METADATA")
-	if path == "" {
+	if os.Getenv("CUSTODY_PILOT_PITR_READBACK") != "1" {
 		t.Skip("requires a paused, independently restored custody pilot")
 	}
-	if !filepath.IsAbs(path) {
-		t.Fatal("absolute PITR metadata path required")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		t.Fatal("PITR metadata unavailable")
-	}
-	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, (16<<10)+1))
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, (16<<10)+1))
 	var e map[string]string
 	if err != nil || len(raw) > 16<<10 || json.Unmarshal(raw, &e) != nil || e["phase"] != "restored" || e["portfolio_id"] != "PF1" || e["custodian_id"] != "CUST-A" {
 		t.Fatal("invalid restored pilot metadata")

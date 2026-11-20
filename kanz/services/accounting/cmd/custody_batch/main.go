@@ -13,11 +13,14 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
@@ -43,7 +46,7 @@ func readFile(path string, limit int64) ([]byte, error) {
 	return b, err
 }
 
-func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
+func importBatch(ctx context.Context, policyPath, batchPath, sigPath string) error {
 	policy, err := readFile(policyPath, 64<<10)
 	if err != nil {
 		return err
@@ -128,19 +131,25 @@ func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
 	return nil
 }
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() int {
 	policy := flag.String("authority", "", "operator-approved public source policy JSON")
 	batch := flag.String("batch", "", "signed statement batch")
 	signature := flag.String("signature", "", "detached 64-byte Ed25519 signature")
 	flag.Parse()
 	if *policy == "" || *batch == "" || *signature == "" || flag.NArg() != 0 {
 		flag.Usage()
-		os.Exit(2)
+		return 2
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	signals, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	fatal := lifecycle.NewFatal(stop)
+	ctx, cancel := context.WithTimeout(signals, 30*time.Second)
 	defer cancel()
-	if err := run(ctx, *policy, *batch, *signature); err != nil {
+	if err := importBatch(ctx, *policy, *batch, *signature); err != nil {
 		slog.Error("statement import failed", "error", err)
-		os.Exit(1)
+		fatal.Raise(err)
 	}
+	return fatal.Code()
 }

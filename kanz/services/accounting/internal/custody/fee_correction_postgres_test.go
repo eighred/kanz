@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -129,14 +128,7 @@ func TestBookedFeeCorrectionRecomparesSameSignedStatement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	read := func(name string) []byte {
-		t.Helper()
-		v, err := os.ReadFile(filepath.Join("../../cmd/custody_batch/testdata/execution_economics", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return v
-	}
+	read := func(name string) []byte { return readExecutionEconomicsFixture(t, name) }
 	var authority BatchAuthority
 	if err := json.Unmarshal(read("authority.json"), &authority); err != nil {
 		t.Fatal(err)
@@ -284,4 +276,20 @@ func feeCorrectionFact(t *testing.T, tenant string, previous *orderpb.Fill, stat
 	}
 	revised.Recovery = &orderpb.ExecutionRecoveryProvenance{CaseId: p.CaseId, MappingVersion: p.MappingVersion, SourceCursor: "synthetic-history-1", PayloadDigest: p.HistoryDigest, ExecutionDigest: revisedDigest, ObservedAt: timestamppb.New(now), FeeApproval: &orderpb.ExecutionFeeApproval{ProposalId: p.CaseId, Digest: proposalDigest, Proposer: p.Proposer, Approver: "user:checker", ApprovedAt: timestamppb.New(now), PreviousExecutionDigest: priorDigest, PreviousFee: previous.Fee}}
 	return &orderpb.ExecutionRecovered{State: state, Fill: revised}
+}
+
+// Read only the checkout's committed fixture directory. The independently
+// configured broker URL cannot select any file on the host.
+func readExecutionEconomicsFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	root, err := os.OpenRoot("../../cmd/custody_batch/testdata/execution_economics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	wire, err := root.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
 }
