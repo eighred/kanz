@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
@@ -40,6 +41,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		Tenant, Endpoint, Socket, Broker string
 		CancelEventID                    string
 		WithdrawalEventID                string
+		WithdrawalStage                  string
 		State                            []byte
 		Version                          int64
 		Generation                       int
@@ -53,6 +55,15 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	working := tenant == "synthetic-go-funded-working"
 	if in.WithdrawalEventID != "" && !working {
 		t.Fatal("a new withdrawal requires the isolated funded working profile")
+	}
+	switch in.WithdrawalStage {
+	case "":
+	case "send", "reconcile", "publish":
+		if in.WithdrawalEventID == "" {
+			t.Fatal("restart stages require the original withdrawal event")
+		}
+	default:
+		t.Fatal("invalid withdrawal restart stage")
 	}
 	switch {
 	case in.CancelEventID == "" && tenant == "synthetic-go-handback" && in.Generation == 2:
@@ -79,6 +90,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		wantStatus, wantSweep = orderpb.OrderStatus_ORDER_STATUS_CANCELLED, 0
 	} else if working {
 		wantStatus = orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
+	}
+	if in.WithdrawalStage == "publish" {
+		wantSweep = 0
 	}
 	if state.Status != wantStatus {
 		t.Fatalf("expected %s retained state, got %s", wantStatus, state.Status)
@@ -132,6 +146,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		// The retained-retry guard requires unlimited broker delivery.
 		brokerConfig.ConsumerTuning = &bus.ConsumerTuning{AckWait: bus.WorkAckWait, MaxDeliver: -1, MaxAckPending: 1}
 	}
+	if in.WithdrawalStage != "" {
+		brokerConfig.ConsumerTuning.AckWait = 3 * time.Second
+	}
 	client, e := bus.DialNATS(ctx, brokerConfig)
 	if e != nil {
 		t.Fatal(e)
@@ -146,6 +163,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if terminal {
 		opts = append(opts, order.WithSyntheticHandoffCancellationRecovery(store))
 	}
+	if in.WithdrawalStage != "" {
+		opts = append(opts, order.WithSyntheticHandoffWithdrawal(store))
+	}
 	svc, e := order.NewService(tenant, store, order.NewEmitter(publisher), nil, execution.NewRouter(venues), nil, logger, opts...)
 	if e != nil {
 		t.Fatal(e)
@@ -157,8 +177,17 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if terminal && (claims != 4 || pending != 3) {
 		t.Fatalf("funded recovery requires a retained accepted fact and three pending facts, got %d / %d", claims, pending)
 	}
-	if working && (claims != 3 || pending != 2) {
-		t.Fatalf("working recovery requires a retained accepted fact and two pending facts, got %d / %d", claims, pending)
+	if working {
+		wantClaims, wantPending := 3, 2
+		switch in.WithdrawalStage {
+		case "reconcile":
+			wantPending = 0
+		case "publish":
+			wantClaims, wantPending = 4, 1
+		}
+		if claims != wantClaims || pending != wantPending {
+			t.Fatalf("retained startup facts: wanted %d/%d, got %d/%d", wantClaims, wantPending, claims, pending)
+		}
 	}
 	if n, err := svc.Outbox().DrainOnce(ctx); err != nil || n != pending {
 		t.Fatalf("startup outbox drain: got %d, expected %d: %v", n, pending, err)
@@ -172,7 +201,21 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	var wire []byte
 	var version int64
 	var facts, unpublished int
-	if e = pool.QueryRow(ctx, "SELECT state,version FROM orders WHERE order_id=$1", state.OrderId).Scan(&wire, &version); e != nil || !bytes.Equal(wire, in.State) || version != in.Version {
+	if e = pool.QueryRow(ctx, "SELECT state,version FROM orders WHERE order_id=$1", state.OrderId).Scan(&wire, &version); e != nil {
+		t.Fatalf("read startup state: %v", e)
+	}
+	if in.WithdrawalStage == "publish" {
+		expected, _, err := order.Cancel(&state, state.GetAsOf().AsTime())
+		var actual orderpb.OrderState
+		if err != nil || proto.Unmarshal(wire, &actual) != nil || actual.GetAsOf().CheckValid() != nil ||
+			actual.GetAsOf().AsTime().Before(state.GetAsOf().AsTime()) || version != in.Version+1 {
+			t.Fatalf("invalid committed withdrawal state at restart: %d", version)
+		}
+		expected.AsOf = actual.AsOf
+		if !proto.Equal(expected, &actual) {
+			t.Fatal("committed withdrawal changed other order fields")
+		}
+	} else if !bytes.Equal(wire, in.State) || version != in.Version {
 		t.Fatalf("startup changed acknowledged order bytes/version: %d vs %d: %v", version, in.Version, e)
 	}
 	if e = pool.QueryRow(ctx, "SELECT count(*), count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE partition_key=$1", state.OrderId).Scan(&facts, &unpublished); e != nil || facts != claims || unpublished != 0 {
@@ -180,12 +223,20 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept %d working orders and preserved native version %d and %d outbox rows", in.Generation, pending, wantSweep, version, facts)
 	if in.WithdrawalEventID != "" {
-		withdrawal, err := order.NewService(tenant, store, order.NewEmitter(publisher), nil, venueRouter, nil, logger,
+		var events order.Bus = publisher
+		if in.WithdrawalStage == "reconcile" {
+			events = stopBeforeWithdrawalFact{Bus: publisher, eventID: in.WithdrawalEventID, orderID: state.OrderId}
+		}
+		withdrawal, err := order.NewService(tenant, store, order.NewEmitter(events), nil, venueRouter, nil, logger,
 			order.WithHaltGate(halt.NewGate(nil)), order.WithSyntheticHandoffWithdrawal(store))
 		if err != nil {
 			t.Fatal(err)
 		}
-		consumeSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID)
+		if in.WithdrawalStage == "" {
+			consumeSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID)
+		} else {
+			restartSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID, in.WithdrawalStage)
+		}
 	}
 }
 

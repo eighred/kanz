@@ -21,14 +21,14 @@ func TestSyntheticGoRustGoRoundTrip(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_ROUNDTRIP") != "1" {
 		t.Skip("requires a disposable Go-to-Rust-to-Go fixture")
 	}
-	exerciseGoRustGo(t, "synthetic-go-roundtrip", false)
+	exerciseGoRustGo(t, "synthetic-go-roundtrip", noGoWithdrawal)
 }
 
 func TestSyntheticFundedGoRustGoRoundTrip(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_ROUNDTRIP") != "1" {
 		t.Skip("requires a disposable funded Go-to-Rust-to-Go fixture")
 	}
-	exerciseGoRustGo(t, "synthetic-funded-cancel-fill", false)
+	exerciseGoRustGo(t, "synthetic-funded-cancel-fill", noGoWithdrawal)
 }
 
 const fundedWorkingTenant = "synthetic-go-funded-working"
@@ -37,17 +37,32 @@ func TestSyntheticFundedWorkingGoRustGo(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WORKING") != "1" {
 		t.Skip("requires a disposable funded working-order handback")
 	}
-	exerciseGoRustGo(t, fundedWorkingTenant, false)
+	exerciseGoRustGo(t, fundedWorkingTenant, noGoWithdrawal)
 }
 
 func TestSyntheticFundedWithdrawalGoRustGo(t *testing.T) {
 	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL") != "1" {
 		t.Skip("requires the disposable funded Go withdrawal fixture")
 	}
-	exerciseGoRustGo(t, fundedWorkingTenant, true)
+	exerciseGoRustGo(t, fundedWorkingTenant, goWithdrawal)
 }
 
-func exerciseGoRustGo(t *testing.T, tenant string, freshWithdrawal bool) {
+func TestSyntheticFundedWithdrawalRestartGoRustGo(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_RESTART") != "1" {
+		t.Skip("requires the disposable funded withdrawal restart fixture")
+	}
+	exerciseGoRustGo(t, fundedWorkingTenant, goWithdrawalRestart)
+}
+
+type goWithdrawalMode int
+
+const (
+	noGoWithdrawal goWithdrawalMode = iota
+	goWithdrawal
+	goWithdrawalRestart
+)
+
+func exerciseGoRustGo(t *testing.T, tenant string, withdrawalMode goWithdrawalMode) {
 	funded := tenant != "synthetic-go-roundtrip"
 	t.Helper()
 	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
@@ -115,7 +130,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, freshWithdrawal bool) {
 		}
 
 		if funded {
-			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor, freshWithdrawal)
+			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor, withdrawalMode)
 			requireNativeReceipt(t, ctx, request, "WRITER_FENCED")
 		} else {
 			exerciseSyntheticGoHandback(t, ctx, s, &cmd, request, 2)
@@ -126,7 +141,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, freshWithdrawal bool) {
 			ARRAY(SELECT DISTINCT writer_epoch FROM synthetic_oms_observations WHERE order_id=c.order_id ORDER BY writer_epoch)
 			FROM synthetic_oms_commands c WHERE c.order_id=$1`, cmd.OrderId).Scan(&admitted, &retained, &observations)
 		wantEpochs := []int64{2}
-		if freshWithdrawal {
+		if withdrawalMode != noGoWithdrawal {
 			wantEpochs = []int64{2, 3}
 			var operations []string
 			if e := reader.QueryRow(ctx, "SELECT array_agg(operation ORDER BY operation) FROM synthetic_oms_observations WHERE order_id=$1 AND writer_epoch=3", cmd.OrderId).Scan(&operations); e != nil || !slices.Equal(operations, []string{"cancel_pending", "cancelled"}) {
@@ -141,7 +156,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, freshWithdrawal bool) {
 }
 
 func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, receipt syntheticvenue.Receipt,
-	addr string, identity *testidentity.Source, event *envelopepb.Envelope, authorizeWithdrawal func(int) string,
+	addr string, identity *testidentity.Source, event *envelopepb.Envelope, authorizeWithdrawal func(int) *fundedWithdrawalApproval,
 ) {
 	t.Helper()
 	tenant := event.TenantId
@@ -170,10 +185,10 @@ func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	if err != nil || replayed.OK || replayed.Code != "WRITER_FENCED" {
 		t.Fatalf("retired Rust funded adapter: %s %v", replayed.Code, err)
 	}
-	withdrawalEventID := ""
+	var withdrawal *fundedWithdrawalApproval
 	if authorizeWithdrawal != nil {
-		withdrawalEventID = authorizeWithdrawal(generation)
+		withdrawal = authorizeWithdrawal(generation)
 	}
 	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, receipt, generation,
-		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, withdrawalEventID)
+		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID, withdrawal)
 }

@@ -235,7 +235,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				o := signedFundedOrder(t, ctx, s, fundedFirst, false)
 				o.authorize(t, ctx, o.request.Principal, time.Now().Add(time.Minute))
 				requireNativeReceipt(t, ctx, o.request, "ACCEPTED")
-				terminal := exerciseFundedVenue(t, ctx, s, o, scenario.extra, scenario.fillOnCancel, nil, false)
+				terminal := exerciseFundedVenue(t, ctx, s, o, scenario.extra, scenario.fillOnCancel, nil, noGoWithdrawal)
 				if scenario.name == "partial_cancel_and_book" && os.Getenv("SYNTHETIC_BLOTTER_CAPTURE") == "1" {
 					// The runner pipes this synthetic native receipt into the separate read-only probe.
 					body, err := json.Marshal(map[string]any{"tenant": tenant, "portfolio": o.request.Portfolio, "state": terminal.State})
@@ -251,7 +251,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 	t.Run("claim_before_venue_send", testFundedDispatchBeforeSend)
 }
 
-type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope, func(int) string)
+type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope, func(int) *fundedWithdrawalApproval)
 
 func refuseFundedPartialHandback(t *testing.T, ctx context.Context, tenant string) {
 	t.Helper()
@@ -277,7 +277,7 @@ func requireFundedPendingFacts(t *testing.T, ctx context.Context, proof *pgxpool
 	}
 }
 
-func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, extra time.Duration, fillOnCancel bool, successor fundedGoSuccessor, freshWithdrawal bool) syntheticvenue.Receipt {
+func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, extra time.Duration, fillOnCancel bool, successor fundedGoSuccessor, withdrawalMode goWithdrawalMode) syntheticvenue.Receipt {
 	t.Helper()
 	tenant, portfolio, orderID := o.request.Tenant, o.request.Portfolio, o.command.OrderId
 	proof := syntheticPool(t, ctx, "PROOF", tenant)
@@ -438,20 +438,21 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		_, partial := get()
 		requireFundedPendingFacts(t, ctx, proof, orderID, 3, []string{"order.order.partially_filled", "order.order.routed"})
 		queriesBefore := queries.Load()
-		var authorizeWithdrawal func(int) string
-		if freshWithdrawal {
-			authorizeWithdrawal = func(generation int) string {
+		var authorizeWithdrawal func(int) *fundedWithdrawalApproval
+		if withdrawalMode != noGoWithdrawal {
+			authorizeWithdrawal = func(generation int) *fundedWithdrawalApproval {
 				approval := control.prepareGoWithdrawal(t, ctx, s, partial, generation)
+				approval.restart = withdrawalMode == goWithdrawalRestart
 				withdrawal.Store(approval)
-				return approval.event.EventId
+				return approval
 			}
 		}
 		successor(t, ctx, s, partial, addr, identity, control.accepted, authorizeWithdrawal)
-		if freshWithdrawal {
+		if withdrawalMode != noGoWithdrawal {
 			if !lostWithdrawalAck.Load() || !terminalApproved.Load() || sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != queriesBefore+3 {
 				t.Fatalf("Go withdrawal after ACK loss: sends=%d cancels=%d queries=%d (previously %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
 			}
-			return verifyGoWithdrawalBooking(t, ctx, s, control, partial, withdrawal.Load())
+			return verifyGoWithdrawalBooking(t, ctx, s, control, withdrawal.Load())
 		}
 		if sends.Load() != 1 || withdrawals.Load() != 0 || queries.Load() != queriesBefore+1 {
 			t.Fatalf("Go working recovery: got %d sends, %d withdrawals, %d queries (was %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)

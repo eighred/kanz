@@ -62,6 +62,7 @@ type Service struct {
 
 	retainedCancelReplay func(context.Context, *envelopepb.Envelope, []byte, *orderpb.CancelOrder, *orderpb.OrderState, int64) (bool, error)
 	fundedWithdrawal     func(context.Context, *envelopepb.Envelope, []byte, *orderpb.CancelOrder, *orderpb.OrderState) error
+	withdrawalPending    func(context.Context, *orderpb.OrderState, int64) (bool, error)
 
 	// accounts binds each portfolio to the exchange account it may execute against.
 	// Empty ⇒ nothing is bound, and every portfolio trades whatever account its
@@ -2914,6 +2915,18 @@ func (s *Service) resumeClaimed(ctx context.Context, fresh *orderpb.OrderState, 
 	// redelivery of an order the world was never told about.
 	if IsTerminal(fresh) {
 		return s.completeTerminalOutcome(ctx, fresh, ver, flushed)
+	}
+	if s.withdrawalPending != nil {
+		pending, err := s.withdrawalPending(ctx, fresh, ver)
+		if err != nil {
+			return err
+		}
+		if pending {
+			// Its retained command owns the outcome and cash change. An
+			// unattributed startup query must not adopt that withdrawal.
+			s.logger.Info("oms awaiting retained withdrawal delivery", "order_id", fresh.GetOrderId())
+			return nil
+		}
 	}
 	st := fresh
 

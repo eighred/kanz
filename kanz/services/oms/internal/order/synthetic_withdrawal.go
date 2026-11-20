@@ -24,7 +24,44 @@ func WithSyntheticHandoffWithdrawal(store *Postgres) ServiceOption {
 		s.fundedWithdrawal = func(ctx context.Context, env *envelopepb.Envelope, payload []byte, cmd *orderpb.CancelOrder, st *orderpb.OrderState) error {
 			return s.withdrawSyntheticHandoff(ctx, store, env, payload, cmd, st)
 		}
+		s.withdrawalPending = store.syntheticWithdrawalPending
 	}
+}
+
+func (p *Postgres) syntheticWithdrawalPending(ctx context.Context, st *orderpb.OrderState, version int64) (bool, error) {
+	if st.GetVenue() != "XSIM" || st.GetVenueAccountId() != "synthetic-spot" ||
+		st.GetInstrumentId() != "SYNTH-USD" || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED {
+		return false, nil
+	}
+	var phase string
+	var active bool
+	var claims int
+	err := p.pool.QueryRow(ctx, `SELECT c.phase,
+		pg_has_role(session_user,to_regrole('kanz_synthetic_oms_go_working_runtime'),'USAGE')
+			AND public.synthetic_oms_assert_writer()>1,
+		(SELECT count(*) FROM public.synthetic_oms_observations x
+		 JOIN public.synthetic_oms_cancellation_authorizations a USING(tenant_id,order_id,event_id)
+		 WHERE (x.tenant_id,x.order_id,a.portfolio_id,a.principal_id)=(c.tenant_id,c.order_id,c.portfolio_id,c.principal_id)
+		   AND x.operation='cancel_pending' AND x.writer_epoch=public.synthetic_oms_assert_writer()
+		   AND x.observation=''::bytea
+		   AND a.effective_at=to_timestamp(x.effective_seconds)+(x.effective_nanos/1000)*interval '1 microsecond')
+		FROM public.synthetic_oms_commands c
+		JOIN public.orders o USING(tenant_id,order_id,portfolio_id)
+		WHERE current_database()='kanz_synthetic_oms' AND o.tenant_id=$1 AND o.order_id=$2 AND o.portfolio_id=$3
+		  AND o.status=$4 AND o.version=$5 AND c.go_gateway_frame IS NOT NULL AND c.go_funding_amounts IS NOT NULL`,
+		bus.TenantIDFromContext(ctx), st.GetOrderId(), st.GetPortfolioId(), st.GetStatus(), version).Scan(&phase, &active, &claims)
+	if err != nil {
+		return false, err
+	}
+	if active {
+		switch {
+		case phase == "working" && claims == 0:
+			return false, nil
+		case (phase == "cancel_pending" || phase == "unknown_cancel") && claims == 1:
+			return true, nil
+		}
+	}
+	return false, errors.New("oms: inconsistent retained withdrawal at startup")
 }
 
 func (s *Service) withdrawSyntheticHandoff(ctx context.Context, store *Postgres, env *envelopepb.Envelope,

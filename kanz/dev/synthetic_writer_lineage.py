@@ -18,12 +18,13 @@ import synthetic_orders as fixture
 
 
 TEST = "TestSyntheticGoWriterLineageHandoff"
+WITHDRAWAL_MODES = ("funded-withdrawal", "funded-withdrawal-restart")
 ROLES = ("RUNTIME", "NEXT_RUNTIME", "SWITCH", "RELAY")
 
 
 def provision_funded(container, env, mode):
     roundtrip = mode != "funded-forward"
-    working = mode in ("funded-working", "funded-withdrawal")
+    working = mode in ("funded-working", *WITHDRAWAL_MODES)
     tenant = "synthetic-go-funded-working" if working else "synthetic-funded-cancel-fill"
     tenants = (tenant,) if roundtrip else ("synthetic-go-funded-forward", "synthetic-go-funded-mismatch")
     fixture.sql(container, """
@@ -44,7 +45,7 @@ def provision_funded(container, env, mode):
         for migration in ("cancellation.sql", "settlement.sql", "go_writer.sql"):
             path = fixture.ROOT / "rust/services/synthetic_oms" / migration
             fixture.sql(container, path.read_text(encoding="utf-8"), fixture.DB)
-        if mode == "funded-withdrawal":
+        if mode in WITHDRAWAL_MODES:
             path = fixture.ROOT / "rust/services/synthetic_oms/go_cancel.sql"
             fixture.sql(container, path.read_text(encoding="utf-8"), fixture.DB)
             fixture.sql(container, "GRANT SELECT (order_id,fill) ON order_executions TO kanz_synthetic_oms_proof;", fixture.DB)
@@ -63,8 +64,8 @@ def provision_funded(container, env, mode):
 
 
 def run(stage, native, mode):
-    roundtrip = mode in ("roundtrip", "funded-roundtrip", "funded-working", "funded-withdrawal")
-    funded = mode in ("funded-forward", "funded-roundtrip", "funded-working", "funded-withdrawal")
+    roundtrip = mode in ("roundtrip", "funded-roundtrip", "funded-working", *WITHDRAWAL_MODES)
+    funded = mode in ("funded-forward", "funded-roundtrip", "funded-working", *WITHDRAWAL_MODES)
     targets = ["services/api_gateway/cmd/api_gateway"]
     if mode == "lineage":
         targets.append("services/oms/internal/order")
@@ -126,7 +127,10 @@ def run(stage, native, mode):
                 fixture.sql(container, (fixture.ROOT / "rust/services/synthetic_oms" / migration).read_text(encoding="utf-8"), fixture.DB)
         if funded:
             provision_funded(container, env, mode)
-            if mode == "funded-withdrawal":
+            if mode == "funded-withdrawal-restart":
+                env["KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_RESTART"] = "1"
+                test = "TestSyntheticFundedWithdrawalRestartGoRustGo"
+            elif mode == "funded-withdrawal":
                 env["KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL"] = "1"
                 test = "TestSyntheticFundedWithdrawalGoRustGo"
             elif mode == "funded-working":
@@ -191,6 +195,8 @@ if __name__ == "__main__":
                        help="recover a single open funded order after its partial execution")
     group.add_argument("--funded-withdrawal", action="store_const", dest="mode", const="funded-withdrawal",
                        help="withdraw the working remainder after the funded Go handback")
+    group.add_argument("--funded-withdrawal-restart", action="store_const", dest="mode", const="funded-withdrawal-restart",
+                       help="recover a funded withdrawal across two process exits and publish its retained terminal fact")
     parser.set_defaults(mode="lineage")
     args = parser.parse_args()
     if not args.native.is_file():

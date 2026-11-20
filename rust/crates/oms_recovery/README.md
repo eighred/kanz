@@ -219,3 +219,11 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 After startup a gateway-authorized cancellation runs through the normal OMS JetStream consumer. The dedicated Go login claims the exact authorized command in PostgreSQL before the typed XSIM cancellation. The bridge exposes only claim and finish, reusing the settlement guard and cash transaction. A lost response leaves the original state and both holds intact. Redelivery can query the same venue order but cannot send another cancellation. Only complete history matching the retained execution and an independently authorized terminal observation can release the unfilled remainder and enqueue the cancellation fact.
 
 This isolated profile covers one previously observed partial fill and one subsequent cancellation, including lost acknowledgement and command replay. A confirmed terminal write keeps 126 USD reserved until Accounting books it. After posting, the balance is 874 USD with no remaining reservation. Additional fills, expired attestations, deployment approval, and production capacity still need their respective acceptance evidence.
+
+### Restart across withdrawal and outbox commit
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-withdrawal-restart
+```
+
+Three separate Go processes use the same writer login and JetStream durable. The first exits after XSIM has withdrawn the order and lost the response, before the handler can ACK. Startup defers the proven current-writer withdrawal claim to its retained command while the ordinary sweep remains active. The second process queries XSIM on redelivery and exits after PostgreSQL commits the terminal state and before the outbox publisher sends it. The third startup drains that one fact and acknowledges the third delivery without contacting XSIM again. The runner compares the cash holds, retained state, broker acknowledgements and published payload across both process cuts.

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/nats-io/nats.go/jetstream"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +23,7 @@ import (
 // state seen at handoff. Its terminal approval additionally requires the actual
 // XSIM query and the original execution journal bytes.
 type fundedWithdrawalApproval struct {
+	restart    bool
 	control    *fundedVenueControl
 	event      *envelopepb.Envelope
 	generation int64
@@ -171,8 +175,9 @@ func (a *fundedWithdrawalApproval) recordTerminal(ctx context.Context, view *ven
 	return nil
 }
 
-func verifyGoWithdrawalBooking(t *testing.T, ctx context.Context, s syntheticSession, control fundedVenueControl, partial syntheticvenue.Receipt, a *fundedWithdrawalApproval) syntheticvenue.Receipt {
+func (a *fundedWithdrawalApproval) verifyTerminal(t *testing.T, ctx context.Context, pending []string) syntheticvenue.Receipt {
 	t.Helper()
+	control := a.control
 	o := control.order
 	a.mu.Lock()
 	expected := a.terminal
@@ -188,13 +193,89 @@ func verifyGoWithdrawalBooking(t *testing.T, ctx context.Context, s syntheticSes
 		WHERE o.order_id=$1 AND o.portfolio_id=$2 AND f.subject='order.order.cancelled'`, o.command.OrderId, o.request.Portfolio).Scan(&state, &version, &payload, &cause, &trace)
 	var st orderpb.OrderState
 	var cancelled orderpb.OrderCancelled
-	if err != nil || version != partial.OrderVersion+1 || proto.Unmarshal(state, &st) != nil || !proto.Equal(&st, expected.Next) ||
+	if err != nil || version != a.partial.OrderVersion+1 || proto.Unmarshal(state, &st) != nil || !proto.Equal(&st, expected.Next) ||
 		proto.Unmarshal(payload, &cancelled) != nil || !proto.Equal(&cancelled, expected.Fact) || cause != a.event.EventId || trace != a.event.TraceContext {
 		t.Fatalf("Go terminal state or FACT differs from the independently observed withdrawal: %v", err)
 	}
-	requireFundedPendingFacts(t, ctx, control.proof, o.command.OrderId, 4, nil)
+	requireFundedPendingFacts(t, ctx, control.proof, o.command.OrderId, 4, pending)
 	checkVenueCash(t, ctx, control.proof, o, 1000, 126, 126, 0, 126, 0)
+	return syntheticvenue.Receipt{OK: true, Code: "FOUND", State: state, OrderVersion: version}
+}
+
+func verifyGoWithdrawalBooking(t *testing.T, ctx context.Context, s syntheticSession, control fundedVenueControl, a *fundedWithdrawalApproval) syntheticvenue.Receipt {
+	t.Helper()
+	terminal := a.verifyTerminal(t, ctx, nil)
+	o := control.order
+	facts, err := s.js.Stream(ctx, "SYNTHETIC_FACTS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := facts.Info(ctx)
+	if err != nil || info.State.Msgs != 4 || info.State.LastSeq != 4 {
+		t.Fatalf("expected precisely four published lifecycle records: %v", err)
+	}
+	raw, err := facts.GetLastMsgForSubject(ctx, "order.order.cancelled")
+	if err != nil || raw.Sequence != 4 {
+		t.Fatalf("terminal cancellation was not the fourth broker record: %v", err)
+	}
+	env, payload, err := bus.Unframe(raw.Data)
+	var retained []byte
+	var recordedAt time.Time
+	if err != nil || env.GetTenantId() != o.request.Tenant || env.GetPartitionKey() != o.command.OrderId ||
+		env.GetCorrelationId() != control.accepted.CorrelationId || env.GetCausationId() != a.event.EventId ||
+		env.GetTraceContext() != a.event.TraceContext || env.GetEventTime().CheckValid() != nil {
+		t.Fatalf("published withdrawal lineage differs from retained authority: %v", err)
+	}
+	if err = control.proof.QueryRow(ctx, "SELECT payload,event_time FROM outbox WHERE partition_key=$1 AND subject='order.order.cancelled'", o.command.OrderId).Scan(&retained, &recordedAt); err != nil ||
+		!bytes.Equal(payload, retained) || !env.GetEventTime().AsTime().Equal(recordedAt) {
+		t.Fatalf("published withdrawal differs from the terminal outbox record: %v", err)
+	}
 	applyVenueAccounting(t, ctx, s, control.proof, o, 126, 0)
 	t.Log("XSIM funded withdrawal: gateway-authorized G3 cancel, one placement, one committed withdrawal, lost ACK, terminal query, one execution, one 126 USD debit; remaining cash 874 USD, zero reserves")
-	return syntheticvenue.Receipt{OK: true, Code: "FOUND", State: state, OrderVersion: version}
+	return terminal
+}
+
+// Observe the remote store without adding a venue query on behalf of the first
+// writer. Recovery must still ask XSIM through its own authenticated RPC.
+func (a *fundedWithdrawalApproval) verifyRemoteAfterCrash(t *testing.T, ctx context.Context) {
+	t.Helper()
+	o := a.control.order
+	remote := syntheticPool(t, ctx, "VENUE", o.request.Tenant)
+	var working bool
+	var wire, recorded []byte
+	if err := remote.QueryRow(ctx, "SELECT working_partial,execution FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3",
+		o.request.Tenant, o.request.Portfolio, o.command.OrderId).Scan(&working, &wire); err != nil || working || len(wire) == 0 {
+		t.Fatalf("XSIM did not retain the first process's withdrawal and fill: %v", err)
+	}
+	if err := a.control.proof.QueryRow(ctx, "SELECT fill FROM order_executions WHERE order_id=$1", o.command.OrderId).Scan(&recorded); err != nil || !bytes.Equal(wire, recorded) {
+		t.Fatalf("XSIM execution differs from the retained fill after process exit: %v", err)
+	}
+}
+
+func (a *fundedWithdrawalApproval) verifyBrokerBeforePublish(t *testing.T, ctx context.Context, s syntheticSession, delivery uint64) {
+	t.Helper()
+	facts, err := s.js.Stream(ctx, "SYNTHETIC_FACTS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := facts.Info(ctx)
+	if err != nil || info.State.Msgs != 3 {
+		t.Fatalf("expected the three preceding OMS FACTs after delivery %d: %v", delivery, err)
+	}
+	if _, err = facts.GetLastMsgForSubject(ctx, "order.order.cancelled"); !errors.Is(err, jetstream.ErrMsgNotFound) {
+		t.Fatalf("unexpected terminal FACT before restart at delivery %d: %v", delivery, err)
+	}
+	subject := bus.TenantRoutedSubject(a.event.TenantId, "order.order.cancel")
+	durable := "synthetic-go-funded-withdrawal-" + strings.ReplaceAll(subject, ".", "_")
+	consumer, err := s.js.Consumer(ctx, "SYNTHETIC_ORDERS", durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := consumer.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Delivered.Consumer != delivery || state.AckFloor.Consumer != 0 || state.NumAckPending != 1 {
+		t.Fatalf("withdrawal durable after process exit: deliveries=%d (want %d), ACK floor=%d, pending=%d", state.Delivered.Consumer, delivery, state.AckFloor.Consumer, state.NumAckPending)
+	}
 }

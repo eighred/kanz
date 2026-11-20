@@ -164,7 +164,7 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 	if r, e := observe(ctx, dispatch); e != nil || r.OK || r.Code != "WRITER_FENCED" {
 		t.Fatalf("retired adapter: %s %v", r.Code, e)
 	}
-	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "")
+	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, working, generation, goDSN, "", nil)
 	if sends.Load() != 1 || queries.Load() != 2 {
 		t.Fatalf("expected one original Execute and one Query per writer, got %d/%d", sends.Load(), queries.Load())
 	}
@@ -177,29 +177,53 @@ func exerciseSyntheticGoHandback(t *testing.T, ctx context.Context, s syntheticS
 }
 
 func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, tenant, addr string, identity *testidentity.Source,
-	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, newWithdrawalEventID ...string,
+	working syntheticvenue.Receipt, generation int, goDSN, cancelEventID string, withdrawal *fundedWithdrawalApproval,
 ) {
 	t.Helper()
 	_, socket := testidentity.StartWorkload(t, identity)
-	var withdrawalEventID string
-	if len(newWithdrawalEventID) == 1 {
-		withdrawalEventID = newWithdrawalEventID[0]
+	args := map[string]any{"tenant": tenant, "endpoint": addr, "socket": socket, "broker": s.broker,
+		"state": working.State, "version": working.OrderVersion, "generation": generation, "cancelEventID": cancelEventID}
+	if withdrawal != nil {
+		args["withdrawalEventID"] = withdrawal.event.EventId
 	}
-	input, err := json.Marshal(map[string]any{"tenant": tenant, "endpoint": addr, "socket": socket, "broker": s.broker,
-		"state": working.State, "version": working.OrderVersion, "generation": generation, "cancelEventID": cancelEventID, "withdrawalEventID": withdrawalEventID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	child := exec.CommandContext(ctx, "/fixture/oms", "-test.run=^TestSyntheticRecoveredGoStartup$", "-test.count=1", "-test.v")
-	child.Env = []string{"KANZ_SYNTHETIC_GO_HANDBACK=1", "SYNTHETIC_OMS_NEXT_RUNTIME_URL=" + goDSN}
-	child.Stdin = bytes.NewReader(input)
-	output, err := child.CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "--- PASS: TestSyntheticRecoveredGoStartup") {
-		t.Fatalf("Go startup sweep failed: %v: %s", err, output)
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if _, message, ok := strings.Cut(line, "GO_HANDBACK "); ok {
-			t.Log("GO_HANDBACK " + message)
+	run := func(stage string, wantExit int) {
+		t.Helper()
+		args["withdrawalStage"] = stage
+		input, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := exec.CommandContext(ctx, "/fixture/oms", "-test.run=^TestSyntheticRecoveredGoStartup$", "-test.count=1", "-test.v")
+		child.Env = []string{"KANZ_SYNTHETIC_GO_HANDBACK=1", "SYNTHETIC_OMS_NEXT_RUNTIME_URL=" + goDSN}
+		child.Stdin = bytes.NewReader(input)
+		output, err := child.CombinedOutput()
+		if wantExit != 0 {
+			var exited *exec.ExitError
+			if !errors.As(err, &exited) || exited.ExitCode() != wantExit {
+				t.Fatalf("Go withdrawal %s expected process exit %d: %v: %s", stage, wantExit, err, output)
+			}
+			t.Logf("GO_HANDBACK withdrawal %s process exited %d", stage, wantExit)
+		} else if err != nil || !strings.Contains(string(output), "--- PASS: TestSyntheticRecoveredGoStartup") {
+			t.Fatalf("Go startup sweep failed: %v: %s", err, output)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if _, message, ok := strings.Cut(line, "GO_HANDBACK "); ok {
+				t.Log("GO_HANDBACK " + message)
+			}
 		}
 	}
+	if withdrawal == nil || !withdrawal.restart {
+		run("", 0)
+		return
+	}
+	run("send", 71)
+	if err := withdrawal.checkClaim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	withdrawal.verifyRemoteAfterCrash(t, ctx)
+	withdrawal.verifyBrokerBeforePublish(t, ctx, s, 1)
+	run("reconcile", 72)
+	withdrawal.verifyTerminal(t, ctx, []string{"order.order.cancelled"})
+	withdrawal.verifyBrokerBeforePublish(t, ctx, s, 2)
+	run("publish", 0)
 }
