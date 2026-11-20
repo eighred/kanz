@@ -44,6 +44,11 @@ function recordedLabel(result: Extract<DatedCustodyResult, { state: 'recorded' }
   return outcomes[result.outcome]
 }
 const states = { not_compared: 'No comparison recorded', pending: 'Statement awaiting comparison', unknown: 'Result unknown' }
+const pendingLabels = {
+  journal_changed: 'Journal changes awaiting comparison',
+  assignment_changed: 'Custody account assignment changed since comparison',
+  assignment_unproven: 'Awaiting comparison with a verified custody account assignment',
+}
 </script>
 
 <template>
@@ -59,7 +64,7 @@ const states = { not_compared: 'No comparison recorded', pending: 'Statement awa
     <p v-if="error" role="alert">{{ error }}</p>
     <output v-if="result" :data-state="result.state">
       <span v-if="savedRun">Historical comparison · </span>
-      <strong>{{ result.state === 'recorded' ? recordedLabel(result) : result.reason === 'journal_changed' ? 'Journal changes awaiting comparison' : states[result.state] }}</strong>
+      <strong>{{ result.state === 'recorded' ? recordedLabel(result) : result.reason ? pendingLabels[result.reason] : states[result.state] }}</strong>
       <strong v-if="result.state === 'recorded' && result.historical?.execution_quantities?.differences.length"> · Execution quantity differences found</strong>
       · {{ result.portfolio_id }} · {{ result.custodian_id }} · {{ result.business_date }}
       <span v-if="result.statement_id"> · Statement <code>{{ result.statement_id }}</code></span>

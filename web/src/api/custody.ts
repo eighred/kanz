@@ -92,8 +92,14 @@ function retainedBreak(value: unknown): RetainedBreak {
   return { break_id, kind, key, values_state, ibor, custodian, difference }
 }
 
+const pendingReasons = ['journal_changed', 'assignment_changed', 'assignment_unproven'] as const
+type PendingReason = typeof pendingReasons[number]
+function isPendingReason(reason: unknown): reason is PendingReason {
+  return pendingReasons.some(candidate => candidate === reason)
+}
+
 export type DatedCustodyResult = CustodySubject & { tenant_id: string } & (
-  | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: 'journal_changed' }
+  | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: PendingReason }
   | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; account_assignment_verified?: true; transactions?: TransactionComparison; historical?: HistoricalComparison }
 )
 
@@ -119,7 +125,8 @@ export const custody = {
     const invalid = () => new Error('Dated result could not be verified.')
     if (!nonempty(tenant) || !result || result.tenant_id !== tenant || result.portfolio_id !== subject.portfolio_id || result.custodian_id !== subject.custodian_id ||
         result.business_date !== subject.business_date || (result.statement_id !== undefined && !nonempty(result.statement_id))) throw invalid()
-    if (result.reason !== undefined && (result.state !== 'pending' || result.reason !== 'journal_changed')) throw invalid()
+    const reason = result.reason
+    if (reason !== undefined && (result.state !== 'pending' || !isPendingReason(reason))) throw invalid()
     const scope = { tenant_id: tenant, portfolio_id: subject.portfolio_id, custodian_id: subject.custodian_id, business_date: subject.business_date }
     const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
     const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
@@ -171,7 +178,7 @@ export const custody = {
         (result.state === 'pending' && !result.statement_id) || (result.state === 'unknown' && result.statement_id !== undefined) ||
         ['run_id', 'outcome', 'completed_at', 'scope_mode', 'journal_position'].some(key => result[key] !== undefined)) throw invalid()
     return { ...scope, state: result.state as 'not_compared' | 'pending' | 'unknown',
-      statement_id: result.statement_id as string | undefined, reason: result.reason as 'journal_changed' | undefined }
+      statement_id: result.statement_id as string | undefined, reason }
   },
   async queue(signal?: AbortSignal): Promise<{ breaks: CustodyBreak[]; rerunActor?: string }> {
     const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown; rerun_enabled?: unknown }>('/api/v1/custody/breaks', { signal })

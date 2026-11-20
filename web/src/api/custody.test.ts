@@ -8,6 +8,18 @@ afterEach(() => vi.restoreAllMocks())
 const item = { break_id: 'break-1', kind: 'quantity', key: 'BTC-USD', ibor: '1.00000001', custodian: '1', difference: '0.00000001', status: 'OPEN', first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-02T00:00:00Z', status_changed_at: '2026-01-01T00:00:00Z', age_seconds: 86400 }
 
 describe('custody response boundary', () => {
+  it('preserves the reason a trusted current comparison is pending', async () => {
+    const subject = { portfolio_id: 'PF1', custodian_id: 'CUST-A', business_date: '2020-02-04' }
+    const pending = { ...subject, tenant_id: 'tenant', statement_id: 's', state: 'pending' }
+    const get = vi.spyOn(api, 'get')
+    for (const reason of ['assignment_changed', 'assignment_unproven', 'journal_changed']) {
+      get.mockResolvedValueOnce({ ...pending, reason })
+      await expect(custody.dated(subject, 'tenant')).resolves.toMatchObject({ state: 'pending', reason })
+    }
+    get.mockResolvedValueOnce({ ...pending, reason: 'unknown_reason' })
+    await expect(custody.dated(subject, 'tenant')).rejects.toThrow('Dated result could not be verified.')
+  })
+
   const detection = { run_id: 'run-1', statement_id: 'source-r1', business_date: '2020-02-04', journal_position: '9007199254740993', scope_mode: 'declared' }
   const scoped = { ...item, portfolio_id: 'PF1', custodian_id: 'CUST-A', detection }
   it('preserves the exact retained source and optional fields', async () => {
