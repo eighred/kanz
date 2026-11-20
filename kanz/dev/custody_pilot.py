@@ -517,9 +517,8 @@ def verify_physical_recovery(docker, binaries, node, env, directory):
         )}
         if cut != dict(expected, phase="source"):
             raise RuntimeError("Recovery target does not identify the observed source close.")
-        metadata = directory / "restore.json"
-        metadata.write_text(json.dumps(dict(expected, phase="restored", future_run=source["run_id"],
-                                            future_statement=source["statement_id"])), encoding="utf-8")
+        metadata = json.dumps(dict(expected, phase="restored", future_run=source["run_id"],
+                                   future_statement=source["statement_id"])).encode("utf-8")
         # The primary has been removed. Only the restored cluster can answer.
         _, endpoint = pitr.restore()
         if not re.fullmatch(r"127\.0\.0\.1:[1-9]\d{0,4}", endpoint) or int(endpoint.split(":")[1]) > 65535:
@@ -530,12 +529,12 @@ def verify_physical_recovery(docker, binaries, node, env, directory):
         after_file = directory / "after-recovery.json"
         read_env.update(
             TEST_POSTGRES_URL=f"{credential}@{endpoint}/{DATABASE}?sslmode=disable",
-            CUSTODY_PILOT_PITR_METADATA=str(metadata),
+            CUSTODY_PILOT_PITR_READBACK="1",
             CUSTODY_PILOT_RETAINED_DOWNLOADS=str(after_file),
         )
         proof = subprocess.run(
             [binaries["accounting"], "-test.run=^TestSignedCustodyPITRReadback$", "-test.v", "-test.count=1"],
-            cwd=CMD, env=read_env, capture_output=True, timeout=75,
+            cwd=CMD, env=read_env, input=metadata, capture_output=True, timeout=75,
         )
         if (proof.returncode or b"--- SKIP" in proof.stdout
                 or b"--- PASS: TestSignedCustodyPITRReadback" not in proof.stdout):

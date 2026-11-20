@@ -12,8 +12,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
@@ -21,21 +24,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() int {
 	kind := flag.String("kind", "", "venue_identity or custody_assignment")
 	evidence := flag.String("evidence", "", "signed JSON file")
 	signature := flag.String("signature", "", "detached raw Ed25519 signature file")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		flag.Usage()
-		os.Exit(2)
+		return 2
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	signals, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	fatal := lifecycle.NewFatal(stop)
+	ctx, cancel := context.WithTimeout(signals, 30*time.Second)
 	defer cancel()
-	if err := run(ctx, *kind, *evidence, *signature); err != nil {
+	if err := importSignedEvidence(ctx, *kind, *evidence, *signature); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fatal.Raise(err)
 	}
+	return fatal.Code()
 }
 
 func readBounded(path string, limit int64) ([]byte, error) {
@@ -55,7 +64,7 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-func run(ctx context.Context, kind, evidenceFile, signatureFile string) error {
+func importSignedEvidence(ctx context.Context, kind, evidenceFile, signatureFile string) error {
 	raw, err := readBounded(evidenceFile, custody.AccountEvidenceLimit)
 	if err != nil {
 		return err

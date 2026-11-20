@@ -54,7 +54,7 @@ func TestIntegerContractActualUnsafeRepresentationsFail(t *testing.T) {
 		{"unsigned mandate document", "web/src/api/mandates.ts", "version: string", "version: number", "MandateDocument.version"},
 		{"unsigned mandate proposal", "web/src/api/mandates.ts", "version: string\n  rule_count", "version: number\n  rule_count", "ProposedMandateChange.version"},
 		{"signed account projection", "kanz/services/identity/internal/server/administration_json.go", "Revision     string", "Revision     int64", "Access.revision"},
-		{"signed JSON tag", "kanz/services/accounting/internal/server/custody.go", `json:"revision,string"`, `json:"revision"`, "breakView.revision"},
+		{"signed JSON tag", "kanz/services/accounting/internal/server/custody.go", `json:"revision,string,omitempty"`, `json:"revision,omitempty"`, "breakView.revision"},
 		{"unsigned JSON map", integerComplianceSource, "jsonUint64(m.GetVersion())", "m.GetVersion()", "handlePropose"},
 		{"unsigned JSON formatter", integerComplianceSource, "strconv.FormatUint(v, 10)", "v", "jsonUint64"},
 		{"bounded producer replaced", "kanz/services/accounting/internal/server/custody.go", "int64(b.Age(now).Seconds())", "now.UnixNano()", "CustodyBreak.age_seconds"},

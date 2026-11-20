@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -152,10 +151,7 @@ func TestManualHistoricalComparisonPreservesLaterWorkingSet(t *testing.T) {
 	}
 	statement := func(name string) *accountingpb.CustodianStatement {
 		t.Helper()
-		data, err := os.ReadFile(filepath.Join("../../cmd/custody_batch/testdata/execution_economics", name+".json"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		data := readExecutionEconomicsFixture(t, name+".json")
 		var fixture signedBatch
 		if err := json.Unmarshal(data, &fixture); err != nil {
 			t.Fatal(err)

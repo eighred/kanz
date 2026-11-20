@@ -94,7 +94,7 @@ func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, beforeI
 		for attempt := 0; attempt < 2; attempt++ {
 			if processes {
 				runPilotImporter(t, ctx, source, broker.address, policy, batch, sig)
-			} else if err := run(ctx, policy, batch, sig); err != nil {
+			} else if err := importBatch(ctx, policy, batch, sig); err != nil {
 				t.Fatalf("revision %d attempt %d: %v", file.revision, attempt+1, err)
 			}
 		}

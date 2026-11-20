@@ -23,6 +23,31 @@ func TestCustodyRunBusinessDateOrdering(t *testing.T) {
 	})
 }
 
+func TestMemoryCustodyLegacyVerificationStillOwnsItsBusinessDate(t *testing.T) {
+	st := NewMemoryStore()
+	ctx := testRunContext(t.Context())
+	first := Run{RunID: "legacy-newer", Subject: subject(), Outcome: OutcomeClean, CompletedAt: t0, Tolerance: new(big.Rat)}
+	first.Subject.BusinessDate = first.Subject.BusinessDate.AddDate(0, 0, 2)
+	older := first
+	older.RunID, older.Subject.BusinessDate = "legacy-older", first.Subject.BusinessDate.AddDate(0, 0, -1)
+	missing := first
+	missing.RunID, missing.Outcome = "legacy-missing", OutcomeNoStatement
+	missing.Subject.BusinessDate = first.Subject.BusinessDate.AddDate(0, 0, 1)
+	for _, r := range []Run{first, older, missing} {
+		if err := st.SaveRun(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	older.RunID = "fresh-older"
+	if _, err := st.CommitRun(ctx, older); !errors.Is(err, ErrHistoricalLifecycle) || st.outbox.PendingCount() != 0 {
+		t.Fatalf("legacy verification lost authority over an older run: %v", err)
+	}
+	first.RunID = "fresh-same-day"
+	if _, err := st.CommitRun(ctx, first); err != nil || st.outbox.PendingCount() != 1 {
+		t.Fatalf("missing statement advanced the last verified date: %v", err)
+	}
+}
+
 func checkCustodyRunDates(t *testing.T, st Store, ctx context.Context) {
 	t.Helper()
 	commit := func(run Run) Run {
