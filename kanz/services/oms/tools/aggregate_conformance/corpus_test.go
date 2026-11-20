@@ -19,9 +19,19 @@ func decimal(c int64, e int32) *commonpb.Decimal {
 func unknown(n protowire.Number) []byte {
 	return protowire.AppendBytes(protowire.AppendTag(nil, n, protowire.BytesType), []byte("retained-unknown"))
 }
+
+const futureField protowire.Number = 50_000
+
 func baseState() *orderpb.OrderState {
 	s := &orderpb.OrderState{OrderId: "order", PortfolioId: "portfolio", InstrumentId: "BTC/USD", Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTC, OrderedQuantity: decimal(10, 0), FilledQuantity: decimal(0, 0), LeavesQuantity: decimal(10, 0), LimitPrice: decimal(123, -2), AverageFillPrice: decimal(17, -1), ExpireAt: timestamppb.New(eventTime.Add(time.Hour)), StopPrice: decimal(122, -2), Status: orderpb.OrderStatus_ORDER_STATUS_ROUTED, Venue: "fixture", VenueAccountId: "account", ParentOrderId: "parent", AsOf: timestamppb.New(eventTime.Add(-1)), ArrivalPrice: decimal(99, 0), ArrivalAt: timestamppb.New(eventTime), ReleasePrice: decimal(101, 0), ReleaseBid: decimal(100, 0), ReleaseAsk: decimal(102, 0), ReleaseAt: timestamppb.New(eventTime), Leverage: decimal(2, 0), MarginMode: 2, VenueAckAt: timestamppb.New(eventTime), Quarantine: &orderpb.OrderQuarantine{Reason: "retained", At: timestamppb.New(eventTime)}, AcceptedAnnouncedAt: timestamppb.New(eventTime), CancelAnnouncedAt: timestamppb.New(eventTime), OutcomeAnnouncedAt: timestamppb.New(eventTime), ExecutionSchedule: &orderpb.ExecutionSchedule{Algo: 1, SliceCount: 2, WindowStart: timestamppb.New(eventTime), WindowEnd: timestamppb.New(eventTime.Add(1000000000))}}
-	s.ProtoReflect().SetUnknown(append(unknown(501), unknown(33)...))
+	s.CancellationRequest = &orderpb.OrderCancellationRequest{
+		Command:       &orderpb.CancelOrder{OrderId: s.OrderId},
+		RequestedAt:   timestamppb.New(eventTime),
+		CorrelationId: "root",
+		CausationId:   "cancel",
+	}
+	s.ProtoReflect().SetUnknown(append(unknown(501), unknown(futureField)...))
+	s.CancellationRequest.ProtoReflect().SetUnknown(unknown(futureField))
 	s.LimitPrice.ProtoReflect().SetUnknown(unknown(502))
 	s.AverageFillPrice.ProtoReflect().SetUnknown(unknown(505))
 	s.ExpireAt.ProtoReflect().SetUnknown(unknown(506))

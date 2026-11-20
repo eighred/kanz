@@ -277,11 +277,25 @@ func TestRustOrderAggregateRefusesMalformedWire(t *testing.T) {
 }
 
 func TestAggregateCanonicalBoundary(t *testing.T) {
-	if baseState().ProtoReflect().Descriptor().Fields().ByNumber(33) != nil {
-		t.Fatal("field33 is no longer unknown; qualify the newly authoritative cancellation contract explicitly")
+	state := baseState()
+	fields := state.ProtoReflect().Descriptor().Fields()
+	cancel := fields.ByNumber(33)
+	if cancel == nil || cancel.Name() != "cancellation_request" || cancel.Message() == nil ||
+		cancel.Message().FullName() != "order.v1.OrderCancellationRequest" {
+		t.Fatal("OrderState field 33 must carry typed cancellation evidence")
 	}
-	if len(baseState().ProtoReflect().GetUnknown()) == 0 {
-		t.Fatal("unknown preservation fixture absent")
+	if fields.ByNumber(futureField) != nil || cancel.Message().Fields().ByNumber(futureField) != nil {
+		t.Fatalf("future tag %d is now declared; update the unknown-field fixture", futureField)
+	}
+	decoded := read(wire(state), &orderpb.OrderState{})
+	request := decoded.GetCancellationRequest()
+	if request == nil || request.GetCommand().GetOrderId() != state.OrderId ||
+		!request.GetRequestedAt().AsTime().Equal(eventTime) || request.CorrelationId != "root" || request.CausationId != "cancel" {
+		t.Fatal("typed cancellation evidence changed on the wire")
+	}
+	if !bytes.Equal(decoded.ProtoReflect().GetUnknown(), append(unknown(501), unknown(futureField)...)) ||
+		!bytes.Equal(request.ProtoReflect().GetUnknown(), unknown(futureField)) {
+		t.Fatal("root or nested future bytes changed on the wire")
 	}
 }
 func TestRustOrderAggregateBoundedRefusals(t *testing.T) {
