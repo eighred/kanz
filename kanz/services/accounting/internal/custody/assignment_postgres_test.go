@@ -204,3 +204,17 @@ func TestDeclaredAccountIsProvenByDatedIndependentAuthorities(t *testing.T) {
 		t.Fatal("fixture required journal entries", rows, err)
 	}
 }
+
+func TestDeclaredAccountIsProvenOnlyOnIntersectionOfEffectiveWindows(t *testing.T) {
+	day := BusinessDay(t0)
+	for offset := -2; offset <= 2; offset++ {
+		got := coveredAssignmentDay(day.AddDate(0, 0, offset), day, day.AddDate(0, 0, 1), day.AddDate(-1, 0, 0), day.AddDate(1, 0, 0))
+		if got != (offset == 0) {
+			t.Fatal("one-day venue identity within annual custody approval", offset, got)
+		}
+		got = coveredAssignmentDay(day.AddDate(0, 0, offset), day.AddDate(-1, 0, 0), day.AddDate(1, 0, 0), day, day.AddDate(0, 0, 1))
+		if got != (offset == 0) {
+			t.Fatal("one-day approval within annual venue identity", offset, got)
+		}
+	}
+}
