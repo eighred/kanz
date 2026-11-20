@@ -61,13 +61,19 @@ func (run *Run) confirmStatement(current Statement, err error) error {
 	}
 	prior := run.compared
 	run.compared = nil
-	if current.StatementID != prior.StatementID || !current.ReceivedAt.Equal(prior.ReceivedAt) ||
-		current.Grain != prior.Grain || !maps.EqualFunc(current.Positions, prior.Positions, equalFigure) ||
-		!maps.EqualFunc(current.Cash, prior.Cash, equalFigure) ||
-		!slices.EqualFunc(current.Transactions, prior.Transactions, equalTransaction) {
+	if !sameComparison(current, *prior) {
 		return ErrStatementChanged
 	}
 	return nil
+}
+
+func sameComparison(current, prior Statement) bool {
+	return current.StatementID == prior.StatementID && current.PortfolioID == prior.PortfolioID &&
+		current.CustodianID == prior.CustodianID && current.BusinessDate.Equal(prior.BusinessDate) &&
+		current.ReceivedAt.Equal(prior.ReceivedAt) && current.Grain == prior.Grain &&
+		maps.EqualFunc(current.Positions, prior.Positions, equalFigure) &&
+		maps.EqualFunc(current.Cash, prior.Cash, equalFigure) &&
+		slices.EqualFunc(current.Transactions, prior.Transactions, equalTransaction)
 }
 
 func equalFigure(a, b *big.Rat) bool {
@@ -209,10 +215,10 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	if !locked {
 		return Run{}, ErrRunBusy
 	}
+	if run.RequestID != "" && bus.TenantIDFromContext(ctx) != tenant {
+		return Run{}, ErrInvalidManualRequest
+	}
 	if incoming := bus.TenantIDFromContext(ctx); incoming != "" {
-		if run.RequestID != "" && incoming != tenant {
-			return Run{}, ErrInvalidManualRequest
-		}
 		if err := bus.RequireTenantScope(incoming, tenant); err != nil {
 			return Run{}, err
 		}
@@ -253,6 +259,11 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	// Existing store operations open SAVEPOINTs on this handle. Their local
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
+	if run.RequestID != "" && (verifying(run) || run.observedMissing) {
+		if err := confirmManualIntake(ctx, tx, run); err != nil {
+			return Run{}, err
+		}
+	}
 	if run.observedMissing {
 		_, err := staged.LatestStatement(ctx, run.Subject)
 		if err == nil {
@@ -287,6 +298,11 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			}
 			if newer {
 				return Run{}, ErrBookBasisChanged
+			}
+		}
+		if run.RequestID != "" {
+			if err := confirmManualStatement(ctx, tx, run); err != nil {
+				return Run{}, err
 			}
 		}
 		if run.compared != nil {

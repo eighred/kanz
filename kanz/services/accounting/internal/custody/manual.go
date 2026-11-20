@@ -29,17 +29,23 @@ func (r *Reconciler) ReconcileManual(ctx context.Context, subject Subject, reque
 	}
 	request := Run{RunID: "manual:" + requestID, RequestID: requestID, Actor: actor, Subject: subject}
 	prior, err := r.store.ManualReceipt(ctx, request)
-	if errors.Is(err, ErrNoRun) {
-		prior, err = r.reconcile(ctx, request)
-	} else if err == nil {
+	switch {
+	case errors.Is(err, ErrNoRun):
+		prior, err = r.reconcile(ctx, request, subject)
+	case err != nil:
+		return Run{}, err
+	default:
 		err = r.publish(ctx, prior)
 	}
 	if prior.RunID == "" || errors.Is(err, ErrPublicationPending) {
 		return prior, err
 	}
 	if prior.Outcome == OutcomeFailed {
-		if prior.FailureReason == ErrHistoricalLifecycle.Error() {
+		switch prior.FailureReason {
+		case ErrHistoricalLifecycle.Error():
 			return prior, ErrHistoricalLifecycle
+		case errBatchReceipt.Error():
+			return prior, errBatchReceipt
 		}
 		return prior, errors.New(prior.FailureReason)
 	}
