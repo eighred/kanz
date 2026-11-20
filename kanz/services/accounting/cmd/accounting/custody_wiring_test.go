@@ -83,11 +83,12 @@ func baseCfg() config.Config {
 func buildPlane(t *testing.T, cfg config.Config, h *capturingHandler) (*custodyPlane, error) {
 	t.Helper()
 	logger := slog.New(h)
-	cc, err := buildCustodyConfig(cfg)
+	store := custody.NewMemoryStore()
+	cc, err := admittedCustodyConfig(custodyRunContext(t.Context(), cfg.Tenant), cfg, store, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	return buildCustodyPlane(cfg, cc, nil, custody.NewMemoryStore(), ledger.NewMemoryStore(), noopPublisher{}, prometheus.NewRegistry(), logger)
+	return buildCustodyPlane(cfg, cc, nil, store, ledger.NewMemoryStore(), noopPublisher{}, prometheus.NewRegistry(), logger)
 }
 
 // THE WIRING ASSEMBLES AND THE SCHEDULER EXISTS. A plane that builds without a

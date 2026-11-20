@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +52,25 @@ func TestAdmittedBookUsesDatedIndependentVersionsForAllDeclaredAccounts(t *testi
 		t.Fatalf("dated book proof without prior trades: basis=%+v dates=%v err=%v", basis, observed, err)
 	}
 	refuse = true
-	if book, _, basis, err := load(ctx, subject); book != nil || basis != nil || !errors.Is(err, ErrUnprovenAssignment) || err.Error() == "private reader error" {
+	if book, _, basis, err := load(ctx, subject); book != nil || basis != nil || !errors.Is(err, ErrUnprovenAssignment) || strings.Contains(err.Error(), "private reader error") {
 		t.Fatalf("runtime accepted old boot proof: %+v %+v %v", book, basis, err)
+	}
+	store := NewMemoryStore()
+	if err := store.SaveStatement(ctx, Statement{PortfolioID: subject.PortfolioID, CustodianID: subject.CustodianID, BusinessDate: oldDay, StatementID: "source-row", ReceivedAt: oldDay}); err != nil {
+		t.Fatal(err)
+	}
+	clock := func() time.Time { return oldDay.AddDate(0, 0, 1) }
+	r, err := NewReconciler(store, load, nil, nil, nil, testLogger(), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := NewScheduler(r, SchedulerConfig{Pairs: []Subject{subject}, Interval: time.Minute, LagDays: 1}, testLogger(), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler.Tick(ctx)
+	run, err := store.LatestRun(ctx, subject.PortfolioID, subject.CustodianID)
+	if err != nil || run.Outcome != OutcomeFailed || run.Basis != nil || !run.Subject.BusinessDate.Equal(oldDay) || len(run.Breaks) != 0 {
+		t.Fatalf("scheduled comparison with unavailable approval: %+v %v", run, err)
 	}
 }
