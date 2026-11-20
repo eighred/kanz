@@ -444,6 +444,15 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 			t.Fatalf("prior/saved independent receipt: %s %s %+v %v", want.RunID, want.Outcome, saved, err)
 		}
 	}
+	// A scheduler retry after outbox pruning retrieves the same authoritative
+	// completion; it does not publish a new historical failure for this close.
+	repeated, err := r.Reconcile(ctx, sub)
+	if err != nil || repeated.RunID != receipt.RunID || repeated.Outcome != OutcomeHistoricalQuantityCorrection {
+		t.Fatal("scheduled correction retry", repeated, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE tenant_id=app_current_tenant()").Scan(&count); err != nil || count != 0 {
+		t.Fatal("scheduled replay enqueued another completion", count, err)
+	}
 	current, err := restart.DatedResult(ctx, sub)
 	if err != nil || current.State != "pending" || current.HistoricalQuantityCorrectionRunID != receipt.RunID {
 		t.Fatalf("current historical discovery: %+v %v", current, err)
