@@ -31,6 +31,7 @@ import (
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/numerics"
 )
 
 // DefaultConfidence is the VaR confidence level — 99% one-day, matching the
@@ -155,14 +156,19 @@ func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsPr
 	if !ok {
 		return nil, 0, false
 	}
-	pnl = make([]float64, len(panel.Intervals))
+	var initial numerics.Sum
+	daily := make([]numerics.Sum, len(panel.Intervals))
 	for i, row := range panel.Values {
-		v0 += values[i]
+		initial.Add(values[i])
 		for j, value := range row {
-			pnl[j] += values[i] * value
+			daily[j].Add(values[i] * value)
 		}
 	}
-	return pnl, v0, true
+	pnl = make([]float64, len(daily))
+	for j := range daily {
+		pnl[j] = daily[j].Value()
+	}
+	return pnl, initial.Value(), true
 }
 
 // zeroNamed is the zero-value measure for name — the MeasureFunc never-error

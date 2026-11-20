@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -12,16 +13,87 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/state"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	factorpb "github.com/eighred/kanz/kanz-schemas-go/factor/v1"
 	inferencepb "github.com/eighred/kanz/kanz-schemas-go/inference/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/risk_engine/internal/app"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type hedgeModel struct{ model *factormodel.Model }
+
+func (h hedgeModel) Model(context.Context, time.Time) (*factormodel.Model, bool) {
+	return h.model, true
+}
+
+func hedgedFeatureBook(t *testing.T, portfolio string, at time.Time) (*domain.Portfolio, *compute.Registry) {
+	t.Helper()
+	ts := timestamppb.New(at)
+	snapshot := &factorpb.FactorModelSnapshot{
+		Model:           &factorpb.FactorModel{ModelId: "unit", AsOf: ts, Factors: []*factorpb.Factor{{Name: "F", Type: factorpb.FactorType_FACTOR_TYPE_STATISTICAL}}},
+		Covariance:      &factorpb.FactorCovariance{ModelId: "unit", AsOf: ts, Dimension: 1, Values: []float64{1}},
+		InputProvenance: map[string]string{"input_digest": "unit-fixture"},
+	}
+	p := domain.NewPortfolio(v1.PortfolioID(portfolio), "USD")
+	prices := store.NewMemory()
+	for _, pos := range []domain.Position{
+		{InstrumentID: "A", MarketValue: money(1<<49, "USD")},
+		{InstrumentID: "B", MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 2, Exponent: -2}}},
+		{InstrumentID: "C", MarketValue: money(-(1 << 49), "USD")},
+	} {
+		pos.AsOf = at
+		p.SetPosition(pos)
+		id := string(pos.InstrumentID)
+		snapshot.Exposures = append(snapshot.Exposures, &factorpb.FactorExposure{ModelId: "unit", AsOf: ts, InstrumentId: id, Loadings: []float64{1}})
+		for i, close := range []int64{100, 50, 25} {
+			date := at.AddDate(0, 0, i-2)
+			if err := prices.Put(t.Context(), []store.Observation{{InstrumentID: id, ObservationTime: date, KnowledgeTime: date, Kind: store.PriceKindClose, CurrencyCode: "USD", Price: &commonpb.Decimal{Coefficient: close}}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	m, err := factormodel.FromSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := compute.DefaultRegistry()
+	compute.RegisterFactorRisk(t.Context(), reg, compute.FactorProviders{Model: hedgeModel{m}})
+	varmodel.Register(t.Context(), reg, returns.NewStoreReturnsProvider(prices, returns.ReturnsConfig{Method: returns.ReturnSimple}), varmodel.Config{})
+	return p, reg
+}
+
+func TestHedgedFeatureUsesCoveredHistoricalLoss(t *testing.T) {
+	at := time.Date(2026, 2, 10, 0, 0, 0, 0, time.UTC)
+	p, reg := hedgedFeatureBook(t, "hedge", at)
+	names := []v1.MeasureName{compute.MeasureGrossExposure, compute.MeasureVaR99, compute.MeasureFactorVaR99}
+	ms := compute.ComputeMeasuresContext(t.Context(), p, reg, names)
+	// Unit factor volatility on the two-cent net exposure gives a 99% normal
+	// VaR of five cents (rounded). Both observed daily losses were one cent.
+	factor, ok := ms.Lookup(compute.MeasureFactorVaR99)
+	if !ok || factor.Coverage.Contributed != 3 || factor.Coverage.ExcludedCount != 0 || !proto.Equal(factor.Value, &commonpb.Decimal{Coefficient: 5, Exponent: -2}) {
+		t.Fatalf("factor scalar on complete hedge: %+v", factor)
+	}
+	fv := publishedPortfolioRisk(t, ms)
+	if fv == nil || fv.FeatureSetRef != "portfolio-risk:1" || len(fv.Values) != 2 || fv.Values["GrossExposure"].GetScalar() != 1<<50 || fv.Values["VaR99"].GetScalar() != .01 {
+		t.Fatalf("wrong historical inputs for hedged book: %v", fv)
+	}
+	p.SetPosition(domain.Position{InstrumentID: "B", MarketValue: &commonpb.Money{CurrencyCode: "USD"}, AsOf: at.Add(time.Second)})
+	ms = compute.ComputeMeasuresContext(t.Context(), p, reg, names)
+	factor, ok = ms.Lookup(compute.MeasureFactorVaR99)
+	wantExclusions := []v1.InputExclusion{{InstrumentID: "B", Reason: compute.SkipNoMarketValue}, {Reason: "excluded_exposure_unrepresentable"}}
+	if !ok || factor.Coverage.Contributed != 2 || factor.Coverage.ExcludedCount != len(wantExclusions) || !slices.Equal(factor.Coverage.Exclusions, wantExclusions) || factor.Provenance.ExcludedGross != nil {
+		t.Fatalf("unvalued holding counted as factor coverage: %+v", factor)
+	}
+	if got := publishedPortfolioRisk(t, ms); got != nil {
+		t.Fatalf("unvalued holding published a feature: %v", got)
+	}
+}
 
 func publishedPortfolioRisk(t *testing.T, ms *domain.MeasureSet) *inferencepb.FeatureVector {
 	t.Helper()

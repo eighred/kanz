@@ -31,6 +31,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/eighred/kanz/internal/risk/numerics"
 )
 
 // FactorType is the category a factor belongs to — the dimension a risk report
@@ -191,7 +193,7 @@ func (m *Model) Loading(id string) ([]float64, bool) {
 func (m *Model) FactorExposures(values map[string]float64) []float64 {
 	k := len(m.Factors)
 	e := make([]float64, k)
-	correction := make([]float64, k)
+	sums := make([]numerics.Sum, k)
 	for i, id := range m.Instruments {
 		v, ok := values[id]
 		if !ok {
@@ -199,20 +201,11 @@ func (m *Model) FactorExposures(values map[string]float64) []float64 {
 		}
 		row := m.Loadings[i]
 		for f := 0; f < k; f++ {
-			// Neumaier summation retains a small holding when the large
-			// long and short factor exposures on either side cancel.
-			term := v * row[f]
-			sum := e[f] + term
-			if math.Abs(e[f]) >= math.Abs(term) {
-				correction[f] += (e[f] - sum) + term
-			} else {
-				correction[f] += (term - sum) + e[f]
-			}
-			e[f] = sum
+			sums[f].Add(v * row[f])
 		}
 	}
 	for f := range e {
-		e[f] += correction[f]
+		e[f] = sums[f].Value()
 	}
 	return e
 }

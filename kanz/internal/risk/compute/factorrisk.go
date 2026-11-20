@@ -270,6 +270,13 @@ func factorValues(p *domain.Portfolio, model *factormodel.Model, providers Facto
 			continue
 		}
 		id := string(pos.InstrumentID)
+		value, valued := decutil.Float64(pos.MarketValue.GetAmount())
+		if !valued {
+			skipFactor(providers, id, SkipNoMarketValue)
+			cov.Exclude(pos.InstrumentID, SkipNoMarketValue)
+			excluded.Add(pos.MarketValue.GetAmount())
+			continue
+		}
 		// Loading is the membership oracle deliberately: it consults the same
 		// id→row index FactorExposures does, so this cannot report coverage the
 		// arithmetic disagrees with. The returned copy is discarded — a K-float
@@ -281,7 +288,7 @@ func factorValues(p *domain.Portfolio, model *factormodel.Model, providers Facto
 		} else {
 			cov.Contributed++
 		}
-		values[id] = decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
+		values[id] = value
 	}
 	prov.ExcludedGross = excluded.Result(cov)
 	return values
