@@ -111,13 +111,7 @@ func TestEveryMeasureCarriesItsCoverage(t *testing.T) {
 // Placeholder provenance and OMS refusal are separately tested in compute's
 // provenance_test.go and services/oms/internal/riskview/placeholder_test.go.
 var bareMeasureExempt = map[string]string{
-	// NO PROVIDER, SO NOTHING TO EXCLUDE. These read the portfolio directly; a
-	// zero from them is arithmetic over the whole book and is always a claim the
-	// engine can stand behind. Currency exclusions ride on the SET (#257), not on
-	// the measure.
-	"GrossExposure": "reads domain.Portfolio directly — no provider can decline",
-	"NetExposure":   "reads domain.Portfolio directly — no provider can decline",
-	"VaR99":         "the 1%-of-gross placeholder; arithmetic over the book, no provider",
+	"NetExposure": "reads domain.Portfolio directly — no provider can decline",
 	// CORRECTED (#1055). This entry used to read "the net-exposure placeholder
 	// RegisterGreeks overwrites", and the premise was false in every deployment:
 	// RegisterGreeks has no production caller anywhere in the estate — it needs a

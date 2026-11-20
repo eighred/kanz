@@ -129,7 +129,8 @@ func TestRecomputedHedgeFeatureOnJetStream(t *testing.T) {
 			if fv.SubjectId != id {
 				continue
 			}
-			if env.GetSource() != "risk-engine" || env.GetTenantId() != "acme" || fv.FeatureSetRef != "portfolio-risk:1" || !fv.AsOf.AsTime().Equal(at.Add(expected.offset)) || len(fv.Values) != 2 || fv.Values["GrossExposure"].GetScalar() != 1<<50 || fv.Values["VaR99"] == nil || fv.Values["VaR99"].GetScalar() != expected.loss {
+			want := expectedHedgeFeature(id, at.Add(expected.offset), expected.loss)
+			if env.GetSource() != "risk-engine" || env.GetTenantId() != "acme" || !proto.Equal(&fv, want) {
 				t.Fatalf("incorrect persisted hedge feature: %v", &fv)
 			}
 			break

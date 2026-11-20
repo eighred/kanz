@@ -68,6 +68,16 @@ func hedgedFeatureBook(t *testing.T, portfolio string, at time.Time) (*domain.Po
 	return p, reg
 }
 
+func expectedHedgeFeature(id string, at time.Time, loss float64) *inferencepb.FeatureVector {
+	return &inferencepb.FeatureVector{
+		SubjectId: id, FeatureSetRef: "portfolio-risk:1", AsOf: timestamppb.New(at),
+		Values: map[string]*inferencepb.FeatureValue{
+			"GrossExposure": {Value: &inferencepb.FeatureValue_Scalar{Scalar: 1 << 50}},
+			"VaR99":         {Value: &inferencepb.FeatureValue_Scalar{Scalar: loss}},
+		},
+	}
+}
+
 func TestHedgedFeatureUsesCoveredHistoricalLoss(t *testing.T) {
 	at := time.Date(2026, 2, 10, 0, 0, 0, 0, time.UTC)
 	p, reg := hedgedFeatureBook(t, "hedge", at)
@@ -80,7 +90,7 @@ func TestHedgedFeatureUsesCoveredHistoricalLoss(t *testing.T) {
 		t.Fatalf("factor scalar on complete hedge: %+v", factor)
 	}
 	fv := publishedPortfolioRisk(t, ms)
-	if fv == nil || fv.FeatureSetRef != "portfolio-risk:1" || len(fv.Values) != 2 || fv.Values["GrossExposure"].GetScalar() != 1<<50 || fv.Values["VaR99"].GetScalar() != .01 {
+	if !proto.Equal(fv, expectedHedgeFeature("hedge", at, .01)) {
 		t.Fatalf("wrong historical inputs for hedged book: %v", fv)
 	}
 	p.SetPosition(domain.Position{InstrumentID: "B", MarketValue: &commonpb.Money{CurrencyCode: "USD"}, AsOf: at.Add(time.Second)})
