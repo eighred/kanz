@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = "https://github.com/apache/arrow-rs-object-store.git"
 RELEASE = "7a65b75b0d26fd8a282999462cb7030fb85fdcc3"
 DURATION_CHANGE = "67985f7e58ee8246d9f2771e9f52665f97171869"
-BACKPORT_TREE = "ba3dd2c6c57ec4b3fd80f16d944ccfde557158f7"
+BACKPORT_TREE = "c91afce7acce0c87ca3147387ba2562a96120440"
 
 
 def git(directory, *args):

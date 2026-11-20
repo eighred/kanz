@@ -55,6 +55,7 @@ expected_store = {
     "local::checked_modified_tests::file_mtime_preserves_nanoseconds_or_returns_an_error",
     "aws::credential::tests::test_sign_with_signed_payload",
     "azure::client::tests::test_delegated_key_response",
+    "azure::credential::az_cli_date_format::tests::local_expiry_requires_one_known_instant",
     "gcp::credential::tests::test_canonicalize_headers",
 }
 for case in expected_store:

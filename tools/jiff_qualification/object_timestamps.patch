@@ -307,7 +307,7 @@ index 6f1ad23..35dbd57 100644
      pub content_length: u64,
      #[serde(rename = "Content-Type")]
 diff --git a/src/azure/credential.rs b/src/azure/credential.rs
-index 1fbb101..28bb1d3 100644
+index 1fbb101..6e1aa88 100644
 --- a/src/azure/credential.rs
 +++ b/src/azure/credential.rs
 @@ -26,13 +26,13 @@ use crate::util::hmac_sha256;
@@ -402,51 +402,83 @@ index 1fbb101..28bb1d3 100644
      delegation_key: &UserDelegationKey,
  ) -> (String, HashMap<&'static str, String>) {
      let (signed_resource, signed_permissions, signed_start, signed_expiry, canonicalized_resource) =
-@@ -837,23 +837,20 @@ impl TokenProvider for WorkloadIdentityOAuthProvider {
+@@ -837,23 +837,48 @@ impl TokenProvider for WorkloadIdentityOAuthProvider {
  }
 
  mod az_cli_date_format {
 -    use chrono::{DateTime, TimeZone};
++    use jiff::{Timestamp, tz::TimeZone};
      use serde::{self, Deserialize, Deserializer};
 
 -    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<chrono::Local>, D::Error>
-+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<jiff::ZonedDateTime, D::Error>
++    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Timestamp, D::Error>
      where
          D: Deserializer<'de>,
      {
-         let s = String::deserialize(deserializer)?;
-         // expiresOn from azure cli uses the local timezone
+-        let s = String::deserialize(deserializer)?;
+-        // expiresOn from azure cli uses the local timezone
 -        let date = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%6f")
-+        let date = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S.%6f", &s)
-             .map_err(serde::de::Error::custom)?;
+-            .map_err(serde::de::Error::custom)?;
 -        chrono::Local
 -            .from_local_datetime(&date)
 -            .single()
 -            .ok_or(serde::de::Error::custom(
 -                "azure cli returned ambiguous expiry date",
 -            ))
-+        jiff::tz::TimeZone::system()
-+            .to_ambiguous_zoned_datetime(date)
++        let local = String::deserialize(deserializer)?;
++        let zone = TimeZone::try_system().map_err(serde::de::Error::custom)?;
++        parse(&local, &zone)
++    }
++
++    fn parse<E: serde::de::Error>(local: &str, zone: &TimeZone) -> Result<Timestamp, E> {
++        // expiresOn is a local civil time. Unknown zones and DST folds/gaps have
++        // no authoritative single expiry instant.
++        if zone.is_unknown() {
++            return Err(E::custom("unknown Azure CLI expiry time zone"));
++        }
++        let civil = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S.%6f", local)
++            .map_err(E::custom)?;
++        zone.to_ambiguous_zoned_datetime(civil)
 +            .unambiguous()
-+            .map_err(serde::de::Error::custom)
++            .map(|date| date.timestamp())
++            .map_err(E::custom)
++    }
++
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++
++        #[test]
++        fn local_expiry_requires_one_known_instant() {
++            let eastern = TimeZone::get("America/New_York").unwrap();
++            let parse = |date, zone| super::parse::<serde_json::Error>(date, zone);
++            let end = parse("2026-03-08 03:30:00.123456", &eastern).unwrap();
++            assert_eq!(end, "2026-03-08T07:30:00.123456Z".parse::<Timestamp>().unwrap());
++            let start = parse("2026-03-08 01:30:00.123456", &eastern).unwrap();
++            assert_eq!((end - start).as_secs(), 3600);
++            assert!(parse("2026-03-08 02:30:00.000000", &eastern).is_err());
++            assert!(parse("2026-11-01 01:30:00.000000", &eastern).is_err());
++            assert!(parse("2026-11-01 07:30:00.000000", &TimeZone::unknown()).is_err());
++        }
      }
  }
 
-@@ -862,7 +859,7 @@ mod az_cli_date_format {
+@@ -862,7 +887,7 @@ mod az_cli_date_format {
  struct AzureCliTokenResponse {
      pub access_token: String,
      #[serde(with = "az_cli_date_format")]
 -    pub expires_on: DateTime<chrono::Local>,
-+    pub expires_on: jiff::ZonedDateTime,
++    pub expires_on: jiff::Timestamp,
      pub token_type: String,
  }
 
-@@ -915,12 +912,12 @@ impl AzureCliCredential {
+@@ -914,13 +939,12 @@ impl AzureCliCredential {
+                         ),
                      });
                  }
-                 let duration =
+-                let duration =
 -                    token_response.expires_on.naive_local() - chrono::Local::now().naive_local();
-+                    token_response.expires_on.timestamp() - jiff::Timestamp::now();
++                let duration = token_response.expires_on - jiff::Timestamp::now();
                  Ok(TemporaryToken {
                      token: Arc::new(AzureCredential::BearerToken(token_response.access_token)),
                      expiry: Some(
