@@ -369,6 +369,9 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 		if err != nil {
 			return r.recordFailure(ctx, run, err)
 		}
+		if observed != nil && len(basis.Assignments) > 0 {
+			run.measured = observed.Measured
+		}
 		run.ExecutionQuantities, err = quantityEvidence(observed)
 		if err != nil {
 			return r.recordFailure(ctx, run, err)
@@ -447,6 +450,7 @@ func (r *Reconciler) stateLeg(subject Subject, stmt Statement, leg recon.LegStat
 // from "nothing was scheduled".
 func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (Run, error) {
 	run.ExecutionQuantities = nil
+	run.measured = nil
 	run.compared, run.Breaks, run.Outcome, run.FailureReason = nil, nil, OutcomeFailed, reason.Error()
 	if run.RequestID == "" {
 		run.StatementID, run.Basis = "", nil

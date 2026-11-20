@@ -26,17 +26,46 @@ import (
 )
 
 func TestSignedExecutionQuantityDiagnosticsAfterCorrection(t *testing.T) {
+	runSignedQuantityFixture(t, false)
+}
+
+func TestSignedExecutionQuantityWorkingLifecycle(t *testing.T) {
+	if os.Getenv("TEST_CUSTODY_ASSIGNMENT_FIXTURE") != "1" {
+		t.Skip("requires distinct restricted evidence issuers")
+	}
+	runSignedQuantityFixture(t, true)
+}
+
+func runSignedQuantityFixture(t *testing.T, enrolled bool) {
+	t.Helper()
 	url := os.Getenv("TEST_NATS_URL")
 	if url == "" || os.Getenv("TEST_POSTGRES_URL") == "" {
 		t.Skip("requires restricted PostgreSQL and real JetStream")
 	}
-	const tenant = "execution-quantity-pilot"
+	tenant := "execution-quantity-pilot"
+	if enrolled {
+		tenant = "synthetic-custody-pilot"
+	}
 	pool := newCustodyPool(t, tenant)
 	requireRestrictedCustodyRole(t, pool)
 	applyCustodySchema(t, pool)
 	ctx := bus.WithTenantID(t.Context(), tenant)
 	source, key := exampleAuthority(t, tenant)
 	source.Account = "ACC1"
+	if enrolled {
+		source.Account = "sandbox-account"
+		_, v, g := assignmentRolePools(t, pool, tenant)
+		write := signedAccountFixture(t, pool, ctx)
+		if err := write(v, "venue_identity", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := write(g, "custody_assignment", nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, "INSERT INTO custody_assignment_readers VALUES(session_user,$1)", tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
 	source.Instruments = []string{"AAPL"}
 	st := NewPostgres(pool)
 	receiver, err := NewSignedBatchConsumer(st, tenant, testLogger())
@@ -73,26 +102,44 @@ func TestSignedExecutionQuantityDiagnosticsAfterCorrection(t *testing.T) {
 		}
 		return p
 	}
-	importer, err := NewBatchImporter(source, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:ACC1", pool, publisher(BatchProducer), testLogger())
+	importer, err := NewBatchImporter(source, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:"+source.Account, pool, publisher(BatchProducer), testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
 	journal := ledger.NewPostgres(pool)
 	for i, id := range []string{"independent-buy", "independent-sell"} {
 		q := int64(1 - 2*i)
-		if err := journal.Append(ctx, closeTrade(id, q, -10*q, t0), nil); err != nil {
+		entry := closeTrade(id, q, -10*q, t0)
+		entry.VenueAccountID = source.Account
+		if err := journal.Append(ctx, entry, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	sub := subject()
 	sub.BusinessDate = BusinessDay(t0)
-	r, err := NewReconciler(st, LedgerBookLoader(journal, closeScope(t, true), testLogger()), publisher("accounting"), nil, nil, testLogger(), time.Now)
+	scope, err := NewBookScope([]Subject{sub}, map[string]map[string][]string{"PF1": {"CUST-A": {source.Account}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enrolled {
+		scope, err = scope.AdmitAssignments(ctx, sub.BusinessDate, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := NewReconciler(st, LedgerBookLoader(journal, scope, testLogger()), publisher("accounting"), nil, nil, testLogger(), time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	previous := ""
 	var retained []Run
-	for index, qty := range []int{2, 2, 1} {
+	var originalIDs []string
+	var originalRun string
+	for pos, index := range []int{0, 1, 0, 2} {
+		qty := 2
+		if index == 2 {
+			qty = 1
+		}
 		line := func(ref string, q int) string {
 			units := ""
 			if index > 0 {
@@ -101,7 +148,7 @@ func TestSignedExecutionQuantityDiagnosticsAfterCorrection(t *testing.T) {
 			return fmt.Sprintf(`{"externalRef":%q,"instrumentId":"AAPL","currencyCode":"USD","tradeDate":%q,"quantity":{"coefficient":"%d"},"price":{"coefficient":"10"},"cash":{"coefficient":"%d"}%s}`, ref, sub.BusinessDate.Format(time.RFC3339), q, -10*q, units)
 		}
 		level := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":%q,"positions":[],"cash":[],"transactions":[%s,%s],"grain":"STATEMENT_GRAIN_TRANSACTIONS"}`, sub.BusinessDate.Format(time.RFC3339), line("independent-buy", qty), line("independent-sell", -qty)))
-		raw, err := json.Marshal(signedBatch{BatchFormat, source.Source, tenant, source.Account, int64(index + 1), previous, true, level})
+		raw, err := json.Marshal(signedBatch{BatchFormat, source.Source, tenant, source.Account, int64(pos + 1), previous, true, level})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,16 +174,62 @@ func TestSignedExecutionQuantityDiagnosticsAfterCorrection(t *testing.T) {
 		}
 		verifyExecutionQuantityRevision(t, index, run.ExecutionQuantities)
 		retained = append(retained, run)
+		// An older writer scans and resolves absence in its own generic working set.
+		if _, err := st.UpsertBreaks(ctx, sub, nil, run.CompletedAt); err != nil {
+			t.Fatal(err)
+		}
+		queue, err := st.OutstandingBreaks(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if enrolled && (pos == 1 || pos == 2) {
+			if len(queue) != 2 {
+				t.Fatalf("expected both signed quantity working items, got %d", len(queue))
+			}
+			if pos == 1 {
+				originalRun = run.RunID
+			}
+			for i, b := range queue {
+				if b.Kind.String() != "execution_quantity" || b.InstrumentID != "AAPL" || b.Detection.RunID != originalRun || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Revision != 0 || !b.ValuesVerified || b.Status != BreakOpen {
+					t.Fatalf("incorrect working item: %+v", b)
+				}
+				sign := int64(1)
+				if b.Key == "independent-sell" {
+					sign = -1
+				} else if b.Key != "independent-buy" {
+					t.Fatal(b.Key)
+				}
+				if b.IBOR.Cmp(big.NewRat(sign, 1)) != 0 || b.Custodian.Cmp(big.NewRat(2*sign, 1)) != 0 || b.Diff.Cmp(big.NewRat(-sign, 1)) != 0 {
+					t.Fatal(b)
+				}
+				if pos == 1 {
+					originalIDs = append(originalIDs, b.BreakID)
+				} else if b.BreakID != originalIDs[i] {
+					t.Fatal("unmeasured revision replaced original item")
+				}
+				if _, err := st.LoadBreak(ctx, b.BreakID); !errors.Is(err, ErrNoBreak) {
+					t.Fatal("quantity exposed via action target", err)
+				}
+			}
+			foreign := NewPostgres(newCustodyPool(t, "second-tenant"))
+			other, err := foreign.OutstandingBreaks(ctx)
+			if err != nil || len(other) != 0 {
+				t.Fatal("foreign queue", other, err)
+			}
+		} else if len(queue) != 0 {
+			t.Fatal("unexpected outstanding", queue)
+		}
+
 	}
 	if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE tenant_id=app_current_tenant()"); err != nil {
 		t.Fatal(err)
 	}
 	for i, run := range retained {
-		result, err := NewPostgres(pool).HistoricalReceipt(ctx, sub, "ACC1", run.RunID)
+		result, err := NewPostgres(pool).HistoricalReceipt(ctx, sub, source.Account, run.RunID)
 		if err != nil || result.State != "recorded" || result.StatementID != run.StatementID {
 			t.Fatalf("historical revision %d: %+v %v", i, result, err)
 		}
-		verifyExecutionQuantityRevision(t, i, result.Run.ExecutionQuantities)
+		verifyExecutionQuantityRevision(t, []int{0, 1, 0, 2}[i], result.Run.ExecutionQuantities)
 	}
 	outstanding, err := st.OutstandingBreaks(ctx)
 	if err != nil || len(outstanding) != 0 {

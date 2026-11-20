@@ -150,6 +150,27 @@ describe('custody exact review', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('shows the reference, instrument and exact working figures without write actions', async () => {
+    const quantity = { ...row, kind: 'execution_quantity', key: 'external-7', instrument_id: 'SYN', revision: undefined,
+      portfolio_id: 'PF1', custodian_id: 'CUST-A', detection: { run_id: 'original', statement_id: 'signed-r1', business_date: '2020-02-04', scope_mode: 'declared', journal_position: '1' },
+      ibor: '-10.5', custodian: '0', difference: '-10.5' }
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ breaks: [quantity], count: 1, actions_enabled: true })
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      await flushPromises()
+      const item = wrapper.get('tbody tr')
+      expect(item.text()).toContain('external-7')
+      expect(item.text()).toContain('Instrument SYN')
+      expect(item.text()).toContain('signed-r1')
+      expect(item.findAll('td').slice(2, 5).map(cell => cell.text())).toEqual(['-10.5', '0', '-10.5'])
+      expect(item.find('button').exists()).toBe(false)
+      for (const fields of [{ instrument_id: '' }, { revision: '1' }, { values_state: 'unavailable' }, { detection: undefined }]) {
+        get.mockResolvedValueOnce({ breaks: [{ ...quantity, ...fields }], count: 1 })
+        await expect(custody.queue()).rejects.toThrow('Invalid custody response.')
+      }
+    } finally { wrapper.unmount() }
+  })
+
   it('reads detection again on reload and preserves unknown historical fields', async () => {
     const detection = { run_id: 'recorded-run', statement_id: 'signed-statement-r1', business_date: '2020-02-04', journal_position: '9007199254740993' }
     const get = vi.spyOn(custody, 'queue').mockResolvedValueOnce({ breaks: [{ ...row, portfolio_id: 'PF1', custodian_id: 'CUST-A', detection }] }).mockResolvedValueOnce({ breaks: [row] })

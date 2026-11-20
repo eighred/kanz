@@ -45,6 +45,8 @@ const (
 	// MEANS A FILL NEVER REACHED THE BOOK — observed on a reference, rather than
 	// inferred from a balance.
 	BreakExecutionMissingInIBOR
+	// A working discrepancy between dated, independently attested quantities in one instrument.
+	BreakExecutionQuantity
 )
 
 // BreakKinds returns every kind this engine can produce, in declaration order.
@@ -58,7 +60,7 @@ const (
 // without anyone remembering a second edit.
 func BreakKinds() []BreakKind {
 	return []BreakKind{BreakQuantity, BreakMissingAtCustodian, BreakMissingInIBOR, BreakCash,
-		BreakExecutionMissingAtCustodian, BreakExecutionMissingInIBOR}
+		BreakExecutionMissingAtCustodian, BreakExecutionMissingInIBOR, BreakExecutionQuantity}
 }
 
 func (k BreakKind) String() string {
@@ -75,6 +77,8 @@ func (k BreakKind) String() string {
 		return "execution_missing_at_custodian"
 	case BreakExecutionMissingInIBOR:
 		return "execution_missing_in_ibor"
+	case BreakExecutionQuantity:
+		return "execution_quantity"
 	default:
 		return "unknown"
 	}

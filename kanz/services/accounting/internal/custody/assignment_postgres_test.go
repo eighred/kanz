@@ -26,22 +26,7 @@ func TestDeclaredAccountIsProvenByDatedIndependentAuthorities(t *testing.T) {
 	const tenant = "synthetic-custody-pilot"
 	admin, reader, venue, governance := assignmentTestPools(t, tenant)
 	ctx := bus.WithTenantID(t.Context(), tenant)
-	fixture := func(name string) []byte {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join("../../cmd/custody_proof/testdata", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-	exec := func(pool *pgxpool.Pool, q string, args ...any) {
-		t.Helper()
-		if _, err := pool.Exec(ctx, q, args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(admin, `INSERT INTO custody_proof_issuers SELECT (r->>'login_role')::name,r->>'kind',r->>'tenant_id',r->>'authority',decode(r->>'public_key','base64') FROM jsonb_array_elements($1::jsonb) r`, string(fixture("issuers.json")))
-	exec(admin, `INSERT INTO custody_proof_scopes(login_role,tenant_id,venue,account_id,exchange_account_id,portfolio_id,custodian_id) SELECT (r->>'login_role')::name,r->>'tenant_id',r->>'venue',r->>'account_id',r->>'exchange_account_id',r->>'portfolio_id',r->>'custodian_id' FROM jsonb_array_elements($1::jsonb) r`, string(fixture("scopes.json")))
+	write := signedAccountFixture(t, admin, ctx)
 	st := NewPostgres(reader)
 	sub := subject()
 	sub.BusinessDate = BusinessDay(t0)
@@ -53,17 +38,6 @@ func TestDeclaredAccountIsProvenByDatedIndependentAuthorities(t *testing.T) {
 		}
 	}
 	expectDenied(sub, ids)
-	write := func(p *pgxpool.Pool, name string, alter func(*AccountEvidence)) error {
-		raw, sig := fixture(name+".json"), fixture(name+".sig")
-		e, err := ParseAccountEvidence(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if alter != nil {
-			alter(&e)
-		}
-		return insertFixtureEvidence(ctx, p, e, raw, sig)
-	}
 	deniedSQL := func(err error) {
 		t.Helper()
 		var db *pgconn.PgError
@@ -252,6 +226,37 @@ func TestDeclaredAccountIsProvenOnlyOnIntersectionOfEffectiveWindows(t *testing.
 	}
 }
 
+func signedAccountFixture(t *testing.T, admin *pgxpool.Pool, ctx context.Context) func(*pgxpool.Pool, string, func(*AccountEvidence)) error {
+	t.Helper()
+	fixture := func(name string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("../../cmd/custody_proof/testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	exec := func(pool *pgxpool.Pool, q string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(admin, `INSERT INTO custody_proof_issuers SELECT (r->>'login_role')::name,r->>'kind',r->>'tenant_id',r->>'authority',decode(r->>'public_key','base64') FROM jsonb_array_elements($1::jsonb) r`, string(fixture("issuers.json")))
+	exec(admin, `INSERT INTO custody_proof_scopes(login_role,tenant_id,venue,account_id,exchange_account_id,portfolio_id,custodian_id) SELECT (r->>'login_role')::name,r->>'tenant_id',r->>'venue',r->>'account_id',r->>'exchange_account_id',r->>'portfolio_id',r->>'custodian_id' FROM jsonb_array_elements($1::jsonb) r`, string(fixture("scopes.json")))
+	return func(p *pgxpool.Pool, name string, alter func(*AccountEvidence)) error {
+		raw, sig := fixture(name+".json"), fixture(name+".sig")
+		e, err := ParseAccountEvidence(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if alter != nil {
+			alter(&e)
+		}
+		return insertFixtureEvidence(ctx, p, e, raw, sig)
+	}
+}
+
 func assignmentTestPools(t *testing.T, tenant string) (*pgxpool.Pool, *pgxpool.Pool, *pgxpool.Pool, *pgxpool.Pool) {
 	t.Helper()
 	if os.Getenv("TEST_CUSTODY_ASSIGNMENT_FIXTURE") != "1" {
@@ -260,6 +265,12 @@ func assignmentTestPools(t *testing.T, tenant string) (*pgxpool.Pool, *pgxpool.P
 	admin := newCustodyPool(t, tenant)
 	requireRestrictedCustodyRole(t, admin)
 	applyCustodySchema(t, admin)
+	reader, venue, governance := assignmentRolePools(t, admin, tenant)
+	return admin, reader, venue, governance
+}
+
+func assignmentRolePools(t *testing.T, admin *pgxpool.Pool, tenant string) (*pgxpool.Pool, *pgxpool.Pool, *pgxpool.Pool) {
+	t.Helper()
 	ctx := bus.WithTenantID(t.Context(), tenant)
 	exec := func(pool *pgxpool.Pool, q string, args ...any) {
 		t.Helper()
@@ -275,6 +286,8 @@ func assignmentTestPools(t *testing.T, tenant string) (*pgxpool.Pool, *pgxpool.P
  GRANT SELECT,INSERT ON custody_runs TO pilot_assignment_reader;
  GRANT SELECT ON custody_statements,custody_batch_receipts,ledger_heads,ledger_entries,ledger_append_positions,custody_break_detections TO pilot_assignment_reader;
  GRANT SELECT,INSERT,UPDATE ON custody_breaks,outbox TO pilot_assignment_reader;
+ GRANT SELECT,INSERT ON custody_execution_quantity_observations TO pilot_assignment_reader;
+ GRANT USAGE ON SEQUENCE custody_execution_quantity_observations_observation_seq TO pilot_assignment_reader;
  GRANT USAGE,SELECT ON SEQUENCE outbox_id_seq TO pilot_assignment_reader`)
 	role := func(name string) *pgxpool.Pool {
 		t.Helper()
@@ -294,7 +307,7 @@ func assignmentTestPools(t *testing.T, tenant string) (*pgxpool.Pool, *pgxpool.P
 		requireRestrictedCustodyRole(t, p)
 		return p
 	}
-	return admin, role("pilot_assignment_reader"), role("pilot_venue_proof"), role("pilot_custody_assignment")
+	return role("pilot_assignment_reader"), role("pilot_venue_proof"), role("pilot_custody_assignment")
 }
 
 type fixtureEvidenceWriter interface {
