@@ -368,6 +368,9 @@ func (r Record) Event() (bus.Event, error) {
 // direction. Do not add one. If a transition ever needs a FACT without a
 // state write, it needs a different mechanism, not a bare Enqueue.
 type Queue interface {
+	drainRecords
+	// lockDrain binds all record operations to the session that owns the key.
+	lockDrain(ctx context.Context, key string, wait bool) (drainLease, bool, error)
 	// PendingKeys returns partition keys that have unpublished records, oldest
 	// pending record first, capped at limit.
 	PendingKeys(ctx context.Context, limit int) ([]string, error)
@@ -386,6 +389,20 @@ type Queue interface {
 	// same key first — a trading command sent to the DLQ by a benign race. The
 	// wait is bounded by ctx, which on the handler path is the delivery's.
 	LockKey(ctx context.Context, key string, wait bool) (release func(), ok bool, err error)
+	// OldestPendingAge reports how long the oldest unpublished record has been
+	// waiting, and false when the queue is empty. It is the ONLY number that
+	// distinguishes a drained outbox from a relay that stopped running — both of
+	// which otherwise look like "no errors in the log".
+	OldestPendingAge(ctx context.Context, now time.Time) (time.Duration, bool, error)
+}
+
+// A drain lease is valid until its release function returns.
+type drainLease struct {
+	drainRecords
+	release func()
+}
+
+type drainRecords interface {
 	// Pending returns up to limit unpublished records for one key, in ID order.
 	Pending(ctx context.Context, key string, limit int) ([]Pending, error)
 	// MarkPublished records that the broker has this record.
@@ -401,9 +418,4 @@ type Queue interface {
 	// climbs, the age gauge climbs, and the field that says why is reachable
 	// only by hand-written SQL against a production database mid-incident.
 	MarkFailed(ctx context.Context, id int64, cause error) error
-	// OldestPendingAge reports how long the oldest unpublished record has been
-	// waiting, and false when the queue is empty. It is the ONLY number that
-	// distinguishes a drained outbox from a relay that stopped running — both of
-	// which otherwise look like "no errors in the log".
-	OldestPendingAge(ctx context.Context, now time.Time) (time.Duration, bool, error)
 }
