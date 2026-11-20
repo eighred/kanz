@@ -1,0 +1,46 @@
+name: schema-sdk-assembly
+
+on:
+  pull_request:
+    paths: &inputs
+      - '.github/workflows/schema-sdk-assembly.yml'
+      - 'schemas/packaging/**'
+      - 'schemas/proto/**'
+      - 'schemas/buf*.yaml'
+      - 'schemas/bootstrap-go-sdk.sh'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'kanz/Makefile'
+      - 'kanz/ts/kanz_bus/**'
+      - 'python/requirements*.txt'
+  push:
+    branches: [main]
+    paths: *inputs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup_buf
+        with:
+          version: '1.69.0'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12.16'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.2'
+      - name: Assemble packages and exercise clean consumers
+        run: bash schemas/packaging/build-release.sh 0.1.0 "$(git rev-parse HEAD)" "$RUNNER_TEMP/sdk-release"
