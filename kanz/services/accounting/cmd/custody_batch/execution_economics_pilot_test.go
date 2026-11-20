@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"log/slog"
 	"math/big"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,7 +16,6 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
-	"github.com/eighred/kanz/services/accounting/internal/server"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -35,7 +32,7 @@ func TestSignedExecutionEconomicsPilot(t *testing.T) {
 	}
 	var originalRun string
 	retained := make(map[string][]byte)
-	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "execution_economics"), files, func(ctx context.Context, pool *pgxpool.Pool, stmt custody.Statement, revision int, broker pilotBroker) {
+	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "execution_economics"), true, files, func(ctx context.Context, pool *pgxpool.Pool, stmt custody.Statement, revision int, broker pilotBroker) {
 		ctx = bus.WithTenantID(ctx, tenant)
 		subject := stmt.Subject()
 		journal := ledger.NewPostgres(pool)
@@ -53,45 +50,40 @@ func TestSignedExecutionEconomicsPilot(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		store, scope, reconciler := pilotComparison(t, ctx, pool, journal, subject, broker)
-		run, err := reconciler.Reconcile(ctx, subject)
-		if err != nil || run.StatementID != stmt.StatementID {
-			t.Fatalf("comparison %d: %v", revision, err)
-		}
-		if revision == 1 {
-			originalRun = run.RunID
-		}
+		site, stop := startPilotAccounting(t, ctx, broker, "pilot-ingest", subject.BusinessDate)
+		defer stop()
+		awaitPilot(t, ctx, "scheduled completion", func(check context.Context) bool {
+			info, err := broker.completions.Info(check)
+			return err == nil && info.State.Msgs >= uint64(revision)
+		})
 		msg, err := broker.completions.GetMsg(ctx, uint64(revision))
 		if err != nil {
 			t.Fatal(err)
 		}
 		var frame envelopepb.EventFrame
 		var fact accountingpb.ReconciliationRun
-		if proto.Unmarshal(msg.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil || frame.GetEnvelope().GetSource() != "accounting" || frame.GetEnvelope().GetTenantId() != tenant || fact.GetRunId() != run.RunID || fact.GetStatementId() != stmt.StatementID {
+		if proto.Unmarshal(msg.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil || frame.GetEnvelope().GetSource() != "accounting" || frame.GetEnvelope().GetTenantId() != tenant || fact.GetRunId() == "" || fact.GetStatementId() != stmt.StatementID {
 			t.Fatal("unexpected completion identity")
 		}
-		retained[run.RunID] = frame.Payload
+		runID := fact.GetRunId()
+		if revision == 1 {
+			originalRun = runID
+		}
+		retained[runID] = frame.Payload
+		awaitPilot(t, ctx, "persisted completion publication", func(check context.Context) bool {
+			var sent bool
+			err := pool.QueryRow(check, `SELECT EXISTS(SELECT FROM outbox WHERE producer_service='accounting' AND event_type=$1 AND correlation_id=$2 AND published_at IS NOT NULL)`, custody.SubjectRun, runID).Scan(&sent)
+			return err == nil && sent
+		})
 		before := pilotFinancialSnapshot(t, ctx, pool)
-		// Re-deliver the same accepted source FACT to a newly constructed consumer.
-		// A fresh scheduled invocation is a different request and has its own run ID.
-		restarted, err := custody.NewSignedBatchConsumer(custody.NewPostgres(pool), tenant, nil)
-		if err != nil {
-			t.Fatal(err)
+		if revision == len(files) {
+			// A fresh durable starts at the beginning of the retained statement
+			// stream. It must ACK all four revisions without replacing receipts.
+			_, stopReplay := startPilotAccounting(t, ctx, broker, "pilot-replay", time.Time{})
+			defer stopReplay()
+			awaitPilotStatementAck(t, ctx, broker, "pilot-replay", uint64(revision))
 		}
-		source, err := broker.statements.GetMsg(ctx, uint64(revision))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var observed envelopepb.EventFrame
-		if err = proto.Unmarshal(source.Data, &observed); err != nil {
-			t.Fatal(err)
-		}
-		if err = restarted.Handle(ctx, observed.Envelope, observed.Payload); err != nil {
-			t.Fatal(err)
-		}
-		site := httptest.NewServer(server.New(&server.Readiness{}, slog.Default(), journal, "USD", server.WithTenant(tenant), server.WithBreakStore(store), server.WithCustodyBookScope(scope), server.WithReadOnlyCustodyReview()))
-		defer site.Close()
-		provePilotBrowser(t, ctx, site.URL, "TestSignedCustodyOperatorBrowser", os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"), map[string]any{"revision": revision, "run_id": run.RunID, "statement_id": stmt.StatementID, "original_run": originalRun, "date": subject.BusinessDate.Format(time.DateOnly)})
+		provePilotBrowser(t, ctx, site, "TestSignedCustodyOperatorBrowser", os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"), map[string]any{"revision": revision, "run_id": runID, "statement_id": stmt.StatementID, "original_run": originalRun, "date": subject.BusinessDate.Format(time.DateOnly)})
 		for id, payload := range retained {
 			var data []byte
 			if err := pool.QueryRow(ctx, "SELECT manual_receipt FROM custody_runs WHERE run_id=$1", id).Scan(&data); err != nil || !bytes.Equal(data, payload) {
