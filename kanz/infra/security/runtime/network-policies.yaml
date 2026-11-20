@@ -1330,13 +1330,8 @@ spec:
 # version of this failure to read, because the service comes up, authenticates, and
 # then simply never receives a tick.
 #
-# venue-binance is included even though BINANCE_WS_BASE currently points at
-# wss://testnet.binance.vision (which IS 443). Production is
-# wss://stream.binance.com:9443, so promoting that one env var off testnet would
-# otherwise re-open this hole — and it would re-open it as a silent backoff loop on
-# the live order path. The grant is to a public-internet-only ipBlock on two ports
-# an exchange publishes streams on; pre-granting it costs nothing and removes a trap
-# from the one change most likely to be made under time pressure.
+# The Binance adapter's private WebSocket API uses HTTPS egress on port 443.
+# Market-ingest and venue-okx still need their exchange stream ports.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1349,7 +1344,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: [market-ingest, venue-binance, venue-okx]
+        values: [market-ingest, venue-okx]
   policyTypes: [Egress]
   egress:
     - to:

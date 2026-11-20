@@ -62,7 +62,7 @@ func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 	}, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c.Start(ctx, WorkerDeps{
+	if err := c.Start(ctx, WorkerDeps{
 		Publisher:         capt,
 		Expected:          staticOrders{},
 		Balances:          unknownBalances{reason: execution.BalanceUnknownNeverAnnounced},
@@ -72,7 +72,9 @@ func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 		// An hour, so the mark feed does not publish into the capture and turn this
 		// into an assertion about the ticker.
 		TickerInterval: time.Hour,
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && len(unknown.snapshot()) == 0 {

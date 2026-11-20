@@ -3,14 +3,10 @@ package binance
 import (
 	"context"
 	"io"
-	"net/http"
-	"net/http/httptest"
+
 	"testing"
-	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
-
-	"github.com/coder/websocket"
 
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
@@ -139,44 +135,5 @@ func TestUserData_PartialAndNoiseHandling(t *testing.T) {
 	}
 	if pf.GetState().GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED {
 		t.Fatal("partial fill status wrong")
-	}
-}
-
-// TestUserData_WebsocketTransport certifies the real coder/websocket transport
-// hermetically: an httptest server serves the listenKey REST + the ws upgrade
-// and pushes a frame; binanceUserDataWS connects and Recv reads it.
-func TestUserData_WebsocketTransport(t *testing.T) {
-	frame := `{"e":"executionReport","c":"o1","x":"TRADE","X":"FILLED"}`
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/userDataStream", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"listenKey":"abc123"}`))
-	})
-	mux.HandleFunc("/ws/abc123", func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer c.Close(websocket.StatusNormalClosure, "")
-		_ = c.Write(r.Context(), websocket.MessageText, []byte(frame))
-		time.Sleep(100 * time.Millisecond)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	ws := newBinanceUserDataWS(srv.URL, srv.URL, "key", nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	stop, err := ws.Connect(ctx)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer stop()
-
-	got, err := ws.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if string(got) != frame {
-		t.Fatalf("frame = %q, want %q", got, frame)
 	}
 }

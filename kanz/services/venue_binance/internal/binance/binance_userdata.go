@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/eighred/kanz/internal/execution"
-	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -20,7 +19,11 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	strictjson "sigs.k8s.io/json"
 
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -155,7 +158,7 @@ func (i *UserDataIngester) Run(ctx context.Context) error {
 
 func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	var rep executionReport
-	if json.Unmarshal(raw, &rep) != nil || rep.Event != "executionReport" || rep.ExecType != "TRADE" {
+	if !validPrivateJSON(raw, &rep) || rep.Event != "executionReport" || rep.ExecType != "TRADE" {
 		return nil // not a fill — ignore
 	}
 	st, ok, lerr := i.orders.Lookup(rep.ClientOrderID)
@@ -209,7 +212,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	// path can: there is no acknowledgement to withhold. handle returns to Run,
 	// Run returns to runUserData, which logs "user-data stream ended;
 	// reconnecting", grows execution.UserDataBackoff and re-dials. Binance replays
-	// NOTHING on a new listenKey stream, so THIS report is gone. The recovery is
+	// NOTHING on a new subscription, so THIS report is gone. The recovery is
 	// the reconciler's next pass over Open orders and the OMS sweep, and the sweep
 	// only adopts an execution while its order is still non-terminal.
 	//
@@ -386,92 +389,126 @@ func reportFee(rep executionReport) (*commonpb.Money, bool) {
 
 // --- concrete Binance user-data websocket transport (coder/websocket) ---
 
-// binanceUserDataWS maintains the 24/7 user-data websocket: it obtains a
-// listenKey via signed REST, dials wss://<base>/ws/<listenKey>, and keeps the
-// key alive. Recv returns the next frame; the caller (UserDataIngester) reconnects
-// on error.
+// Binance distinguishes case-sensitive keys such as e (event type) and E
+// (event time). Ambiguous duplicate identities must not select a subscription.
+func validPrivateJSON(data []byte, target any) bool {
+	duplicates, err := strictjson.UnmarshalStrict(data, target, strictjson.DisallowDuplicateFields)
+	return err == nil && len(duplicates) == 0
+}
+
+// A dedicated connection has one outstanding request and one account subscription.
+const subscribeRequestID = "private-stream"
+
 type binanceUserDataWS struct {
-	restBase string
-	wsBase   string
-	apiKey   string
-	httpc    *http.Client
-	conn     *websocket.Conn
+	conn           *websocket.Conn
+	subscriptionID int64
 }
 
-func newBinanceUserDataWS(restBase, wsBase, apiKey string, httpc *http.Client) *binanceUserDataWS {
-	if httpc == nil {
-		httpc = &http.Client{Timeout: 10 * time.Second}
+// privateStreamEndpoint binds the signed subscription to the same environment
+// as account proof. Private proxies must expose both transports on one TLS origin.
+func privateStreamEndpoint(restBase, wsBase string) (string, error) {
+	rest, err := url.Parse(restBase)
+	if err != nil || rest.Scheme != "https" || rest.Host == "" || rest.User != nil {
+		return "", errors.New("binance: invalid private REST origin")
 	}
-	return &binanceUserDataWS{restBase: restBase, wsBase: wsBase, apiKey: apiKey, httpc: httpc}
+	ws, err := url.Parse(wsBase)
+	if err != nil || ws.Scheme != "wss" || ws.Host == "" || ws.User != nil ||
+		(ws.Path != "" && ws.Path != "/") || ws.RawQuery != "" || ws.ForceQuery || ws.Fragment != "" {
+		return "", errors.New("binance: invalid private WebSocket API origin")
+	}
+	expected := strings.TrimSuffix(rest.Host, ":443")
+	switch rest.Hostname() {
+	case "testnet.binance.vision":
+		expected = "ws-api.testnet.binance.vision"
+	case "api.binance.com", "api-gcp.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com", "api4.binance.com":
+		expected = "ws-api.binance.com"
+	}
+	if strings.TrimSuffix(ws.Host, ":443") != expected {
+		return "", errors.New("binance: private WebSocket API origin does not match REST account origin")
+	}
+	ws.Path = "/ws-api/v3"
+	return ws.String(), nil
 }
 
-// Connect obtains a listenKey and dials the stream. Returns a keepalive stopper.
-func (w *binanceUserDataWS) Connect(ctx context.Context) (func(), error) {
-	listenKey, err := w.listenKey(ctx)
-	if err != nil {
-		return nil, err
+func (c *binanceREST) subscribeUserData(ctx context.Context, endpoint string) (UserDataStream, func(), error) {
+	if c.apiKey == "" || len(c.apiSecret) == 0 {
+		return nil, nil, errors.New("binance: private subscription credentials missing")
 	}
-	conn, _, err := websocket.Dial(ctx, w.wsBase+"/ws/"+listenKey, nil)
-	if err != nil {
-		return nil, err
+	if !c.bucket.Allow(2) {
+		c.onThrottle()
+		return nil, nil, ErrRateLimited
 	}
+	// Bound establishment and authentication together. A long-lived socket has
+	// no HTTP client timeout. The venue cannot redirect a signed subscription.
+	setup, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	client := &http.Client{Transport: c.httpc.Transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	conn, _, err := websocket.Dial(setup, endpoint, &websocket.DialOptions{HTTPClient: client})
+	if err != nil {
+		return nil, nil, errors.New("binance: private WebSocket API handshake failed")
+	}
+	stop := func() { _ = conn.CloseNow() }
 	conn.SetReadLimit(1 << 20)
-	w.conn = conn
-
-	// Keepalive: Binance expires a listenKey after 60m; PUT every 30m.
-	kaCtx, cancel := context.WithCancel(ctx)
-	go w.keepAlive(kaCtx, listenKey)
-	return cancel, nil
+	timestamp := c.now().UnixMilli()
+	payload := "apiKey=" + c.apiKey + "&timestamp=" + strconv.FormatInt(timestamp, 10)
+	req := map[string]any{
+		"id": subscribeRequestID, "method": "userDataStream.subscribe.signature",
+		"params": map[string]any{"apiKey": c.apiKey, "timestamp": timestamp, "signature": c.sign(payload)},
+	}
+	if err := wsjson.Write(setup, conn, req); err != nil {
+		stop()
+		return nil, nil, errors.New("binance: private subscription write failed")
+	}
+	frameType, raw, err := conn.Read(setup)
+	var reply struct {
+		ID     string          `json:"id"`
+		Status int             `json:"status"`
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			SubscriptionID *int64 `json:"subscriptionId"`
+		} `json:"result"`
+	}
+	if err != nil || frameType != websocket.MessageText || !validPrivateJSON(raw, &reply) ||
+		reply.ID != subscribeRequestID || reply.Status != http.StatusOK || reply.Error != nil ||
+		reply.Result.SubscriptionID == nil || *reply.Result.SubscriptionID < 0 {
+		stop()
+		return nil, nil, errors.New("binance: private subscription not confirmed")
+	}
+	return &binanceUserDataWS{conn: conn, subscriptionID: *reply.Result.SubscriptionID}, stop, nil
 }
 
-// Recv reads the next websocket frame.
 func (w *binanceUserDataWS) Recv(ctx context.Context) ([]byte, error) {
-	if w.conn == nil {
-		return nil, errors.New("binance: user-data stream not connected")
-	}
-	_, data, err := w.conn.Read(ctx)
-	return data, err
-}
-
-func (w *binanceUserDataWS) listenKey(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.restBase+"/api/v3/userDataStream", nil)
+	frameType, raw, err := w.conn.Read(ctx)
 	if err != nil {
-		return "", err
-	}
-	req.Header.Set("X-MBX-APIKEY", w.apiKey)
-	resp, err := w.httpc.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var out struct {
-		ListenKey string `json:"listenKey"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
-	}
-	if out.ListenKey == "" {
-		return "", errors.New("binance: empty listenKey")
-	}
-	return out.ListenKey, nil
-}
-
-func (w *binanceUserDataWS) keepAlive(ctx context.Context, listenKey string) {
-	t := time.NewTicker(30 * time.Minute)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			req, _ := http.NewRequestWithContext(ctx, http.MethodPut,
-				w.restBase+"/api/v3/userDataStream?"+url.Values{"listenKey": {listenKey}}.Encode(), nil)
-			req.Header.Set("X-MBX-APIKEY", w.apiKey)
-			if resp, err := w.httpc.Do(req); err == nil {
-				_ = resp.Body.Close()
-			}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
+		return nil, errors.New("binance: private stream disconnected")
 	}
+	var envelope struct {
+		SubscriptionID *int64          `json:"subscriptionId"`
+		Event          json.RawMessage `json:"event"`
+	}
+	var event struct {
+		Type string `json:"e"`
+	}
+	if frameType != websocket.MessageText || !validPrivateJSON(raw, &envelope) ||
+		!validPrivateJSON(envelope.Event, &event) || event.Type == "" {
+		return nil, errors.New("binance: invalid private event envelope")
+	}
+	if event.Type == "serverShutdown" && envelope.SubscriptionID == nil {
+		return nil, errors.New("binance: private WebSocket API shutting down")
+	}
+	if envelope.SubscriptionID == nil || *envelope.SubscriptionID != w.subscriptionID {
+		return nil, errors.New("binance: unexpected private subscription")
+	}
+	switch event.Type {
+	case "eventStreamTerminated", "listenKeyExpired":
+		return nil, errors.New("binance: private subscription ended")
+	}
+	return envelope.Event, nil
 }
 
 // resolvedAReport reports whether this session published at least one fill FACT.

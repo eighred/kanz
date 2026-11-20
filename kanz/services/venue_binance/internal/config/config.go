@@ -154,7 +154,7 @@ func Load() (Config, error) {
 		AccountUID:             accountUID,
 		AllowUnverifiedAccount: os.Getenv("BINANCE_ALLOW_UNVERIFIED_ACCOUNT") == "true",
 		BaseURL:                env.Or("BINANCE_BASE_URL", "https://testnet.binance.vision"),
-		WSBase:                 env.Or("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
+		WSBase:                 env.Or("BINANCE_WS_BASE", "wss://ws-api.testnet.binance.vision"),
 		APIKey:                 apiKey,
 		APISecret:              apiSecret,
 		Symbols:                os.Getenv("BINANCE_SYMBOLS"),

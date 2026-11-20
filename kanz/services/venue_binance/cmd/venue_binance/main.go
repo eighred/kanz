@@ -397,7 +397,24 @@ func serve(cfg config.Config) error {
 		}
 	}()
 
-	conn.Start(ctx, execution.WorkerDeps{
+	// WHOSE MONEY DOES THIS ADAPTER SPEND? (SOV-02a)
+	//
+	// Ask Binance, before serving a single order. The account is the collateral
+	// boundary — an exchange margins and LIQUIDATES per account — and until now it was
+	// asserted by config on both sides of the wire and checked by nobody. If Binance
+	// says this key belongs to a different account than we claim, we do not start:
+	// every fill would be booked to the account we NAME while the exchange debits the
+	// account we HOLD.
+	proof, err := accountproof.Resolve(ctx, conn.Exchange(), accountproof.Want{
+		Account:         cfg.Account,
+		ExchangeUID:     cfg.AccountUID,
+		AllowUnverified: cfg.AllowUnverifiedAccount,
+	}, logger)
+	if err != nil {
+		return err
+	}
+
+	if err := conn.Start(ctx, execution.WorkerDeps{
 		Publisher: publishHealth,
 		Orders:    seam,
 		Expected:  seam,
@@ -490,22 +507,7 @@ func serve(cfg config.Config) error {
 				"order_id", orderID, "instrument_id", instrumentID, "reason", reason)
 		},
 		Logger: logger,
-	})
-
-	// WHOSE MONEY DOES THIS ADAPTER SPEND? (SOV-02a)
-	//
-	// Ask Binance, before serving a single order. The account is the collateral
-	// boundary — an exchange margins and LIQUIDATES per account — and until now it was
-	// asserted by config on both sides of the wire and checked by nobody. If Binance
-	// says this key belongs to a different account than we claim, we do not start:
-	// every fill would be booked to the account we NAME while the exchange debits the
-	// account we HOLD.
-	proof, err := accountproof.Resolve(ctx, conn.Exchange(), accountproof.Want{
-		Account:         cfg.Account,
-		ExchangeUID:     cfg.AccountUID,
-		AllowUnverified: cfg.AllowUnverifiedAccount,
-	}, logger)
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 

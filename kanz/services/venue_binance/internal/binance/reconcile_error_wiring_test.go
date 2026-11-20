@@ -16,7 +16,7 @@ func TestStartForwardsReconcileErrorObserver(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	seen := make(chan error, 1)
-	c.Start(ctx, WorkerDeps{Publisher: &reconCapture{}, Expected: staticOrders{}, Balances: staticBalances{"USD": big.NewRat(0, 1)}, Tenant: "test", TickerInterval: time.Hour, ReconcileInterval: time.Millisecond,
+	if err := c.Start(ctx, WorkerDeps{Publisher: &reconCapture{}, Expected: staticOrders{}, Balances: staticBalances{"USD": big.NewRat(0, 1)}, Tenant: "test", TickerInterval: time.Hour, ReconcileInterval: time.Millisecond,
 		OnReconcileError: func(_ context.Context, loop string, err error) {
 			if err != nil {
 				cancel()
@@ -25,7 +25,9 @@ func TestStartForwardsReconcileErrorObserver(t *testing.T) {
 				default:
 				}
 			}
-		}})
+		}}); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-seen:
 		if !errors.Is(err, execution.ErrReconcileEvidence) {

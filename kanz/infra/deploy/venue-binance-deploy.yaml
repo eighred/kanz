@@ -161,7 +161,7 @@ spec:
             # Testnet by default. Pointing this at the live exchange is a
             # deliberate, reviewable edit — not a default.
             - { name: BINANCE_BASE_URL, value: "https://testnet.binance.vision" }
-            - { name: BINANCE_WS_BASE, value: "wss://testnet.binance.vision" }
+            - { name: BINANCE_WS_BASE, value: "wss://ws-api.testnet.binance.vision" }
             - { name: BINANCE_SYMBOLS, value: "BTC-USDT=BTCUSDT,ETH-USDT=ETHUSDT" }
             # ARMED, NOW THAT THE ESTATE IS CORRECTED (#419). #407 fixed the map
             # above — BTC-USD=BTCUSDT recorded a USDT pair as dollars — and left

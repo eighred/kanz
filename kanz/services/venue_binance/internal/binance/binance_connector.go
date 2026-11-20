@@ -14,10 +14,10 @@ import (
 // ticker feed that drives tv-sync's mark source. The composition root builds it,
 // takes Venue() for the router, and calls Start to run the workers.
 type BinanceConnector struct {
-	settings VenueSettings
-	rest     *binanceREST
-	venue    *BinanceVenue
-	wsBase   string
+	settings        VenueSettings
+	rest            *binanceREST
+	venue           *BinanceVenue
+	streamConfigErr error
 	// dialUserData opens ONE private user-data websocket, or fails.
 	//
 	// IT IS A FIELD SO THE RECONNECT LOOP IS TESTABLE (#1047). The loop's whole
@@ -34,17 +34,13 @@ type BinanceConnector struct {
 }
 
 // NewBinanceConnector assembles the venue + shared REST client from settings.
-// wsBase is the websocket origin (e.g. wss://testnet.binance.vision).
+// wsBase is the private WebSocket API origin.
 func NewBinanceConnector(settings VenueSettings, wsBase string) *BinanceConnector {
 	venue := NewBinanceVenueFromSettings(settings)
-	c := &BinanceConnector{settings: settings, rest: venue.rest, venue: venue, wsBase: wsBase}
+	endpoint, err := privateStreamEndpoint(settings.BaseURL, wsBase)
+	c := &BinanceConnector{settings: settings, rest: venue.rest, venue: venue, streamConfigErr: err}
 	c.dialUserData = func(ctx context.Context) (UserDataStream, func(), error) {
-		ws := newBinanceUserDataWS(c.settings.BaseURL, c.wsBase, c.settings.APIKey, nil)
-		stop, err := ws.Connect(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		return ws, stop, nil
+		return c.rest.subscribeUserData(ctx, endpoint)
 	}
 	c.newUserDataBackoff = newUserDataBackoff
 	return c
@@ -62,7 +58,10 @@ func (c *BinanceConnector) Exchange() accountproof.Exchange { return c.rest }
 
 // Start launches the reconciler, the user-data ingester (with reconnect), and
 // the ticker feed as background goroutines until ctx is cancelled.
-func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
+func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) error {
+	if deps.Orders != nil && c.streamConfigErr != nil {
+		return c.streamConfigErr
+	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
@@ -133,6 +132,7 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 	}
 	// Ticker feed → market price FACTs → tv-sync MarkSource.
 	go c.runTicker(ctx, deps)
+	return nil
 }
 
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
