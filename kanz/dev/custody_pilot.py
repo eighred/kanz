@@ -28,6 +28,7 @@ DATABASE = "kanz_custody_pilot"
 PACKAGES = {
     "accounting": "./services/accounting/cmd/custody_batch",
     "assignment_test": "./services/accounting/internal/custody",
+    "proof_test": "./services/accounting/cmd/custody_proof",
     "gateway": "./services/api_gateway/cmd/api_gateway",
     "bff": "./services/web_bff/internal/server",
 }
@@ -274,7 +275,7 @@ def run_pitr_source(command, env, directory, pitr, container):
     return subprocess.CompletedProcess(command, code, stdout=log_path.read_bytes())
 
 
-def qualify(docker, container, binaries, node, env, observations, profile, pitr=None):
+def qualify(docker, container, binaries, node, env, observations, profile, pitr=None, *, schema):
     economics = profile == "execution_economics"
     booked_fee = profile == "booked_fee_correction"
     historical = profile == "historical_comparison"
@@ -305,6 +306,11 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         f"CREATE ROLE pilot_check LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{owner_password}';\n"
         f"CREATE DATABASE {DATABASE} OWNER pilot_migrator;\n"
     ).encode())
+    if schema != "public":
+        sql(DATABASE, b"""
+            CREATE SCHEMA :"accounting_schema" AUTHORIZATION pilot_migrator;
+            ALTER DATABASE kanz_custody_pilot SET search_path TO :"accounting_schema";
+        """, "-v", "accounting_schema=" + schema)
     for migration in sorted((CMD.parents[1] / "migrations").glob("*.sql")):
         try:
             sql(DATABASE, b"SET ROLE pilot_migrator;\n" + migration.read_bytes())
@@ -327,14 +333,14 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
     if not rerun:
         sql(DATABASE, b"", "-v", "review_fence_only=on", "-f", "/tmp/pilot_grants.sql")
     sql(DATABASE, b"""
-        GRANT USAGE ON SCHEMA public TO pilot_check;
+        GRANT USAGE ON SCHEMA :"accounting_schema" TO pilot_check;
         GRANT SELECT ON custody_batch_receipts, ledger_snapshots TO pilot_check;
         GRANT SELECT, INSERT ON ledger_entries, ledger_append_positions, custody_runs, custody_actions TO pilot_check;
         GRANT SELECT, INSERT, UPDATE ON ledger_heads, custody_statements, custody_breaks, outbox TO pilot_check;
         GRANT SELECT, INSERT, UPDATE, DELETE ON custody_break_detections TO pilot_check;
         GRANT SELECT, INSERT ON custody_execution_quantity_observations TO pilot_check;
         GRANT USAGE ON SEQUENCE outbox_id_seq, custody_execution_quantity_observations_observation_seq TO pilot_check;
-    """)
+    """, "-v", "accounting_schema=" + schema)
     sql("postgres", (
         "CREATE ROLE pilot_source LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE kanz_custody_batch_pilot "
         f"PASSWORD '{source_password}';"
@@ -351,7 +357,7 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
     reader_url = f"postgres://pilot_check:{owner_password}@{endpoint}/{DATABASE}?sslmode=disable"
     check_withdrawal = enroll_accounts(sql, DATABASE, endpoint, reader_url, binaries, env,
                                        CMD.parent / "custody_proof" / "testdata",
-                                       check_startup=profile == "comparisons")
+                                       check_startup=profile == "comparisons", schema=schema)
     pilot_env = dict(env,
         TEST_POSTGRES_URL=reader_url,
         TEST_CUSTODY_BATCH_DATABASE_URL=f"postgres://pilot_source:{source_password}@{endpoint}/{DATABASE}?sslmode=disable",
@@ -481,7 +487,7 @@ def customer_downloads(observations, records):
     return receipts
 
 
-def run_profile(docker, binaries, node, env, observations, profile, pitr=None):
+def run_profile(docker, binaries, node, env, observations, profile, pitr=None, *, schema):
     # Local SQL administration uses peer auth. The disposable remote roles use SCRAM.
     name = "kanz-custody-pilot-" + secrets.token_hex(8)
     command = (
@@ -497,16 +503,16 @@ def run_profile(docker, binaries, node, env, observations, profile, pitr=None):
             "--entrypoint", "sh", IMAGE, "-ec", command]
     container = subprocess.check_output(args, env=env, text=True, timeout=30).strip()
     try:
-        return qualify(docker, container, binaries, node, env, observations, profile, pitr)
+        return qualify(docker, container, binaries, node, env, observations, profile, pitr, schema=schema)
     finally:
         subprocess.run([*docker, "rm", "--force", container], env=env, check=True,
                        stdout=subprocess.DEVNULL, timeout=30)
 
 
-def verify_physical_recovery(docker, binaries, node, env, directory):
+def verify_physical_recovery(docker, binaries, node, env, directory, *, schema):
     with CustodyPITR(docker, env, IMAGE) as pitr:
         source, read_env = run_profile(docker, binaries, node, env, directory / "source.json",
-                                       "historical_comparison", pitr)
+                                       "historical_comparison", pitr, schema=schema)
         cut_file = directory / "cut.json"
         if cut_file.stat().st_size > 8192:
             raise RuntimeError("Recovery target metadata exceeds its bound.")
@@ -548,7 +554,7 @@ def verify_physical_recovery(docker, binaries, node, env, directory):
         before, after = before_file.read_bytes(), after_file.read_bytes()
         if before != after:
             raise RuntimeError("The restored dated browser receipt differs from the source.")
-        return {"postgres_image": IMAGE, "source": source, "recovery": pitr.evidence,
+        return {"postgres_image": IMAGE, "accounting_schema": schema, "source": source, "recovery": pitr.evidence,
                 "identical_browser_receipt_sha256": hashlib.sha256(after).hexdigest()}
 
 
@@ -557,8 +563,11 @@ def main():
     parser.add_argument("--node", default="node", help="Node executable matching web/.nvmrc")
     parser.add_argument("--pull-image", action="store_true", help="Fetch the pinned PostgreSQL image before startup")
     parser.add_argument("--pitr", action="store_true", help="Run the isolated physical recovery drill")
+    parser.add_argument("--named-schema", action="store_true",
+                        help="Install Accounting in a dedicated schema with no public fallback")
     parser.add_argument("--receipt", type=Path, help="Write the verified synthetic comparison results as JSON")
     args = parser.parse_args()
+    schema = "pilot_books" if args.named_schema else "public"
     node = shutil.which(args.node)
     if not node:
         raise RuntimeError("Node executable unavailable.")
@@ -569,13 +578,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
         if args.pitr:
-            results = verify_physical_recovery(docker, binaries, node, env, Path(directory))
+            results = verify_physical_recovery(docker, binaries, node, env, Path(directory), schema=schema)
         else:
-            results = {"postgres_image": IMAGE}
+            results = {"postgres_image": IMAGE, "accounting_schema": schema}
             for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction",
                         "execution_economics", "historical_comparison", "booked_fee_correction"):
                 observations = Path(directory) / (key + ".json")
-                results[key], onboarding = run_profile(docker, binaries, node, env, observations, key)
+                results[key], onboarding = run_profile(docker, binaries, node, env, observations, key, schema=schema)
                 if onboarding:
                     results["account_onboarding"] = onboarding
                 if key == "execution_economics":

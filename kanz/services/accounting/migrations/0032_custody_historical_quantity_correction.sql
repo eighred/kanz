@@ -11,7 +11,11 @@ ALTER TABLE custody_runs DROP CONSTRAINT custody_runs_check,
     );
 
 -- A late signed equality may clear only the exact prior observed execution.
-CREATE OR REPLACE FUNCTION custody_quantity_observation_origin() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DO $install$
+DECLARE owning_schema name := pg_catalog.current_schema();
+BEGIN
+ EXECUTE pg_catalog.format($ddl$CREATE OR REPLACE FUNCTION %1$I.custody_quantity_observation_origin() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,%1$I,pg_temp AS %2$L$ddl$,
+     owning_schema, $body$
 BEGIN
     IF EXISTS (
         WITH signed_lines AS MATERIALIZED (
@@ -85,4 +89,6 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$;
+$body$);
+END;
+$install$;

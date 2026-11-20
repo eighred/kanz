@@ -39,7 +39,11 @@ $$;
 
 -- Verify each statement's exact signed line and the actual journal entry before
 -- accepting working observations. Parse a batch once for its set of matched rows.
-CREATE OR REPLACE FUNCTION custody_quantity_observation_origin() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+DO $install$
+DECLARE owning_schema name := pg_catalog.current_schema();
+BEGIN
+ EXECUTE pg_catalog.format($ddl$CREATE OR REPLACE FUNCTION %1$I.custody_quantity_observation_origin() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,%1$I,pg_temp AS %2$L$ddl$,
+     owning_schema, $body$
 BEGIN
     IF EXISTS (
         WITH signed_lines AS MATERIALIZED (
@@ -100,7 +104,9 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$;
+$body$);
+END;
+$install$;
 CREATE TRIGGER custody_quantity_origin AFTER INSERT ON custody_execution_quantity_observations
     REFERENCING NEW TABLE AS new_observations FOR EACH STATEMENT EXECUTE FUNCTION custody_quantity_observation_origin();
 CREATE TRIGGER custody_quantity_observation_immutable BEFORE UPDATE OR DELETE ON custody_execution_quantity_observations

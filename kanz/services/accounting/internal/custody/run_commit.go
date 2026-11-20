@@ -343,7 +343,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run, checks ...func(contex
 	if verifying(run) {
 		var verifiedAssignment bool
 		if run.Basis != nil && run.Basis.Assignments != nil {
-			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtextextended('custody-assignment-tenant:' || public.app_current_tenant(),0))"); err != nil {
+			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtextextended('custody-assignment-tenant:' || app_current_tenant(),0))"); err != nil {
 				return Run{}, err
 			}
 			verifiedAssignment, err = confirmRunAssignments(ctx, tx, run.Subject, run.Basis, false)
@@ -437,7 +437,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run, checks ...func(contex
 				if len(run.measured) > 0 && run.Basis != nil && len(run.Basis.Accounts[run.Subject.CustodianID]) == 1 {
 					var id string
 					err := tx.QueryRow(ctx, `SELECT run_id FROM custody_runs
-                        WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3
+                        WHERE tenant_id=app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3
                           AND outcome='historical_quantity_correction' AND statement_id=$4 AND signed_statement_sha256=$5
                           AND (book_basis->>'journal_position')::bigint=$6
                         ORDER BY completed_at DESC,run_id LIMIT 1`, run.Subject.PortfolioID, run.Subject.CustodianID, run.Subject.BusinessDate, run.StatementID, signedDigest, run.Basis.JournalPosition).Scan(&id)
@@ -524,7 +524,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run, checks ...func(contex
 // Read the prefix in a fresh READ COMMITTED statement after acquiring it.
 func lockJournalForComparison(ctx context.Context, tx pgx.Tx, portfolio string) error {
 	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(public.app_current_tenant()),hashtext($1))`, portfolio).Scan(&locked); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtext(app_current_tenant()),hashtext($1))`, portfolio).Scan(&locked); err != nil {
 		return err
 	}
 	if !locked {
@@ -539,8 +539,8 @@ func confirmCurrentJournalPosition(ctx context.Context, tx pgx.Tx, run Run) erro
 	}
 	var stable bool
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(
-		(SELECT position FROM ledger_heads WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1),
-		CASE WHEN $3 THEN (SELECT count(*) FROM ledger_entries WHERE tenant_id=public.app_current_tenant() AND portfolio_id=$1) END
+		(SELECT position FROM ledger_heads WHERE tenant_id=app_current_tenant() AND portfolio_id=$1),
+		CASE WHEN $3 THEN (SELECT count(*) FROM ledger_entries WHERE tenant_id=app_current_tenant() AND portfolio_id=$1) END
 	) IS NOT DISTINCT FROM $2::bigint`, run.Subject.PortfolioID, run.Basis.JournalPosition, run.RequestID != "").Scan(&stable); err != nil {
 		return err
 	}

@@ -90,17 +90,31 @@ func importSignedEvidence(ctx context.Context, kind, evidenceFile, signatureFile
 	return importEvidence(ctx, pool, e, raw, sig)
 }
 
+// Resolve Accounting independently of the issuer's connection search_path.
+// The scalar subquery requires a single ledger even when the issuer cannot
+// access a second schema. Never select the first visible matching ledger.
+const accountingNamespace = `SELECT n.oid, n.nspname FROM pg_catalog.pg_namespace n
+    WHERE n.oid=(
+        SELECT t.relnamespace FROM pg_catalog.pg_class t
+        JOIN pg_catalog.pg_namespace ns ON ns.oid=t.relnamespace
+        WHERE t.relname='ledger_entries' AND t.relkind IN ('r','p')
+          AND ns.nspname !~ '^pg_' AND ns.nspname <> 'information_schema'
+    )
+      AND pg_catalog.has_schema_privilege(session_user,n.oid,'USAGE')
+      AND NOT pg_catalog.has_schema_privilege(session_user,n.oid,'CREATE')
+      AND NOT pg_catalog.pg_has_role(session_user,n.nspowner,'USAGE')`
+
 const authorizedIssuer = `SELECT i.public_key
-    FROM public.custody_proof_issuers i
-    JOIN public.custody_proof_scopes s ON s.tenant_id=i.tenant_id AND s.login_role=i.login_role
+    FROM %[1]s.custody_proof_issuers i
+    JOIN %[1]s.custody_proof_scopes s ON s.tenant_id=i.tenant_id AND s.login_role=i.login_role
     JOIN pg_catalog.pg_roles r ON r.rolname=i.login_role
     WHERE i.login_role=session_user AND current_user=session_user
       AND NOT (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication)
       AND i.tenant_id=$1 AND i.kind=$2 AND i.authority=$3
       AND s.account_id=$4 AND s.venue=$5 AND s.exchange_account_id=$6 AND s.portfolio_id=$7 AND s.custodian_id=$8
       AND NOT EXISTS (
-        SELECT 1 FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
-        WHERE n.nspname='public' AND t.relkind IN ('r','p') AND (
+        SELECT 1 FROM pg_catalog.pg_class t
+        WHERE t.relnamespace=$9::oid AND t.relkind IN ('r','p') AND (
           has_table_privilege(session_user,t.oid,'UPDATE,DELETE,TRUNCATE,TRIGGER')
           OR has_any_column_privilege(session_user,t.oid,'UPDATE')
           OR (t.relname<>CASE WHEN i.kind='venue_identity' THEN 'custody_account_proofs' ELSE 'custody_account_assignments' END
@@ -108,24 +122,41 @@ const authorizedIssuer = `SELECT i.public_key
         )
       )`
 
+func pinAccountingNamespace(ctx context.Context, tx pgx.Tx) (uint32, string, error) {
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path = pg_catalog, pg_temp"); err != nil {
+		return 0, "", errors.New("custody proof: unable to secure transaction scope")
+	}
+	var namespace uint32
+	var name string
+	if err := tx.QueryRow(ctx, accountingNamespace).Scan(&namespace, &name); err != nil {
+		return 0, "", errors.New("custody proof: accounting schema unknown or issuer schema privileges refused")
+	}
+	schema := pgx.Identifier{name}.Sanitize()
+	if _, err := tx.Exec(ctx, "SELECT pg_catalog.set_config('search_path', $1, true)", "pg_catalog,"+schema+",pg_temp"); err != nil {
+		return 0, "", errors.New("custody proof: unable to secure transaction scope")
+	}
+	return namespace, schema, nil
+}
+
 func importEvidence(ctx context.Context, pool *pgxpool.Pool, e custody.AccountEvidence, raw, sig []byte) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return errors.New("custody proof: database unavailable")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err = tx.Exec(ctx, "SET LOCAL search_path = pg_catalog, public, pg_temp"); err != nil {
-		return errors.New("custody proof: unable to secure transaction scope")
+	namespace, schema, err := pinAccountingNamespace(ctx, tx)
+	if err != nil {
+		return err
 	}
 	var key []byte
-	if err = tx.QueryRow(ctx, authorizedIssuer, e.TenantID, e.Kind, e.Authority, e.AccountID, e.Venue, e.ExchangeAccountID, e.PortfolioID, e.CustodianID).Scan(&key); err != nil {
+	if err = tx.QueryRow(ctx, fmt.Sprintf(authorizedIssuer, schema), e.TenantID, e.Kind, e.Authority, e.AccountID, e.Venue, e.ExchangeAccountID, e.PortfolioID, e.CustodianID, namespace).Scan(&key); err != nil {
 		return errors.New("custody proof: issuer role or scope refused")
 	}
 	if !custody.VerifyAccountEvidence(e, raw, sig, key) {
 		return errors.New("custody proof: signature refused")
 	}
 	digest := sha256.Sum256(raw)
-	if err = appendEvidence(ctx, tx, e, raw, sig, digest[:]); err != nil {
+	if err = appendEvidence(ctx, tx, schema, e, raw, sig, digest[:]); err != nil {
 		return errors.New("custody proof: evidence conflicts with its identity, assignment history or database grant")
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -135,22 +166,22 @@ func importEvidence(ctx context.Context, pool *pgxpool.Pool, e custody.AccountEv
 }
 
 // Replay accepts only the identical signed payload on the same immutable row.
-func appendEvidence(ctx context.Context, tx pgx.Tx, e custody.AccountEvidence, raw, sig, digest []byte) error {
+func appendEvidence(ctx context.Context, tx pgx.Tx, schema string, e custody.AccountEvidence, raw, sig, digest []byte) error {
 	var insert, lookup string
 	args := []any{e.TenantID, e.AccountID, e.ProofID, e.Authority, e.EffectiveFrom, e.EffectiveUntil, digest, raw, sig}
 	switch e.Kind {
 	case "venue_identity":
 		args = append(args, e.Venue, e.ExchangeAccountID)
-		insert = `INSERT INTO public.custody_account_proofs(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_sha256,evidence_payload,signature,venue,exchange_account_id)
+		insert = `INSERT INTO ` + schema + `.custody_account_proofs(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_sha256,evidence_payload,signature,venue,exchange_account_id)
             VALUES ($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`
-		lookup = `SELECT evidence_payload FROM public.custody_account_proofs
+		lookup = `SELECT evidence_payload FROM ` + schema + `.custody_account_proofs
             WHERE tenant_id=$1 AND account_id=$2 AND proof_id=$3 AND authority=$4 AND effective_from=$5::text::date AND effective_until=$6::text::date
             AND evidence_sha256=$7 AND evidence_payload=$8 AND signature=$9 AND venue=$10 AND exchange_account_id=$11 AND issuer_role=session_user`
 	case "custody_assignment":
 		args = append(args, e.PortfolioID, e.CustodianID, e.Version, e.Revision, e.Withdrawn)
-		insert = `INSERT INTO public.custody_account_assignments(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_sha256,evidence_payload,signature,portfolio_id,custodian_id,version,revision,withdrawn)
+		insert = `INSERT INTO ` + schema + `.custody_account_assignments(tenant_id,account_id,proof_id,authority,effective_from,effective_until,evidence_sha256,evidence_payload,signature,portfolio_id,custodian_id,version,revision,withdrawn)
             VALUES ($1,$2,$3,$4,$5::text::date,$6::text::date,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING`
-		lookup = `SELECT evidence_payload FROM public.custody_account_assignments
+		lookup = `SELECT evidence_payload FROM ` + schema + `.custody_account_assignments
             WHERE tenant_id=$1 AND account_id=$2 AND proof_id=$3 AND authority=$4 AND effective_from=$5::text::date AND effective_until=$6::text::date
             AND evidence_sha256=$7 AND evidence_payload=$8 AND signature=$9 AND portfolio_id=$10 AND custodian_id=$11 AND version=$12 AND revision=$13 AND withdrawn=$14 AND issuer_role=session_user`
 	default:
