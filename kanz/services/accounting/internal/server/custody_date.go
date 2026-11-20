@@ -12,6 +12,10 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 )
 
+type historicalCustodyReader interface {
+	HistoricalReceipt(context.Context, custody.Subject, string, string) (custody.DatedResult, error)
+}
+
 type datedCustodyReader interface {
 	DatedResult(context.Context, custody.Subject) (custody.DatedResult, error)
 }
@@ -25,7 +29,10 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			return
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
-		if err != nil || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
+		ids, historical := query["run_id"]
+		delete(query, "run_id")
+		validID := !historical || len(ids) == 1 && custody.ValidReceiptID(ids[0])
+		if err != nil || !validID || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
 			writeJSON(w, 400, map[string]string{"error": "one custodian and business date required"})
 			return
 		}
@@ -40,7 +47,18 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			return
 		}
 		subject := custody.Subject{PortfolioID: portfolio, CustodianID: custodian, BusinessDate: date}
-		result, err := reader.DatedResult(bus.WithTenantID(r.Context(), principal.Tenant), subject)
+		ctx := bus.WithTenantID(r.Context(), principal.Tenant)
+		configured, _ := s.custodyScope.For(portfolio, custodian)
+		result := custody.DatedResult{State: "unknown"}
+		if historical {
+			if prior, supported := reader.(historicalCustodyReader); supported && len(configured) == 1 {
+				for account := range configured {
+					result, err = prior.HistoricalReceipt(ctx, subject, account, ids[0])
+				}
+			}
+		} else {
+			result, err = reader.DatedResult(ctx, subject)
+		}
 		if err != nil {
 			writeJSON(w, 503, map[string]string{"error": "dated comparison unavailable"})
 			return
@@ -48,13 +66,12 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		// An operator may have reassigned this custodian since the run. The
 		// customer report must not describe that old account as today's basis.
 		if result.State == "recorded" && (result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
-			configured, _ := s.custodyScope.For(portfolio, custodian)
 			basis := result.Run.Basis
 			if basis == nil || basis.Mode != custody.BasisDeclared || len(basis.Accounts[custodian]) != 1 || len(configured) != 1 || !configured.Has(basis.Accounts[custodian][0]) {
 				result = custody.DatedResult{State: "unknown"}
 			}
 		}
-		response := map[string]string{"tenant_id": principal.Tenant, "state": result.State, "portfolio_id": portfolio, "custodian_id": custodian, "business_date": date.Format(time.DateOnly)}
+		response := map[string]any{"tenant_id": principal.Tenant, "state": result.State, "portfolio_id": portfolio, "custodian_id": custodian, "business_date": date.Format(time.DateOnly)}
 		if result.Reason != "" {
 			response["reason"] = result.Reason
 		}
@@ -75,6 +92,16 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 						response["unreferenced_book_trades"] = strconv.Itoa(*proof.UnreferencedBookTrades)
 					}
 				}
+			}
+			if historical {
+				response["signed_statement_sha256"] = result.SignedStatementSHA256
+				rows := make([]map[string]string, 0, len(result.Run.Breaks))
+				for _, b := range result.Run.Breaks {
+					v := toBreakView(b, result.Run.CompletedAt)
+					rows = append(rows, map[string]string{"break_id": v.BreakID, "kind": v.Kind, "key": v.Key,
+						"values_state": v.ValuesState, "ibor": v.IBOR, "custodian": v.Custodian, "difference": v.Difference})
+				}
+				response["breaks"] = rows
 			}
 			if b := result.Run.Basis; b != nil {
 				response["scope_mode"] = b.Mode
