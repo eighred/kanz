@@ -41,6 +41,8 @@ type Capability string
 const (
 	// Read: query the fund's state. Exposure, positions, orders, executions, prices.
 	Read Capability = "read"
+	// SessionRead lets a principal inspect their own effective gateway permissions.
+	SessionRead Capability = "session.read"
 	// Snapshot custody is a separate optional tenant-wide grant. Neither
 	// ordinary Read nor Operate implies access or durable snapshot creation.
 	LakeSnapshotCreate Capability = "lake.snapshot.create"
@@ -267,6 +269,7 @@ type Route struct {
 // leave out of a chain.
 type Mux struct {
 	cashHistoryRole string
+	custodyReadRole string
 	mfaRequired     bool
 	mux             *http.ServeMux
 	grants          Grants
@@ -281,6 +284,10 @@ func WithMFARequired(required bool) Option { return func(m *Mux) { m.mfaRequired
 // WithCashHistoryRole names the dedicated workload bearer. The same token
 // on a public/BFF connection cannot exercise the OMS workload grant.
 func WithCashHistoryRole(role string) Option { return func(m *Mux) { m.cashHistoryRole = role } }
+
+// WithCustodyReadRole restricts the dedicated customer role to its scoped
+// custody reads and permission introspection, including on a mixed-role token.
+func WithCustodyReadRole(role string) Option { return func(m *Mux) { m.custodyReadRole = role } }
 
 type omsHistoryPeerKey struct{}
 
@@ -297,7 +304,17 @@ func IsOMSHistoryRequest(r *http.Request) bool {
 	return r.Context().Value(omsHistoryPeerKey{}) == true
 }
 
-func (m *Mux) requestGrant(r *http.Request, p *middleware.Principal, cap Capability) (role string, allowed, workload bool) {
+func (m *Mux) requestGrant(r *http.Request, p *middleware.Principal, cap Capability) (role string, allowed, workload bool, denial string) {
+	if m.custodyReadRole != "" && p.HasRole(m.custodyReadRole) && cap != SessionRead {
+		if cap != CustodyRead {
+			return "", false, false, "custody customer role restricts this session to custody reads"
+		}
+		if len(p.Portfolios) == 0 || p.Tenant == "" {
+			return "", false, false, "custody customer read requires a tenant and an explicit portfolio grant"
+		}
+		role, allowed = m.grants.grantingRole([]string{m.custodyReadRole}, cap)
+		return
+	}
 	if cap != CashHistory {
 		role, allowed = m.grants.grantingRole(p.Roles, cap)
 		return
@@ -306,12 +323,12 @@ func (m *Mux) requestGrant(r *http.Request, p *middleware.Principal, cap Capabil
 		role = m.cashHistoryRole
 		allowed = role != "" && p.HasRole(role) && m.grants.Allows([]string{role}, CashHistory) &&
 			p.Tenant != "" && auth.PortfolioEntitled(p.Portfolios, r.PathValue("id"))
-		return role, allowed, allowed
+		return role, allowed, allowed, ""
 	}
 	// Human readers reach this financial evidence through their existing Fund
 	// authorization and step-up policy, including on browser workload connections.
 	role, allowed = m.grants.grantingRole(p.Roles, Fund)
-	return role, allowed && m.grants.Allows([]string{role}, CashHistory), false
+	return role, allowed && m.grants.Allows([]string{role}, CashHistory), false, ""
 }
 
 // NewMux returns a Mux enforcing grants and recording every decision it makes.
@@ -379,15 +396,19 @@ func (m *Mux) require(cap Capability, pattern string, next http.HandlerFunc) htt
 			forbidden(w)
 			return
 		}
-		role, allowed, workload := m.requestGrant(r, p, cap)
-		if allowed && cap != Read && ((m.mfaRequired && !workload) || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
+		role, allowed, workload, denial := m.requestGrant(r, p, cap)
+		if allowed && cap != Read && cap != SessionRead && ((m.mfaRequired && !workload) || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
 			m.record(r, p, cap, pattern, auth.Decision{Reason: "recent WebAuthn MFA required"})
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"Recent MFA required. Verify your security key on the Authentication page.","code":"mfa_required"}`))
 			return
 		}
-		m.record(r, p, cap, pattern, decisionFor(cap, role, allowed, p.Roles))
+		decision := auth.Decision{Reason: denial}
+		if denial == "" {
+			decision = decisionFor(cap, role, allowed, p.Roles)
+		}
+		m.record(r, p, cap, pattern, decision)
 		if !allowed {
 			forbidden(w)
 			return

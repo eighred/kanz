@@ -273,7 +273,8 @@ type Config struct {
 	FundRole string
 	// CashHistoryRole grants only the retained cash-commit read. It is intended
 	// for the OMS workload token and must never grant Fund's cash-write routes.
-	CashHistoryRole  string
+	CashHistoryRole string
+	// CustodyReadRole identifies customer sessions restricted to their custody portfolio grants.
 	CustodyReadRole  string
 	CustodyRerunRole string
 	// ApproveRole is the role carrying authz.Approve — the second signature on an
