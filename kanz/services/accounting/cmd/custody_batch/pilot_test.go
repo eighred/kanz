@@ -29,7 +29,7 @@ func checkSignedPilotCommand(t *testing.T, limit time.Duration, afterReceipt fun
 	if os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1" {
 		fixture = filepath.Join(fixture, "instrument_units")
 	}
-	checkPilotSeries(t, limit, fixture, false, []pilotStatementFile{
+	checkPilotSeries(t, limit, fixture, nil, []pilotStatementFile{
 		{name: "statement-r1", revision: 1, position: big.NewRat(19, 2), trade: true},
 		{name: "statement-r2", revision: 2, position: big.NewRat(21, 2), trade: true},
 	}, afterReceipt)
@@ -44,12 +44,13 @@ type pilotStatementFile struct {
 	trade     bool
 }
 
-func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, processes bool, files []pilotStatementFile, afterReceipt func(context.Context, *pgxpool.Pool, custody.Statement, int, pilotBroker)) {
+func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, beforeIntake func(context.Context, *pgxpool.Pool, pilotBroker, time.Time), files []pilotStatementFile, afterReceipt func(context.Context, *pgxpool.Pool, custody.Statement, int, pilotBroker)) {
 	t.Helper()
 	source, owner := os.Getenv("TEST_CUSTODY_BATCH_DATABASE_URL"), os.Getenv("TEST_POSTGRES_URL")
 	if source == "" || owner == "" {
 		t.Skip("requires isolated provisioned pilot source and owner")
 	}
+	processes := beforeIntake != nil
 	broker := grantBroker(t, processes)
 	const tenant = "synthetic-custody-pilot"
 	t.Setenv("ACCOUNTING_DATABASE_URL", source)
@@ -81,6 +82,9 @@ func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, process
 		}
 	}
 	firstDay := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
+	if beforeIntake != nil {
+		beforeIntake(ctx, pool, broker, firstDay)
+	}
 	for index, file := range files {
 		sequence := uint64(index + 1)
 		subject := custody.Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: firstDay.AddDate(0, 0, file.dayOffset)}

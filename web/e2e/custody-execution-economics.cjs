@@ -11,7 +11,7 @@ async function main() {
     assert(input.length < 65536)
   }
   const { base, cookies, expected } = JSON.parse(input)
-  const { revision, date, run_id: run, statement_id: statement, original_run: original } = expected
+  const { phase, revision, date, run_id: run, statement_id: statement, original_run: original, missing_run: missing } = expected
   assert.equal(new URL(base).origin, base)
   assert.equal(new URL(base).hostname, '127.0.0.1')
   const pathname = '/api/v1/portfolios/PF1/custody/comparison'
@@ -35,7 +35,7 @@ async function main() {
         stage = name + '-open-response'
         await page.goto(base + '/custody-breaks')
         if (name !== 'authorized') {
-          for (const saved of [run, original]) {
+          for (const saved of [run, original, missing]) {
             const query = new URLSearchParams({ custodian_id: 'CUST-A', business_date: date, run_id: saved })
             const reply = await page.evaluate(async path => {
               const r = await fetch(path)
@@ -51,10 +51,10 @@ async function main() {
           const u = new URL(r.url())
           return r.request().method() === 'GET' && u.pathname === pathname && u.searchParams.get('run_id') === id
         })
-        async function dated(id) {
+        async function dated(id, day = date) {
           await region.getByLabel('Portfolio ID', { exact: true }).fill('PF1')
           await region.getByLabel('Custodian ID', { exact: true }).fill('CUST-A')
-          await region.getByLabel('Business date', { exact: true }).fill(date)
+          await region.getByLabel('Business date', { exact: true }).fill(day)
           await region.getByLabel('Saved run ID (optional)', { exact: true }).fill(id || '')
           const pending = answer(id)
           await region.getByRole('button', { name: 'View dated result' }).click()
@@ -78,11 +78,45 @@ async function main() {
           await item.delete()
           const doc = JSON.parse(bytes)
           assert.equal(doc.run_id, body.run_id)
-          assert.equal(doc.signed_statement_sha256, body.statement_id.slice(-64))
+          assert.equal(doc.business_date, body.business_date)
+          assert.equal(doc.outcome, body.outcome)
+          assert.equal(doc.statement_id, body.statement_id)
+          assert.equal(doc.signed_statement_sha256, body.statement_id?.slice(-64))
           assert.deepEqual(doc.execution_economics, body.execution_economics)
           return { receipt: doc, sha256: createHash('sha256').update(bytes).digest('hex') }
         }
+        async function absence(id) {
+          const body = await dated(id)
+          assert.equal(body.state, 'recorded')
+          assert.equal(body.outcome, 'no_statement')
+          assert.equal(body.run_id, missing)
+          assert.equal(body.business_date, date)
+          assert.equal(body.portfolio_id, 'PF1')
+          assert.equal(body.custodian_id, 'CUST-A')
+          for (const key of ['statement_id', 'signed_statement_sha256', 'breaks', 'journal_position', 'account_assignment_verified', 'transaction_pass', 'execution_economics']) {
+            assert.equal(body[key], undefined)
+          }
+          await region.getByText('No statement received', { exact: true }).waitFor()
+          if (id) await region.getByText('Historical scheduled run', { exact: false }).waitFor()
+          return download(body)
+        }
+        if (phase === 'missing') {
+          stage = 'authorized-open-row'
+          const capture = await absence(null)
+          await fs.writeFile(file + '.missing', JSON.stringify(capture), { mode: 0o600 })
+          continue
+        }
         const current = await dated(null)
+        if (phase === 'pending') {
+          stage = 'authorized-open-row'
+          assert.equal(current.state, 'pending')
+          assert.equal(current.statement_id, statement)
+          assert.equal(current.outcome, undefined)
+          assert.equal(current.run_id, undefined)
+          await region.getByText('Statement awaiting comparison', { exact: true }).waitFor()
+          assert.equal(await region.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
+          continue
+        }
         assert.equal(current.run_id, run)
         assert.equal(current.execution_economics_status, state)
         await region.getByText(labels[state], { exact: true }).first().waitFor()
@@ -126,6 +160,14 @@ async function main() {
         await page.reload()
         const same = await dated(run)
         assert.deepEqual(await download(same), retained)
+        if (revision === 1) {
+          stage = 'authorized-reload-details'
+          const initial = JSON.parse(await fs.readFile(file + '.missing', 'utf8'))
+          assert.deepEqual(await absence(missing), initial)
+          const wrongDate = await dated(missing, '2020-02-03')
+          assert.equal(wrongDate.state, 'unknown')
+          assert.equal(wrongDate.run_id, undefined)
+        }
         if (revision === 2) {
           const previous = await dated(original)
           assert.equal(previous.execution_economics.rows[0].status, 'mismatch')
@@ -133,7 +175,7 @@ async function main() {
         }
       } finally { await context.close() }
     }
-    await fs.writeFile(file, JSON.stringify(history), { mode: 0o600 })
+    if (!phase) await fs.writeFile(file, JSON.stringify(history), { mode: 0o600 })
   } finally { await browser.close() }
 }
-main().catch(() => { process.stderr.write('custody-browser-stage = '+stage+'\n'); process.exitCode=1 })
+main().catch(() => { process.stderr.write('custody-browser-stage=' + stage + '\n'); process.exitCode = 1 })

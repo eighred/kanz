@@ -30,46 +30,63 @@ func TestSignedExecutionEconomicsPilot(t *testing.T) {
 	for i, name := range []string{"statement-r1", "statement-r2", "statement-r3", "statement-r4"} {
 		files = append(files, pilotStatementFile{name: name, revision: i + 1, position: big.NewRat(21, 2), cash: big.NewRat(-43, 4), trade: true})
 	}
-	var originalRun string
+	var originalRun, missingRun, missingSite string
+	var stopMissing func()
 	retained := make(map[string][]byte)
-	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "execution_economics"), true, files, func(ctx context.Context, pool *pgxpool.Pool, stmt custody.Statement, revision int, broker pilotBroker) {
+	script := os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT")
+	beforeIntake := func(ctx context.Context, pool *pgxpool.Pool, broker pilotBroker, day time.Time) {
 		ctx = bus.WithTenantID(ctx, tenant)
-		subject := stmt.Subject()
 		journal := ledger.NewPostgres(pool)
-		if revision == 1 {
-			// This independently booked fill supplies the actual commission and
-			// settlement evidence. Only the shared external reference joins it to the statement.
-			fill := &orderpb.Fill{FillId: "external-7", OrderId: "synthetic-order-7", Venue: "XSIM", VenueAccountId: "sandbox-account", VenueExecutionId: "7", InstrumentId: "SYN", Side: orderpb.Side_SIDE_BUY,
-				Quantity: &commonpb.Decimal{Coefficient: 105, Exponent: -1}, Price: &commonpb.Decimal{Coefficient: 1},
-				Fee: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 25, Exponent: -2}, CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(subject.BusinessDate)}
-			trade, err := ledger.FromFill("PF1", fill, "USD", subject.BusinessDate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = journal.Append(ctx, trade, nil); err != nil {
-				t.Fatal(err)
-			}
-		}
-		site, stop := startPilotAccounting(t, ctx, broker, "pilot-ingest", subject.BusinessDate)
-		defer stop()
-		awaitPilot(t, ctx, "scheduled completion", func(check context.Context) bool {
-			info, err := broker.completions.Info(check)
-			return err == nil && info.State.Msgs >= uint64(revision)
-		})
-		msg, err := broker.completions.GetMsg(ctx, uint64(revision))
+		// This independently booked fill supplies the actual commission and
+		// settlement evidence. Only the shared external reference joins it to the statement.
+		fill := &orderpb.Fill{FillId: "external-7", OrderId: "synthetic-order-7", Venue: "XSIM", VenueAccountId: "sandbox-account", VenueExecutionId: "7", InstrumentId: "SYN", Side: orderpb.Side_SIDE_BUY,
+			Quantity: &commonpb.Decimal{Coefficient: 105, Exponent: -1}, Price: &commonpb.Decimal{Coefficient: 1},
+			Fee: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 25, Exponent: -2}, CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(day)}
+		trade, err := ledger.FromFill("PF1", fill, "USD", day)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var frame envelopepb.EventFrame
-		var fact accountingpb.ReconciliationRun
-		if proto.Unmarshal(msg.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil || frame.GetEnvelope().GetSource() != "accounting" || frame.GetEnvelope().GetTenantId() != tenant || fact.GetRunId() == "" || fact.GetStatementId() != stmt.StatementID {
-			t.Fatal("unexpected completion identity")
+		if err = journal.Append(ctx, trade, nil); err != nil {
+			t.Fatal(err)
+		}
+		missingSite, stopMissing = startPilotAccounting(t, ctx, broker, "pilot-missing", day)
+		fact, payload := pilotCompletion(t, ctx, broker, 1)
+		if fact.GetOutcome() != accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_NO_STATEMENT || fact.GetStatementId() != "" || len(fact.GetBreaks()) != 0 {
+			t.Fatal("initial scheduled close did not record missing statement")
+		}
+		missingRun = fact.GetRunId()
+		retained[missingRun] = payload
+		provePilotBrowser(t, ctx, missingSite, "TestSignedCustodyOperatorBrowser", script,
+			map[string]any{"phase": "missing", "date": day.Format(time.DateOnly), "missing_run": missingRun})
+		t.Log("scheduled missing statement displayed and downloaded through Chromium")
+	}
+	t.Cleanup(func() {
+		if stopMissing != nil {
+			stopMissing()
+		}
+	})
+	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "execution_economics"), beforeIntake, files, func(ctx context.Context, pool *pgxpool.Pool, stmt custody.Statement, revision int, broker pilotBroker) {
+		ctx = bus.WithTenantID(ctx, tenant)
+		subject := stmt.Subject()
+		if revision == 1 {
+			provePilotBrowser(t, ctx, missingSite, "TestSignedCustodyOperatorBrowser", script,
+				map[string]any{"phase": "pending", "date": subject.BusinessDate.Format(time.DateOnly), "statement_id": stmt.StatementID})
+			stopMissing()
+			stopMissing = nil
+		}
+		site, stop := startPilotAccounting(t, ctx, broker, "pilot-ingest", subject.BusinessDate)
+		defer stop()
+		completionSequence := uint64(revision + 1)
+		fact, payload := pilotCompletion(t, ctx, broker, completionSequence)
+		if fact.GetStatementId() != stmt.StatementID ||
+			fact.GetOutcome() != accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_CLEAN {
+			t.Fatal("late signed close did not produce the expected compared outcome")
 		}
 		runID := fact.GetRunId()
 		if revision == 1 {
 			originalRun = runID
 		}
-		retained[runID] = frame.Payload
+		retained[runID] = payload
 		awaitPilot(t, ctx, "persisted completion publication", func(check context.Context) bool {
 			var sent bool
 			err := pool.QueryRow(check, `SELECT EXISTS(SELECT FROM outbox WHERE producer_service='accounting' AND event_type=$1 AND correlation_id=$2 AND published_at IS NOT NULL)`, custody.SubjectRun, runID).Scan(&sent)
@@ -83,7 +100,7 @@ func TestSignedExecutionEconomicsPilot(t *testing.T) {
 			defer stopReplay()
 			awaitPilotStatementAck(t, ctx, broker, "pilot-replay", uint64(revision))
 		}
-		provePilotBrowser(t, ctx, site, "TestSignedCustodyOperatorBrowser", os.Getenv("CUSTODY_PILOT_BROWSER_SCRIPT"), map[string]any{"revision": revision, "run_id": runID, "statement_id": stmt.StatementID, "original_run": originalRun, "date": subject.BusinessDate.Format(time.DateOnly)})
+		provePilotBrowser(t, ctx, site, "TestSignedCustodyOperatorBrowser", script, map[string]any{"revision": revision, "run_id": runID, "statement_id": stmt.StatementID, "original_run": originalRun, "missing_run": missingRun, "date": subject.BusinessDate.Format(time.DateOnly)})
 		for id, payload := range retained {
 			var data []byte
 			if err := pool.QueryRow(ctx, "SELECT manual_receipt FROM custody_runs WHERE run_id=$1", id).Scan(&data); err != nil || !bytes.Equal(data, payload) {
@@ -91,9 +108,28 @@ func TestSignedExecutionEconomicsPilot(t *testing.T) {
 			}
 		}
 		info, err := broker.completions.Info(ctx)
-		if err != nil || info.State.Msgs != uint64(revision) || before != pilotFinancialSnapshot(t, ctx, pool) {
+		if err != nil || info.State.Msgs != completionSequence || before != pilotFinancialSnapshot(t, ctx, pool) {
 			t.Fatal("replay or read changed financial state or completion count")
 		}
 		t.Logf("signed economics revision %d retained and reopened through Chromium", revision)
 	})
+}
+
+func pilotCompletion(t *testing.T, ctx context.Context, broker pilotBroker, sequence uint64) (*accountingpb.ReconciliationRun, []byte) {
+	t.Helper()
+	awaitPilot(t, ctx, "scheduled completion", func(check context.Context) bool {
+		info, err := broker.completions.Info(check)
+		return err == nil && info.State.Msgs >= sequence
+	})
+	msg, err := broker.completions.GetMsg(ctx, sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frame envelopepb.EventFrame
+	var fact accountingpb.ReconciliationRun
+	if proto.Unmarshal(msg.Data, &frame) != nil || proto.Unmarshal(frame.Payload, &fact) != nil ||
+		frame.GetEnvelope().GetSource() != "accounting" || frame.GetEnvelope().GetTenantId() != "synthetic-custody-pilot" || fact.GetRunId() == "" {
+		t.Fatal("unexpected completion identity")
+	}
+	return &fact, frame.Payload
 }

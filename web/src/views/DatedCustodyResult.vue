@@ -97,7 +97,7 @@ const pendingLabels = {
     </form>
     <p v-if="error" role="alert">{{ error }}</p>
     <output v-if="result" :data-state="result.state">
-      <span v-if="savedRun">Historical comparison · </span>
+      <span v-if="savedRun">{{ result.state === 'recorded' && result.outcome === 'no_statement' ? 'Historical scheduled run' : 'Historical comparison' }} · </span>
       <strong>{{ result.state === 'recorded' ? recordedLabel(result) : result.reason ? pendingLabels[result.reason] : states[result.state] }}</strong>
       <strong v-if="result.state === 'recorded' && result.historical?.execution_quantities?.differences.length"> · Execution quantity differences found</strong>
       · {{ result.portfolio_id }} · {{ result.custodian_id }} · {{ result.business_date }}

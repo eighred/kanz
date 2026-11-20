@@ -98,6 +98,20 @@ describe('custody response boundary', () => {
     }
   })
 
+  it('reopens a scheduled absence without accepting signed figures or another run', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const wire = { ...subject, tenant_id: 'tenant', state: 'recorded', outcome: 'no_statement',
+      run_id: 'missing-run', completed_at: '2020-02-05T01:00:00Z' }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(wire)
+    const read = () => custody.dated(subject, 'tenant', undefined, wire.run_id)
+    await expect(read()).resolves.toMatchObject(wire)
+    for (const invalid of [{ run_id: 'other-run' }, { statement_id: 'signed-statement' },
+      { signed_statement_sha256: 'a'.repeat(64) }, { breaks: [] }, { journal_position: '0' }]) {
+      get.mockResolvedValueOnce({ ...wire, ...invalid })
+      await expect(read()).rejects.toThrow('Dated result could not be verified.')
+    }
+  })
+
   it('binds the saved run, signed digest and exact immutable differences to the requested portfolio and date', async () => {
     const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
     const digest = 'a'.repeat(64)

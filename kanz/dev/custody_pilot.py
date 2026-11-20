@@ -321,7 +321,9 @@ def qualify(docker, container, binaries, node, env, observations, profile):
     markers = [b"signed customer recovered the applied historical quantity correction"] if late else [
         b"signed gateway and Chromium verified the persisted detection"]
     if economics:
-        markers = [f"signed economics revision {revision} retained and reopened through Chromium".encode() for revision in range(1, 5)]
+        markers = [b"scheduled missing statement displayed and downloaded through Chromium"]
+        markers.extend(f"signed economics revision {revision} retained and reopened through Chromium".encode()
+                       for revision in range(1, 5))
     if not (late or rerun or economics):
         markers.append(b"signed customer verified clean, missing and unobserved business dates")
     if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
@@ -394,6 +396,11 @@ def main():
                                                    observations, key)
                 if onboarding:
                     results["account_onboarding"] = onboarding
+                if key == "execution_economics":
+                    missing_path = observations.with_suffix(".downloads.json.missing")
+                    if missing_path.stat().st_size > 8192:
+                        raise RuntimeError("Missing statement receipt exceeds its pilot bound.")
+                    results["missing_statement_recovery"] = json.loads(missing_path.read_bytes())
                 if key == "quantity_comparisons":
                     results["customer_downloads"] = customer_downloads(observations, results[key])
             finally:
@@ -406,7 +413,7 @@ def main():
           "A separate operator replayed one request with one durable receipt and completion FACT. "
           "After a later close, the customer downloaded the quantity correction against the original execution. "
           "Four signed execution revisions showed a mismatch, agreement, inconsistent cash and a missing convention. "
-          "The original execution receipt reopened unchanged after correction.")
+          "The original execution receipt reopened unchanged after correction. The first late statement replaced the scheduled missing result, and both receipts reopened unchanged.")
 
 
 if __name__ == "__main__":
