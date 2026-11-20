@@ -44,6 +44,19 @@ JOIN custody_statements s USING (tenant_id, statement_id)
 ORDER BY r.revision;
 ```
 
+## Reproduce the operator workflow
+
+From the repository root, prepare the local generated Go SDK using `schemas/README.md`. Install the Go toolchain from `kanz/go.mod`, Node matching `web/.nvmrc`, npm, Python 3, and a local Docker engine with Linux containers. Then run:
+
+```sh
+rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
+(cd web && npm ci && npx playwright install chromium)
+docker pull postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
+python kanz/dev/custody_pilot.py
+```
+
+On Linux, install Chromium's OS libraries with `npx playwright install-deps chromium` from `web` if needed. Use `--node /absolute/path/to/node` for a separate Node installation. The runner builds `web/dist` through the normal npm build, compiles the three Go test executables, and starts a fresh loopback PostgreSQL instance with SCRAM and separate restricted accounting and source logins. It uses the two checked-in signed statements, the publisher grant and a real loopback JetStream. Chromium reads the r1 difference and its retained run and statement through the BFF and authenticated gateway on initial load and reload. The three restricted sessions exercise foreign tenant, excluded portfolio and missing Fund permission. Accounting then verifies that the r2 correction clears the break. The command exits successfully only after these checks pass. It removes the temporary database and test executables on exit.
+
 ## Verification
 
 With a fresh provisioned fixture database, set `TEST_CUSTODY_BATCH_DATABASE_URL` to its dedicated source role and `TEST_POSTGRES_URL` to its separate restricted accounting role. In this directory run `go test -p 1 -run TestSignedPilotCommandRestricted -count=1 -v .`. The test starts its own loopback JetStream and reads both retained publications back through the accounting consumer. Run `TestSignedCustodyBatchReconciliationOnRealSpine` in `../../internal/custody` against a **separate disposable migration-test database** and a bootstrapped `TEST_NATS_URL`. That suite resets accounting tables. It covers booking, comparison, immutable revision conflicts, publication recovery and cross-tenant refusal.
