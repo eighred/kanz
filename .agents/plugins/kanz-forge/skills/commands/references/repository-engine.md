@@ -58,6 +58,29 @@ release or changing a live estate. Keep that action with its authorized owner
 and continue any independently authorized design, implementation and disposable
 verification. Count the issue only when its full acceptance is met.
 
+## Select work for a customer workflow
+
+For a launch or revenue request, name the customer role, the first operation
+they can complete, its input authority and the observable result. Trace the
+normal interface through its service, store and audit evidence on current main.
+Distinguish results from disposable test data, customer acceptance on authorized
+data, and a commercial agreement or payment. Reference the separate owner for
+each missing result. Keep contractual terms and customer data out of public issues.
+
+When reviewing the whole repository, inventory tracked files at a fixed revision
+and reconcile every open issue and PR with its owner and acceptance. Give each
+open issue a disposition. For overlaps, transfer every outstanding acceptance
+check to its continuing owner before closing a duplicate. Record a deferred
+product choice and its re-entry condition. Preserve independent financial,
+security and recovery controls even when they share a PR.
+
+For equivalent executable tasks the graph accepts one optional
+`customer_workflow` with `actor`, `outcome`, an `acceptance` reference and
+`steps` mapping task IDs to evidence that each is needed. It gives that
+workflow precedence within its existing priority, after shared gate recovery.
+Report the first missing step that can be completed, the last verified user
+operation and the evidence still required from an external party.
+
 ## Stop repeating unchanged failures
 
 Read the owning issue's latest substantive evidence before reproducing a known
