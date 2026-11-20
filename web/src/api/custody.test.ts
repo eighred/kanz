@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { users } from './users'
 import { api, auth, ApiError } from './client'
-import { custody, describeCustody } from './custody'
+import { custody, describeCustody, downloadCustodyComparison } from './custody'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -37,18 +37,76 @@ describe('custody response boundary', () => {
 
   it('requires the dated subject, exact position and a source for a successful result', async () => {
     const subject = { portfolio_id: 'PF/1', custodian_id: 'C & A', business_date: '2020-02-04' }
-    const data = { ...subject, state: 'recorded', run_id: 'retained', outcome: 'clean', statement_id: 'r2', completed_at: '2020-02-05T01:00:00Z', journal_position: '9007199254740993', scope_mode: 'declared' }
+    const data = { ...subject, tenant_id: 'tenant', transaction_pass: 'balances_only', state: 'recorded', run_id: 'retained', outcome: 'clean', statement_id: 'r2', completed_at: '2020-02-05T01:00:00Z', journal_position: '9007199254740993', scope_mode: 'declared' }
     const get = vi.spyOn(api, 'get').mockResolvedValueOnce(data)
-    expect(await custody.dated(subject)).toEqual(data)
+    const projected = await custody.dated(subject, 'tenant')
+    expect(projected).toMatchObject({ state: 'recorded', journal_position: '9007199254740993', transactions: { transaction_pass: 'balances_only' } })
     expect(get.mock.calls[0]?.[0]).toBe('/api/v1/portfolios/PF%2F1/custody/comparison?custodian_id=C+%26+A&business_date=2020-02-04')
-    for (const patch of [{ portfolio_id: 'PF2' }, { statement_id: undefined }, { state: 'not_compared' }, { journal_position: 9007199254740992 }, { journal_position: '-1' }, { journal_position: undefined }, { outcome: 'no_statement' }]) {
+    for (const patch of [{ tenant_id: 'foreign' }, { tenant_id: undefined }, { transaction_pass: undefined },
+      { transaction_pass: 'unknown', book_reference_count: '0' }, { transaction_pass: 'ran', statement_reference_count: '1' },
+      { transaction_pass: 'ran', book_reference_count: '0', statement_reference_count: 1, unreferenced_book_trades: '0' }, { portfolio_id: 'PF2' }, { statement_id: undefined }, { state: 'not_compared' }, { journal_position: 9007199254740992 }, { journal_position: '-1' }, { journal_position: undefined }, { outcome: 'no_statement' }]) {
       get.mockResolvedValueOnce({ ...data, ...patch })
-      await expect(custody.dated(subject)).rejects.toThrow('verified')
+      await expect(custody.dated(subject, 'tenant')).rejects.toThrow('verified')
     }
     for (const state of ['not_compared', 'unknown']) {
-      get.mockResolvedValueOnce({ ...subject, state })
-      expect((await custody.dated(subject)).state).toBe(state)
+      get.mockResolvedValueOnce({ ...subject, tenant_id: 'tenant', state })
+      expect((await custody.dated(subject, 'tenant')).state).toBe(state)
     }
+  })
+
+  it('downloads only the dated projection and preserves exact reference counts on repeated reads', async () => {
+    const subject = { portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04' }
+    const wire = { ...subject, tenant_id: 'fixture', state: 'recorded', outcome: 'breaks', run_id: 'run-1',
+      completed_at: '2020-02-05T01:00:00Z', statement_id: 'signed-r1', scope_mode: 'declared', journal_position: '9007199254740993',
+      transaction_pass: 'ran', statement_reference_count: '0', book_reference_count: '9007199254740994', unreferenced_book_trades: '2' }
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ ...wire, raw_statement: 'discard', actor: 'discard', account_ids: ['discard'] })
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:custody')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const downloads: string[] = []
+    for (let i = 0; i < 2; i++) {
+      const result = await custody.dated(subject, 'fixture')
+      if (result.state !== 'recorded') throw new Error('expected a recorded comparison')
+      downloadCustodyComparison(result)
+      const blob = create.mock.calls[i]?.[0]
+      if (!(blob instanceof Blob)) throw new Error('expected a downloadable JSON file')
+      downloads.push(await blob.text())
+    }
+    expect(downloads[0]).toBe(downloads[1])
+    expect(JSON.parse(downloads[0]!)).toEqual({ format: 'kanz.custody-comparison.v1', ...wire, transaction_comparison_basis: 'external_reference_membership' })
+    expect(click).toHaveBeenCalledTimes(2)
+    for (const value of ['-1', '01', '9223372036854775808', null, 0]) {
+      get.mockResolvedValueOnce({ ...wire, unreferenced_book_trades: value })
+      await expect(custody.dated(subject, 'fixture')).rejects.toThrow('verified')
+    }
+  })
+
+  it('binds the saved run, signed digest and exact immutable differences to the requested portfolio and date', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const digest = 'a'.repeat(64)
+    const row = { break_id: 'P|C|quantity|F', kind: 'quantity', key: 'ΔF', values_state: 'exact', ibor: '10.5000001', custodian: '9.5', difference: '1.0000001' }
+    const request = 'old+run:1'
+    const wire = { ...subject, tenant_id: 'tenant', state: 'recorded', outcome: 'breaks', run_id: request, completed_at: '2020-02-05T01:00:00Z',
+      statement_id: 'custody-batch.v1.source.r1.' + digest, scope_mode: 'declared', journal_position: '1',
+      transaction_pass: 'unknown', signed_statement_sha256: digest, breaks: [{ ...row, assignee: 'discard' }] }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(wire)
+    const read = () => custody.dated(subject, 'tenant', undefined, request)
+    const result = await read()
+    expect(get.mock.calls[0]?.[0]).toContain('run_id=old%2Brun%3A1')
+    expect(result.state === 'recorded' && result.historical?.breaks).toEqual([row])
+    for (const patch of [{ run_id: 'other' }, { signed_statement_sha256: 'b'.repeat(64) }, { transaction_pass: undefined },
+      { outcome: 'clean' }, { breaks: [] }, { breaks: [row, row] }, { breaks: [{ ...row, ibor: 10.5 }] }, { breaks: [{ ...row, values_state: 'unavailable' }] }]) {
+      get.mockResolvedValueOnce({ ...wire, ...patch })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce({ ...wire, breaks: [{ ...row, values_state: 'unavailable', ibor: '', custodian: '', difference: '' }] })
+    expect((await read()).state).toBe('recorded')
+    get.mockResolvedValueOnce({ ...wire, outcome: 'clean', breaks: [] })
+    expect((await read()).state).toBe('recorded')
+    get.mockResolvedValueOnce({ ...subject, state: 'unknown', tenant_id: 'tenant', breaks: [] })
+    await expect(read()).rejects.toThrow('verified')
+    get.mockResolvedValueOnce(wire)
+    await expect(custody.dated(subject, 'tenant')).rejects.toThrow('verified')
   })
 
   it('preserves exact decimal text', async () => {

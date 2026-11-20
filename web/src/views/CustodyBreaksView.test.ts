@@ -58,17 +58,26 @@ describe('custody exact review', () => {
       const region = wrapper.get('[aria-label="Dated custody result"]')
       const fields = region.findAll('input')
       for (const [i, value] of ['PF1', 'C', '2020-02-04'].entries()) await fields[i]!.setValue(value)
-      const subject = { portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04' }
+      const subject = { tenant_id: 'fixture', portfolio_id: 'PF1', custodian_id: 'C', business_date: '2020-02-04' }
       const receipt = { ...subject, run_id: 'run-r2', state: 'recorded' as const, completed_at: '2020-02-05T01:00:00Z' }
       for (const [result, status] of [
-        [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', scope_mode: 'declared', journal_position: '9007199254740993' }, 'Clean comparison'],
+        [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', scope_mode: 'declared', journal_position: '9007199254740993',
+          transactions: { transaction_pass: 'ran', statement_reference_count: '1', book_reference_count: '1', unreferenced_book_trades: '0' } }, 'Clean comparison'],
+        [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'balances_only' } }, 'Transactions were not compared'],
+        [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'unknown' } }, 'Transaction coverage unknown'],
+        [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'ran', statement_reference_count: '0',
+          book_reference_count: '0', unreferenced_book_trades: '2' } }, 'Incomplete coverage'],
         [{ ...receipt, outcome: 'no_statement' }, 'No statement received'],
         [{ ...subject, state: 'not_compared' }, 'No comparison recorded'],
       ] as const) {
         select.mockResolvedValueOnce(result)
         await region.get('form').trigger('submit'); await flushPromises()
         expect(region.get('output').text()).toContain(status)
+        expect(region.findAll('button').some(b => b.text() === 'Download comparison receipt')).toBe(result.state === 'recorded')
         if ('journal_position' in result) expect(region.get('output').text()).toContain(result.journal_position)
+        if ('transactions' in result && (result.transactions.transaction_pass !== 'ran' || result.transactions.unreferenced_book_trades !== '0')) {
+          expect(region.get('output').text()).not.toContain('Clean comparison')
+        }
       }
       await fields[1]!.setValue('different')
       expect(region.find('output').exists()).toBe(false)

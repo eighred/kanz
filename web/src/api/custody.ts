@@ -1,5 +1,6 @@
 import { api, auth, ApiError } from './client'
 import { users } from './users'
+import { downloadJson } from './evidence'
 
 export interface CustodyDetection {
   run_id: string; statement_id: string; business_date: string
@@ -68,19 +69,84 @@ export interface CustodyRerunReceipt extends CustodyRerunRequest {
 }
 
 export interface CustodySubject { portfolio_id: string; custodian_id: string; business_date: string }
-export type DatedCustodyResult = CustodySubject & (
+export type TransactionComparison =
+  | { transaction_pass: 'ran'; statement_reference_count: string; book_reference_count: string; unreferenced_book_trades: string }
+  | { transaction_pass: 'balances_only' | 'unknown' }
+interface RetainedBreak {
+  break_id: string; kind: string; key: string; values_state: 'exact' | 'unavailable'
+  ibor: string; custodian: string; difference: string
+}
+interface HistoricalComparison { signed_statement_sha256: string; breaks: RetainedBreak[] }
+
+function retainedBreak(value: unknown): RetainedBreak {
+  const invalid = () => new Error('Historical difference could not be verified.')
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid()
+  const row = value as Record<string, unknown>
+  if (!nonempty(row.break_id) || !nonempty(row.kind) || !nonempty(row.key)) throw invalid()
+  const { break_id, kind, key, values_state, ibor, custodian, difference } = row
+  if (values_state === 'unavailable' && ibor === '' && custodian === '' && difference === '') {
+    return { break_id, kind, key, values_state, ibor, custodian, difference }
+  }
+  if (values_state !== 'exact' || !exact(ibor) || !exact(custodian) || !exact(difference)) throw invalid()
+  return { break_id, kind, key, values_state, ibor, custodian, difference }
+}
+
+export type DatedCustodyResult = CustodySubject & { tenant_id: string } & (
   | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: 'journal_changed' }
-  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string }
+  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; transactions?: TransactionComparison; historical?: HistoricalComparison }
 )
 
+export function downloadCustodyComparison(receipt: Extract<DatedCustodyResult, { state: 'recorded' }>): void {
+  const { transactions, historical, ...comparison } = receipt
+  downloadJson({
+    format: 'kanz.custody-comparison.v1',
+    ...comparison,
+    ...(transactions?.transaction_pass === 'ran' ? { transaction_comparison_basis: 'external_reference_membership' } : {}),
+    ...transactions,
+    ...(historical && { lookup: 'retained_run', ...historical }),
+  }, `custody-comparison-${receipt.business_date}.json`)
+}
+
 export const custody = {
-  async dated(subject: CustodySubject, signal?: AbortSignal): Promise<DatedCustodyResult> {
+  async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = ''): Promise<DatedCustodyResult> {
     const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
+    if (runID) {
+      if (runID !== runID.trim() || /[\u0000-\u001f\u007f]/u.test(runID) || new TextEncoder().encode(runID).length > 512) throw new Error('Invalid saved run ID.')
+      query.set('run_id', runID)
+    }
     const result = await api.get<Record<string, unknown>>('/api/v1/portfolios/' + encodeURIComponent(subject.portfolio_id) + '/custody/comparison?' + query, { expectedStatus: 200, signal })
     const invalid = () => new Error('Dated result could not be verified.')
-    if (!result || result.portfolio_id !== subject.portfolio_id || result.custodian_id !== subject.custodian_id ||
+    if (!nonempty(tenant) || !result || result.tenant_id !== tenant || result.portfolio_id !== subject.portfolio_id || result.custodian_id !== subject.custodian_id ||
         result.business_date !== subject.business_date || (result.statement_id !== undefined && !nonempty(result.statement_id))) throw invalid()
     if (result.reason !== undefined && (result.state !== 'pending' || result.reason !== 'journal_changed')) throw invalid()
+    const scope = { ...subject, tenant_id: tenant }
+    const referenceCounts = ['statement_reference_count', 'book_reference_count', 'unreferenced_book_trades'] as const
+    const verified = result.state === 'recorded' && (result.outcome === 'clean' || result.outcome === 'breaks')
+    let historical: HistoricalComparison | undefined
+    if (runID && result.state === 'recorded') {
+      const digest = result.signed_statement_sha256
+      if (!verified || result.run_id !== runID || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
+          typeof result.statement_id !== 'string' || !result.statement_id.endsWith('.' + digest) || !Array.isArray(result.breaks) ||
+          result.breaks.length > 4096 || (result.outcome === 'clean') !== (result.breaks.length === 0)) throw invalid()
+      const breaks = result.breaks.map(retainedBreak)
+      if (new Set(breaks.map(row => row.break_id)).size !== breaks.length) throw invalid()
+      historical = { signed_statement_sha256: digest, breaks }
+    } else if ((runID && result.state !== 'unknown') || result.breaks !== undefined || result.signed_statement_sha256 !== undefined) throw invalid()
+    let transactions: TransactionComparison | undefined
+    if (verified) {
+      if (result.transaction_pass === 'ran') {
+        const count = (key: typeof referenceCounts[number]): string => {
+          const value = result[key]
+          if (typeof value !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(value) || BigInt(value) > 9223372036854775807n) throw invalid()
+          return value
+        }
+        transactions = { transaction_pass: 'ran', statement_reference_count: count('statement_reference_count'),
+          book_reference_count: count('book_reference_count'), unreferenced_book_trades: count('unreferenced_book_trades') }
+      } else if (result.transaction_pass === 'balances_only' || result.transaction_pass === 'unknown') {
+        transactions = { transaction_pass: result.transaction_pass }
+      } else throw invalid()
+    } else if (result.transaction_pass !== undefined) throw invalid()
+    if (transactions?.transaction_pass !== 'ran' && referenceCounts.some(key => result[key] !== undefined)) throw invalid()
     if (result.state === 'recorded') {
       if (!nonempty(result.run_id) || !nonempty(result.completed_at) || !Number.isFinite(Date.parse(result.completed_at)) ||
           !['clean', 'breaks', 'no_statement', 'failed'].some(value => value === result.outcome)) throw invalid()
@@ -89,10 +155,14 @@ export const custody = {
       if (scoped && (!['declared', 'derived'].some(value => value === result.scope_mode) || typeof result.journal_position !== 'string' ||
           !/^(0|[1-9]\d{0,18})$/.test(result.journal_position) || BigInt(result.journal_position) > 9223372036854775807n)) throw invalid()
       if ((result.outcome === 'clean' || result.outcome === 'breaks') && (!result.statement_id || !scoped)) throw invalid()
+      return { ...scope, state: 'recorded', outcome: result.outcome as CustodyRerunReceipt['outcome'], run_id: result.run_id,
+        completed_at: result.completed_at, statement_id: result.statement_id as string | undefined,
+        scope_mode: result.scope_mode as string | undefined, journal_position: result.journal_position as string | undefined, transactions, historical }
     } else if (!['not_compared', 'pending', 'unknown'].some(value => value === result.state) ||
         (result.state === 'pending' && !result.statement_id) || (result.state === 'unknown' && result.statement_id !== undefined) ||
         ['run_id', 'outcome', 'completed_at', 'scope_mode', 'journal_position'].some(key => result[key] !== undefined)) throw invalid()
-    return result as unknown as DatedCustodyResult
+    return { ...scope, state: result.state as 'not_compared' | 'pending' | 'unknown',
+      statement_id: result.statement_id as string | undefined, reason: result.reason as 'journal_changed' | undefined }
   },
   async queue(signal?: AbortSignal): Promise<{ breaks: CustodyBreak[]; rerunActor?: string }> {
     const body = await api.get<{ breaks: unknown; count: unknown; actions_enabled?: unknown; rerun_enabled?: unknown }>('/api/v1/custody/breaks', { signal })
