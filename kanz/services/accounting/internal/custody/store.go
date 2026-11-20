@@ -118,12 +118,13 @@ var ErrNoBreak = errors.New("custody: no such break")
 // behaviour proven only against MemoryStore is not proven at all — the
 // Postgres-gated tests are the ones that exercise it.
 type MemoryStore struct {
-	mu         sync.Mutex
-	statements map[string][]Statement // subject key -> statements, append order
-	runs       map[string][]Run       // portfolio|custodian -> runs, append order
-	runIDs     map[string]runReference
-	breaks     map[string]Break // break id -> break
-	outbox     *outbox.Memory
+	mu            sync.Mutex
+	statements    map[string][]Statement // subject key -> statements, append order
+	runs          map[string][]Run       // portfolio|custodian -> runs, append order
+	runIDs        map[string]runReference
+	verifiedDates map[[2]string]time.Time
+	breaks        map[string]Break // break id -> break
+	outbox        *outbox.Memory
 }
 
 // runReference locates the one canonical run in append-only history. Capture
@@ -138,11 +139,12 @@ type runReference struct {
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		statements: map[string][]Statement{},
-		runs:       map[string][]Run{},
-		runIDs:     map[string]runReference{},
-		breaks:     map[string]Break{},
-		outbox:     outbox.NewMemory(),
+		statements:    map[string][]Statement{},
+		runs:          map[string][]Run{},
+		runIDs:        map[string]runReference{},
+		verifiedDates: map[[2]string]time.Time{},
+		breaks:        map[string]Break{},
+		outbox:        outbox.NewMemory(),
 	}
 }
 
@@ -212,6 +214,13 @@ func (m *MemoryStore) appendRunLocked(run Run, completionCaptured bool) {
 	key := pairKey(run.Subject.PortfolioID, run.Subject.CustodianID)
 	m.runIDs[run.RunID] = runReference{pair: key, index: len(m.runs[key]), completionCaptured: completionCaptured}
 	m.runs[key] = append(m.runs[key], cloneRun(run))
+	if verifying(run) {
+		pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
+		date := BusinessDay(run.Subject.BusinessDate)
+		if date.After(m.verifiedDates[pair]) {
+			m.verifiedDates[pair] = date
+		}
+	}
 }
 
 // LatestRun implements Store.

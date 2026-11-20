@@ -23,6 +23,7 @@ var ErrPublicationPending = errors.New("custody: run committed; completion FACT 
 var ErrRunBusy = errors.New("custody: reconciliation pair is being committed")
 var ErrRunCompletionMissing = errors.New("custody: existing run has no immutable completion FACT")
 var ErrRunIdentityConflict = errors.New("custody: run ID belongs to another subject")
+var ErrHistoricalLifecycle = errors.New("custody: a later business date already controls outstanding breaks")
 
 func verifying(run Run) bool { return run.Outcome == OutcomeClean || run.Outcome == OutcomeBreaks }
 
@@ -77,6 +78,10 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		return cloneRun(prior), nil
 	}
 	run = cloneRun(run)
+	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
+	if verifying(run) && m.verifiedDates[pair].After(BusinessDay(run.Subject.BusinessDate)) {
+		return Run{}, ErrHistoricalLifecycle
+	}
 	// Stage into a detached map. Encoding/tenant/outbox refusal must leave the
 	// original lifecycle intact, just as a PostgreSQL rollback does.
 	staged := NewMemoryStore()
@@ -157,6 +162,20 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	// commits cannot survive failure of the enclosing run/outbox transaction.
 	staged := &Postgres{pool: p.pool, tx: tx}
 	if verifying(run) {
+		// The transaction already owns the pair lock. A later clean run is as
+		// authoritative as a later break and must prevent historical reopening.
+		var later bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM custody_runs WHERE tenant_id=app_current_tenant()
+			AND portfolio_id=$1 AND custodian_id=$2 AND outcome IN ('clean','breaks')
+			AND business_date > $3::date)`, run.Subject.PortfolioID, run.Subject.CustodianID,
+			BusinessDay(run.Subject.BusinessDate)).Scan(&later)
+		if err != nil {
+			return Run{}, err
+		}
+		if later {
+			return Run{}, ErrHistoricalLifecycle
+		}
 		stored, err := staged.UpsertBreaks(ctx, run.Subject, run.Breaks, run.CompletedAt)
 		if err != nil {
 			return Run{}, err
