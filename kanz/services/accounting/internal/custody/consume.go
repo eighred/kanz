@@ -28,9 +28,10 @@ import (
 // statement six times produced six runs of identical evidence, burying the daily
 // record under redelivery noise.
 type StatementConsumer struct {
-	store  Store
-	tenant string
-	logger *slog.Logger
+	signedOnly bool
+	store      Store
+	tenant     string
+	logger     *slog.Logger
 }
 
 // NewStatementConsumer wires a consumer over store, pinned to tenant.
@@ -52,6 +53,19 @@ func NewStatementConsumer(store Store, tenant string, logger *slog.Logger) (*Sta
 		logger = slog.Default()
 	}
 	return &StatementConsumer{store: store, tenant: tenant, logger: logger}, nil
+}
+
+// NewSignedBatchConsumer restricts this tenant's entire intake to statements
+// backed by its durable signed receipts, including the first delivery.
+func NewSignedBatchConsumer(store Store, tenant string, logger *slog.Logger) (*StatementConsumer, error) {
+	if _, ok := store.(*Postgres); !ok {
+		return nil, errors.New("custody: signed statements require a durable receipt store")
+	}
+	c, err := NewStatementConsumer(store, tenant, logger)
+	if err == nil {
+		c.signedOnly = true
+	}
+	return c, err
 }
 
 // Handle folds one statement delivery.
@@ -78,7 +92,7 @@ func (c *StatementConsumer) Handle(ctx context.Context, env *envelopepb.Envelope
 	if err != nil {
 		return err
 	}
-	if isBatchStatement(stmt.StatementID) || env.GetSource() == BatchProducer {
+	if c.signedOnly || isBatchStatement(stmt.StatementID) || env.GetSource() == BatchProducer {
 		writer, ok := c.store.(interface {
 			saveStatement(context.Context, Statement, []byte) error
 		})

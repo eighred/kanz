@@ -21,6 +21,9 @@ import (
 
 const BatchFormat = "kanz.synthetic-custody.v1"
 const BatchLimit = 1 << 20
+
+// The pilot retains at most 16 MiB of signed material per declared custody account.
+const BatchRetentionLimit = 16 << 20
 const BatchProducer = "custody-batch"
 const BatchInbox = "_INBOX.custody_batch"
 

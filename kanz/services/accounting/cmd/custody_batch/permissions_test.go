@@ -17,7 +17,8 @@ import (
 
 // The checked-in fragment is parsed by the actual broker. Only this disposable
 // loopback test maps the unauthenticated connection to the synthetic publisher.
-func TestDedicatedStatementPublisherGrant(t *testing.T) {
+func grantBroker(t *testing.T) (string, jetstream.Stream) {
+	t.Helper()
 	grant, err := os.ReadFile("../../../../infra/nats/custody_batch_permissions.conf")
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +31,7 @@ func TestDedicatedStatementPublisherGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Wipe()
+	t.Cleanup(admin.Wipe)
 	public, err := admin.PublicKey()
 	if err != nil {
 		t.Fatal(err)
@@ -58,18 +59,26 @@ func TestDedicatedStatementPublisherGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal("fixture broker control unavailable")
 	}
-	defer control.Close()
+	t.Cleanup(control.Close)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	js, err := jetstream.New(control)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "STATEMENTS", Subjects: []string{custody.SubjectStatement, "accounting.test.blocked"}}); err != nil {
+	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "STATEMENTS", Subjects: []string{custody.SubjectStatement, "accounting.test.blocked"}})
+	if err != nil {
 		t.Fatal(err)
 	}
+	return s.ClientURL(), stream
+}
+
+func TestDedicatedStatementPublisherGrant(t *testing.T) {
+	url, _ := grantBroker(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
 	denied := make(chan error, 4)
-	nc, err := nats.Connect(s.ClientURL(), nats.CustomInboxPrefix(custody.BatchInbox), nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { denied <- err }))
+	nc, err := nats.Connect(url, nats.CustomInboxPrefix(custody.BatchInbox), nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { denied <- err }))
 	if err != nil {
 		t.Fatal("fixture publisher unavailable")
 	}

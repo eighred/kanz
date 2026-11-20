@@ -128,7 +128,7 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 		return i
 	}
 	st := NewPostgres(pool)
-	owner, err := NewStatementConsumer(st, tenant, testLogger())
+	owner, err := NewSignedBatchConsumer(st, tenant, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +243,14 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 		t.Fatal("missing preceding revision accepted")
 	}
 	correction, cs := signedExample(t, a, key, 2, digest, 105)
+	i.retentionLimit = int64(len(raw) + len(correction) - 1)
+	if _, err := i.Import(ctx, correction, cs); err == nil {
+		t.Fatal("signed material retention exceeded")
+	}
+	if replay, err := i.Import(ctx, raw, sig); err != nil || replay != id {
+		t.Fatalf("budget refused existing evidence: %v", err)
+	}
+	i.retentionLimit++
 	corrected, err := i.Import(ctx, correction, cs)
 	if err != nil || corrected == id {
 		t.Fatal("invalid correction", err)
@@ -264,6 +272,14 @@ func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+	changed.StatementId = "ordinary-fixture-statement"
+	legacyWire, err := proto.Marshal(&changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: "legacy"}, legacyWire); !errors.Is(err, errBatchReceipt) {
+		t.Fatal("signed-only tenant accepted a message without a receipt")
 	}
 	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: "another-source"}, originalWire); !errors.Is(err, errBatchReceipt) {
 		t.Fatal("unrelated producer reused reserved source identity")

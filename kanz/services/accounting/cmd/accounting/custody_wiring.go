@@ -201,7 +201,11 @@ func buildCustodyPlane(
 		return nil, err
 	}
 
-	plane.consumer, err = custody.NewStatementConsumer(plane.store, cfg.Tenant, logger)
+	newConsumer := custody.NewStatementConsumer
+	if cfg.CustodySignedBatchOnly {
+		newConsumer = custody.NewSignedBatchConsumer
+	}
+	plane.consumer, err = newConsumer(plane.store, cfg.Tenant, logger)
 	if err != nil {
 		return nil, err
 	}

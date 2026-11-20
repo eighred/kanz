@@ -29,7 +29,7 @@ import (
 func readFile(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("custody batch: input file unavailable")
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
@@ -69,6 +69,9 @@ func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
 	if err != nil {
 		return err
 	}
+	if !cfg.CustodySignedBatchOnly {
+		return errors.New("custody batch: signed-only accounting tenant required")
+	}
 	if cfg.DatabaseURL == "" || cfg.NATSURL == "" || os.Getenv("ACCOUNTING_TENANT") == "" {
 		return errors.New("custody batch: explicit accounting database, tenant and broker required")
 	}
@@ -91,7 +94,11 @@ func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
 	}
 	defer pool.Close()
 	var restricted bool
-	if err = pool.QueryRow(ctx, "SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user").Scan(&restricted); err != nil || !restricted {
+	if err = pool.QueryRow(ctx, `SELECT current_database() = 'kanz_custody_pilot' AND NOT rolsuper AND NOT rolbypassrls
+		AND pg_has_role(current_user, 'kanz_custody_batch_pilot', 'usage')
+		AND NOT has_table_privilege(current_user, 'ledger_entries', 'INSERT')
+		AND NOT has_table_privilege(current_user, 'custody_batch_receipts', 'UPDATE')
+		FROM pg_roles WHERE rolname=current_user`).Scan(&restricted); err != nil || !restricted {
 		return errors.New("custody batch: restricted database role required")
 	}
 	metrics := bus.NewBusMetrics(prometheus.NewRegistry())
@@ -111,7 +118,11 @@ func run(ctx context.Context, policyPath, batchPath, sigPath string) error {
 	}
 	id, err := importer.Import(bus.WithTenantID(ctx, cfg.Tenant), raw, sig)
 	if err != nil {
-		return err
+		if id != "" {
+			fmt.Fprintln(os.Stderr, id)
+			return errors.New("custody batch: publication pending; retry the identical signed file")
+		}
+		return errors.New("custody batch: admission failed; check signature, scope, revision, retention and storage")
 	}
 	fmt.Println(id)
 	return nil

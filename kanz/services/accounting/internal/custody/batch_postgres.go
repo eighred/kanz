@@ -16,9 +16,10 @@ import (
 )
 
 type BatchImporter struct {
-	verify batchVerifier
-	pool   *pgxpool.Pool
-	relay  *outbox.Relay
+	verify         batchVerifier
+	pool           *pgxpool.Pool
+	relay          *outbox.Relay
+	retentionLimit int64
 }
 
 func NewBatchImporter(a BatchAuthority, tenant string, pairs []string, accounts string, pool *pgxpool.Pool, publisher outbox.Publisher, logger *slog.Logger) (*BatchImporter, error) {
@@ -33,7 +34,7 @@ func NewBatchImporter(a BatchAuthority, tenant string, pairs []string, accounts 
 	if err != nil {
 		return nil, err
 	}
-	return &BatchImporter{v, pool, relay}, nil
+	return &BatchImporter{verify: v, pool: pool, relay: relay, retentionLimit: BatchRetentionLimit}, nil
 }
 
 // Import commits the original signed record and queues one canonical statement.
@@ -61,7 +62,7 @@ func (i *BatchImporter) Import(ctx context.Context, raw, signature []byte) (stri
 	}
 	day := b.statement.BusinessDate.AsTime().Format(time.DateOnly)
 	part := b.statement.PortfolioId
-	key := fmt.Sprintf("%s/%s/%s/%s", tenant, part, a.Custodian, day)
+	key := fmt.Sprintf("%s/%s/%s", tenant, part, a.Custodian)
 	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "custody-batch/"+key); err != nil {
 		return "", err
 	}
@@ -99,6 +100,15 @@ func (i *BatchImporter) append(ctx context.Context, tx pgx.Tx, b batchInput, raw
 	}
 	if b.header.Revision-1 != revision || b.header.Previous != digest || revision > 0 && (source != a.Source || account != a.Account) {
 		return errors.New("custody batch: previous signed source revision missing or different")
+	}
+	var retained int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(octet_length(signed_batch)),0) FROM custody_batch_receipts
+		WHERE tenant_id=$1 AND portfolio_id=$2 AND custodian_id=$3 AND account_id=$4`,
+		a.Tenant, a.Portfolio, a.Custodian, a.Account).Scan(&retained); err != nil {
+		return err
+	}
+	if retained+int64(len(raw)) > i.retentionLimit {
+		return errors.New("custody batch: signed account retention limit reached")
 	}
 	var received time.Time
 	if err = tx.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&received); err != nil {
