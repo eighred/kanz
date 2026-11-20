@@ -198,7 +198,7 @@ function age(seconds: number): string {
           <td :class="item.age_seconds >= 86_400 ? 'state-warn' : ''">{{ age(item.age_seconds) }}</td>
           <td>{{ item.kind }}<br /><code>{{ item.key }}</code><template v-if="item.kind === 'execution_quantity'"><br />Instrument <code>{{ item.instrument_id }}</code></template></td>
           <td v-for="field in figures" :key="field">{{ item.values_state === 'exact' ? item[field] : item.values_state === 'unavailable' ? 'Unavailable' : 'Unverified' }}</td>
-          <td>{{ item.status }}</td><td>{{ item.assignee || 'Unassigned' }}</td>
+          <td>{{ item.status }}<p v-if="item.late_correction_statement_id">A later business date has closed. Signed revision <code>{{ item.late_correction_statement_id }}</code> awaits historical quantity review.</p></td><td>{{ item.assignee || 'Unassigned' }}</td>
           <td>{{ item.last_seen_at }}</td>
           <td>
             <details v-if="item.detection || item.portfolio_id">

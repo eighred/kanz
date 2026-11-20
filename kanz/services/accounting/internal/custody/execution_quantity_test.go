@@ -219,6 +219,34 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 		} else if len(queue) != 0 {
 			t.Fatal("unexpected outstanding", queue)
 		}
+		if enrolled && pos == 2 {
+			// Mimic a direct writer applying the account's measured book amount
+			// as an equality to a later, membership-only source.
+			_, err := pool.Exec(ctx, `INSERT INTO custody_execution_quantity_observations
+                (portfolio_id,custodian_id,business_date,break_id,run_id,statement_id,entry_id,account_id,instrument_id,external_ref,
+                 source_revision,ibor,custodian,difference,first_seen_at,measured_at)
+                SELECT o.portfolio_id,o.custodian_id,o.business_date,o.break_id,$1,$2,o.entry_id,o.account_id,o.instrument_id,o.external_ref,
+                       3,o.ibor,o.ibor,'0',o.first_seen_at,$3 FROM custody_execution_quantity_observations o WHERE o.run_id=$4`,
+				run.RunID, run.StatementID, run.CompletedAt, originalRun)
+			var db *pgconn.PgError
+			if !errors.As(err, &db) || db.Code != "P0001" || !strings.Contains(db.Message, "signed measurement") {
+				t.Fatalf("undocumented equality was accepted: %v", err)
+			}
+		}
+		if enrolled && pos == 3 {
+			// Re-delivering the signed correction and re-running the same close
+			// must leave exactly one resolving measurement per original item.
+			if err := receiver.Handle(ctx, frame.Envelope, frame.Payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(ctx, sub); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM custody_execution_quantity_observations WHERE difference='0'").Scan(&count); err != nil || count != 2 {
+				t.Fatal("duplicated correction", count, err)
+			}
+		}
 
 	}
 	if _, err := pool.Exec(ctx, "DELETE FROM outbox WHERE tenant_id=app_current_tenant()"); err != nil {
@@ -235,6 +263,78 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 	if err != nil || len(outstanding) != 0 {
 		t.Fatal("diagnostic populated the working queue", outstanding, err)
 	}
+	if !enrolled {
+		return
+	}
+	// Reopen on D, actually complete D+1, then deliver a signed correction for
+	// D. The historical balance fence must keep the original working items open.
+	deliver := func(level json.RawMessage, rev int64, previous string) (id, digest string) {
+		t.Helper()
+		raw, err := json.Marshal(signedBatch{BatchFormat, source.Source, tenant, source.Account, rev, previous, true, level})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err = importer.Import(ctx, raw, ed25519.Sign(key, raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := stream.GetLastMsgForSubject(ctx, SubjectStatement)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var frame envelopepb.EventFrame
+		if err := proto.Unmarshal(msg.Data, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if err := receiver.Handle(ctx, frame.Envelope, frame.Payload); err != nil {
+			t.Fatal(err)
+		}
+		return id, fmt.Sprintf("%x", sha256.Sum256(raw))
+	}
+	levelAt := func(revision int64) json.RawMessage {
+		t.Helper()
+		var raw []byte
+		if err := pool.QueryRow(ctx, "SELECT signed_batch FROM custody_batch_receipts WHERE business_date=$1 AND revision=$2", sub.BusinessDate, revision).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var batch signedBatch
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			t.Fatal(err)
+		}
+		return batch.Statement
+	}
+	_, digest := deliver(levelAt(2), 5, previous)
+	original, err := r.Reconcile(ctx, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := sub
+	next.BusinessDate = next.BusinessDate.AddDate(0, 0, 1)
+	nextLevel := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":%q,"positions":[],"cash":[],"transactions":[],"grain":"STATEMENT_GRAIN_TRANSACTIONS"}`, next.BusinessDate.Format(time.RFC3339)))
+	deliver(nextLevel, 1, "")
+	if future, err := r.Reconcile(ctx, next); err != nil || future.Outcome != OutcomeClean {
+		t.Fatalf("future comparison: %+v %v", future, err)
+	}
+	late, _ := deliver(levelAt(4), 6, digest)
+	if _, err := r.Reconcile(ctx, sub); !errors.Is(err, ErrHistoricalLifecycle) {
+		t.Fatal("historical comparison", err)
+	}
+	for _, other := range [][]string{{"other-portfolio"}, {"other-portfolio", "another"}} {
+		denied, err := st.OutstandingBreaks(ctx, other...)
+		if err != nil || len(denied) != 0 {
+			t.Fatal("out-of-scope queue", denied, err)
+		}
+	}
+	blocked, err := st.OutstandingBreaks(ctx, sub.PortfolioID)
+	if err != nil || len(blocked) != 2 {
+		t.Fatal("late correction removed open items", blocked, err)
+	}
+	for _, item := range blocked {
+		if item.LateCorrectionStatementID != late || item.Detection.RunID != original.RunID {
+			t.Fatal("late correction replaced original detection", item)
+		}
+	}
+
 }
 
 func verifyExecutionQuantityRevision(t *testing.T, index int, q *accountingpb.ExecutionQuantityComparison) {

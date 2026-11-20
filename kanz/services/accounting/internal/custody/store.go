@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -78,7 +79,7 @@ type Store interface {
 
 	// OutstandingBreaks returns every break that is still work, for the gauge and
 	// for the operator surface. A nil portfolioID/custodianID means "all".
-	OutstandingBreaks(ctx context.Context) ([]Break, error)
+	OutstandingBreaks(ctx context.Context, portfolios ...string) ([]Break, error)
 
 	// LoadBreak returns one break by id, or ErrNoBreak.
 	LoadBreak(ctx context.Context, breakID string) (Break, error)
@@ -315,16 +316,16 @@ func sameSubject(b Break, subject Subject) bool {
 }
 
 // OutstandingBreaks implements Store.
-func (m *MemoryStore) OutstandingBreaks(_ context.Context) ([]Break, error) {
+func (m *MemoryStore) OutstandingBreaks(_ context.Context, portfolios ...string) ([]Break, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.outstandingLocked(), nil
+	return m.outstandingLocked(portfolios...), nil
 }
 
-func (m *MemoryStore) outstandingLocked() []Break {
+func (m *MemoryStore) outstandingLocked(portfolios ...string) []Break {
 	var out []Break
 	for _, b := range m.breaks {
-		if b.Status.Outstanding() {
+		if b.Status.Outstanding() && (len(portfolios) == 0 || slices.Contains(portfolios, b.PortfolioID)) {
 			out = append(out, b)
 		}
 	}

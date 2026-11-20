@@ -34,7 +34,7 @@ import (
 // subset of custody.Store this package uses, declared here so the server depends
 // on the two operations it calls rather than on the whole store.
 type BreakStore interface {
-	OutstandingBreaks(ctx context.Context) ([]custody.Break, error)
+	OutstandingBreaks(ctx context.Context, portfolios ...string) ([]custody.Break, error)
 	ApplyAction(ctx context.Context, action custody.Action) (custody.ActionEvidence, error)
 	ActionsEnabled() bool
 }
@@ -80,25 +80,26 @@ func (s *Server) custodyRoutes() {
 // and a quantity beyond float's exact range would be shown to the person deciding
 // what to do about it as a different number from the one the book holds.
 type breakView struct {
-	PortfolioID     string             `json:"portfolio_id"`
-	CustodianID     string             `json:"custodian_id"`
-	Detection       *custody.Detection `json:"detection,omitempty"`
-	BreakID         string             `json:"break_id"`
-	Kind            string             `json:"kind"`
-	Key             string             `json:"key"`
-	InstrumentID    string             `json:"instrument_id,omitempty"`
-	IBOR            string             `json:"ibor"`
-	Custodian       string             `json:"custodian"`
-	Difference      string             `json:"difference"`
-	Status          string             `json:"status"`
-	Assignee        string             `json:"assignee,omitempty"`
-	Explanation     string             `json:"explanation,omitempty"`
-	FirstSeenAt     string             `json:"first_seen_at"`
-	LastSeenAt      string             `json:"last_seen_at"`
-	StatusChangedAt string             `json:"status_changed_at"`
-	AgeSeconds      int64              `json:"age_seconds"`
-	Revision        int64              `json:"revision,string,omitempty"`
-	ValuesState     string             `json:"values_state"`
+	LateCorrectionStatementID string             `json:"late_correction_statement_id,omitempty"`
+	PortfolioID               string             `json:"portfolio_id"`
+	CustodianID               string             `json:"custodian_id"`
+	Detection                 *custody.Detection `json:"detection,omitempty"`
+	BreakID                   string             `json:"break_id"`
+	Kind                      string             `json:"kind"`
+	Key                       string             `json:"key"`
+	InstrumentID              string             `json:"instrument_id,omitempty"`
+	IBOR                      string             `json:"ibor"`
+	Custodian                 string             `json:"custodian"`
+	Difference                string             `json:"difference"`
+	Status                    string             `json:"status"`
+	Assignee                  string             `json:"assignee,omitempty"`
+	Explanation               string             `json:"explanation,omitempty"`
+	FirstSeenAt               string             `json:"first_seen_at"`
+	LastSeenAt                string             `json:"last_seen_at"`
+	StatusChangedAt           string             `json:"status_changed_at"`
+	AgeSeconds                int64              `json:"age_seconds"`
+	Revision                  int64              `json:"revision,string,omitempty"`
+	ValuesState               string             `json:"values_state"`
 }
 
 func toBreakView(b custody.Break, now time.Time) breakView {
@@ -124,7 +125,7 @@ func toBreakView(b custody.Break, now time.Time) breakView {
 		BreakID:     b.BreakID,
 		Revision:    b.Revision,
 		Kind:        b.Kind.String(),
-		Key:         b.Key, InstrumentID: b.InstrumentID,
+		Key:         b.Key, InstrumentID: b.InstrumentID, LateCorrectionStatementID: b.LateCorrectionStatementID,
 		IBOR:        ibor,
 		Custodian:   custodian,
 		Difference:  difference,
@@ -148,7 +149,7 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	breaks, err := s.breaks.OutstandingBreaks(r.Context())
+	breaks, err := s.breaks.OutstandingBreaks(r.Context(), principal.Portfolios...)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "custody values could not be verified"})
 		return

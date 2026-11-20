@@ -414,8 +414,9 @@ type Detection struct {
 
 // Break is one discrepancy, carried as a working item rather than a log line.
 type Break struct {
-	Detection    Detection
-	InstrumentID string
+	Detection                 Detection
+	InstrumentID              string
+	LateCorrectionStatementID string
 	// BreakID is stable ACROSS RUNS, derived from (portfolio, custodian, kind,
 	// key) — see BreakID. The age depends on it: a break given a fresh id every
 	// day would be permanently one day old.
