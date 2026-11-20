@@ -204,5 +204,22 @@ func TestSignedDatedReferenceCoverage(t *testing.T) {
 	disputed := feed("TRANSACTIONS", trades("different-buy"))
 	check(disputed, OutcomeBreaks, ran(2, 2, 2))
 	matching := feed("TRANSACTIONS", trades("independent-buy"))
-	check(matching, OutcomeClean, ran(2, 2, 2))
+	last := check(matching, OutcomeClean, ran(2, 2, 2))
+	// Retained counts must fit the actual prefix, the signed inventory, and
+	// the membership result. None of these changes can describe the measured run.
+	for _, counts := range []string{
+		`{"pass":"ran","book_references":2,"unreferenced_book_trades":2}`,
+		`{"pass":"ran","statement_references":1,"book_references":2,"unreferenced_book_trades":2}`,
+		`{"pass":"ran","statement_references":2,"book_references":1,"unreferenced_book_trades":2}`,
+		`{"pass":"ran","statement_references":2,"book_references":2,"unreferenced_book_trades":5}`,
+		`{"pass":"balances_only"}`,
+	} {
+		if _, err := pool.Exec(ctx, "UPDATE custody_runs SET book_basis=jsonb_set(book_basis,'{transactions}',$2::jsonb) WHERE run_id=$1", last.RunID, counts); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.DatedResult(ctx, sub)
+		if err != nil || got.State != "unknown" || got.Run.RunID != "" {
+			t.Fatalf("inconsistent coverage exposed: %+v, %v", got, err)
+		}
+	}
 }
