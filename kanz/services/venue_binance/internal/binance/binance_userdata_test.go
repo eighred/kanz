@@ -119,10 +119,10 @@ func TestUserData_FilledReportBecomesOrderFilled(t *testing.T) {
 func TestUserData_PartialAndNoiseHandling(t *testing.T) {
 	cap := &reconCapture{}
 	frames := [][]byte{
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"NEW","X":"NEW"}`),                                         // not a fill
-		[]byte(`{"e":"outboundAccountPosition"}`),                                                                            // unrelated event
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"unknown","x":"TRADE","X":"FILLED","l":"1","L":"1","z":"1","t":9}`), // unknown order
-		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50000","z":"0.5","q":"1","t":8}`),
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"NEW","X":"NEW"}`),                                                           // not a fill
+		[]byte(`{"e":"outboundAccountPosition"}`),                                                                                              // unrelated event
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"unknown","x":"TRADE","X":"FILLED","l":"1","L":"1","z":"1","t":9,"T":1700000000000}`), // unknown order
+		[]byte(`{"e":"executionReport","s":"BTCUSDT","c":"o1","x":"TRADE","X":"PARTIALLY_FILLED","l":"0.5","L":"50000","z":"0.5","q":"1","t":8,"T":1700000000001}`),
 	}
 	_ = ingesterOver(frames, cap).Run(context.Background())
 

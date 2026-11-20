@@ -42,7 +42,7 @@ type executionReport struct {
 	CommissionAst string `json:"N"`
 	CumQty        string `json:"z"` // cumulative filled quantity
 	OrderQty      string `json:"q"` // order quantity
-	TradeID       int64  `json:"t"`
+	TradeID       *int64 `json:"t"`
 	TransactTime  int64  `json:"T"`
 	// EventTime is the stream's OWN clock for this report — when Binance emitted
 	// it, not when the trade matched — and it is the ORDERING TOKEN this adapter
@@ -167,8 +167,21 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		}
 		return nil // an unrelated account event can have a different field schema
 	}
-	if rep.Event != "executionReport" || rep.ExecType != "TRADE" {
-		return nil // not a fill — ignore
+	if rep.Event != "executionReport" {
+		return nil
+	}
+	if rep.ExecType == "" {
+		return errors.New("binance: malformed private execution report")
+	}
+	if rep.ExecType != "TRADE" {
+		return nil
+	}
+	// A missing trade ID must never become trade zero: both paths deduplicate
+	// fills by symbol and the exchange's actual trade ID.
+	if rep.TradeID == nil || *rep.TradeID < 0 || rep.Symbol == "" || rep.ClientOrderID == "" ||
+		rep.TransactTime <= 0 || rep.LastQty == "" || rep.LastPrice == "" || rep.CumQty == "" ||
+		(rep.OrderStatus != "FILLED" && rep.OrderStatus != "PARTIALLY_FILLED") {
+		return errors.New("binance: malformed private execution report")
 	}
 	st, ok, lerr := i.orders.Lookup(rep.ClientOrderID)
 	if lerr != nil {
@@ -239,8 +252,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	qty, qok := parseDec(rep.LastQty)
 	px, pok := parseDec(rep.LastPrice)
 	if !qok || !pok {
-		return fmt.Errorf("binance: order %s fill is not representable as a Decimal (lastQty=%q lastPrice=%q)",
-			rep.ClientOrderID, rep.LastQty, rep.LastPrice)
+		return errors.New("binance: fill quantity or price is not representable as a Decimal")
 	}
 	if err := execution.ValidateExecutedPrice(qty, px); err != nil {
 		i.refusal.Refuse(rep.ClientOrderID, err)
@@ -248,8 +260,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	}
 	feeMoney, feeOK := reportFee(rep)
 	if !feeOK {
-		return fmt.Errorf("binance: order %s commission %q %s is not representable as a Decimal",
-			rep.ClientOrderID, rep.Commission, rep.CommissionAst)
+		return errors.New("binance: fill commission is not representable as a Decimal")
 	}
 	healed, herr := applyFillToState(st, rep)
 	if herr != nil {
@@ -276,7 +287,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		return nil
 	}
 	fill := &orderpb.Fill{
-		FillId:           fmt.Sprintf("%s-%d", rep.Symbol, rep.TradeID),
+		FillId:           fmt.Sprintf("%s-%d", rep.Symbol, *rep.TradeID),
 		OrderId:          rep.ClientOrderID,
 		InstrumentId:     st.GetInstrumentId(),
 		Side:             st.GetSide(),
@@ -284,7 +295,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		Price:            px,
 		Fee:              feeMoney,
 		Venue:            i.venue,
-		VenueExecutionId: strconv.FormatInt(rep.TradeID, 10),
+		VenueExecutionId: strconv.FormatInt(*rep.TradeID, 10),
 		ExecutedAt:       timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
 	}
 	subject := fillfact.SubjectPartiallyFilled
@@ -343,8 +354,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.OrderState, error) {
 	cum, cok := parseDec(rep.CumQty)
 	if !cok {
-		return nil, fmt.Errorf("binance: order %s cumulative filled quantity %q is not representable as a Decimal",
-			rep.ClientOrderID, rep.CumQty)
+		return nil, errors.New("binance: cumulative filled quantity is not representable as a Decimal")
 	}
 	ordered := st.GetOrderedQuantity()
 	leaves, lerr := leavesRemaining(ordered, cum)

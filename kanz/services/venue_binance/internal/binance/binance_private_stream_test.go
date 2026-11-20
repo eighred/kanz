@@ -285,6 +285,26 @@ func TestPrivateStreamCancellationAndMalformedExecution(t *testing.T) {
 	}
 }
 
+func TestPrivateStreamExecutionRequiresWireIdentity(t *testing.T) {
+	const trade = `{"e":"executionReport","x":"TRADE","s":"BTCUSDT","c":"o1","X":"FILLED","l":"1","L":"2","z":"1","t":0,"T":1700000000000}`
+	for _, field := range []string{`"x":"TRADE",`, `"s":"BTCUSDT",`, `"c":"o1",`, `"X":"FILLED",`, `"t":0,`, `,"T":1700000000000`} {
+		ing := newUserDataIngester(UserDataConfig{})
+		if err := ing.handle(t.Context(), []byte(strings.Replace(trade, field, "", 1))); err == nil || err.Error() != "binance: malformed private execution report" {
+			t.Fatalf("missing %s did not end the session", field)
+		}
+	}
+	ing := newUserDataIngester(UserDataConfig{Orders: newFakeOrders("o1"), Pub: &reconCapture{}})
+	if err := ing.handle(t.Context(), []byte(trade)); err != nil || !ing.resolvedAReport() {
+		t.Fatal("valid exchange trade zero was refused", err)
+	}
+	for _, field := range []string{"l", "L"} {
+		raw := strings.Replace(trade, fmt.Sprintf(`"%s":"`, field), fmt.Sprintf(`"%s":"fixture-secret`, field), 1)
+		if err := ing.handle(t.Context(), []byte(raw)); err == nil || strings.Contains(err.Error(), "fixture-secret") {
+			t.Fatalf("invalid %s was accepted or exposed", field)
+		}
+	}
+}
+
 func TestPrivateStreamOriginAndRedirect(t *testing.T) {
 	const testREST = "https://testnet.binance.vision"
 	for _, ws := range []string{"wss://ws-api.binance.com", "ws://ws-api.testnet.binance.vision", "wss://ws-api.testnet.binance.vision/wrong", "wss://example.test", "wss://user@ws-api.testnet.binance.vision", "wss://ws-api.testnet.binance.vision?key=x"} {
