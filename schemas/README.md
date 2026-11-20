@@ -10,6 +10,44 @@ buf lint
 bash check-breaking.sh  # compare with origin/main, including its pre-move layout
 ```
 
+## Use the published SDKs in an isolated checkout
+
+Version `0.1.0` comes from the private `eighred/kanz-schemas-go` release. The offline consumer check builds the accounting, API gateway and web BFF binaries, tests the accounting custody read and tenant refusal, exercises the Python inference and interactive servicer tests, and builds and tests the TypeScript bus package with its Go serialization fixtures. The release manifest and canonical schemas are pinned. Changing the schema requires a new compatible SDK release.
+
+On Linux, prepare a private scratch directory and use existing read access to verify and download the immutable release. Keep the resulting files outside the repository.
+
+```sh
+assets=$(mktemp -d)
+gh release verify v0.1.0 --repo eighred/kanz-schemas-go
+gh release download v0.1.0 --repo eighred/kanz-schemas-go --dir "$assets"
+```
+
+The offline phase needs Go 1.27.4, Python 3.12 and Node 24 with npm. On the target OS and architecture, prepare the public dependencies separately:
+
+```sh
+public=$(mktemp -d)
+cp kanz/go.mod "$public/public.mod"
+cp kanz/go.sum "$public/public.sum"
+(
+  cd kanz
+  export GOWORK=off GOFLAGS="-modfile=$public/public.mod"
+  go mod edit -dropreplace=github.com/eighred/kanz/kanz-schemas-go -droprequire=github.com/eighred/kanz/kanz-schemas-go
+  GOPRIVATE='github.com/eighred/*' GOVCS='*:off' go mod download
+)
+cp kanz/ts/kanz_bus/package.json "$public/package.json"
+cp schemas/packaging/ts/public-consumer-lock.json "$public/package-lock.json"
+(cd "$public" && npm pkg delete dependencies.@eighred/kanz-schemas && npm ci --ignore-scripts --no-audit --no-fund)
+wheels=$(mktemp -d)
+python3 -m pip download --dest "$wheels" --only-binary=:all: --require-hashes -r python/requirements.txt
+python3 -m pip download --dest "$wheels" --only-binary=:all: pytest pytest-asyncio
+```
+
+In a clean consumer checkout with those caches, run the following without network access or GitHub credentials. The temporary Go module file removes the local SDK replacement, the Python environment installs the wheel and npm installs the tarball. Local generation remains available through the ordinary developer bootstrap.
+
+```sh
+PIP_FIND_LINKS="$wheels" bash schemas/packaging/verify-release.sh --published "$assets"
+```
+
 ## What is normative here
 
 These five specifications are not commentary on the code — they are the contract

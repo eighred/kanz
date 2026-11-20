@@ -35,14 +35,16 @@ def module_sums(bundle, module, tag):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["write", "check"])
+    parser.add_argument("mode", choices=["write", "check", "assets"])
     parser.add_argument("version")
     parser.add_argument("source_sha")
     parser.add_argument("assets", type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[01](?:\.(?:0|[1-9][0-9]*)){2}", args.version):
         parser.error("expected a stable Go v0 or v1 compatible SDK version")
-    if not re.fullmatch(r"[0-9a-f]{40}", args.source_sha) or command("git", "rev-parse", "HEAD") != args.source_sha:
+    if not re.fullmatch(r"[0-9a-f]{40}", args.source_sha):
+        parser.error("expected a source commit SHA")
+    if args.mode != "assets" and command("git", "rev-parse", "HEAD") != args.source_sha:
         parser.error("source SHA differs from the checkout")
     tag = "v" + args.version
     go_name = f"kanz-schemas-go-proxy-{tag}.zip"
@@ -53,6 +55,14 @@ def main():
         if path.is_symlink() or not path.is_file():
             parser.error(f"missing regular release asset {name}")
         expected[name] = sha256(path)
+    manifest = args.assets / "sdk-manifest.json"
+    if args.mode == "assets":
+        recorded = json.loads(manifest.read_bytes())
+        if (recorded.get("assets") != expected or recorded.get("source_repository") != "eighred/kanz"
+                or recorded.get("source_sha") != args.source_sha or recorded.get("version") != args.version):
+            parser.error("published SDK assets differ from the pinned manifest")
+        return
+
     locks = [
         "schemas/buf.gen.yaml", "kanz/go.mod", "kanz/go.sum",
         "python/requirements-codegen.txt", "python/requirements.txt",
@@ -65,7 +75,6 @@ def main():
         "assets": expected,
         "inputs": {name: sha256(Path(name)) for name in locks},
     }
-    manifest = args.assets / "sdk-manifest.json"
     if args.mode == "write":
         identity["go_module"] = module_sums(args.assets / go_name, "github.com/eighred/kanz/kanz-schemas-go", tag)
         identity["toolchains"] = {
