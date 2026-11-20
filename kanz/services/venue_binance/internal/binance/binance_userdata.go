@@ -69,6 +69,15 @@ type executionReport struct {
 	EventTime int64 `json:"E"`
 }
 
+// The private report and signed trade history document milliseconds per match.
+func tradeTimestamp(ms int64) (*timestamppb.Timestamp, error) {
+	ts := timestamppb.New(time.UnixMilli(ms).UTC())
+	if ms <= 0 || ts.CheckValid() != nil {
+		return nil, errors.New("binance: invalid execution timestamp")
+	}
+	return ts, nil
+}
+
 // UserDataIngester reads the Binance user-data stream and converts each fill
 // (x=TRADE) into an order.v1.OrderFilled / OrderPartiallyFilled FACT fanned onto
 // the bus — so a fill the synchronous placement path did not capture (a resting
@@ -181,8 +190,12 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	// A missing trade ID must never become trade zero: both paths deduplicate
 	// fills by symbol and the exchange's actual trade ID.
 	if rep.TradeID == nil || *rep.TradeID < 0 || rep.Symbol == "" || rep.ClientOrderID == "" ||
-		rep.TransactTime <= 0 || rep.LastQty == "" || rep.LastPrice == "" || rep.CumQty == "" ||
+		rep.LastQty == "" || rep.LastPrice == "" || rep.CumQty == "" ||
 		(rep.OrderStatus != "FILLED" && rep.OrderStatus != "PARTIALLY_FILLED") {
+		return errors.New("binance: malformed private execution report")
+	}
+	executedAt, err := tradeTimestamp(rep.TransactTime)
+	if err != nil {
 		return errors.New("binance: malformed private execution report")
 	}
 	st, ok, lerr := i.orders.Lookup(rep.ClientOrderID)
@@ -306,7 +319,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		Fee:              feeMoney,
 		Venue:            i.venue,
 		VenueExecutionId: strconv.FormatInt(*rep.TradeID, 10),
-		ExecutedAt:       timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
+		ExecutedAt:       executedAt,
 	}
 	subject := fillfact.SubjectPartiallyFilled
 	var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: rep.ClientOrderID, Fill: fill, State: healed}

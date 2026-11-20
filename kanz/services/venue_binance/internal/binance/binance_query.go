@@ -40,11 +40,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"github.com/eighred/kanz/internal/execution"
-	"time"
-
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
@@ -251,10 +248,8 @@ func (v *BinanceVenue) withdrawnView(ctx context.Context, st *orderpb.OrderState
 // So the real trades are fetched, and the fills are built by the SAME v.fills
 // used on the placement path — one construction, so the ids cannot drift apart.
 func (v *BinanceVenue) tradesFor(ctx context.Context, st *orderpb.OrderState, symbol string, resp *orderResponse) ([]*orderpb.Fill, error) {
-	if resp.OrderID == 0 {
-		// myTrades addresses trades by the EXCHANGE's numeric order id; there is
-		// no client-order-id form of it. Without one there is nothing to ask.
-		return nil, nil
+	if resp.Symbol != symbol || resp.ClientOrderID != st.GetOrderId() || resp.OrderID <= 0 {
+		return nil, errors.New("binance: trade history order scope is unverified")
 	}
 	trades, err := v.rest.myTrades(ctx, symbol, resp.OrderID)
 	if err != nil {
@@ -271,7 +266,14 @@ func (v *BinanceVenue) tradesFor(ctx context.Context, st *orderpb.OrderState, sy
 	// produce for the same trade, which is what makes re-adoption a no-op
 	// instead of a double count.
 	shaped := &orderResponse{Symbol: symbol, Fills: make([]orderFill, 0, len(trades))}
+	side, err := binanceSide(st.GetSide())
+	if err != nil {
+		return nil, err
+	}
 	for _, t := range trades {
+		if t.IsBuyer == nil || *t.IsBuyer != (side == "BUY") {
+			return nil, errors.New("binance: trade history side differs from admitted order")
+		}
 		shaped.Fills = append(shaped.Fills, orderFill{
 			Price:           t.Price,
 			Qty:             t.Qty,
@@ -284,14 +286,10 @@ func (v *BinanceVenue) tradesFor(ctx context.Context, st *orderpb.OrderState, sy
 	if err != nil {
 		return nil, err
 	}
-	// THE TRADE'S OWN INSTANT, NOT THIS ONE. v.fills stamps executed_at from the
-	// connector clock, which is right on the placement path (the trade just
-	// happened) and wrong here: this is the RECOVERY path, and an order adopted
-	// an hour after it traded would be timestamped an hour late in every
-	// execution-quality measurement that reads it.
 	for i, t := range trades {
-		if t.Time > 0 {
-			fills[i].ExecutedAt = timestamppb.New(time.UnixMilli(t.Time).UTC())
+		fills[i].ExecutedAt, err = tradeTimestamp(t.Time)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return fills, nil

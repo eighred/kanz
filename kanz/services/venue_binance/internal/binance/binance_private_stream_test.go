@@ -30,9 +30,12 @@ import (
 const confirmed = `{"id":"private-stream","status":200,"result":{"subscriptionId":0}}`
 const fixtureTime int64 = 1700000000000
 
-func privateStreamFixture(t *testing.T, serve func(context.Context, *websocket.Conn)) (*binanceREST, string) {
+func privateStreamFixture(t *testing.T, serve func(context.Context, *websocket.Conn), routes ...func(*http.ServeMux)) (*binanceREST, string) {
 	t.Helper()
 	mux := http.NewServeMux()
+	for _, register := range routes {
+		register(mux)
+	}
 	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, r *http.Request) {
 		mac := hmac.New(sha256.New, []byte("fixture-secret"))
 		fmt.Fprint(mac, "recvWindow=5000&timestamp=1700000000000")
@@ -431,11 +434,48 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 				return
 			}
 		}
+	}, func(mux *http.ServeMux) {
+		// The read-only order history and subscription use the same dedicated credential.
+		signed := func(w http.ResponseWriter, r *http.Request) bool {
+			q := r.URL.Query()
+			signature := q.Get("signature")
+			q.Del("signature")
+			mac := hmac.New(sha256.New, []byte("fixture-secret"))
+			fmt.Fprint(mac, q.Encode())
+			if r.Header.Get("X-MBX-APIKEY") != "fixture" || signature != hex.EncodeToString(mac.Sum(nil)) {
+				w.WriteHeader(401)
+				return false
+			}
+			return true
+		}
+		mux.HandleFunc("GET /api/v3/order", func(w http.ResponseWriter, r *http.Request) {
+			if !signed(w, r) {
+				return
+			}
+			if r.URL.Query().Get("origClientOrderId") != "o1" || r.URL.Query().Get("symbol") != "BTCUSDT" {
+				t.Error("unexpected order scope")
+			}
+			fmt.Fprint(w, `{"clientOrderId":"o1","orderId":2,"symbol":"BTCUSDT","status":"FILLED","executedQty":"1","updateTime":1700000009999}`)
+		})
+		mux.HandleFunc("GET /api/v3/myTrades", func(w http.ResponseWriter, r *http.Request) {
+			if !signed(w, r) {
+				return
+			}
+			if r.URL.Query().Get("orderId") != "2" || r.URL.Query().Get("symbol") != "BTCUSDT" {
+				t.Error("unexpected history scope")
+			}
+			fmt.Fprint(w, `[{"orderId":2,"symbol":"BTCUSDT","id":8,"qty":"1","price":"50000","isBuyer":true,"time":1700000000000}]`)
+		})
 	})
 	// The credential used to subscribe belongs to the same REST client that resolved the bound account.
 	proof, err := accountproof.Resolve(ctx, rest, accountproof.Want{Account: "fixture-account", ExchangeUID: "123"}, slog.Default())
 	if err != nil || !proof.Verified {
 		t.Fatal("fixture account proof failed", err)
+	}
+	venue := NewBinanceVenue(BinanceConfig{Account: "fixture-account", Symbols: fixtureTradeSymbols(), REST: rest})
+	historyView, err := venue.QueryOrder(ctx, marketOrder("o1"))
+	if err != nil || len(historyView.Fills) != 1 || historyView.State != OrderViewFilled {
+		t.Fatalf("queried trade: %v %v", historyView, err)
 	}
 	view := newFakeOrders("o1", "o2", "o3")
 	for range 2 {
@@ -480,6 +520,9 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 		fill := payload.GetFill()
 		if fill.GetFillId() != "BTCUSDT-8" || fill.GetVenueExecutionId() != "8" || fill.GetOrderId() != "o1" || dec.Cmp(fill.GetQuantity(), bdec("1")) != 0 || fill.GetExecutedAt().AsTime().UnixMilli() != fixtureTime {
 			t.Fatal("fill attribution changed", fill)
+		}
+		if !fillfact.SameExecution(historyView.Fills[0], fill) || !fillfact.SameExecution(fill, historyView.Fills[0]) || fillfact.ExecutionKey(historyView.Fills[0]) != fillfact.ExecutionKey(fill) {
+			t.Fatal("queried history and subscribed trade disagree")
 		}
 		if first != nil && (!fillfact.SameExecution(first, fill) || fillfact.ExecutionKey(first) != fillfact.ExecutionKey(fill)) {
 			t.Fatal("replayed trade had a different economic identity")

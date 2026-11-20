@@ -119,9 +119,9 @@ func TestBinanceQuery_FilledCarriesTheVenuesOwnFillIdentities(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"symbol":"BTCUSDT","orderId":9001,"clientOrderId":"o1","status":"FILLED","executedQty":"1.00000000"}`
 	f.myTradesBody = `[{"symbol":"BTCUSDT","id":42,"orderId":9001,"price":"50000.00","qty":"0.60000000",` +
-		`"commission":"0.001","commissionAsset":"BNB","time":1750000000000},` +
+		`"commission":"0.001","commissionAsset":"BNB","isBuyer":true,"time":1750000000000},` +
 		`{"symbol":"BTCUSDT","id":43,"orderId":9001,"price":"50010.00","qty":"0.40000000",` +
-		`"commission":"0.001","commissionAsset":"BNB","time":1750000001000}]`
+		`"commission":"0.001","commissionAsset":"BNB","isBuyer":true,"time":1750000001000}]`
 
 	view, err := venueOverFake(f).QueryOrder(context.Background(), queryOrderState("o1"))
 	if err != nil {
@@ -162,7 +162,7 @@ func TestBinanceQuery_PartiallyFilledCarriesTheTradesSoFar(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"symbol":"BTCUSDT","orderId":9001,"clientOrderId":"o1","status":"PARTIALLY_FILLED","executedQty":"0.60000000"}`
 	f.myTradesBody = `[{"symbol":"BTCUSDT","id":42,"orderId":9001,"price":"50000.00","qty":"0.60000000",` +
-		`"commission":"0.001","commissionAsset":"BNB","time":1750000000000}]`
+		`"commission":"0.001","commissionAsset":"BNB","isBuyer":true,"time":1750000000000}]`
 
 	view, err := venueOverFake(f).QueryOrder(context.Background(), queryOrderState("o1"))
 	if err != nil {
@@ -295,7 +295,7 @@ func TestBinanceQuery_AWithdrawalThatPartiallyTradedCarriesItsFills(t *testing.T
 		f.queryBody = `{"symbol":"BTCUSDT","orderId":9001,"clientOrderId":"o1","status":"` + tc.status +
 			`","executedQty":"0.60000000"}`
 		f.myTradesBody = `[{"symbol":"BTCUSDT","id":42,"orderId":9001,"price":"50000.00","qty":"0.60000000",` +
-			`"commission":"0.001","commissionAsset":"BNB","time":1750000000000}]`
+			`"commission":"0.001","commissionAsset":"BNB","isBuyer":true,"time":1750000000000}]`
 
 		view, err := venueOverFake(f).QueryOrder(context.Background(), queryOrderState("o1"))
 		if err != nil {

@@ -3,6 +3,7 @@ package binance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -205,6 +206,17 @@ type tradeEntry struct {
 	Commission      string `json:"commission"`
 	CommissionAsset string `json:"commissionAsset"`
 	Time            int64  `json:"time"`
+	IsBuyer         *bool  `json:"isBuyer"`
+}
+
+func (t *tradeEntry) UnmarshalJSON(data []byte) error {
+	type wire tradeEntry
+	row := wire{ID: -1}
+	if !validPrivateJSON(data, &row) || row.ID < 0 {
+		return errors.New("binance: missing or invalid history trade identity")
+	}
+	*t = tradeEntry(row)
+	return nil
 }
 
 // myTradesWeight is the request weight of GET /api/v3/myTrades. It is far more

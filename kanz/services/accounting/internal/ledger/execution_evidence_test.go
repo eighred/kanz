@@ -107,3 +107,30 @@ func TestExecutionEvidenceAndClaimRollBackWithAnnouncement(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyBinanceProcessTimeCannotRewriteSettledExecution(t *testing.T) {
+	ctx := t.Context()
+	store := NewPostgres(newPool(t))
+	old := executionEvidenceFixture("")
+	old.OrderId = "known-order"
+	matched := proto.Clone(old).(*orderpb.Fill)
+	matched.ExecutedAt = timestamppb.New(day(2))
+	for i, f := range []*orderpb.Fill{old, matched, old} {
+		event, err := FromFill("fund", f, "USD", day(3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = store.Append(ctx, event, nil)
+		if (i == 1 && !errors.Is(err, fillfact.ErrExecutionIdentityConflict)) || (i != 1 && err != nil) {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+	}
+	journal, err := store.Journal(ctx, "fund")
+	if err != nil || len(journal) != 1 || !journal[0].Effective.Equal(day(1)) || journal[0].VenueAccountID != "" {
+		t.Fatalf("legacy time or account changed: %+v %v", journal, err)
+	}
+	book := Replay("fund", journal)
+	if book.Cash["USD"].Cmp(big.NewRat(-101, 1)) != 0 || book.Positions["BTC-USD"].Qty.Cmp(big.NewRat(1, 1)) != 0 {
+		t.Fatal("legacy replay changed settled cash or quantity")
+	}
+}
