@@ -32,8 +32,17 @@ async function main() {
         await context.addCookies([{ name: 'kanz_session', value: cookies[name], url: base, httpOnly: true, sameSite: 'Lax' }])
         const page = await context.newPage()
         page.setDefaultTimeout(7000)
+        const permissions = name === 'authorized' ? page.waitForResponse(response =>
+          response.url() === base + '/api/v1/permissions' && response.request().method() === 'GET') : undefined
         await page.goto(base + '/custody-breaks')
         if (name === 'authorized') {
+          const response = await permissions
+          assert.equal(response.status(), 200)
+          const grants = await response.json()
+          assert.equal(grants.subject, 'custody-pilot-rerun-authorized')
+          assert.equal(grants.tenant, 'synthetic-custody-pilot')
+          assert.deepEqual(grants.portfolios, [expected.portfolio_id])
+          assert(grants.routes.some(route => route.Pattern === 'POST /v1/portfolios/{id}/custody/reruns' && route.Capability === 'custody_rerun'))
           const form = page.getByRole('region', { name: 'Rerun custody comparison' })
           await form.getByLabel('Portfolio ID').fill(expected.portfolio_id)
           await form.getByLabel('Custodian ID').fill(expected.custodian_id)

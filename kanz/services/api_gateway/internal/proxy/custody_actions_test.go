@@ -55,7 +55,7 @@ func TestCustodyCustomerReadRequiresScopeAndCannotWrite(t *testing.T) {
 		{read, []string{"PF1"}, "POST", "/v1/portfolios/PF1/cash-movements", 403},
 	} {
 		be := &fakeBackend{resp: Response{Status: 200}}
-		m := authz.NewMux(authz.Grants{read: {authz.CustodyRead}, "fund": {authz.Fund, authz.CustodyRead}, "baseline": {authz.Read}}, nil)
+		m := authz.NewMux(authz.Grants{read: {authz.CustodyRead}, "fund": {authz.Fund, authz.CustodyRead}, "baseline": {authz.Read}}, nil, authz.WithCustodyReadRole(read))
 		New(be, Roles{CustodyRead: read, Fund: "fund", CustodyRerun: "rerunner"}).Routes(m)
 		r := httptest.NewRequest(tc.method, tc.path, nil)
 		r = r.WithContext(middleware.WithPrincipal(r.Context(), &middleware.Principal{Subject: "operator", Tenant: "fixture", Roles: []string{tc.role}, Portfolios: tc.scope}))

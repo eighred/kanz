@@ -266,7 +266,8 @@ type Config struct {
 	// is indistinguishable from a working control. validateAuth below closes the
 	// other direction: once AccountingAddr IS set the role becomes REQUIRED, so the
 	// funding surface cannot be exposed without saying who may reach it.
-	FundRole         string
+	FundRole string
+	// CustodyReadRole identifies customer sessions restricted to their custody portfolio grants.
 	CustodyReadRole  string
 	CustodyRerunRole string
 	// ApproveRole is the role carrying authz.Approve — the second signature on an

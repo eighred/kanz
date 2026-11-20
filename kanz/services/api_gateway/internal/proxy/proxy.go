@@ -560,16 +560,9 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "POST /v2/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
 }
 
-// A separate customer read grant always names portfolios. Existing Fund holders
-// retain the deployment's established tenant-wide read semantics.
 func (h *Handler) custodyReader() http.HandlerFunc {
 	forward := h.handle(ServiceAccounting, true, nil)
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := middleware.PrincipalFromContext(r.Context())
-		if p != nil && h.roles.CustodyRead != "" && p.HasRole(h.roles.CustodyRead) && !(h.roles.Fund != "" && p.HasRole(h.roles.Fund)) && len(p.Portfolios) == 0 {
-			writeError(w, http.StatusForbidden, "an explicit custody portfolio is required")
-			return
-		}
 		// URL.Query drops malformed fields. Losing an invalid continuation
 		// would restart the operator at page one without reporting the failure.
 		if r.URL.Path == "/v1/custody/breaks" {

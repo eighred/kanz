@@ -74,6 +74,25 @@ async function main() {
             continue
           }
           assert.equal(data.actions_enabled, false)
+          if (navigation === 'open') {
+            const access = await page.evaluate(async () => {
+              const permissions = await fetch('/api/v1/permissions')
+              const accounts = await fetch('/api/v1/broker/accounts')
+              return { status: permissions.status, grants: await permissions.json(), accounts: accounts.status }
+            })
+            assert.equal(access.status, 200)
+            assert.equal(access.grants.subject, 'custody-pilot-reader')
+            assert.equal(access.grants.tenant, 'synthetic-custody-pilot')
+            assert.deepEqual(access.grants.portfolios, [expected.portfolio_id])
+            assert.deepEqual(access.grants.capabilities, ['custody_read', 'session.read'])
+            assert.deepEqual(access.grants.routes, [
+              { Pattern: 'GET /v1/custody/breaks', Capability: 'custody_read' },
+              { Pattern: 'GET /v1/permissions', Capability: 'session.read' },
+              { Pattern: 'GET /v1/portfolios/{id}/custody/comparison', Capability: 'custody_read' },
+            ])
+            assert.equal(access.accounts, 403)
+          }
+          assert.equal(await page.getByRole('region', { name: 'Rerun custody comparison' }).count(), 0)
           assert.equal(data.count, queue.length)
           assert.equal(data.breaks.length, queue.length)
           for (const item of queue) {

@@ -18,7 +18,7 @@ func (m *Mux) Permissions(w http.ResponseWriter, r *http.Request) {
 	caps := make([]Capability, 0)
 	routes := make([]Route, 0)
 	for _, route := range m.routes {
-		if m.grants.Allows(p.Roles, route.Capability) {
+		if _, allowed, _ := m.requestGrant(p, route.Capability); allowed {
 			routes = append(routes, route)
 			if !slices.Contains(caps, route.Capability) {
 				caps = append(caps, route.Capability)

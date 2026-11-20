@@ -1069,7 +1069,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	grants := authz.Grants{
 		// The baseline role admits a caller to the gateway at all (SEC-M1) and lets them
 		// READ. It must never carry Trade: every authenticated caller holds it.
-		cfg.RequiredRole: {authz.Read},
+		cfg.RequiredRole: {authz.Read, authz.SessionRead},
 		// The trade role MOVES CAPITAL. A trader can obviously also read — a control that
 		// made traders carry two tokens would be routed around within a week.
 		cfg.TradeRole: {authz.Read, authz.Trade},
@@ -1103,7 +1103,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund}
 	}
 	if cfg.CustodyReadRole != "" {
-		grants[cfg.CustodyReadRole] = []authz.Capability{authz.Read, authz.CustodyRead}
+		grants[cfg.CustodyReadRole] = []authz.Capability{authz.CustodyRead}
 		if cfg.FundRole != "" {
 			grants[cfg.FundRole] = append(grants[cfg.FundRole], authz.CustodyRead)
 		}
@@ -1173,8 +1173,8 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		grants[cfg.LakeSnapshot.CreateRole] = append(grants[cfg.LakeSnapshot.CreateRole], []authz.Capability{authz.LakeSnapshotCreate}...)
 		grants[cfg.LakeSnapshot.ReadRole] = append(grants[cfg.LakeSnapshot.ReadRole], []authz.Capability{authz.LakeSnapshotRead}...)
 	}
-	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired))
-	gwMux.Handle(authz.Read, "GET /v1/permissions", gwMux.Permissions)
+	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired), authz.WithCustodyReadRole(cfg.CustodyReadRole))
+	gwMux.Handle(authz.SessionRead, "GET /v1/permissions", gwMux.Permissions)
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)

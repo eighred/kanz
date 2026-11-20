@@ -98,7 +98,7 @@ Production source rights, custody account assignment, file delivery, authorized 
 
 ### Review a dated result
 
-Set `API_GATEWAY_CUSTODY_READ_ROLE` to a distinct identity role for customer readers. Issue the role together with the gateway baseline and an explicit portfolio allow-list. The Fund role retains its existing access. In the read-only pilot, both custody reads work with the customer role alone beyond baseline.
+Set `API_GATEWAY_CUSTODY_READ_ROLE` to a distinct identity role for customer readers. Issue it with the gateway baseline and an explicit portfolio allow-list. A session with the customer role can inspect its permissions and read the custody queue and dated receipts. This role restricts the session even if its token also carries a staff grant. Keep staff identities for Fund and authorized reruns separate from customer identities. Send the customer to `/custody-breaks` to start the review after sign-in.
 
 In **Custody breaks**, enter the portfolio, custodian and completed UTC business date under **Dated custody result**. The gateway forwards `GET /v1/portfolios/{id}/custody/comparison?custodian_id=...&business_date=YYYY-MM-DD`. Accounting reads the stored runs and statement receipts in one PostgreSQL snapshot. A recorded result identifies the run and completion time. A confirmed comparison also identifies the signed statement, scope mode and exact journal position. The result requires an immutable signed-source digest recorded with that run and a matching current receipt and materialized statement.
 
