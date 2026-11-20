@@ -839,12 +839,14 @@ data:
                   # locally and invisible, and the staleness alert has no series
                   # to age.
                   "accounting.custody.reconciled",
+                  "accounting.performance.daily_return",
                   "accounting.custody.action_recorded",
                   "accounting.collateral.recorded",
                   "dlq.accounting.collateral.snapshot",
                   "dlq.accounting.collateral.confirmation.*",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "dlq.accounting.custody.statement",
+                  "dlq.accounting.performance.daily_return",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
@@ -868,6 +870,7 @@ data:
                   # to publish, and so the estate reports the absence out loud
                   # instead of being silent about it.
                   "accounting.custody.statement",
+                  "accounting.performance.daily_return",
                   "accounting.collateral.snapshot",
                   "accounting.collateral.confirmation.*",
                 ]
@@ -2169,12 +2172,14 @@ data:
                   # platform accounting entry above for why it is published on
                   # every outcome.
                   "accounting.custody.reconciled",
+                  "accounting.performance.daily_return",
                   "accounting.custody.action_recorded",
                   "accounting.collateral.recorded",
                   "dlq.accounting.collateral.snapshot",
                   "dlq.accounting.collateral.confirmation.*",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "dlq.accounting.custody.statement",
+                  "dlq.accounting.performance.daily_return",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
@@ -2186,6 +2191,7 @@ data:
                   # The custodian statement feed (#962); see the platform
                   # accounting entry above.
                   "accounting.custody.statement",
+                  "accounting.performance.daily_return",
                   "accounting.collateral.snapshot",
                   "accounting.collateral.confirmation.*",
                 ]

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
+import { createPinia } from 'pinia'
 import ExposureView from './ExposureView.vue'
 import * as api from '../api/risk'
 import { ApiError } from '../api/client'
@@ -37,7 +38,7 @@ async function open(resp: ExposureResponse | Error) {
   const r = router()
   await r.push('/portfolios/PF1/exposure')
   await r.isReady()
-  const wrapper = mount(ExposureView, { global: { plugins: [r] } })
+  const wrapper = mount(ExposureView, { global: { plugins: [r, createPinia()] } })
   await flushPromises()
   return wrapper
 }
@@ -150,7 +151,7 @@ it('clears the previous portfolio exposure while the next portfolio is loading o
     .mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject }))
   const r = router()
   await r.push('/portfolios/A/exposure')
-  const wrapper = mount(ExposureView, { global: { plugins: [r] } })
+  const wrapper = mount(ExposureView, { global: { plugins: [r, createPinia()] } })
   await flushPromises()
   expect(wrapper.text()).toContain('9007199254740993.01 USD')
   await r.push('/portfolios/B/exposure')

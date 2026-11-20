@@ -38,6 +38,7 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/fxfeed"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/return_basis"
 	"github.com/eighred/kanz/services/accounting/internal/server"
 )
 
@@ -233,6 +234,13 @@ func run() int {
 		server.WithSnapshotMetrics(snapMetrics),
 		server.WithBreakStore(custodyStore),
 		server.WithCustodyBookScope(custodyCfg.scope),
+	}
+	if cfg.DailyReturnEnabled {
+		if ledgerPool == nil || cfg.NATSURL == "" || cfg.Source != "accounting" || cfg.Tenant == "__system__" {
+			logger.Error("daily return requires tenant Accounting with PostgreSQL and JetStream")
+			return 2
+		}
+		opts = append(opts, server.WithReturnBasis(returnbasis.NewStore(ledgerPool)))
 	}
 	var collateralConsumer *collateralops.Consumer
 	if cfg.CollateralInputSource != "" || cfg.CollateralCustodySources != "" {
@@ -641,6 +649,9 @@ func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfi
 	subscribe(fillfact.SubjectRecovered, folder.Handle)
 	for _, subject := range cfg.CashSubjects {
 		subscribe(subject, folder.HandleCash)
+	}
+	if cfg.DailyReturnEnabled {
+		subscribe(returnbasis.Subject, returnbasis.NewStore(ledgerPool).Handle)
 	}
 	if collateralConsumer != nil {
 		subscribe(collateralops.SubjectSnapshot, collateralConsumer.HandleSnapshot)

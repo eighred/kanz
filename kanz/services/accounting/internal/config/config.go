@@ -18,6 +18,7 @@ import (
 // bus consumer that feeds the journal is wired there too, so the default boot
 // serves the read/reconcile endpoints without a broker.
 type Config struct {
+	DailyReturnEnabled bool
 	// Listen is the API port — the tenant-scoped routes that MOVE MONEY
 	// (cash-movements, nav, reconcile). It is deliberately NOT the scraped port
 	// (#447): allow-observability-scrape must admit whatever port serves
@@ -252,7 +253,13 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	dailyReturn, err := env.Bool("ACCOUNTING_DAILY_RETURN_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
+		DailyReturnEnabled:       dailyReturn,
 		Listen:                   env.Or("ACCOUNTING_LISTEN", ":8101"),
 		MetricsListen:            env.Or("ACCOUNTING_METRICS_LISTEN", ":8080"),
 		LogLevel:                 env.ParseLevelOr(os.Getenv("ACCOUNTING_LOG_LEVEL"), slog.LevelInfo),

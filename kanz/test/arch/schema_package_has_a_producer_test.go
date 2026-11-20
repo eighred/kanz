@@ -148,9 +148,6 @@ func TestEverySchemaPackageHasAProducer(t *testing.T) {
 // each is its own piece of work with its own data seam, and a guard that lands
 // with four unrelated features attached is a guard that does not land.
 var schemaPackageWithoutAProducerExempt = map[string]string{
-	"performance/v1": "PERF-01 return/attribution wire shapes. The performance module computes " +
-		"attribution in-process and serves it over the query surface; nothing ever builds a " +
-		"performance.v1 message. #1072 owns its producer, conditional on #1028's surface decision.",
 	"regulatory/v1": "Regulatory filing wire shapes. The filing path assembles its own in-process " +
 		"shapes and this package is named by neither Go, Python nor TypeScript. #1070 owns its producer.",
 	"sustainability/v1": "Climate/ESG wire shapes. Same finding as regulatory/v1 and found by the " +

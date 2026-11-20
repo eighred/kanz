@@ -53,6 +53,9 @@ func (s *Store) Accept(ctx context.Context, raw, signature []byte) (Receipt, err
 		if existing != receipt.Digest || !bytes.Equal(saved, raw) || !bytes.Equal(savedSignature, signature) {
 			return Receipt{}, ErrConflict
 		}
+		if err := enqueue(ctx, tx, receipt); err != nil {
+			return Receipt{}, err
+		}
 		return receipt, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -72,6 +75,9 @@ func (s *Store) Accept(ctx context.Context, raw, signature []byte) (Receipt, err
 	_, err = tx.Exec(ctx, `INSERT INTO return_basis_receipts (portfolio_id,currency,close_date,as_of,digest,signed_payload,signature)
 		VALUES ($1,$2,$3::text::date,$4,$5,$6,$7)`, e.Portfolio, e.Currency, e.CloseDate, e.AsOf, receipt.Digest, raw, signature)
 	if err != nil {
+		return Receipt{}, err
+	}
+	if err := enqueue(ctx, tx, receipt); err != nil {
 		return Receipt{}, err
 	}
 	return receipt, tx.Commit(ctx)

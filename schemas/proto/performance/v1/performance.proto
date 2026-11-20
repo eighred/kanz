@@ -168,3 +168,24 @@ message RiskStatistics {
   // over.
   int32 periods = 5;
 }
+
+// DailyReturnAssessment binds one daily result to its dated source evidence.
+// Presence of measured distinguishes a measured zero from an unassessed day.
+message DailyReturnAssessment {
+  string portfolio_id = 1;
+  string currency = 2;
+  google.protobuf.Timestamp start = 3;
+  google.protobuf.Timestamp end = 4;
+  google.protobuf.Timestamp as_of = 5;
+  string source_digest = 6;
+  string previous_source_digest = 7;
+  string opening_nav_reference = 8;
+  string closing_nav_reference = 9;
+  string flow_scope = 10;
+  string flow_completion_reference = 11;
+  optional uint64 external_flow_count = 12;
+  oneof result {
+    ReturnPeriod measured = 13;
+    string unassessed_reason = 14;
+  }
+}

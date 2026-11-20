@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 	if owner == "" || source == "" || reader == "" {
 		t.Skip("requires dedicated migrated PostgreSQL and distinct restricted source and reader roles")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	const tenant, portfolio, ccy = "basis-test", "PF1", "USD"
 	key, priv, err := ed25519.GenerateKey(nil)
@@ -51,6 +53,21 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 		}
 		if err := os.WriteFile(sigPath, ed25519.Sign(signer, raw), 0600); err != nil {
 			t.Fatal(err)
+		}
+		if binary := os.Getenv("RETURN_PILOT_IMPORTER_BIN"); binary != "" {
+			cmd := exec.CommandContext(ctx, binary, "-evidence", inputPath, "-signature", sigPath)
+			cmd.Env = []string{"ACCOUNTING_DATABASE_URL=" + source, "ACCOUNTING_TENANT=" + tenant,
+				"ACCOUNTING_DAILY_RETURN_ENABLED=true"}
+			for _, k := range []string{"SystemRoot", "TEMP", "TMP", "TMPDIR"} {
+				if value, ok := os.LookupEnv(k); ok {
+					cmd.Env = append(cmd.Env, k+"="+value)
+				}
+			}
+			output, err := cmd.Output()
+			if err != nil {
+				return "", errors.New("signed source subprocess refused")
+			}
+			return strings.TrimSpace(string(output)), nil
 		}
 		return run(ctx, inputPath, sigPath)
 	}
@@ -84,7 +101,8 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 	incomplete.AsOf = incomplete.AsOf.Add(time.Hour)
 	incomplete.PreviousDigest = newDigest
 	incomplete.Flows = nil
-	if _, err := put(incomplete, priv); err != nil {
+	unknownDigest, err := put(incomplete, priv)
+	if err != nil {
 		t.Fatal("signed unknown must be retained without asserting zero", err)
 	}
 	_, unauthorizedKey, err := ed25519.GenerateKey(nil)
@@ -133,4 +151,8 @@ func TestSignedReturnBasisAdmissionAndReplay(t *testing.T) {
 	if _, err := store.Read(scope, "PF2", ccy, original.CloseDate, original.AsOf); !errors.Is(err, returnbasis.ErrNotFound) {
 		t.Fatal("foreign portfolio appeared")
 	}
+	if os.Getenv("RETURN_PILOT_VERIFY") == "1" {
+		proveDailyReturn(t, scope, store, []returnbasis.Evidence{original, correction, incomplete}, []string{oldDigest, newDigest, unknownDigest})
+	}
+
 }

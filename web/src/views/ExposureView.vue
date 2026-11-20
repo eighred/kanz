@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import DailyReturn from './DailyReturn.vue'
 import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
 import {
@@ -62,6 +63,8 @@ function money(m: Parameters<typeof formatMoney>[0]): string {
     <code>{{ id }}</code>
     <span v-if="data?.as_of"> · as of {{ data.as_of }}</span>
   </p>
+
+  <DailyReturn :portfolio="id" />
 
   <p v-if="loading">Loading…</p>
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>

@@ -29,6 +29,7 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
+	"github.com/eighred/kanz/services/accounting/internal/return_basis"
 )
 
 // Readiness gates traffic; the read endpoints are pure over the store, so the
@@ -48,6 +49,7 @@ type Server struct {
 	fxProvider    func() accounting.FXConverter
 	instrumentCcy accounting.InstrumentCurrency
 	cashCommands  *cashmove.Commands
+	returnBasis   *returnbasis.Store
 	collateral    *collateralops.Store
 	// breaks is the custody reconciliation break queue (#962). Nil ⇒ the routes
 	// are not registered and the surface answers 404, which is the truthful
@@ -108,6 +110,10 @@ func WithSnapshotMetrics(m *ledger.SnapshotMetrics) Option {
 // WithTenant pins the instance to the one tenant it serves — the same value main
 // gives pg.NewTenantPool. Without it every /v1 route refuses (#415).
 func WithTenant(t string) Option { return func(s *Server) { s.tenant = t } }
+
+func WithReturnBasis(store *returnbasis.Store) Option {
+	return func(s *Server) { s.returnBasis = store }
+}
 
 func WithCashCommands(commands *cashmove.Commands) Option {
 	return func(s *Server) { s.cashCommands = commands }
@@ -191,6 +197,9 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements", s.handleCashMovement)
 		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements/preview", s.previewCashMovement)
 		s.mux.HandleFunc("GET /v1/portfolios/{id}/cash-movements/{movement}", s.cashMovementStatus)
+	}
+	if s.returnBasis != nil {
+		s.mux.HandleFunc("GET /v1/portfolios/{id}/daily-return", s.dailyReturn)
 	}
 	s.custodyRoutes()
 	s.collateralRoutes()

@@ -25,8 +25,33 @@ the last edition and a strictly later knowledge time. Exact replay returns
 the same digest. There is one enrolled issuer per scope in this pilot.
 
 Run with explicit `ACCOUNTING_DATABASE_URL` and `ACCOUNTING_TENANT` using the
-restricted source login.
+restricted source login. Enable the controlled pilot with
+`ACCOUNTING_DAILY_RETURN_ENABLED=true` on the command and Accounting service.
 
 ```sh
 go run ./services/accounting/cmd/return_basis -evidence close.json -signature close.sig
 ```
+
+
+The importer commits the signed receipt and its typed return FACT to the
+Accounting outbox in one transaction. Grant the source conditional insert
+columns `portfolio_id,currency,close_date,as_of` on
+`return_basis_publications`, plus the normal Accounting outbox insert/read
+and sequence privileges. Grant only the Accounting consumer update access to
+`observed_payload`. The consumer verifies the broker payload against the
+signed source before saving it. Replays preserve the exact first payload.
+
+Open **Daily return** on the portfolio's Exposure page. Enter the UTC close
+date, reporting currency and exact knowledge time. The panel distinguishes
+a measured zero from an unassessed period. Enter the earlier knowledge time
+to reopen the original published result after a correction.
+
+For the isolated acceptance, generate the Go schema SDK and install the
+locked Web dependencies and Chromium. From the repository root run
+`python -B kanz/dev/daily_return_pilot.py`. It applies the Accounting
+migrations to a disposable PostgreSQL container, builds the normal importer
+and Accounting service and exercises a real JetStream consumer and authenticated
+gateway/BFF in Chromium.
+
+The first estate needs a governed issuer and complete source scope before
+enrolling real keys. The synthetic fixture owns its signing key for one run.
