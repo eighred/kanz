@@ -13,8 +13,23 @@ from chisel_image import DEFINITIONS, reference, sha
 from qualify import required, run_corpus
 
 
-PACKAGES = {"base-files", "ca-certificates", "libc6", "libssl3t64", "openssl", "tzdata", "tzdata-legacy"}
-LIBC = "d821b41fc59cb4978ecd53bc83e5c964ac15d305c8d2ac4c8a35aebe55010fb9"
+# Exact binary archives from the reviewed, signed Noble cut. Requalify before updating.
+PACKAGES = {
+    "base-files": ("amd64", "13ubuntu10.5",
+        "87e8c41e62f61625fb78a982d0bc0a70f40ef8375bc313b154914d1b3759c823"),
+    "ca-certificates": ("all", "20260816ubuntu0.24.04.2",
+        "f9fbacd417b515450b831032cc39d18059e9874e67525679a43c16071dabf9a0"),
+    "libc6": ("amd64", "2.39-0ubuntu8.12",
+        "d821b41fc59cb4978ecd53bc83e5c964ac15d305c8d2ac4c8a35aebe55010fb9"),
+    "libssl3t64": ("amd64", "3.0.13-0ubuntu3.16",
+        "219f43b1cd836a4da550938db5fda93160d269d39a4edcf1f1ce698a470db797"),
+    "openssl": ("amd64", "3.0.13-0ubuntu3.16",
+        "675b84971ffd4467707008c25ef7520f90ea7c23ef27b7a76b0dccf1d7c4dc3f"),
+    "tzdata": ("all", "2026e-0ubuntu0.24.04.1",
+        "2f6794a7f31753fc947d9ac02ff03ea46510f34864f9d132a93d7b105e3c4447"),
+    "tzdata-legacy": ("all", "2026e-0ubuntu0.24.04.1",
+        "da66b34322e7545f12bd97f2bd31c5f78406a9a9ec0ccfe284c3f3eb791647bf"),
+}
 MODULES = {"UHC.so", "ISO-2022-CN-EXT.so", "IBM1390.so", "IBM1399.so"}
 REMOVED_ROOTS = {"86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b",
                  "d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4"}
@@ -51,12 +66,21 @@ def records(rows, kind, key):
     return result
 
 
+def archive_identity(row):
+    return row["arch"], row["version"], row["sha256"]
+
+
+def verify_packages(packages):
+    if {name: archive_identity(row) for name, row in packages.items()} != PACKAGES:
+        raise ValueError("Chisel package set or archive identity differs from the reviewed Noble cut")
+
+
 def control_modules(control):
     with tarfile.open(control) as archive:
         members = names(archive)
         rows = wall(archive, members)
         package = records(rows, "package", "name")["libc6"]
-        if package["sha256"] != LIBC or "libc6_gconv" not in records(rows, "slice", "name"):
+        if archive_identity(package) != PACKAGES["libc6"] or "libc6_gconv" not in records(rows, "slice", "name"):
             raise ValueError("positive control uses another libc6 or slice")
         paths = records(rows, "path", "path")
         hashes = {}
@@ -75,7 +99,8 @@ def base_inventory(data, control):
         members = names(archive)
         rows = wall(archive, members)
         packages = records(rows, "package", "name")
-        if set(packages) != PACKAGES or packages["libc6"] != control_package:
+        verify_packages(packages)
+        if packages["libc6"] != control_package:
             raise ValueError("candidate and control package identity mismatch")
         slices = records(rows, "slice", "name")
         if "libc6_libs" not in slices or any(s.startswith("libc6_gconv") for s in slices):

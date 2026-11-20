@@ -5,10 +5,21 @@ import tarfile
 import tempfile
 import unittest
 
-from chisel_verify import names, scanner_packages
+from chisel_verify import PACKAGES, names, scanner_packages, verify_packages
 
 
 class ChiselTests(unittest.TestCase):
+    def test_each_reviewed_archive_identity_is_required(self):
+        reviewed = {name: {"arch": arch, "version": version, "sha256": digest}
+                    for name, (arch, version, digest) in PACKAGES.items()}
+        verify_packages(reviewed)
+        for name, row in reviewed.items():
+            for field, other in (("arch", "arm64"), ("version", "old"), ("sha256", "0" * 64)):
+                with self.subTest(name=name, field=field), self.assertRaisesRegex(ValueError, "archive identity"):
+                    verify_packages({**reviewed, name: {**row, field: other}})
+        with self.assertRaisesRegex(ValueError, "package set"):
+            verify_packages({name: row for name, row in reviewed.items() if name != "openssl"})
+
     def test_duplicate_layer_paths_are_rejected(self):
         packed = io.BytesIO()
         with tarfile.open(fileobj=packed, mode="w") as out:
