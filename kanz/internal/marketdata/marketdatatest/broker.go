@@ -19,11 +19,12 @@ import (
 )
 
 type Broker struct {
-	ID      string
-	subject string
-	client  *bus.NATSClient
-	nc      *nats.Conn
-	js      jetstream.JetStream
+	ID       string
+	subject  string
+	client   *bus.NATSClient
+	producer *bus.Producer
+	nc       *nats.Conn
+	js       jetstream.JetStream
 }
 
 func NewBroker(t *testing.T, ctx context.Context) Broker {
@@ -74,7 +75,11 @@ func NewBroker(t *testing.T, ctx context.Context) Broker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	return Broker{id, subject, client, nc, js}
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "payload-time-test", ProducerVersion: "test", Tenant: "__system__"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Broker{ID: id, subject: subject, client: client, producer: producer, nc: nc, js: js}
 }
 
 // InstrumentPayload supplies the partition key from the generated market message.
@@ -91,13 +96,9 @@ type Frame struct {
 
 func (b Broker) Publish(t *testing.T, ctx context.Context, frames []Frame, at time.Time) {
 	t.Helper()
-	p, err := bus.NewProducer(b.client, bus.ProducerConfig{Source: "payload-time-test", ProducerVersion: "test", Tenant: "__system__"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for n, frame := range frames {
 		id := frame.Payload.GetInstrumentId()
-		if err := p.Publish(ctx, bus.Event{Subject: fmt.Sprintf("%s.%d", b.subject, n), EventType: frame.EventType, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "market", PartitionKey: id, EventTime: at, IngestionTime: at, Payload: frame.Payload}); err != nil {
+		if err := b.producer.Publish(ctx, bus.Event{Subject: fmt.Sprintf("%s.%d", b.subject, n), EventType: frame.EventType, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "market", PartitionKey: id, EventTime: at, IngestionTime: at, Payload: frame.Payload}); err != nil {
 			t.Fatalf("publish %s: %v", frame.EventType, err)
 		}
 	}
