@@ -395,6 +395,7 @@ type Run struct {
 	observedMissing               bool
 	measured                      []recon.ExecutionQuantityDifference
 	ExecutionQuantities           *accountingpb.ExecutionQuantityComparison
+	ExecutionEconomics            *accountingpb.ExecutionEconomicsComparison
 	HistoricalQuantityResolutions []*accountingpb.HistoricalQuantityResolution
 	RunID                         string
 	RequestID                     string

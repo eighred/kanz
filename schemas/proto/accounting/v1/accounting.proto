@@ -574,7 +574,7 @@ enum StatementGrain {
 // The transaction pass establishes whether both sides saw the execution. A
 // signed line may separately attest its instrument quantity unit for exact
 // matched-reference quantity diagnostics. Price and cash are not assessed
-// per execution by either comparison.
+// per execution by either comparison. A separate signed convention enables execution economics.
 message StatementTransaction {
   // external_ref is the custodian's identity for the execution, in the SAME
   // reference space the book stamps on the journal entry (ledger.Event.SourceRef,
@@ -618,6 +618,17 @@ message StatementTransaction {
   // The source attests that quantity is expressed in the canonical instrument's
   // natural units as booked by the ledger. False or absent offers no unit proof.
   bool quantity_in_instrument_units = 9;
+  StatementExecutionEconomics execution_economics = 10;
+}
+
+// unit_price_net_cash_same_currency_commission_v1 declares one natural unit
+// per price unit, with price, all-in nonnegative commission and posted net cash
+// in currency_code. Cash is minus signed quantity times unit price minus
+// commission. Both trade and cash settle on the signed UTC business date.
+message StatementExecutionEconomics {
+  string convention = 1;
+  // Presence distinguishes an explicitly signed zero charge from missing cost.
+  common.v1.Decimal commission = 2;
 }
 
 // ReconciliationOutcome is what a run concluded.
@@ -839,6 +850,39 @@ message ReconciliationRun {
   // Absent on historical completions and sources without unit attestations.
   ExecutionQuantityComparison execution_quantities = 13;
   repeated HistoricalQuantityResolution historical_quantity_resolutions = 14;
+  // Assesses execution economics independently of balance and membership breaks.
+  ExecutionEconomicsComparison execution_economics = 15;
+}
+
+// Bounded, ordered complete inventory for the signed execution lines. Each
+// economic difference is the original book value minus the signed value.
+message ExecutionEconomicsComparison {
+  repeated ExecutionEconomicsRow rows = 1;
+  string unassessed_reason = 2;
+}
+
+message ExecutionEconomicsRow {
+  string external_ref = 1;
+  string instrument_id = 2;
+  string convention = 3;
+  string currency_code = 4;
+  string status = 5;
+  string reason = 6;
+  string entry_id = 7;
+  ExecutionEconomicsFigures book = 8;
+  ExecutionEconomicsFigures custodian = 9;
+  ExecutionEconomicsFigures difference = 10;
+  string book_settlement_date = 11;
+  string custodian_settlement_date = 12;
+}
+
+message ExecutionEconomicsFigures {
+  common.v1.Decimal quantity = 1;
+  common.v1.Decimal price = 2;
+  common.v1.Decimal commission = 3;
+  common.v1.Decimal net_cash = 4;
+  common.v1.Decimal gross_cash = 5;
+  common.v1.Decimal settled_cash = 6;
 }
 
 // An equality established by a newer signed statement on an earlier business date.

@@ -102,6 +102,8 @@ type Transaction struct {
 	SettlementDate            time.Time
 	InstrumentID              string
 	QuantityInInstrumentUnits bool
+	EconomicsConvention       string
+	Commission                *big.Rat
 	Quantity                  *big.Rat
 	Price                     *big.Rat
 	Cash                      *big.Rat

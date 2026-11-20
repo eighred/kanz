@@ -16,6 +16,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/proto"
 )
 
 // ValidReceiptID bounds a saved opaque ID before it reaches PostgreSQL.
@@ -97,6 +98,28 @@ func historicalReceiptSnapshot(ctx context.Context, tx pgx.Tx, tenant string, su
 		return DatedResult{}, err
 	}
 	run.Basis = basis
+	// Earlier readers could not ingest a signed source declaring this contract.
+	// A verified ordinary receipt against such a source must retain the
+	// measurements it committed, including an explicitly unassessed row.
+	if verifiedAssignment && verifying(run) && run.ExecutionEconomics == nil {
+		for _, line := range source.Transactions {
+			if line.EconomicsConvention != "" || line.Commission != nil {
+				return unknown, nil
+			}
+		}
+	}
+	if run.ExecutionEconomics != nil {
+		if !verifiedAssignment {
+			return unknown, nil
+		}
+		expected, err := compareExecutionEconomics(ctx, tx, run, source)
+		if err != nil {
+			return DatedResult{}, err
+		}
+		if !proto.Equal(expected, run.ExecutionEconomics) {
+			return unknown, nil
+		}
+	}
 	if run.Outcome == OutcomeHistoricalQuantityCorrection {
 		if !verifiedAssignment || run.ExecutionQuantities != nil || len(run.HistoricalQuantityResolutions) == 0 || len(run.HistoricalQuantityResolutions) > historicalBreakLimit {
 			return unknown, nil
