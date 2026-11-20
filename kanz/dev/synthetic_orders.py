@@ -403,7 +403,8 @@ def run(stage, native, prior_accounting=None):
                 print(f"{package}: funded cancellation passed ({', '.join(terminal_cases)}) without skips", flush=True)
                 settlement = ROOT / "rust/services/synthetic_oms/settlement.sql"
                 sql(container, settlement.read_text(encoding="utf-8"), DB)
-                for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair"):
+                for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair",
+                               "synthetic-funded-before-send"):
                     sql(container, f"""
                         BEGIN;
                         SET LOCAL app.tenant_id='{tenant}';
@@ -417,7 +418,7 @@ def run(stage, native, prior_accounting=None):
                 grant_cash_projection(container, DB)
                 venue = "TestSyntheticFundedVenueLifecycle"
                 venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
-                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair"))
+                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair", "claim_before_venue_send"))
                 for line in venue_log.splitlines():
                     if "XSIM " in line and "synthetic_" in line:
                         print(line[line.index("XSIM "):], flush=True)

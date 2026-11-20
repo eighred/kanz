@@ -387,6 +387,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 		})
 	}
 	t.Run("same_microsecond_pair", testSameMicrosecondPair)
+	t.Run("claim_before_venue_send", testFundedDispatchBeforeSend)
 }
 
 // Two actual XSIM orders execute within one database microsecond. The ledger

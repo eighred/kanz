@@ -39,6 +39,8 @@ The HTTP interfaces used by the exercise are `POST /v1/orders`, `POST /v1/orders
 
 The fixture arms capital admission for a fresh tenant and submits a signed XSIM limit order. The Go capital owner calculates the physical debit and fees. A separate insert-only role records the resulting amounts against the tenant, principal, portfolio, order, command digest and expiry. The native writer validates the five control decisions and calls the same PostgreSQL reservation function as Go, within the transaction that records the order and its acceptance. An independent tenant-scoped reader checks the resulting ledger. [Go capital contract](https://github.com/eighred/kanz/pull/1317) · [Reservation migration](../services/oms/migrations/0027_capital_reserve.sql) · [Synthetic authorization](../../rust/services/synthetic_oms/funding.sql)
 
+The native drill interrupts delivery after the funded dispatch claim commits and before XSIM receives a request. On two redeliveries a fresh ingress queries XSIM. An unknown order retains its quarantine and its 252 USD and 1 BNB reservations. The order stays eligible for reconciliation, with zero venue sends, executions or additional outbox facts.
+
 | Case | Expected durable result |
 | --- | --- |
 | Buy 1.25 SYN at 200 USD with fees of 2 USD and 1 BNB | From opening cash of 1000 USD and 8 BNB, reserve 252 USD and 1 BNB. Persist two commitments, two memberships, one order, one command claim and one accepted fact. |
