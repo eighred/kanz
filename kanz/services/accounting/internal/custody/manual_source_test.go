@@ -41,6 +41,18 @@ func signedStatementFeed(t *testing.T, ctx context.Context, st *Postgres) func(j
 }
 func signedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgres, account string) func(json.RawMessage) string {
 	t.Helper()
+	retain := retainedStatementFeedForAccount(t, ctx, st, account)
+	return func(stmt json.RawMessage) string {
+		t.Helper()
+		id, deliver := retain(stmt)
+		deliver()
+		return id
+	}
+}
+
+// Keep the committed import and its signed consumer delivery as two real steps.
+func retainedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgres, account string) func(json.RawMessage) (string, func()) {
+	t.Helper()
 	tenant := bus.TenantIDFromContext(ctx)
 	a, key := exampleAuthority(t, tenant)
 	a.Account, a.Instruments = account, []string{"AAPL"}
@@ -53,7 +65,7 @@ func signedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgr
 		t.Fatal(err)
 	}
 	revision, previous := int64(0), ""
-	return func(stmt json.RawMessage) string {
+	return func(stmt json.RawMessage) (string, func()) {
 		t.Helper()
 		revision++
 		raw, err := json.Marshal(signedBatch{BatchFormat, a.Source, tenant, a.Account, revision, previous, true, stmt})
@@ -69,10 +81,12 @@ func signedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgr
 		if err := st.pool.QueryRow(ctx, `SELECT o.payload FROM custody_batch_receipts r JOIN outbox o ON o.tenant_id=r.tenant_id AND o.producer_service=$2 AND o.event_time=r.received_at WHERE r.statement_id=$1`, id, BatchProducer).Scan(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if err := consumer.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: BatchProducer}, payload); err != nil {
-			t.Fatal(err)
+		return id, func() {
+			t.Helper()
+			if err := consumer.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: BatchProducer}, payload); err != nil {
+				t.Fatal(err)
+			}
 		}
-		return id
 	}
 }
 
@@ -184,6 +198,70 @@ func TestManualAbsentLevelWaitsForRetainedSignedInput(t *testing.T) {
 	}
 	if run, err := r.ReconcileManual(ctx, sub, key, "operator"); err != nil || run.Outcome != OutcomeClean || run.StatementID != id {
 		t.Fatalf("delivered signed rerun: %+v %v", run, err)
+	}
+}
+
+func TestScheduledComparisonWaitsForRetainedSignedInput(t *testing.T) {
+	const tenant = "scheduled-pending"
+	pool := newCustodyPool(t, tenant)
+	requireRestrictedCustodyRole(t, pool)
+	applyCustodySchema(t, pool)
+	ctx := bus.WithTenantID(t.Context(), tenant)
+	st := NewPostgres(pool)
+	sub := subject()
+	sub.BusinessDate = BusinessDay(t0)
+	now := t0.AddDate(0, 0, 3)
+	r, err := NewReconciler(st, LedgerBookLoader(ledger.NewPostgres(pool), closeScope(t, true), testLogger()), &capturePublisher{}, nil, nil, testLogger(), func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retain := retainedStatementFeedForAccount(t, ctx, st, "ACC1")
+	counts := func(want int) {
+		t.Helper()
+		var runs, completions int
+		if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM custody_runs),
+            (SELECT count(*) FROM outbox WHERE subject=$1)`, SubjectRun).Scan(&runs, &completions); err != nil {
+			t.Fatal(err)
+		}
+		if runs != want || completions != want {
+			t.Errorf("committed runs/FACTs = %d/%d; want %d/%d", runs, completions, want, want)
+		}
+	}
+	for i, tc := range []struct {
+		positions string
+		outcome   Outcome
+	}{
+		{"[]", OutcomeClean},
+		{`[{"instrumentId":"AAPL","quantity":{"coefficient":"1"}}]`, OutcomeBreaks},
+	} {
+		stmt := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":"%s","positions":%s,"cash":[],"transactions":[],"grain":"STATEMENT_GRAIN_BALANCES_ONLY"}`, sub.BusinessDate.Format(time.RFC3339), tc.positions))
+		id, deliver := retain(stmt)
+		var found bool
+		if err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT FROM custody_statements WHERE statement_id=$1)", id).Scan(&found); err != nil || found {
+			t.Fatalf("revision %d already materialized: %t %v", i+1, found, err)
+		}
+		run, err := r.Reconcile(ctx, sub)
+		if !errors.Is(err, ErrStatementChanged) || run.RunID != "" {
+			t.Errorf("pending revision %d returned %s (%s), %v", i+1, run.Outcome, run.RunID, err)
+		}
+		counts(i)
+		pending, err := st.DatedResult(ctx, sub)
+		if err != nil || pending.State != "pending" || pending.StatementID != id || pending.Run.RunID != "" {
+			t.Fatalf("pending revision %d: %+v %v", i+1, pending, err)
+		}
+		deliver()
+		run, err = r.Reconcile(ctx, sub)
+		if err != nil || run.Outcome != tc.outcome || run.StatementID != id || run.RunID == "" {
+			t.Fatalf("materialized revision %d: %+v %v", i+1, run, err)
+		}
+		counts(i + 1)
+		recorded, err := st.DatedResult(ctx, sub)
+		if err != nil || recorded.State != "recorded" || recorded.Run.RunID != run.RunID || recorded.StatementID != id {
+			t.Fatalf("recorded revision %d: %+v %v", i+1, recorded, err)
+		}
 	}
 }
 

@@ -410,6 +410,11 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 	run.Breaks = FromRecon(subject, detected, now)
 	stored, err := r.record(ctx, run)
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
+		// The signed input changed or its commit is in flight. Wait for the
+		// authoritative revision before recording a comparison or failure.
+		if isBatchStatement(run.StatementID) && (errors.Is(err, ErrStatementChanged) || errors.Is(err, ErrRunBusy)) {
+			return Run{}, err
+		}
 		// Transient contention or invalidated observations must not consume an
 		// operator's idempotency key as a permanently failed comparison.
 		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) && !errors.Is(err, errBatchReceipt) && !errors.Is(err, errQuantityReceiptLimit) {
@@ -484,6 +489,9 @@ func (r *Reconciler) record(ctx context.Context, run Run) (Run, error) {
 	if err != nil {
 		if run.RequestID != "" {
 			return Run{}, fmt.Errorf("custody: commit manual run: %w", err)
+		}
+		if run.observedMissing {
+			run = Run{}
 		}
 		return run, fmt.Errorf("custody: commit run: %w", err)
 	}

@@ -19,8 +19,8 @@ import (
 
 // Serialize the view of the signed intake with the importer's append. A
 // recorded batch awaiting consumer delivery makes absence or an older signed
-// level inconclusive. The request can be retried once ingestion catches up.
-func confirmManualIntake(ctx context.Context, tx pgx.Tx, tenant string, run Run) ([]byte, error) {
+// level inconclusive. Both scheduled and manual runs can retry after delivery.
+func confirmSignedIntake(ctx context.Context, tx pgx.Tx, tenant string, run Run) ([]byte, error) {
 	var locked bool
 	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0))`,
 		batchLockKey(tenant, run.Subject.PortfolioID, run.Subject.CustodianID)).Scan(&locked); err != nil {

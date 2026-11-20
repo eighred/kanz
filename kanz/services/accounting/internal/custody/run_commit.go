@@ -291,13 +291,12 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	staged := &Postgres{pool: p.pool, tx: tx}
 	var signedDigest []byte
 	switch {
-	case run.RequestID != "" && (verifying(run) || run.observedMissing):
-		signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
-	case verifying(run) && run.compared != nil && isBatchStatement(run.StatementID) && run.Basis != nil && run.Basis.Mode == BasisDeclared:
-		// A scheduled comparison of an authorized signed account receives the
-		// same durable attestation as a manual one. Ordinary source modes
-		// retain their original comparison outcome and carry no signed proof.
-		signedDigest, err = signedStatementDigest(ctx, tx, tenant, run)
+	case run.observedMissing, run.RequestID != "" && verifying(run),
+		verifying(run) && run.compared != nil && isBatchStatement(run.StatementID) && run.Basis != nil && run.Basis.Mode == BasisDeclared:
+		// A retained signed revision can arrive before its delivery to the
+		// statement consumer. Keep that intake frontier stable through commit
+		// so neither an absence nor an older comparison is recorded meanwhile.
+		signedDigest, err = confirmSignedIntake(ctx, tx, tenant, run)
 	}
 	if err != nil {
 		return Run{}, err
@@ -344,14 +343,6 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			}
 			if newer {
 				return Run{}, ErrBookBasisChanged
-			}
-		}
-		if later && run.RequestID == "" && len(run.measured) > 0 {
-			// Scheduled late application needs the same signed intake frontier
-			// as a manual command: a newer published-but-undelivered revision wins.
-			signedDigest, err = confirmManualIntake(ctx, tx, tenant, run)
-			if err != nil {
-				return Run{}, err
 			}
 		}
 		if run.compared != nil {
