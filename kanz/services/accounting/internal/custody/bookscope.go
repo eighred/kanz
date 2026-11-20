@@ -62,6 +62,7 @@ type BookScope struct {
 // It describes the comparison, without certifying that a declared account exists.
 // The run's subject supplies the portfolio and inclusive UTC business-day close.
 type RunBasis struct {
+	HistoricalDetections map[string]string `json:"historical_quantity_detections,omitempty"`
 	// MeasuredEntries binds an eligible execution to the immutable book entry
 	// actually compared by this writer. Older completed runs lack this field.
 	MeasuredEntries map[string]string      `json:"measured_execution_entries,omitempty"`
@@ -101,6 +102,7 @@ func (b *RunBasis) clone() *RunBasis {
 	out := *b
 	out.Assignments = slices.Clone(b.Assignments)
 	out.MeasuredEntries = maps.Clone(b.MeasuredEntries)
+	out.HistoricalDetections = maps.Clone(b.HistoricalDetections)
 	if b.Transactions != nil {
 		tx := *b.Transactions
 		if tx.StatementReferences != nil {

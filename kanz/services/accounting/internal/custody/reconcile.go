@@ -526,18 +526,19 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 		return nil, fmt.Errorf("custody: run %s: tolerance is not representable as a Decimal", run.RunID)
 	}
 	out := &accountingpb.ReconciliationRun{
-		ExecutionQuantities: run.ExecutionQuantities,
-		RunId:               run.RunID,
-		RequestId:           run.RequestID,
-		Actor:               run.Actor,
-		PortfolioId:         run.Subject.PortfolioID,
-		CustodianId:         run.Subject.CustodianID,
-		BusinessDate:        timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
-		Outcome:             wireOutcome(run.Outcome),
-		StatementId:         run.StatementID,
-		Tolerance:           tolerance,
-		CompletedAt:         timestamppb.New(run.CompletedAt),
-		FailureReason:       run.FailureReason,
+		ExecutionQuantities:           run.ExecutionQuantities,
+		RunId:                         run.RunID,
+		RequestId:                     run.RequestID,
+		Actor:                         run.Actor,
+		PortfolioId:                   run.Subject.PortfolioID,
+		CustodianId:                   run.Subject.CustodianID,
+		BusinessDate:                  timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
+		Outcome:                       wireOutcome(run.Outcome),
+		HistoricalQuantityResolutions: run.HistoricalQuantityResolutions,
+		StatementId:                   run.StatementID,
+		Tolerance:                     tolerance,
+		CompletedAt:                   timestamppb.New(run.CompletedAt),
+		FailureReason:                 run.FailureReason,
 	}
 	for _, b := range run.Breaks {
 		kind, ok := wireKind(b.Kind)

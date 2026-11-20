@@ -14,12 +14,13 @@ import (
 // DatedResult describes what the recorded comparison establishes for one UTC close.
 // A historical lookup also returns the digest of the specific verified signed revision.
 type DatedResult struct {
-	AccountAssignmentVerified bool
-	State                     string
-	Reason                    string
-	StatementID               string
-	SignedStatementSHA256     string
-	Run                       Run
+	HistoricalQuantityCorrectionRunID string
+	AccountAssignmentVerified         bool
+	State                             string
+	Reason                            string
+	StatementID                       string
+	SignedStatementSHA256             string
+	Run                               Run
 }
 
 func (p TransactionComparison) matches(stmt Statement, outcome Outcome, prefix int64) bool {
@@ -91,7 +92,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
         FROM custody_runs
         WHERE tenant_id=app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3 AND statement_id=$4
     ), best AS (
-        SELECT * FROM candidates ORDER BY compared DESC,
+        SELECT * FROM candidates ORDER BY compared DESC,(outcome='historical_quantity_correction') DESC,
             CASE WHEN compared THEN (book_basis->>'journal_position')::bigint END DESC NULLS LAST,
             CASE WHEN compared THEN signed_statement_sha256 IS NOT NULL END DESC,
             CASE WHEN compared THEN book_basis->'assignments' IS NOT NULL END DESC,
@@ -129,7 +130,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		return DatedResult{State: "unknown"}, nil
 	}
 	verifiedAssignment := false
-	if verifying(run) {
+	if verifying(run) || run.Outcome == OutcomeHistoricalQuantityCorrection {
 		if len(binding) != sha256.Size || run.Basis == nil || run.Basis.JournalPosition < 0 {
 			return DatedResult{State: "unknown"}, nil
 		}
@@ -183,6 +184,21 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 			return DatedResult{}, err
 		}
 		run.compared = nil
+	}
+	if run.Outcome == OutcomeHistoricalQuantityCorrection {
+		pending := DatedResult{State: "pending", StatementID: id}
+		accounts := run.Basis.Accounts[subject.CustodianID]
+		if verifiedAssignment && len(accounts) == 1 {
+			saved, err := historicalReceiptSnapshot(ctx, tx, tenant, subject, accounts[0], run.RunID)
+			if err != nil {
+				return DatedResult{}, err
+			}
+			if saved.State == "recorded" {
+				pending.HistoricalQuantityCorrectionRunID = run.RunID
+				pending.Run.Basis = run.Basis
+			}
+		}
+		return pending, nil
 	}
 	return DatedResult{State: "recorded", StatementID: id, Run: run, AccountAssignmentVerified: verifiedAssignment}, nil
 }
