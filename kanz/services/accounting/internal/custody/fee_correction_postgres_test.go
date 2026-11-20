@@ -236,6 +236,17 @@ func TestBookedFeeCorrectionRecomparesSameSignedStatement(t *testing.T) {
 	}
 	receipt(original)
 	receipt(fresh)
+	bookPrior, err := store.PreviousBookComparison(ctx, s, account, fresh.RunID)
+	if err != nil || bookPrior.State != "recorded" || !bookPrior.AccountAssignmentVerified || bookPrior.StatementID != statement ||
+		bookPrior.SignedStatementSHA256 != signedSHA || bookPrior.Run.RunID != original.RunID || bookPrior.Run.Basis.JournalPosition != 1 ||
+		bookPrior.Run.Outcome != OutcomeClean || !proto.Equal(bookPrior.Run.ExecutionEconomics, original.ExecutionEconomics) {
+		t.Fatal("prior comparison of the same signed statement", bookPrior, err)
+	}
+	checkHistoricalEconomics(t, bookPrior.Run, false)
+	sourcePrior, err := store.PreviousComparison(ctx, s, account, fresh.RunID)
+	if err != nil || sourcePrior.State != "unknown" || sourcePrior.StatementID != "" || sourcePrior.Run.RunID != "" {
+		t.Fatal("revision one has no prior signed statement", sourcePrior, err)
+	}
 	if !bytes.Equal(originalBytes, storedBytes(original.RunID)) || !bytes.Equal(freshBytes, storedBytes(fresh.RunID)) {
 		t.Fatal("retained comparison bytes changed")
 	}

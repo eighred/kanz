@@ -227,6 +227,44 @@ describe('custody response boundary', () => {
     expect(await read()).toMatchObject({ state: 'unknown' })
   })
 
+  it('binds an earlier book receipt to the exact signed revision and strictly lower integer journal position', async () => {
+    const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
+    const digest = 'b'.repeat(64), signed = 'custody-batch.v1.s.r1.' + digest
+    const anchor = { earlierBookOf: signed, journalPosition: '9007199254740993' }
+    const receipt = { ...subject, tenant_id: 'T', state: 'recorded', outcome: 'clean', run_id: 'original',
+      completed_at: '2020-02-05T01:00:00Z', transaction_pass: 'balances_only', account_assignment_verified: true, scope_mode: 'declared',
+      journal_position: '9007199254740992', statement_id: signed, signed_statement_sha256: digest, breaks: [],
+      previous_of_run_id: 'corrected', previous_of_statement_id: signed, previous_of_journal_position: anchor.journalPosition }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(receipt)
+    const read = () => custody.dated(subject, 'T', undefined, 'corrected', anchor)
+    const found = await read()
+    expect(found).toMatchObject({ run_id: 'original', journal_position: receipt.journal_position, historical: { signed_statement_sha256: digest } })
+    expect(found).not.toHaveProperty('previous_of_journal_position')
+    expect(get.mock.lastCall?.[0]).toContain('run_id=corrected&include=previous_book_comparison')
+    for (const change of [{ previous_of_journal_position: undefined }, { previous_of_journal_position: '2' },
+      { journal_position: anchor.journalPosition }, { journal_position: '9007199254740994' }, { journal_position: '01' },
+      { previous_of_run_id: 'unknown' }, { previous_of_statement_id: signed + 'a' }, { run_id: 'corrected' },
+      { signed_statement_sha256: 'a'.repeat(64) }, { statement_id: signed.replace('.r1.', '.r2.') },
+      { tenant_id: 'other' }, { portfolio_id: 'other' }, { account_assignment_verified: undefined }]) {
+      get.mockResolvedValueOnce({ ...receipt, ...change })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    const unknown = { ...subject, tenant_id: 'T', state: 'unknown' }
+    for (const state of ['not_compared', 'pending']) {
+      get.mockResolvedValueOnce({ ...unknown, state, statement_id: signed })
+      await expect(read()).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce({ ...unknown, previous_of_journal_position: anchor.journalPosition })
+    await expect(read()).rejects.toThrow('verified')
+    get.mockResolvedValueOnce(unknown)
+    expect(await read()).toMatchObject({ state: 'unknown' })
+    for (const position of ['0', '-1', '1.0', '9223372036854775808']) {
+      await expect(custody.dated(subject, 'T', undefined, 'corrected', { ...anchor, journalPosition: position })).rejects.toThrow('verified')
+    }
+    get.mockResolvedValueOnce(receipt)
+    await expect(custody.dated(subject, 'T', undefined, 'original')).rejects.toThrow('verified')
+  })
+
   it('reads source figures only on the explicitly requested, proven signed revision', async () => {
     const subject = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04' }
     const digest = 'a'.repeat(64)

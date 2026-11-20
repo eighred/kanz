@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
-import { custody, cleanComparison, downloadCustodyComparison, fullComparison, historicalClose, previousStatementPrefix, signedStatement, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
+import { custody, cleanComparison, downloadCustodyComparison, fullComparison, historicalClose, previousStatementPrefix, signedStatement, ReportedFiguresExportLimit, type ComparisonProjection, type DatedCustodyResult } from '../api/custody'
 import CustodyExecutionEconomics from './CustodyExecutionEconomics.vue'
 import { ApiError } from '../api/client'
 import { formatDecimal } from '../api/decimal'
@@ -10,6 +10,11 @@ const session = useSession()
 const subject = reactive({ portfolio_id: '', custodian_id: '', business_date: '' })
 const savedRun = ref('')
 const result = ref<DatedCustodyResult>()
+const bookAnchor = computed(() => {
+  const r = result.value
+  if (r?.state === 'recorded' && fullComparison(r.outcome) && r.account_assignment_verified && signedStatement(r.statement_id) &&
+      r.journal_position && r.journal_position !== '0') return { earlierBookOf: r.statement_id, journalPosition: r.journal_position }
+})
 const error = ref('')
 const pending = ref(false)
 let active: AbortController | undefined
@@ -24,7 +29,7 @@ watch(subject, clear, { flush: 'sync' })
 watch(savedRun, clear, { flush: 'sync' })
 watch(() => session.identity, () => { clear(); savedRun.value = ''; Object.assign(subject, { portfolio_id: '', custodian_id: '', business_date: '' }) }, { deep: true, flush: 'sync' })
 onUnmounted(clear)
-async function read(correctionStatement?: string, projection: boolean | 'previous' = false, expectedStatement?: string) {
+async function read(correctionStatement?: string, projection: ComparisonProjection = false, expectedStatement?: string) {
   if (pending.value || !session.identity) return
   const request = new AbortController()
   active = request
@@ -35,15 +40,20 @@ async function read(correctionStatement?: string, projection: boolean | 'previou
   error.value = ''
   pending.value = true
   try {
-    const priorLookup = projection === 'previous' && previous?.state === 'recorded' && previous.statement_id
+    const priorLookup = typeof projection === 'object' && previous?.state === 'recorded'
     const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal,
-      priorLookup ? previous.run_id : savedRun.value, priorLookup ? { previousOf: priorLookup } : reportedFigures)
+      priorLookup ? previous.run_id : savedRun.value, projection)
     if (expectedStatement && (dated.state !== 'recorded' || !dated.historical || dated.statement_id !== expectedStatement)) throw new Error('Original statement changed.')
     if (correctionStatement && (dated.state !== 'recorded' || dated.outcome !== 'historical_quantity_correction' ||
         dated.statement_id !== correctionStatement)) throw new Error('Correction source changed.')
     if (reportedFigures && (!previousDigest || dated.state !== 'recorded' ||
         previousDigest !== dated.historical?.signed_statement_sha256 || !dated.historical?.reported_execution_figures)) throw new Error('Unverified source.')
     if (!request.signal.aborted) {
+      if (typeof projection === 'object' && 'earlierBookOf' in projection && dated.state === 'unknown') {
+        result.value = previous
+        error.value = 'No verified earlier book comparison is available.'
+        return
+      }
       if (priorLookup && dated.state === 'recorded') savedRun.value = dated.run_id
       result.value = dated
     }
@@ -125,8 +135,9 @@ const pendingLabels = {
     <button v-if="result?.state === 'recorded' && !result.historical && result.account_assignment_verified && signedStatement(result.statement_id)"
       type="button" @click="openOriginal">View original comparison receipt</button>
     <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
-    <button v-if="result?.state === 'recorded' && fullComparison(result.outcome) && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
-      type="button" @click="read(undefined, 'previous')">View previous statement comparison</button>
+    <button v-if="result?.state === 'recorded' && fullComparison(result.outcome) && result.account_assignment_verified && result.statement_id && previousStatementPrefix(result.statement_id)"
+      type="button" @click="read(undefined, { previousOf: result.statement_id })">View previous statement comparison</button>
+    <button v-if="bookAnchor" type="button" @click="read(undefined, bookAnchor)">Find earlier book comparison</button>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
       <button v-if="result.account_assignment_verified && result.transactions?.transaction_pass === 'ran' && !result.historical.reported_execution_figures"

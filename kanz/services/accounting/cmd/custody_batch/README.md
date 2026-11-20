@@ -153,7 +153,13 @@ independent synthetic fee correction raises the booked commission from
 until Accounting compares the new journal position. The two execution
 measurements then agree at −11 USD of settled cash. The statement's unchanged
 aggregate cash of −10.75 USD leaves a separate −0.25 USD balance difference.
-Use the original run ID to reopen its receipt. The pilot verifies identical
+Choose **Find earlier book comparison** on the newer result to reopen the
+saved receipt for the same signed statement at the nearest earlier journal
+position. A saved run ID also opens its specific receipt. The lookup requires
+verified matching account scope and tolerance. If two candidate captures tie
+at the selected position, the report shows that no earlier comparison could
+be verified. This lookup also works for the first signed statement revision.
+The pilot verifies identical
 original download bytes and records both receipts in `booked_fee_correction`.
 
 The accounting writer inserts the completion bytes with the run and enqueues its FACT in the same transaction. Migration 0028 protects a retained row and its book basis after insertion. Older scheduled runs can replay the original relay record while it exists; a historical customer read requires retained, signed evidence. A legacy operator writer can finish its original receipt only with the matching completion FACT.
