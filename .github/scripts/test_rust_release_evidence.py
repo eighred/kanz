@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
-import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +20,102 @@ def fixture(service="binance-depth"):
     sbom = {"packages": [{"name": p["name"], "versionInfo": p["version"], "externalRefs": [
         {"referenceType": "purl", "referenceLocator": f"pkg:cargo/{p['name']}@{p['version']}"}]} for p in packages]}
     return {"packages": packages}, {"package": copy.deepcopy(packages)}, sbom
+
+
+class TemporalSourceTests(unittest.TestCase):
+    def test_protected_builder_inputs_are_independently_bound(self):
+        import temporal_rust_release_evidence as source
+
+        name, version = "arrow-array", "59.3.2"
+        relative = f"rust/temporal_sources/generated/{name}-{version}/Cargo.toml"
+        # This production writer pin comes from the independently qualified Apache archive.
+        apache = {"name": name, "version": version, "manifestPath": relative,
+                  "patchSHA256": "5c107560c2cf08797275fbd78000badc64d3c4c44e2d41e5bccb561e27e5b908",
+                  "treeSHA256": "1bb87fa6d3991524611c6465453ce8eeff4af49658c389ac552936ff9c7b506f",
+                  "upstream": {"kind": "registry-archive", "url": f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
+                               "sha256": "72b5b1682924f11ecf6929689c16cbc69efbb6dd141b06ad98ee1cb10d858c43"}}
+        fork = "sad-chrono"
+        fork_hash = "59944182ae44e540eb6a61059eefb6d437b4bb3a7eff26e75149ed35601b7c5f"
+        source_sha, db_sha = "a" * 40, "b" * 40
+        worker = source.WORKER
+        worker_path = "/src/rust/target-provenance/release/" + worker
+        lock = {"package": [{"name": name, "version": version}, {"name": fork, "version": "0.5.1",
+                             "checksum": fork_hash, "source": source.REGISTRY}]}
+        embedded = {"packages": [{"name": name, "version": version, "source": "local"},
+                                 {"name": fork, "version": "0.5.1", "source": "crates.io"}]}
+        sbom = {"packages": [{"name": row["name"], "versionInfo": row["version"], "externalRefs": [
+                {"referenceType": "purl", "referenceLocator": f"pkg:cargo/{row['name']}@{row['version']}"}]}
+                for row in embedded["packages"]]}
+        policy = json.dumps({"schema": "kanz.apache-temporal-sources.v1", "packages": [apache]}).encode()
+        api_id = "path+file:///src/rust/temporal_sources/generated/arrow-array-59.3.2#arrow-array@59.3.2"
+        fork_id = source.REGISTRY + "#sad-chrono@0.5.1"
+        package_rows = [{**apache, "packageID": api_id}, {"packageID": fork_id, "name": fork, "version": "0.5.1",
+                        "upstream": {"kind": "registry-archive", "url": "https://static.crates.io/crates/sad-chrono/sad-chrono-0.5.1.crate",
+                                     "sha256": fork_hash}}]
+        def artifact(identifier, manifest, lib, label, exe=None):
+            return {"reason": "compiler-artifact", "package_id": identifier, "manifest_path": manifest,
+                    "target": {"name": label, "kind": ["lib" if lib else "bin"]}, "profile": {"test": False},
+                    "fresh": False, "executable": exe, "filenames": [exe] if exe else []}
+        compiler = [artifact(api_id, "/src/" + relative, True, "arrow_array"),
+                    artifact(fork_id, "/cargo/registry/src/index/sad-chrono-0.5.1/Cargo.toml", True, "sad_chrono"),
+                    artifact("path+file:///src/rust/services/lake_snapshot#kanz-lake-snapshot@0.1.0",
+                             "/src/rust/services/lake_snapshot/Cargo.toml", False, worker, worker_path),
+                    {"reason": "build-finished", "success": True}]
+        snapshot = {"rustsec_commit": db_sha}
+        advisory = json.dumps(snapshot).encode()
+        receipt = {"schema": source.SCHEMA, "service": "lake-sink", "target": "x86_64-unknown-linux-gnu",
+                   "sourceRevision": source_sha, "binarySHA256": "c" * 64, "lockSHA256": "d" * 64,
+                   "patchSetSHA256": source.sha256(policy), "advisorySnapshotSHA256": source.sha256(advisory),
+                   "packages": package_rows}
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            for change in ("valid", "source", "binary", "lock", "patch-set", "tree", "missing-compiler", "registry-copy",
+                           "cached-library", "debug-worker", "spdx-source", "elf-source", "new-disclosure", "unreviewed",
+                           "extra-compiler-origin", "incomplete", "duplicate-lock", "legacy-package", "target-name", "encoded-spdx-alias"):
+                with self.subTest(change=change):
+                    data, build, elf, spdx, rows = map(copy.deepcopy, (receipt, compiler, embedded, sbom, lock))
+                    if change == "source": data["sourceRevision"] = "e" * 40
+                    if change == "binary": data["binarySHA256"] = "e" * 64
+                    if change == "lock": data["lockSHA256"] = "e" * 64
+                    if change == "patch-set": data["patchSetSHA256"] = "e" * 64
+                    if change == "tree": data["packages"][0]["treeSHA256"] = "e" * 64
+                    if change == "missing-compiler": build.pop(0)
+                    if change == "registry-copy": build[0]["package_id"] = source.REGISTRY + "#arrow-array@59.3.2"
+                    if change == "cached-library": build[0]["fresh"] = True
+                    if change == "debug-worker": build[2]["executable"] = worker_path.replace("/release/", "/debug/")
+                    if change == "spdx-source": spdx["packages"][0]["externalRefs"][0]["referenceLocator"] += "?source=elsewhere"
+                    if change == "elf-source": elf["packages"][0]["source"] = "crates.io"
+                    if change == "unreviewed": data["packages"].pop(0)
+                    if change == "extra-compiler-origin": build.insert(0, {**build[0], "package_id": source.REGISTRY + "#arrow-array@59.3.2"})
+                    if change == "incomplete": build.pop()
+                    if change == "duplicate-lock": rows["package"].append(copy.deepcopy(rows["package"][0]))
+                    if change == "legacy-package": rows["package"].append({"name": "chrono", "version": "0.4.45"})
+                    if change == "target-name": build[0]["target"]["name"] = "other"
+                    if change == "encoded-spdx-alias":
+                        spdx["packages"].append({"name": "other", "versionInfo": version, "externalRefs": [
+                            {"referenceType": "purl", "referenceLocator": "pkg:cargo/%61rrow-array@59.3.2"}]})
+                    (folder / "compiler.jsonl").write_text("\n".join(map(json.dumps, build)))
+                    (folder / "provenance.json").write_text(json.dumps(data))
+                    (folder / "chrono-advisories.json").write_bytes(advisory)
+                    observed = []
+                    def evaluate(s, v, c):
+                        if s.get("new-fork-finding"):
+                            raise ValueError("new disclosure")
+                        observed.append((s, v, c))
+                    current = {"rustsec_commit": "f" * 40}
+                    if change == "new-disclosure": current["new-fork-finding"] = True
+                    def check():
+                        return source.verify(folder, policy, source_sha, "d" * 64, "c" * 64, rows, elf, spdx,
+                                             lambda: current, evaluate)
+                    if change == "valid":
+                        evidence, saved_snapshot = check()
+                        self.assertEqual(evidence["reviewedPackages"], 2)
+                        self.assertEqual(evidence["releaseAdvisorySnapshotSHA256"], source.sha256(saved_snapshot))
+                        self.assertEqual(json.loads(saved_snapshot), current)
+                        self.assertEqual(observed, [(snapshot, "0.5.1", fork_hash), (current, "0.5.1", fork_hash)])
+                    else:
+                        with self.assertRaises(ValueError):
+                            check()
 
 
 class EvidenceTests(unittest.TestCase):
@@ -355,8 +450,19 @@ class EvidenceTests(unittest.TestCase):
     def test_orchestration_extracts_without_execution_and_scrubs_auditor(self):
         self.orchestrate()
 
-    def test_failed_audit_cannot_produce_pass_evidence(self):
-        self.orchestrate(fail_audit=True)
+    def test_workspace_and_extracted_binary_have_independent_results(self):
+        for lock in ("clean", "finding"):
+            for binary in ("clean", "finding"):
+                with self.subTest(lock=lock, binary=binary):
+                    self.orchestrate(audits=(lock, binary))
+
+    def test_failed_scanner_and_invalid_evidence_refuse_both_release_paths(self):
+        for defect in ("empty", "malformed", "no-fields", "wrong-db", "duplicate", "other-input",
+                       "ignored", "bad-count", "bad-type", "zero-with-warning",
+                       "zero-with-vulnerability", "nonzero-clean", "timeout"):
+            for audits in ((defect, "clean"), ("clean", defect)):
+                with self.subTest(audits=audits):
+                    self.orchestrate(audits=audits, service="lake-sink")
 
     def test_extraction_failure_removes_container(self):
         self.orchestrate(fail_copy=True)
@@ -365,14 +471,16 @@ class EvidenceTests(unittest.TestCase):
         self.orchestrate(service="lake-sink", fail_hybrid=True)
         self.orchestrate(service="lake-sink")
 
-    def orchestrate(self, fail_audit=False, fail_copy=False, service="binance-depth", fail_hybrid=False):
-        data, _, sbom = fixture(service)
-        lock = tomllib.loads((Path(gate.__file__).resolve().parents[2] / "rust/Cargo.lock").read_text())
-        versions = {p["name"]: p["version"] for p in lock["package"]}
-        for package, entry in zip(data["packages"], sbom["packages"]):
-            version = versions[package["name"]]
-            package["version"] = entry["versionInfo"] = version
-            entry["externalRefs"][0]["referenceLocator"] = f"pkg:cargo/{package['name']}@{version}"
+    def test_selected_fork_requires_builder_evidence_in_release_entrypoint(self):
+        self.orchestrate(service="lake-sink", missing_temporal=True)
+
+    def orchestrate(self, audits=("clean", "clean"), fail_copy=False, service="binance-depth", fail_hybrid=False,
+                    missing_temporal=False):
+        data, lock, sbom = fixture(service)
+        lock["package"].append({"name": "other-workspace-member", "version": "1.1.0"})
+        if missing_temporal:
+            lock["package"].append({"name": "sad-chrono", "version": "0.5.1"})
+        fail_audit = any(outcome != "clean" for outcome in audits)
         calls = []
         image = "ghcr.io/eighred/" + service + "@sha256:" + "a" * 64
 
@@ -399,35 +507,89 @@ class EvidenceTests(unittest.TestCase):
                 self.assertNotIn("--no-fetch", args)
                 self.assertNotIn("--ignore", args)
                 self.assertNotIn("--stale", args)
-                if fail_audit: raise subprocess.CalledProcessError(1, args)
-                kwargs["stdout"].write("{}")
+                self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+                self.assertEqual(args[args.index("--deny") + 1], "warnings")
+                binary = "bin" in args
+                outcome = audits[1 if binary else 0]
+                package_counts = (len(lock["package"]), len(data["packages"]))
+                report = {"database": {"last-commit": "c" * 40}, "settings": {"ignore": []},
+                          "lockfile": {"dependency-count": package_counts[binary]},
+                          "vulnerabilities": {"found": False, "count": 0, "list": []}, "warnings": {}}
+                if outcome in ("finding", "zero-with-warning"):
+                    report["warnings"] = {"unmaintained": [{"kind": "unmaintained"}]}
+                elif outcome == "zero-with-vulnerability":
+                    report["vulnerabilities"] = {"found": True, "count": 1, "list": [{}]}
+                elif outcome == "wrong-db":
+                    report["database"]["last-commit"] = "d" * 40
+                elif outcome == "other-input":
+                    report["lockfile"]["dependency-count"] = package_counts[not binary]
+                elif outcome == "ignored":
+                    report["settings"]["ignore"] = ["RUSTSEC-fixture"]
+                elif outcome == "bad-count":
+                    report["vulnerabilities"]["count"] = 1
+                elif outcome == "bad-type":
+                    report["vulnerabilities"]["found"] = 0
+                elif outcome == "timeout":
+                    raise subprocess.TimeoutExpired(args, 900)
+                payload = {"empty": "", "malformed": "incomplete JSON", "no-fields": "{}"}.get(outcome)
+                if outcome == "duplicate":
+                    payload = '{"warnings":{"unmaintained":[{}]},' + json.dumps(report)[1:]
+                kwargs["stdout"].write(json.dumps(report) if payload is None else payload)
+                if outcome in ("finding", "nonzero-clean"):
+                    raise subprocess.CalledProcessError(1, args)
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
+            (path / "rust").mkdir()
+            (path / "rust/Cargo.lock").write_text("".join(
+                f'[[package]]\nname = "{entry["name"]}"\nversion = "{entry["version"]}"\n'
+                for entry in lock["package"]))
             (path / "sbom.json").write_text(json.dumps(sbom))
             argv = ["gate", "--service", service, "--image", image,
                     "--sbom", str(path / "sbom.json"), "--output", str(path / "evidence")]
             with patch("sys.argv", argv), patch.object(gate, "run", side_effect=fake_run), \
+                 patch.object(gate, "__file__", str(path / ".github/scripts/rust_release_evidence.py")), \
                  patch.object(gate, "output", side_effect=fake_output), \
                  patch.object(gate.shutil, "which", return_value="/pinned/cargo-audit"), \
                  patch.dict(gate.os.environ, {"SECRET": "must-not-inherit"}), \
                  patch.object(gate, "verify_hybrid", side_effect=ValueError("hybrid refused") if fail_hybrid else None, return_value={"validated": True}) as hybrid:
-                if fail_hybrid:
+                if missing_temporal:
+                    with self.assertRaisesRegex(ValueError, "requires protected builder evidence"):
+                        gate.main()
+                elif fail_hybrid or fail_audit:
                     with self.assertRaises(ValueError): gate.main()
-                elif fail_copy or fail_audit:
+                elif fail_copy:
                     with self.assertRaises(subprocess.CalledProcessError): gate.main()
                 else:
                     gate.main()
             evidence = json.loads((path / "evidence/evidence.json").read_text())
-            self.assertEqual(evidence["passed"], not (fail_copy or fail_audit or fail_hybrid))
-            self.assertEqual(hybrid.call_count, int(service == "lake-sink" and not (fail_copy or fail_audit)))
+            self.assertEqual(evidence["passed"], not (fail_copy or fail_audit or fail_hybrid or missing_temporal))
+            self.assertEqual(hybrid.call_count, int(service == "lake-sink" and not (fail_copy or fail_audit or missing_temporal)))
             self.assertIn(["docker", "rm", "container"], calls)
             self.assertFalse(any(c[:2] in (["docker", "run"], ["docker", "start"], ["docker", "exec"]) for c in calls))
-            if not (fail_copy or fail_audit):
-                audits = [c for c in calls if c[0] == "/pinned/cargo-audit"]
-                self.assertEqual(len(audits), 2)
-                self.assertIn("--file", audits[0])
-                self.assertIn("bin", audits[1])
+            scans = [c for c in calls if c[0] == "/pinned/cargo-audit"]
+            if fail_copy:
+                self.assertEqual(scans, [])
+                self.assertNotIn("audits", evidence)
+                return
+            self.assertEqual(len(scans), 2)
+            self.assertEqual(scans[0][-2:], ["--file", str(path / "rust/Cargo.lock")])
+            self.assertEqual(scans[1][-2], "bin")
+            self.assertEqual(Path(scans[1][-1]).name, gate.image_recipe(service).rust_root)
+            for name, outcome in zip(("lock", "binary"), audits):
+                receipt = evidence["audits"][name]
+                self.assertEqual(receipt["passed"], outcome == "clean")
+                expected_exit = {"finding": 1, "nonzero-clean": 1, "timeout": None}.get(outcome, 0)
+                self.assertEqual(receipt["exitCode"], expected_exit)
+                retained = outcome in ("clean", "finding", "zero-with-warning", "zero-with-vulnerability", "nonzero-clean")
+                artifact = path / "evidence" / f"audit-{name}.json"
+                self.assertEqual(artifact.exists(), retained)
+                if retained:
+                    self.assertEqual(receipt["reportSHA256"], gate.digest(artifact))
+                    self.assertEqual(evidence[name + "AdvisoryDBCommit"], "c" * 40)
+                else:
+                    self.assertNotIn("reportSHA256", receipt)
+                    self.assertNotIn(name + "AdvisoryDBCommit", evidence)
 
 
 if __name__ == "__main__":
