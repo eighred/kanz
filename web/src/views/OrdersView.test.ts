@@ -148,7 +148,7 @@ describe('a refusal is not an empty history', () => {
   // reading is "this portfolio has never traded".
   it('explains a 404 rather than drawing an empty table', async () => {
     const wrapper = await open(new ApiError(404, 'portfolio not found'))
-    expect(wrapper.find('[role="alert"]').text()).toMatch(/not the same as the fund having none/i)
+    expect(wrapper.get('[role="alert"]').text()).toMatch(/order history is unavailable for this portfolio/i)
     expect(wrapper.find('table').exists()).toBe(false)
   })
 })
@@ -196,4 +196,80 @@ it('shows unrecognized enum codes with neutral status', async () => {
   const view = await open({ orders: [{ portfolio_id: 'PF1', order_id: 'A', side: 99, status: 42 }], unindexed: '0' })
   expect(view.get('.state-unset').text()).toBe('unknown (42)')
   expect(view.text()).toContain('unknown (99)')
+})
+
+it('follows a partially executed cancellation through OMS observations on the portfolio route', async () => {
+  const order = {
+    portfolio_id: 'PF1', order_id: 'synthetic-order', instrument_id: 'SYN',
+    ordered_quantity: { coefficient: '125', exponent: -2 },
+    filled_quantity: { coefficient: '625', exponent: -3 },
+    leaves_quantity: { coefficient: '625', exponent: -3 },
+    average_fill_price: { coefficient: '200', exponent: 0 },
+    limit_price: { coefficient: '201', exponent: 0 },
+  }
+  const markTime = '2026-11-19T09:30:01.000000321Z'
+  const page = (fields: object) => Response.json({
+    owner_tenant: 'fixture-tenant', unindexed: '0', orders: [{ ...order, ...fields }],
+  })
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(page({ status: 'ORDER_STATUS_PARTIALLY_FILLED' }))
+    .mockResolvedValueOnce(page({ status: 'ORDER_STATUS_PARTIALLY_FILLED', quarantine: { at: markTime } }))
+    .mockResolvedValueOnce(page({ status: 'ORDER_STATUS_CANCELLED' }))
+    .mockResolvedValueOnce(Response.json({}, { status: 503 }))
+    .mockResolvedValueOnce(page({
+      status: 'ORDER_STATUS_FILLED', order_id: 'another-order', filled_quantity: order.ordered_quantity,
+      leaves_quantity: { coefficient: '0', exponent: 0 },
+      arrival_price: { coefficient: '9007199254740993', exponent: -8 }, arrival_at: markTime,
+    }))
+  vi.stubGlobal('fetch', fetch)
+  const r = router()
+  await r.push('/portfolios/PF1/orders')
+  const wrapper = mount(OrdersView, { global: { plugins: [r] } })
+  const refresh = async () => {
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+  }
+  const cell = (heading: string) => {
+    const index = wrapper.findAll('th').findIndex(th => th.text() === heading)
+    expect(index).toBeGreaterThanOrEqual(0)
+    return wrapper.findAll('tbody td')[index]!.text()
+  }
+  try {
+    await flushPromises()
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/portfolios/PF1/orders?limit=200')
+    expect(cell('Status')).toBe('partially filled')
+    expect(cell('Filled')).toBe('0.625')
+    expect(cell('Unfilled quantity')).toBe('0.625')
+    expect(cell('Market mark at admission')).toBe('Unavailable')
+    await refresh()
+    expect(cell('Status')).toContain('Remote outcome unknown')
+    expect(cell('Status')).toContain('Last recorded status: partially filled')
+    expect(cell('Filled')).toBe('0.625')
+    await refresh()
+    expect(cell('Status')).toBe('cancelled')
+    expect(cell('Filled')).toBe('0.625')
+    expect(cell('Unfilled quantity')).toBe('0.625')
+    await refresh()
+    expect(wrapper.get('[role=alert]').text()).toMatch(/order history is temporarily unavailable/i)
+    expect(wrapper.find('table').exists()).toBe(false)
+    await refresh()
+    expect(cell('Status')).toBe('filled')
+    expect(cell('Unfilled quantity')).toBe('0')
+    expect(cell('Market mark at admission')).toContain('90071992.54740993')
+    expect(cell('Market mark at admission')).toContain(markTime)
+  } finally {
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+  }
+})
+
+it.each([
+  { arrival_at: '2026-11-19T09:30:00Z' },
+  { arrival_price: { coefficient: '200', exponent: 0 } },
+])('requires both the admission mark and its observation time', async partial => {
+  const view = await open({ ...filled, orders: [{ ...filled.orders[0]!, ...partial }] })
+  const cells = view.findAll('tbody td')
+  expect(cells.at(-1)!.text()).toBe('Unavailable')
+  expect(cells.at(-2)!.text()).toBe('—')
+  view.unmount()
 })

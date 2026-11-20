@@ -46,8 +46,14 @@ async function main() {
         const status = state.status.replace('ORDER_STATUS_', '').replaceAll('_', ' ').toLowerCase()
         assert(cells[3].includes(status))
         assert.equal(cells[3].includes('Remote outcome unknown'), Boolean(state.quarantine))
-        for (const [index, field] of ['ordered_quantity', 'filled_quantity', 'limit_price', 'average_fill_price'].entries()) {
+        for (const [index, field] of ['ordered_quantity', 'filled_quantity', 'limit_price', 'average_fill_price', 'leaves_quantity'].entries()) {
           assert.equal(cells[index + 4].trim(), decimal(state[field]))
+        }
+        if (state.arrival_at && state.arrival_price) {
+          assert(cells[9].includes(decimal(state.arrival_price)))
+          assert(cells[9].includes(state.arrival_at))
+        } else {
+          assert.equal(cells[9].trim(), 'Unavailable')
         }
         await page.clock.fastForward(61_000)
         await page.getByRole('status').filter({ hasText: 'snapshot is stale' }).waitFor()

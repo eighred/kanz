@@ -83,7 +83,7 @@ describe('the portfolio order-history wire contract', () => {
   it.each([
     {}, { ...page, orders: null }, { ...page, orders: undefined }, { ...page, owner_tenant: 'other' },
     ...[undefined, null, '', '01', '-1', 0, '9223372036854775808'].map(unindexed => ({ ...page, unindexed })),
-    ...[{ as_of: 'bad' }, { quarantine: null }, { quarantine: {} },
+    ...[{ as_of: 'bad' }, { arrival_at: 'bad' }, { arrival_price: '201' }, { leaves_quantity: 0.625 }, { quarantine: null }, { quarantine: {} },
       { quarantine: { at: '2026-01-01T00:00:00Z', last_query_at: 'bad' } }].map(extra => ({ ...page, orders: [{ ...order, ...extra }] })),
     { ...page, orders: [order, order] }, { ...page, orders: [{ ...order, order_id: '' }] },
     { ...page, orders: [{ ...order, portfolio_id: 'other' }] }, { ...page, orders: [null] },
