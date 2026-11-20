@@ -89,8 +89,8 @@ func isolatedOrderDSN(raw, role string) bool {
 func syntheticPool(t *testing.T, ctx context.Context, role, tenant string) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("SYNTHETIC_OMS_" + role + "_URL")
-	expected := map[string]string{"RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "VENUE": "kanz_synthetic_venue"}[role]
-	if expected == "" || !isolatedOrderDSN(dsn, expected) {
+	expected := map[string]string{"SWITCH": "kanz_synthetic_handoff_probe", "RELAY": "kanz_synthetic_oms_relay", "CONTROL": "kanz_synthetic_oms_control", "RUNTIME": "kanz_synthetic_oms_runtime", "VENUE": "kanz_synthetic_venue"}[role]
+	if expected == "" || !(isolatedOrderDSN(dsn, expected) || (role == "RUNTIME" && isolatedOrderDSN(dsn, expected+"_g2"))) {
 		t.Fatal("refused a database outside the synthetic role and loopback scope")
 	}
 	pool, err := pg.NewTenantPool(ctx, dsn, tenant)
@@ -149,7 +149,11 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 		if orders != 0 || commands != 0 || factsAtRollback != 0 {
 			t.Fatalf("failed commit left orders=%d commands=%d outbox=%d", orders, commands, factsAtRollback)
 		}
-		original := requireNativeReceipt(t, ctx, request, "ACCEPTED")
+		var original syntheticvenue.Receipt
+		if !t.Run("fenced_restart", func(sub *testing.T) { original = exerciseFencedRestart(sub, ctx, s, request, runtimePool) }) {
+			t.FailNow()
+		}
+		useWriterGeneration(t, "NEXT")
 		duplicate := requireNativeReceipt(t, ctx, request, "DUPLICATE")
 		if !bytes.Equal(original.State, duplicate.State) {
 			t.Fatal("duplicate submission changed order state")
@@ -278,6 +282,30 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 			}
 		}
 		consume(1, true)
+		if !t.Run("unknown_across_handoff", func(sub *testing.T) {
+			before := requireNativeReceipt(sub, ctx, read, "FOUND")
+			var beforeState orderpb.OrderState
+			if proto.Unmarshal(before.State, &beforeState) != nil || beforeState.GetQuarantine() == nil {
+				sub.Fatal("expected a durable unknown remote outcome")
+			}
+			operator := syntheticPool(sub, ctx, "SWITCH", tenant)
+			var epoch int64
+			if e := operator.QueryRow(ctx, "SELECT synthetic_test_recovery_handoff()").Scan(&epoch); e != nil || epoch != 3 {
+				sub.Fatalf("recovery handoff: %v", e)
+			}
+			old, e := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_RUNTIME_URL"), request)
+			if e != nil || old.OK || old.Code != "WRITER_FENCED" {
+				sub.Fatal("retired writer confirmed a replay after uncertain venue execution")
+			}
+			useWriterGeneration(sub, "RECOVERY")
+			after := requireNativeReceipt(sub, ctx, read, "FOUND")
+			if !bytes.Equal(after.State, before.State) || after.OrderVersion != before.OrderVersion {
+				sub.Fatal("handoff changed quarantine, version or confirmed economics")
+			}
+		}) {
+			t.FailNow()
+		}
+		useWriterGeneration(t, "RECOVERY")
 		consume(2, false)
 		cancel := s.cancelOrder().GetEnvelope()
 		if err = ingress.Cancel(ctx, orderID, cancel.GetEventId(), cancel.GetEventTime().AsTime()); err != nil {
@@ -298,6 +326,14 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 		replay := requireNativeReceipt(t, ctx, read, "FOUND")
 		if !bytes.Equal(replay.State, final.State) || replay.OrderVersion != final.OrderVersion {
 			t.Fatal("replay changed final durable state")
+		}
+		var originalEpoch int64
+		var observedEpochs []int64
+		if e := runtimePool.QueryRow(ctx, "SELECT writer_epoch FROM synthetic_oms_commands WHERE order_id=$1", orderID).Scan(&originalEpoch); e != nil || originalEpoch != 1 {
+			t.Fatalf("immutable admission epoch: %v", e)
+		}
+		if e := runtimePool.QueryRow(ctx, "SELECT array_agg(DISTINCT writer_epoch ORDER BY writer_epoch) FROM synthetic_oms_observations WHERE order_id=$1", orderID).Scan(&observedEpochs); e != nil || len(observedEpochs) != 2 || observedEpochs[0] != 2 || observedEpochs[1] != 3 {
+			t.Fatalf("observed venue generations: %v, %v", observedEpochs, e)
 		}
 		assertSyntheticOrderBlotter(t, os.Getenv("SYNTHETIC_OMS_READ_URL"), tenant, portfolio, &state)
 	})

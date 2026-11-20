@@ -60,6 +60,11 @@ def require_tests(log, names):
 
 ROLES = {
     "CONTROL": "kanz_synthetic_oms_control",
+    "SWITCH": "kanz_synthetic_handoff_probe",
+    "NEXT_RUNTIME": "kanz_synthetic_oms_runtime_g2",
+    "NEXT_ADAPTER": "kanz_synthetic_oms_adapter_g2",
+    "RECOVERY_RUNTIME": "kanz_synthetic_oms_runtime_g3",
+    "RECOVERY_ADAPTER": "kanz_synthetic_oms_adapter_g3",
     "RUNTIME": "kanz_synthetic_oms_runtime",
     "ADAPTER": "kanz_synthetic_oms_adapter",
     "VENUE": "kanz_synthetic_venue",
@@ -76,9 +81,79 @@ def provision_native(container, fixture_env):
     migrations = sorted((ROOT / "kanz/services/oms/migrations").glob("*.sql"))
     if not migrations:
         raise RuntimeError("no canonical OMS migrations")
-    for migration in [*migrations, ROOT / "rust/services/synthetic_oms/schema.sql",
-                      ROOT / "kanz/services/oms/tools/syntheticvenue/schema.sql"]:
+    for migration in migrations:
         sql(container, migration.read_text(encoding="utf-8"), DB)
+    owner_schema = (ROOT / "rust/services/synthetic_oms/schema.sql").read_text(encoding="utf-8")
+    sql(container, owner_schema, DB)
+    # Populate the actual pre-fence schema. The atomic upgrade must preserve
+    # these bytes and must never invent a generation for a legacy command.
+    sql(container, """
+        BEGIN;
+        SET LOCAL app.tenant_id='synthetic-legacy-probe';
+        INSERT INTO orders(tenant_id,order_id,status,state,portfolio_id,parent_order_id)
+            VALUES('synthetic-legacy-probe','legacy',1,decode('00','hex'),'legacy','');
+        INSERT INTO synthetic_oms_commands(order_id,principal_id,portfolio_id,idempotency_key,command_sha256,command,evidence_ids)
+            VALUES('legacy','user:legacy','legacy','legacy',sha256(decode('00','hex')),decode('00','hex'),ARRAY['a','b','c','d','e']);
+        COMMIT;
+    """, DB)
+    writer_schema = ROOT / "rust/services/synthetic_oms/writer.sql"
+    sql(container, writer_schema.read_text(encoding="utf-8"), DB)
+    sql(container, """
+        BEGIN; SET LOCAL app.tenant_id='synthetic-legacy-probe';
+        DO $$ BEGIN
+            BEGIN
+                PERFORM synthetic_oms_handoff(0,'kanz_synthetic_oms_runtime','kanz_synthetic_oms_adapter');
+                RAISE EXCEPTION 'unowned legacy state admitted';
+            EXCEPTION WHEN SQLSTATE 'P1533' THEN NULL;
+            END;
+            IF (SELECT count(*) FROM orders WHERE order_id='legacy' AND state=decode('00','hex'))<>1
+               OR (SELECT count(*) FROM synthetic_oms_commands WHERE order_id='legacy' AND writer_epoch IS NULL)<>1
+               OR (SELECT epoch FROM synthetic_oms_writer WHERE singleton)<>0 THEN
+                RAISE EXCEPTION 'legacy state mutated';
+            END IF;
+        END $$;
+        DELETE FROM synthetic_oms_commands WHERE tenant_id='synthetic-legacy-probe' AND order_id='legacy';
+        DELETE FROM orders WHERE tenant_id='synthetic-legacy-probe' AND order_id='legacy';
+        COMMIT;
+    """, DB)
+    venue_schema = ROOT / "kanz/services/oms/tools/syntheticvenue/schema.sql"
+    sql(container, venue_schema.read_text(encoding="utf-8"), DB)
+    sql(container, """
+        GRANT kanz_synthetic_oms_runtime TO kanz_synthetic_oms_runtime_g2;
+        GRANT kanz_synthetic_oms_adapter TO kanz_synthetic_oms_adapter_g2;
+        GRANT kanz_synthetic_oms_runtime TO kanz_synthetic_oms_runtime_g3;
+        GRANT kanz_synthetic_oms_adapter TO kanz_synthetic_oms_adapter_g3;
+        DO $$ BEGIN
+            BEGIN
+                PERFORM synthetic_oms_assert_writer();
+                RAISE EXCEPTION 'unenrolled generation admitted';
+            EXCEPTION WHEN SQLSTATE 'P1533' THEN NULL;
+            END;
+        END $$;
+        SELECT synthetic_oms_handoff(0,'kanz_synthetic_oms_runtime','kanz_synthetic_oms_adapter');
+        BEGIN;
+        DELETE FROM synthetic_oms_writer_history WHERE epoch=1;
+        SET LOCAL SESSION AUTHORIZATION kanz_synthetic_oms_runtime;
+        DO $$ BEGIN
+            BEGIN
+                PERFORM synthetic_oms_assert_writer();
+                RAISE EXCEPTION 'incomplete writer history admitted';
+            EXCEPTION WHEN SQLSTATE 'P1533' THEN NULL;
+            END;
+        END $$;
+        ROLLBACK;
+        CREATE FUNCTION synthetic_test_handoff() RETURNS bigint LANGUAGE sql SECURITY DEFINER
+            SET search_path=pg_catalog,public,pg_temp AS $$
+            SELECT public.synthetic_oms_handoff(1,'kanz_synthetic_oms_runtime_g2','kanz_synthetic_oms_adapter_g2') $$;
+        REVOKE ALL ON FUNCTION synthetic_test_handoff() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION synthetic_test_handoff() TO kanz_synthetic_handoff_probe;
+        CREATE FUNCTION synthetic_test_recovery_handoff() RETURNS bigint LANGUAGE sql SECURITY DEFINER
+            SET search_path=pg_catalog,public,pg_temp AS $$
+            SELECT public.synthetic_oms_handoff(2,'kanz_synthetic_oms_runtime_g3','kanz_synthetic_oms_adapter_g3') $$;
+        REVOKE ALL ON FUNCTION synthetic_test_recovery_handoff() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION synthetic_test_recovery_handoff() TO kanz_synthetic_handoff_probe;
+        GRANT SELECT ON synthetic_oms_writer_history TO kanz_synthetic_handoff_probe;
+    """, DB)
     sql(container, "GRANT SELECT ON orders TO kanz_synthetic_oms_read; "
                    "GRANT SELECT, UPDATE(published_at,attempts,last_error) ON outbox TO kanz_synthetic_oms_relay;", DB)
 
@@ -166,6 +241,11 @@ def run(stage, native):
                     log = log.replace(value, "[fixture connection]")
             if proc.returncode:
                 raise RuntimeError(log)
+            if native and base == "api_gateway":
+                for name in ("fenced_restart", "unknown_across_handoff"):
+                    case = rf"^\s*--- PASS: TestSyntheticOrderCommandLifecycle/{name} "
+                    if len(re.findall(case, log, re.MULTILINE)) != 1:
+                        raise RuntimeError("missing writer recovery proof: " + name)
             count = require_tests(log, names)
             print(f"{package}: {count} named tests passed without skips", flush=True)
     finally:

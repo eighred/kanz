@@ -29,6 +29,20 @@ fn decode(raw: Option<&String>) -> Result<Vec<u8>, &'static str> {
         .decode(raw.ok_or("INVALID")?)
         .map_err(|_| "INVALID")
 }
+fn synthetic_login(name: &str) -> bool {
+    ["kanz_synthetic_oms_runtime", "kanz_synthetic_oms_adapter"]
+        .into_iter()
+        .any(|base| {
+            name == base
+                || name
+                    .strip_prefix(base)
+                    .and_then(|suffix| suffix.strip_prefix("_g"))
+                    .is_some_and(|n| {
+                        !n.starts_with('0')
+                            && n.parse::<u64>().is_ok_and(|v| v > 0 && n == v.to_string())
+                    })
+        })
+}
 async fn execute(r: Request) -> Result<Value, &'static str> {
     if r.version != 1 {
         return Err("UNSUPPORTED_VERSION");
@@ -38,10 +52,7 @@ async fn execute(r: Request) -> Result<Value, &'static str> {
     if config.get_dbname() != Some("kanz_synthetic_oms")
         || config.get_hosts().len() != 1
         || !config.get_hostaddrs().is_empty()
-        || !matches!(
-            config.get_user(),
-            Some("kanz_synthetic_oms_runtime" | "kanz_synthetic_oms_adapter")
-        )
+        || !config.get_user().is_some_and(synthetic_login)
     {
         return Err("UNAUTHORIZED");
     }

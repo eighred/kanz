@@ -33,6 +33,7 @@ pub struct Receipt {
 pub enum Refusal {
     Invalid,
     Unauthorized,
+    Fenced,
     Controls(&'static str),
     Conflict,
     NotFound,
@@ -44,6 +45,7 @@ impl Refusal {
         match self {
             Self::Invalid => "INVALID",
             Self::Unauthorized => "UNAUTHORIZED",
+            Self::Fenced => "WRITER_FENCED",
             Self::Controls(_) => "CONTROL_DENIED",
             Self::Conflict => "CONFLICT",
             Self::NotFound => "NOT_FOUND",
@@ -97,10 +99,30 @@ async fn begin<'a>(
     // Resolve all canonical relations in reviewed schemas, including the RLS preflight.
     tx.batch_execute("SET LOCAL search_path=pg_catalog,public,pg_temp; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='3s'").await?;
     scope_existing(&tx, s.tenant).await?;
-    let row=tx.query_one("SELECT current_user::text, current_database()='kanz_synthetic_oms' AND current_user=session_user AND NOT has_table_privilege(current_user,'synthetic_oms_evidence','INSERT,UPDATE,DELETE,TRUNCATE') AND NOT has_any_column_privilege(current_user,'synthetic_oms_evidence','INSERT,UPDATE') AND (SELECT count(*)=3 FROM pg_class WHERE oid IN ('synthetic_oms_evidence'::regclass,'synthetic_oms_commands'::regclass,'synthetic_oms_observations'::regclass) AND relrowsecurity AND relforcerowsecurity AND NOT pg_has_role(current_user,relowner,'MEMBER'))", &[]).await?;
+    let row=tx.query_one("SELECT CASE WHEN pg_has_role(session_user,'kanz_synthetic_oms_runtime','USAGE') AND NOT pg_has_role(session_user,'kanz_synthetic_oms_adapter','MEMBER') THEN 'kanz_synthetic_oms_runtime' WHEN pg_has_role(session_user,'kanz_synthetic_oms_adapter','USAGE') AND NOT pg_has_role(session_user,'kanz_synthetic_oms_runtime','MEMBER') THEN 'kanz_synthetic_oms_adapter' ELSE '' END, current_database()='kanz_synthetic_oms' AND current_user=session_user AND NOT has_table_privilege(current_user,'synthetic_oms_evidence','INSERT,UPDATE,DELETE,TRUNCATE') AND NOT has_any_column_privilege(current_user,'synthetic_oms_evidence','INSERT,UPDATE') AND (SELECT count(*)=3 FROM pg_class WHERE oid IN ('synthetic_oms_evidence'::regclass,'synthetic_oms_commands'::regclass,'synthetic_oms_observations'::regclass) AND relrowsecurity AND relforcerowsecurity AND NOT pg_has_role(current_user,relowner,'MEMBER'))", &[]).await?;
     if !row.get::<_, bool>(1) || !roles.contains(&row.get::<_, String>(0).as_str()) {
         return Err(Refusal::Unauthorized);
     }
+    Ok(tx)
+}
+
+// Acquire the same row-share lock that the database triggers require before
+// checking immutable replay. A retired writer cannot acknowledge a duplicate.
+async fn begin_write<'a>(
+    client: &'a mut Client,
+    s: &Scope<'_>,
+    role: &str,
+) -> Result<Transaction<'a>> {
+    let tx = begin(client, s, &[role]).await?;
+    tx.query_one("SELECT public.synthetic_oms_assert_writer()", &[])
+        .await
+        .map_err(|e| {
+            if e.code().is_some_and(|c| c.code() == "P1533") {
+                Refusal::Fenced
+            } else {
+                e.into()
+            }
+        })?;
     Ok(tx)
 }
 
@@ -297,7 +319,7 @@ pub async fn submit(client: &mut Client, s: &Scope<'_>, key: &str, wire: &[u8]) 
     }
     let hash = Sha256::digest(wire).to_vec();
     let id = &cmd.value().order_id;
-    let tx = begin(client, s, &[RUNTIME]).await?;
+    let tx = begin_write(client, s, RUNTIME).await?;
     if let Some(r) = replay(&tx, s, id, key, &hash).await? {
         return Ok(r);
     }
@@ -343,7 +365,7 @@ pub async fn get(client: &mut Client, s: &Scope<'_>, id: &str) -> Result<Receipt
         return Err(Refusal::Invalid);
     }
     let tx = begin(client, s, &[RUNTIME, ADAPTER]).await?;
-    if tx.query_opt("SELECT 1 FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 AND (principal_id=$3 OR (current_user='kanz_synthetic_oms_adapter' AND $3='spiffe://kanz.internal/ns/kanz-services/sa/oms'))",&[&id,&s.portfolio,&s.principal]).await?.is_none(){return Err(Refusal::NotFound)}
+    if tx.query_opt("SELECT 1 FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 AND (principal_id=$3 OR (pg_has_role(session_user,'kanz_synthetic_oms_adapter','USAGE') AND $3='spiffe://kanz.internal/ns/kanz-services/sa/oms'))",&[&id,&s.portfolio,&s.principal]).await?.is_none(){return Err(Refusal::NotFound)}
     Ok(Receipt {
         code: "FOUND",
         lineage: Lineage::load(&tx, id).await?,
@@ -513,7 +535,7 @@ pub async fn observe(
     if !order_id(id) || !identifier(event.id) || event.body.len() > 65536 {
         return Err(Refusal::Invalid);
     }
-    let tx = begin(client, s, &[ADAPTER]).await?;
+    let tx = begin_write(client, s, ADAPTER).await?;
     let row=tx.query_opt("SELECT phase,principal_id,command_sha256,command FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 FOR UPDATE",&[&id,&s.portfolio]).await?.ok_or(Refusal::NotFound)?;
     let phase: String = row.get(0);
     let lineage = Lineage::load(&tx, id).await?;
