@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -22,6 +23,9 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/consume"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	nserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -228,4 +232,91 @@ func TestBinanceBrokerFramesBookOnceAcrossRestart(t *testing.T) {
 		t.Fatal("replayed debit counted again", applied)
 	}
 	t.Logf("verified 4 venue FACT frames read twice across consumer/folder reconstruction; 2 exact source-backed ledger trades; 2 debits of 50000.1 USDT; net -100000.2 USDT; %d durable Accounting cash FACTs, each original debit applied once", cinfo.State.Msgs)
+
+	t.Run("legacy_writer_after_scoped_receipts", func(t *testing.T) {
+		before := retainedAccountingState(t, ctx, pool, tenant, 2, "-500001/5")
+		err := appendHistoricalBinanceTrade(ctx, pool, tenant)
+		var refused *pgconn.PgError
+		if !errors.As(err, &refused) || refused.Code != "P0001" || refused.Message != "legacy ledger writer cannot attribute a scoped execution alias" {
+			t.Fatalf("expected the rollout trigger to refuse the historical writer: %v", err)
+		}
+		if after := retainedAccountingState(t, ctx, pool, tenant, 2, "-500001/5"); after != before {
+			t.Fatal("refused historical writer changed scoped journal or cash commits")
+		}
+		t.Log("migration 0016 refused the raw alias with SQLSTATE P0001; both scoped trades and -100000.2 USDT retained")
+	})
+	t.Run("legacy_writer_before_scoped_receipts", func(t *testing.T) {
+		// Reinitialize the disposable Accounting journal so the original tenant
+		// and the retained broker frames remain identical in both arrival orders.
+		legacyPool := cashTimeRestrictedPool(t, ctx, dsn, tenant)
+		if err := appendHistoricalBinanceTrade(ctx, legacyPool, tenant); err != nil {
+			t.Fatal(err)
+		}
+		before := retainedAccountingState(t, ctx, legacyPool, tenant, 1, "-500001/10")
+		st := ledger.NewPostgres(legacyPool)
+		ann := consume.NewAnnouncer(st, pub, "USDT", consume.EntrySourcePosture{Produced: []string{"trade"}, Unproduced: []string{"cash", "fee", "accrual", "corporate_action"}}, nil, time.Now)
+		folder, err := consume.NewFolder(tenant, st, "USDT", consume.WithAnnouncer(ann))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for seq := sinfo.State.FirstSeq; seq <= sinfo.State.LastSeq; seq++ {
+			frame, err := source.GetMsg(ctx, seq)
+			if err != nil || sha256.Sum256(frame.Data) != hashes[seq] {
+				t.Fatalf("original broker frame %d unavailable: %v", seq, err)
+			}
+			env, payload, err := bus.Unframe(frame.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := folder.Handle(bus.WithTenantID(ctx, tenant), env, payload); !errors.Is(err, ledger.ErrLegacyExecutionUnknown) {
+				t.Fatalf("frame %d must hold for unknown historical attribution: %v", seq, err)
+			}
+			if after := retainedAccountingState(t, ctx, legacyPool, tenant, 1, "-500001/10"); after != before {
+				t.Fatalf("refused scoped frame %d changed historical journal or cash commits", seq)
+			}
+		}
+		t.Log("four original scoped frames returned ErrLegacyExecutionUnknown; one historical raw trade and -50000.1 USDT retained")
+	})
+	afterRefusals, err := cashStream.Info(ctx)
+	if err != nil || afterRefusals.State.Msgs != cinfo.State.Msgs {
+		t.Fatalf("cash FACT count changed after refusal: %v", err)
+	}
+}
+
+// An old writer inserted the raw alias and no execution_evidence column, with
+// no verified venue account. Exercise its actual INSERT against migration 0016.
+func appendHistoricalBinanceTrade(ctx context.Context, pool *pgxpool.Pool, portfolio string) error {
+	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.venue_account_id', '', true)"); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO ledger_entries
+			(entry_id, portfolio_id, entry_type, instrument_id, quantity, price, cash, cash_currency, effective_time, knowledge_time, source_ref)
+			VALUES ('fill:BTCUSDT-0', $1, $2, 'BTC-USD', '1', '50000', '-500001/10', 'USDT', $3, $3, 'BTCUSDT-0')
+			ON CONFLICT (tenant_id,entry_id) DO NOTHING`, portfolio, int(ledger.EntryTrade), time.UnixMilli(1700000000000))
+		return err
+	})
+}
+
+func retainedAccountingState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, portfolio string, count int, cash string) string {
+	t.Helper()
+	st := ledger.NewPostgres(pool)
+	rows, err := st.Journal(ctx, portfolio)
+	if err != nil || len(rows) != count {
+		t.Fatalf("expected %d retained trades, got %d: %v", count, len(rows), err)
+	}
+	projection, err := ledger.MaterializeCash(ctx, st, portfolio, time.Now())
+	if err != nil || projection.Book.CashBalance("USDT").RatString() != cash {
+		t.Fatalf("retained cash must remain %s USDT: %v", cash, err)
+	}
+	var state string
+	err = pool.QueryRow(ctx, `SELECT json_build_array(
+		(SELECT json_agg(e ORDER BY entry_id) FROM ledger_entries e WHERE portfolio_id=$1),
+		(SELECT json_agg(h ORDER BY currency,revision) FROM cash_commit_history h WHERE portfolio_id=$1),
+		(SELECT json_agg(d ORDER BY currency,order_id) FROM cash_commit_debits d WHERE portfolio_id=$1),
+		(SELECT json_agg(o ORDER BY id) FROM outbox o WHERE partition_key=$1))::text`, portfolio).Scan(&state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
 }
