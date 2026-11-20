@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict')
 
-async function comparisonDownload(page, region, response) {
+async function comparisonDownload(page, region, response, economicsStatus = 'unknown') {
   const ready = page.waitForEvent('download')
   await region.getByRole('button', { name: 'Download comparison receipt' }).click()
   const download = await ready
@@ -23,11 +23,11 @@ async function comparisonDownload(page, region, response) {
   if (response.transaction_pass === 'ran') expected.transaction_comparison_basis = 'external_reference_membership'
   if (response.signed_statement_sha256 !== undefined) {
     if (response.execution_economics !== undefined) {
-      // These older pilot statements have no signed commission convention.
-      assert.equal(response.execution_economics_status, 'unknown')
+      assert.equal(response.execution_economics_status, economicsStatus)
       for (const row of response.execution_economics.rows) {
-        assert.equal(row.status, 'unknown')
-        assert(row.reason && !row.book && !row.custodian && !row.difference)
+        assert.equal(row.status, economicsStatus)
+        if (economicsStatus === 'unknown') assert(row.reason && !row.book && !row.custodian && !row.difference)
+        else assert(!row.reason && row.book && row.custodian && row.difference)
       }
       expected.execution_economics = response.execution_economics
     }

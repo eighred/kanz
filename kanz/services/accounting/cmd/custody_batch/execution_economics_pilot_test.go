@@ -39,9 +39,7 @@ func TestSignedExecutionEconomicsPilot(t *testing.T) {
 		journal := ledger.NewPostgres(pool)
 		// This independently booked fill supplies the actual commission and
 		// settlement evidence. Only the shared external reference joins it to the statement.
-		fill := &orderpb.Fill{FillId: "external-7", OrderId: "synthetic-order-7", Venue: "XSIM", VenueAccountId: "sandbox-account", VenueExecutionId: "7", InstrumentId: "SYN", Side: orderpb.Side_SIDE_BUY,
-			Quantity: &commonpb.Decimal{Coefficient: 105, Exponent: -1}, Price: &commonpb.Decimal{Coefficient: 1},
-			Fee: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 25, Exponent: -2}, CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(day)}
+		fill := pilotEconomicsFill(day)
 		trade, err := ledger.FromFill("PF1", fill, "USD", day)
 		if err != nil {
 			t.Fatal(err)
@@ -132,4 +130,10 @@ func pilotCompletion(t *testing.T, ctx context.Context, broker pilotBroker, sequ
 		t.Fatal("unexpected completion identity")
 	}
 	return &fact, frame.Payload
+}
+
+func pilotEconomicsFill(day time.Time) *orderpb.Fill {
+	return &orderpb.Fill{FillId: "external-7", OrderId: "synthetic-order-7", Venue: "XSIM", VenueAccountId: "sandbox-account", VenueExecutionId: "7", InstrumentId: "SYN", Side: orderpb.Side_SIDE_BUY,
+		Quantity: &commonpb.Decimal{Coefficient: 105, Exponent: -1}, Price: &commonpb.Decimal{Coefficient: 1},
+		Fee: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 25, Exponent: -2}, CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(day)}
 }

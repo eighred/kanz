@@ -78,7 +78,7 @@ The runner builds the production web bundle, accounting service, signed batch im
 
 On the first database, the normal accounting service must refuse startup before account enrollment and after the venue identity alone. It must answer its readiness probe after the separate governance issuer signs the custody assignment, refuse startup after withdrawal and become ready again after reinstatement. The script runs each initial signed import twice with the issuer’s restricted login. The optional JSON receipt records the five startup outcomes and the dated store verification under `account_onboarding`. A separate database on the first instance checks current and retained reads, the overlap of the two effective intervals and concurrent enrollment during commit. The other two pilot environments enroll their own issuers and verify the same initial signed evidence. See the [issuer command and provisioning requirements](../custody_proof/README.md).
 
-The required Go quality job runs the same command with `--pull-image --receipt`. Its `custody-pilot` artifact records the checked-out commit and tree and the observed comparisons in five isolated databases, including the signed statement IDs, run IDs, business date, JetStream completion sequences and outstanding break counts. To retain the synthetic results locally, pass `--receipt comparisons.json` with a path outside the checkout.
+The required Go quality job runs the same command with `--pull-image --receipt`. Its `custody-pilot` artifact records the checked-out commit and tree and the observed comparisons in seven isolated databases, including the signed statement IDs, run IDs, business date, JetStream completion sequences and outstanding break counts. To retain the synthetic results locally, pass `--receipt comparisons.json` with a path outside the checkout.
 
 The runner builds the executables once and starts a second fresh PostgreSQL instance for the authorized operator. Both fixtures enforce the signed intake grant and refuse manual claim/explanation at the database. The read-only pilot additionally refuses operator rerun IDs in PostgreSQL even when a service calls the reconciler. The separate writable fixture gives its restricted accounting login permission to update only the manual receipt column on an existing run. A signed operator session repeats the same request after browser reload. The receipt and JetStream completion identify one operator, request, run and source; the signed correction then clears its queue. No customer or shared database is used.
 
@@ -127,6 +127,11 @@ in place. The scheduler can compare again on its next tick. A manual retry
 uses the same request ID. A posting for an unrelated future close can advance
 the journal without invalidating the selected comparison.
 
+A signed comparison must fit the retained receipt limits of 4,096
+breaks and 1 MiB of serialized completion data. Accounting records a failed
+comparison if either limit is exceeded. The previous receipts and working
+queue stay in place.
+
 
 An enrolled account’s current comparison becomes pending when its assignment has changed or the original run lacks assignment evidence. A saved run keeps the assignment version that governed the comparison. The verified indicator in its download means that accounting rechecked both issuers’ signatures, their authorized scopes and the effective business date. Earlier receipts keep their original evidence fields.
 
@@ -141,6 +146,15 @@ On a saved comparison with a verified account and a completed transaction-refere
 The series in `testdata/execution_economics/` contains four signed revisions for the same execution. The pilot runs the `custody_batch` executable with each file, signature and source authorization. A running `accounting` service consumes the statement from JetStream. The configured scheduler compares it with an independently booked synthetic fill and serves the result to the normal dated view. After the fourth revision, a fresh accounting consumer replays and acknowledges all four statements. The pilot checks the stored completions, financial state and completion count across this replay. Its convention, `unit_price_net_cash_same_currency_commission_v1`, specifies signed natural units, a unit price in the cash currency, an explicit commission in that currency, and same-day posted settlement with no other charges. Gross cash is the negated signed quantity times the unit price. Net and settled cash equal gross cash less commission. A zero commission must be explicit. Compare book, signed custodian and book-minus-custodian for each measure. The book uses the original journal position and account assignment. Apply accounting migration 0033 for the approved commission lookup.
 
 For the 10.5 SYN purchase at USD 1, both sources show gross cash of −10.50 USD. The book records a 0.25 USD fee and −10.75 USD settlement. The first signed statement declares a 0.50 USD fee and −11.00 USD settlement. The second agrees with the book. The third contradicts its own cash calculation and the fourth omits the convention. Both show **Unknown** with a reason. The runner reopens the first receipt after the correction and verifies identical download bytes. In the exported `execution_economics` list, compare the four statement digests, statuses, reasons and monetary figures across clean runs. Run IDs and completion times identify each independent execution. Download hashes identify the bytes recovered within that execution. An actual custodian must declare its own convention before these measures can be assessed.
+
+The booked-fee profile keeps the first signed file unchanged while an
+independent synthetic fee correction raises the booked commission from
+0.25 to 0.50 USD. After the fee posting, the live comparison is pending
+until Accounting compares the new journal position. The two execution
+measurements then agree at −11 USD of settled cash. The statement's unchanged
+aggregate cash of −10.75 USD leaves a separate −0.25 USD balance difference.
+Use the original run ID to reopen its receipt. The pilot verifies identical
+original download bytes and records both receipts in `booked_fee_correction`.
 
 The accounting writer inserts the completion bytes with the run and enqueues its FACT in the same transaction. Migration 0028 protects a retained row and its book basis after insertion. Older scheduled runs can replay the original relay record while it exists; a historical customer read requires retained, signed evidence. A legacy operator writer can finish its original receipt only with the matching completion FACT.
 

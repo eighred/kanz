@@ -276,6 +276,7 @@ def run_pitr_source(command, env, directory, pitr, container):
 
 def qualify(docker, container, binaries, node, env, observations, profile, pitr=None):
     economics = profile == "execution_economics"
+    booked_fee = profile == "booked_fee_correction"
     historical = profile == "historical_comparison"
     rerun = profile == "operator_comparisons" or historical
     quantity_evidence = profile == "quantity_comparisons"
@@ -314,7 +315,7 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         fixture = fixture / "instrument_units"
     elif late or historical:
         fixture = fixture / "late_quantity"
-    elif economics:
+    elif economics or booked_fee:
         fixture = fixture / "execution_economics"
     authority = json.loads((fixture / "authority.json").read_bytes())
     # psql resolves the read-only profile's relative include beside its entrypoint.
@@ -339,6 +340,11 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         f"PASSWORD '{source_password}';"
     ).encode())
 
+    if booked_fee:
+        sql(DATABASE, b"""
+            GRANT SELECT, INSERT ON execution_fee_revisions TO pilot_check;
+            GRANT USAGE ON SEQUENCE execution_fee_revisions_revision_sequence_seq TO pilot_check;
+        """)
     endpoint = subprocess.check_output([*docker, "port", container, "5432/tcp"], env=env, text=True).strip()
     if not re.fullmatch(r"127\.0\.0\.1:[1-9]\d{0,4}", endpoint) or int(endpoint.split(":")[1]) > 65535:
         raise RuntimeError("PostgreSQL must have exactly one literal loopback port.")
@@ -371,17 +377,20 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-late-correction.cjs")
     if historical:
         pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-historical-comparison.cjs")
-    if economics:
+    if economics or booked_fee:
         pilot_env["CUSTODY_PILOT_IMPORTER"] = str(binaries["source"])
         pilot_env["CUSTODY_PILOT_SERVICE"] = str(binaries["service"])
-        pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-execution-economics.cjs")
-    if late or quantity_evidence or economics:
+        script = "custody-booked-fee.cjs" if booked_fee else "custody-execution-economics.cjs"
+        pilot_env["CUSTODY_PILOT_BROWSER_SCRIPT"] = str(WEB / "e2e" / script)
+    if late or quantity_evidence or economics or booked_fee:
         pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.with_suffix(".downloads.json"))
     test = "TestSignedCustodyAuthorizedRerun" if rerun else "TestSignedCustodyOperatorReadback"
     if historical:
         test = "TestSignedHistoricalComparisonPilot"
     if economics:
         test = "TestSignedExecutionEconomicsPilot"
+    if booked_fee:
+        test = "TestSignedBookedFeePilot"
     command = [binaries["accounting"], "-test.run=^" + test + "$", "-test.v", "-test.count=1"]
     if pitr is None:
         proof = subprocess.run(command, cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
@@ -396,7 +405,9 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
                        for revision in range(1, 5))
     if historical:
         markers = [b"signed historical comparison preserved the later close and live queue through Chromium"]
-    if not (late or rerun or economics):
+    if booked_fee:
+        markers = [b"signed Chromium verified unchanged-source booked fee correction and original receipt"]
+    if not (late or rerun or economics or booked_fee):
         markers.append(b"signed customer verified clean, missing and unobserved business dates")
     if profile == "comparisons":
         markers.append(b"signed Chromium discovered the original receipt from a revised comparison with breaks")
@@ -407,11 +418,14 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
             stage = re.search(rb"custody-late-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|tenant-portfolio-permission)|pending-corrected-source|correction-discovery|correction-recovery|original-and-following|retain-corrective-download)\b", output)
         if profile == "comparisons" and not stage:
             stage = re.search(rb"custody-previous-browser-stage=(input|launch|authorized|foreign|excluded|unfunded)\b", output)
+        if booked_fee and not stage:
+            stage = re.search(rb"custody-browser-stage=([a-z0-9-]+)", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
         if not stage:
-            location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test|historical_comparison_pilot_test|execution_economics_pilot_test)\.go:([0-9]+):", output)
-            if location:
-                suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
+            locations = re.findall(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test|historical_comparison_pilot_test|execution_economics_pilot_test|booked_fee_pilot_test)\.go:([0-9]+):", output)
+            if locations:
+                file, line = locations[-1]
+                suffix = " at " + file.decode() + ".go:" + line.decode()
         raise RuntimeError(test + " failed" + suffix + ".")
     if pitr is not None:
         source = verify_historical_comparison(observations, fixture)
@@ -423,8 +437,30 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         return verify_historical_comparison(observations, fixture), None
     if economics:
         return verify_execution_economics(observations, fixture), None
+    if booked_fee:
+        return verify_booked_fee(observations, fixture), None
     records = verify_late_correction(observations, fixture) if late else verify_observations(observations, fixture, rerun, quantity_evidence)
     return records, check_withdrawal() if check_withdrawal else None
+
+
+def verify_booked_fee(observations, fixture):
+    digest = hashlib.sha256((fixture / "statement-r1.json").read_bytes()).hexdigest()
+    expected_id = "custody-batch.v1.synthetic-source.r1." + digest
+    results = {}
+    for phase, outcome, position in (("original", "clean", "1"), ("corrected", "breaks", "2")):
+        path = observations.with_suffix(".downloads.json.fee-" + phase)
+        if not 0 < path.stat().st_size <= 64 << 10:
+            raise RuntimeError("Booked fee receipt exceeds its pilot limit.")
+        raw = path.read_bytes()
+        row = json.loads(raw)
+        if (row.get("signed_statement_sha256"), row.get("statement_id"), row.get("outcome"), row.get("journal_position")) != (
+            digest, expected_id, outcome, position
+        ):
+            raise RuntimeError("Booked fee receipts do not identify the same signed source and distinct journal positions.")
+        results[phase] = {"sha256": hashlib.sha256(raw).hexdigest(), "receipt": row}
+    if results["original"]["receipt"]["run_id"] == results["corrected"]["receipt"]["run_id"]:
+        raise RuntimeError("Booked fee correction reused the original run identity.")
+    return results
 
 
 def customer_downloads(observations, records):
@@ -538,7 +574,7 @@ def main():
         else:
             results = {"postgres_image": IMAGE}
             for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction",
-                        "execution_economics", "historical_comparison"):
+                        "execution_economics", "historical_comparison", "booked_fee_correction"):
                 observations = Path(directory) / (key + ".json")
                 results[key], onboarding = run_profile(docker, binaries, node, env, observations, key)
                 if onboarding:
@@ -564,7 +600,8 @@ def main():
           "Four signed execution revisions showed a mismatch, agreement, inconsistent cash and a missing convention. "
           "The original execution receipt reopened unchanged after correction. The first late statement replaced the scheduled missing result, and both receipts reopened unchanged. "
           "A full historical comparison reopened in Chromium and preserved the later close and live queue. "
-          "A corrected comparison with a new break still opened its original signed receipt.")
+          "A corrected comparison with a new break still opened its original signed receipt. "
+          "A booked fee correction retained both outcomes for one signed source.")
 
 
 if __name__ == "__main__":
