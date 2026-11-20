@@ -164,6 +164,12 @@ func exerciseStoreRefusal(t *testing.T, tenant, code, reason, constraint string)
 
 func syntheticVenueClient(t *testing.T, ctx context.Context, cfg syntheticvenue.Config) venuepb.VenueAdapterServiceClient {
 	t.Helper()
+	client, _, _ := startSyntheticVenue(t, ctx, cfg)
+	return client
+}
+
+func startSyntheticVenue(t *testing.T, ctx context.Context, cfg syntheticvenue.Config, options ...grpc.ServerOption) (venuepb.VenueAdapterServiceClient, string, *testidentity.Source) {
+	t.Helper()
 	now := time.Now().UTC()
 	venue, err := syntheticvenue.New(ctx, cfg, syntheticPool(t, ctx, "VENUE", cfg.Tenant))
 	if err != nil {
@@ -187,7 +193,8 @@ func syntheticVenueClient(t *testing.T, ctx context.Context, cfg syntheticvenue.
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsconfig.MTLSServerConfig(protocol, protocol, tlsconfig.AuthorizeID(spiffeid.RequireFromString(syntheticvenue.OMSIdentity))))))
+	serverTLS := tlsconfig.MTLSServerConfig(protocol, protocol, tlsconfig.AuthorizeID(spiffeid.RequireFromString(syntheticvenue.OMSIdentity)))
+	srv := grpc.NewServer(append(options, grpc.Creds(credentials.NewTLS(serverTLS)))...)
 	venuepb.RegisterVenueAdapterServiceServer(srv, venue)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(listener) }()
@@ -197,7 +204,7 @@ func syntheticVenueClient(t *testing.T, ctx context.Context, cfg syntheticvenue.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return venuepb.NewVenueAdapterServiceClient(conn)
+	return venuepb.NewVenueAdapterServiceClient(conn), listener.Addr().String(), actor
 }
 
 func TestSyntheticLegacyFundingRefusal(t *testing.T) {
