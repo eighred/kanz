@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -82,6 +83,34 @@ func TestIdempotencyRefusesAConcurrentDuplicate(t *testing.T) {
 	if second.Code != http.StatusConflict {
 		t.Errorf("the concurrent duplicate got %d, want 409; it must be REFUSED and told so, "+
 			"not silently executed", second.Code)
+	}
+}
+
+func TestOrderSubmitReplayRequiresIdenticalRequest(t *testing.T) {
+	calls := 0
+	h := IdempotencyWith(nil, time.Minute, 10)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != "original" {
+			t.Fatalf("unexpected delivered body %q: %v", body, err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("original-receipt"))
+	}))
+	for _, tc := range []struct {
+		body string
+		want int
+	}{{"original", 202}, {"changed", 409}, {"original", 202}} {
+		request := idemRequest("acme", "operator", http.MethodPost, "/v1/orders", "stable")
+		request.Body = io.NopCloser(strings.NewReader(tc.body))
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		if response.Code != tc.want || (tc.want == 409 && strings.Contains(response.Body.String(), "original-receipt")) {
+			t.Fatalf("got %d %q for %q", response.Code, response.Body.String(), tc.body)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("forwarded %d requests", calls)
 	}
 }
 

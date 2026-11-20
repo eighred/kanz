@@ -1,4 +1,5 @@
 import { api, ApiError } from './client'
+import { isTimestamp } from './timestamp'
 import { isNonnegativeInt64 } from './int64'
 import { checkWireDecimal, checkWireMoney } from './financial-wire'
 import type { Decimal, Money } from './decimal'
@@ -120,6 +121,7 @@ export interface OrderSummary {
   average_fill_price?: Decimal
   venue?: string
   as_of?: string
+  quarantine?: { at: string; last_query_at?: string }
 }
 
 export interface OrdersResponse {
@@ -174,6 +176,11 @@ export const risk = {
       if (!order || order.portfolio_id !== id || typeof order.order_id !== 'string' || !order.order_id.trim() ||
           ids.has(order.order_id) || [order.instrument_id, order.venue].some(value => value !== undefined && typeof value !== 'string') ||
           !isWireEnum(order.side) || !isWireEnum(order.status)) throw new Error('The order history could not be verified.')
+      if ((order.as_of !== undefined && !isTimestamp(order.as_of)) ||
+          (order.quarantine !== undefined && (!order.quarantine || !isTimestamp(order.quarantine.at) ||
+            (order.quarantine.last_query_at !== undefined && !isTimestamp(order.quarantine.last_query_at))))) {
+        throw new Error('The order history could not be verified.')
+      }
       ids.add(order.order_id)
       checkWireDecimal(order.ordered_quantity)
       checkWireDecimal(order.filled_quantity)

@@ -62,6 +62,37 @@ beforeEach(() => {
   useSession().identity = { tenant: 'fixture-tenant', subject: 'reader', expires_at: '2099-01-01T00:00:00Z' }
 })
 
+describe('order observations', () => {
+  it('distinguishes an old effective time from an aging observation, and refreshes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const wrapper = await open({ ...filled, orders: [{ ...filled.orders[0]!, as_of: '2000-01-01T00:00:00Z' }] })
+      expect(wrapper.text()).toContain('Effective at 2000-01-01')
+      expect(wrapper.text()).not.toContain('snapshot is stale')
+      await vi.advanceTimersByTimeAsync(60_001)
+      expect(wrapper.text()).toContain('snapshot is stale')
+      await wrapper.get('button').trigger('click')
+      await flushPromises()
+      expect(api.risk.orders).toHaveBeenCalledTimes(2)
+      expect(wrapper.text()).not.toContain('snapshot is stale')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows the remote uncertainty alongside the last recorded status', async () => {
+    const wrapper = await open({ ...filled, orders: [{ ...filled.orders[0]!, quarantine: {
+      at: '2026-01-01T00:00:00Z', last_query_at: '2026-01-01T00:00:01Z',
+    } }] })
+    expect(wrapper.text()).toContain('Remote outcome unknown')
+    expect(wrapper.text()).toContain('Last recorded status: filled')
+    expect(wrapper.text()).toContain('Last venue query: 2026-01-01T00:00:01Z')
+    expect(wrapper.find('tbody tr .state-warn').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
 describe('orders that cannot be shown are declared', () => {
   it('states the unindexed count as an alert, not a hint', async () => {
     const wrapper = await open({ ...filled, unindexed: '412' })

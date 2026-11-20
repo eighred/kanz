@@ -1,5 +1,13 @@
 # Operator browser client
 
+The portfolio Orders view reads the authenticated OMS history through
+`GET /api/v1/portfolios/{id}/orders?limit=200`. The effective time on a row
+belongs to the order change. The timestamp above the table records when the
+browser requested the current page. After one minute the page marks the
+observation stale and the operator can refresh it. A quarantined order displays
+the last recorded status, the unknown remote outcome, and available venue query
+time. Portfolio changes, session changes and refused reads clear the old rows.
+
 The Vue 3/TypeScript application is Kanz's operator interface. It uses the Go
 web BFF for same-origin sessions and authorized domain APIs; it does not hold
 venue credentials or own financial admission. The npm package name `kanz-web`

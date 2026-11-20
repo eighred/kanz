@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
 import { risk, orderHistoryLimit, type OrderSummary } from '../api/risk'
@@ -24,11 +24,31 @@ const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 
 const session = useSession()
-const selection = computed(() => ({ portfolio: id.value, tenant: session.identity?.tenant, subject: session.identity?.subject }))
-const { data, error, loading } = usePortfolioRead(selection, ({ portfolio, tenant, subject }, signal) => {
+const refresh = ref(0)
+const selection = computed(() => ({ portfolio: id.value, tenant: session.identity?.tenant, subject: session.identity?.subject, refresh: refresh.value }))
+const { data, error, loading } = usePortfolioRead(selection, async ({ portfolio, tenant, subject }, signal) => {
   if (!tenant || !subject) throw new Error('Sign in to read order history.')
-  return risk.orders(portfolio, tenant, signal)
+  // Start the observation window before the read so a slow response cannot
+  // reset the age of the snapshot when it arrives.
+  const started = performance.now()
+  const requestedAt = new Date().toISOString()
+  const page = await risk.orders(portfolio, tenant, signal)
+  return { ...page, started, requestedAt }
 })
+
+// The age of the page is independent of any order's last effective time.
+const stale = ref(false)
+watch(data, (page, _, cleanup) => {
+  stale.value = false
+  if (!page) return
+  const remaining = 60_000 - (performance.now() - page.started)
+  if (remaining <= 0) {
+    stale.value = true
+    return
+  }
+  const timer = window.setTimeout(() => { stale.value = true }, remaining)
+  cleanup(() => window.clearTimeout(timer))
+}, { flush: 'sync' })
 
 const orders = computed<OrderSummary[]>(() => data.value?.orders ?? [])
 
@@ -77,10 +97,15 @@ function tone(o: OrderSummary): string {
     <code>{{ id }}</code>
   </p>
 
+  <button type="button" :disabled="loading" @click="refresh++">Refresh order history</button>
   <p v-if="loading">Loading…</p>
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
 
   <template v-else>
+    <p v-if="data" :class="stale ? 'state-warn' : 'muted'" :role="stale ? 'status' : undefined">
+      OMS history requested at <time :datetime="data.requestedAt">{{ data.requestedAt }}</time>.
+      <span v-if="stale">This snapshot is stale. Refresh to see subsequent order changes.</span>
+    </p>
     <!-- NOT A HINT. These orders are missing from the table below and cannot be
          retrieved by any page of it, so the count is part of the answer rather
          than a note about it. -->
@@ -108,7 +133,20 @@ function tone(o: OrderSummary): string {
           </td>
           <td>{{ o.instrument_id || '—' }}</td>
           <td>{{ enumLabel(o.side, 'SIDE_') }}</td>
-          <td :class="tone(o)">{{ enumLabel(o.status, 'ORDER_STATUS_') }}</td>
+          <td :class="o.quarantine ? 'state-warn' : tone(o)">
+            <template v-if="o.quarantine">
+              Remote outcome unknown · reconciliation required<br />
+              Last recorded status: {{ enumLabel(o.status, 'ORDER_STATUS_') }}<br />
+              Quarantined at <time :datetime="o.quarantine.at">{{ o.quarantine.at }}</time>
+              <template v-if="o.quarantine.last_query_at">
+                <br />Last venue query: <time :datetime="o.quarantine.last_query_at">{{ o.quarantine.last_query_at }}</time>
+              </template>
+            </template>
+            <template v-else>{{ enumLabel(o.status, 'ORDER_STATUS_') }}</template>
+            <template v-if="o.as_of">
+              <br />Effective at <time :datetime="o.as_of">{{ o.as_of }}</time>
+            </template>
+          </td>
           <td>{{ qty(o.ordered_quantity) }}</td>
           <td>{{ qty(o.filled_quantity) }}</td>
           <td>{{ qty(o.limit_price) }}</td>

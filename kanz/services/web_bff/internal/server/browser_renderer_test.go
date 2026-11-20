@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -52,6 +53,11 @@ func TestBrowserRendererProductionBundle(t *testing.T) {
 	canonical, err := marshal.Marshal(&orderpb.OrderState{
 		OrderId: "canonical", PortfolioId: "fixture", InstrumentId: "BTC-USD",
 		Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED,
+		AsOf: timestamppb.New(time.Unix(1_700_000_000, 0)),
+		Quarantine: &orderpb.OrderQuarantine{
+			At:          timestamppb.New(time.Unix(1_700_000_100, 0)),
+			LastQueryAt: timestamppb.New(time.Unix(1_700_000_105, 0)),
+		},
 		OrderedQuantity:  &commonpb.Decimal{Coefficient: 9007199254740993, Exponent: -2},
 		FilledQuantity:   &commonpb.Decimal{Coefficient: 25, Exponent: -2},
 		LimitPrice:       &commonpb.Decimal{Coefficient: 150, Exponent: -2},
@@ -102,7 +108,7 @@ func TestBrowserRendererProductionBundle(t *testing.T) {
 	if err := command.Run(); err != nil {
 		t.Fatal("actual browser renderer qualification failed")
 	}
-	if requests.Load() != 5 {
+	if requests.Load() != 6 {
 		t.Fatal("browser scenarios did not traverse the authenticated BFF")
 	}
 }
