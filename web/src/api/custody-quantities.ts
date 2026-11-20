@@ -12,7 +12,7 @@ export interface ExecutionQuantities {
   compared: number; unassessed: number; differences: QuantityDifference[]
 }
 
-function invalid(): never { throw new Error('Execution quantity evidence could not be verified.') }
+function invalid(): never { throw new Error('Execution comparison evidence could not be verified.') }
 
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return invalid()
@@ -122,4 +122,64 @@ export function readExecutionQuantities(value: unknown, statementReferences: str
     return { external_ref, instrument_id, ibor: measured(ibor), custodian: measured(custodian), difference: delta }
   })
   return { compared, unassessed, differences }
+}
+// All these figures are sealed by accounting on the original comparison.
+export const economicsMeasures = ['quantity', 'price', 'gross_cash', 'commission', 'net_cash', 'settled_cash'] as const
+export type EconomicsMeasure = typeof economicsMeasures[number]
+export type EconomicsStatus = 'equal' | 'mismatch' | 'unknown'
+type EconomicsFigures = Record<EconomicsMeasure, Required<Decimal>>
+type EconomicsRow = {
+  external_ref: string; instrument_id: string; convention: string; currency_code: string; entry_id: string
+  book_settlement_date: string; custodian_settlement_date: string; reason: string
+} & (
+  | { status: 'equal' | 'mismatch'; book: EconomicsFigures; custodian: EconomicsFigures; difference: EconomicsFigures }
+  | { status: 'unknown'; book?: never; custodian?: never; difference?: never }
+)
+export interface ExecutionEconomics { rows: EconomicsRow[]; unassessed_reason: string }
+
+export function readExecutionEconomics(value: unknown, referenceCount: string, summary: EconomicsStatus, businessDate: string): ExecutionEconomics {
+  const section = record(value)
+  if (!Array.isArray(section.rows) || section.rows.length > 128 || typeof section.unassessed_reason !== 'string') return invalid()
+  if (section.unassessed_reason) {
+    if (section.unassessed_reason !== 'row_limit' || BigInt(referenceCount) <= 128n || section.rows.length || summary !== 'unknown') return invalid()
+    return { rows: [], unassessed_reason: section.unassessed_reason }
+  }
+  if (String(section.rows.length) !== referenceCount) return invalid()
+  const utf8 = new TextEncoder()
+  let previous = new Uint8Array()
+  let bytes = 0
+  function text(field: unknown): string {
+    if (typeof field !== 'string' || field.length > receiptByteLimit || /\p{Cs}/u.test(field)) return invalid()
+    bytes += utf8.encode(field).length
+    if (bytes > receiptByteLimit) return invalid()
+    return field
+  }
+  function figures(value: unknown): EconomicsFigures {
+    const f = record(value)
+    return { quantity: measured(f.quantity), price: measured(f.price), gross_cash: measured(f.gross_cash),
+      commission: measured(f.commission), net_cash: measured(f.net_cash), settled_cash: measured(f.settled_cash) }
+  }
+  const rows: EconomicsRow[] = section.rows.map(item => {
+    const row = record(item)
+    const external_ref = text(row.external_ref)
+    const ref = utf8.encode(external_ref)
+    if (!precedes(previous, ref) || /^\p{White_Space}|\p{White_Space}$/u.test(external_ref)) return invalid()
+    previous = ref
+    const fields = { external_ref, instrument_id: text(row.instrument_id), convention: text(row.convention),
+      currency_code: text(row.currency_code), entry_id: text(row.entry_id), reason: text(row.reason),
+      book_settlement_date: text(row.book_settlement_date), custodian_settlement_date: text(row.custodian_settlement_date) }
+    if (row.status === 'unknown') {
+      if (!fields.reason || fields.entry_id || fields.book_settlement_date || fields.custodian_settlement_date || row.book !== undefined || row.custodian !== undefined || row.difference !== undefined) return invalid()
+      return { ...fields, status: 'unknown' }
+    }
+    if ((row.status !== 'equal' && row.status !== 'mismatch') || fields.reason || !fields.instrument_id || !fields.currency_code || !fields.entry_id ||
+        fields.convention !== 'unit_price_net_cash_same_currency_commission_v1' ||
+        fields.book_settlement_date !== businessDate || fields.custodian_settlement_date !== businessDate) return invalid()
+    const book = figures(row.book), custodian = figures(row.custodian), difference = figures(row.difference)
+    if ((row.status === 'equal') !== economicsMeasures.every(k => difference[k].coefficient === '0')) return invalid()
+    return { ...fields, status: row.status, book, custodian, difference }
+  })
+  const expected = rows.some(r => r.status === 'mismatch') ? 'mismatch' : rows.length && rows.every(r => r.status === 'equal') ? 'equal' : 'unknown'
+  if (expected !== summary) return invalid()
+  return { rows, unassessed_reason: '' }
 }

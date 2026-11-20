@@ -1,7 +1,7 @@
 import { api, auth, ApiError } from './client'
 import { users } from './users'
 import { downloadJson } from './evidence'
-import { readExecutionQuantities, readReportedFigures, type ReportedExecutionFigures, readQuantityResolutions, validCustodyRunID, type ExecutionQuantities, type QuantityResolution } from './custody-quantities'
+import { readExecutionEconomics, type ExecutionEconomics, type EconomicsStatus, readExecutionQuantities, readReportedFigures, type ReportedExecutionFigures, readQuantityResolutions, validCustodyRunID, type ExecutionQuantities, type QuantityResolution } from './custody-quantities'
 
 export interface CustodyDetection {
   run_id: string; statement_id: string; business_date: string
@@ -81,11 +81,11 @@ interface RetainedBreak {
   ibor: string; custodian: string; difference: string
 }
 type HistoricalComparison = { signed_statement_sha256: string; reported_execution_figures?: ReportedExecutionFigures } & (
-  | { breaks: RetainedBreak[]; execution_quantities?: ExecutionQuantities; historical_quantity_resolutions?: never }
-  | { historical_quantity_resolutions: QuantityResolution[]; breaks?: never; execution_quantities?: never }
+  | { breaks: RetainedBreak[]; execution_economics?: ExecutionEconomics; execution_quantities?: ExecutionQuantities; historical_quantity_resolutions?: never }
+  | { historical_quantity_resolutions: QuantityResolution[]; execution_economics?: never; breaks?: never; execution_quantities?: never }
 )
 
-function signedStatement(value: unknown): value is string {
+export function signedStatement(value: unknown): value is string {
   return typeof value === 'string' && /^custody-batch\.v1\.[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.r[1-9]\d{0,18}\.[a-f0-9]{64}$/.test(value)
 }
 
@@ -118,7 +118,7 @@ function isPendingReason(reason: unknown): reason is PendingReason {
 
 export type DatedCustodyResult = CustodySubject & { tenant_id: string } & (
   | { state: 'not_compared' | 'pending' | 'unknown'; statement_id?: string; reason?: PendingReason; historical_quantity_correction_run_id?: string }
-  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; account_assignment_verified?: true; transactions?: TransactionComparison; historical?: HistoricalComparison }
+  | { state: 'recorded'; outcome: CustodyRerunReceipt['outcome']; run_id: string; completed_at: string; statement_id?: string; scope_mode?: string; journal_position?: string; account_assignment_verified?: true; transactions?: TransactionComparison; execution_economics_status?: EconomicsStatus; historical?: HistoricalComparison }
 )
 
 function comparisonArtifact(receipt: Extract<DatedCustodyResult, { state: 'recorded' }>) {
@@ -214,6 +214,13 @@ export const custody = {
       } else throw invalid()
     } else if (result.transaction_pass !== undefined) throw invalid()
     if (transactions?.transaction_pass !== 'ran' && referenceCounts.some(key => result[key] !== undefined)) throw invalid()
+    const economics = result.execution_economics_status
+    if (economics !== undefined && ((economics !== 'unknown' && economics !== 'equal' && economics !== 'mismatch') ||
+        !verified || result.account_assignment_verified !== true || transactions?.transaction_pass !== 'ran' || !signedStatement(result.statement_id))) throw invalid()
+    if (result.execution_economics !== undefined) {
+      if (economics === undefined || !historical?.breaks || transactions?.transaction_pass !== 'ran') throw invalid()
+      historical.execution_economics = readExecutionEconomics(result.execution_economics, transactions.statement_reference_count, economics, subject.business_date)
+    } else if (historical && economics !== undefined) throw invalid()
     if (result.execution_quantities !== undefined) {
       if (!historical || transactions?.transaction_pass !== 'ran') throw invalid()
       historical.execution_quantities = readExecutionQuantities(result.execution_quantities, transactions.statement_reference_count, transactions.book_reference_count)
@@ -230,10 +237,10 @@ export const custody = {
         if (!historical || correction || result.account_assignment_verified !== true || transactions?.transaction_pass !== 'ran') throw invalid()
         historical.reported_execution_figures = readReportedFigures(result.reported_execution_figures, historical.signed_statement_sha256, transactions.statement_reference_count)
       }
-      const receipt = { ...scope, state: 'recorded' as const, outcome: result.outcome as CustodyRerunReceipt['outcome'], run_id: result.run_id,
+      const receipt: Extract<DatedCustodyResult, { state: 'recorded' }> = { ...scope, state: 'recorded', outcome: result.outcome as CustodyRerunReceipt['outcome'], run_id: result.run_id,
         completed_at: result.completed_at, statement_id: result.statement_id as string | undefined,
         scope_mode: result.scope_mode as string | undefined, journal_position: result.journal_position as string | undefined,
-        account_assignment_verified: result.account_assignment_verified as true | undefined, transactions, historical }
+        account_assignment_verified: result.account_assignment_verified as true | undefined, transactions, ...(economics !== undefined && { execution_economics_status: economics }), historical }
       if (historical?.reported_execution_figures && new TextEncoder().encode(JSON.stringify(comparisonArtifact(receipt), null, 2)).length > (1 << 20)) {
         throw new ReportedFiguresExportLimit(historical.signed_statement_sha256)
       }

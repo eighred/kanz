@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onUnmounted, reactive, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
-import { custody, downloadCustodyComparison, previousStatementPrefix, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
+import { custody, downloadCustodyComparison, previousStatementPrefix, signedStatement, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
+import CustodyExecutionEconomics from './CustodyExecutionEconomics.vue'
 import { ApiError } from '../api/client'
 import { formatDecimal } from '../api/decimal'
 
@@ -23,7 +24,7 @@ watch(subject, clear, { flush: 'sync' })
 watch(savedRun, clear, { flush: 'sync' })
 watch(() => session.identity, () => { clear(); savedRun.value = ''; Object.assign(subject, { portfolio_id: '', custodian_id: '', business_date: '' }) }, { deep: true, flush: 'sync' })
 onUnmounted(clear)
-async function read(correctionStatement?: string, projection: boolean | 'previous' = false) {
+async function read(correctionStatement?: string, projection: boolean | 'previous' = false, expectedStatement?: string) {
   if (pending.value || !session.identity) return
   const request = new AbortController()
   active = request
@@ -37,6 +38,7 @@ async function read(correctionStatement?: string, projection: boolean | 'previou
     const priorLookup = projection === 'previous' && previous?.state === 'recorded' && previous.statement_id
     const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal,
       priorLookup ? previous.run_id : savedRun.value, priorLookup ? { previousOf: priorLookup } : reportedFigures)
+    if (expectedStatement && (dated.state !== 'recorded' || !dated.historical || dated.statement_id !== expectedStatement)) throw new Error('Original statement changed.')
     if (correctionStatement && (dated.state !== 'recorded' || dated.outcome !== 'historical_quantity_correction' ||
         dated.statement_id !== correctionStatement)) throw new Error('Correction source changed.')
     if (reportedFigures && (!previousDigest || dated.state !== 'recorded' ||
@@ -57,6 +59,13 @@ async function read(correctionStatement?: string, projection: boolean | 'previou
       ? 'Access to this dated result is unavailable.' : 'Unable to verify the dated result.'
   } finally { if (!request.signal.aborted) pending.value = false }
 }
+function openOriginal() {
+  const current = result.value
+  if (current?.state !== 'recorded' || !current.account_assignment_verified || !signedStatement(current.statement_id)) return
+  savedRun.value = current.run_id
+  void read(undefined, false, current.statement_id)
+}
+const economicsLabel = { equal: 'Execution economics agree', mismatch: 'Execution economics differ', unknown: 'Execution economics unknown' }
 function openCorrection() {
   const current = result.value
   if (current?.state !== 'pending' || !current.historical_quantity_correction_run_id || !current.statement_id) return
@@ -99,6 +108,7 @@ const pendingLabels = {
         <span v-if="result.outcome === 'clean' || result.outcome === 'breaks'">
           · {{ result.account_assignment_verified ? 'Custody account assignment verified for this close' : 'Custody account assignment unverified for this close' }}
         </span>
+        <span v-if="result.execution_economics_status"> · <strong>{{ economicsLabel[result.execution_economics_status] }}</strong> for the signed references</span>
         <span v-if="result.transactions?.transaction_pass === 'ran'">
           · Independent reference comparison · Statement references {{ result.transactions.statement_reference_count }}
           · Book references {{ result.transactions.book_reference_count }}
@@ -109,6 +119,8 @@ const pendingLabels = {
         <span v-else-if="result.transactions?.transaction_pass === 'unknown'"> · Transaction coverage unknown</span>
       </template>
     </output>
+    <button v-if="result?.state === 'recorded' && !result.historical && result.account_assignment_verified && signedStatement(result.statement_id)"
+      type="button" @click="openOriginal">View original comparison receipt</button>
     <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
     <button v-if="result?.state === 'recorded' && result.outcome === 'clean' && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
       type="button" @click="read(undefined, 'previous')">View previous statement comparison</button>
@@ -116,9 +128,10 @@ const pendingLabels = {
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
       <button v-if="result.account_assignment_verified && result.transactions?.transaction_pass === 'ran' && !result.historical.reported_execution_figures"
         type="button" @click="read(undefined, true)">View custodian-reported price and cash</button>
+      <CustodyExecutionEconomics v-if="result.historical.execution_economics" :comparison="result.historical.execution_economics" />
       <section v-if="result.historical.reported_execution_figures" aria-label="Custodian-reported execution figures">
         <h3>Custodian-reported price and cash</h3>
-        <p>These figures come from the signed statement above. The currency shown applies to cash. Execution prices, cash and fees have no independent book comparison in this receipt.</p>
+        <p>These figures come from the signed statement above. The currency shown applies to cash. <template v-if="!result.historical.execution_economics">Execution prices, cash and fees have no independent book comparison in this receipt.</template></p>
         <table v-if="result.historical.reported_execution_figures.rows.length" aria-label="Reported execution figures">
           <thead><tr><th scope="col">Execution reference</th><th scope="col">Instrument</th><th scope="col">Reported unit price</th>
             <th scope="col">Reported signed cash</th><th scope="col">Cash currency</th></tr></thead>
@@ -133,7 +146,7 @@ const pendingLabels = {
         <h3>Execution quantities</h3>
         <p>Matched references compared: {{ result.historical.execution_quantities.compared }} · Unassessed: {{ result.historical.execution_quantities.unassessed }}.</p>
         <p v-if="result.historical.execution_quantities.unassessed">Some matched references lack comparable quantity evidence.</p>
-        <p>Quantities use each instrument’s natural units. Trade prices and cash amounts remain unverified.</p>
+        <p>Quantities use each instrument’s natural units. <template v-if="!result.historical.execution_economics">Trade prices and cash amounts remain unverified.</template></p>
         <table v-if="result.historical.execution_quantities.differences.length" aria-label="Execution quantity differences">
           <thead><tr><th scope="col">Execution reference</th><th scope="col">Instrument</th><th scope="col">Book</th>
             <th scope="col">Custodian</th><th scope="col">Book minus custodian</th></tr></thead>
