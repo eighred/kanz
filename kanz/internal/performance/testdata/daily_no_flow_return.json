@@ -1,0 +1,13 @@
+[
+  {"name":"two_percent","opening":"100","closing":"102","flow_count":0,"fraction":"1/50"},
+  {"name":"measured_zero","opening":"100","closing":"100","flow_count":0,"fraction":"0"},
+  {"name":"negative_return","opening":"100","closing":"95","flow_count":0,"fraction":"-1/20"},
+  {"name":"fractional_money","opening":"125/4","closing":"255/8","flow_count":0,"fraction":"1/50"},
+  {"name":"small_money_change","opening":"9007199254740992","closing":"9007199254740993","flow_count":0,"fraction":"1/9007199254740992"},
+  {"name":"unknown_flow_coverage","opening":"100","closing":"100","flow_count":null,"fraction":null},
+  {"name":"offsetting_flows","opening":"100","closing":"100","flow_count":2,"fraction":null},
+  {"name":"missing_open","opening":null,"closing":"100","flow_count":0,"fraction":null},
+  {"name":"missing_close","opening":"100","closing":null,"flow_count":0,"fraction":null},
+  {"name":"zero_base","opening":"0","closing":"102","flow_count":0,"fraction":null},
+  {"name":"negative_base","opening":"-100","closing":"102","flow_count":0,"fraction":null}
+]

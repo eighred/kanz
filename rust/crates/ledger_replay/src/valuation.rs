@@ -37,6 +37,29 @@ pub struct Valuation {
     pub local_exposure: BTreeMap<String, Rat>,
 }
 
+/// Exact fractional return for two NAVs in the same currency over one close-to-close
+/// day. The caller verifies the dated NAVs, their common knowledge horizon and
+/// coverage of the external-flow source. Only its confirmed count of zero
+/// qualifies. An unknown count, any flow, a missing NAV or a nonpositive opening
+/// NAV yields no result. Equal NAVs under complete coverage yield Some(0).
+pub fn daily_return_without_external_flows(
+    opening: Option<&Rat>,
+    closing: Option<&Rat>,
+    confirmed_flow_count: Option<u64>,
+) -> Result<Option<Rat>, Error> {
+    let (Some(opening), Some(closing), Some(0)) = (opening, closing, confirmed_flow_count) else {
+        return Ok(None);
+    };
+    bound(opening)?;
+    bound(closing)?;
+    if !opening.is_positive() {
+        return Ok(None);
+    }
+    let relative = (closing - opening) / opening;
+    bound(&relative)?;
+    Ok(Some(relative))
+}
+
 struct Converter<'a> {
     reporting: &'a str,
     rates: &'a Quotes,
