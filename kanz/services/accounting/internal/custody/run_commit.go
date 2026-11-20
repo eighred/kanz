@@ -103,7 +103,7 @@ func (run Run) requiresBoundedReceipt() bool {
 		run.ExecutionQuantities != nil || run.ExecutionEconomics != nil || len(run.HistoricalQuantityResolutions) > 0
 }
 
-func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, error) {
+func runRecord(ctx context.Context, tenant string, run Run, checks ...func(context.Context, bus.Event) error) (outbox.Record, error) {
 	msg, err := runToProto(run)
 	if err != nil {
 		return outbox.Record{}, err
@@ -113,11 +113,20 @@ func runRecord(ctx context.Context, tenant string, run Run) (outbox.Record, erro
 	if run.requiresBoundedReceipt() && (len(msg.Breaks) > historicalBreakLimit || len(run.HistoricalQuantityResolutions) > historicalBreakLimit || proto.Size(msg) > BatchLimit) {
 		return outbox.Record{}, errRunReceiptLimit
 	}
-	return outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
+	record, err := outbox.From(ctx, bus.Event{Subject: SubjectRun, EventType: SubjectRun,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
 		TenantID: tenant, EventTime: run.CompletedAt, CorrelationID: run.RunID, CausationID: run.RequestID,
 		PartitionKey:     pairKey(run.Subject.PortfolioID, run.Subject.CustodianID),
 		PayloadSchemaRef: schemaRefRun, Payload: msg})
+	if err != nil {
+		return outbox.Record{}, err
+	}
+	for _, check := range checks {
+		if err := record.PreflightPublication(ctx, check); err != nil {
+			return outbox.Record{}, err
+		}
+	}
+	return record, nil
 }
 
 func cloneRun(run Run) Run {
@@ -148,7 +157,7 @@ func NewMemoryStoreWithOutbox(queue *outbox.Memory) (*MemoryStore, error) {
 	return m, nil
 }
 
-func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
+func (m *MemoryStore) CommitRun(ctx context.Context, run Run, checks ...func(context.Context, bus.Event) error) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if ref, ok := m.runIDs[run.RunID]; ok {
@@ -212,7 +221,7 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		run.Breaks = breaksForSubject(stored, run.Subject)
 	}
-	record, err := runRecord(ctx, bus.TenantIDFromContext(ctx), run)
+	record, err := runRecord(ctx, bus.TenantIDFromContext(ctx), run, checks...)
 	if err != nil {
 		return Run{}, err
 	}
@@ -224,7 +233,7 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	return cloneRun(run), nil
 }
 
-func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
+func (p *Postgres) CommitRun(ctx context.Context, run Run, checks ...func(context.Context, bus.Event) error) (Run, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	// Re-read the admitted set after the tenant assignment lock is acquired.
@@ -483,7 +492,7 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			run.Breaks = breaksForSubject(stored, run.Subject)
 		}
 	}
-	record, err := runRecord(ctx, tenant, run)
+	record, err := runRecord(ctx, tenant, run, checks...)
 	if err != nil {
 		return Run{}, err
 	}

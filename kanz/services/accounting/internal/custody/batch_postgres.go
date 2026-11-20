@@ -19,6 +19,7 @@ type BatchImporter struct {
 	verify         batchVerifier
 	pool           *pgxpool.Pool
 	relay          *outbox.Relay
+	preflight      func(context.Context, bus.Event) error
 	retentionLimit int64
 }
 
@@ -30,11 +31,11 @@ func NewBatchImporter(a BatchAuthority, tenant string, pairs []string, accounts 
 	if err != nil {
 		return nil, err
 	}
-	relay, err := outbox.NewRelay(outbox.NewPostgres(pool, BatchProducer), publisher, logger)
+	relay, err := outbox.NewRelay(outbox.NewPostgres(pool, outbox.ServiceCustodyBatch), publisher, logger)
 	if err != nil {
 		return nil, err
 	}
-	return &BatchImporter{verify: v, pool: pool, relay: relay, retentionLimit: BatchRetentionLimit}, nil
+	return &BatchImporter{verify: v, pool: pool, relay: relay, preflight: custodyPublicationCheck(publisher), retentionLimit: BatchRetentionLimit}, nil
 }
 
 // Import commits the original signed record and queues one canonical statement.
@@ -74,7 +75,11 @@ func (i *BatchImporter) Import(ctx context.Context, raw, signature []byte) (stri
 			return "", errors.New("custody batch: conflicting immutable revision")
 		}
 	case errors.Is(err, pgx.ErrNoRows):
-		if err = i.append(ctx, tx, b, raw, signature, day); err != nil {
+		record, err := i.append(ctx, tx, b, raw, signature, day)
+		if err != nil {
+			return "", err
+		}
+		if err := outbox.Enqueue(ctx, tx, outbox.ServiceCustodyBatch, record); err != nil {
 			return "", err
 		}
 	default:
@@ -93,47 +98,50 @@ func batchLockKey(tenant, portfolio, custodian string) string {
 	return fmt.Sprintf("custody-batch/%s/%s/%s", tenant, portfolio, custodian)
 }
 
-func (i *BatchImporter) append(ctx context.Context, tx pgx.Tx, b batchInput, raw, signature []byte, day string) error {
+func (i *BatchImporter) append(ctx context.Context, tx pgx.Tx, b batchInput, raw, signature []byte, day string) (outbox.Record, error) {
 	a := i.verify.authority
 	var revision int64
 	var digest, source, account string
 	var last time.Time
 	err := tx.QueryRow(ctx, `SELECT revision,sha256,source_id,account_id,received_at FROM custody_batch_receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND custodian_id=$3 AND business_date=$4::text::date ORDER BY revision DESC LIMIT 1`, a.Tenant, a.Portfolio, a.Custodian, day).Scan(&revision, &digest, &source, &account, &last)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
+		return outbox.Record{}, err
 	}
 	if b.header.Revision-1 != revision || b.header.Previous != digest || revision > 0 && (source != a.Source || account != a.Account) {
-		return errors.New("custody batch: previous signed source revision missing or different")
+		return outbox.Record{}, errors.New("custody batch: previous signed source revision missing or different")
 	}
 	var retained int64
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(octet_length(signed_batch)),0) FROM custody_batch_receipts
 		WHERE tenant_id=$1 AND portfolio_id=$2 AND custodian_id=$3 AND account_id=$4`,
 		a.Tenant, a.Portfolio, a.Custodian, a.Account).Scan(&retained); err != nil {
-		return err
+		return outbox.Record{}, err
 	}
 	if retained+int64(len(raw)) > i.retentionLimit {
-		return errors.New("custody batch: signed account retention limit reached")
+		return outbox.Record{}, errors.New("custody batch: signed account retention limit reached")
 	}
 	var received time.Time
 	if err = tx.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&received); err != nil {
-		return err
+		return outbox.Record{}, err
 	}
 	if !received.After(last) {
-		return errors.New("custody batch: database receipt clock has not advanced")
+		return outbox.Record{}, errors.New("custody batch: database receipt clock has not advanced")
 	}
 	if err = b.stamp(received); err != nil {
-		return err
+		return outbox.Record{}, err
 	}
 	record, err := outbox.From(ctx, bus.Event{Subject: SubjectStatement, EventType: SubjectStatement, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT,
 		SchemaVersion: 1, Domain: "accounting", TenantID: a.Tenant, EventTime: received, PartitionKey: a.Portfolio, PayloadSchemaRef: schemaRefStatement, Payload: b.statement})
 	if err != nil {
-		return err
+		return outbox.Record{}, err
+	}
+	if err := record.PreflightPublication(ctx, i.preflight); err != nil {
+		return outbox.Record{}, fmt.Errorf("custody batch: statement frame: %w", err)
 	}
 	wireDigest := sha256.Sum256(record.Payload)
 	_, err = tx.Exec(ctx, `INSERT INTO custody_batch_receipts (portfolio_id,custodian_id,account_id,source_id,business_date,revision,previous_sha256,sha256,public_key,signature,signed_batch,received_at,statement_id,wire_sha256)
 		VALUES($1,$2,$3,$4,$5::text::date,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, a.Portfolio, a.Custodian, a.Account, a.Source, day, b.header.Revision, b.header.Previous, b.digest, []byte(i.verify.key), signature, raw, received, b.statement.StatementId, wireDigest[:])
 	if err != nil {
-		return err
+		return outbox.Record{}, err
 	}
-	return outbox.Enqueue(ctx, tx, BatchProducer, record)
+	return record, nil
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/outbox"
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -25,7 +26,7 @@ const BatchLimit = 1 << 20
 
 // The pilot retains at most 16 MiB of signed material per declared custody account.
 const BatchRetentionLimit = 16 << 20
-const BatchProducer = "custody-batch"
+const BatchProducer = outbox.ServiceCustodyBatch
 const BatchInbox = "_INBOX.custody_batch"
 
 const batchStatementPrefix = "custody-batch.v1."

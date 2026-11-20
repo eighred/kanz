@@ -251,7 +251,7 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 	if e.Payload == nil {
 		return errors.New("bus: Event.Payload required")
 	}
-	env, err := p.stamp(ctx, e)
+	env, err := p.stamp(ctx, e, time.Now().UTC(), p.nextSequence)
 	if err != nil {
 		return err
 	}
@@ -277,12 +277,20 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 			return fmt.Errorf("command issuer verification: %w", err)
 		}
 	}
+	msg, err := framedMessage(e, env, payloadBytes)
+	if err != nil {
+		return err
+	}
+	return p.client.Publish(ctx, msg)
+}
+
+func framedMessage(e Event, env *envelopepb.Envelope, payloadBytes []byte) (Message, error) {
 	body, err := proto.Marshal(&envelopepb.EventFrame{
 		Envelope: env,
 		Payload:  payloadBytes,
 	})
 	if err != nil {
-		return fmt.Errorf("frame marshal: %w", err)
+		return Message{}, fmt.Errorf("frame marshal: %w", err)
 	}
 	// NATS JetStream keys its broker-side dedup window on Nats-Msg-Id
 	// (EVT-08); Kafka treats this as an ordinary user header (harmless).
@@ -295,15 +303,15 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 	if e.ExpectedLastSubjectSeq != nil {
 		headers[headerExpectedLastSubjectSeq] = strconv.FormatUint(*e.ExpectedLastSubjectSeq, 10)
 	}
-	return p.client.Publish(ctx, Message{
+	return Message{
 		Subject: e.Subject,
 		Key:     []byte(env.PartitionKey),
 		Body:    body,
 		Headers: headers,
-	})
+	}, nil
 }
 
-func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, error) {
+func (p *Producer) stamp(ctx context.Context, e Event, now time.Time, nextSequence func(string, string) uint64) (*envelopepb.Envelope, error) {
 	if e.EventTime.IsZero() {
 		return nil, errors.New("Event.EventTime required")
 	}
@@ -321,7 +329,6 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 		}
 	}
 
-	now := time.Now().UTC()
 	ing := e.IngestionTime
 	if ing.IsZero() {
 		ing = now
@@ -375,7 +382,7 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 		tenant = p.cfg.Tenant
 	}
 
-	seq := p.nextSequence(e.EventType, e.PartitionKey)
+	seq := nextSequence(e.EventType, e.PartitionKey)
 
 	return &envelopepb.Envelope{
 		EventId:          eventID,

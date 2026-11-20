@@ -256,6 +256,7 @@ func stateResidue(logger *slog.Logger, subject Subject, basis string, residue le
 // would not materialize" indistinguishably. Each of those is now a different
 // outcome on a FACT with a timestamp.
 type Reconciler struct {
+	preflight func(context.Context, bus.Event) error
 	store     Store
 	book      BookLoader
 	relay     *outbox.Relay
@@ -304,9 +305,20 @@ func NewReconciler(store Store, book BookLoader, publisher Publisher, tolerance 
 		}
 	}
 	return &Reconciler{
-		store: store, book: book,
+		store: store, book: book, preflight: custodyPublicationCheck(publisher),
 		relay: relay, tolerance: tolerance, metrics: metrics, logger: logger, now: now,
 	}, nil
+}
+
+// Real NATS publishers validate the final frame before any new receipt commits.
+func custodyPublicationCheck(publisher Publisher) func(context.Context, bus.Event) error {
+	checker, ok := publisher.(interface {
+		PreflightNATSFact(context.Context, bus.Event) error
+	})
+	if !ok {
+		return nil
+	}
+	return checker.PreflightNATSFact
 }
 
 // Reconcile performs the reconciliation for one subject and records the run.
@@ -410,6 +422,9 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 	run.Breaks = FromRecon(subject, detected, now)
 	stored, err := r.record(ctx, run)
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
+		if errors.Is(err, bus.ErrPublishCapacityUnknown) {
+			return Run{}, err
+		}
 		// Retry a signed comparison invalidated by a statement or book change,
 		// or by a concurrent writer still holding its commit lock.
 		if isBatchStatement(run.StatementID) && (errors.Is(err, ErrStatementChanged) || errors.Is(err, ErrBookBasisChanged) || errors.Is(err, ErrRunBusy)) {
@@ -417,7 +432,9 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 		}
 		// Transient contention or invalidated observations must not consume an
 		// operator's idempotency key as a permanently failed comparison.
-		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) && !errors.Is(err, errBatchReceipt) && !errors.Is(err, errRunReceiptLimit) {
+		terminal := errors.Is(err, ErrHistoricalLifecycle) || errors.Is(err, errBatchReceipt) ||
+			errors.Is(err, errRunReceiptLimit) || errors.Is(err, bus.ErrPublishFrameTooLarge)
+		if run.RequestID != "" && !terminal {
 			return Run{}, err
 		}
 		return r.recordFailure(ctx, run, fmt.Errorf("commit reconciliation: %w", err))
@@ -469,6 +486,8 @@ func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (
 		run.FailureReason = ErrHistoricalLifecycle.Error()
 	} else if errors.Is(reason, errBatchReceipt) {
 		run.FailureReason = errBatchReceipt.Error()
+	} else if errors.Is(reason, bus.ErrPublishFrameTooLarge) {
+		run.FailureReason = bus.ErrPublishFrameTooLarge.Error()
 	}
 	run, err := r.record(ctx, run)
 	if err != nil {
@@ -485,7 +504,7 @@ func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (
 // recovery can leave this timestamp conservative until the next successful run;
 // a queued completion must never imply that the estate already received it.
 func (r *Reconciler) record(ctx context.Context, run Run) (Run, error) {
-	stored, err := r.store.CommitRun(ctx, run)
+	stored, err := r.store.CommitRun(ctx, run, r.preflight)
 	if err != nil {
 		if run.RequestID != "" {
 			return Run{}, fmt.Errorf("custody: commit manual run: %w", err)

@@ -295,11 +295,8 @@ func (r Record) Event() (bus.Event, error) {
 	if err := proto.Unmarshal(r.Payload, msg); err != nil {
 		return bus.Event{}, fmt.Errorf("outbox: decode %s payload as %s: %w", r.EventType, name, err)
 	}
-	// EVERY LINEAGE FIELD IS SET EXPLICITLY. bus.Event's explicit fields beat
-	// ctx (producer.go stamp()), and the relay's ctx belongs to the relay — it
-	// carries no correlation, no causation and no tenant of its own. Leaving one
-	// empty here would not error; it would publish a FACT that validates and is
-	// simply detached from the command that caused it.
+	// Restore the lineage captured with the decision. publicationContext keeps
+	// an empty stored field from inheriting the command that drains the queue.
 	return bus.Event{
 		Subject:          r.Subject,
 		EventType:        r.EventType,
@@ -315,6 +312,27 @@ func (r Record) Event() (bus.Event, error) {
 		TenantID:         r.TenantID,
 		Payload:          msg,
 	}, nil
+}
+
+// An inline flush can deliver an older record under an unrelated command.
+// Keep cancellation, deadlines and the active telemetry span for this attempt.
+func publicationContext(ctx context.Context) context.Context {
+	ctx = bus.WithCorrelationID(ctx, "")
+	ctx = bus.WithCausationID(ctx, "")
+	return bus.WithTraceContext(ctx, "")
+}
+
+// PreflightPublication checks the event the relay will reconstruct before its
+// owner commits the record. A nil check leaves existing store callers unchanged.
+func (r Record) PreflightPublication(ctx context.Context, check func(context.Context, bus.Event) error) error {
+	if check == nil {
+		return nil
+	}
+	event, err := r.Event()
+	if err != nil {
+		return err
+	}
+	return check(publicationContext(ctx), event)
 }
 
 // Queue is the drain surface the relay needs. Postgres is the production
