@@ -94,7 +94,7 @@ describe('custody response boundary', () => {
     const result = await read()
     expect(get.mock.calls[0]?.[0]).toContain('run_id=old%2Brun%3A1')
     expect(result.state === 'recorded' && result.historical?.breaks).toEqual([row])
-    for (const patch of [{ run_id: 'other' }, { signed_statement_sha256: 'b'.repeat(64) }, { transaction_pass: undefined },
+    for (const patch of [{ run_id: 'other' }, { signed_statement_sha256: 'b'.repeat(64) }, { statement_id: 'unrelated.' + digest }, { transaction_pass: undefined },
       { outcome: 'clean' }, { breaks: [] }, { breaks: [row, row] }, { breaks: [{ ...row, ibor: 10.5 }] }, { breaks: [{ ...row, values_state: 'unavailable' }] }]) {
       get.mockResolvedValueOnce({ ...wire, ...patch })
       await expect(read()).rejects.toThrow('verified')

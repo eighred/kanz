@@ -117,7 +117,7 @@ async function main() {
               if (outcome === 'breaks') {
                 assert.equal(receipt.breaks.length, 1)
                 const row = receipt.breaks[0]
-                for (const k of ['break_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(row[k], prior[k])
+                for (const k of ['break_id', 'kind', 'key', 'ibor', 'custodian', 'difference']) assert.equal(row[k], prior[k])
                 assert.equal(row.values_state, 'exact')
                 const history = region.getByRole('table', { name: 'Differences at comparison' })
                 const values = history.getByRole('row').filter({ has: page.getByRole('rowheader', { name: prior.break_id, exact: true }) })
