@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal/recon"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -17,6 +18,17 @@ type DatedResult struct {
 	Reason      string
 	StatementID string
 	Run         Run
+}
+
+func (p TransactionComparison) matches(stmt Statement) bool {
+	switch stmt.Grain {
+	case recon.GrainBalancesOnly:
+		return p.Pass == recon.LegBalancesOnly.String() && p.StatementReferences == nil && p.BookReferences == nil && p.UnreferencedBookTrades == nil
+	case recon.GrainTransactions:
+		return p.Pass == recon.LegRan.String() && p.StatementReferences != nil && *p.StatementReferences == len(stmt.Transactions) &&
+			p.BookReferences != nil && *p.BookReferences >= 0 && p.UnreferencedBookTrades != nil && *p.UnreferencedBookTrades >= 0
+	}
+	return false
 }
 
 func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResult, error) {
@@ -81,8 +93,9 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
             CASE WHEN NOT compared THEN completed_at END DESC NULLS LAST
         FETCH FIRST 1 ROW WITH TIES
     ) SELECT run_id,outcome,completed_at,book_basis,signed_statement_sha256,
-        (SELECT bool_and(values_verified) AND count(DISTINCT (outcome,tolerance,signed_statement_sha256,book_basis->>'mode',book_basis->'accounts'->$2))=1 FROM best)
-        FROM best ORDER BY completed_at DESC,run_id LIMIT 1`
+        (SELECT bool_and(values_verified) AND count(DISTINCT (outcome,tolerance,signed_statement_sha256,book_basis->>'mode',book_basis->'accounts'->$2))=1
+          AND count(DISTINCT book_basis->'transactions')<=1 FROM best)
+        FROM best ORDER BY (book_basis->'transactions' IS NOT NULL) DESC,completed_at DESC,run_id LIMIT 1`
 	var run Run
 	var outcome string
 	var binding []byte
@@ -142,6 +155,9 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		}
 		if changed {
 			return DatedResult{State: "pending", StatementID: id, Reason: "journal_changed"}, nil
+		}
+		if proof := run.Basis.Transactions; proof != nil && !proof.matches(materialized) {
+			return DatedResult{State: "unknown"}, nil
 		}
 		run.compared = nil
 	}

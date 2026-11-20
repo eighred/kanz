@@ -136,6 +136,10 @@ type CustodyBasis struct {
 	// separates them.
 	Unreferenced int
 
+	// Counts for the UTC custody date of the effective cutoff. Earlier trades still
+	// contribute to the balance, but cannot stand for references compared that day.
+	DayReferenced, DayUnreferenced int
+
 	// Accounts is the exchange-account scope actually folded — declared for
 	// MaterializeForAccounts, derived from the journal for MaterializeAttributed.
 	Accounts AccountScope
@@ -147,7 +151,7 @@ type CustodyBasis struct {
 	Residue UnattributedResidue
 }
 
-// executionsOf builds the transaction grain of a set of kept entries.
+// collectExecutions builds the transaction grain of a set of kept entries.
 //
 // DEDUPED ON EntryID the way Book.Apply is, and for the same reason: the journal
 // legitimately returns a restated entry alongside the original, and counting both
@@ -157,10 +161,10 @@ type CustodyBasis struct {
 //
 // The entries are expected in the fold's canonical order, so the copy that wins a
 // duplicate is the same one Book.Apply folded.
-func executionsOf(kept []*Event) ([]Execution, int) {
+func (basis *CustodyBasis) collectExecutions(kept []*Event, cutoff time.Time) {
 	seen := make(map[string]bool, len(kept))
 	out := make([]Execution, 0, len(kept))
-	unreferenced := 0
+	day := (Execution{TradeDate: cutoff}).CustodyDate()
 	for _, e := range kept {
 		if e == nil || e.EntryID == "" || seen[e.EntryID] {
 			continue
@@ -175,15 +179,22 @@ func executionsOf(kept []*Event) ([]Execution, int) {
 			// which is the queue an operations team stops reading.
 			continue
 		}
+		onDate := (Execution{TradeDate: e.Effective, SettlementDate: e.SettlementDate}).CustodyDate().Equal(day)
 		if e.SourceRef == "" {
 			// Only an entry that MOVES something is a missing execution when it
 			// is missing: a bookkeeping artefact with no legs is not a trade the
 			// custodian should have reported, and counting it would make the
 			// unreferenced figure unreadable.
 			if movesValue(e) {
-				unreferenced++
+				basis.Unreferenced++
+				if onDate {
+					basis.DayUnreferenced++
+				}
 			}
 			continue
+		}
+		if onDate {
+			basis.DayReferenced++
 		}
 		out = append(out, Execution{
 			Ref:             e.SourceRef,
@@ -205,7 +216,7 @@ func executionsOf(kept []*Event) ([]Execution, int) {
 		}
 		return out[i].EntryID < out[j].EntryID
 	})
-	return out, unreferenced
+	basis.Executions = out
 }
 
 func cloneRat(r *big.Rat) *big.Rat {

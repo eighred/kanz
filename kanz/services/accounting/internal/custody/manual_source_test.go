@@ -21,6 +21,22 @@ import (
 // the exact emitted bytes. Each call advances the same source revision chain.
 func manualSignedFeed(t *testing.T, ctx context.Context, st *Postgres) func(int, int) string {
 	t.Helper()
+	write := signedStatementFeed(t, ctx, st)
+	return func(qty, cash int) string {
+		position, currencies := "[]", "[]"
+		if qty != 0 {
+			position = fmt.Sprintf(`[{"instrumentId":"AAPL","quantity":{"coefficient":"%d"}}]`, qty)
+		}
+		if cash != 0 {
+			currencies = fmt.Sprintf(`[{"currencyCode":"USD","balance":{"coefficient":"%d"}}]`, cash)
+		}
+		stmt := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":"%s","positions":%s,"cash":%s,"transactions":[],"grain":"STATEMENT_GRAIN_BALANCES_ONLY"}`, BusinessDay(t0).Format(time.RFC3339), position, currencies))
+		return write(stmt)
+	}
+}
+
+func signedStatementFeed(t *testing.T, ctx context.Context, st *Postgres) func(json.RawMessage) string {
+	t.Helper()
 	tenant := bus.TenantIDFromContext(ctx)
 	a, key := exampleAuthority(t, tenant)
 	a.Account, a.Instruments = "ACC1", []string{"AAPL"}
@@ -33,16 +49,8 @@ func manualSignedFeed(t *testing.T, ctx context.Context, st *Postgres) func(int,
 		t.Fatal(err)
 	}
 	revision, previous := int64(0), ""
-	return func(qty, cash int) string {
+	return func(stmt json.RawMessage) string {
 		t.Helper()
-		position, currencies := "[]", "[]"
-		if qty != 0 {
-			position = fmt.Sprintf(`[{"instrumentId":"AAPL","quantity":{"coefficient":"%d"}}]`, qty)
-		}
-		if cash != 0 {
-			currencies = fmt.Sprintf(`[{"currencyCode":"USD","balance":{"coefficient":"%d"}}]`, cash)
-		}
-		stmt := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":"%s","positions":%s,"cash":%s,"transactions":[],"grain":"STATEMENT_GRAIN_BALANCES_ONLY"}`, BusinessDay(t0).Format(time.RFC3339), position, currencies))
 		revision++
 		raw, err := json.Marshal(signedBatch{BatchFormat, a.Source, tenant, a.Account, revision, previous, true, stmt})
 		if err != nil {
