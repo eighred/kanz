@@ -33,7 +33,12 @@ func TestSignedHistoricalComparisonPilot(t *testing.T) {
 		{name: "following-r1", revision: 1, dayOffset: 1, position: big.NewRat(21, 2)},
 		{name: "statement-r2", revision: 2, position: big.NewRat(21, 2), trade: true},
 	}
-	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "late_quantity"), nil, files,
+	limit := 2 * time.Minute
+	pitrDir := os.Getenv("CUSTODY_PILOT_PITR_DIR")
+	if pitrDir != "" {
+		limit += 3 * time.Minute // the checkpoint waits for an external WAL archive
+	}
+	checkPilotSeries(t, limit, filepath.Join("testdata", "late_quantity"), nil, files,
 		func(ctx context.Context, pool *pgxpool.Pool, statement custody.Statement, stage int, broker pilotBroker) {
 			ctx = bus.WithTenantID(ctx, tenant)
 			subject := statement.Subject()
@@ -62,6 +67,9 @@ func TestSignedHistoricalComparisonPilot(t *testing.T) {
 				} else {
 					expected["following_date"] = subject.BusinessDate.Format(time.DateOnly)
 					expected["following_run"], expected["following_statement"] = run.RunID, statement.StatementID
+					if pitrDir != "" {
+						pilotPITRCut(t, ctx, pitrDir, pool, scope, expected)
+					}
 				}
 				return
 			}

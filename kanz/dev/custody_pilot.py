@@ -17,6 +17,7 @@ import time
 import uuid
 
 from custody_pilot_accounts import enroll_accounts
+from custody_pitr import CustodyPITR
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "kanz"
@@ -249,7 +250,31 @@ def verify_historical_comparison(path, fixture):
     return record
 
 
-def qualify(docker, container, binaries, node, env, observations, profile):
+def run_pitr_source(command, env, directory, pitr, container):
+    # Use a private output file so a full pipe cannot stall the child at the cut.
+    log_path = directory / "source.log"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(command, cwd=CMD, env=env, stdout=log, stderr=log)
+        try:
+            deadline = time.monotonic() + 150
+            while process.poll() is None and not (directory / "cut.json").is_file():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("The source pilot did not reach its restore point.")
+                time.sleep(0.1)
+            if process.poll() is None:
+                pitr.mark(container)
+                (directory / "cut-ready").touch(exist_ok=False)
+            code = process.wait(timeout=max(1, deadline - time.monotonic()))
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=15)
+    if log_path.stat().st_size > 256 * 1024:
+        raise RuntimeError("Source verification log exceeds its bound.")
+    return subprocess.CompletedProcess(command, code, stdout=log_path.read_bytes())
+
+
+def qualify(docker, container, binaries, node, env, observations, profile, pitr=None):
     economics = profile == "execution_economics"
     historical = profile == "historical_comparison"
     rerun = profile == "operator_comparisons" or historical
@@ -330,6 +355,13 @@ def qualify(docker, container, binaries, node, env, observations, profile):
         CUSTODY_PILOT_BROWSER_SCRIPT=str(WEB / "e2e" / ("custody-rerun.cjs" if rerun else "custody-detection.cjs")),
         CUSTODY_PILOT_DATED_SCRIPT=str(WEB / "e2e/custody-dated.cjs"), CUSTODY_PILOT_RECEIPT=str(observations),
     )
+    if pitr is not None:
+        if not historical:
+            raise RuntimeError("Physical recovery requires the historical comparison profile.")
+        pitr.base_backup(container)
+        pilot_env["CUSTODY_PILOT_PITR_DIR"] = str(observations.parent)
+        pilot_env["CUSTODY_PILOT_PITR_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-pitr.cjs")
+        pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.parent / "before-recovery.json")
     if quantity_evidence:
         pilot_env["CUSTODY_PILOT_QUANTITY_FIXTURE"] = "1"
     if late:
@@ -348,8 +380,11 @@ def qualify(docker, container, binaries, node, env, observations, profile):
         test = "TestSignedHistoricalComparisonPilot"
     if economics:
         test = "TestSignedExecutionEconomicsPilot"
-    proof = subprocess.run([binaries["accounting"], "-test.run=^" + test + "$",
-                            "-test.v", "-test.count=1"], cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
+    command = [binaries["accounting"], "-test.run=^" + test + "$", "-test.v", "-test.count=1"]
+    if pitr is None:
+        proof = subprocess.run(command, cwd=CMD, env=pilot_env, capture_output=True, timeout=155)
+    else:
+        proof = run_pitr_source(command, pilot_env, observations.parent, pitr, container)
     output = proof.stdout
     markers = [b"signed customer recovered the applied historical quantity correction"] if late else [
         b"signed gateway and Chromium verified the persisted detection"]
@@ -372,6 +407,12 @@ def qualify(docker, container, binaries, node, env, observations, profile):
             if location:
                 suffix = " at " + location.group(1).decode() + ".go:" + location.group(2).decode()
         raise RuntimeError(test + " failed" + suffix + ".")
+    if pitr is not None:
+        source = verify_historical_comparison(observations, fixture)
+        pitr.archive_after_target(container)
+        # Only the readback process receives the saved synthetic reader URL.
+        del pilot_env["TEST_CUSTODY_BATCH_DATABASE_URL"], pilot_env["CUSTODY_PILOT_PITR_DIR"], pilot_env["CUSTODY_PILOT_VERIFY"]
+        return source, pilot_env
     if historical:
         return verify_historical_comparison(observations, fixture), None
     if economics:
@@ -398,10 +439,83 @@ def customer_downloads(observations, records):
     return receipts
 
 
+def run_profile(docker, binaries, node, env, observations, profile, pitr=None):
+    # Local SQL administration uses peer auth. The disposable remote roles use SCRAM.
+    name = "kanz-custody-pilot-" + secrets.token_hex(8)
+    command = (
+        "umask 077; head -c 32 /dev/urandom | base64 > /run/pilot/admin; "
+        "chown postgres /run/pilot/admin; exec docker-entrypoint.sh postgres"
+        if pitr is None else pitr.primary_command()
+    )
+    recovery_args = [] if pitr is None else pitr.primary_args()
+    args = [*docker, "run", "--detach", "--rm", "--pull=never", "--name", name,
+            "--publish", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data",
+            "--tmpfs", "/run/pilot", "--env", "POSTGRES_INITDB_ARGS=--auth-local=peer --auth-host=scram-sha-256",
+            "--env", "POSTGRES_PASSWORD_FILE=/run/pilot/admin", *recovery_args,
+            "--entrypoint", "sh", IMAGE, "-ec", command]
+    container = subprocess.check_output(args, env=env, text=True, timeout=30).strip()
+    try:
+        return qualify(docker, container, binaries, node, env, observations, profile, pitr)
+    finally:
+        subprocess.run([*docker, "rm", "--force", container], env=env, check=True,
+                       stdout=subprocess.DEVNULL, timeout=30)
+
+
+def verify_physical_recovery(docker, binaries, node, env, directory):
+    with CustodyPITR(docker, env, IMAGE) as pitr:
+        source, read_env = run_profile(docker, binaries, node, env, directory / "source.json",
+                                       "historical_comparison", pitr)
+        cut_file = directory / "cut.json"
+        if cut_file.stat().st_size > 8192:
+            raise RuntimeError("Recovery target metadata exceeds its bound.")
+        cut = json.loads(cut_file.read_bytes())
+        expected = {key: source[key] for key in (
+            "portfolio_id", "custodian_id", "date", "original_run", "original_statement",
+            "following_date", "following_run", "following_statement",
+        )}
+        if cut != dict(expected, phase="source"):
+            raise RuntimeError("Recovery target does not identify the observed source close.")
+        metadata = directory / "restore.json"
+        metadata.write_text(json.dumps(dict(expected, phase="restored", future_run=source["run_id"],
+                                            future_statement=source["statement_id"])), encoding="utf-8")
+        # The primary has been removed. Only the restored cluster can answer.
+        _, endpoint = pitr.restore()
+        if not re.fullmatch(r"127\.0\.0\.1:[1-9]\d{0,4}", endpoint) or int(endpoint.split(":")[1]) > 65535:
+            raise RuntimeError("The restored reader must have a literal loopback address.")
+        credential, sep, old_endpoint = read_env["TEST_POSTGRES_URL"].partition("@")
+        if sep != "@" or not credential.startswith("postgres://pilot_check:") or not old_endpoint.startswith("127.0.0.1:"):
+            raise RuntimeError("The source reader is outside the isolated pilot.")
+        after_file = directory / "after-recovery.json"
+        read_env.update(
+            TEST_POSTGRES_URL=f"{credential}@{endpoint}/{DATABASE}?sslmode=disable",
+            CUSTODY_PILOT_PITR_METADATA=str(metadata),
+            CUSTODY_PILOT_RETAINED_DOWNLOADS=str(after_file),
+        )
+        proof = subprocess.run(
+            [binaries["accounting"], "-test.run=^TestSignedCustodyPITRReadback$", "-test.v", "-test.count=1"],
+            cwd=CMD, env=read_env, capture_output=True, timeout=75,
+        )
+        if (proof.returncode or b"--- SKIP" in proof.stdout
+                or b"--- PASS: TestSignedCustodyPITRReadback" not in proof.stdout):
+            stage = re.search(rb"custody-browser-stage=[a-z-]{1,50}|custody_pitr_readback_test\.go:[0-9]+", proof.stdout)
+            where = " at " + stage.group().decode() if stage else ""
+            raise RuntimeError("Restored custody browser readback failed" + where + ".")
+        pitr.verify_paused()
+        before_file = directory / "before-recovery.json"
+        if not 1 <= before_file.stat().st_size <= 1024 * 1024 or not 1 <= after_file.stat().st_size <= 1024 * 1024:
+            raise RuntimeError("Recovery receipt exceeds its pilot bound.")
+        before, after = before_file.read_bytes(), after_file.read_bytes()
+        if before != after:
+            raise RuntimeError("The restored dated browser receipt differs from the source.")
+        return {"postgres_image": IMAGE, "source": source, "recovery": pitr.evidence,
+                "identical_browser_receipt_sha256": hashlib.sha256(after).hexdigest()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--node", default="node", help="Node executable matching web/.nvmrc")
     parser.add_argument("--pull-image", action="store_true", help="Fetch the pinned PostgreSQL image before startup")
+    parser.add_argument("--pitr", action="store_true", help="Run the isolated physical recovery drill")
     parser.add_argument("--receipt", type=Path, help="Write the verified synthetic comparison results as JSON")
     args = parser.parse_args()
     node = shutil.which(args.node)
@@ -413,25 +527,14 @@ def main():
         subprocess.run([*docker, "pull", IMAGE], check=True, env=env)
     with tempfile.TemporaryDirectory(prefix="kanz-custody-pilot-") as directory:
         binaries = build(node, Path(directory), env)
-        results = {"postgres_image": IMAGE}
-        for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction",
-                    "execution_economics", "historical_comparison"):
-            # The image initializes its own secret in tmpfs. Local SQL administration
-            # uses the postgres OS identity (peer); network logins require SCRAM.
-            name = "kanz-custody-pilot-" + secrets.token_hex(8)
-            run = [*docker, "run", "--detach", "--rm", "--pull=never", "--name", name,
-                   "--publish", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data",
-                   "--tmpfs", "/run/pilot", "--env", "POSTGRES_INITDB_ARGS=--auth-local=peer --auth-host=scram-sha-256",
-                   "--env", "POSTGRES_PASSWORD_FILE=/run/pilot/admin", "--entrypoint", "sh", IMAGE, "-ec",
-                   "umask 077; head -c 32 /dev/urandom | base64 > /run/pilot/admin; "
-                   "chown postgres /run/pilot/admin; exec docker-entrypoint.sh postgres"]
-            # Use the exact returned container ID for cleanup. No shared DB or
-            # external service connection is accepted by the entrypoint.
-            container = subprocess.check_output(run, env=env, text=True).strip()
-            try:
+        if args.pitr:
+            results = verify_physical_recovery(docker, binaries, node, env, Path(directory))
+        else:
+            results = {"postgres_image": IMAGE}
+            for key in ("comparisons", "operator_comparisons", "quantity_comparisons", "historical_quantity_correction",
+                        "execution_economics", "historical_comparison"):
                 observations = Path(directory) / (key + ".json")
-                results[key], onboarding = qualify(docker, container, binaries, node, env,
-                                                   observations, key)
+                results[key], onboarding = run_profile(docker, binaries, node, env, observations, key)
                 if onboarding:
                     results["account_onboarding"] = onboarding
                 if key == "execution_economics":
@@ -441,11 +544,13 @@ def main():
                     results["missing_statement_recovery"] = json.loads(missing_path.read_bytes())
                 if key == "quantity_comparisons":
                     results["customer_downloads"] = customer_downloads(observations, results[key])
-            finally:
-                subprocess.run([*docker, "rm", "--force", container], env=env, check=True, stdout=subprocess.DEVNULL)
     if args.receipt:
         args.receipt.write_text(json.dumps(results, indent=2) + "\n",
                                 encoding="utf-8")
+    if args.pitr:
+        print("PASS: Physical WAL recovery stopped at the named target. The signed customer "
+              "downloaded the original receipt byte for byte, while the later correction was absent.")
+        return
     print("PASS: The signed customer read the discrepancy, corrected clean date, missing statement and "
           "unobserved date in Chromium. The customer could not post cash, change the break or start a rerun. "
           "A separate operator replayed one request with one durable receipt and completion FACT. "
