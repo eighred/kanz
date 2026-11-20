@@ -169,3 +169,13 @@ only their reused row reads; shared read admission/rollback is included in Total
 so these stage scopes are not comparable with the preceding diagnostic revision.
 Fresh full dependency qualification is required; no latency improvement follows
 from source round-trip counts alone.
+
+### Retained Go admission at the writer fence
+
+Follow the [synthetic order build instructions](../../../kanz/dev/synthetic-orders.md) for Python 3.11+, Docker Linux amd64, the module's Go toolchain, generated Go SDK and Rust 1.90 native binary. Cache the digest-pinned PostgreSQL and Rust runtime images used by the synthetic order drill. From the repository root run:
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms
+```
+
+The dedicated database first permits a generation change in a rolled-back rehearsal. The Go store then admits one unfunded order and queues its acceptance. Two attempted transfers must refuse the retained order's missing command lineage, preserve the original state and pending fact, and fence a successor submission. This fixture leaves the unmatched order intact until its disposable database shuts down.
