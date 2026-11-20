@@ -54,7 +54,7 @@ func (c *binanceREST) currentCommission(ctx context.Context, symbol string) (*ve
 	if err != nil {
 		return nil, err
 	}
-	raw, err := c.readResponse(req, true)
+	raw, err := c.capitalResponse(req)
 	if err != nil {
 		return nil, err
 	}

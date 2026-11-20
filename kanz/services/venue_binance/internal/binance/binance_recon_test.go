@@ -56,7 +56,7 @@ func reconOver(f *fakeBinance, cap *reconCapture, exp staticOrders, bal staticBa
 // StateHealed correcting FACT (never edits state), carrying the venue truth.
 func TestRecon_HealsDriftedOrder(t *testing.T) {
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"FILLED","executedQty":"2.00000000"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"FILLED","executedQty":"2.00000000"}`
 	cap := &reconCapture{}
 	exp := staticOrders{{
 		OrderId: "o1", PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
@@ -91,7 +91,7 @@ func TestRecon_HealsDriftedOrder(t *testing.T) {
 
 func TestRecon_NoDriftNoHeal(t *testing.T) {
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"FILLED","executedQty":"2.00000000"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"FILLED","executedQty":"2.00000000"}`
 	cap := &reconCapture{}
 	exp := staticOrders{{
 		OrderId: "o1", PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",

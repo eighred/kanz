@@ -105,6 +105,7 @@ func TestOverfillReachesNoBroker(t *testing.T) {
 
 	refused := 0
 	ing := newUserDataIngester(UserDataConfig{
+		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{
 			[]byte(fmt.Sprintf(`{"e":"executionReport","s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE",`+
 				`"X":"FILLED","l":"10","L":"50000","z":"10","q":"10","t":11,"T":1700000000000}`, okOrder)),

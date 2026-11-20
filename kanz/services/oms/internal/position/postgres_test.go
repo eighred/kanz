@@ -15,6 +15,7 @@ package position
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -338,4 +340,29 @@ func TestSnapshotAggregatesAcrossVenues(t *testing.T) {
 	if got := dec.FromProto(snap.GetPositions()[0].GetQuantity()); got.Cmp(big.NewRat(3, 1)) != 0 {
 		t.Errorf("snapshot BTC = %s, want 3", got.RatString())
 	}
+}
+
+func TestPostgresRefusesUnknownFillSideBeforeClaim(t *testing.T) {
+	pool := newPool(t, "acme")
+	freshSchema(t, pool)
+	store := NewPostgres(pool, "USDT")
+	ctx := context.Background()
+	when := time.Unix(1_700_000_000, 0)
+	for _, side := range []orderpb.Side{orderpb.Side_SIDE_UNSPECIFIED, orderpb.Side(77)} {
+		f := fill("F-side", side, d(2, 0), d(7, 0), when.Unix())
+		result, err := store.Apply(ctx, "PF", f, when, nil)
+		if !errors.Is(err, fillfact.ErrUnknownSide) || result != nil {
+			t.Fatalf("side %d returned %v, %v", side, result, err)
+		}
+	}
+	var claims, positions int
+	if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM position_fills),(SELECT count(*) FROM positions)").Scan(&claims, &positions); err != nil || claims != 0 || positions != 0 {
+		t.Fatal("refused side reached the position book", claims, positions, err)
+	}
+	corrected := fill("F-side", orderpb.Side_SIDE_SELL, d(2, 0), d(7, 0), when.Unix())
+	result, err := store.Apply(ctx, "PF", corrected, when, nil)
+	if err != nil || result == nil || result.Venue == nil {
+		t.Fatal("corrected sell did not book", result, err)
+	}
+	assertPositionNumber(t, result.Venue.Quantity, "-2")
 }

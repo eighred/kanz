@@ -30,6 +30,7 @@ func TestUserData_NegativeCumulativeIsRefusedAndQuarantined(t *testing.T) {
 			capture := &reconCapture{}
 			refused := 0
 			ing := newUserDataIngester(UserDataConfig{
+				Symbols: fixtureTradeSymbols(),
 				Stream: &fakeStream{frames: [][]byte{[]byte(fmt.Sprintf(
 					`{"e":"executionReport","s":"BTCUSDT","c":"negative1620","S":"BUY","x":"TRADE","X":%q,"l":"1","L":"1","z":"-1","t":7,"T":1700000000000}`, status))}},
 				Orders: view, Pub: capture, Venue: "BINANCE", Tenant: "fund-alpha",
@@ -119,7 +120,8 @@ func TestNegativeCumulativeReachesNoBroker(t *testing.T) {
 	}
 	refused := 0
 	ing := newUserDataIngester(UserDataConfig{
-		Stream: &fakeStream{frames: frames}, Orders: view, Pub: producer,
+		Symbols: fixtureTradeSymbols(),
+		Stream:  &fakeStream{frames: frames}, Orders: view, Pub: producer,
 		Venue: "BINANCE", Tenant: "fund-alpha",
 		OnRefused: func(string, string, string) { refused++ },
 	})

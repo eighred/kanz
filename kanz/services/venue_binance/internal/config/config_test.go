@@ -16,6 +16,13 @@ import (
 	"testing"
 )
 
+func TestSignedPrivateStreamRefusesUnverifiedMode(t *testing.T) {
+	t.Setenv("BINANCE_ALLOW_UNVERIFIED_ACCOUNT", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BINANCE_VENUE_ACCOUNT_UID") {
+		t.Fatal("missing migration diagnostic for an unverified Binance adapter")
+	}
+}
+
 func TestUnreadableDatabaseURLFileFailsFast(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist")

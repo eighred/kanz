@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
@@ -77,19 +78,12 @@ type Config struct {
 	// and the first books its fills to the wrong fund's ledger while the exchange
 	// debits the right one.
 	//
-	// Empty ⇒ nothing can be proved ⇒ the adapter refuses to start unless
-	// AllowUnverifiedAccount says otherwise.
+	// A signed private stream requires this binding before startup.
 	AccountUID string
-	// AllowUnverifiedAccount permits booting with an account NOBODY has confirmed. It
-	// is the explicit, affirmative choice the brain's no-simulator-reachable-by-
-	// omission rule demands — absence of configuration must never quietly become
-	// trust. It does NOT permit booting a WRONG account: if Binance says the key
-	// belongs elsewhere, the adapter refuses whatever this says.
-	AllowUnverifiedAccount bool
-	BaseURL                string
-	WSBase                 string
-	APIKey                 string
-	APISecret              string
+	BaseURL    string
+	WSBase     string
+	APIKey     string
+	APISecret  string
 	// Symbols maps Kanz instrument_id → Binance symbol ("BTC-USD=BTCUSDT").
 	Symbols string
 
@@ -137,6 +131,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	allowUnverified, err := env.Bool("BINANCE_ALLOW_UNVERIFIED_ACCOUNT", false)
+	if err != nil {
+		return Config{}, err
+	}
+	if allowUnverified {
+		return Config{}, errors.New("BINANCE_ALLOW_UNVERIFIED_ACCOUNT cannot enable an unverified private stream; bind BINANCE_VENUE_ACCOUNT_UID or its file mount and set the option to false")
+	}
+
 	return Config{
 		GRPCListen:     env.Or("VENUE_BINANCE_GRPC_LISTEN", ":9000"),
 		HTTPListen:     env.Or("VENUE_BINANCE_LISTEN", ":8091"),
@@ -149,15 +151,14 @@ func Load() (Config, error) {
 		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		AllowedClients: os.Getenv("VENUE_BINANCE_ALLOWED_CLIENTS"),
 
-		MIC:                    env.Or("BINANCE_MIC", "BINANCE"),
-		Account:                env.Or("BINANCE_VENUE_ACCOUNT", env.Or("BINANCE_MIC", "BINANCE")),
-		AccountUID:             accountUID,
-		AllowUnverifiedAccount: os.Getenv("BINANCE_ALLOW_UNVERIFIED_ACCOUNT") == "true",
-		BaseURL:                env.Or("BINANCE_BASE_URL", "https://testnet.binance.vision"),
-		WSBase:                 env.Or("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
-		APIKey:                 apiKey,
-		APISecret:              apiSecret,
-		Symbols:                os.Getenv("BINANCE_SYMBOLS"),
-		RequireQuoteMatch:      requireQuoteMatch,
+		MIC:               env.Or("BINANCE_MIC", "BINANCE"),
+		Account:           env.Or("BINANCE_VENUE_ACCOUNT", env.Or("BINANCE_MIC", "BINANCE")),
+		AccountUID:        accountUID,
+		BaseURL:           env.Or("BINANCE_BASE_URL", "https://testnet.binance.vision"),
+		WSBase:            env.Or("BINANCE_WS_BASE", "wss://ws-api.testnet.binance.vision"),
+		APIKey:            apiKey,
+		APISecret:         apiSecret,
+		Symbols:           os.Getenv("BINANCE_SYMBOLS"),
+		RequireQuoteMatch: requireQuoteMatch,
 	}, nil
 }

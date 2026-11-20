@@ -76,7 +76,7 @@ func TestBinanceCloseIntent_AnAmbiguousCancelIsQueriedAtTheVenueNotDropped(t *te
 	f.cancelStatus = http.StatusGatewayTimeout
 	// What the exchange says when the watchdog finally asks: still working. The
 	// fund is holding a live order the OMS has already booked as CANCELLED.
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"NEW","executedQty":"0"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"NEW","executedQty":"0"}`
 
 	closes := NewCloseRegistry()
 	srv := adapterOverFake(t, f, closes)

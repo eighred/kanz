@@ -20,7 +20,7 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 		for _, failure := range []string{"rate_limited", "invalid_evidence", "broker"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				f := newFakeBinance(t)
-				f.queryBody = `{"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
+				f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
 				f.accountBody = `{"balances":[{"asset":"USD","free":"1","locked":"0"}]}`
 				cap := &reconCapture{}
 				r := reconOver(f, cap, staticOrders{}, staticBalances{"USD": big.NewRat(0, 1)})
@@ -39,7 +39,7 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 					// An unanswered query must reach the loop without resolving the close.
 				case "invalid_evidence":
 					if phase == "healing" {
-						f.queryBody = `{"clientOrderId":"o1","status":"CANCELED","executedQty":"invalid"}`
+						f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"CANCELED","executedQty":"invalid"}`
 					} else {
 						f.accountBody = `{"balances":[{"asset":"USD","free":"invalid","locked":"0"}]}`
 					}

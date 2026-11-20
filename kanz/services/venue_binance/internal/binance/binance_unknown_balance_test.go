@@ -52,7 +52,7 @@ func (b unknownBalances) Balance(string) (*big.Rat, bool, string) { return nil, 
 func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 	f := newFakeBinance(t)
 	// The exchange holds USDT. Kanz has never been told what this account holds.
-	f.accountBody = `{"balances":[{"asset":"USDT","free":"1000.00","locked":"0.00"}]}`
+	f.accountBody = `{"uid":123,"balances":[{"asset":"USDT","free":"1000.00","locked":"0.00"}]}`
 	capt := &reconCapture{}
 	unknown := &unknownCapture{}
 
@@ -62,7 +62,7 @@ func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 	}, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c.Start(ctx, WorkerDeps{
+	if _, err := c.Start(ctx, "123", WorkerDeps{
 		Publisher:         capt,
 		Expected:          staticOrders{},
 		Balances:          unknownBalances{reason: execution.BalanceUnknownNeverAnnounced},
@@ -72,7 +72,9 @@ func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 		// An hour, so the mark feed does not publish into the capture and turn this
 		// into an assertion about the ticker.
 		TickerInterval: time.Hour,
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && len(unknown.snapshot()) == 0 {
@@ -106,7 +108,7 @@ func TestStartWiresTheUnknownBalanceSeamThroughToTheReconciler(t *testing.T) {
 // forever, and this one is reached from an exchange response.
 func TestAnUnrecognisedUnknownReasonIsNamedRatherThanPassedThrough(t *testing.T) {
 	f := newFakeBinance(t)
-	f.accountBody = `{"balances":[{"asset":"USDT","free":"1.00","locked":"0.00"}]}`
+	f.accountBody = `{"uid":123,"balances":[{"asset":"USDT","free":"1.00","locked":"0.00"}]}`
 	capt := &reconCapture{}
 	unknown := &unknownCapture{}
 

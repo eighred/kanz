@@ -11,12 +11,12 @@ import (
 
 func TestStartForwardsReconcileErrorObserver(t *testing.T) {
 	f := newFakeBinance(t)
-	f.accountBody = `{"balances":[{"asset":"USD","free":"invalid","locked":"0"}]}`
+	f.accountBody = `{"uid":123,"balances":[{"asset":"USD","free":"invalid","locked":"0"}]}`
 	c := NewBinanceConnector(VenueSettings{MIC: "BINANCE", BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Symbols: map[string]string{"BTC-USD": "BTCUSDT"}, WeightBudget: 1200}, "")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	seen := make(chan error, 1)
-	c.Start(ctx, WorkerDeps{Publisher: &reconCapture{}, Expected: staticOrders{}, Balances: staticBalances{"USD": big.NewRat(0, 1)}, Tenant: "test", TickerInterval: time.Hour, ReconcileInterval: time.Millisecond,
+	if _, err := c.Start(ctx, "123", WorkerDeps{Publisher: &reconCapture{}, Expected: staticOrders{}, Balances: staticBalances{"USD": big.NewRat(0, 1)}, Tenant: "test", TickerInterval: time.Hour, ReconcileInterval: time.Millisecond,
 		OnReconcileError: func(_ context.Context, loop string, err error) {
 			if err != nil {
 				cancel()
@@ -25,7 +25,9 @@ func TestStartForwardsReconcileErrorObserver(t *testing.T) {
 				default:
 				}
 			}
-		}})
+		}}); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-seen:
 		if !errors.Is(err, execution.ErrReconcileEvidence) {

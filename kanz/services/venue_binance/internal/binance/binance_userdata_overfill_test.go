@@ -48,6 +48,7 @@ func TestUserData_OverfillReportIsRefusedAndQuarantined(t *testing.T) {
 
 	var refusals []string
 	ing := newUserDataIngester(UserDataConfig{
+		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
 				`"l":"4","L":"50000","z":"14","q":"10","t":7,"T":1700000000000}`)}},
@@ -107,6 +108,7 @@ func TestUserData_OverfillOnAPartialReportIsAlsoRefused(t *testing.T) {
 	}
 	refused := 0
 	ing := newUserDataIngester(UserDataConfig{
+		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"PARTIALLY_FILLED",` +
 				`"l":"1","L":"50000","z":"10.5","q":"10","t":8,"T":1700000000000}`)}},
@@ -139,6 +141,7 @@ func TestUserData_AnExactFillIsNotMistakenForAnOverfill(t *testing.T) {
 	}
 	refused := 0
 	ing := newUserDataIngester(UserDataConfig{
+		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
 				`"l":"10","L":"50000","z":"10","q":"10","t":9,"T":1700000000000}`)}},

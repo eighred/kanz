@@ -82,6 +82,7 @@ func TestUserData_StoreErrorIsNotASkip(t *testing.T) {
 
 	var dropped []string
 	ing := newUserDataIngester(UserDataConfig{
+		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED",` +
 				`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`)}},
@@ -148,6 +149,7 @@ func TestUserData_StoreErrorReasonIsNotUsedForAnUnknownOrder(t *testing.T) {
 
 	var dropped []string
 	ing := newUserDataIngester(UserDataConfig{
+		Symbols: fixtureTradeSymbols(),
 		Stream: &fakeStream{frames: [][]byte{[]byte(
 			`{"e":"executionReport","s":"BTCUSDT","c":"somebody-elses","S":"BUY","x":"TRADE","X":"FILLED",` +
 				`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`)}},

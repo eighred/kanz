@@ -265,6 +265,7 @@ const omsOrderStore = "oms"
 // with production — see the venue-okx exemption, where demo is selected by a
 // request header and so cannot be established from configuration at all.
 var nonLiveExchangeHosts = map[string]string{
+	"ws-api.testnet.binance.vision": "The dedicated Binance Spot Testnet WebSocket API uses testnet accounts and balances (#1648).",
 	"testnet.binance.vision": "Binance Spot Testnet — a physically separate exchange with its own " +
 		"order book and its own faucet-issued balances. A key valid here is rejected by " +
 		"api.binance.com, so a misdirected order fails rather than fills.",

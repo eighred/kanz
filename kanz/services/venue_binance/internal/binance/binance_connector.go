@@ -2,6 +2,7 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -16,10 +17,10 @@ import (
 // ticker feed that drives tv-sync's mark source. The composition root builds it,
 // takes Venue() for the router, and calls Start to run the workers.
 type BinanceConnector struct {
-	settings VenueSettings
-	rest     *binanceREST
-	venue    *BinanceVenue
-	wsBase   string
+	settings        VenueSettings
+	rest            *binanceREST
+	venue           *BinanceVenue
+	streamConfigErr error
 	// dialUserData opens ONE private user-data websocket, or fails.
 	//
 	// IT IS A FIELD SO THE RECONNECT LOOP IS TESTABLE (#1047). The loop's whole
@@ -36,17 +37,13 @@ type BinanceConnector struct {
 }
 
 // NewBinanceConnector assembles the venue + shared REST client from settings.
-// wsBase is the websocket origin (e.g. wss://testnet.binance.vision).
+// wsBase is the private WebSocket API origin.
 func NewBinanceConnector(settings VenueSettings, wsBase string) *BinanceConnector {
 	venue := NewBinanceVenueFromSettings(settings)
-	c := &BinanceConnector{settings: settings, rest: venue.rest, venue: venue, wsBase: wsBase}
+	endpoint, err := privateStreamEndpoint(settings.BaseURL, wsBase)
+	c := &BinanceConnector{settings: settings, rest: venue.rest, venue: venue, streamConfigErr: err}
 	c.dialUserData = func(ctx context.Context) (UserDataStream, func(), error) {
-		ws := newBinanceUserDataWS(c.settings.BaseURL, c.wsBase, c.settings.APIKey, nil)
-		stop, err := ws.Connect(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		return ws, stop, nil
+		return c.rest.subscribeUserData(ctx, endpoint)
 	}
 	c.newUserDataBackoff = newUserDataBackoff
 	return c
@@ -54,13 +51,6 @@ func NewBinanceConnector(settings VenueSettings, wsBase string) *BinanceConnecto
 
 // Venue returns the execution venue for the router.
 func (c *BinanceConnector) Venue() Venue { return c.venue }
-
-// Exchange is the seam that asks Binance which account this adapter's API credential
-// actually belongs to (SOV-02a) — accountproof.Exchange, satisfied by the same signed
-// REST client the reconciler already uses. The composition root calls it ONCE, at
-// startup, and refuses to serve orders if the exchange names a different account than
-// this deployment claims to be.
-func (c *BinanceConnector) Exchange() accountproof.Exchange { return c.rest }
 
 // VerifyCatalogue binds every configured pair to Binance's actual settlement
 // assets before this adapter can serve orders.
@@ -77,11 +67,26 @@ func (c *BinanceConnector) VerifyCatalogue(ctx context.Context) error {
 	return execution.CheckExchangeCatalogue(configured, actual, "TRADING")
 }
 
-// Start launches the reconciler, the user-data ingester (with reconnect), and
-// the ticker feed as background goroutines until ctx is cancelled.
-func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
+// Start verifies the account before launching workers. The same proof is
+// returned to the composition root for the typed venue service.
+func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps WorkerDeps) (execution.AccountProof, error) {
+	if deps.Orders != nil && c.streamConfigErr != nil {
+		return execution.AccountProof{}, c.streamConfigErr
+	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
+	}
+	if expectedUID == "" {
+		return execution.AccountProof{}, fmt.Errorf("%w: bound BINANCE_VENUE_ACCOUNT_UID or its file mount is required", accountproof.ErrUnverifiable)
+	}
+	proof, err := accountproof.Resolve(ctx, c.rest, accountproof.Want{Account: c.settings.Account, ExchangeUID: expectedUID}, deps.Logger)
+	if err != nil {
+		if errors.Is(err, accountproof.ErrWrongAccount) {
+			return execution.AccountProof{}, accountproof.ErrWrongAccount
+		}
+		// Exchange error text may echo credentials. The operator can distinguish
+		// an unavailable proof from a confirmed account mismatch.
+		return execution.AccountProof{}, accountproof.ErrUnverifiable
 	}
 	// Reconciliation loop (secondary audit; emits correcting FACTs) + the
 	// In-Flight Certainty healing watchdog, which runs on its own fast tick.
@@ -150,11 +155,12 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 	}
 	// Ticker feed → market price FACTs → tv-sync MarkSource.
 	go c.runTicker(ctx, deps)
+	return proof, nil
 }
 
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 	ing := newUserDataIngester(UserDataConfig{
-		Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
+		Symbols: StaticSymbolMap(c.settings.Symbols), Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
 		OnRefused: deps.OnFillRefused, OnDropped: deps.OnFillDropped, Logger: deps.Logger,
 	})
 	// THE RE-DIAL RATE IS THE THING THIS LOOP DECIDES, AND IT IS A VENUE-SAFETY

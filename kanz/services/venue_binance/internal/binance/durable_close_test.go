@@ -97,7 +97,7 @@ func TestDurableCloseRecoveryWithRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.closes = restarted
-	f.queryBody = strings.ReplaceAll(`{"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`, "o1", id)
+	f.queryBody = strings.ReplaceAll(`{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`, "o1", id)
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}

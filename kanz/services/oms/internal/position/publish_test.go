@@ -134,6 +134,7 @@ func filledDelivery(t *testing.T, tenant string) (context.Context, *envelopepb.E
 		State: &orderpb.OrderState{PortfolioId: testPortfolio},
 		Fill: &orderpb.Fill{
 			FillId:       "f-1",
+			Side:         orderpb.Side_SIDE_BUY,
 			InstrumentId: testInstr,
 			Venue:        testVenue,
 			Quantity:     &commonpb.Decimal{Coefficient: 1, Exponent: 0},

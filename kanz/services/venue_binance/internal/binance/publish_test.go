@@ -108,9 +108,10 @@ func TestUserDataFillEmitsAValidEnvelope(t *testing.T) {
 		`"l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
 
 	ing := newUserDataIngester(UserDataConfig{
-		Stream: &fakeStream{frames: [][]byte{[]byte(report)}},
-		Orders: newFakeOrders("o1"),
-		Pub:    prod, Venue: "BINANCE", Tenant: "fund-alpha",
+		Symbols: fixtureTradeSymbols(),
+		Stream:  &fakeStream{frames: [][]byte{[]byte(report)}},
+		Orders:  newFakeOrders("o1"),
+		Pub:     prod, Venue: "BINANCE", Tenant: "fund-alpha",
 	})
 	_ = ing.Run(context.Background()) // returns io.EOF at end of frames
 
@@ -125,7 +126,7 @@ func TestUserDataFillEmitsAValidEnvelope(t *testing.T) {
 func TestReconStateHealedEmitsAValidEnvelope(t *testing.T) {
 	prod, cc := realVenueProducer(t)
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"FILLED","executedQty":"2.00000000"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"FILLED","executedQty":"2.00000000"}`
 	exp := staticOrders{{
 		OrderId: "o1", PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
 		Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT,
@@ -166,7 +167,7 @@ func TestReconStateHealedEmitsAValidEnvelope(t *testing.T) {
 func TestReconBalanceReconciledEmitsAValidEnvelope(t *testing.T) {
 	prod, cc := realVenueProducer(t)
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"FILLED","executedQty":"1.00000000"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"FILLED","executedQty":"1.00000000"}`
 	// The venue holds 1 BTC; Balances below expects 5. That gap is the break.
 	f.accountBody = `{"balances":[{"asset":"BTC","free":"1.0","locked":"0"}]}`
 	bucket := newWeightBucket(1200, time.Minute, nil)

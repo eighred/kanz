@@ -2,6 +2,7 @@ package consume
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
@@ -293,5 +295,39 @@ func TestHandleCashStillFoldsAnOrdinaryEntry(t *testing.T) {
 	}
 	if j, _ := st.Journal(context.Background(), "PORT-2"); len(j) != 1 {
 		t.Fatalf("ordinary cash entry wrote %d journal entries, want 1", len(j))
+	}
+}
+
+func TestFolderRefusesUnknownFillSideBeforePosting(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	folder, err := NewFolder(testTenant, st, "USDT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	when := time.Unix(1_700_000_000, 0)
+	env := &envelopepb.Envelope{TenantId: testTenant, EventType: orderEventFilled, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, IngestionTime: timestamppb.New(when)}
+	for _, side := range []orderpb.Side{orderpb.Side_SIDE_UNSPECIFIED, orderpb.Side(77)} {
+		raw := filledPayload(t, "PF", "F", "BTC-USDT", side, decv(2, 0), decv(7, 0), when)
+		if err := folder.Handle(ctx, env, raw); !errors.Is(err, fillfact.ErrUnknownSide) {
+			t.Fatalf("side %d: %v", side, err)
+		}
+	}
+	book, _, err := ledger.MaterializeCurrent(ctx, st, "PF")
+	if err != nil || len(book.Positions) != 0 || book.CashBalance("USDT").Sign() != 0 {
+		t.Fatal("invalid side changed financial state", book, err)
+	}
+	// The rejected deliveries must leave the ID available for an attributable fill.
+	raw := filledPayload(t, "PF", "F", "BTC-USDT", orderpb.Side_SIDE_SELL, decv(2, 0), decv(7, 0), when)
+	if err := folder.Handle(ctx, env, raw); err != nil {
+		t.Fatal(err)
+	}
+	book, _, err = ledger.MaterializeCurrent(ctx, st, "PF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := book.Positions["BTC-USDT"]
+	if pos == nil || pos.Qty.Cmp(big.NewRat(-2, 1)) != 0 || book.CashBalance("USDT").Cmp(big.NewRat(14, 1)) != 0 {
+		t.Fatal("corrected sell did not post once in the expected units", book)
 	}
 }
