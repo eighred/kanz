@@ -50,5 +50,5 @@ jobs:
           docker pull --platform linux/amd64 ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f
       - name: Compare Jiff timestamps and durations
         run: python -B tools/jiff_qualification/run.py
-      - name: Exercise the duration backport with the released DataFusion consumer
+      - name: Exercise combined duration and timezone backports in the lake worker
         run: python -B tools/jiff_qualification/object_store.py
