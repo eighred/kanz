@@ -56,7 +56,8 @@ class CapacityTests(unittest.TestCase):
             with patch.object(qualify.subprocess, 'run', return_value=result):
                 with self.assertRaises(ValueError): qualify.prepare_host(7 << 30)
 
-    def test_report_requires_every_bound_capacity_observation(self):
+    @staticmethod
+    def complete_report():
         sha = 'a' * 40
         evidence = {'sourceSHA': sha, 'passed': True, 'cleanupPassed': True,
                     'developmentOnly': True, 'brokerImage': qualify.REDPANDA,
@@ -76,9 +77,44 @@ class CapacityTests(unittest.TestCase):
             evidence['observations'].append({'case': case, 'passed': True, 'mode': mode,
                 'identity': qualify.identity(sa), 'subjectDN': 'CN=fixture,O=SPIRE,C=US,' + qualify.subject(sa),
                 'renewed': mode == 'publish', 'boundedReplay': mode == 'publish', 'sourceVersion': sha})
+            observation = evidence['observations'][-1]
+            if mode in ('publish', 'verify'):
+                topics = [sa] if mode == 'publish' else ['proof-a', 'proof-b']
+                observation['frames'] = {}
+                for topic in topics:
+                    observation['frames'][topic] = [
+                        {'offset': i, 'frameSHA256': topic[-1] * 63 + str(i)} for i in range(2)]
+            if mode in ('resume', 'restored-offset'):
+                observation['groupNextOffset'] = 2
             evidence['storageObservations'].append({'case': case, 'totalBytes': 40 << 30,
                 'usedBytes': 10 << 30, 'availableBytes': 30 << 30, 'producerReserveBytes': 5 << 30,
                 'requiredHeadroomBytes': qualify.HEADROOM})
+        return evidence, sha
+
+    def test_acknowledged_recovery_point(self):
+        evidence, sha = self.complete_report()
+        qualify.validate_report(evidence, sha)
+        for case in ('client-a', 'verify-reprovision', 'verify-after-restore'):
+            bad = copy.deepcopy(evidence)
+            row = next(r for r in bad['observations'] if r['case'] == case)
+            row['frames']['proof-a'][1]['frameSHA256'] = 'd' * 64
+            # The older fixture has the same valid checksum, labels, offsets
+            # and checkpoint shape. Changed acknowledged bytes must refuse it.
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, 'differs'):
+                qualify.validate_report(bad, sha)
+        for field, value in (('offset', True), ('frameSHA256', 'short')):
+            bad = copy.deepcopy(evidence)
+            next(r for r in bad['observations'] if r['case'] == 'verify-after-restore')['frames']['proof-a'][1][field] = value
+            with self.assertRaises(ValueError):
+                qualify.validate_report(bad, sha)
+        for case in ('resume', 'restored-offset'):
+            bad = copy.deepcopy(evidence)
+            next(r for r in bad['observations'] if r['case'] == case)['groupNextOffset'] = 1
+            with self.assertRaises(ValueError):
+                qualify.validate_report(bad, sha)
+
+    def test_report_requires_every_bound_capacity_observation(self):
+        evidence, sha = self.complete_report()
         qualify.validate_report(evidence, sha)
         for field, value in [('sourcePod', evidence['coldRestore']['restoredPod']),
                              ('sourcePod', '00000000-0000-0000-0000-000000000088'),

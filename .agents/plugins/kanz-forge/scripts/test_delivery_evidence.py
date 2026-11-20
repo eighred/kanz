@@ -190,6 +190,37 @@ class DeliveryEvidenceTests(unittest.TestCase):
         self.assertEqual(assess(data)["issue_backlog"]["closure_candidates"], [42])
         data["backlog"]["open_total"] = 2
         self.assertEqual(assess(data)["issue_backlog"]["closure_candidates"], [])
+        self.assertFalse(assess(data)["issue_backlog"]["issues"][0]["closure_candidate"])
+
+    def test_backlog_closure_requires_current_main_acceptance_and_resolved_dependencies(self):
+        data = snapshot()
+        proof = dict(merge_sha=HEAD, verified_on_main=True, all_acceptance_passed=True, evidence="run/5")
+        issue = dict(number=42, status="ready for verification or closure", priority="P1",
+                     component="accounting", security_impact="unknown", next_action="check journal",
+                     updated_at="2026-11-09T00:00:00Z", acceptance_documented=True, closure_proof=proof)
+        data["backlog"] = dict(as_of="2026-11-10T00:00:00Z", inventory_complete=True,
+                               open_total=1, issues=[issue])
+
+        def check(eligible):
+            report = assess(data)["issue_backlog"]
+            self.assertEqual(report["closure_candidates"], [42] if eligible else [])
+            self.assertEqual(report["issues"][0]["closure_candidate"], eligible)
+            self.assertEqual(report["awaiting_verification"], [] if eligible else [42])
+
+        check(False)
+        proof["verified_sha"] = MAIN
+        check(True)
+        issue["unresolved_dependencies"] = [101]
+        check(False)
+        issue["unresolved_dependencies"] = []
+        data["main"]["inventory_complete"] = False
+        check(False)
+        data["main"]["inventory_complete"] = True
+        data["main"]["observed"][0]["status"] = "FAILURE"
+        check(False)
+        data["main"]["observed"][0]["status"] = "SUCCESS"
+        proof["evidence"] = "  "
+        check(False)
 
     def test_backlog_prioritizes_actionable_work_and_preserves_holds(self):
         data = snapshot()
