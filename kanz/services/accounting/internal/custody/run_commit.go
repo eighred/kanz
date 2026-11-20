@@ -215,7 +215,9 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	tx, err := p.pool.Begin(ctx)
+	// Re-read the admitted set after the tenant assignment lock is acquired.
+	// A deployment-level repeatable-read default would retain an older snapshot.
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Run{}, err
 	}
