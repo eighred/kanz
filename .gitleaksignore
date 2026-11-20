@@ -1,0 +1,3 @@
+# SHA-256 of the public LLVM APInt.cpp source in the Julia compiler receipt.
+# https://github.com/JuliaLang/llvm-project/blob/9cba7d4b7efbbc8d3755144e3deb741de8011b41/llvm/lib/Support/APInt.cpp
+fd182788c9ae37d68d4d67dec6c30f44cf6eb84f:julia/qualification/application_bundle/llvm_core_sources.json:generic-api-key:37
