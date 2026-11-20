@@ -121,6 +121,73 @@ describe('custody exact review', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('keeps the signed base download only when optional figures exceed a limit on the same authorized receipt', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
+    const get = vi.spyOn(api, 'get')
+    const digest = 'a'.repeat(64)
+    const base = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04', tenant_id: 'fixture',
+      state: 'recorded', outcome: 'clean', run_id: 'run', completed_at: '2020-02-05T01:00:00Z', statement_id: 'custody-batch.v1.src.r1.' + digest,
+      scope_mode: 'declared', account_assignment_verified: true, journal_position: '1', signed_statement_sha256: digest, breaks: [],
+      transaction_pass: 'ran', statement_reference_count: '1', book_reference_count: '1', unreferenced_book_trades: '0' }
+    const row = { external_ref: 'x', instrument_id: 'SYN', cash_currency: 'USD', reported_cash: '-2' }
+    const section = { basis: 'signed_custodian_statement', signed_statement_sha256: digest, rows: [row] }
+    const expanded = { ...base, reported_execution_figures: section }
+    const limit = 1 << 20
+    row.external_ref = 'x'.repeat(limit - JSON.stringify(expanded).length - 100)
+    expect(JSON.stringify(expanded).length + 1).toBeLessThan(limit)
+    expect(JSON.stringify(expanded, null, 2).length).toBeGreaterThan(limit)
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:custody')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      const region = wrapper.get('[aria-label="Dated custody result"]')
+      const form = region.get('form')
+      for (const [i, value] of ['P', 'C', base.business_date, 'run'].entries()) await form.findAll('input')[i]!.setValue(value)
+      async function openBase() {
+        get.mockResolvedValueOnce(base)
+        await form.trigger('submit')
+        await flushPromises()
+      }
+      async function openFigures() {
+        await button(wrapper, 'View custodian-reported price and cash').trigger('click')
+        await flushPromises()
+      }
+      await openBase()
+      for (const response of [expanded, new ApiError(422, 'signed execution figures exceed receipt limit')]) {
+        if (response instanceof Error) get.mockRejectedValueOnce(response)
+        else get.mockResolvedValueOnce(response)
+        await openFigures()
+        expect(region.get('[role="alert"]').text()).toContain('receipt limit')
+        expect(region.get('output').text()).toContain(base.statement_id)
+        await button(wrapper, 'Download comparison receipt').trigger('click')
+        const artifact = JSON.parse(await (create.mock.lastCall![0] as Blob).text())
+        expect(artifact.signed_statement_sha256).toBe(digest)
+        expect(artifact).not.toHaveProperty('reported_execution_figures')
+      }
+      const changed = 'b'.repeat(64)
+      for (const response of [new ApiError(403, 'forbidden'), new ApiError(503, 'unavailable'),
+        { ...expanded, tenant_id: 'other' }, { ...expanded, signed_statement_sha256: changed, statement_id: 'custody-batch.v1.src.r1.' + changed,
+          reported_execution_figures: { ...section, signed_statement_sha256: changed } }]) {
+        await openBase()
+        if (response instanceof Error) get.mockRejectedValueOnce(response)
+        else get.mockResolvedValueOnce(response)
+        await openFigures()
+        expect(region.find('output').exists()).toBe(false)
+        expect(region.text()).not.toContain('Download comparison receipt')
+      }
+      await openBase()
+      let finish: (value: typeof expanded) => void = () => { throw new Error('Read did not start') }
+      get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      await button(wrapper, 'View custodian-reported price and cash').trigger('click')
+      useSession().identity!.tenant = 'other'
+      finish(expanded)
+      await flushPromises()
+      expect(region.find('output').exists()).toBe(false)
+      expect(region.text()).not.toContain('Download comparison receipt')
+    } finally { wrapper.unmount() }
+  })
+
   it('shows signed execution units separately and clears them when a later saved lookup fails', async () => {
     vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
     const get = vi.spyOn(api, 'get')

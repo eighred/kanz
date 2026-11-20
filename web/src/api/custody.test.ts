@@ -177,7 +177,7 @@ describe('custody response boundary', () => {
     for (const changed of [{ ...section, basis: 'verified' }, { ...section, signed_statement_sha256: 'b'.repeat(64) },
       { ...section, rows: [b, a] }, { ...section, rows: [a, a] }, { ...section, rows: [a] },
       { ...section, rows: [a, { ...b, reported_cash: 0 }] }, { ...section, rows: [a, { ...b, cash_currency: '' }] },
-      { ...section, rows: [a, { ...b, external_ref: 'x'.repeat(1 << 20) }] }]) {
+      { ...section, rows: [a, { ...b, external_ref: 'x'.repeat((1 << 20) + 1) }] }]) {
       get.mockResolvedValueOnce({ ...base, reported_execution_figures: changed })
       await expect(read()).rejects.toThrow('verified')
     }

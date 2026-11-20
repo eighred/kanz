@@ -128,6 +128,12 @@ export function downloadCustodyComparison(receipt: Extract<DatedCustodyResult, {
   downloadJson(comparisonArtifact(receipt), `custody-comparison-${receipt.business_date}.json`)
 }
 
+export class ReportedFiguresExportLimit extends Error {
+  constructor(readonly signedStatementSHA256: string) {
+    super('Custodian-reported execution figures exceed the download limit.')
+  }
+}
+
 function validQueueCursor(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9_-]+$/.test(value)
 }
@@ -209,7 +215,9 @@ export const custody = {
         completed_at: result.completed_at, statement_id: result.statement_id as string | undefined,
         scope_mode: result.scope_mode as string | undefined, journal_position: result.journal_position as string | undefined,
         account_assignment_verified: result.account_assignment_verified as true | undefined, transactions, historical }
-      if (reportedFigures && new TextEncoder().encode(JSON.stringify(comparisonArtifact(receipt), null, 2)).length > (1 << 20)) throw invalid()
+      if (historical?.reported_execution_figures && new TextEncoder().encode(JSON.stringify(comparisonArtifact(receipt), null, 2)).length > (1 << 20)) {
+        throw new ReportedFiguresExportLimit(historical.signed_statement_sha256)
+      }
       return receipt
     } else if (!['not_compared', 'pending', 'unknown'].some(value => value === result.state) ||
         (result.state === 'pending' && !result.statement_id) || (result.state === 'unknown' && result.statement_id !== undefined) ||

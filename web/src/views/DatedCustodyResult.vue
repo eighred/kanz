@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onUnmounted, reactive, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
-import { custody, downloadCustodyComparison, type DatedCustodyResult } from '../api/custody'
+import { custody, downloadCustodyComparison, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
 import { ApiError } from '../api/client'
 import { formatDecimal } from '../api/decimal'
 
@@ -28,6 +28,7 @@ async function read(correctionStatement?: string, reportedFigures = false) {
   const request = new AbortController()
   active = request
   const previous = result.value
+  const previousDigest = previous?.state === 'recorded' && previous.account_assignment_verified ? previous.historical?.signed_statement_sha256 : undefined
   result.value = undefined
   error.value = ''
   pending.value = true
@@ -35,11 +36,13 @@ async function read(correctionStatement?: string, reportedFigures = false) {
     const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal, savedRun.value, reportedFigures)
     if (correctionStatement && (dated.state !== 'recorded' || dated.outcome !== 'historical_quantity_correction' ||
         dated.statement_id !== correctionStatement)) throw new Error('Correction source changed.')
-    if (reportedFigures && (previous?.state !== 'recorded' || dated.state !== 'recorded' ||
-        previous.historical?.signed_statement_sha256 !== dated.historical?.signed_statement_sha256 || !dated.historical?.reported_execution_figures)) throw new Error('Unverified source.')
+    if (reportedFigures && (!previousDigest || dated.state !== 'recorded' ||
+        previousDigest !== dated.historical?.signed_statement_sha256 || !dated.historical?.reported_execution_figures)) throw new Error('Unverified source.')
     if (!request.signal.aborted) result.value = dated
   } catch (e) {
-    if (!request.signal.aborted && reportedFigures && e instanceof ApiError && e.status === 422) {
+    const unavailable = (e instanceof ApiError && e.status === 422) ||
+      (e instanceof ReportedFiguresExportLimit && e.signedStatementSHA256 === previousDigest)
+    if (!request.signal.aborted && reportedFigures && previousDigest && unavailable) {
       result.value = previous
       error.value = 'Signed execution figures are unavailable within the receipt limit.'
       return
