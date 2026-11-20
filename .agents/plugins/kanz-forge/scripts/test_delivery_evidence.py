@@ -46,24 +46,41 @@ class DeliveryEvidenceTests(unittest.TestCase):
                 data["issue_states"] = [observation] if observation else []
                 result = assess(data)["work_session"]
                 self.assertEqual(result["initial_verified_on_main"], [url])
+                self.assertEqual(result["tracker_closed_as_completed"], [])
+                self.assertEqual(result["tracker_closed_pending_main_acceptance"], [])
                 self.assertEqual(result["initial_closed_as_completed"], [])
                 self.assertEqual(result["closures_remaining"], 1)
                 self.assertFalse(result["complete"])
         data["issue_states"] = [completed]
         self.assertTrue(assess(data)["work_session"]["complete"])
         data["issues"] = [dict(number=42, url=url)]
-        self.assertEqual(assess(data)["work_session"]["closures_remaining"], 1)
+        result = assess(data)["work_session"]
+        self.assertEqual(result["tracker_closed_as_completed"], [])
+        self.assertEqual(result["closures_remaining"], 1)
         del data["issues"]
         with self.assertRaisesRegex(ValueError, "current open issues"):
             assess(data)
         data["issues"] = []
         data["work_session"]["requested_count"] = 30
         result = assess(data)["work_session"]
+        self.assertEqual(result["tracker_closed_as_completed"], [url])
+        self.assertEqual(result["tracker_closed_pending_main_acceptance"], [])
         self.assertEqual(result["initial_closed_as_completed"], [url])
         self.assertEqual(result["closures_remaining"], 29)
         self.assertFalse(result["complete"])
         proof["all_acceptance_passed"] = False
-        self.assertEqual(assess(data)["work_session"]["initial_closed_as_completed"], [])
+        result = assess(data)["work_session"]
+        self.assertEqual(result["tracker_closed_pending_main_acceptance"], [url])
+        self.assertEqual(result["initial_closed_as_completed"], [])
+        proof["all_acceptance_passed"] = True
+        data["main"]["sha"] = HEAD
+        data["main"]["observed"][0]["sha"] = HEAD
+        result = assess(data)["work_session"]
+        self.assertEqual(result["tracker_closed_as_completed"], [url])
+        self.assertEqual(result["tracker_closed_pending_main_acceptance"], [url])
+        self.assertEqual(result["initial_closed_as_completed"], [])
+        self.assertEqual(result["closures_remaining"], 30)
+        self.assertFalse(result["complete"])
         for key, state in ((url, "CLOSED"), (url.replace("/issues/", "/pull/"), "OPEN"),
                            (url.replace("/kanz/", "/other/"), "OPEN"), (url + "/slice", "OPEN")):
             with self.subTest(key=key, state=state):
