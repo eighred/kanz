@@ -30,7 +30,9 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		ids, historical := query["run_id"]
-		if err != nil || len(query) != 2 && !historical || historical && (len(query) != 3 || len(ids) != 1 || !custody.ValidReceiptID(ids[0])) || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
+		delete(query, "run_id")
+		validID := !historical || len(ids) == 1 && custody.ValidReceiptID(ids[0])
+		if err != nil || !validID || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
 			writeJSON(w, 400, map[string]string{"error": "one custodian and business date required"})
 			return
 		}

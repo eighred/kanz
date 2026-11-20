@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ValidReceiptID bounds a saved opaque ID before it reaches PostgreSQL.
 func ValidReceiptID(id string) bool {
 	return id != "" && len(id) <= 512 && utf8.ValidString(id) && strings.TrimSpace(id) == id && strings.IndexFunc(id, unicode.IsControl) < 0
 }
@@ -79,7 +80,7 @@ func (p *Postgres) HistoricalReceipt(ctx context.Context, subject Subject, accou
 	if err != nil {
 		return DatedResult{}, err
 	}
-	if !bytes.Equal(digest, binding) || (basis.Transactions != nil && !basis.Transactions.matches(source)) || !receiptFiguresMatch(run, source) {
+	if !bytes.Equal(digest, binding) || (basis.Transactions != nil && !basis.Transactions.matches(source, run.Outcome, basis.JournalPosition)) || !receiptFiguresMatch(run, source) {
 		return unknown, nil
 	}
 	run.Basis = basis
