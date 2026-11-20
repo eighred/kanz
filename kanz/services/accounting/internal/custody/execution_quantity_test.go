@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +190,7 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 			}
 			if pos == 1 {
 				originalRun = run.RunID
+				verifyMixedQueuePages(t, ctx, st, queue)
 			}
 			for i, b := range queue {
 				if b.Kind.String() != "execution_quantity" || b.InstrumentID != "AAPL" || b.Detection.RunID != originalRun || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Revision != 0 || !b.ValuesVerified || b.Status != BreakOpen {
@@ -335,6 +338,49 @@ func runSignedQuantityFixture(t *testing.T, enrolled bool) {
 		}
 	}
 
+}
+
+// The two quantity observations were written by the signed source and real ledger
+// fixture. Compare them with ordinary breaks in the same database snapshot.
+func verifyMixedQueuePages(t *testing.T, ctx context.Context, st *Postgres, quantity []Break) {
+	t.Helper()
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	const add = `INSERT INTO custody_breaks(break_id,portfolio_id,custodian_id,kind,break_key,ibor,custodian,difference,first_seen_at,last_seen_at,status_changed_at,status,values_verified)
+ VALUES($1,$2,'PAGE-C','quantity',$1,'1','2','-1',now(),now(),now(),'open',true)`
+	for _, row := range [][2]string{{"A-before", "PF1"}, {"z-after", "PF1"}, {"00-other", "PF2"}} {
+		if _, err := tx.Exec(ctx, add, row[0], row[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := &Postgres{pool: st.pool, tx: tx}
+	want := []string{"A-before", quantity[0].BreakID, quantity[1].BreakID, "z-after"}
+	for _, limit := range []int{1, 2, 3, 4} {
+		var seen []string
+		after := ""
+		for len(seen) <= len(want) {
+			page, err := snapshot.BreakPage(ctx, []string{"PF1"}, after, limit)
+			if err != nil || len(page) > limit {
+				t.Fatalf("limit %d rows %d: %v", limit, len(page), err)
+			}
+			for _, b := range page {
+				if b.BreakID <= after || b.PortfolioID != "PF1" {
+					t.Fatalf("invalid continuation after %q: %+v", after, b)
+				}
+				seen = append(seen, b.BreakID)
+				after = b.BreakID
+			}
+			if len(page) < limit {
+				break
+			}
+		}
+		if !slices.Equal(seen, want) {
+			t.Fatalf("limit %d got %v want %v", limit, seen, want)
+		}
+	}
 }
 
 func verifyExecutionQuantityRevision(t *testing.T, index int, q *accountingpb.ExecutionQuantityComparison) {

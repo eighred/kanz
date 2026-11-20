@@ -81,6 +81,9 @@ type Store interface {
 	// for the operator surface. A nil portfolioID/custodianID means "all".
 	OutstandingBreaks(ctx context.Context, portfolios ...string) ([]Break, error)
 
+	// BreakPage returns up to limit authorized, outstanding items strictly after a break ID.
+	BreakPage(ctx context.Context, portfolios []string, after string, limit int) ([]Break, error)
+
 	// LoadBreak returns one break by id, or ErrNoBreak.
 	LoadBreak(ctx context.Context, breakID string) (Break, error)
 
@@ -320,6 +323,25 @@ func (m *MemoryStore) OutstandingBreaks(_ context.Context, portfolios ...string)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.outstandingLocked(portfolios...), nil
+}
+
+func (m *MemoryStore) BreakPage(_ context.Context, portfolios []string, after string, limit int) ([]Break, error) {
+	if err := validQueueFetch(limit); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var items []Break
+	for _, b := range m.breaks {
+		if !b.Status.Outstanding() || b.PortfolioID == "" || b.BreakID <= after || (len(portfolios) > 0 && !slices.Contains(portfolios, b.PortfolioID)) {
+			continue
+		}
+		items = append(items, b)
+		if len(items) == 2*limit {
+			items = sortQueuePage(items, limit)
+		}
+	}
+	return sortQueuePage(items, limit), nil
 }
 
 func (m *MemoryStore) outstandingLocked(portfolios ...string) []Break {
