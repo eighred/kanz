@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,12 @@ import (
 // The synthetic owner is an opt-in workspace executable. Its only transport
 // is a local PostgreSQL session; every economic fold remains inside OMS.
 const syntheticOMSPath = "services/synthetic_oms"
+
+var syntheticOMSFiles = []string{
+	"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql",
+	"funding.sql", "cancellation.sql", "settlement.sql",
+}
+
 const syntheticOMSCargo = `[package]
 name = "kanz-synthetic-oms"
 version = "0.1.0"
@@ -48,9 +55,7 @@ func checkSyntheticOMS(root string) error {
 			}
 			return nil
 		}
-		switch rel {
-		case "Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "funding.sql", "cancellation.sql", "settlement.sql":
-		default:
+		if !slices.Contains(syntheticOMSFiles, rel) {
 			return fmt.Errorf("unexpected synthetic OMS input %s", rel)
 		}
 		data, e := os.ReadFile(path)
@@ -63,7 +68,7 @@ func checkSyntheticOMS(root string) error {
 	if err != nil {
 		return err
 	}
-	if len(files) != 8 || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
+	if len(files) != len(syntheticOMSFiles) || rustMigrationCompact(files["Cargo.toml"]) != rustMigrationCompact(syntheticOMSCargo) {
 		return fmt.Errorf("synthetic OMS workspace recipe changed")
 	}
 	source, err := rustMigrationWithoutComments(files["src/main.rs"])
@@ -228,7 +233,7 @@ func TestSyntheticOMSGuardsLocalIngressAndEvidence(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "src"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Cargo.toml", "src/main.rs", "schema.sql", "writer.sql", "go_writer.sql", "funding.sql", "cancellation.sql", "settlement.sql"} {
+			for _, name := range syntheticOMSFiles {
 				raw, err := os.ReadFile(filepath.Join(root, syntheticOMSPath, name))
 				if err != nil {
 					t.Fatal(err)
