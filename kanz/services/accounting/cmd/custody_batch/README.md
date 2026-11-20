@@ -50,6 +50,12 @@ The read-only pilot keeps manual reruns disabled. For a separately authorized op
 
 An operator with custody read access and the comparison role can open **Custody breaks**, enter a portfolio, custodian and completed UTC business date, review them, and run the comparison. The gateway accepts `POST /v1/portfolios/{id}/custody/reruns` with `custodian_id`, `business_date` and a stable lowercase UUID-v4 `request_id`. The session supplies tenant, subject and portfolio grants. Accounting reads the stored statement and journal basis, then returns the committed comparison receipt. Retry the same request ID after an unconfirmed outcome. A new request starts a new comparison.
 
+### Compare an earlier close after the next close
+
+An authorized operator can rerun an earlier date after a later comparison has taken ownership of the live break queue. Accounting requires the latest materialized signed revision for the earlier date, an independently verified effective account assignment, and the same journal prefix at measurement and commit. The receipt records the dated comparison and existing execution measures. Use its run ID to reopen the signed evidence. The live queue, the later close, and the preceding signed receipts retain their own authority and identifiers. Replaying the same request returns the original completion.
+
+Apply accounting migration 0034 and upgrade the Accounting readers and writers together before enabling manual historical comparison in the pilot. Both new outcome values are additive to the canonical schema. Earlier readers require a compatible SDK upgrade to display the new outcomes.
+
 ## Reproduce the operator workflow
 
 Start in a clean checkout of the pilot revision. Use its Go toolchain (`kanz/go.mod`), Node major (`web/.nvmrc`), npm, Python 3, Buf 1.69.0 and a local Docker engine with Linux containers. Run from the repository root. The final command writes synthetic results outside the checkout.

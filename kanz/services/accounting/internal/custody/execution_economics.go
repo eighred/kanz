@@ -21,7 +21,7 @@ const maxEconomicsRows = 128
 // transaction-grain book snapshot. Their values are never economic inputs.
 func compareExecutionEconomics(ctx context.Context, tx pgx.Tx, run Run, stmt Statement) (*accountingpb.ExecutionEconomicsComparison, error) {
 	basis := run.Basis
-	if basis == nil || basis.Mode != BasisDeclared || basis.Transactions == nil || basis.Transactions.Pass != recon.LegRan.String() || stmt.Grain != recon.GrainTransactions || !verifying(run) {
+	if basis == nil || basis.Mode != BasisDeclared || basis.Transactions == nil || basis.Transactions.Pass != recon.LegRan.String() || stmt.Grain != recon.GrainTransactions || !run.Outcome.IsFullComparison() {
 		return nil, nil
 	}
 	accounts := basis.Accounts[stmt.CustodianID]

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onUnmounted, reactive, ref, watch } from 'vue'
 import { useSession } from '../stores/session'
-import { custody, downloadCustodyComparison, previousStatementPrefix, signedStatement, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
+import { custody, cleanComparison, downloadCustodyComparison, fullComparison, historicalClose, previousStatementPrefix, signedStatement, ReportedFiguresExportLimit, type DatedCustodyResult } from '../api/custody'
 import CustodyExecutionEconomics from './CustodyExecutionEconomics.vue'
 import { ApiError } from '../api/client'
 import { formatDecimal } from '../api/decimal'
@@ -72,9 +72,10 @@ function openCorrection() {
   savedRun.value = current.historical_quantity_correction_run_id
   void read(current.statement_id)
 }
-const outcomes = { historical_quantity_correction: 'Historical execution quantities corrected', clean: 'Balances and transaction references agree', breaks: 'Differences found', no_statement: 'No statement received', failed: 'Comparison failed' }
+const outcomes = { historical_quantity_correction: 'Historical execution quantities corrected', breaks: 'Differences found', historical_breaks: 'Differences found', no_statement: 'No statement received', failed: 'Comparison failed' }
 function recordedLabel(result: Extract<DatedCustodyResult, { state: 'recorded' }>): string {
-  if (result.outcome === 'clean' && (result.transactions?.transaction_pass !== 'ran' || result.transactions.unreferenced_book_trades !== '0')) return 'Balances agree'
+  if (cleanComparison(result.outcome)) return result.transactions?.transaction_pass === 'ran' && result.transactions.unreferenced_book_trades === '0'
+    ? 'Balances and transaction references agree' : 'Balances agree'
   return outcomes[result.outcome]
 }
 const states = { not_compared: 'No comparison recorded', pending: 'Statement awaiting comparison', unknown: 'Result unknown' }
@@ -97,7 +98,8 @@ const pendingLabels = {
     </form>
     <p v-if="error" role="alert">{{ error }}</p>
     <output v-if="result" :data-state="result.state">
-      <span v-if="savedRun">{{ result.state === 'recorded' && result.outcome === 'no_statement' ? 'Historical scheduled run' : 'Historical comparison' }} · </span>
+      <span v-if="result.state === 'recorded' && historicalClose(result.outcome)">Historical close comparison · </span>
+      <span v-else-if="savedRun">{{ result.state === 'recorded' && result.outcome === 'no_statement' ? 'Historical scheduled run' : 'Historical comparison' }} · </span>
       <strong>{{ result.state === 'recorded' ? recordedLabel(result) : result.reason ? pendingLabels[result.reason] : states[result.state] }}</strong>
       <strong v-if="result.state === 'recorded' && result.historical?.execution_quantities?.differences.length"> · Execution quantity differences found</strong>
       · {{ result.portfolio_id }} · {{ result.custodian_id }} · {{ result.business_date }}
@@ -105,7 +107,8 @@ const pendingLabels = {
       <template v-if="result.state === 'recorded'">
         · Run <code>{{ result.run_id }}</code> · Completed {{ result.completed_at }}
         <span v-if="result.journal_position !== undefined"> · Journal position <code>{{ result.journal_position }}</code> · Account scope {{ result.scope_mode }}</span>
-        <span v-if="result.outcome === 'clean' || result.outcome === 'breaks'">
+        <span v-if="historicalClose(result.outcome)"> · A later close controls the outstanding break queue.</span>
+        <span v-if="fullComparison(result.outcome)">
           · {{ result.account_assignment_verified ? 'Custody account assignment verified for this close' : 'Custody account assignment unverified for this close' }}
         </span>
         <span v-if="result.execution_economics_status"> · <strong>{{ economicsLabel[result.execution_economics_status] }}</strong> for the signed references</span>
@@ -122,7 +125,7 @@ const pendingLabels = {
     <button v-if="result?.state === 'recorded' && !result.historical && result.account_assignment_verified && signedStatement(result.statement_id)"
       type="button" @click="openOriginal">View original comparison receipt</button>
     <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
-    <button v-if="result?.state === 'recorded' && result.outcome === 'clean' && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
+    <button v-if="result?.state === 'recorded' && cleanComparison(result.outcome) && result.account_assignment_verified && previousStatementPrefix(result.statement_id)"
       type="button" @click="read(undefined, 'previous')">View previous statement comparison</button>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>

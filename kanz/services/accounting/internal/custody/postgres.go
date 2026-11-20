@@ -185,6 +185,9 @@ LIMIT 1`
 // written here — they live in custody_breaks under their own cross-run identity,
 // and UpsertBreaks owns them.
 func (p *Postgres) SaveRun(ctx context.Context, r Run) error {
+	if r.Outcome.IsHistoricalComparison() {
+		return ErrUnverifiedPrecision
+	}
 	return p.saveRun(ctx, r, nil, nil)
 }
 
@@ -223,7 +226,7 @@ func (p *Postgres) LatestRun(ctx context.Context, portfolioID, custodianID strin
 	const q = `
 SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis
 FROM custody_runs
-WHERE portfolio_id = $1 AND custodian_id = $2 AND outcome<>'historical_quantity_correction'
+WHERE portfolio_id = $1 AND custodian_id = $2 AND outcome NOT IN ('historical_quantity_correction','historical_clean','historical_breaks')
 ORDER BY completed_at DESC
 LIMIT 1`
 	var (

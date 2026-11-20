@@ -87,7 +87,7 @@ func historicalReceiptSnapshot(ctx context.Context, tx pgx.Tx, tenant string, su
 	// for an absent run, a different tenant/pair/date/account and a legacy row.
 	err := tx.QueryRow(ctx, `SELECT manual_receipt,signed_statement_sha256,statement_id,outcome,tolerance,completed_at,book_basis
 		FROM custody_runs WHERE tenant_id=app_current_tenant() AND tenant_id=$1 AND portfolio_id=$2 AND custodian_id=$3
-		AND business_date=$4 AND run_id=$5 AND values_verified AND outcome IN ('clean','breaks','historical_quantity_correction') AND failure_reason=''
+		AND business_date=$4 AND run_id=$5 AND values_verified AND outcome IN ('clean','breaks','historical_clean','historical_breaks','historical_quantity_correction') AND failure_reason=''
 		AND book_basis->>'mode'=$6 AND book_basis->'accounts'->$3::text=to_jsonb(ARRAY[$7::text])
 		AND octet_length(signed_statement_sha256)=$8 AND octet_length(manual_receipt) BETWEEN 1 AND $9`,
 		tenant, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate), id, BasisDeclared, account, sha256.Size, BatchLimit).
@@ -103,7 +103,8 @@ func historicalReceiptSnapshot(ctx context.Context, tx pgx.Tx, tenant string, su
 		run.Subject.CustodianID != subject.CustodianID || !run.Subject.BusinessDate.Equal(subject.BusinessDate) ||
 		run.RunID != id || run.Outcome.String() != outcome || run.StatementID != statementID ||
 		run.FailureReason != "" || !run.CompletedAt.Truncate(time.Microsecond).Equal(completed) ||
-		!isBatchStatement(statementID) || len(run.Breaks) > historicalBreakLimit || ((run.Outcome == OutcomeClean || run.Outcome == OutcomeHistoricalQuantityCorrection) != (len(run.Breaks) == 0)) {
+		!isBatchStatement(statementID) || len(run.Breaks) > historicalBreakLimit ||
+		((run.Outcome == OutcomeClean || run.Outcome == OutcomeHistoricalClean || run.Outcome == OutcomeHistoricalQuantityCorrection) != (len(run.Breaks) == 0)) {
 		return unknown, nil
 	}
 	storedTolerance, err := parseRatText(tolerance)
@@ -134,11 +135,14 @@ func historicalReceiptSnapshot(ctx context.Context, tx pgx.Tx, tenant string, su
 	if err != nil {
 		return DatedResult{}, err
 	}
+	if run.Outcome.IsHistoricalComparison() && (!verifiedAssignment || run.RequestID == "" || basis.Transactions == nil || len(basis.HistoricalDetections) != 0) {
+		return unknown, nil
+	}
 	run.Basis = basis
 	// Earlier readers could not ingest a signed source declaring this contract.
 	// A verified ordinary receipt against such a source must retain the
 	// measurements it committed, including an explicitly unassessed row.
-	if verifiedAssignment && verifying(run) && run.ExecutionEconomics == nil {
+	if verifiedAssignment && run.Outcome.IsFullComparison() && run.ExecutionEconomics == nil {
 		for _, line := range source.Transactions {
 			if line.EconomicsConvention != "" || line.Commission != nil {
 				return unknown, nil

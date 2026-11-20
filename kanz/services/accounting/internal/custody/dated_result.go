@@ -33,7 +33,7 @@ func (p TransactionComparison) matches(stmt Statement, outcome Outcome, prefix i
 		return p.Pass == recon.LegRan.String() && p.StatementReferences != nil && *p.StatementReferences == len(stmt.Transactions) &&
 			p.BookReferences != nil && *p.BookReferences >= 0 && p.UnreferencedBookTrades != nil && *p.UnreferencedBookTrades >= 0 &&
 			int64(*p.UnreferencedBookTrades) <= prefix-int64(*p.BookReferences) &&
-			(outcome != OutcomeClean || *p.BookReferences == *p.StatementReferences)
+			((outcome != OutcomeClean && outcome != OutcomeHistoricalClean) || *p.BookReferences == *p.StatementReferences)
 	}
 	return false
 }
@@ -90,7 +90,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 	// Conflicting outcomes/bases at the same position leave the result unknown.
 	const result = `WITH candidates AS (
         SELECT run_id,outcome,completed_at,book_basis,tolerance,values_verified,signed_statement_sha256,
-               outcome IN ('clean','breaks') AS compared
+               outcome IN ('clean','breaks','historical_clean','historical_breaks') AS compared
         FROM custody_runs
         WHERE tenant_id=app_current_tenant() AND portfolio_id=$1 AND custodian_id=$2 AND business_date=$3 AND statement_id=$4
     ), best AS (
@@ -132,7 +132,7 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		return DatedResult{State: "unknown"}, nil
 	}
 	verifiedAssignment := false
-	if verifying(run) || run.Outcome == OutcomeHistoricalQuantityCorrection {
+	if run.Outcome.IsFullComparison() || run.Outcome == OutcomeHistoricalQuantityCorrection {
 		if len(binding) != sha256.Size || run.Basis == nil || run.Basis.JournalPosition < 0 {
 			return DatedResult{State: "unknown"}, nil
 		}
@@ -201,6 +201,15 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 			}
 		}
 		return pending, nil
+	}
+	if run.Outcome.IsHistoricalComparison() {
+		// Even the latest dated view uses the retained evidence for a historical
+		// comparison. Its differences have no corresponding live queue rows.
+		accounts := run.Basis.Accounts[subject.CustodianID]
+		if !verifiedAssignment || len(accounts) != 1 {
+			return DatedResult{State: "unknown"}, nil
+		}
+		return historicalReceiptSnapshot(ctx, tx, tenant, subject, accounts[0], run.RunID)
 	}
 	// The current balance result and retained execution evidence must describe
 	// the same signed run, account and database snapshot.

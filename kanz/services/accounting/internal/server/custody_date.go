@@ -85,7 +85,9 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		}
 		// An operator may have reassigned this custodian since the run. The
 		// customer report must not describe that old account as today's basis.
-		if result.HistoricalQuantityCorrectionRunID != "" || (result.State == "recorded" && (result.Run.Outcome == custody.OutcomeHistoricalQuantityCorrection || result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks)) {
+		fullComparison := result.Run.Outcome.IsFullComparison()
+		attributed := fullComparison || result.Run.Outcome == custody.OutcomeHistoricalQuantityCorrection
+		if result.HistoricalQuantityCorrectionRunID != "" || (result.State == "recorded" && attributed) {
 			basis := result.Run.Basis
 			if basis == nil || basis.Mode != custody.BasisDeclared || len(basis.Accounts[custodian]) != 1 || len(configured) != 1 || !configured.Has(basis.Accounts[custodian][0]) {
 				if result.State == "pending" {
@@ -106,13 +108,13 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			response["statement_id"] = result.StatementID
 		}
 		if result.State == "recorded" {
-			if result.AccountAssignmentVerified && (result.Run.Outcome == custody.OutcomeHistoricalQuantityCorrection || result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
+			if result.AccountAssignmentVerified && attributed {
 				response["account_assignment_verified"] = true
 			}
 			response["run_id"] = result.Run.RunID
 			response["outcome"] = result.Run.Outcome.String()
 			response["completed_at"] = result.Run.CompletedAt.UTC().Format(time.RFC3339Nano)
-			if result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks {
+			if fullComparison {
 				response["transaction_pass"] = "unknown"
 				if proof := result.Run.Basis.Transactions; proof != nil {
 					response["transaction_pass"] = proof.Pass
@@ -125,7 +127,7 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 			}
 			if economics := result.Run.ExecutionEconomics; economics != nil && result.AccountAssignmentVerified &&
 				result.Run.Basis != nil && result.Run.Basis.Transactions != nil && result.Run.Basis.Transactions.Pass == "ran" &&
-				(result.Run.Outcome == custody.OutcomeClean || result.Run.Outcome == custody.OutcomeBreaks) {
+				fullComparison {
 				response["execution_economics_status"] = executionEconomicsStatus(economics)
 				if historical {
 					encoded, err := (protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}).Marshal(economics)

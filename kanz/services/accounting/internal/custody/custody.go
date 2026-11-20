@@ -99,7 +99,18 @@ const (
 	// FailureReason says why.
 	OutcomeFailed
 	OutcomeHistoricalQuantityCorrection
+	OutcomeHistoricalClean
+	OutcomeHistoricalBreaks
 )
+
+// IsHistoricalComparison identifies a full manual snapshot without queue authority.
+func (o Outcome) IsHistoricalComparison() bool {
+	return o == OutcomeHistoricalClean || o == OutcomeHistoricalBreaks
+}
+
+func (o Outcome) IsFullComparison() bool {
+	return o == OutcomeClean || o == OutcomeBreaks || o.IsHistoricalComparison()
+}
 
 func (o Outcome) String() string {
 	switch o {
@@ -113,6 +124,10 @@ func (o Outcome) String() string {
 		return "failed"
 	case OutcomeHistoricalQuantityCorrection:
 		return "historical_quantity_correction"
+	case OutcomeHistoricalClean:
+		return "historical_clean"
+	case OutcomeHistoricalBreaks:
+		return "historical_breaks"
 	default:
 		return "unspecified"
 	}
@@ -126,7 +141,7 @@ func (o Outcome) String() string {
 // the metric is pre-seeded from this list. A new outcome added above therefore
 // gets its series without anybody remembering to add it in a second place.
 func Outcomes() []Outcome {
-	return []Outcome{OutcomeClean, OutcomeBreaks, OutcomeNoStatement, OutcomeFailed, OutcomeHistoricalQuantityCorrection}
+	return []Outcome{OutcomeClean, OutcomeBreaks, OutcomeNoStatement, OutcomeFailed, OutcomeHistoricalQuantityCorrection, OutcomeHistoricalClean, OutcomeHistoricalBreaks}
 }
 
 // wireOutcome renders an Outcome onto the wire.
@@ -142,6 +157,10 @@ func wireOutcome(o Outcome) accountingpb.ReconciliationOutcome {
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_FAILED
 	case OutcomeHistoricalQuantityCorrection:
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_HISTORICAL_QUANTITY_CORRECTION
+	case OutcomeHistoricalClean:
+		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_HISTORICAL_CLEAN
+	case OutcomeHistoricalBreaks:
+		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_HISTORICAL_BREAKS
 	default:
 		return accountingpb.ReconciliationOutcome_RECONCILIATION_OUTCOME_UNSPECIFIED
 	}

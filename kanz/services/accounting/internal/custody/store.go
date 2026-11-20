@@ -212,6 +212,9 @@ func (m *MemoryStore) latestStatementLocked(subject Subject) (Statement, error) 
 
 // SaveRun implements Store.
 func (m *MemoryStore) SaveRun(_ context.Context, r Run) error {
+	if r.Outcome.IsHistoricalComparison() {
+		return ErrDurableActionStore
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, dup := m.runIDs[r.RunID]; dup {
