@@ -93,10 +93,14 @@ func assignmentSnapshot(ctx context.Context, tx pgx.Tx, subject Subject, account
  ) SELECT a.portfolio_id,a.custodian_id,a.account_id,a.version,a.revision,a.authority,a.effective_from,a.effective_until,a.recorded_at,
  a.evidence_sha256,a.evidence_payload,a.signature,ai.public_key,
  p.venue,p.exchange_account_id,p.proof_id,p.authority,p.effective_from,p.effective_until,p.recorded_at,
- p.evidence_sha256,p.evidence_payload,p.signature,pi.public_key,a.aliases,a.withdrawn
+ p.evidence_sha256,p.evidence_payload,p.signature,pi.public_key,a.aliases,a.withdrawn,
+ EXISTS(SELECT FROM custody_proof_scopes s WHERE (s.login_role,s.tenant_id,s.venue,s.account_id,s.exchange_account_id,s.portfolio_id,s.custodian_id)=
+    (p.issuer_role,p.tenant_id,p.venue,p.account_id,p.exchange_account_id,'','')),
+ EXISTS(SELECT FROM custody_proof_scopes s WHERE (s.login_role,s.tenant_id,s.venue,s.account_id,s.exchange_account_id,s.portfolio_id,s.custodian_id)=
+    (a.issuer_role,a.tenant_id,'',a.account_id,'',a.portfolio_id,a.custodian_id))
  FROM active a JOIN custody_account_proofs p USING(tenant_id,account_id,proof_id)
- JOIN custody_proof_issuers ai ON(ai.login_role=a.issuer_role AND ai.tenant_id=a.tenant_id AND ai.authority=a.authority AND ai.kind='custody_assignment')
- JOIN custody_proof_issuers pi ON(pi.login_role=p.issuer_role AND pi.tenant_id=p.tenant_id AND pi.authority=p.authority AND pi.kind='venue_identity')
+ LEFT JOIN custody_proof_issuers ai ON(ai.login_role=a.issuer_role AND ai.tenant_id=a.tenant_id AND ai.authority=a.authority AND ai.kind='custody_assignment')
+ LEFT JOIN custody_proof_issuers pi ON(pi.login_role=p.issuer_role AND pi.tenant_id=p.tenant_id AND pi.authority=p.authority AND pi.kind='venue_identity')
  WHERE EXISTS(SELECT FROM custody_account_assignments seen WHERE seen.tenant_id=a.tenant_id AND seen.account_id=a.account_id
    AND seen.portfolio_id=$4 AND (NOT $5::boolean OR seen.custodian_id=$6) AND seen.effective_from<=$2::date)
  ORDER BY a.custodian_id COLLATE "C",a.account_id COLLATE "C"`
@@ -111,12 +115,12 @@ func assignmentSnapshot(ctx context.Context, tx pgx.Tx, subject Subject, account
 		var af, au, ar, pf, pu, pr time.Time
 		var ad, ab, as, ak, pd, pb, ps, pk []byte
 		var aliases int64
-		var withdrawn bool
+		var withdrawn, identityScope, assignmentScope bool
 		if err := rows.Scan(&a.PortfolioID, &a.CustodianID, &a.AccountID, &a.Version, &a.Revision, &a.AssignmentAuthority, &af, &au, &ar, &ad, &ab, &as, &ak,
-			&a.Venue, &a.ExchangeAccountID, &a.ProofID, &a.ProofAuthority, &pf, &pu, &pr, &pd, &pb, &ps, &pk, &aliases, &withdrawn); err != nil {
+			&a.Venue, &a.ExchangeAccountID, &a.ProofID, &a.ProofAuthority, &pf, &pu, &pr, &pd, &pb, &ps, &pk, &aliases, &withdrawn, &identityScope, &assignmentScope); err != nil {
 			return nil, err
 		}
-		if !withdrawn && (af.Before(pf) || au.After(pu)) {
+		if !identityScope || !assignmentScope || (!withdrawn && (af.Before(pf) || au.After(pu))) {
 			return nil, ErrUnprovenAssignment
 		}
 		a.EffectiveFrom, a.EffectiveUntil, a.ProofFrom, a.ProofUntil = af.Format(time.DateOnly), au.Format(time.DateOnly), pf.Format(time.DateOnly), pu.Format(time.DateOnly)

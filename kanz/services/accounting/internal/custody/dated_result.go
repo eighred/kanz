@@ -166,6 +166,15 @@ func (p *Postgres) DatedResult(ctx context.Context, subject Subject) (DatedResul
 		if proof := run.Basis.Transactions; proof != nil && !proof.matches(materialized, run.Outcome, run.Basis.JournalPosition) {
 			return DatedResult{State: "unknown"}, nil
 		}
+		if run.Basis.Assignments == nil {
+			var enrolled bool
+			if err := tx.QueryRow(ctx, "SELECT public.custody_assignment_reader_enrolled()").Scan(&enrolled); err != nil {
+				return DatedResult{}, err
+			}
+			if enrolled {
+				return DatedResult{State: "pending", StatementID: id, Reason: "assignment_unproven"}, nil
+			}
+		}
 		verifiedAssignment, err = confirmRunAssignments(ctx, tx, subject, run.Basis, false)
 		if errors.Is(err, ErrUnprovenAssignment) {
 			return DatedResult{State: "pending", Reason: "assignment_changed", StatementID: id}, nil

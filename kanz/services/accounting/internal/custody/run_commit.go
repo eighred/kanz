@@ -154,6 +154,9 @@ func (m *MemoryStore) CommitRun(ctx context.Context, run Run) (Run, error) {
 	}
 	run = cloneRun(run)
 	pair := [2]string{run.Subject.PortfolioID, run.Subject.CustodianID}
+	if run.Basis != nil && run.Basis.Assignments != nil {
+		return Run{}, ErrUnprovenAssignment
+	}
 	if run.ExecutionQuantities != nil {
 		return Run{}, errBatchReceipt
 	}

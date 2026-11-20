@@ -99,6 +99,14 @@ BEGIN
  END LOOP;
 END;
 $$;
+-- The caller can discover only its own enrollment. Existing deployments need
+-- no grants on the proof tables merely to read their pre-enrollment history.
+CREATE OR REPLACE FUNCTION custody_assignment_reader_enrolled() RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+ SELECT EXISTS(SELECT FROM public.custody_assignment_readers
+ WHERE login_role=session_user AND tenant_id=public.app_current_tenant())
+$$;
+
 -- During a rolling upgrade, previously deployed accounting binaries must fail
 -- closed for a newly enrolled login. Legacy deployments have no enrollment.
 CREATE OR REPLACE FUNCTION custody_require_proven_run() RETURNS trigger
