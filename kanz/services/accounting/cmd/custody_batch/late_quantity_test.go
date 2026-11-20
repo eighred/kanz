@@ -41,7 +41,7 @@ func checkLateQuantityPilot(t *testing.T) {
 	}
 	sealed := make(map[string][]byte)
 	outcomes := []string{"breaks", "clean", "historical_quantity_correction"}
-	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "late_quantity"), false, sequence, func(ctx context.Context, pool *pgxpool.Pool, stmt custody.Statement, stage int, broker pilotBroker) {
+	checkPilotSeries(t, 2*time.Minute, filepath.Join("testdata", "late_quantity"), nil, sequence, func(ctx context.Context, pool *pgxpool.Pool, stmt custody.Statement, stage int, broker pilotBroker) {
 		ctx = bus.WithTenantID(ctx, tenant)
 		subject := stmt.Subject()
 		journal := ledger.NewPostgres(pool)

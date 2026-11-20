@@ -37,7 +37,44 @@ func (p *Postgres) HistoricalReceipt(ctx context.Context, subject Subject, accou
 		return DatedResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	return historicalReceiptSnapshot(ctx, tx, tenant, subject, account, id)
+	saved, err := historicalReceiptSnapshot(ctx, tx, tenant, subject, account, id)
+	if err != nil || saved.State == "recorded" {
+		return saved, err
+	}
+	return historicalAbsenceSnapshot(ctx, tx, tenant, subject, id)
+}
+
+// Absence belongs to the scheduled portfolio/custodian close. The retained
+// diagnostic attests what the scheduler observed, independently of the
+// current statement. It contains no signed source or account-level figures.
+func historicalAbsenceSnapshot(ctx context.Context, tx pgx.Tx, tenant string, subject Subject, id string) (DatedResult, error) {
+	unknown := DatedResult{State: "unknown"}
+	var payload []byte
+	var completed time.Time
+	day := BusinessDay(subject.BusinessDate)
+	err := tx.QueryRow(ctx, `SELECT manual_receipt, completed_at FROM custody_runs
+		WHERE tenant_id=app_current_tenant() AND tenant_id=$1 AND portfolio_id=$2 AND custodian_id=$3
+		AND business_date=$4 AND run_id=$5 AND values_verified AND outcome='no_statement'
+		AND failure_reason='' AND statement_id='' AND signed_statement_sha256 IS NULL AND book_basis IS NULL
+		AND octet_length(manual_receipt) BETWEEN 1 AND $6`,
+		tenant, subject.PortfolioID, subject.CustodianID, day, id, BatchLimit).Scan(&payload, &completed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return unknown, nil
+	}
+	if err != nil {
+		return DatedResult{}, err
+	}
+	run, err := runFromRecord(payload)
+	if err != nil || run.RunID != id || run.RunID != runID(subject, run.CompletedAt) ||
+		run.Subject.PortfolioID != subject.PortfolioID || run.Subject.CustodianID != subject.CustodianID || !run.Subject.BusinessDate.Equal(day) ||
+		!run.CompletedAt.Truncate(time.Microsecond).Equal(completed) || run.Outcome != OutcomeNoStatement ||
+		run.RequestID != "" || run.Actor != "" || run.StatementID != "" || run.FailureReason != "" || len(run.Breaks) != 0 ||
+		run.ExecutionEconomics != nil || run.ExecutionQuantities != nil || len(run.HistoricalQuantityResolutions) != 0 {
+		return unknown, nil
+	}
+	// Use PostgreSQL's timestamp precision, as in DatedResult's live lookup.
+	run.CompletedAt = completed
+	return DatedResult{State: "recorded", Run: run}, nil
 }
 
 func historicalReceiptSnapshot(ctx context.Context, tx pgx.Tx, tenant string, subject Subject, account, id string) (DatedResult, error) {

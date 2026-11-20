@@ -186,7 +186,10 @@ export const custody = {
     if (result.account_assignment_verified !== undefined &&
         (result.account_assignment_verified !== true || (!verified && !correction) || result.scope_mode !== 'declared')) throw invalid()
     let historical: HistoricalComparison | undefined
-    if (runID && result.state === 'recorded') {
+    if (result.state === 'recorded' && result.outcome === 'no_statement') {
+      if ((runID && result.run_id !== runID) || result.scope_mode !== undefined || result.journal_position !== undefined ||
+          result.breaks !== undefined || result.signed_statement_sha256 !== undefined) throw invalid()
+    } else if (runID && result.state === 'recorded') {
       const digest = result.signed_statement_sha256
       if ((!verified && !correction) || (anchor === undefined && result.run_id !== runID) || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest) ||
           !signedStatement(result.statement_id) || !result.statement_id.endsWith('.' + digest)) throw invalid()

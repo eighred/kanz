@@ -136,7 +136,7 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 					response["execution_economics"] = json.RawMessage(encoded)
 				}
 			}
-			if historical {
+			if historical && result.Run.Outcome != custody.OutcomeNoStatement {
 				if q := result.Run.ExecutionQuantities; q != nil {
 					// Protobuf JSON preserves the signed 64-bit coefficients as decimal strings.
 					figures, err := (protojson.MarshalOptions{UseProtoNames: true, EmitDefaultValues: true}).Marshal(q)
