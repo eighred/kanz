@@ -274,16 +274,8 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 		source = orderview.RecoveryQuery
 		ctx = recoveryCtx
 	}
-	switch resp.Status {
-	case "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "PENDING_CANCEL":
-		// A positive placement survives caller cancellation or a subsequent
-		// failure to obtain complete match history.
-		ackCtx, cancelAck := newPlacementRecoveryContext(ctx)
-		err := v.acknowledge(ackCtx, st, symbol, resp.OrderID, source)
-		cancelAck()
-		if err != nil {
-			return nil, fmt.Errorf("binance: persist placement acknowledgement: %w", err)
-		}
+	if err := v.acknowledgeResponse(ctx, st, symbol, resp, source); err != nil {
+		return nil, err
 	}
 	if resp.Status == "NEW" || resp.Status == "FILLED" || resp.Status == "PARTIALLY_FILLED" {
 		// FULL supplies only an order-level time. Placement and later recovery

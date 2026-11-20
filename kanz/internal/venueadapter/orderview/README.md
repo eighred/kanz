@@ -43,7 +43,7 @@ reconciler enforces the exchange-order binding. A rollback requires holding
 placement and reconciliation before starting an older binary. Keep the columns
 and index for recovery.
 
-The first verified placement response, recovery lookup during dispatch, or
+The first verified placement response, recovery lookup, or
 private trade report records the exchange account UID, symbol, numeric order
 ID, observation source and database receipt time on the tenant's dispatch row.
 A missing acknowledgement leaves an uncertain dispatch. A later signed venue

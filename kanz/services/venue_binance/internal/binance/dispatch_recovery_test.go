@@ -77,9 +77,24 @@ func startBinanceRPC(t *testing.T, open func() *orderview.Postgres, f *fakeBinan
 	return execution.NewGRPCVenue("BINANCE", "fixture-account", cc, "fund-alpha"), func() { _ = cc.Close(); rpc.Stop() }
 }
 
+func requireSignedFixtureRequests(t *testing.T, f *fakeBinance) {
+	t.Helper()
+	f.onRequest = func(r *http.Request) {
+		params := r.URL.Query()
+		signature := params.Get("signature")
+		params.Del("signature")
+		mac := hmac.New(sha256.New, []byte("fixture-secret"))
+		_, _ = mac.Write([]byte(params.Encode()))
+		if r.Header.Get("X-MBX-APIKEY") != "fixture-key" || signature != hex.EncodeToString(mac.Sum(nil)) {
+			t.Error("unsigned synthetic account, placement or history request")
+		}
+	}
+}
+
 func TestMissingOrderAfterAdapterRestartCannotAuthorizeASecondPlacement(t *testing.T) {
 	open := backing.VenueStore(t, "../../migrations")
 	f := newFakeBinance(t)
+	requireSignedFixtureRequests(t, f)
 	f.accountBody = `{"uid":12345678}`
 	ctx := t.Context()
 	start := func() (*execution.GRPCVenue, func()) { return startBinanceRPC(t, open, f) }
@@ -142,12 +157,41 @@ func TestMissingOrderAfterAdapterRestartCannotAuthorizeASecondPlacement(t *testi
 	if err != nil || view.State != execution.OrderViewUnknown {
 		t.Fatalf("venue miss before dispatch: %+v %v", view, err)
 	}
+	f.queryStatus, f.queryBody = http.StatusForbidden, `{"code":-2015,"msg":"Permission denied"}`
+	if _, err := restarted.QueryOrder(ctx, order); err == nil {
+		t.Fatal("denied recovery call became an affirmative answer")
+	}
+	f.queryStatus, f.queryBody = http.StatusOK, `{"symbol":"BTCUSDT","clientOrderId":"sent","orderId":7,"status":"PENDING_NEW","executedQty":"0"}`
+	view, err = restarted.QueryOrder(ctx, order)
+	if err != nil || view.State != execution.OrderViewIndeterminate {
+		t.Fatalf("pending venue response affirmed placement: %+v %v", view, err)
+	}
+	if _, found, err := open().PlacementFor(ctx, order.GetOrderId()); err != nil || found {
+		t.Fatal("unconfirmed recovery acquired a durable acknowledgement", err)
+	}
 	// Positive venue evidence can still recover the original order as resting.
 	f.queryStatus, f.queryBody = http.StatusOK, `{"symbol":"BTCUSDT","clientOrderId":"sent","orderId":7,"status":"NEW","executedQty":"0"}`
 	view, err = restarted.QueryOrder(ctx, order)
 	if err != nil || view.State != execution.OrderViewWorking || len(view.Fills) != 0 || f.posts != 1 || f.myTradesCalls != 0 {
 		t.Fatalf("resting order recovery: %+v %v placements=%d", view, err, f.posts)
 	}
+	receipt, found, err := open().PlacementFor(ctx, order.GetOrderId())
+	want := orderview.Placement{AccountUID: "12345678", Symbol: "BTCUSDT", OrderID: 7}
+	if err != nil || !found || receipt.Placement != want || receipt.Source != orderview.RecoveryQuery || receipt.RecordedAt.IsZero() {
+		t.Fatalf("standalone positive recovery did not retain the original exchange identity: %+v %v", receipt, err)
+	}
+	stop()
+	recovered, closeRecovered := start()
+	defer closeRecovered()
+	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"sent","orderId":8,"status":"PARTIALLY_FILLED","executedQty":"0.6"}`
+	view, err = recovered.QueryOrder(ctx, order)
+	if err != nil || view.State != execution.OrderViewIndeterminate || len(view.Fills) != 0 || f.myTradesCalls != 0 || f.posts != 1 {
+		t.Fatalf("changed exchange order reached trade history after recovery: %+v %v", view, err)
+	}
+	if retained, ok, err := open().PlacementFor(ctx, order.GetOrderId()); err != nil || !ok || retained != receipt {
+		t.Fatalf("conflict changed the first recovery receipt: %+v %v", retained, err)
+	}
+
 }
 
 func TestPendingBinanceTradeHistoryAcrossAdapterRestart(t *testing.T) {
@@ -159,16 +203,7 @@ func TestPendingBinanceTradeHistoryAcrossAdapterRestart(t *testing.T) {
 	f.newOrderBody, f.queryBody, f.myTradesBody = partial, partial, "[]"
 	witness := open()
 	want := orderview.Placement{AccountUID: "12345678", Symbol: "BTCUSDT", OrderID: 7}
-	f.onRequest = func(r *http.Request) {
-		params := r.URL.Query()
-		signature := params.Get("signature")
-		params.Del("signature")
-		mac := hmac.New(sha256.New, []byte("fixture-secret"))
-		_, _ = mac.Write([]byte(params.Encode()))
-		if r.Header.Get("X-MBX-APIKEY") != "fixture-key" || signature != hex.EncodeToString(mac.Sum(nil)) {
-			t.Error("unsigned synthetic account, placement or history request")
-		}
-	}
+	requireSignedFixtureRequests(t, f)
 	f.onHistory = func() {
 		got, found, err := witness.PlacementFor(t.Context(), order.GetOrderId())
 		if err != nil || !found || got.Placement != want || got.Source != orderview.PlacementResponse || got.RecordedAt.IsZero() {

@@ -42,3 +42,17 @@ func (v *BinanceVenue) acknowledge(ctx context.Context, st *orderpb.OrderState, 
 	}
 	return v.placements.AcknowledgePlacement(ctx, st, v.placementIdentity(symbol, orderID), source)
 }
+
+// Commit the first verified positive identity before reading match history.
+// Neither a venue rejection nor a status we cannot interpret proves acceptance.
+func (v *BinanceVenue) acknowledgeResponse(ctx context.Context, st *orderpb.OrderState, symbol string, resp *orderResponse, source orderview.PlacementSource) error {
+	switch resp.Status {
+	case "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "PENDING_CANCEL":
+		ackCtx, cancel := newPlacementRecoveryContext(ctx)
+		defer cancel()
+		if err := v.acknowledge(ackCtx, st, symbol, resp.OrderID, source); err != nil {
+			return fmt.Errorf("binance: persist placement acknowledgement: %w", err)
+		}
+	}
+	return nil
+}
