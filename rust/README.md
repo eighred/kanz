@@ -8,6 +8,8 @@ Comparison checks signs and decimal orders before alignment. Equal orders bound 
 
 ## Decimal-library verification
 
+Prepare the reviewed Apache dependencies once from the repository root with `python3 -B rust/temporal_sources/prepare.py`. This verifies every original archive, applies its tracked patch and checks the resulting source tree before publishing the directory selected by Cargo. To use an offline mirror, add `--archives PATH` with the original archives named `PACKAGE-VERSION.tar.gz`. Subsequent workspace builds can use Cargo's usual offline mode after fetching their remaining registry dependencies. Use `--check` to verify the prepared trees. [Source and patch identities](temporal_sources/manifest.json)
+
 Generate the existing Go SDK first using the repository schema workflow. From the repository root on a supported build host:
 
 ```sh

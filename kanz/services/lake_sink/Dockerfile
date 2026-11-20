@@ -25,7 +25,7 @@ RUN sh /usr/local/bin/go-mod-download.sh
 
 COPY schemas/gen/go/ /src/schemas/gen/go/
 COPY kanz/ ./
-# CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
+# CGO off â‡’ a fully static binary (every dep â€” pgx, nats, kafka-go, go-spiffe â€”
 # is pure Go), which is what distroless/static requires. -trimpath strips local
 # paths; -s -w drop the symbol/debug tables.
 # VERSION is stamped into the binary (internal/version, #143). Unset here means
@@ -40,27 +40,47 @@ FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169
 RUN cargo install --locked --version 0.7.7 cargo-auditable
 RUN cargo install --locked --version 0.1.78 cargo-chef
 WORKDIR /src/rust
+ENV CARGO_BUILD_JOBS=3
 
-FROM rust-tools AS rust-planner
+FROM rust-tools AS rust-sources
+COPY rust/temporal_sources/manifest.json rust/temporal_sources/prepare.py ./temporal_sources/
+COPY rust/temporal_sources/patches/ ./temporal_sources/patches/
+COPY tools/jiff_qualification/chrono_advisories.py /opt/kanz/chrono_advisories.py
+RUN python3 -B temporal_sources/prepare.py
+RUN mkdir /kanz-source-evidence && python3 -B /opt/kanz/chrono_advisories.py --output /kanz-source-evidence/chrono-advisories.json
+
+FROM rust-sources AS rust-planner
 COPY rust/ ./
 RUN cargo chef prepare --recipe-path /recipe.json
 
-FROM rust-tools AS rust-build
+FROM rust-sources AS rust-build
 # Only dependency manifests, lockfile and build configuration reach this layer.
 # VERSION and real source enter afterward; dummy workspace artifacts are removed
 # by chef before the original manifests and build scripts are restored.
 COPY --from=rust-planner /recipe.json /recipe.json
 RUN cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot
-COPY rust/ ./
+COPY --from=rust-sources /src/rust/temporal_sources/generated/ /src/rust/temporal_sources/generated/
+COPY --exclude=services/lake_snapshot/src/main.rs rust/ ./
 COPY schemas/proto/ /src/schemas/proto/
+RUN python3 -B temporal_sources/prepare.py --check
+ENV CARGO_TARGET_DIR=/src/rust/target-provenance
+RUN cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --lib --message-format=json-render-diagnostics > /kanz-source-evidence/library-compiler.jsonl
+RUN python3 -B temporal_sources/produce.py --seal-libraries
+COPY rust/services/lake_snapshot/src/main.rs services/lake_snapshot/src/main.rs
 ARG VERSION
-RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot
+RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl
+ARG SOURCE_REVISION=$VERSION
+RUN python3 -B temporal_sources/produce.py "$SOURCE_REVISION"
+
+FROM scratch AS rust-source-evidence
+COPY --from=rust-build /kanz-source-evidence/ /kanz-source-evidence/
+COPY --from=rust-build /src/rust/target-provenance/library-artifacts.json /kanz-source-evidence/library-archives.json
 
 # GNU worker needs the pinned C/C++ runtime; the Go owner remains fully static.
 # Root-owned, nonwritable worker bytes are required by the verified-FD launcher.
 FROM ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=build /out/lake-sink /lake-sink
-COPY --from=rust-build --chown=0:0 --chmod=0555 /src/rust/target/release/kanz-lake-snapshot /kanz-lake-snapshot
+COPY --from=rust-build --chown=0:0 --chmod=0555 /src/rust/target-provenance/release/kanz-lake-snapshot /kanz-lake-snapshot
 USER nonroot:nonroot
 EXPOSE 8085
 ENTRYPOINT ["/lake-sink"]

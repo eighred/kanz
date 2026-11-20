@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +21,8 @@ import sys
 from pathlib import PurePosixPath
 import tomllib
 from urllib.parse import unquote
+
+import temporal_rust_release_evidence as temporal
 
 # A recipe is an exact image contract; hybrid acceptance additionally requires
 # Go binary/source/SBOM/audit and pinned native-base evidence.
@@ -64,10 +67,10 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def read_json(path, limit=LIMIT):
+def read_json(path, limit=LIMIT, *, object_pairs_hook=None):
     if not path.is_file() or path.stat().st_size > limit:
         raise ValueError("missing or oversized evidence")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=object_pairs_hook)
 
 
 def validate_reference(service, ref, local):
@@ -607,6 +610,53 @@ def verify_hybrid(root, image, image_inspect, binary, temp, destination, sbom):
             "nativeInventorySHA256": digest(destination / "native-inventory.json"),
             "goPlainAuditSHA256": digest(destination / "go-audit.txt"), "goJSONAuditSHA256": digest(audit_path)}
 
+def unique_audit_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("duplicate audit field")
+    return fields
+
+
+def clean_audit_report(report, commit, expected_packages):
+    if not isinstance(report, dict) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("invalid advisory database revision or report")
+    database = report["database"]
+    dependencies = report["lockfile"]["dependency-count"]
+    if (database["last-commit"] != commit or type(dependencies) is not int or dependencies != expected_packages
+            or report["settings"]["ignore"] != []):
+        raise ValueError("audit policy, input or database mismatch")
+    vulnerabilities = report["vulnerabilities"]
+    found, count, entries = vulnerabilities["found"], vulnerabilities["count"], vulnerabilities["list"]
+    warnings = report["warnings"]
+    if (not isinstance(entries, list) or type(count) is not int or count != len(entries)
+            or found is not bool(count) or not isinstance(warnings, dict)):
+        raise ValueError("inconsistent advisory report")
+    return not (found or warnings)
+
+
+def audit_input(command, db, env, temp, report_path, expected_packages):
+    # Keep malformed or partial scanner output out of the uploaded artifacts.
+    raw = temp / report_path.name
+    receipt = {"exitCode": None, "passed": False}
+    try:
+        with raw.open("w", encoding="utf-8") as stream:
+            try:
+                run(command, cwd=temp, env=env, stdout=stream, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as error:
+                receipt["exitCode"] = error.returncode
+            else:
+                receipt["exitCode"] = 0
+        commit = output(["git", "-C", str(db), "rev-parse", "HEAD"], env=env, stderr=subprocess.DEVNULL)
+        report = read_json(raw, object_pairs_hook=unique_audit_fields)
+        clean = clean_audit_report(report, commit, expected_packages)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, RecursionError):
+        return receipt
+    shutil.copyfile(raw, report_path)
+    receipt.update(passed=clean and receipt["exitCode"] == 0,
+                   advisoryDBCommit=commit, reportSHA256=digest(report_path))
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--service", required=True, choices=SERVICES)
@@ -614,7 +664,11 @@ def main():
     parser.add_argument("--local", action="store_true", help="nonpublishing CI only: immutable Docker image ID")
     parser.add_argument("--sbom", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--builder-evidence", type=Path,
+                        help="direct evidence export from the protected build of this exact lake image")
     args = parser.parse_args()
+    if args.builder_evidence is not None and args.service != "lake-sink":
+        parser.error("temporal build evidence belongs to the lake worker")
     validate_reference(args.service, args.image, args.local)
     recipe = image_recipe(args.service)
     root = Path(__file__).resolve().parents[2]
@@ -650,7 +704,8 @@ def main():
         evidence["binarySHA256"] = digest(binary)
         with (destination / "dependencies.json").open("w", encoding="utf-8") as result:
             run(["rust-audit-info", str(binary), "104857600", str(LIMIT)], stdout=result)
-        counts = validate_inventory(read_json(destination / "dependencies.json"), lock, args.service, sbom)
+        embedded = read_json(destination / "dependencies.json")
+        counts = validate_inventory(embedded, lock, args.service, sbom)
         evidence["embeddedPackages"], evidence["runtimePackages"] = counts
         save_evidence()
         # No project/user audit.toml, Cargo configuration or credential inheritance.
@@ -662,11 +717,35 @@ def main():
         env.update(HOME=str(temp), CARGO_HOME=str(temp / "cargo"))
         db = temp / "advisory-db"
         common = [audit, "audit", "--db", str(db), "--deny", "warnings", "--json"]
-        # Default fetch stays enabled for EACH audit; fetch/parse errors refuse.
-        for name, tail in (("lock", ["--file", str(lock_path)]), ("binary", ["bin", str(binary)])):
-            with (destination / f"audit-{name}.json").open("w", encoding="utf-8") as result:
-                run(common + tail, cwd=temp, env=env, stdout=result)
-            evidence[f"{name}AdvisoryDBCommit"] = output(["git", "-C", str(db), "rev-parse", "HEAD"], env=env)
+        # A workspace refusal must still leave independent evidence for the extracted binary.
+        evidence["audits"] = {}
+        targets = (("lock", ["--file", str(lock_path)], len(lock["package"])),
+                   ("binary", ["bin", str(binary)], evidence["embeddedPackages"]))
+        for name, tail, expected_packages in targets:
+            receipt = audit_input(common + tail, db, env, temp, destination / f"audit-{name}.json", expected_packages)
+            evidence["audits"][name] = receipt
+            if "advisoryDBCommit" in receipt:
+                evidence[f"{name}AdvisoryDBCommit"] = receipt["advisoryDBCommit"]
+            save_evidence()
+        refused = [name for name, receipt in evidence["audits"].items() if not receipt["passed"]]
+        if refused:
+            raise ValueError("Rust advisory audit refused: " + ", ".join(refused))
+        selected_temporal = any(p["name"] == temporal.TEMPORAL for p in lock["package"])
+        if args.service == "lake-sink" and (selected_temporal or args.builder_evidence is not None):
+            if args.builder_evidence is None:
+                raise ValueError("selected temporal dependency requires protected builder evidence")
+            # The release policy comes from the audited revision, never from the builder export.
+            policy_path = "rust/temporal_sources/manifest.json"
+            blob = evidence["sourceSHA"] + ":" + policy_path
+            if int(output(["git", "cat-file", "-s", blob], cwd=root)) > 1024 * 1024:
+                raise ValueError("oversized temporal source manifest")
+            policy = run(["git", "cat-file", "blob", blob], cwd=root, stdout=subprocess.PIPE).stdout
+            advisories = runpy.run_path(str(root / "tools/jiff_qualification/chrono_advisories.py"))
+            evidence["temporalSources"], current = temporal.verify(
+                args.builder_evidence, policy, evidence["sourceSHA"], evidence["lockSHA256"],
+                evidence["binarySHA256"], lock, embedded, sbom,
+                advisories["collect"], advisories["evaluate"])
+            (destination / "temporal-release-advisories.json").write_bytes(current)
             save_evidence()
         if recipe.go_path is not None:
             evidence["hybrid"] = verify_hybrid(root, args.image, image, binary, temp, destination, sbom)

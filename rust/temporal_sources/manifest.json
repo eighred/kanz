@@ -1,0 +1,423 @@
+{
+  "packages": [
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-58.4.1/Cargo.toml",
+      "name": "arrow",
+      "patchSHA256": "2a65a8e4e85f76343ce3d008568a4c534e660b4359c9a09f4aa82ae85d8ef1d1",
+      "treeSHA256": "72961abb26d0ab3ca16ab561767901dc7afd071fdae9407ad2e341b469ed616b",
+      "upstream": {
+        "fileTreeSHA256": "b35bd7900a5e661585ec53042fd90ab0c0d716c514616b11e90ce0be326718e9",
+        "kind": "registry-archive",
+        "sha256": "c943b9bec582e47f8394e44713c3cbfbe645fd049e3a7771585f54849c710fe6",
+        "url": "https://static.crates.io/crates/arrow/arrow-58.4.1.crate"
+      },
+      "version": "58.4.1"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-arith-58.4.1/Cargo.toml",
+      "name": "arrow-arith",
+      "patchSHA256": "4f3219fc5cd4ccd554c6f29811eb39d075804c5ebefb93b72175b4b82321256a",
+      "treeSHA256": "d4a0db5dd7bc5b4a50f7d669f4a6bfc8025be0d44e4e02568381fb9f70a5b167",
+      "upstream": {
+        "fileTreeSHA256": "c20bc7c29f09e4509205859c24555b34a44da8024a529648d7be1a0753392f58",
+        "kind": "registry-archive",
+        "sha256": "8b13b85a6a547a1669114e418f6ab3c3e39c2edb1b8be5ab2889e5739a433ae9",
+        "url": "https://static.crates.io/crates/arrow-arith/arrow-arith-58.4.1.crate"
+      },
+      "version": "58.4.1"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-array-58.4.1/Cargo.toml",
+      "name": "arrow-array",
+      "patchSHA256": "5893c7afced6a921fa8c495de582b9ceb12b35f4a7538af93ef92f1ce7adc339",
+      "treeSHA256": "33edd3864df809cfbc7ddde8233f50d4138dc8413cae3414d39a30470b02f635",
+      "upstream": {
+        "fileTreeSHA256": "603707762c39a7af3fb8839ad457d50759ff7996f1c609c3a7ea7b8b03fa8c1e",
+        "kind": "registry-archive",
+        "sha256": "7b11eb61b95868592ad6edbd537465a6940eb3c81a875addecec24283301b267",
+        "url": "https://static.crates.io/crates/arrow-array/arrow-array-58.4.1.crate"
+      },
+      "version": "58.4.1"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-array-59.3.2/Cargo.toml",
+      "name": "arrow-array",
+      "patchSHA256": "5c107560c2cf08797275fbd78000badc64d3c4c44e2d41e5bccb561e27e5b908",
+      "treeSHA256": "1bb87fa6d3991524611c6465453ce8eeff4af49658c389ac552936ff9c7b506f",
+      "upstream": {
+        "fileTreeSHA256": "7536d63586698e7a50538d936eb888905accb09a9f669d55b912993691a321c5",
+        "kind": "registry-archive",
+        "sha256": "72b5b1682924f11ecf6929689c16cbc69efbb6dd141b06ad98ee1cb10d858c43",
+        "url": "https://static.crates.io/crates/arrow-array/arrow-array-59.3.2.crate"
+      },
+      "version": "59.3.2"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-cast-58.4.1/Cargo.toml",
+      "name": "arrow-cast",
+      "patchSHA256": "c0a347c843e8a594b5a8788d3443bf7daf1d452f4ebf9aeae10f1531adb17a45",
+      "treeSHA256": "b66c8b6db1e66f28941d452e4d46f035a58ca46ea12c91270f2ee432eb4ab5cd",
+      "upstream": {
+        "fileTreeSHA256": "28a33afb3049e3ba8fe4afb3aaa001a5641c0536b8047a44a3c015c00e403062",
+        "kind": "registry-archive",
+        "sha256": "9575323ffeb4bc6955f39bf8716f734671a32780f1fac9ba6c2891048fc0ea1f",
+        "url": "https://static.crates.io/crates/arrow-cast/arrow-cast-58.4.1.crate"
+      },
+      "version": "58.4.1"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-csv-58.4.1/Cargo.toml",
+      "name": "arrow-csv",
+      "patchSHA256": "19c6212723dbd9c68f1e7ce2cc4adb06700b3f201c214129d2174ef8c515ff30",
+      "treeSHA256": "db90668297957a9b20be8e9e9cafd2973ede7cc756409dc14378da006f619534",
+      "upstream": {
+        "fileTreeSHA256": "0e83248c3565ac75f553b7a94d9301af446f5f455c67fa39f218449ca5885db6",
+        "kind": "registry-archive",
+        "sha256": "50659e76e264937e967167e08d76b1d50b1c162f723c5a3c0527d28c4cdf0d56",
+        "url": "https://static.crates.io/crates/arrow-csv/arrow-csv-58.4.1.crate"
+      },
+      "version": "58.4.1"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/arrow-json-58.4.1/Cargo.toml",
+      "name": "arrow-json",
+      "patchSHA256": "be8ca650d1de794e97a001dc663bd6c3608330b2e0f408020b48a7821bae30c8",
+      "treeSHA256": "c3eb6df12b6efbb09585cc4225d0d1342e79a50b7186f711044fe58ad17ca1ef",
+      "upstream": {
+        "fileTreeSHA256": "4327b3f01b580e4f36028800c81a915501549dbb4aae911f4ae86a61e78c19dd",
+        "kind": "registry-archive",
+        "sha256": "a0efe21cd317f22e6b8d7eecc4ed71a043e7269a7bc313a8827c7fb8733866ca",
+        "url": "https://static.crates.io/crates/arrow-json/arrow-json-58.4.1.crate"
+      },
+      "version": "58.4.1"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-54.1.0/Cargo.toml",
+      "name": "datafusion",
+      "patchSHA256": "5536e69f5e8fc1602760616831239a7019d50a61554f403298ac665cc0b68fb4",
+      "treeSHA256": "14d99ceb758e109cce2fab43e99cb662c91522929426d95d5ab0a86e0c039c39",
+      "upstream": {
+        "fileTreeSHA256": "ef48ab76801a68fb4bcc75127504415d3ef67d636fc1376c722027ecfc387919",
+        "kind": "registry-archive",
+        "sha256": "754ef4e8f073922a26f5b23133b9db4829342362b09be0bc94309cf261c2f098",
+        "url": "https://static.crates.io/crates/datafusion/datafusion-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-catalog-54.1.0/Cargo.toml",
+      "name": "datafusion-catalog",
+      "patchSHA256": "83a2776678086daf28efbac078b987e72d41e9a6e3b6b9beffc64e269bd558f4",
+      "treeSHA256": "e0f1bec70cd5748c0241927d14cc55e66e07fac8413aa4addb40b4a1a4674ca4",
+      "upstream": {
+        "fileTreeSHA256": "06a76a9d5d71c9a017776281f629090f510bbdc1a1042267fd8209616673f98f",
+        "kind": "registry-archive",
+        "sha256": "06afd1e38dd27bbb1258685a1fc6524df6aff4e07b25b393a47de59635178d99",
+        "url": "https://static.crates.io/crates/datafusion-catalog/datafusion-catalog-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-catalog-listing-54.1.0/Cargo.toml",
+      "name": "datafusion-catalog-listing",
+      "patchSHA256": "18035218cfd4e4d64aeaec8db0634d1dbce1211dc9110fba4eb564c7fe7474f2",
+      "treeSHA256": "3594412de3223f8d495df10201243577f8b369adad1481bad56c6aafb054f661",
+      "upstream": {
+        "fileTreeSHA256": "60a2a4dc4248f0f6d9ec671581a39d7647aa7044f08bead8fce6eb5a16c6bee6",
+        "kind": "registry-archive",
+        "sha256": "f0668fb32c12065ec242be0e5b4bc62bd7a06a0be3ecd83791ef877e4be67e02",
+        "url": "https://static.crates.io/crates/datafusion-catalog-listing/datafusion-catalog-listing-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-common-54.1.0/Cargo.toml",
+      "name": "datafusion-common",
+      "patchSHA256": "627bac9ac1783a1695325249a35510ee08d4f9eb21c3201ab4ad65fa5a0fc812",
+      "treeSHA256": "6640540e9d33e201ebe4360b8c929ebaa769257b2726696a0d029fa5d62de849",
+      "upstream": {
+        "fileTreeSHA256": "8c7fb23e7013d7020d813179c5308a1e4d811911bdb1e552d4aee9f5b9812045",
+        "kind": "registry-archive",
+        "sha256": "ca43b263cdff57042cfa8fb817fb3469f4878933380dccff25f5e793580abbf9",
+        "url": "https://static.crates.io/crates/datafusion-common/datafusion-common-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-datasource-54.1.0/Cargo.toml",
+      "name": "datafusion-datasource",
+      "patchSHA256": "d20d88835df5398b0e24179571cd255723eb76c73603c9f130a98a0b42d3528b",
+      "treeSHA256": "635e1443263f2287cd84c98bcd7a3475a6a12d0f402712a8e38db5c5dd08f77e",
+      "upstream": {
+        "fileTreeSHA256": "820d82442b32456b5df8113d9b5f6e91b36bfd5261c7c28a66101406cb9dbab5",
+        "kind": "registry-archive",
+        "sha256": "b840a8bce0bcbf5afad02946d438591e7c373f7afccaf3d874c04485772514dd",
+        "url": "https://static.crates.io/crates/datafusion-datasource/datafusion-datasource-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-datasource-arrow-54.1.0/Cargo.toml",
+      "name": "datafusion-datasource-arrow",
+      "patchSHA256": "68f84299fc46cf9988e391962323e29795eb9c6ebf7c00ddcf07f4f68d4874d0",
+      "treeSHA256": "5f0cdded991f5d048cf0ae653bd7dfea4ac4657e71c1caa7393c11adcde27f76",
+      "upstream": {
+        "fileTreeSHA256": "d2b1700cee38fc6fdcc2a90a70d030180706386bb02156da595348946616fa0f",
+        "kind": "registry-archive",
+        "sha256": "a24cc0b9cf6e367f27f27406eff13abf48a11b72446aaa40b3105c0ded5c17d9",
+        "url": "https://static.crates.io/crates/datafusion-datasource-arrow/datafusion-datasource-arrow-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-datasource-csv-54.1.0/Cargo.toml",
+      "name": "datafusion-datasource-csv",
+      "patchSHA256": "83a2776678086daf28efbac078b987e72d41e9a6e3b6b9beffc64e269bd558f4",
+      "treeSHA256": "6f32fe1bde24822475b7c3e7e665922efa104f99d74ab799fbe44a24b5843e18",
+      "upstream": {
+        "fileTreeSHA256": "21de40c2c9212723d92d2a627056ff3e66839486e6444df7fd827d2c257309f0",
+        "kind": "registry-archive",
+        "sha256": "e1abe56b2a7a2d1d6de5117dd1a203181e267f28529faa5da546947621b697d7",
+        "url": "https://static.crates.io/crates/datafusion-datasource-csv/datafusion-datasource-csv-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-datasource-json-54.1.0/Cargo.toml",
+      "name": "datafusion-datasource-json",
+      "patchSHA256": "83a2776678086daf28efbac078b987e72d41e9a6e3b6b9beffc64e269bd558f4",
+      "treeSHA256": "37d1619b4033b333007f8434e6e53a04e503fd85703db9709ca4bd03d7cd97a4",
+      "upstream": {
+        "fileTreeSHA256": "8d25b9e24740e566aff01178005cae2e3da43e18bfdd5f66521b0058a5e1038e",
+        "kind": "registry-archive",
+        "sha256": "9c3e467f0611ad7bdd5aad17c63c9bb6182d04e5282e5496d897ea2b49c024ba",
+        "url": "https://static.crates.io/crates/datafusion-datasource-json/datafusion-datasource-json-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-execution-54.1.0/Cargo.toml",
+      "name": "datafusion-execution",
+      "patchSHA256": "26008189cf0c0c3c1a9aa9fb9a87a9be610bd3f7cd1964e5dc973913f15b8543",
+      "treeSHA256": "52bd6a0967532ca0fdfa0c9d96873023104b2778bd5d0ae20a7fad04da677390",
+      "upstream": {
+        "fileTreeSHA256": "58b0bd6194bc856cc83bed6a5e77de3b4fd873ba028f2835d26284b9a5d31e00",
+        "kind": "registry-archive",
+        "sha256": "d8eac0a09bc8d263f52025cad9e001da4d8138d633fa288edda4d06b1772eae6",
+        "url": "https://static.crates.io/crates/datafusion-execution/datafusion-execution-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-expr-54.1.0/Cargo.toml",
+      "name": "datafusion-expr",
+      "patchSHA256": "e94d808c82d3cbf3a628f4eb8e7eddd96710d7a2805a7ac5160847772c952cb3",
+      "treeSHA256": "170ca2101c055f030bfbb2e822fa8fff7b84b4a2d117615a4e82ea723fdba813",
+      "upstream": {
+        "fileTreeSHA256": "e3fe09bbdc3c30392dd69a3d631140d532cc79834626f0ccd6c009fb10687d53",
+        "kind": "registry-archive",
+        "sha256": "eeb14d374767ee0fc62dc79a5ba8bcf8a63c14e993c7d992d0e63adfa23d77d3",
+        "url": "https://static.crates.io/crates/datafusion-expr/datafusion-expr-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-expr-common-54.1.0/Cargo.toml",
+      "name": "datafusion-expr-common",
+      "patchSHA256": "f592ee76a8d30b72426308cc64b8514bb030b75fbdf3fe35d16bddd6df1c927d",
+      "treeSHA256": "216c36637b78f01475e3e207f48bf47cdd651998a2363153f838a7a2076d72b7",
+      "upstream": {
+        "fileTreeSHA256": "2bfc8d24c29d8155cac83a792ee8a6909a5373e8c6cc271754f316b5b3f3d660",
+        "kind": "registry-archive",
+        "sha256": "b7b19a8c95522bee8cbb313d74263b85e355d2b52f42e67ef5694bf5de9e9356",
+        "url": "https://static.crates.io/crates/datafusion-expr-common/datafusion-expr-common-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-functions-54.1.0/Cargo.toml",
+      "name": "datafusion-functions",
+      "patchSHA256": "ce8f837c514f14bc56853f1da4ee22078e7c7c932e0b4b69939e935498c02f9a",
+      "treeSHA256": "ab6bf01424a09654804664c816d13bfbcb32897f7c9e366f3eda5af433cfc53a",
+      "upstream": {
+        "fileTreeSHA256": "f750f4ad220a6ff2ae7b76060e0010e7119cafb33087676c316d0aa57bf96430",
+        "kind": "registry-archive",
+        "sha256": "5f64c983bbbdcb729d921a2b2ac3375598719b5cc0c30345ad664936f3176fc7",
+        "url": "https://static.crates.io/crates/datafusion-functions/datafusion-functions-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-functions-aggregate-54.1.0/Cargo.toml",
+      "name": "datafusion-functions-aggregate",
+      "patchSHA256": "d279789b81162ccba381d33d0ad2d234f38a1701c49544f3be96803bd8b5a68c",
+      "treeSHA256": "2fccbf4b8e1c7ab0eaa0b35b1c32e61a30a0155eda743aa97abda3881df0e666",
+      "upstream": {
+        "fileTreeSHA256": "55132abb344d0e06cfbd1e94d8a2c4561026c00cb3390ab1fecc1d0ce5045bbe",
+        "kind": "registry-archive",
+        "sha256": "89bc17041e424a47ed062f43df24d84aab8b57c4c3221e5c1a5eef46d6c5718b",
+        "url": "https://static.crates.io/crates/datafusion-functions-aggregate/datafusion-functions-aggregate-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-functions-aggregate-common-54.1.0/Cargo.toml",
+      "name": "datafusion-functions-aggregate-common",
+      "patchSHA256": "54cf7d524643cc0fc2d0a395b0335e256c755d20a1a45a9d0ae95381aa7c7a51",
+      "treeSHA256": "56f5c7b82b3462fcbf71c7af698fd0e571137b7642660a8e4d9e7d3411ace314",
+      "upstream": {
+        "fileTreeSHA256": "bb2e9c7d13013046961a3f2920ed3c59041a2741da4f6b55c9d378036b6f123e",
+        "kind": "registry-archive",
+        "sha256": "97dd2a9e865c6108059f5b37b77934f84b50bfb108f837bd0e5c9536e03f0545",
+        "url": "https://static.crates.io/crates/datafusion-functions-aggregate-common/datafusion-functions-aggregate-common-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-functions-table-54.1.0/Cargo.toml",
+      "name": "datafusion-functions-table",
+      "patchSHA256": "fb16157aa139c7bfbba214ad97fad2646e942054dd6045b1fd94e19646fe6e6d",
+      "treeSHA256": "a3a218b4bd16d9f7ba51b6812d60fc8285b284085d191b00b8841f11e303bb8e",
+      "upstream": {
+        "fileTreeSHA256": "02d762a7177c320e83e26587dcdf60467c7a7f01387af25d9ffb96f29222c9b2",
+        "kind": "registry-archive",
+        "sha256": "f4e4941673c917819616877e9993da4503e4f4739812be0bc32c5356184c6383",
+        "url": "https://static.crates.io/crates/datafusion-functions-table/datafusion-functions-table-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-functions-window-54.1.0/Cargo.toml",
+      "name": "datafusion-functions-window",
+      "patchSHA256": "54cf7d524643cc0fc2d0a395b0335e256c755d20a1a45a9d0ae95381aa7c7a51",
+      "treeSHA256": "77546e15a0955c7d3f85bb152d0b0b3114b00530dbe7fbd0d10ee3ce91ec3a68",
+      "upstream": {
+        "fileTreeSHA256": "622c5e15c3d8554649b231d5138c33d48a9fb37666d822203fc07a8068bac233",
+        "kind": "registry-archive",
+        "sha256": "12dd2e16c12b84b6f6b41b19f55b366dd1c46876bb35b86896c6349067379e8d",
+        "url": "https://static.crates.io/crates/datafusion-functions-window/datafusion-functions-window-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-optimizer-54.1.0/Cargo.toml",
+      "name": "datafusion-optimizer",
+      "patchSHA256": "d061100b62c1d081eb2a07e1145810592cc8c3e50ace75649b6ec1c1045fa1a7",
+      "treeSHA256": "50634447bb75552f094b3ca2d8a905673c1f2f2145c9c44cb7c3cde21dd44261",
+      "upstream": {
+        "fileTreeSHA256": "4a632a67888485dcbcef91319eb3aea1e2a3ed715650501d8838d3d55a8f145a",
+        "kind": "registry-archive",
+        "sha256": "a0635620b050b81bb92764e99250868f654e2cd5ad1bece413283b3f73c83179",
+        "url": "https://static.crates.io/crates/datafusion-optimizer/datafusion-optimizer-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-physical-expr-54.1.0/Cargo.toml",
+      "name": "datafusion-physical-expr",
+      "patchSHA256": "9561cfaaa141abab4bb5ed4ab46bff8f0349e7ea974f690669ac212a3e295f5d",
+      "treeSHA256": "94aa7a1ecd01acc95deceaf6a8a3e9c930946786fd9ccec7411e461776fd6519",
+      "upstream": {
+        "fileTreeSHA256": "d1ff44c5a38d4cbbb6e64c5813777b685e5e4a24119851dc8a94c4ce94f8b0d9",
+        "kind": "registry-archive",
+        "sha256": "8cabf7a86eb70b816729e33c81bf7767c936ee1226f607a114f5dac2decac8d0",
+        "url": "https://static.crates.io/crates/datafusion-physical-expr/datafusion-physical-expr-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-physical-expr-adapter-54.1.0/Cargo.toml",
+      "name": "datafusion-physical-expr-adapter",
+      "patchSHA256": "d810ebf434d56bf8a778ab3d5911a8c1e4b416213fabab771acea0259549d2e8",
+      "treeSHA256": "237699ec0e63d2f39a257c26fd97bc07c32d71550b597ba3ff4cdfa102211dfc",
+      "upstream": {
+        "fileTreeSHA256": "2219aa6504d3dba42011ed30d6e32a9a4e92c18fe1964566d4565445bf16c2ec",
+        "kind": "registry-archive",
+        "sha256": "de222e04f7e6744501555a54ab0abe26bfdfebee380af79a9bdc175704246859",
+        "url": "https://static.crates.io/crates/datafusion-physical-expr-adapter/datafusion-physical-expr-adapter-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-physical-expr-common-54.1.0/Cargo.toml",
+      "name": "datafusion-physical-expr-common",
+      "patchSHA256": "874b69e02fbe426877d9ed0da996b868d6db3f90a6a1d1afdf870447c6bb2d0c",
+      "treeSHA256": "4521ce0754534e6405509846301815a4de8391c2137fdc304e6ffbeab22e8ebd",
+      "upstream": {
+        "fileTreeSHA256": "4cd0ffd5b97f66c886969c4e52e9ced2b16552823065afd6734c886dcc3c8831",
+        "kind": "registry-archive",
+        "sha256": "72d0d0057fc5a502d45c870cb6d47c66eb7bdd5edb1bd71ad6f3f724975ac2a8",
+        "url": "https://static.crates.io/crates/datafusion-physical-expr-common/datafusion-physical-expr-common-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-physical-optimizer-54.1.0/Cargo.toml",
+      "name": "datafusion-physical-optimizer",
+      "patchSHA256": "e60ccdf80b1aaa70b21f363054d97306a1406a756d455c0a7591aea69d2f524d",
+      "treeSHA256": "cce438b8298506f5faa79f3fbd1f88378854bc5e0d502c41a6c76f83fc02c387",
+      "upstream": {
+        "fileTreeSHA256": "5abd11e6e5d4c7793f34ab7aaf99254ccad68b25c066ad55eccd0379b6579e3a",
+        "kind": "registry-archive",
+        "sha256": "86046eed10950c5f9aaed9acfd148e9bd2e1dfdfe4f9aef607d1447b271e4183",
+        "url": "https://static.crates.io/crates/datafusion-physical-optimizer/datafusion-physical-optimizer-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-physical-plan-54.1.0/Cargo.toml",
+      "name": "datafusion-physical-plan",
+      "patchSHA256": "7d32c7ee81204747af66514c52f62e6e19316500fad94e96429bde7ec93c70b3",
+      "treeSHA256": "4b5e596a46bcc4d3066dee202557bd74333535ddd176436c381a3db01fe7ff07",
+      "upstream": {
+        "fileTreeSHA256": "2dcd6783b9d0973f28a67d1d06fcac42c7e84bf3921acfbc4f0a9d060e2c1718",
+        "kind": "registry-archive",
+        "sha256": "9bc84da934c903407ba297971ebcc020c4c1a38aafd765d6c144c76eff3fa6a1",
+        "url": "https://static.crates.io/crates/datafusion-physical-plan/datafusion-physical-plan-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/datafusion-pruning-54.1.0/Cargo.toml",
+      "name": "datafusion-pruning",
+      "patchSHA256": "3e49fb4f841bf7a5bbb3db3185febff800a8ee7bcef922b59a498673f01a4eb4",
+      "treeSHA256": "e711ec223dd5fb0a8b2de65dd821ec7055d1f6263d427cb61cfbb6498c365ea1",
+      "upstream": {
+        "fileTreeSHA256": "c5cd6e6048c76f9318499c3839ebb6697fdfd1ba28f9fa30edcdabdcbd9194fe",
+        "kind": "registry-archive",
+        "sha256": "eb63eeac6de19be40f487b65dd84e546195f783c5a9928618e0c4f2a3569b0d7",
+        "url": "https://static.crates.io/crates/datafusion-pruning/datafusion-pruning-54.1.0.crate"
+      },
+      "version": "54.1.0"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/object_store-0.13.2/Cargo.toml",
+      "name": "object_store",
+      "patchSHA256": "67deda23df429020fce9a1f6cf882bcb50516cd5a0f88b88c25791ef190566c9",
+      "treeSHA256": "f083e04ccd5024f15c764d4110fa10f8c2a83c6451d1b9f4821463be6cd2709c",
+      "upstream": {
+        "commit": "7a65b75b0d26fd8a282999462cb7030fb85fdcc3",
+        "fileTreeSHA256": "4c3304a46f9683347c38920e80e98ab156b3c0fcb83b3976ffee82c94900db0b",
+        "kind": "git-archive",
+        "sha256": "9ffe3225218f3b84a34e81f84d2470ed5b83244019d200f5e267511416a455be",
+        "tree": "4e773b8bf65228e952241a91c5ee82c937dcbe28",
+        "url": "https://codeload.github.com/apache/arrow-rs-object-store/tar.gz/7a65b75b0d26fd8a282999462cb7030fb85fdcc3"
+      },
+      "version": "0.13.2"
+    },
+    {
+      "manifestPath": "rust/temporal_sources/generated/parquet-59.3.2/Cargo.toml",
+      "name": "parquet",
+      "patchSHA256": "2eb5b7005cf70b176f5007b4e244ffd0e14e2d30a96280c655c795990fbd5720",
+      "treeSHA256": "ed27dcde9eb8f59b170aa68557dad8392d568ad980c91ad335d273f5a5f1a15a",
+      "upstream": {
+        "fileTreeSHA256": "c6bf82c2b2d7fc01616a1129a00d36015c35183d01f3e771ec6d576c62b061cc",
+        "kind": "registry-archive",
+        "sha256": "8eb260d566f2fbdabe356d26aaa5d13403aac29b5b4e44463b8f9bd7b2b12680",
+        "url": "https://static.crates.io/crates/parquet/parquet-59.3.2.crate"
+      },
+      "version": "59.3.2"
+    }
+  ],
+  "schema": "kanz.apache-temporal-sources.v1"
+}

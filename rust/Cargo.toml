@@ -8,6 +8,7 @@ publish = false
 [workspace]
 members = ["crates/oms_recovery", "crates/order_core", "crates/market_feed", "crates/oms_store", "crates/proto_wire", "crates/oms_venue", "services/binance_depth", "services/okx_depth", "services/bond_risk_shadow", "services/oms_fold_shadow", "services/lake_snapshot", "crates/browser_render", "crates/ledger_replay", "crates/option_pricing", "crates/term_structure"]
 resolver = "2"
+exclude = ["temporal_sources/generated/*"]
 
 [dependencies]
 prost = "=0.14.6"
@@ -22,3 +23,37 @@ serde_json = "=1.0.154"
 
 [profile.release]
 overflow-checks = true
+
+[patch.crates-io]
+arrow = { package = "arrow", path = "temporal_sources/generated/arrow-58.4.1" }
+arrow-arith = { package = "arrow-arith", path = "temporal_sources/generated/arrow-arith-58.4.1" }
+arrow-array = { package = "arrow-array", path = "temporal_sources/generated/arrow-array-58.4.1" }
+arrow-array-writer = { package = "arrow-array", path = "temporal_sources/generated/arrow-array-59.3.2" }
+arrow-cast = { package = "arrow-cast", path = "temporal_sources/generated/arrow-cast-58.4.1" }
+arrow-csv = { package = "arrow-csv", path = "temporal_sources/generated/arrow-csv-58.4.1" }
+arrow-json = { package = "arrow-json", path = "temporal_sources/generated/arrow-json-58.4.1" }
+datafusion = { package = "datafusion", path = "temporal_sources/generated/datafusion-54.1.0" }
+datafusion-catalog = { package = "datafusion-catalog", path = "temporal_sources/generated/datafusion-catalog-54.1.0" }
+datafusion-catalog-listing = { package = "datafusion-catalog-listing", path = "temporal_sources/generated/datafusion-catalog-listing-54.1.0" }
+datafusion-common = { package = "datafusion-common", path = "temporal_sources/generated/datafusion-common-54.1.0" }
+datafusion-datasource = { package = "datafusion-datasource", path = "temporal_sources/generated/datafusion-datasource-54.1.0" }
+datafusion-datasource-arrow = { package = "datafusion-datasource-arrow", path = "temporal_sources/generated/datafusion-datasource-arrow-54.1.0" }
+datafusion-datasource-csv = { package = "datafusion-datasource-csv", path = "temporal_sources/generated/datafusion-datasource-csv-54.1.0" }
+datafusion-datasource-json = { package = "datafusion-datasource-json", path = "temporal_sources/generated/datafusion-datasource-json-54.1.0" }
+datafusion-execution = { package = "datafusion-execution", path = "temporal_sources/generated/datafusion-execution-54.1.0" }
+datafusion-expr = { package = "datafusion-expr", path = "temporal_sources/generated/datafusion-expr-54.1.0" }
+datafusion-expr-common = { package = "datafusion-expr-common", path = "temporal_sources/generated/datafusion-expr-common-54.1.0" }
+datafusion-functions = { package = "datafusion-functions", path = "temporal_sources/generated/datafusion-functions-54.1.0" }
+datafusion-functions-aggregate = { package = "datafusion-functions-aggregate", path = "temporal_sources/generated/datafusion-functions-aggregate-54.1.0" }
+datafusion-functions-aggregate-common = { package = "datafusion-functions-aggregate-common", path = "temporal_sources/generated/datafusion-functions-aggregate-common-54.1.0" }
+datafusion-functions-table = { package = "datafusion-functions-table", path = "temporal_sources/generated/datafusion-functions-table-54.1.0" }
+datafusion-functions-window = { package = "datafusion-functions-window", path = "temporal_sources/generated/datafusion-functions-window-54.1.0" }
+datafusion-optimizer = { package = "datafusion-optimizer", path = "temporal_sources/generated/datafusion-optimizer-54.1.0" }
+datafusion-physical-expr = { package = "datafusion-physical-expr", path = "temporal_sources/generated/datafusion-physical-expr-54.1.0" }
+datafusion-physical-expr-adapter = { package = "datafusion-physical-expr-adapter", path = "temporal_sources/generated/datafusion-physical-expr-adapter-54.1.0" }
+datafusion-physical-expr-common = { package = "datafusion-physical-expr-common", path = "temporal_sources/generated/datafusion-physical-expr-common-54.1.0" }
+datafusion-physical-optimizer = { package = "datafusion-physical-optimizer", path = "temporal_sources/generated/datafusion-physical-optimizer-54.1.0" }
+datafusion-physical-plan = { package = "datafusion-physical-plan", path = "temporal_sources/generated/datafusion-physical-plan-54.1.0" }
+datafusion-pruning = { package = "datafusion-pruning", path = "temporal_sources/generated/datafusion-pruning-54.1.0" }
+object_store = { package = "object_store", path = "temporal_sources/generated/object_store-0.13.2" }
+parquet = { package = "parquet", path = "temporal_sources/generated/parquet-59.3.2" }

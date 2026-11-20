@@ -16,6 +16,11 @@ fn partitioned_file_metadata_uses_signed_instants() {
     assert_eq!(file.object_meta.last_modified.as_nanosecond(), 0);
     assert_eq!(file.object_meta, ranged.object_meta);
 
+    // ext4 saturates mtimes before year 10000. Linux tmpfs can present the
+    // invalid instant to object_store so the refusal exercises its converter.
+    #[cfg(target_os = "linux")]
+    let root = std::path::PathBuf::from("/dev/shm");
+    #[cfg(not(target_os = "linux"))]
     let root = std::env::temp_dir();
     let name = format!("kanz-object-mtime-{}.parquet", std::process::id());
     let fixture_path = root.join(&name);
@@ -63,6 +68,8 @@ fn partitioned_file_metadata_uses_signed_instants() {
         .unwrap();
     assert_eq!(fixture.metadata().unwrap().modified().unwrap(), too_late);
     let refusal = runtime.block_on(store.head(&path)).unwrap_err();
-    assert!(refusal.to_string().contains(&format!("Unable to access metadata for {path}")));
+    assert!(refusal
+        .to_string()
+        .contains(&format!("Unable to access metadata for {path}")));
     std::fs::remove_file(fixture_path).unwrap();
 }

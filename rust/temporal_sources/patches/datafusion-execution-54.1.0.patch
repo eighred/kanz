@@ -1,0 +1,21 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -50,7 +50,7 @@
+ version = "58.3.0"
+ features = [
+     "prettyprint",
+-    "chrono-tz",
++    "jiff",
+ ]
+ 
+ [dependencies.arrow-buffer]
+@@ -109,7 +109,8 @@
+ version = "2.5.7"
+ 
+ [dev-dependencies.chrono]
+-version = "0.4.44"
++package = "sad-chrono"
++version = "=0.5.1"
+ default-features = false
+ 
+ [dev-dependencies.insta]

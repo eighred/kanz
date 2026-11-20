@@ -34,26 +34,41 @@ func lakeHybridImageRecipe(raw string) error {
 	tools := []string{
 		"FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-tools",
 		"RUN cargo install --locked --version 0.7.7 cargo-auditable",
-		"RUN cargo install --locked --version 0.1.78 cargo-chef", "WORKDIR /src/rust",
+		"RUN cargo install --locked --version 0.1.78 cargo-chef", "WORKDIR /src/rust", "ENV CARGO_BUILD_JOBS=3",
+	}
+	sources := []string{
+		"FROM rust-tools AS rust-sources",
+		"COPY rust/temporal_sources/manifest.json rust/temporal_sources/prepare.py ./temporal_sources/",
+		"COPY rust/temporal_sources/patches/ ./temporal_sources/patches/",
+		"COPY tools/jiff_qualification/chrono_advisories.py /opt/kanz/chrono_advisories.py",
+		"RUN python3 -B temporal_sources/prepare.py",
+		"RUN mkdir /kanz-source-evidence && python3 -B /opt/kanz/chrono_advisories.py --output /kanz-source-evidence/chrono-advisories.json",
 	}
 	planner := []string{
-		"FROM rust-tools AS rust-planner", "COPY rust/ ./",
+		"FROM rust-sources AS rust-planner", "COPY rust/ ./",
 		"RUN cargo chef prepare --recipe-path /recipe.json",
 	}
 	rust := []string{
-		"FROM rust-tools AS rust-build",
+		"FROM rust-sources AS rust-build",
 		"COPY --from=rust-planner /recipe.json /recipe.json",
 		"RUN cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot",
-		"COPY rust/ ./", "COPY schemas/proto/ /src/schemas/proto/", "ARG VERSION",
-		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot`,
+		"COPY --from=rust-sources /src/rust/temporal_sources/generated/ /src/rust/temporal_sources/generated/",
+		"COPY --exclude=services/lake_snapshot/src/main.rs rust/ ./", "COPY schemas/proto/ /src/schemas/proto/",
+		"RUN python3 -B temporal_sources/prepare.py --check", "ENV CARGO_TARGET_DIR=/src/rust/target-provenance",
+		"RUN cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --lib --message-format=json-render-diagnostics > /kanz-source-evidence/library-compiler.jsonl",
+		"RUN python3 -B temporal_sources/produce.py --seal-libraries", "COPY rust/services/lake_snapshot/src/main.rs services/lake_snapshot/src/main.rs", "ARG VERSION",
+		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl`,
+		"ARG SOURCE_REVISION=$VERSION", `RUN python3 -B temporal_sources/produce.py "$SOURCE_REVISION"`,
 	}
+	evidence := []string{"FROM scratch AS rust-source-evidence", "COPY --from=rust-build /kanz-source-evidence/ /kanz-source-evidence/",
+		"COPY --from=rust-build /src/rust/target-provenance/library-artifacts.json /kanz-source-evidence/library-archives.json"}
 	runtime := []string{
 		"FROM ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
 		"COPY --from=build /out/lake-sink /lake-sink",
-		"COPY --from=rust-build --chown=0:0 --chmod=0555 /src/rust/target/release/kanz-lake-snapshot /kanz-lake-snapshot",
+		"COPY --from=rust-build --chown=0:0 --chmod=0555 /src/rust/target-provenance/release/kanz-lake-snapshot /kanz-lake-snapshot",
 		"USER nonroot:nonroot", "EXPOSE 8085", `ENTRYPOINT ["/lake-sink"]`,
 	}
-	if len(stages) != 5 || !slices.Equal(stages[1], tools) || !slices.Equal(stages[2], planner) || !slices.Equal(stages[3], rust) || !slices.Equal(stages[4], runtime) {
+	if len(stages) != 7 || !slices.Equal(stages[1], tools) || !slices.Equal(stages[2], sources) || !slices.Equal(stages[3], planner) || !slices.Equal(stages[4], rust) || !slices.Equal(stages[5], evidence) || !slices.Equal(stages[6], runtime) {
 		return fmt.Errorf("lake hybrid image must preserve closed worker and runtime recipe")
 	}
 	return nil
@@ -78,10 +93,11 @@ func lakeHybridCI(raw string) error {
 		return err
 	}
 	fields := map[string]map[string]string{
-		"Install pinned hybrid signature verifier":              {"cosign-release": "v3.0.6"},
-		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake_sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}", "no-cache-filters": "rust-build", "cache-to": ""},
-		"Catalog actual hybrid applications and native runtime": {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
-		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
+		"Install pinned hybrid signature verifier":               {"cosign-release": "v3.0.6"},
+		"Build actual hybrid lake image without publishing":      {"context": ".", "file": "kanz/services/lake_sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}", "no-cache-filters": "rust-build", "cache-to": ""},
+		"Catalog actual hybrid applications and native runtime":  {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
+		"Export temporal evidence from the hybrid image builder": {"context": ".", "file": "kanz/services/lake_sink/Dockerfile", "builder": "${{ steps.lake-builder.outputs.name }}", "target": "rust-source-evidence", "build-args": "VERSION=${{ github.sha }}", "outputs": "type=local,dest=snapshot-owner-proof/builder-evidence", "push": "false"},
+		"Scan actual hybrid runtime before execution":            {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
 	}
 	scripts := map[string][]string{
 		"Verify complete source-bound owner evidence":                     {"check_lake_snapshot_owner_evidence.py --seal"},
@@ -89,7 +105,7 @@ func lakeHybridCI(raw string) error {
 		"Verify synthetic cache probe controls":                           {"test_lake_cache_probe.py"},
 		"Prove joint synthetic source and VERSION dependency cache reuse": {"const env = {};", "['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_CACHE_MODE']", "env.ACTIONS_CACHE_MODE !== 'read'", "'.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE", "'--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER", "'--output', 'snapshot-owner-proof'], {stdio: 'inherit', env}"},
 		"Install reviewed hybrid audit tools":                             {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
-		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
+		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid --builder-evidence snapshot-owner-proof/builder-evidence`},
 		"Actual finite owner on both broker versions without skips":       {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
 		"Stop owned snapshot fixture dependencies and prove absence":      {"label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", `test -z "$image_after$image_volumes_after"`, "image_containers_absent", "image_volumes_absent", `^/kanz-lake-image-$nonce-[0-9]+$`, `^kanz-lake-image-$nonce-[0-9]+$`},
 	}
@@ -120,6 +136,9 @@ func lakeHybridCI(raw string) error {
 		if step.Name == "Install pinned hybrid signature verifier" && step.Uses != "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532" {
 			return fmt.Errorf("hybrid signature verifier identity missing")
 		}
+		if step.Name == "Export temporal evidence from the hybrid image builder" && step.Uses != "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc" {
+			return fmt.Errorf("temporal evidence must use the reviewed image builder")
+		}
 		for key, value := range wanted {
 			if step.With[key] != value {
 				return fmt.Errorf("hybrid action identity missing")
@@ -143,7 +162,7 @@ func lakeHybridCI(raw string) error {
 	}
 	order := []string{
 		"Install pinned hybrid signature verifier", "Install reviewed hybrid audit tools",
-		"Build actual hybrid lake image without publishing", "Bind actual hybrid image identity",
+		"Build actual hybrid lake image without publishing", "Export temporal evidence from the hybrid image builder", "Bind actual hybrid image identity",
 		"Catalog actual hybrid applications and native runtime", "Scan actual hybrid runtime before execution",
 		"Require hybrid binary provenance and fresh Rust and Go audits",
 		"Actual finite owner on both broker versions without skips",
@@ -252,6 +271,14 @@ func TestLakeHybridImageRecipe(t *testing.T) {
 		{"RUN cargo auditable chef cook", "ARG VERSION\nRUN cargo auditable chef cook"},
 		{"WORKDIR /src/rust", "WORKDIR /other"},
 		{"RUN cargo auditable chef cook", "RUN --mount=type=cache,target=/src/rust/target cargo auditable chef cook"},
+		{"RUN python3 -B temporal_sources/prepare.py --check", "RUN true"},
+		{"ENV CARGO_TARGET_DIR=/src/rust/target-provenance", "ENV CARGO_TARGET_DIR=/src/rust/target"},
+		{"python3 -B temporal_sources/produce.py --seal-libraries", "true"},
+		{"COPY --exclude=services/lake_snapshot/src/main.rs rust/ ./", "COPY rust/ ./"},
+		{"COPY --from=rust-sources /src/rust/temporal_sources/generated/ /src/rust/temporal_sources/generated/", "RUN true"},
+		{"COPY --from=rust-build /src/rust/target-provenance/library-artifacts.json /kanz-source-evidence/library-archives.json", "RUN true"},
+		{"python3 -B temporal_sources/produce.py \"$SOURCE_REVISION\"", "true"},
+		{"COPY --from=rust-build /kanz-source-evidence/ /kanz-source-evidence/", "COPY --from=rust-build /kanz-source-evidence/ /"},
 		{"--chown=0:0", "--chown=65532:65532"},
 		{"--chmod=0555", "--chmod=0755"},
 		{"COPY schemas/proto/ /src/schemas/proto/", ""},

@@ -14,12 +14,14 @@ import time
 from rust_release_evidence import bounded_command
 
 COOK = "cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot"
-BUILD = 'test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot'
+LIBRARIES = "cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --lib --message-format=json-render-diagnostics > /kanz-source-evidence/library-compiler.jsonl"
+BUILD = 'test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl'
 SOURCE = "rust/services/lake_snapshot/src/main.rs"
 COMMENT = b"\n// Synthetic joint source and VERSION cache qualification only.\n"
 DOCKERFILE = "kanz/services/lake_sink/Dockerfile"
 LIMIT = 16 << 20
-PATHS = ("rust", "schemas/proto", DOCKERFILE, ".dockerignore")
+ADVISORY_TOOL = "tools/jiff_qualification/chrono_advisories.py"
+PATHS = ("rust", "schemas/proto", DOCKERFILE, ".dockerignore", ADVISORY_TOOL)
 SOURCE_HASHES = ("contextSHA256", "dockerfileSHA256", "sourceBeforeSHA256", "sourceAfterSHA256")
 
 
@@ -39,8 +41,8 @@ def progress(raw, source):
     if not raw or len(raw) > LIMIT or not raw.endswith(b"\n"):
         raise ValueError("progress size or termination differs")
     version = digest(("kanz-lake-joint-cache-probe:" + source).encode())[:40]
-    commands = (("cook", COOK, True), ("build", BUILD.replace("$VERSION", version), False))
-    return target_progress(raw, "rust-build", commands)
+    commands = (("cook", COOK, True), ("libraries", LIBRARIES, True), ("build", BUILD.replace("$VERSION", version), False))
+    return target_progress(raw, "rust-build", commands, canonical_counter=True)
 
 
 def command_name_matches(name, stage, command, canonical_counter=False):
@@ -103,7 +105,7 @@ def target_progress(raw, stage, commands, canonical_counter=False):
 
 def validate(report, raw, source, tree, run, attempt, image, expected_hashes):
     expected = {"schema", "source", "tree", "run", "attempt", "image", "builder", "contextSHA256", "dockerfileSHA256",
-                "sourceBeforeSHA256", "sourceAfterSHA256", "versionSHA256", "progressSHA256", "cook", "build",
+                "sourceBeforeSHA256", "sourceAfterSHA256", "versionSHA256", "progressSHA256", "cook", "libraries", "build",
                 "jointSourceAndVersion", "cookCached", "finalBuildExecuted", "syntheticOnly"}
     if not isinstance(report, dict) or set(report) != expected: raise ValueError("cache report shape differs")
     if (type(report["schema"]) is not int or report["schema"] != 1 or report["source"] != source or report["tree"] != tree
@@ -124,7 +126,7 @@ def validate(report, raw, source, tree, run, attempt, image, expected_hashes):
         raise ValueError("synthetic VERSION differs")
     if report["sourceBeforeSHA256"] == report["sourceAfterSHA256"] or report["progressSHA256"] != digest(raw):
         raise ValueError("cache source/progress binding differs")
-    if progress(raw, source) != {key: report[key] for key in ("cook", "build")}:
+    if progress(raw, source) != {key: report[key] for key in ("cook", "libraries", "build")}:
         raise ValueError("cache vertex binding differs")
 
 
@@ -139,7 +141,7 @@ def checked_path(name, mode, blob):
     path = Path(name)
     if mode not in ("100644", "100755") or not re.fullmatch(r"[0-9a-f]{40}", blob) or path.is_absolute() or ".." in path.parts:
         raise ValueError("unsupported tracked file")
-    if not (name.startswith("rust/") or name.startswith("schemas/proto/") or name in (DOCKERFILE, ".dockerignore")):
+    if not (name.startswith("rust/") or name.startswith("schemas/proto/") or name in (DOCKERFILE, ".dockerignore", ADVISORY_TOOL)):
         raise ValueError("unapproved source path")
     return path
 

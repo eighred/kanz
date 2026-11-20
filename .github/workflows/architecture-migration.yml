@@ -111,6 +111,8 @@ jobs:
       KANZ_BUILD_VERSION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare reviewed workspace sources
+        run: python3 -B rust/temporal_sources/prepare.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: kanz/go.mod
@@ -168,6 +170,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare reviewed workspace sources
+        run: python3 -B rust/temporal_sources/prepare.py
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
       - name: Bind snapshot fixture to exact source
@@ -205,6 +209,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare reviewed workspace sources
+        run: python3 -B rust/temporal_sources/prepare.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: kanz/go.mod
@@ -272,6 +278,16 @@ jobs:
           # Materialize the cook result in this builder. An imported image hit
           # can leave only lazy references to the intermediate dependency layer.
           no-cache-filters: rust-build
+      - name: Export temporal evidence from the hybrid image builder
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: kanz/services/lake_sink/Dockerfile
+          builder: ${{ steps.lake-builder.outputs.name }}
+          target: rust-source-evidence
+          build-args: VERSION=${{ github.sha }}
+          outputs: type=local,dest=snapshot-owner-proof/builder-evidence
+          push: false
       - name: Bind actual hybrid image identity
         id: lake-image
         run: |
@@ -304,7 +320,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py
-          python3 .github/scripts/rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid
+          python3 .github/scripts/rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid --builder-evidence snapshot-owner-proof/builder-evidence
       - name: Install two checksum-pinned native brokers
         run: |
           set -euo pipefail
@@ -456,6 +472,8 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare reviewed workspace sources
+        run: python3 -B rust/temporal_sources/prepare.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: kanz/go.mod
