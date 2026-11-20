@@ -119,6 +119,7 @@ func (f *fakeBus) count(eventType string) int {
 func fullFill() *orderpb.Fill {
 	return &orderpb.Fill{
 		FillId:     "f1",
+		Side:       orderpb.Side_SIDE_BUY,
 		OrderId:    "o1",
 		Quantity:   d(100, 0),
 		Price:      d(1025, -2),
