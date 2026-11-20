@@ -29,7 +29,7 @@ func checkSignedPilotCommand(t *testing.T, limit time.Duration, afterReceipt fun
 	if os.Getenv("CUSTODY_PILOT_QUANTITY_FIXTURE") == "1" {
 		fixture = filepath.Join(fixture, "instrument_units")
 	}
-	checkPilotSeries(t, limit, fixture, []pilotStatementFile{
+	checkPilotSeries(t, limit, fixture, false, []pilotStatementFile{
 		{name: "statement-r1", revision: 1, position: big.NewRat(19, 2), trade: true},
 		{name: "statement-r2", revision: 2, position: big.NewRat(21, 2), trade: true},
 	}, afterReceipt)
@@ -44,13 +44,13 @@ type pilotStatementFile struct {
 	trade     bool
 }
 
-func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, files []pilotStatementFile, afterReceipt func(context.Context, *pgxpool.Pool, custody.Statement, int, pilotBroker)) {
+func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, processes bool, files []pilotStatementFile, afterReceipt func(context.Context, *pgxpool.Pool, custody.Statement, int, pilotBroker)) {
 	t.Helper()
 	source, owner := os.Getenv("TEST_CUSTODY_BATCH_DATABASE_URL"), os.Getenv("TEST_POSTGRES_URL")
 	if source == "" || owner == "" {
 		t.Skip("requires isolated provisioned pilot source and owner")
 	}
-	broker := grantBroker(t)
+	broker := grantBroker(t, processes)
 	const tenant = "synthetic-custody-pilot"
 	t.Setenv("ACCOUNTING_DATABASE_URL", source)
 	t.Setenv("ACCOUNTING_NATS_URL", broker.address)
@@ -70,9 +70,15 @@ func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, files [
 		t.Fatal("restricted accounting reader required")
 	}
 	store := custody.NewPostgres(pool)
-	consumer, err := custody.NewSignedBatchConsumer(store, tenant, nil)
-	if err != nil {
-		t.Fatal(err)
+	var receiver *custody.StatementConsumer
+	if processes {
+		_, stop := startPilotAccounting(t, ctx, broker, "pilot-ingest", time.Time{})
+		defer stop()
+	} else {
+		receiver, err = custody.NewSignedBatchConsumer(store, tenant, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	firstDay := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
 	for index, file := range files {
@@ -82,7 +88,9 @@ func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, files [
 		sig := filepath.Join(fixture, file.name+".sig")
 		policy := filepath.Join(fixture, "authority.json")
 		for attempt := 0; attempt < 2; attempt++ {
-			if err := run(ctx, policy, batch, sig); err != nil {
+			if processes {
+				runPilotImporter(t, ctx, source, broker.address, policy, batch, sig)
+			} else if err := run(ctx, policy, batch, sig); err != nil {
 				t.Fatalf("revision %d attempt %d: %v", file.revision, attempt+1, err)
 			}
 		}
@@ -101,7 +109,9 @@ func checkPilotSeries(t *testing.T, limit time.Duration, fixture string, files [
 		if frame.GetEnvelope().GetSource() != custody.BatchProducer || frame.GetEnvelope().GetTenantId() != tenant {
 			t.Fatal("unexpected frame scope")
 		}
-		if err := consumer.Handle(ctx, frame.Envelope, frame.Payload); err != nil {
+		if processes {
+			awaitPilotStatementAck(t, ctx, broker, "pilot-ingest", sequence)
+		} else if err := receiver.Handle(ctx, frame.Envelope, frame.Payload); err != nil {
 			t.Fatal(err)
 		}
 		stored, err := store.LatestStatement(ctx, subject)
