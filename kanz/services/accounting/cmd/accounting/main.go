@@ -217,7 +217,7 @@ func run() int {
 	// the "read/reconcile only" default — serving the reconcile endpoint with a
 	// declaration nothing had ever validated. A malformed one now refuses the start
 	// on every deployment that can answer the route.
-	custodyCfg, err := buildCustodyConfig(cfg)
+	custodyCfg, err := admittedCustodyConfig(custodyRunContext(ctx, cfg.Tenant), cfg, custodyStore, time.Now().UTC())
 	if err != nil {
 		logger.Error("custody config invalid", "err", err)
 		return 2

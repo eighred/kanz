@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,6 +112,10 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 		// Both modes are restated effective views of the recorded journal,
 		// with no historical knowledge-time bound.
 		if !scope.Declared(subject.PortfolioID) {
+			if scope != nil && scope.admission != nil {
+				// A journal attributes trades to accounts but cannot establish their custodian.
+				return nil, nil, nil, ErrUnprovenAssignment
+			}
 			// ONE CUSTODIAN: the scope is derived from the journal rather than
 			// declared. See ledger.MaterializeAttributed for why that is scoped by
 			// construction and why no declaration could add to it.
@@ -147,6 +152,12 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 			return nil, nil, nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
 				"book slice to compare its statement against", subject.PortfolioID, subject.CustodianID)
 		}
+		proofSubject := subject
+		proofSubject.BusinessDate = BusinessDay(close)
+		assignments, err := scope.assignmentsAt(ctx, proofSubject)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		basis, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed, close)
 		if err != nil {
 			return nil, nil, nil, err
@@ -165,7 +176,19 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger,
 		}
 		stateResidue(logger, subject, BasisDeclared, basis.Residue)
 		stateUnreferenced(logger, subject, BasisDeclared, basis)
-		return basis.Book, basis.Executions, scope.runBasis(subject, BasisDeclared, basis), nil
+		if len(cutoff) != 0 && scope.admission != nil {
+			// The ad-hoc route has no CommitRun transaction to fence scope changes.
+			current, err := scope.assignmentsAt(ctx, proofSubject)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !slices.Equal(assignments, current) {
+				return nil, nil, nil, ErrUnprovenAssignment
+			}
+		}
+		runBasis := scope.runBasis(subject, BasisDeclared, basis)
+		runBasis.Assignments = assignments
+		return basis.Book, basis.Executions, runBasis, nil
 	}
 }
 

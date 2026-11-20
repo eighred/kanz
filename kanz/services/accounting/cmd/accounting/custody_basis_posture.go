@@ -11,23 +11,10 @@ import (
 
 // WHICH SLICE OF THE BOOK EACH CUSTODIAN'S STATEMENT IS COMPARED AGAINST (#1073).
 //
-// Every custody comparison is scoped to exchange accounts, and there are two ways
-// a pair gets its scope:
-//
-//	declared  ACCOUNTING_CUSTODY_ACCOUNTS names the accounts each custodian of the
-//	          portfolio holds. Required whenever a portfolio has two or more
-//	          custodians, because nothing else can say which holds what, and
-//	          custody.NewBookScope refuses the start without it.
-//	derived   the portfolio has ONE custodian, so it holds every exchange account
-//	          the journal touches and the scope is taken from the journal itself.
-//	          Nothing to declare, and nothing an operator can get wrong.
-//
-// THIS FILE REPLACES A LOG LINE THAT SAID THE OPPOSITE. buildCustodyConfig used to
-// record an undeclared portfolio at INFO as an affirmatively correct
-// configuration — "compares the whole portfolio book … reason: one custodian
-// configured for this portfolio" — and comparing the whole book against one
-// custodian's statement is the thing that manufactured the break. An operator who
-// read that line was steered away from the only fact that mattered about it.
+// The gauge describes the configured book geometry. A declared scope names
+// the accounts whose venue identities and custody assignments must be admitted.
+// For a pair with journal-derived geometry, dated account approval is unknown.
+// A new financial comparison requires an admitted declaration (#1074).
 //
 // # The residue, which neither basis reconciles
 //
@@ -92,11 +79,8 @@ func stateCustodyBasisPosture(
 ) []string {
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: custodyBasisMetric,
-		Help: "1 for the basis this (portfolio, custodian) pair's book side is scoped by. " +
-			"declared=1 means ACCOUNTING_CUSTODY_ACCOUNTS names the accounts the custodian holds; " +
-			"derived=1 means the portfolio has one custodian and the scope is taken from the accounts " +
-			"its journal touches. Under BOTH, entries that settled against no exchange account are in " +
-			"no comparison basis and are reconciled by nothing (#1073).",
+		Help: "1 for the configured account scope. Declared accounts require independent dated venue and custody evidence. " +
+			"A derived scope alone cannot support a custody comparison. Entries without an exchange account remain unreconciled.",
 	}, []string{"portfolio", "custodian", "basis"})
 	reg.MustRegister(g)
 
@@ -118,21 +102,10 @@ func stateCustodyBasisPosture(
 		if basis == custodyBasisDeclared {
 			continue
 		}
-		// WARN, not Info. The sentence an operator has to have read before they
-		// treat a clean run as evidence the book agrees with the world is "the
-		// comparison did not cover everything in it", and Info is where that gets
-		// filtered out. It is not an error: the derivation is correct, and the
-		// exclusion is what stops the run fabricating a break.
-		logger.Warn("accounting: custody reconciliation scopes this portfolio's book from the accounts "+
-			"its JOURNAL touches, because it has one custodian — nothing to declare, and nothing an "+
-			"operator can get wrong. Entries that settled against NO exchange account are in no "+
-			"comparison basis and are RECONCILED BY NOTHING (#1073)",
+		logger.Warn("accounting: journal attribution alone cannot prove a custody assignment. "+
+			"New financial comparisons require independently approved accounts. Entries with no exchange account are RECONCILED BY NOTHING.",
 			"portfolio", p.PortfolioID, "custodian", p.CustodianID, "basis", custodyBasisDerived,
-			"declaration", "ACCOUNTING_CUSTODY_ACCOUNTS is not load-bearing for this portfolio; it "+
-				"becomes required the moment a second custodian is added to ACCOUNTING_CUSTODY_PAIRS",
-			"unreconciled", "cash held away from every custodian — an investor subscription into the "+
-				"fund's own bank — is real in the book of record and confirmed by no statement; the "+
-				"amount is logged per run by the book loader",
+			"declaration", "register dated venue identity and custody assignment evidence for the accounts named in ACCOUNTING_CUSTODY_ACCOUNTS",
 			"gauge", custodyBasisMetric+"{portfolio=\""+p.PortfolioID+"\",basis=\""+custodyBasisDerived+"\"}=1")
 	}
 

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -154,6 +155,20 @@ func buildCustodyConfig(cfg config.Config) (custodyConfig, error) {
 		return custodyConfig{}, err
 	}
 	return custodyConfig{pairs: pairs, scope: scope}, nil
+}
+
+// admittedCustodyConfig runs before serving HTTP, including on deployments without a broker.
+func admittedCustodyConfig(ctx context.Context, cfg config.Config, store custody.Store, asOf time.Time) (custodyConfig, error) {
+	cc, err := buildCustodyConfig(cfg)
+	if err != nil {
+		return custodyConfig{}, err
+	}
+	reader, _ := store.(custody.AssignmentReader)
+	cc.scope, err = cc.scope.AdmitAssignments(ctx, asOf, reader)
+	if err != nil {
+		return custodyConfig{}, fmt.Errorf("custody account assignment admission failed: %w", err)
+	}
+	return cc, nil
 }
 
 // buildCustodyPlane assembles the custody reconciliation control.
