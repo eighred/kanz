@@ -56,6 +56,8 @@ jobs:
         run: python -B tools/jiff_qualification/run.py
       - name: Test published temporal package advisory refusals
         run: python -B -m unittest discover -s tools/jiff_qualification -p test_chrono_advisories.py
+      - name: Test temporal source preparation and refusal
+        run: python -B -m unittest discover -s rust/temporal_sources
       - name: Exercise the published temporal package across both Arrow versions
         id: bridge
         run: python -B tools/jiff_qualification/object_store.py --advisories "$RUNNER_TEMP/chrono-advisories.json"

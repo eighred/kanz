@@ -63,6 +63,8 @@ fn partitioned_file_metadata_uses_signed_instants() {
         .unwrap();
     assert_eq!(fixture.metadata().unwrap().modified().unwrap(), too_late);
     let refusal = runtime.block_on(store.head(&path)).unwrap_err();
-    assert!(refusal.to_string().contains(&format!("Unable to access metadata for {path}")));
+    assert!(refusal
+        .to_string()
+        .contains(&format!("Unable to access metadata for {path}")));
     std::fs::remove_file(fixture_path).unwrap();
 }

@@ -5,8 +5,7 @@ fn same_type<T>(first: T, second: T) -> (T, T) {
 #[test]
 fn both_arrow_versions_share_the_published_temporal_type() {
     for nanos in [i64::MIN, -1, 0, 1, i64::MAX] {
-        let writer =
-            arrow_array::temporal_conversions::timestamp_ns_to_datetime(nanos).unwrap();
+        let writer = arrow_array::temporal_conversions::timestamp_ns_to_datetime(nanos).unwrap();
         let compute =
             datafusion::arrow::temporal_conversions::timestamp_ns_to_datetime(nanos).unwrap();
 
