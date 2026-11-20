@@ -27,6 +27,7 @@ describe('custody exact review', () => {
       for (const [i, value] of ['PF1', 'CUST-A', '2020-02-04'].entries()) await form.findAll('input')[i]!.setValue(value)
       await form.trigger('submit')
       expect(compare).not.toHaveBeenCalled()
+      expect(button(wrapper, 'Reload queue').attributes('disabled')).toBeDefined()
       await button(wrapper, 'Run comparison').trigger('click')
       await flushPromises()
       await button(wrapper, 'Retry same request').trigger('click')
