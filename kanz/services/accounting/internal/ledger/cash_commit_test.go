@@ -83,6 +83,7 @@ func TestPostgresCashCommitCoverageAndAtomicHistory(t *testing.T) {
 		return st.Append(ctx, e, announce)
 	}
 	original := executionEvidenceFixture("account")
+	original.ExecutedAt.Nanos = 321
 	if err := appendFill(original); err != nil {
 		t.Fatal(err)
 	}

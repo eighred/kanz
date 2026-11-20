@@ -302,7 +302,7 @@ func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error
 	}
 	sent := 0
 	for _, p := range pending {
-		event, err := p.Record.Event()
+		event, err := p.Event()
 		if err == nil {
 			err = r.pub.Publish(ctx, event)
 		}

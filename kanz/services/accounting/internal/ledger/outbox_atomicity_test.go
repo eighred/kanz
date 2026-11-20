@@ -9,6 +9,8 @@ import (
 	"math/big"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
@@ -26,15 +28,17 @@ import (
 func announceOne(t *testing.T, portfolioID string) Announcer {
 	t.Helper()
 	return func(ctx context.Context, _ Store) ([]outbox.Record, error) {
+		at := time.Unix(1_700_000_000, 0).UTC()
 		rec, err := outbox.From(ctx, bus.Event{
 			Subject:          "accounting.balance.portfolio",
 			EventType:        "accounting.balance.portfolio",
+			EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 			SchemaVersion:    1,
 			Domain:           "accounting",
-			EventTime:        time.Unix(1_700_000_000, 0).UTC(),
+			EventTime:        at,
 			PartitionKey:     portfolioID,
 			PayloadSchemaRef: "accounting.v1.PortfolioCashBalance:1",
-			Payload:          &accountingpb.PortfolioCashBalance{PortfolioId: portfolioID},
+			Payload:          &accountingpb.PortfolioCashBalance{PortfolioId: portfolioID, AsOf: timestamppb.New(at), KnowledgeTime: timestamppb.New(at)},
 		})
 		return []outbox.Record{rec}, err
 	}

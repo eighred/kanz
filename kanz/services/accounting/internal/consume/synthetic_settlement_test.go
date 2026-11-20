@@ -6,6 +6,8 @@ import (
 	"math/big"
 	"net/url"
 	"os"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -31,7 +33,7 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	}
 	const portfolio = "synthetic-portfolio"
 	tenant := os.Getenv("SYNTHETIC_BOOK_TENANT")
-	if tenant != "synthetic-funded-venue" && tenant != "synthetic-funded-venue-nanos" && tenant != "synthetic-cash-clock" {
+	if tenant != "synthetic-funded-venue" && tenant != "synthetic-funded-venue-nanos" && tenant != "synthetic-funded-venue-pair" && tenant != "synthetic-cash-clock-mismatch" && tenant != "synthetic-cash-clock" {
 		t.Fatal("expected a funded XSIM fixture tenant")
 	}
 	dsn, broker := os.Getenv("SYNTHETIC_BOOK_URL"), os.Getenv("SYNTHETIC_BOOK_NATS")
@@ -69,13 +71,7 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	// This estate supplies only opening cash and the XSIM trade. The normal
 	// announcer also records the excluded BNB bucket on the USD level.
 	announcer := consume.NewAnnouncer(store, producer, "USD", consume.EntrySourcePosture{Produced: []string{"cash", "trade"}}, nil, func() time.Time {
-		// The outbox persists event_time as PostgreSQL timestamptz. Sample a
-		// representable fixture cutoff before building the cash payload.
-		at := time.Now().UTC().Truncate(time.Microsecond)
-		if tenant == "synthetic-cash-clock" {
-			return at.Add(321 * time.Nanosecond)
-		}
-		return at
+		return time.Now().UTC().Truncate(time.Microsecond).Add(321 * time.Nanosecond)
 	})
 	folder, err := consume.NewFolder(tenant, store, "USD", consume.WithAnnouncer(announcer))
 	if err != nil {
@@ -150,15 +146,20 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	if err := folder.Handle(ctx, env, frame.Payload); err != nil {
 		t.Fatal(err)
 	}
+	sequence, err := strconv.Atoi(os.Getenv("SYNTHETIC_BOOK_SEQUENCE"))
+	if err != nil || sequence < 1 || sequence > 2 || (sequence == 2 && tenant != "synthetic-funded-venue-pair") {
+		t.Fatal("invalid accounting fixture trade sequence")
+	}
 	entries, err := store.Journal(ctx, portfolio)
-	if err != nil || len(entries) != 3 {
-		t.Fatal("expected two opening entries and one trade", len(entries), err)
+	if err != nil || len(entries) != 2+sequence {
+		t.Fatal("unexpected number of opening and trade entries", len(entries), err)
 	}
 	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(partial.Fill)
 	if err != nil {
 		t.Fatal(err)
 	}
-	trades := 0
+	var tradeTimes []time.Time
+	seenCurrent := false
 	cash := map[string]*big.Rat{}
 	for _, entry := range entries {
 		if entry.Cash == nil || entry.PortfolioID != portfolio || entry.VenueAccountID != "synthetic-spot" {
@@ -171,23 +172,70 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 		if entry.Type != ledger.EntryTrade {
 			continue
 		}
-		trades++
-		if entry.EntryID != "fill:"+fillfact.ExecutionKey(partial.Fill) || !bytes.Equal(entry.ExecutionEvidence, wire) ||
+		var source orderpb.Fill
+		if err := proto.Unmarshal(entry.ExecutionEvidence, &source); err != nil || source.GetExecutedAt().CheckValid() != nil || !entry.Effective.Equal(source.ExecutedAt.AsTime().Truncate(time.Microsecond)) {
+			t.Fatal("journal lost the original execution time", err)
+		}
+		tradeTimes = append(tradeTimes, source.ExecutedAt.AsTime())
+		if source.OrderId == orderID {
+			seenCurrent = true
+			if !bytes.Equal(entry.ExecutionEvidence, wire) {
+				t.Fatal("stored execution differs from its signed-order fill FACT")
+			}
+		}
+		if entry.EntryID != "fill:"+fillfact.ExecutionKey(&source) ||
 			entry.VenueAccountID != "synthetic-spot" || entry.CashCurrency != "USD" || entry.Cash.Cmp(big.NewRat(-126, 1)) != 0 ||
 			entry.Quantity.Cmp(big.NewRat(5, 8)) != 0 || entry.Price.Cmp(big.NewRat(200, 1)) != 0 {
 			t.Fatal("journal differs from the XSIM execution economics")
 		}
 	}
-	if trades != 1 || len(cash) != 2 || cash["USD"] == nil || cash["USD"].Cmp(big.NewRat(874, 1)) != 0 || cash["BNB"] == nil || cash["BNB"].Cmp(big.NewRat(8, 1)) != 0 {
-		t.Fatal("expected one XSIM trade and journal balances of 874 USD and 8 BNB")
+	if !seenCurrent || len(tradeTimes) != sequence || len(cash) != 2 || cash["USD"] == nil || cash["USD"].Cmp(big.NewRat(int64(1000-126*sequence), 1)) != 0 || cash["BNB"] == nil || cash["BNB"].Cmp(big.NewRat(8, 1)) != 0 {
+		t.Fatal("unexpected XSIM trade count or journal cash")
+	}
+	if sequence == 2 {
+		slices.SortFunc(tradeTimes, time.Time.Compare)
+		first, second := tradeTimes[0], tradeTimes[1]
+		if !first.Truncate(time.Microsecond).Equal(second.Truncate(time.Microsecond)) || first.Nanosecond()%1000 != 321 || second.Nanosecond()%1000 != 789 {
+			t.Fatal("journal did not preserve both distinct same-microsecond execution times")
+		}
+		for i, at := range []time.Time{first.Add(-time.Nanosecond), first, second.Add(-time.Nanosecond), second} {
+			p, err := ledger.MaterializeCash(ctx, store, portfolio, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := big.NewRat([]int64{1000, 874, 874, 748}[i], 1)
+			balance := p.Accounts["synthetic-spot"]["USD"]
+			if balance == nil || balance.Cmp(expected) != 0 || p.Book.CashBalance("USD").Cmp(expected) != 0 {
+				t.Fatalf("cash at remainder %dns: account=%v portfolio=%s want=%s", at.Nanosecond()%1000, balance, p.Book.CashBalance("USD"), expected)
+			}
+		}
 	}
 	var historyCount int
-	want := 2
+	want := 2 * sequence
 	if mode == "replay" {
-		want = 3
+		want++
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM cash_commit_history WHERE portfolio_id=$1 AND currency='USD'`, portfolio).Scan(&historyCount); err != nil || historyCount != want {
 		t.Fatal("unexpected cash history length", historyCount, err)
+	}
+	// After redelivery, check each original publication against immutable history.
+	cashStream, err := js.Stream(ctx, "SYNTHETIC_CASH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for revision := 1; revision <= want; revision++ {
+		raw, err := cashStream.GetMsg(ctx, uint64(revision))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var published envelopepb.EventFrame
+		var retained []byte
+		if proto.Unmarshal(raw.Data, &published) != nil || published.GetEnvelope().GetTenantId() != tenant {
+			t.Fatal("unexpected cash history publication")
+		}
+		if err := pool.QueryRow(ctx, "SELECT payload FROM cash_commit_history WHERE portfolio_id=$1 AND currency='USD' AND revision=$2", portfolio, revision).Scan(&retained); err != nil || !bytes.Equal(retained, published.Payload) {
+			t.Fatal("retained cash history differs from original JetStream publication", revision, err)
+		}
 	}
 	if mode == "book" {
 		if err := msg.Nak(); err != nil {

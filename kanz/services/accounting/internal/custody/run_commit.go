@@ -14,6 +14,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal/cashoutbox"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
@@ -50,7 +51,7 @@ func cloneRun(run Run) Run {
 }
 
 func (m *MemoryStore) Outbox() outbox.Queue { return m.outbox }
-func (p *Postgres) Outbox() outbox.Queue    { return outbox.NewPostgres(p.pool, outbox.ServiceAccounting) }
+func (p *Postgres) Outbox() outbox.Queue    { return cashoutbox.New(p.pool) }
 
 // NewMemoryStoreWithOutbox shares the accounting relay's volatile queue. Losing
 // the process still loses both the volatile book and its completion records.

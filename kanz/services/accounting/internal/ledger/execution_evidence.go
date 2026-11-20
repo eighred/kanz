@@ -22,29 +22,44 @@ func exactRat(a, b *big.Rat) bool {
 }
 
 func executionFromEntry(e *Event) (*orderpb.Fill, error) {
-	if len(e.ExecutionEvidence) == 0 {
+	fill, err := decodeExecutionEvidence(e.ExecutionEvidence)
+	if err != nil || fill == nil {
+		return nil, err
+	}
+	if err := validateExecutionTrade(e, fill); err != nil {
+		return nil, err
+	}
+	return fill, nil
+}
+
+func decodeExecutionEvidence(evidence []byte) (*orderpb.Fill, error) {
+	if len(evidence) == 0 {
 		return nil, nil
 	}
-	if len(e.ExecutionEvidence) > 1<<20 {
+	if len(evidence) > 1<<20 {
 		return nil, fillfact.ErrExecutionIdentityConflict
 	}
 	var fill orderpb.Fill
-	if err := proto.Unmarshal(e.ExecutionEvidence, &fill); err != nil {
+	if err := proto.Unmarshal(evidence, &fill); err != nil {
 		return nil, err
 	}
 	if _, ok := dec.InDomainDeep(&fill); !ok {
 		return nil, fillfact.ErrExecutionIdentityConflict
 	}
-	expected, err := FromFill(e.PortfolioID, &fill, e.CashCurrency, e.Knowledge)
+	return &fill, nil
+}
+
+func validateExecutionTrade(e *Event, fill *orderpb.Fill) error {
+	expected, err := FromFill(e.PortfolioID, fill, e.CashCurrency, e.Knowledge)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if e.Type != EntryTrade || e.EntryID != expected.EntryID || e.SourceRef != expected.SourceRef || e.VenueAccountID != expected.VenueAccountID || e.InstrumentID != expected.InstrumentID ||
+	if e.Type != EntryTrade || e.Action != nil || e.EntryID != expected.EntryID || e.SourceRef != expected.SourceRef || e.VenueAccountID != expected.VenueAccountID || e.InstrumentID != expected.InstrumentID ||
 		!exactRat(e.Quantity, expected.Quantity) || !exactRat(e.Price, expected.Price) || !exactRat(e.Cash, expected.Cash) ||
 		!e.Effective.Equal(expected.Effective) || e.SettlementBasis != expected.SettlementBasis || !e.SettlementDate.Equal(expected.SettlementDate) {
-		return nil, fillfact.ErrExecutionIdentityConflict
+		return fillfact.ErrExecutionIdentityConflict
 	}
-	return &fill, nil
+	return nil
 }
 
 // The alias lock also covers older writers through the migration's trigger.

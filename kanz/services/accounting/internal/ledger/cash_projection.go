@@ -19,8 +19,8 @@ type CashProjection struct {
 	events   []*Event
 }
 
-// MaterializeCash preserves the checkpoint path for the portfolio book. The
-// account projection still requires the full journal, as VenueAccountCash does.
+// MaterializeCash uses the portfolio checkpoint when its time precision is
+// sufficient. The account projection also requires the full journal.
 // Inside Append it reuses the transaction so both views include the pending
 // entry; outside Append it holds one repeatable-read snapshot across both reads.
 func MaterializeCash(ctx context.Context, st Store, portfolio string, asOf time.Time) (CashProjection, error) {
@@ -62,11 +62,25 @@ func MaterializeCash(ctx context.Context, st Store, portfolio string, asOf time.
 }
 
 func materializeCash(ctx context.Context, st Store, portfolio string, asOf time.Time) (CashProjection, error) {
-	book, _, err := materializeCurrentAt(ctx, st, portfolio, asOf)
+	events, err := st.Journal(ctx, portfolio)
 	if err != nil {
 		return CashProjection{}, err
 	}
-	events, err := st.Journal(ctx, portfolio)
+	if _, durable := st.(*Postgres); durable {
+		restored := false
+		for _, e := range events {
+			if restoreCashExecutionTime(e) {
+				restored = true
+			}
+		}
+		if restored {
+			// A checkpoint can contain a fill that its rounded effective time
+			// placed before this cutoff. Refold the same immutable rows used
+			// for account cash and order attribution with the verified times.
+			return newCashProjection(ReplayAsOf(portfolio, events, asOf, time.Time{}), events, asOf), nil
+		}
+	}
+	book, _, err := materializeCurrentAt(ctx, st, portfolio, asOf)
 	if err != nil {
 		return CashProjection{}, err
 	}

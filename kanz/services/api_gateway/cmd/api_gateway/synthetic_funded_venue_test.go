@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
-	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -350,27 +349,15 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 				}
 				cashFrames := bookSyntheticFill(t, ctx, s, tenant, fundedFirst)
 				apply := syntheticvenue.CapitalCashHandler(syntheticPool(t, ctx, "CASH", tenant), tenant)
-				if len(cashFrames) == 0 {
-					t.Fatal("missing accounting cash FACT")
+				if len(cashFrames) != 2 {
+					t.Fatal("expected the original cash revision and fill replay")
 				}
 				var booked int64
 				for i, frame := range cashFrames {
-					var level accountingpb.PortfolioCashBalance
-					if err := proto.Unmarshal(frame.Payload, &level); err != nil {
-						t.Fatal(err)
-					}
-					commit := level.GetCashCommit()
-					if i == 0 {
-						if commit.GetComplete() {
-							if len(commit.GetApplied()) != 1 || commit.Applied[0].OrderId != fundedFirst || dec.FromProto(commit.Applied[0].Debit).RatString() != "126" {
-								t.Fatal("complete accounting commitment lacks the order debit")
-							}
-							booked = 126
-						} else if scenario.extra == 0 || len(commit.GetApplied()) != 0 {
-							t.Fatal("unexpected incomplete accounting commitment")
-						}
-					} else if len(commit.GetApplied()) != 0 {
-						t.Fatal("duplicate fill booked a second cash debit")
+					// The baseline writer cannot attribute this trade. Only its successor
+					// can discharge the USD obligation after replaying the immutable fill.
+					if i == 1 || !upgradingBook(tenant) {
+						booked = 126
 					}
 					for range 2 {
 						if err := apply(bus.WithTenantID(ctx, tenant), frame.Envelope, frame.Payload); err != nil {
@@ -378,6 +365,10 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 						}
 						checkVenueCash(t, ctx, proof, o, 874, 126-booked, 126, 0, 126, booked)
 					}
+				}
+				var healthy bool
+				if err := syntheticPool(t, ctx, "CASH", tenant).QueryRow(ctx, "SELECT fault_digest IS NULL FROM capital_source_health WHERE tenant_id=$1", tenant).Scan(&healthy); err != nil || !healthy {
+					t.Fatal("cash FACT quarantined its source", err)
 				}
 				var incompleteFresh bool
 				err = proof.QueryRow(ctx, `SELECT NOT coverage_complete AND NOT conflicted AND gap_revision=0
@@ -395,4 +386,107 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 			})
 		})
 	}
+	t.Run("same_microsecond_pair", testSameMicrosecondPair)
+}
+
+// Two actual XSIM orders execute within one database microsecond. The ledger
+// sees different execution IDs and economic instants; each books its own debit.
+func testSameMicrosecondPair(t *testing.T) {
+	const tenant, portfolio = "synthetic-funded-venue-pair", "synthetic-portfolio"
+	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
+		prepareSyntheticAccounting(t, ctx, s, tenant)
+		stream, relay := syntheticFactRelay(t, ctx, s, tenant)
+		proof := syntheticPool(t, ctx, "PROOF", tenant)
+		issuer := syntheticPool(t, ctx, "CONTROL", tenant)
+		journal := syntheticPool(t, ctx, "ADAPTER", tenant)
+		var orders []fundedOrder
+		for _, id := range []string{fundedFirst, fundedNext} {
+			o := signedFundedOrder(t, ctx, s, id, false)
+			o.authorize(t, ctx, o.request.Principal, time.Now().Add(time.Minute))
+			requireNativeReceipt(t, ctx, o.request, "ACCEPTED")
+			orders = append(orders, o)
+		}
+		base := time.Now().UTC().Truncate(time.Microsecond)
+		var cashFrames []*envelopepb.EventFrame
+		for i, o := range orders {
+			id := o.command.OrderId
+			at := base.Add([]time.Duration{321 * time.Nanosecond, 789 * time.Nanosecond}[i])
+			venue := syntheticVenueClient(t, ctx, syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: at, FillOnExecute: true, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}})
+			control := fundedVenueControl{order: o, proof: proof, issuer: issuer, venue: venue}
+			ingress, err := syntheticvenue.NewWorkingPartialIngress(tenant, portfolio, venue, func(ctx context.Context, c syntheticvenue.Command) (syntheticvenue.Receipt, error) {
+				control.authorize(t, ctx, c)
+				r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_ADAPTER_URL"), struct {
+					Version int `json:"version"`
+					syntheticvenue.Command
+				}{1, c})
+				if err != nil || !r.OK {
+					t.Fatalf("native %s: %s/%s %v", c.Op, r.Code, r.Reason, err)
+				}
+				return r, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, err := relay.Flush(ctx, id); err != nil || n != 1 {
+				t.Fatal("publish accepted FACT", n, err)
+			}
+			msg, err := stream.GetLastMsgForSubject(ctx, syntheticvenue.AcceptedSubject)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var frame envelopepb.EventFrame
+			if proto.Unmarshal(msg.Data, &frame) != nil || bus.Validate(frame.Envelope) != nil || frame.Envelope.PartitionKey != id {
+				t.Fatal("wrong accepted order")
+			}
+			control.accepted = frame.Envelope
+			if err := ingress.HandleAccepted(ctx, frame.Envelope, frame.Payload); err != nil {
+				t.Fatal(err)
+			}
+			get := nativeSubmit{Version: 1, Op: "get", Tenant: tenant, Portfolio: portfolio, Principal: o.request.Principal, OrderID: id}
+			var working orderpb.OrderState
+			if proto.Unmarshal(requireNativeReceipt(t, ctx, get, "FOUND").State, &working) != nil || working.Status != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED {
+				t.Fatal("order did not partially execute")
+			}
+			verifyWorkingFill(t, ctx, venue, journal, tenant, &working, at)
+			cancel := s.cancelOrder(id, "cancel-pair-"+id, "synthetic-trader", portfolio)
+			control.cancellation = cancel.Envelope
+			recordCancellationAuthority(t, ctx, cancellationRequest(t, cancel, portfolio), cancel.Envelope, time.Now().Add(30*time.Second), nil, nil)
+			if err := ingress.Cancel(ctx, id, cancel.Envelope.EventId, cancel.Envelope.EventTime.AsTime()); err != nil {
+				t.Fatal(err)
+			}
+			var terminal orderpb.OrderState
+			if proto.Unmarshal(requireNativeReceipt(t, ctx, get, "FOUND").State, &terminal) != nil || terminal.Status != orderpb.OrderStatus_ORDER_STATUS_CANCELLED || dec.FromProto(terminal.LeavesQuantity).RatString() != "5/8" {
+				t.Fatal("partial remainder was not cancelled")
+			}
+			if n, err := relay.Flush(ctx, id); err != nil || n != 3 {
+				t.Fatal("publish routed, partial and cancelled FACTs", n, err)
+			}
+			cashFrames = append(cashFrames, bookSyntheticTrade(t, ctx, s, tenant, id, i+1)...)
+		}
+		for _, o := range orders {
+			checkVenueCash(t, ctx, proof, o, 1000, 252, 126, 0, 126, 0)
+		}
+		cash := syntheticPool(t, ctx, "CASH", tenant)
+		apply := syntheticvenue.CapitalCashHandler(cash, tenant)
+		for i, frame := range cashFrames {
+			bookedTradeCount := 1 + i/2
+			for range 2 {
+				if err := apply(bus.WithTenantID(ctx, tenant), frame.Envelope, frame.Payload); err != nil {
+					t.Fatal(err)
+				}
+				for j, o := range orders {
+					var booked int64
+					if j < bookedTradeCount {
+						booked = 126
+					}
+					checkVenueCash(t, ctx, proof, o, int64(1000-126*bookedTradeCount), int64(252-126*bookedTradeCount), 126, 0, 126, booked)
+				}
+			}
+		}
+		var healthy bool
+		if err := cash.QueryRow(ctx, "SELECT fault_digest IS NULL FROM capital_source_health WHERE tenant_id=$1", tenant).Scan(&healthy); err != nil || !healthy {
+			t.Fatal("pair cash source quarantined", err)
+		}
+		t.Logf("XSIM cash result tenant=%s total_USD=748 reserved_USD=0 booked_USD=252 reserved_BNB=0", tenant)
+	})
 }

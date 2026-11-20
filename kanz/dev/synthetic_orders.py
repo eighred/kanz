@@ -16,6 +16,8 @@ RUNTIME = "ghcr.io/eighred/base/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce3
 DB = "kanz_synthetic_oms"
 BOOK_DB = "kanz_synthetic_accounting"
 BOOK_ROLE = "kanz_synthetic_accounting"
+HISTORY_ROLE = "kanz_synthetic_cash_history"
+REBUILD_DB = "kanz_synthetic_cash_rebuild"
 FUNDING_DIAGNOSTIC = "0026_funded_order_refusal.sql"
 OWNERS = {
     "services/api_gateway/cmd/api_gateway": [
@@ -255,7 +257,32 @@ def run_fixture_tests(cmd, names, selected_env, password):
     return log
 
 
-def run(stage, native):
+def grant_cash_projection(container, database):
+    sql(container, """
+        BEGIN;
+        GRANT SELECT,INSERT,UPDATE(fault_digest) ON capital_source_health TO kanz_synthetic_oms_cash;
+        GRANT SELECT,INSERT(portfolio_id,currency),UPDATE(reserved,revision,total,observed_at_ns,coverage_complete,conflicted,gap_revision)
+            ON capital_balances TO kanz_synthetic_oms_cash;
+        GRANT SELECT,INSERT(portfolio_id,currency,revision,digest) ON capital_cash_events TO kanz_synthetic_oms_cash;
+        GRANT SELECT,UPDATE(booked_debit) ON capital_commitments,capital_members TO kanz_synthetic_oms_cash;
+        COMMIT;
+    """, database)
+
+
+def provision_upgrade(container, env):
+    password = secrets.token_hex(24)
+    sql(container, f"CREATE ROLE {HISTORY_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{password}';")
+    sql(container, f"GRANT SELECT ON cash_commit_heads,cash_commit_history TO {HISTORY_ROLE};", BOOK_DB)
+    env["SYNTHETIC_BOOK_HISTORY_URL"] = f"postgres://{HISTORY_ROLE}:{password}@127.0.0.1:5432/{BOOK_DB}?sslmode=disable"
+    sql(container, f"CREATE DATABASE {REBUILD_DB};")
+    for migration in sorted((ROOT / "kanz/services/oms/migrations").glob("*.sql")):
+        sql(container, migration.read_text(encoding="utf-8"), REBUILD_DB)
+    grant_cash_projection(container, REBUILD_DB)
+    env["SYNTHETIC_REBUILD_URL"] = env["SYNTHETIC_OMS_CASH_URL"].replace(f"/{DB}?", f"/{REBUILD_DB}?")
+    env["SYNTHETIC_PRIOR_BOOK_BIN"] = "/fixture/prior-accounting"
+
+
+def run(stage, native, prior_accounting=None):
     packages = {path: list(names) for path, names in OWNERS.items()}
     if native:
         packages["services/api_gateway/cmd/api_gateway"].append("TestSyntheticOrderCommandLifecycle")
@@ -263,6 +290,11 @@ def run(stage, native):
         (stage / "native").chmod(0o755)
         with native.open("rb") as binary:
             print("Rust owner SHA-256", hashlib.file_digest(binary, "sha256").hexdigest(), flush=True)
+    if prior_accounting:
+        shutil.copyfile(prior_accounting, stage / "prior-accounting")
+        (stage / "prior-accounting").chmod(0o755)
+        with prior_accounting.open("rb") as binary:
+            print("Prior accounting SHA-256", hashlib.file_digest(binary, "sha256").hexdigest(), flush=True)
     targets = list(packages)
     if native:
         targets.append("services/accounting/internal/consume")
@@ -272,7 +304,8 @@ def run(stage, native):
     hba = stage / "pg_hba.conf"
     hba.write_text("local all postgres peer\nlocal all all reject\n"
                    f"host {DB} {','.join(['kanz_synthetic_test', *ROLES.values()])} 127.0.0.1/32 scram-sha-256\n"
-                   f"host {BOOK_DB} {BOOK_ROLE} 127.0.0.1/32 scram-sha-256\n"
+                   f"host {BOOK_DB} {BOOK_ROLE},{HISTORY_ROLE} 127.0.0.1/32 scram-sha-256\n"
+                   f"host {REBUILD_DB} {ROLES['CASH']} 127.0.0.1/32 scram-sha-256\n"
                    "host all all 0.0.0.0/0 reject\nhost all all ::/0 reject\n", encoding="ascii")
     with_env = dict(os.environ, POSTGRES_PASSWORD=secrets.token_hex(32))
     container = output("docker", "run", "-d", "--rm", "--network", "none",
@@ -302,6 +335,8 @@ def run(stage, native):
         if native:
             pending_migrations = provision_native(container, fixture_env)
             provision_accounting(container, fixture_env)
+            if prior_accounting:
+                provision_upgrade(container, fixture_env)
             fixture_env["KANZ_SYNTHETIC_OMS_BIN"] = "/fixture/native"
         for package, names in packages.items():
             base = package.rsplit("/", 1)[-1]
@@ -368,7 +403,7 @@ def run(stage, native):
                 print(f"{package}: funded cancellation passed ({', '.join(terminal_cases)}) without skips", flush=True)
                 settlement = ROOT / "rust/services/synthetic_oms/settlement.sql"
                 sql(container, settlement.read_text(encoding="utf-8"), DB)
-                for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos"):
+                for tenant in ("synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair"):
                     sql(container, f"""
                         BEGIN;
                         SET LOCAL app.tenant_id='{tenant}';
@@ -379,20 +414,12 @@ def run(stage, native):
                             FROM (VALUES ('USD','1000'),('BNB','8')) AS cash(currency,opening);
                         COMMIT;
                     """, DB)
-                sql(container, """
-                    BEGIN;
-                    GRANT SELECT,INSERT,UPDATE(fault_digest) ON capital_source_health TO kanz_synthetic_oms_cash;
-                    GRANT SELECT,INSERT(portfolio_id,currency),UPDATE(reserved,revision,total,observed_at_ns,coverage_complete,conflicted,gap_revision)
-                        ON capital_balances TO kanz_synthetic_oms_cash;
-                    GRANT SELECT,INSERT(portfolio_id,currency,revision,digest) ON capital_cash_events TO kanz_synthetic_oms_cash;
-                    GRANT SELECT,UPDATE(booked_debit) ON capital_commitments,capital_members TO kanz_synthetic_oms_cash;
-                    COMMIT;
-                """, DB)
+                grant_cash_projection(container, DB)
                 venue = "TestSyntheticFundedVenueLifecycle"
                 venue_log = run_fixture_tests(cmd, [venue, "TestSyntheticAccountingCashClock"], selected_env, password)
-                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt"))
+                require_cases(venue_log, venue, ("partial_cancel_and_book", "submicrosecond_receipt", "same_microsecond_pair"))
                 for line in venue_log.splitlines():
-                    if "XSIM cash result tenant=" in line or "XSIM accounting cutoff difference=" in line:
+                    if "XSIM " in line and "synthetic_" in line:
                         print(line[line.index("XSIM "):], flush=True)
                 print(f"{package}: funded XSIM partial fill, cancellation, journal and cash replay passed without skips", flush=True)
             log = run_fixture_tests(cmd, names, selected_env, password)
@@ -431,6 +458,9 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--native", type=Path, help="run the complete slice with this checkout's Linux amd64 kanz-synthetic-oms")
     mode.add_argument("--owners-only", action="store_true", help="run existing component checks without native integration")
+    parser.add_argument("--prior-accounting", type=Path, help="also use a Linux accounting test binary built from 7077c75b for the historical tenant")
     args = parser.parse_args()
+    if args.prior_accounting and not args.native:
+        parser.error("--prior-accounting requires --native")
     with tempfile.TemporaryDirectory(prefix="kanz-synthetic-orders-") as directory:
-        run(Path(directory), args.native)
+        run(Path(directory), args.native, args.prior_accounting)

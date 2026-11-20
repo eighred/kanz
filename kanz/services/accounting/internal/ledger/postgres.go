@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/services/accounting/internal/cashoutbox"
 )
 
 // Postgres is the durable Store backed by the 0001_ledger.sql schema — the
@@ -84,7 +85,7 @@ func (p *Postgres) currentBook(ctx context.Context, portfolioID string, now time
 // the same pool the journal is written through, so the relay reads under the
 // same RLS scope that wrote the record and there is no cross-tenant read to be
 // had.
-func (p *Postgres) Outbox() outbox.Queue { return outbox.NewPostgres(p.pool, outbox.ServiceAccounting) }
+func (p *Postgres) Outbox() outbox.Queue { return cashoutbox.New(p.pool) }
 
 // Append records one journal entry, idempotent on entry_id (ON CONFLICT DO
 // NOTHING) — the journal is exactly-once over an at-least-once producer.
@@ -207,6 +208,9 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 		records, aerr := announce(ctx, p.withTx(tx))
 		if aerr != nil {
 			return fmt.Errorf("append entry %s: announce: %w", e.EntryID, aerr)
+		}
+		if err := cashoutbox.Validate(ctx, tx, records); err != nil {
+			return fmt.Errorf("append entry %s: validate cash announcement: %w", e.EntryID, err)
 		}
 		if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, records...); err != nil {
 			return fmt.Errorf("append entry %s: enqueue announcement: %w", e.EntryID, err)

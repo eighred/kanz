@@ -155,6 +155,11 @@ func preAuthRouter(t *testing.T, cfg config.Config, authn middleware.Authenticat
 
 func buildRouterFor(t *testing.T, cfg config.Config, authn middleware.Authenticator) (http.Handler, error) {
 	t.Helper()
+	return buildRouterWithBackend(t, cfg, authn, &recordingBackend{})
+}
+
+func buildRouterWithBackend(t *testing.T, cfg config.Config, authn middleware.Authenticator, backend proxy.Backend) (http.Handler, error) {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	obs, err := observability.New(context.Background(), observability.Config{
 		ServiceName: "api-gateway-test", ServiceVersion: version.String(), SampleRatio: 1,
@@ -168,7 +173,7 @@ func buildRouterFor(t *testing.T, cfg config.Config, authn middleware.Authentica
 	return buildRouter(cfg,
 		gateway.New(nil, nil, nil, cfg.ApproveRole, logger),
 		orders.New(nil, cfg.ApproveRole, halt.OpenGate(nil)),
-		proxy.New(&recordingBackend{}, proxyRoles(cfg)),
+		proxy.New(backend, proxyRoles(cfg)),
 		nil, // no control plane
 		obs, &ready, logger,
 		nil, // no decision recorder: these cases assert the refusal, not the audit trail

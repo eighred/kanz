@@ -73,9 +73,20 @@ The funded fixture runs an isolated mTLS XSIM adapter, the Rust OMS writer, the 
 | Accounting books the fill and OMS consumes its cash fact | 0 | 0 | One trade reduces USD cash to 874. The BNB balance stays at 8. |
 | JetStream redelivers the fill to a fresh accounting process | 0 | 0 | One trade remains. The next cash revision contains no additional order debit. |
 
-The primary XSIM clock reports whole microseconds. A second order in a fresh tenant uses a venue clock 321 nanoseconds past a whole microsecond. Both the venue receipt and the OMS fill journal preserve that exact time. Accounting stores the original fill bytes beside microsecond-resolution PostgreSQL timestamps. Its current attribution check compares those timestamps with the original fill. For the second order it reports an unattributed trade, books 874 USD cash and supplies no order debit. OMS keeps 126 USD reserved through redelivery. [Execution attribution](../services/accounting/internal/ledger/execution_evidence.go) · [Cash commit coverage](../services/accounting/internal/ledger/cash_commit.go)
+The fixture repeats the same order with an XSIM timestamp 321 nanoseconds past a whole microsecond. Accounting validates the execution identity, posting terms and stored PostgreSQL time against the original fill. Both timestamps book one 126 USD debit. A second pair of signed orders executes at 321 ns and 789 ns within one microsecond. Their respective cash cutoffs show 1000, 874, 874 and 748 USD immediately before and at those two fills. Each cancellation and replay leaves its own execution and debit intact. The original evidence supplies venue execution time. Historical accounting knowledge time has the precision retained by PostgreSQL. [Cash projection](../services/accounting/internal/ledger/cash_projection.go)
 
-The two order runs use a microsecond-resolution accounting announcement clock. A separate cash-source test sets the announcement clock 321 nanoseconds beyond a whole microsecond. The outbox stores the envelope time at microsecond precision while the cash payload retains nanoseconds. OMS quarantines the source when the two cutoffs differ.
+The cash announcer also uses a clock with a 321 ns remainder. The accounting relay uses the exact cutoff in the sealed cash payload after checking its portfolio, revision, immutable cash history and PostgreSQL timestamp. The OMS accepts the matching frame and still quarantines a contradictory one. [Accounting cash outbox](../services/accounting/internal/cashoutbox/postgres.go)
+
+For the compatibility run, build the accounting test binary in a checkout of `7077c75b` with the generated Go SDK. Run these commands in the indicated checkouts on Linux.
+
+```sh
+# From the 7077c75b Go module
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -mod=readonly -p 1 -c -o /tmp/kanz-7077-accounting ./services/accounting/internal/consume
+# From the current repository root
+python3 -B kanz/dev/synthetic_orders.py --native rust/target/debug/kanz-synthetic-oms --prior-accounting /tmp/kanz-7077-accounting
+```
+
+The historical process commits an unattributed 126 USD trade at cash revision 2. A fresh accounting process consumes the same JetStream delivery and attributes the original debit at revision 3. OMS releases the outstanding reserve. Both the prior history and the original publication retain their bytes. For an already published contradictory opening frame, the original OMS projection retains its quarantine. The drill creates an empty replacement database and uses the OMS workload's private gateway read to replay the sealed accounting opening with its exact cutoff. It verifies the result twice without switching the active writer. [Funded upgrade and recovery](../services/api_gateway/cmd/api_gateway/synthetic_cash_rebuild_test.go)
 
 The terminal fact carries the signed cancellation as its cause and the independently observed confirmation time. A separate cash revision acknowledges the amount attributable to this order. The USD announcement excludes BNB, so new admission that requires complete portfolio coverage still refuses with unknown funding. Go retains production write authority. [Funded OMS](https://github.com/eighred/kanz/issues/1532) · [Cash reservations](https://github.com/eighred/kanz/issues/1316) · [Writer replay](https://github.com/eighred/kanz/issues/1533) · [Accounting](https://github.com/eighred/kanz/issues/1535)
 

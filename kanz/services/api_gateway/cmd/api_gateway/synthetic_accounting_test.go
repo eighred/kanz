@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,22 @@ const syntheticCashSubject = "accounting.balance.portfolio"
 
 func runSyntheticBook(t *testing.T, ctx context.Context, s syntheticSession, tenant, step, orderID string) {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, os.Getenv("SYNTHETIC_BOOK_BIN"), "-test.v", "-test.count=1", "-test.run=^TestSyntheticSettlementJournal$")
-	cmd.Env = []string{"SYNTHETIC_BOOK_TENANT=" + tenant, "SYNTHETIC_BOOK_STEP=" + step, "SYNTHETIC_BOOK_ORDER=" + orderID, "SYNTHETIC_BOOK_URL=" + os.Getenv("SYNTHETIC_BOOK_URL"), "SYNTHETIC_BOOK_NATS=" + s.broker}
+	runSyntheticBookTrade(t, ctx, s, tenant, step, orderID, 1)
+}
+
+func upgradingBook(tenant string) bool {
+	return tenant == "synthetic-funded-venue-nanos" && os.Getenv("SYNTHETIC_PRIOR_BOOK_BIN") != ""
+}
+
+func runSyntheticBookTrade(t *testing.T, ctx context.Context, s syntheticSession, tenant, step, orderID string, sequence int) {
+	t.Helper()
+	binary := os.Getenv("SYNTHETIC_BOOK_BIN")
+	if (upgradingBook(tenant) && (step == "open" || step == "book")) || (tenant == "synthetic-cash-clock" && step == "open" && os.Getenv("SYNTHETIC_PRIOR_BOOK_BIN") != "") {
+		binary = os.Getenv("SYNTHETIC_PRIOR_BOOK_BIN")
+	}
+	cmd := exec.CommandContext(ctx, binary, "-test.v", "-test.count=1", "-test.run=^TestSyntheticSettlementJournal$")
+	cmd.Env = []string{"SYNTHETIC_BOOK_TENANT=" + tenant, "SYNTHETIC_BOOK_STEP=" + step, "SYNTHETIC_BOOK_ORDER=" + orderID, "SYNTHETIC_BOOK_URL=" + os.Getenv("SYNTHETIC_BOOK_URL"), "SYNTHETIC_BOOK_NATS=" + s.broker,
+		"SYNTHETIC_BOOK_SEQUENCE=" + strconv.Itoa(sequence), "SYNTHETIC_BOOK_UPGRADE=" + strconv.FormatBool(upgradingBook(tenant))}
 	data, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(data), "--- PASS: TestSyntheticSettlementJournal") || strings.Contains(string(data), "--- SKIP:") {
 		t.Fatalf("accounting %s: %v\n%s", step, err, data)
@@ -64,29 +79,52 @@ func TestSyntheticAccountingCashClock(t *testing.T) {
 		if err := proto.Unmarshal(frame.Payload, &level); err != nil {
 			t.Fatal(err)
 		}
-		loss := level.GetAsOf().AsTime().Sub(frame.Envelope.GetEventTime().AsTime())
-		pool := syntheticPool(t, ctx, "CASH", tenant)
-		apply := syntheticvenue.CapitalCashHandler(pool, tenant)
-		err := apply(bus.WithTenantID(ctx, tenant), frame.Envelope, frame.Payload)
-		if loss == 0 {
-			if err != nil {
-				t.Fatal("matching accounting cutoff refused", err)
-			}
+		if os.Getenv("SYNTHETIC_PRIOR_BOOK_BIN") != "" {
+			recoverLegacyCashClock(t, ctx, tenant, frame)
 			return
 		}
-		if loss != 321*time.Nanosecond || err == nil {
-			t.Fatalf("unexpected accounting cutoff difference %s or result %v", loss, err)
+		if level.GetAsOf().GetNanos()%1000 != 321 || !level.AsOf.AsTime().Equal(frame.Envelope.GetEventTime().AsTime()) {
+			t.Fatal("cash cutoff did not retain the accounting clock's original 321ns remainder")
+		}
+		pool := syntheticPool(t, ctx, "CASH", tenant)
+		apply := syntheticvenue.CapitalCashHandler(pool, tenant)
+		for range 2 {
+			if err := apply(bus.WithTenantID(ctx, tenant), frame.Envelope, frame.Payload); err != nil {
+				t.Fatal("matching accounting cutoff refused", err)
+			}
 		}
 		var quarantined bool
-		if err := pool.QueryRow(ctx, `SELECT octet_length(fault_digest)=32
-			AND NOT EXISTS(SELECT FROM capital_balances) FROM capital_source_health WHERE tenant_id=$1`, tenant).Scan(&quarantined); err != nil || !quarantined {
+		if err := pool.QueryRow(ctx, `SELECT fault_digest IS NOT NULL FROM capital_source_health WHERE tenant_id=$1`, tenant).Scan(&quarantined); err != nil || quarantined {
+			t.Fatal("exact cutoff quarantined a valid accounting source", err)
+		}
+		var observed int64
+		if err := pool.QueryRow(ctx, `SELECT observed_at_ns FROM capital_balances WHERE portfolio_id='synthetic-portfolio' AND currency='USD' AND revision=1`).Scan(&observed); err != nil || observed != level.AsOf.AsTime().UnixNano() {
+			t.Fatal("OMS retained a different cash cutoff", err)
+		}
+		t.Log("XSIM accounting cutoff difference=0s source_remainder_ns=321 cash_source_quarantined=false")
+	})
+	const mismatch = "synthetic-cash-clock-mismatch"
+	exerciseSyntheticSession(t, mismatch, func(ctx context.Context, s syntheticSession) {
+		frame := prepareSyntheticAccounting(t, ctx, s, mismatch)
+		altered := proto.Clone(frame.Envelope).(*envelopepb.Envelope)
+		altered.EventTime.Nanos--
+		pool := syntheticPool(t, ctx, "CASH", mismatch)
+		if err := syntheticvenue.CapitalCashHandler(pool, mismatch)(bus.WithTenantID(ctx, mismatch), altered, frame.Payload); err == nil {
+			t.Fatal("contradictory cutoff accepted")
+		}
+		var quarantined bool
+		if err := pool.QueryRow(ctx, `SELECT octet_length(fault_digest)=32 AND NOT EXISTS(SELECT FROM capital_balances) FROM capital_source_health WHERE tenant_id=$1`, mismatch).Scan(&quarantined); err != nil || !quarantined {
 			t.Fatal("mismatched cash cutoff must quarantine before creating a balance", err)
 		}
-		t.Logf("XSIM accounting cutoff difference=%s cash_source_quarantined=true", loss)
 	})
 }
 
 func bookSyntheticFill(t *testing.T, ctx context.Context, s syntheticSession, tenant, orderID string) []*envelopepb.EventFrame {
+	t.Helper()
+	return bookSyntheticTrade(t, ctx, s, tenant, orderID, 1)
+}
+
+func bookSyntheticTrade(t *testing.T, ctx context.Context, s syntheticSession, tenant, orderID string, sequence int) []*envelopepb.EventFrame {
 	t.Helper()
 	facts, err := s.js.Stream(ctx, "SYNTHETIC_FACTS")
 	if err != nil {
@@ -106,7 +144,7 @@ func bookSyntheticFill(t *testing.T, ctx context.Context, s syntheticSession, te
 	}
 	var frames []*envelopepb.EventFrame
 	for i, step := range []string{"book", "replay"} {
-		runSyntheticBook(t, ctx, s, tenant, step, orderID)
+		runSyntheticBookTrade(t, ctx, s, tenant, step, orderID, sequence)
 		msg, err := consumer.Next(jetstream.FetchMaxWait(3 * time.Second))
 		if err != nil {
 			t.Fatal(err)
@@ -119,17 +157,21 @@ func bookSyntheticFill(t *testing.T, ctx context.Context, s syntheticSession, te
 		env, commit := frame.GetEnvelope(), level.GetCashCommit()
 		if env.GetSource() != "accounting" || env.GetTenantId() != tenant || env.GetPartitionKey() != "synthetic-portfolio" || env.GetEventType() != syntheticCashSubject ||
 			env.GetCausationId() != fill.GetEnvelope().GetEventId() || env.GetCorrelationId() != fill.GetEnvelope().GetCorrelationId() ||
-			!env.GetEventTime().AsTime().Equal(level.GetAsOf().AsTime()) || level.GetBaseCurrency() != "USD" || dec.FromProto(level.GetTotal()).RatString() != "874" || commit.GetRevision() != int64(i+2) ||
+			!env.GetEventTime().AsTime().Equal(level.GetAsOf().AsTime()) || level.GetBaseCurrency() != "USD" || dec.FromProto(level.GetTotal()).RatString() != strconv.Itoa(1000-126*sequence) || commit.GetRevision() != int64(2*sequence+i) ||
 			len(level.ExcludedCurrencies) != 1 || level.ExcludedCurrencies[0] != "BNB" {
 			t.Fatalf("cash step=%s source=%q tenant=%q partition=%q type=%q cause matches=%v correlation matches=%v cutoff matches=%v currency=%q total=%s revision=%d complete=%v excluded=%v", step, env.GetSource(), env.GetTenantId(), env.GetPartitionKey(), env.GetEventType(), env.GetCausationId() == fill.GetEnvelope().GetEventId(), env.GetCorrelationId() == fill.GetEnvelope().GetCorrelationId(), env.GetEventTime().AsTime().Equal(level.GetAsOf().AsTime()), level.GetBaseCurrency(), dec.FromProto(level.GetTotal()).RatString(), commit.GetRevision(), commit.GetComplete(), level.ExcludedCurrencies)
 		}
-		if !commit.GetComplete() {
-			if tenant != "synthetic-funded-venue-nanos" || commit.GetUnattributedEntries() != 1 || len(commit.GetApplied()) != 0 {
-				t.Fatal("incomplete execution attribution must retain the debit")
+		old := upgradingBook(tenant)
+		if !(old && i == 0) && level.GetAsOf().GetNanos()%1000 != 321 {
+			t.Fatal("cash FACT lost the accounting clock precision")
+		}
+		if old && i == 0 {
+			if commit.GetComplete() || commit.GetUnattributedEntries() != 1 || len(commit.GetApplied()) != 0 {
+				t.Fatal("legacy writer unexpectedly attributed submicrosecond fill")
 			}
-		} else if commit.GetUnattributedEntries() != 0 {
-			t.Fatal("complete cash acknowledgement has an unattributed entry")
-		} else if i == 0 {
+		} else if !commit.GetComplete() || commit.GetUnattributedEntries() != 0 {
+			t.Fatal("cash acknowledgement did not attribute the exact execution")
+		} else if (i == 0 && !old) || (i == 1 && old) {
 			if len(commit.Applied) != 1 || commit.Applied[0].OrderId != orderID || dec.FromProto(commit.Applied[0].Debit).RatString() != "126" {
 				t.Fatal("book did not attribute the exact USD debit")
 			}

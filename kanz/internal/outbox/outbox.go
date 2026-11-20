@@ -111,6 +111,9 @@ type Pending struct {
 	ID       int64
 	Attempts int
 	Record   Record
+	// RecordError is an owner's failure to reconstruct this durable row.
+	// It stalls this key at the row, like an undecodable payload.
+	RecordError error
 	// LastError is what the PREVIOUS attempt on this record recorded — possibly
 	// by a different replica, possibly in a previous pod's lifetime. Empty means
 	// no attempt has failed yet, which is why it is only meaningful read
@@ -132,6 +135,13 @@ type Pending struct {
 	// added to explain. It belongs on a log line and in a read plane, not in a
 	// series. See Relay.drainKey.
 	LastError string
+}
+
+func (p Pending) Event() (bus.Event, error) {
+	if p.RecordError != nil {
+		return bus.Event{}, p.RecordError
+	}
+	return p.Record.Event()
 }
 
 // causeLimit bounds a recorded cause. It is a COLUMN, not a log line: a venue
