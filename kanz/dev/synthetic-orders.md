@@ -49,7 +49,18 @@ The fixture arms capital admission for a fresh tenant and submits a signed XSIM 
 | Reuse an order ID across tenants | Each tenant can reserve its own cash. RLS hides the first tenant's reservation from the second. An expired or wrong-principal approval is refused. |
 | Dispatch a funded acceptance | Return `FUNDED_LIFECYCLE_HELD`. Both reservations remain held and no adapter observation is recorded. |
 
-This fixture covers admission through the accepted fact. Funded venue execution, settlement, release and production activation require their own acceptance. [Funded OMS scope](https://github.com/eighred/kanz/issues/1532) · [Pending cash scope](https://github.com/eighred/kanz/issues/1316)
+### Cancel before dispatch
+
+Use the signed gateway cancellation for an accepted funded order. The synthetic Rust OMS checks the cancellation entitlement against the command delivered by JetStream and verifies that the order never reached the venue. It locks the cash balances, releases the order's unexecuted debit in each currency and records the terminal state, cancellation receipt and `order.order.cancelled` fact in one PostgreSQL transaction. [Synthetic cancellation contract](../../rust/services/synthetic_oms/cancellation.sql)
+
+| Case | Expected durable result |
+| --- | --- |
+| Cancel one of two funded orders | Release 252 USD and 1 BNB. The other order keeps its own 252 USD and 1 BNB reserved. The cancelled order keeps its original admission amounts for audit. |
+| Redeliver after the transaction commits | Once the original cancellation authority expires, JetStream redelivers the same command to a fresh Rust process. It returns the stored terminal result. The outbox relay publishes the accepted and cancelled facts in order, and the reader acknowledges both. |
+| Send two cancellations while the USD balance is locked | The same user sends identical command bytes with two gateway event IDs. Observe both native writers waiting in PostgreSQL. Releasing the lock permits one terminal transition. The other writer returns the existing terminal state. |
+| Fail while inserting the terminal fact | The reader still sees the pending order and both full reservations. Retrying the signed command commits the cancellation and releases both currencies. |
+
+Funded venue dispatch, partial-fill settlement and terminal release following a venue execution require separate acceptance. Go retains production write authority. [Funded OMS scope](https://github.com/eighred/kanz/issues/1532) · [Pending cash scope](https://github.com/eighred/kanz/issues/1316) · [Multi-currency terminal locking](https://github.com/eighred/kanz/issues/1360)
 
 ## Read the same order in Chromium
 

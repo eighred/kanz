@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,7 +19,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"strings"
 
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/internal/platform/halt"
@@ -43,7 +43,7 @@ type syntheticSession struct {
 	frame       *envelopepb.EventFrame
 	broker      string
 	js          jetstream.JetStream
-	cancelOrder func() *envelopepb.EventFrame
+	cancelOrder func(orderID, key, subject, portfolio string) *envelopepb.EventFrame
 	submitOrder func(string, *orderpb.SubmitOrder) *envelopepb.EventFrame
 }
 
@@ -116,15 +116,15 @@ func exerciseSyntheticSession(t *testing.T, tenant string, exercise func(context
 	}
 	api := httptest.NewServer(router)
 	defer api.Close()
-	token := func(subject string, roles ...string) string {
+	token := func(subject, entitledPortfolio string, roles ...string) string {
 		t.Helper()
-		jwt, _, err := st.signer.Mint(&identity.User{Subject: subject, Tenant: tenant, Portfolios: []string{portfolio}, Roles: roles, Status: identity.StatusActive})
+		jwt, _, err := st.signer.Mint(&identity.User{Subject: subject, Tenant: tenant, Portfolios: []string{entitledPortfolio}, Roles: roles, Status: identity.StatusActive})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return jwt
 	}
-	trader := token("synthetic-trader", baselineRole, traderRole)
+	trader := token("synthetic-trader", portfolio, baselineRole, traderRole)
 	body := []byte(`{"order_id":"` + orderID + `","portfolio_id":"` + portfolio + `","instrument_id":"SYNTH-USD","side":"SIDE_BUY","quantity":{"coefficient":"25","exponent":-1},"limit_price":{"coefficient":"9101","exponent":-2},"order_type":"ORDER_TYPE_LIMIT","time_in_force":"TIME_IN_FORCE_GTC","venue":"XSIM"}`)
 	post := func(path, jwt, key string, payload []byte, want int) {
 		t.Helper()
@@ -148,7 +148,7 @@ func exerciseSyntheticSession(t *testing.T, tenant string, exercise func(context
 		}
 	}
 	post("/v1/orders", "", "no-session", body, http.StatusUnauthorized)
-	post("/v1/orders", token("synthetic-viewer", baselineRole), "no-trade", body, http.StatusForbidden)
+	post("/v1/orders", token("synthetic-viewer", portfolio, baselineRole), "no-trade", body, http.StatusForbidden)
 	post("/v1/orders", trader, "before-resume", body, http.StatusLocked)
 	info, err := stream.Info(ctx)
 	if err != nil || info.State.Msgs != 0 {
@@ -239,16 +239,23 @@ func exerciseSyntheticSession(t *testing.T, tenant string, exercise func(context
 			}
 			return &next
 		}
-		exercise(ctx, syntheticSession{frame: &frame, broker: broker.ClientURL(), js: js, submitOrder: submitOrder, cancelOrder: func() *envelopepb.EventFrame {
+		exercise(ctx, syntheticSession{frame: &frame, broker: broker.ClientURL(), js: js, submitOrder: submitOrder, cancelOrder: func(orderID, key, subject, entitledPortfolio string) *envelopepb.EventFrame {
 			t.Helper()
-			post("/v1/orders/"+orderID+"/cancel", trader, "synthetic-cancel", nil, http.StatusAccepted)
+			post("/v1/orders/"+orderID+"/cancel", token(subject, entitledPortfolio, baselineRole, traderRole), key, nil, http.StatusAccepted)
 			msg, err := stream.GetLastMsgForSubject(ctx, bus.TenantRoutedSubject(tenant, "order.order.cancel"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			var cancelFrame envelopepb.EventFrame
 			var cancelCmd orderpb.CancelOrder
-			if proto.Unmarshal(msg.Data, &cancelFrame) != nil || proto.Unmarshal(cancelFrame.Payload, &cancelCmd) != nil || cancelFrame.GetEnvelope().GetEventClass() != envelopepb.EventClass_EVENT_CLASS_COMMAND || cancelFrame.GetEnvelope().GetEventType() != "order.order.cancel" || cancelFrame.GetEnvelope().GetSource() != "api-gateway" || cancelFrame.GetEnvelope().GetTenantId() != tenant || cancelCmd.GetOrderId() != orderID || cancelCmd.GetMetadata().GetIssuer() != scope.GetIssuer() || !auth.PortfolioEntitled(cancelCmd.GetMetadata().GetPrincipalPortfolios(), portfolio) {
+			if proto.Unmarshal(msg.Data, &cancelFrame) != nil || proto.Unmarshal(cancelFrame.Payload, &cancelCmd) != nil {
+				t.Fatal("invalid durable cancellation")
+			}
+			env, meta := cancelFrame.GetEnvelope(), cancelCmd.GetMetadata()
+			if env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_COMMAND || env.GetEventType() != "order.order.cancel" ||
+				env.GetSource() != "api-gateway" || env.GetTenantId() != tenant || env.GetEventId() == "" || env.GetIdempotencyKey() != key ||
+				env.GetPartitionKey() != orderID || cancelCmd.GetOrderId() != orderID || meta.GetTargetId() != orderID ||
+				meta.GetIssuer() != "user:"+subject || len(meta.GetPrincipalPortfolios()) != 1 || meta.GetPrincipalPortfolios()[0] != entitledPortfolio {
 				t.Fatal("cancellation did not carry the authenticated order authority")
 			}
 			return &cancelFrame

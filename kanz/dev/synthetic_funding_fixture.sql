@@ -27,7 +27,8 @@ BEGIN
     opened_ns := (extract(epoch FROM clock_timestamp()) * 1000000000)::bigint;
     FOREACH tenant IN ARRAY ARRAY['synthetic-funded-ok','synthetic-funded-short',
         'synthetic-funded-race','synthetic-funded-rollback','synthetic-funded-foreign',
-        'synthetic-funded-stale','synthetic-funded-short-fee'] LOOP
+        'synthetic-funded-stale','synthetic-funded-short-fee',
+        'synthetic-cancel-ok','synthetic-cancel-race','synthetic-cancel-rollback','synthetic-cancel-scope'] LOOP
         PERFORM set_config('app.tenant_id',tenant,true);
         INSERT INTO capital_activation(enabled,activated_at) VALUES(true,clock_timestamp());
         INSERT INTO capital_source_health(tenant_id) VALUES(tenant);
@@ -53,7 +54,7 @@ GRANT SELECT, UPDATE(tenant_id) ON capital_balances TO kanz_synthetic_funding_pr
 CREATE FUNCTION synthetic_hold_competing_cash() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
 BEGIN
-    IF app_current_tenant() IS DISTINCT FROM 'synthetic-funded-race' THEN
+    IF coalesce(app_current_tenant(),'') NOT IN ('synthetic-funded-race','synthetic-cancel-race') THEN
         RAISE EXCEPTION 'unexpected competition tenant';
     END IF;
     PERFORM 1 FROM public.capital_balances
@@ -89,4 +90,29 @@ REVOKE ALL ON FUNCTION synthetic_reject_funded_outbox() FROM PUBLIC;
 CREATE TRIGGER synthetic_funded_outbox_failure BEFORE INSERT ON outbox
     FOR EACH ROW WHEN (NEW.tenant_id='synthetic-funded-rollback')
     EXECUTE FUNCTION synthetic_reject_funded_outbox();
+
+-- An independent session must still see the original funded acceptance
+-- after this late failure, and the same signed cancellation must be retryable.
+CREATE SEQUENCE synthetic_cancel_rollback_seen;
+GRANT SELECT ON SEQUENCE synthetic_cancel_rollback_seen TO kanz_synthetic_oms_proof;
+GRANT USAGE ON SEQUENCE synthetic_cancel_rollback_seen TO kanz_synthetic_funding_probe;
+CREATE FUNCTION synthetic_reject_cancel_outbox() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+    IF (SELECT count(*) FROM public.capital_commitments WHERE order_id=NEW.partition_key
+        AND required_debit='0' AND version=2 AND currency IN ('USD','BNB')) = 2
+       AND (SELECT count(*) FROM public.capital_balances WHERE portfolio_id='synthetic-portfolio'
+            AND reserved='0' AND currency IN ('USD','BNB')) = 2
+       AND EXISTS (SELECT FROM public.orders WHERE order_id=NEW.partition_key AND status=5) THEN
+        IF nextval('public.synthetic_cancel_rollback_seen')=1 THEN
+            RAISE EXCEPTION 'injected cancellation outbox failure after cash release';
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$;
+ALTER FUNCTION synthetic_reject_cancel_outbox() OWNER TO kanz_synthetic_funding_probe;
+REVOKE ALL ON FUNCTION synthetic_reject_cancel_outbox() FROM PUBLIC;
+CREATE TRIGGER synthetic_cancel_outbox_failure BEFORE INSERT ON outbox
+    FOR EACH ROW WHEN (NEW.tenant_id='synthetic-cancel-rollback' AND NEW.subject='order.order.cancelled')
+    EXECUTE FUNCTION synthetic_reject_cancel_outbox();
 COMMIT;

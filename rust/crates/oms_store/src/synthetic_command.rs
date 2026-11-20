@@ -72,6 +72,21 @@ impl From<tokio_postgres::Error> for Refusal {
         if let Some(db) = e.as_db_error() {
             if db.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
                 && db.schema() == Some("public")
+                && db.table() == Some("synthetic_oms_funded_withdrawals")
+            {
+                match db.constraint() {
+                    Some("cancellation_unauthorized") => {
+                        return Self::Controls("FUNDING_CANCELLATION_UNAUTHORIZED");
+                    }
+                    Some("cancellation_invalid_state") => return Self::State,
+                    Some("cancellation_funding_unknown") => {
+                        return Self::Controls("FUNDING_UNKNOWN")
+                    }
+                    _ => {}
+                }
+            }
+            if db.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                && db.schema() == Some("public")
                 && db.table() == Some("synthetic_oms_commands")
             {
                 match db.constraint() {
@@ -81,7 +96,9 @@ impl From<tokio_postgres::Error> for Refusal {
                     Some("funding_insufficient") => return Self::Controls("FUNDING_INSUFFICIENT"),
                     Some("funding_unknown") => return Self::Controls("FUNDING_UNKNOWN"),
                     Some("funding_conflict") => return Self::Controls("FUNDING_CONFLICT"),
-                    Some("funded_lifecycle_held") => return Self::Controls("FUNDED_LIFECYCLE_HELD"),
+                    Some("funded_lifecycle_held") => {
+                        return Self::Controls("FUNDED_LIFECYCLE_HELD")
+                    }
                     _ => {}
                 }
             }
@@ -388,6 +405,169 @@ pub async fn get(client: &mut Client, s: &Scope<'_>, id: &str) -> Result<Receipt
         code: "FOUND",
         lineage: Lineage::load(&tx, id).await?,
         order: load_in(&tx, id).await?,
+    })
+}
+
+const CANCEL_DENIED: Refusal = Refusal::Controls("FUNDING_CANCELLATION_UNAUTHORIZED");
+
+async fn cancellation_authority(
+    tx: &Transaction<'_>,
+    s: &Scope<'_>,
+    id: &str,
+    event: &str,
+    hash: &[u8],
+    deadline: Option<SystemTime>,
+) -> Result<(Timestamp, String)> {
+    let row = tx
+        .query_opt(
+            "SELECT effective_at,trace_context FROM synthetic_oms_cancellation_authorizations
+         WHERE (principal_id,portfolio_id,order_id,event_id,command_sha256)=($1,$2,$3,$4,$5)
+           AND observed_at<=clock_timestamp() AND expires_at>clock_timestamp()
+           AND ($6::timestamptz IS NULL OR $6>clock_timestamp())",
+            &[&s.principal, &s.portfolio, &id, &event, &hash, &deadline],
+        )
+        .await?
+        .ok_or(CANCEL_DENIED)?;
+    let trace: String = row.get(1);
+    if !traceparent(&trace) {
+        return Err(CANCEL_DENIED);
+    }
+    Ok((Timestamp::from(row.get::<_, SystemTime>(0)), trace))
+}
+
+async fn withdrawal_replay(
+    tx: &Transaction<'_>,
+    s: &Scope<'_>,
+    id: &str,
+    event: &str,
+    hash: &[u8],
+    deadline: Option<SystemTime>,
+) -> Result<Option<Receipt>> {
+    let Some(row) = tx.query_opt(
+        "SELECT w.event_id,w.command_sha256,a.trace_context FROM synthetic_oms_funded_withdrawals w
+         JOIN synthetic_oms_cancellation_authorizations a USING (tenant_id,event_id)
+         WHERE w.order_id=$1 AND w.principal_id=$2 AND w.portfolio_id=$3",
+        &[&id,&s.principal,&s.portfolio],
+    ).await? else { return Ok(None) };
+    let code = if row.get::<_, &str>(0) == event {
+        if row.get::<_, Vec<u8>>(1) != hash {
+            return Err(Refusal::Conflict);
+        }
+        // Only an immutable, exact prior receipt survives authorization expiry.
+        "DUPLICATE"
+    } else {
+        cancellation_authority(tx, s, id, event, hash, deadline).await?;
+        "ALREADY_CANCELLED"
+    };
+    let mut lineage = Lineage::load(tx, id).await?;
+    lineage.trace_context = row.get(2);
+    Ok(Some(Receipt {
+        code,
+        order: load_in(tx, id).await?,
+        lineage,
+    }))
+}
+
+pub async fn cancel_funded(
+    client: &mut Client,
+    s: &Scope<'_>,
+    event: &str,
+    wire: &[u8],
+) -> Result<Receipt> {
+    if !identifier(event) || wire.is_empty() || wire.len() > 65536 {
+        return Err(Refusal::Invalid);
+    }
+    let cmd = CancelOrder::decode(wire).map_err(|_| Refusal::Invalid)?;
+    let id = &cmd.order_id;
+    if !order_id(id) || cmd.encode_to_vec() != wire {
+        return Err(Refusal::Invalid);
+    }
+    let meta = cmd.metadata.as_ref().ok_or(Refusal::Unauthorized)?;
+    if !s.principal.starts_with("user:")
+        || s.principal.len() <= 5
+        || meta.issuer != s.principal
+        || meta.target_id != *id
+        || !meta.principal_portfolios.iter().any(|p| p == s.portfolio)
+    {
+        return Err(Refusal::Unauthorized);
+    }
+    let deadline = meta.valid_until.as_ref().map(recovery::time).transpose()?;
+    let hash = Sha256::digest(wire).to_vec();
+    let tx = begin_write(client, s, RUNTIME).await?;
+    if tx.query_opt("SELECT FROM synthetic_oms_commands WHERE order_id=$1 AND portfolio_id=$2 AND principal_id=$3",
+        &[id,&s.portfolio,&s.principal]).await?.is_none() {
+        return Err(Refusal::NotFound);
+    }
+    // At READ COMMITTED, read the order before the receipt: a concurrently
+    // committed terminal state must also have a visible immutable receipt.
+    let opening = load_in(&tx, id).await?;
+    if let Some(r) = withdrawal_replay(&tx, s, id, event, &hash, deadline).await? {
+        return Ok(r);
+    }
+    let (at, trace) = cancellation_authority(&tx, s, id, event, &hash, deadline).await?;
+    let st = Canonical::<OrderState>::decode(&opening.state).map_err(|_| Refusal::State)?;
+    let order = st.value();
+    // Only ordinary canonical synthetic accepts can be withdrawn locally. An
+    // unknown wire field or observed venue outcome requires reconciliation.
+    if opening.version != 0
+        || order.encode_to_vec() != opening.state
+        || order.order_id != *id
+        || order.portfolio_id != s.portfolio
+        || order.venue != VENUE
+        || order.venue_account_id != ACCOUNT
+        || order.instrument_id != INSTRUMENT
+        || order.status != OrderStatus::PendingNew as i32
+        || order.venue_ack_at.is_some()
+        || order.quarantine.is_some()
+        || order.cancel_announced_at.is_some()
+        || order.outcome_announced_at.is_some()
+        || !order.parent_order_id.is_empty()
+        || order.execution_schedule.is_some()
+        || !positive(order.ordered_quantity.as_ref())
+        || !positive(order.leaves_quantity.as_ref())
+        || compare(
+            order.ordered_quantity.as_ref(),
+            order.leaves_quantity.as_ref(),
+        )
+        .is_ne()
+        || !in_domain(order.filled_quantity.as_ref())
+        || order.filled_quantity.is_none_or(|q| q.coefficient != 0)
+        || order.average_fill_price.is_some()
+    {
+        return Err(Refusal::State);
+    }
+    let next = aggregate::cancel(&st, at).map_err(|_| Refusal::State)?;
+    let state = next.value().encode_to_vec();
+    let payload = OrderCancelled {
+        order_id: id.clone(),
+        cancelled_quantity: order.leaves_quantity,
+    }
+    .encode_to_vec();
+    let prior = Sha256::digest(&opening.state).to_vec();
+    let inserted=tx.execute(
+        "INSERT INTO synthetic_oms_funded_withdrawals
+         (order_id,event_id,principal_id,portfolio_id,command,prior_state_sha256,state,fact_payload,command_deadline)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
+        &[id,&event,&s.principal,&s.portfolio,&wire,&prior,&state,&payload,&deadline],
+    ).await?;
+    if inserted == 0 {
+        return withdrawal_replay(&tx, s, id, event, &hash, deadline)
+            .await?
+            .ok_or(Refusal::Conflict);
+    }
+    let mut lineage = Lineage::load(&tx, id).await?;
+    lineage.trace_context = trace;
+    enqueue(
+        &tx,
+        &[lineage.fact(s, id, ("cancelled", "OrderCancelled"), &at, event, payload)?],
+    )
+    .await?;
+    let order = load_in(&tx, id).await?;
+    commit(tx).await?;
+    Ok(Receipt {
+        code: "CANCELLED",
+        order,
+        lineage,
     })
 }
 

@@ -300,6 +300,43 @@ def run(stage, native):
                 cases = ("ok", "ok/funded_dispatch_held", "short", "short-fee", "race", "rollback", "stale", "foreign")
                 require_cases(funded_log, funded, cases)
                 print(f"{package}: funded admission passed ({', '.join(cases)}) without skips", flush=True)
+                cancellation = ROOT / "rust/services/synthetic_oms/cancellation.sql"
+                sql(container, cancellation.read_text(encoding="utf-8"), DB)
+                sql(container, """
+                    GRANT SELECT ON public.synthetic_oms_funded_withdrawals TO kanz_synthetic_oms_proof;
+                    DO $$ DECLARE actor name; BEGIN
+                        FOREACH actor IN ARRAY ARRAY['kanz_synthetic_oms_runtime','kanz_synthetic_oms_adapter',
+                                'kanz_synthetic_oms_control','kanz_synthetic_oms_funding'] LOOP
+                            IF has_any_column_privilege(actor,'public.capital_balances','UPDATE')
+                               OR has_any_column_privilege(actor,'public.capital_commitments','UPDATE')
+                               OR has_any_column_privilege(actor,'public.synthetic_oms_funded_withdrawals','UPDATE')
+                               OR has_any_column_privilege(actor,'public.synthetic_oms_cancellation_authorizations','UPDATE')
+                               OR has_function_privilege(actor,'public.synthetic_oms_withdraw_funded()','EXECUTE')
+                               OR has_any_column_privilege(actor,'public.synthetic_oms_cancellation_authorizations','INSERT')
+                                  IS DISTINCT FROM (actor='kanz_synthetic_oms_control') THEN
+                                RAISE EXCEPTION 'unexpected cancellation privileges for %',actor;
+                            END IF;
+                        END LOOP;
+                    END $$;
+                    BEGIN;
+                    SET LOCAL ROLE kanz_synthetic_oms_proof;
+                    SET LOCAL app.tenant_id='synthetic-funded-ok';
+                    DO $$ BEGIN
+                        IF (SELECT count(*) FROM public.orders WHERE status=1)<>1
+                           OR (SELECT count(*) FROM public.outbox WHERE subject='order.order.accepted')<>1
+                           OR EXISTS (SELECT FROM public.synthetic_oms_funded_withdrawals)
+                           OR (SELECT count(*) FROM public.capital_balances
+                               WHERE (currency,reserved) IN (('USD','252'),('BNB','1')))<>2 THEN
+                            RAISE EXCEPTION 'cancellation installation changed a prior funded acceptance';
+                        END IF;
+                    END $$;
+                    COMMIT;
+                """, DB)
+                terminal = "TestSyntheticFundedOrderCancellation"
+                terminal_log = run_fixture_tests(cmd, [terminal], selected_env, password)
+                terminal_cases = ("ok", "race", "rollback", "scope")
+                require_cases(terminal_log, terminal, terminal_cases)
+                print(f"{package}: funded cancellation passed ({', '.join(terminal_cases)}) without skips", flush=True)
             log = run_fixture_tests(cmd, names, selected_env, password)
             if native and base == "api_gateway":
                 require_cases(log, "TestSyntheticOrderCommandLifecycle",

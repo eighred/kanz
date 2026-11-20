@@ -85,6 +85,15 @@ async fn execute(r: Request) -> Result<Value, &'static str> {
             .await
         }
         "get" => owner::get(&mut client, &s, r.order_id.as_deref().ok_or("INVALID")?).await,
+        "cancel_funded" => {
+            owner::cancel_funded(
+                &mut client,
+                &s,
+                r.event_id.as_deref().ok_or("INVALID")?,
+                &decode(r.command_b64.as_ref())?,
+            )
+            .await
+        }
         "dispatch" | "ack" | "fill" | "timeout" | "cancel_pending" | "cancelled" => {
             let body = match r.op.as_str() {
                 "ack" => r

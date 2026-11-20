@@ -68,6 +68,20 @@ func requireFundedReason(t *testing.T, ctx context.Context, o fundedOrder, want 
 	}
 }
 
+func requireFundedDispatchHeld(t *testing.T, ctx context.Context, o fundedOrder) {
+	t.Helper()
+	now := time.Now().UTC()
+	r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_ADAPTER_URL"), struct {
+		Version int `json:"version"`
+		syntheticvenue.Command
+	}{1, syntheticvenue.Command{Op: "dispatch", OrderID: o.command.OrderId, Tenant: o.request.Tenant,
+		Portfolio: o.request.Portfolio, Principal: syntheticvenue.OMSIdentity, EventID: "funded-dispatch",
+		EffectiveSeconds: now.Unix(), EffectiveNanos: int32(now.Nanosecond())}})
+	if err != nil || r.OK || r.Code != "CONTROL_DENIED" || r.Reason != "FUNDED_LIFECYCLE_HELD" {
+		t.Fatalf("funded dispatch produced %q/%q: %v", r.Code, r.Reason, err)
+	}
+}
+
 func exactCapital(t *testing.T, value string, expected int64) {
 	t.Helper()
 	r, ok := new(big.Rat).SetString(value)
@@ -140,7 +154,7 @@ func verifyFundedBook(t *testing.T, ctx context.Context, proof *pgxpool.Pool, ac
 
 // Keep the USD row locked until both native writers are waiting on it,
 // directly or through the other writer's BNB lock. A sequential run cannot pass.
-func exerciseFundedCompetition(t *testing.T, ctx context.Context, proof *pgxpool.Pool, first, second fundedOrder) {
+func observeCompetingWriters(t *testing.T, ctx context.Context, proof *pgxpool.Pool, launch func()) {
 	t.Helper()
 	holder, err := proof.Begin(ctx)
 	if err != nil {
@@ -151,18 +165,7 @@ func exerciseFundedCompetition(t *testing.T, ctx context.Context, proof *pgxpool
 	if err := holder.QueryRow(ctx, "SELECT pg_backend_pid() FROM synthetic_hold_competing_cash()").Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
-	type outcome struct {
-		order   fundedOrder
-		receipt syntheticvenue.Receipt
-		err     error
-	}
-	answers := make(chan outcome, 2)
-	for _, candidate := range []fundedOrder{first, second} {
-		go func() {
-			r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_RUNTIME_URL"), candidate.request)
-			answers <- outcome{candidate, r, err}
-		}()
-	}
+	launch()
 	wait, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	for {
@@ -186,6 +189,24 @@ func exerciseFundedCompetition(t *testing.T, ctx context.Context, proof *pgxpool
 	if err := holder.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func exerciseFundedCompetition(t *testing.T, ctx context.Context, proof *pgxpool.Pool, first, second fundedOrder) {
+	t.Helper()
+	type outcome struct {
+		order   fundedOrder
+		receipt syntheticvenue.Receipt
+		err     error
+	}
+	answers := make(chan outcome, 2)
+	observeCompetingWriters(t, ctx, proof, func() {
+		for _, candidate := range []fundedOrder{first, second} {
+			go func() {
+				r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_RUNTIME_URL"), candidate.request)
+				answers <- outcome{candidate, r, err}
+			}()
+		}
+	})
 	var winner *fundedOrder
 	for range 2 {
 		answer := <-answers
@@ -257,16 +278,7 @@ func TestSyntheticFundedOrderAdmission(t *testing.T) {
 				first := requireNativeReceipt(t, ctx, o.request, "ACCEPTED")
 				if scenario == "ok" {
 					t.Run("funded_dispatch_held", func(t *testing.T) {
-						now := time.Now().UTC()
-						r, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_ADAPTER_URL"), struct {
-							Version int `json:"version"`
-							syntheticvenue.Command
-						}{1, syntheticvenue.Command{Op: "dispatch", OrderID: o.command.OrderId, Tenant: tenant,
-							Portfolio: o.request.Portfolio, Principal: syntheticvenue.OMSIdentity, EventID: "funded-dispatch",
-							EffectiveSeconds: now.Unix(), EffectiveNanos: int32(now.Nanosecond())}})
-						if err != nil || r.OK || r.Code != "CONTROL_DENIED" || r.Reason != "FUNDED_LIFECYCLE_HELD" {
-							t.Fatalf("funded dispatch produced %q/%q: %v", r.Code, r.Reason, err)
-						}
+						requireFundedDispatchHeld(t, ctx, o)
 						verifyFundedBook(t, ctx, proof, &o, 252)
 					})
 				}

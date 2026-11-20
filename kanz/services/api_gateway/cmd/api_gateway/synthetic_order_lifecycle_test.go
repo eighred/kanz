@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -26,7 +25,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"
-	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/testidentity"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -219,24 +217,7 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 		foreign.Tenant = "unrelated-tenant"
 		requireNativeReceipt(t, ctx, foreign, "NOT_FOUND")
 
-		facts, err := s.js.CreateStream(ctx, jetstream.StreamConfig{Name: "SYNTHETIC_FACTS", Subjects: []string{"order.>"}, Storage: jetstream.FileStorage})
-		if err != nil {
-			t.Fatal(err)
-		}
-		client, err := bus.DialNATS(ctx, bus.NATSConfig{Name: "oms", URL: s.broker})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer client.Close()
-		publisher, err := bus.NewProducer(client, bus.ProducerConfig{Source: "oms", ProducerVersion: "synthetic"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		relayPool := syntheticPool(t, ctx, "RELAY", tenant)
-		relay, err := outbox.NewRelay(outbox.NewPostgres(relayPool, outbox.ServiceOMS), publisher, slog.Default())
-		if err != nil {
-			t.Fatal(err)
-		}
+		facts, relay := syntheticFactRelay(t, ctx, s, tenant)
 		if n, err := relay.Flush(ctx, orderID); err != nil || n != 1 {
 			t.Fatalf("accepted outbox relay: %d published, %v", n, err)
 		}
@@ -355,7 +336,7 @@ func TestSyntheticOrderCommandLifecycle(t *testing.T) {
 		}
 		useWriterGeneration(t, "RECOVERY")
 		consume(2, false)
-		cancel := s.cancelOrder().GetEnvelope()
+		cancel := s.cancelOrder(orderID, "synthetic-cancel", "synthetic-trader", portfolio).GetEnvelope()
 		if err = ingress.Cancel(ctx, orderID, cancel.GetEventId(), cancel.GetEventTime().AsTime()); err != nil {
 			t.Fatal(err)
 		}
