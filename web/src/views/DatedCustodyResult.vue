@@ -23,7 +23,7 @@ watch(subject, clear, { flush: 'sync' })
 watch(savedRun, clear, { flush: 'sync' })
 watch(() => session.identity, () => { clear(); savedRun.value = ''; Object.assign(subject, { portfolio_id: '', custodian_id: '', business_date: '' }) }, { deep: true, flush: 'sync' })
 onUnmounted(clear)
-async function read() {
+async function read(correctionStatement?: string) {
   if (pending.value || !session.identity) return
   const request = new AbortController()
   active = request
@@ -32,13 +32,21 @@ async function read() {
   pending.value = true
   try {
     const dated = await custody.dated({ ...subject }, session.identity.tenant, request.signal, savedRun.value)
+    if (correctionStatement && (dated.state !== 'recorded' || dated.outcome !== 'historical_quantity_correction' ||
+        dated.statement_id !== correctionStatement)) throw new Error('Correction source changed.')
     if (!request.signal.aborted) result.value = dated
   } catch (e) {
     if (!request.signal.aborted) error.value = e instanceof ApiError && [403, 404].includes(e.status)
       ? 'Access to this dated result is unavailable.' : 'Unable to verify the dated result.'
   } finally { if (!request.signal.aborted) pending.value = false }
 }
-const outcomes = { clean: 'Balances and transaction references agree', breaks: 'Differences found', no_statement: 'No statement received', failed: 'Comparison failed' }
+function openCorrection() {
+  const current = result.value
+  if (current?.state !== 'pending' || !current.historical_quantity_correction_run_id || !current.statement_id) return
+  savedRun.value = current.historical_quantity_correction_run_id
+  void read(current.statement_id)
+}
+const outcomes = { historical_quantity_correction: 'Historical execution quantities corrected', clean: 'Balances and transaction references agree', breaks: 'Differences found', no_statement: 'No statement received', failed: 'Comparison failed' }
 function recordedLabel(result: Extract<DatedCustodyResult, { state: 'recorded' }>): string {
   if (result.outcome === 'clean' && (result.transactions?.transaction_pass !== 'ran' || result.transactions.unreferenced_book_trades !== '0')) return 'Balances agree'
   return outcomes[result.outcome]
@@ -54,7 +62,7 @@ const pendingLabels = {
 <template>
   <section class="panel" aria-label="Dated custody result">
     <h2>Dated custody result</h2>
-    <form @submit.prevent="read">
+    <form @submit.prevent="read()">
       <label>Portfolio ID <input v-model.trim="subject.portfolio_id" required maxlength="256" /></label>
       <label>Custodian ID <input v-model.trim="subject.custodian_id" required maxlength="256" /></label>
       <label>Business date <input v-model="subject.business_date" type="date" required /></label>
@@ -84,6 +92,7 @@ const pendingLabels = {
         <span v-else-if="result.transactions?.transaction_pass === 'unknown'"> · Transaction coverage unknown</span>
       </template>
     </output>
+    <button v-if="result?.state === 'pending' && result.historical_quantity_correction_run_id" type="button" @click="openCorrection">View corrected execution quantities</button>
     <template v-if="result?.state === 'recorded' && result.historical">
       <p>Signed statement SHA-256 <code>{{ result.historical.signed_statement_sha256 }}</code></p>
       <section v-if="result.historical.execution_quantities" aria-label="Execution quantities">
@@ -101,7 +110,20 @@ const pendingLabels = {
         </table>
         <p v-else-if="result.historical.execution_quantities.compared">Compared quantities agree.</p>
       </section>
-      <table v-if="result.historical.breaks.length" aria-label="Differences at comparison">
+      <section v-if="result.historical.historical_quantity_resolutions" aria-label="Corrected execution quantities">
+        <h3>Corrected execution quantities</h3>
+        <p>This receipt covers only the listed executions. The original close and the following close keep their own comparison results.</p>
+        <p>Custody account assignment verified for this correction.</p>
+        <table aria-label="Execution quantity resolutions">
+          <thead><tr><th scope="col">Execution reference</th><th scope="col">Instrument</th><th scope="col">Agreed quantity</th>
+            <th scope="col">Book entry</th><th scope="col">Original detection run</th><th scope="col">Discrepancy ID</th></tr></thead>
+          <tbody><tr v-for="row in result.historical.historical_quantity_resolutions" :key="row.break_id">
+            <th scope="row">{{ row.external_ref }}</th><td>{{ row.instrument_id }}</td><td>{{ formatDecimal(row.agreed_quantity) }}</td>
+            <td>{{ row.entry_id }}</td><td>{{ row.detection_run_id }}</td><td>{{ row.break_id }}</td>
+          </tr></tbody>
+        </table>
+      </section>
+      <table v-if="result.historical.breaks?.length" aria-label="Differences at comparison">
         <thead><tr><th scope="col">Discrepancy</th><th scope="col">Kind</th><th scope="col">Key</th>
           <th scope="col">IBOR</th><th scope="col">Custodian</th><th scope="col">Difference</th></tr></thead>
         <tbody><tr v-for="row in result.historical.breaks" :key="row.break_id">
