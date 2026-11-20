@@ -410,9 +410,9 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 	run.Breaks = FromRecon(subject, detected, now)
 	stored, err := r.record(ctx, run)
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
-		// The signed input changed or its commit is in flight. Wait for the
-		// authoritative revision before recording a comparison or failure.
-		if isBatchStatement(run.StatementID) && (errors.Is(err, ErrStatementChanged) || errors.Is(err, ErrRunBusy)) {
+		// Retry a signed comparison invalidated by a statement or book change,
+		// or by a concurrent writer still holding its commit lock.
+		if isBatchStatement(run.StatementID) && (errors.Is(err, ErrStatementChanged) || errors.Is(err, ErrBookBasisChanged) || errors.Is(err, ErrRunBusy)) {
 			return Run{}, err
 		}
 		// Transient contention or invalidated observations must not consume an

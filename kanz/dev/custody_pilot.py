@@ -362,6 +362,8 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         pilot_env["CUSTODY_PILOT_PITR_DIR"] = str(observations.parent)
         pilot_env["CUSTODY_PILOT_PITR_BROWSER_SCRIPT"] = str(WEB / "e2e/custody-pitr.cjs")
         pilot_env["CUSTODY_PILOT_RETAINED_DOWNLOADS"] = str(observations.parent / "before-recovery.json")
+    if profile == "comparisons":
+        pilot_env["CUSTODY_PILOT_PREVIOUS_SCRIPT"] = str(WEB / "e2e/custody-previous-breaks.cjs")
     if quantity_evidence:
         pilot_env["CUSTODY_PILOT_QUANTITY_FIXTURE"] = "1"
     if late:
@@ -396,11 +398,15 @@ def qualify(docker, container, binaries, node, env, observations, profile, pitr=
         markers = [b"signed historical comparison preserved the later close and live queue through Chromium"]
     if not (late or rerun or economics):
         markers.append(b"signed customer verified clean, missing and unobserved business dates")
+    if profile == "comparisons":
+        markers.append(b"signed Chromium discovered the original receipt from a revised comparison with breaks")
     if (proof.returncode or b"--- SKIP" in output or ("--- PASS: " + test).encode() not in output
             or not all(marker in output for marker in markers)):
         stage = re.search(rb"custody-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|reload)-(?:response|payload|row|details))", output)
         if late:
             stage = re.search(rb"custody-late-browser-stage=(input|launch|(?:authorized|foreign|excluded|unfunded)-(?:open|tenant-portfolio-permission)|pending-corrected-source|correction-discovery|correction-recovery|original-and-following|retain-corrective-download)\b", output)
+        if profile == "comparisons" and not stage:
+            stage = re.search(rb"custody-previous-browser-stage=(input|launch|authorized|foreign|excluded|unfunded)\b", output)
         suffix = " at " + stage.group(1).decode() if stage else ""
         if not stage:
             location = re.search(rb"\b(operator_test|pilot_test|rollback_test|late_quantity_test|historical_comparison_pilot_test|execution_economics_pilot_test)\.go:([0-9]+):", output)
@@ -557,7 +563,8 @@ def main():
           "After a later close, the customer downloaded the quantity correction against the original execution. "
           "Four signed execution revisions showed a mismatch, agreement, inconsistent cash and a missing convention. "
           "The original execution receipt reopened unchanged after correction. The first late statement replaced the scheduled missing result, and both receipts reopened unchanged. "
-          "A full historical comparison reopened in Chromium and preserved the later close and live queue.")
+          "A full historical comparison reopened in Chromium and preserved the later close and live queue. "
+          "A corrected comparison with a new break still opened its original signed receipt.")
 
 
 if __name__ == "__main__":
