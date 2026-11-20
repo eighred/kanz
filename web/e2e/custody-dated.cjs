@@ -60,12 +60,12 @@ async function main() {
         }
         let downloadedHistory
         for (const [date, state, outcome, label, run, saved, reload] of [
-          [clean_date, 'recorded', 'clean', 'Clean comparison', clean_run],
+          [clean_date, 'recorded', 'clean', 'Balances and transaction references agree', clean_run],
           [missing_date, 'recorded', 'no_statement', 'No statement received', missing_run],
           [unobserved_date, 'not_compared', undefined, 'No comparison recorded', undefined],
           [clean_date, 'recorded', 'breaks', 'Differences found', oldRun, oldRun],
           [clean_date, 'recorded', 'breaks', 'Differences found', oldRun, oldRun, true],
-          [clean_date, 'recorded', 'clean', 'Clean comparison', clean_run, clean_run],
+          [clean_date, 'recorded', 'clean', 'Balances and transaction references agree', clean_run, clean_run],
           [missing_date, 'unknown', undefined, 'Result unknown', undefined, oldRun],
           [clean_date, 'unknown', undefined, 'Result unknown', undefined, 'synthetic-absent-run'],
         ]) {
@@ -105,6 +105,7 @@ async function main() {
             assert.equal(receipt.statement_reference_count, '1')
             assert.equal(receipt.unreferenced_book_trades, '0')
             assert(text.includes('Independent reference comparison'))
+            assert(text.includes('Individual trade quantities, prices and cash amounts remain unverified.'))
             assert(text.includes(receipt.statement_id))
           } else {
             assert.equal(receipt.transaction_pass, undefined)

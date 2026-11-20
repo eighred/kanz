@@ -37,7 +37,7 @@ async function read() {
       ? 'Access to this dated result is unavailable.' : 'Unable to verify the dated result.'
   } finally { if (!request.signal.aborted) pending.value = false }
 }
-const outcomes = { clean: 'Clean comparison', breaks: 'Differences found', no_statement: 'No statement received', failed: 'Comparison failed' }
+const outcomes = { clean: 'Balances and transaction references agree', breaks: 'Differences found', no_statement: 'No statement received', failed: 'Comparison failed' }
 function recordedLabel(result: Extract<DatedCustodyResult, { state: 'recorded' }>): string {
   if (result.outcome === 'clean' && (result.transactions?.transaction_pass !== 'ran' || result.transactions.unreferenced_book_trades !== '0')) return 'Balances agree'
   return outcomes[result.outcome]
@@ -67,6 +67,7 @@ const states = { not_compared: 'No comparison recorded', pending: 'Statement awa
         <span v-if="result.transactions?.transaction_pass === 'ran'">
           · Independent reference comparison · Statement references {{ result.transactions.statement_reference_count }}
           · Book references {{ result.transactions.book_reference_count }}
+          · Individual trade quantities, prices and cash amounts remain unverified.
           <strong v-if="result.transactions.unreferenced_book_trades !== '0'"> · Incomplete coverage · {{ result.transactions.unreferenced_book_trades }} book trades without independent references</strong>
         </span>
         <span v-else-if="result.transactions?.transaction_pass === 'balances_only'"> · Balances only · Transactions were not compared</span>

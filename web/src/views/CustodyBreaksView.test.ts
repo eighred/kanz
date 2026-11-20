@@ -62,7 +62,7 @@ describe('custody exact review', () => {
       const receipt = { ...subject, run_id: 'run-r2', state: 'recorded' as const, completed_at: '2020-02-05T01:00:00Z' }
       for (const [result, status] of [
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', scope_mode: 'declared', journal_position: '9007199254740993',
-          transactions: { transaction_pass: 'ran', statement_reference_count: '1', book_reference_count: '1', unreferenced_book_trades: '0' } }, 'Clean comparison'],
+          transactions: { transaction_pass: 'ran', statement_reference_count: '1', book_reference_count: '1', unreferenced_book_trades: '0' } }, 'Balances and transaction references agree'],
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'balances_only' } }, 'Transactions were not compared'],
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'unknown' } }, 'Transaction coverage unknown'],
         [{ ...receipt, outcome: 'clean', statement_id: 'signed-r2', transactions: { transaction_pass: 'ran', statement_reference_count: '0',
@@ -76,7 +76,7 @@ describe('custody exact review', () => {
         expect(region.findAll('button').some(b => b.text() === 'Download comparison receipt')).toBe(result.state === 'recorded')
         if ('journal_position' in result) expect(region.get('output').text()).toContain(result.journal_position)
         if ('transactions' in result && (result.transactions.transaction_pass !== 'ran' || result.transactions.unreferenced_book_trades !== '0')) {
-          expect(region.get('output').text()).not.toContain('Clean comparison')
+          expect(region.get('output').text()).not.toContain('Balances and transaction references agree')
         }
       }
       await fields[1]!.setValue('different')
