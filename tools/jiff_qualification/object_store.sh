@@ -17,6 +17,9 @@ resolver = "2"
 object_store = { path = "/work/source" }
 EOF
     # Seed the consumer from its real lock. Cargo records the new source in this disposable copy.
+    cp "$owner/Cargo.lock" /work/kanz.lock
+    cargo fetch --manifest-path "$owner/Cargo.toml"
+    python3 -B /inputs/lake_sources.py
     cargo fetch --manifest-path "$owner/Cargo.toml"
     cargo fetch --manifest-path /work/source/Cargo.toml
     ;;
@@ -27,8 +30,11 @@ test)
         > /work/duration.txt
     cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test worker \
         --message-format=json-render-diagnostics > /work/worker.jsonl
-    python3 - <<'PY'
-import json
+    cp /inputs/named_zone.rs "$owner/services/lake_snapshot/tests/named_zone.rs"
+    cargo test --locked --offline --manifest-path "$owner/Cargo.toml" -p kanz-lake-snapshot --test named_zone \
+        > /work/named_zone.txt
+    PYTHONPATH=/inputs python3 -B - <<'PY'
+from lake_sources import verify
 from pathlib import Path
 
 def check_summary(lines):
@@ -44,11 +50,11 @@ if not expected_duration.issubset(passed_duration):
 
 lines = Path("/work/worker.jsonl").read_text().splitlines()
 check_summary(lines)
-artifacts = [json.loads(line) for line in lines if line.startswith("{")]
-owners = [row["package_id"] for row in artifacts
-          if row.get("reason") == "compiler-artifact" and row["target"]["name"] == "object_store"]
-if owners != ["path+file:///work/source#object_store@0.13.2"]:
-    raise ValueError(f"worker did not build the selected source: {owners}")
+verify(lines)
+zone = Path("/work/named_zone.txt").read_text().splitlines()
+check_summary(zone)
+if "test named_zone_timestamps ... ok" not in zone:
+    raise ValueError("named-zone DataFusion UDF did not run")
 expected_worker = {
     "actual_sandbox_convert_preserves_exact_wire_and_unknown_coordinates",
     "actual_datafusion_queries_preserve_zero_cursor_duplicates_and_nanoseconds",

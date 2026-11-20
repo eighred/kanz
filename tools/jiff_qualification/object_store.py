@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import uuid
 
-from run import IMAGE
+from run import IMAGE, checked_input
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +47,13 @@ def prepare(work, inputs):
     git(checkout, "archive", "--format=tar", "--output=" + str(inputs / "object.tar"), BACKPORT_TREE)
     git(ROOT, "archive", "--format=tar", "--output=" + str(inputs / "kanz.tar"), "HEAD",
         "rust/services/lake_snapshot", "rust/Cargo.lock", "schemas/proto/envelope", "schemas/proto/lake")
+    zone_url = ("https://raw.githubusercontent.com/apache/arrow-rs/"
+                "1041671b007886b1d0b13794160c6af9c42bddec/arrow-array/src/timezone.rs")
+    (inputs / "timezone.rs").write_bytes(checked_input(
+        None, "timezone.rs", zone_url, 49562,
+        "1f02dae57e17e81de748e91a80b4050625d9e882ac0df533448b7261055e5711"))
+    for name in ("lake_sources.py", "named_zone.rs"):
+        (inputs / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     # Do not mount either repository or its Git configuration inside the compiler.
     (inputs / "verify.sh").write_bytes(Path(__file__).with_name("object_store.sh").read_bytes())
     for path in inputs.iterdir():
