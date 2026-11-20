@@ -74,7 +74,8 @@ CREATE POLICY custody_assignment_issue ON custody_account_assignments FOR INSERT
  WHERE i.login_role=session_user AND i.kind='custody_assignment' AND i.tenant_id=custody_account_assignments.tenant_id
  AND i.authority=custody_account_assignments.authority AND (s.portfolio_id,s.custodian_id,s.account_id) =
  (custody_account_assignments.portfolio_id,custody_account_assignments.custodian_id,custody_account_assignments.account_id)));
-CREATE OR REPLACE FUNCTION custody_record_assignment_knowledge() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION custody_record_assignment_knowledge() RETURNS trigger LANGUAGE plpgsql
+SET search_path=pg_catalog,public,pg_temp AS $$
 BEGIN
  -- Comparing a complete portfolio set must serialize with newly added accounts too.
  PERFORM pg_advisory_xact_lock(hashtextextended('custody-assignment-tenant:' || NEW.tenant_id,0));
