@@ -278,6 +278,16 @@ jobs:
           # Materialize the cook result in this builder. An imported image hit
           # can leave only lazy references to the intermediate dependency layer.
           no-cache-filters: rust-build
+      - name: Export temporal evidence from the hybrid image builder
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: kanz/services/lake_sink/Dockerfile
+          builder: ${{ steps.lake-builder.outputs.name }}
+          target: rust-source-evidence
+          build-args: VERSION=${{ github.sha }}
+          outputs: type=local,dest=snapshot-owner-proof/builder-evidence
+          push: false
       - name: Bind actual hybrid image identity
         id: lake-image
         run: |
@@ -310,7 +320,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py
-          python3 .github/scripts/rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid
+          python3 .github/scripts/rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid --builder-evidence snapshot-owner-proof/builder-evidence
       - name: Install two checksum-pinned native brokers
         run: |
           set -euo pipefail

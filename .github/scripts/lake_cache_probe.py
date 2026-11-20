@@ -14,7 +14,7 @@ import time
 from rust_release_evidence import bounded_command
 
 COOK = "cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot"
-BUILD = 'test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl && python3 -B temporal_sources/produce.py "$VERSION"'
+BUILD = 'test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl'
 SOURCE = "rust/services/lake_snapshot/src/main.rs"
 COMMENT = b"\n// Synthetic joint source and VERSION cache qualification only.\n"
 DOCKERFILE = "kanz/services/lake_sink/Dockerfile"

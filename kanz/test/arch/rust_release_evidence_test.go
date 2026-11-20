@@ -2,6 +2,7 @@ package arch
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,8 @@ import (
 func rustReleaseEvidenceBoundary(release, build, migration, installer string) error {
 	type step struct {
 		Name     string            `yaml:"name"`
+		ID       string            `yaml:"id"`
+		Uses     string            `yaml:"uses"`
 		Run      string            `yaml:"run"`
 		If       string            `yaml:"if"`
 		Continue bool              `yaml:"continue-on-error"`
@@ -32,7 +35,40 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	}
 	const condition = "matrix.service == 'binance-depth' || matrix.service == 'okx-depth' || matrix.service == 'lake-sink'"
 	gate, sign, setup, sbom, goAudit := -1, -1, -1, -1, -1
+	builder, source, image, receipt := -1, -1, -1, -1
+	const builderName = "${{ steps.release-builder.outputs.name }}"
+	const releaseBuildArgs = "VERSION=${{ github.ref_name }}\n${{ matrix.service == 'lake-sink' && format('SOURCE_REVISION={0}', steps.lake-source.outputs.sha) || '' }}"
+	exportInputs := map[string]string{
+		"context": ".", "file": "${{ matrix.dockerfile }}", "builder": builderName,
+		"target": "rust-source-evidence", "push": "false", "outputs": "type=local,dest=${{ runner.temp }}/lake-source-evidence",
+		"build-args": "VERSION=${{ github.ref_name }}\nSOURCE_REVISION=${{ steps.lake-source.outputs.sha }}\n",
+	}
 	for i, s := range rel.Jobs["release"].Steps {
+		if s.ID == "release-builder" {
+			if builder >= 0 || s.If != "" || s.Continue || s.Uses != "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069" {
+				return fmt.Errorf("unbound release builder")
+			}
+			builder = i
+		}
+		if s.ID == "lake-source" {
+			if source >= 0 || s.If != "matrix.service == 'lake-sink'" || s.Continue || s.Run != `echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"` {
+				return fmt.Errorf("lake source must identify the checked-out commit")
+			}
+			source = i
+		}
+		if s.Name == "Build and push" {
+			if image >= 0 || s.With["builder"] != builderName || strings.TrimSpace(s.With["build-args"]) != releaseBuildArgs {
+				return fmt.Errorf("release image differs from its source or builder")
+			}
+			image = i
+		}
+		if s.Name == "Export temporal evidence from the same release builder" {
+			if receipt >= 0 || s.If != "matrix.service == 'lake-sink'" || s.Continue ||
+				s.Uses != "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc" || !maps.Equal(s.With, exportInputs) {
+				return fmt.Errorf("lake receipt must come from the same release build")
+			}
+			receipt = i
+		}
 		if strings.Contains(s.Run, "cosign sign") || strings.Contains(s.Run, "cosign attest") {
 			if s.If != "" || s.Continue {
 				return fmt.Errorf("signing must retain success-only execution")
@@ -60,14 +96,14 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 			goAudit = i
 		}
 		if s.Name == "Require actual Rust image inventory and current RustSec audit" {
-			const expected = "python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py\npython3 .github/scripts/rust_release_evidence.py --service \"$RUST_SERVICE\" --image \"$RUST_IMAGE\" --sbom sbom.spdx.json --output rust-evidence"
+			const expected = "python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py\nset --\nif test \"$RUST_SERVICE\" = lake-sink; then set -- --builder-evidence \"$RUNNER_TEMP/lake-source-evidence\"; fi\npython3 .github/scripts/rust_release_evidence.py --service \"$RUST_SERVICE\" --image \"$RUST_IMAGE\" --sbom sbom.spdx.json --output rust-evidence \"$@\""
 			if strings.TrimSpace(s.Run) != expected || s.If != condition || s.Continue || s.Env["RUST_SERVICE"] != "${{ matrix.service }}" || s.Env["RUST_IMAGE"] != "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" {
 				return fmt.Errorf("Rust release gate must fail closed on exact image digest")
 			}
 			gate = i
 		}
 	}
-	if setup < 0 || sbom < 0 || goAudit < 0 || gate <= goAudit || gate <= setup || gate <= sbom || sign <= gate {
+	if builder < 0 || source < 0 || image <= builder || image <= source || receipt <= image || gate <= receipt || setup < 0 || sbom < 0 || goAudit < 0 || gate <= goAudit || gate <= setup || gate <= sbom || sign <= gate {
 		return fmt.Errorf("Rust evidence must precede signing")
 	}
 	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust_audit_tools/consume.py"} {
@@ -137,7 +173,9 @@ func TestRustReleaseEvidenceMutations(t *testing.T) {
 		{"skipped-gate", 0, "name: Require actual Rust", "name: Disabled actual Rust"},
 		{"only-binance", 0, "if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth'", "if: matrix.service == 'binance-depth'"},
 		{"local-release-bypass", 0, "rust_release_evidence.py --service", "rust_release_evidence.py --local --service"},
-		{"ignored-failure", 0, "--output rust-evidence\n", "--output rust-evidence || true\n"},
+		{"ignored-failure", 0, "--output rust-evidence \"$@\"\n", "--output rust-evidence \"$@\" || true\n"},
+		{"different-lake-source", 0, "SOURCE_REVISION=${{ steps.lake-source.outputs.sha }}", "SOURCE_REVISION=${{ github.ref_name }}"},
+		{"different-receipt-target", 0, "target: rust-source-evidence", "target: rust-build"},
 		{"mutable-image", 0, "RUST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}", "RUST_IMAGE: ${{ env.IMAGE }}:latest"},
 		{"missing-binance", 0, "service: binance-depth", "service: absent"},
 		{"missing-okx", 1, "service: okx-depth", "service: absent"},

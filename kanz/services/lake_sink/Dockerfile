@@ -25,7 +25,7 @@ RUN sh /usr/local/bin/go-mod-download.sh
 
 COPY schemas/gen/go/ /src/schemas/gen/go/
 COPY kanz/ ./
-# CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
+# CGO off â‡’ a fully static binary (every dep â€” pgx, nats, kafka-go, go-spiffe â€”
 # is pure Go), which is what distroless/static requires. -trimpath strips local
 # paths; -s -w drop the symbol/debug tables.
 # VERSION is stamped into the binary (internal/version, #143). Unset here means
@@ -65,7 +65,9 @@ COPY schemas/proto/ /src/schemas/proto/
 RUN python3 -B temporal_sources/prepare.py --check
 ENV CARGO_TARGET_DIR=/src/rust/target-provenance
 ARG VERSION
-RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl && python3 -B temporal_sources/produce.py "$VERSION"
+RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl
+ARG SOURCE_REVISION=$VERSION
+RUN python3 -B temporal_sources/produce.py "$SOURCE_REVISION"
 
 FROM scratch AS rust-source-evidence
 COPY --from=rust-build /kanz-source-evidence/ /

@@ -76,6 +76,12 @@ class SourcePreparationTests(unittest.TestCase):
             prepare.unpack(self.input, self.work)
         self.assertFalse((self.root / "outside").exists())
 
+    def test_reusing_prepared_sources_rechecks_the_reviewed_patch(self):
+        prepare.materialize(self.row, self.work, self.root)
+        (self.recipe / "patches" / f"{self.key}.patch").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "patch differs"):
+            prepare.verify(self.work, [self.row])
+
 
 if __name__ == "__main__":
     unittest.main()

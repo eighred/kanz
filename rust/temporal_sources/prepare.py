@@ -100,6 +100,10 @@ def verify(destination, rows):
     expected = {f"{r['name']}-{r['version']}": r["treeSHA256"] for r in rows}
     if destination.is_symlink() or len(expected) != len(rows) or {p.name for p in destination.iterdir()} != set(expected):
         raise ValueError("generated Cargo source set differs")
+    for row in rows:
+        delta = HERE / "patches" / f"{row['name']}-{row['version']}.patch"
+        if delta.is_symlink() or digest(delta) != row["patchSHA256"]:
+            raise ValueError(f"prepared source patch differs: {delta.name}")
     for name, checksum in expected.items():
         folder = destination / name
         if folder.is_symlink() or not folder.is_dir() or tree(folder) != checksum:

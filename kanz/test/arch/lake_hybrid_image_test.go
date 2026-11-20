@@ -55,7 +55,8 @@ func lakeHybridImageRecipe(raw string) error {
 		"COPY --from=rust-sources /src/rust/temporal_sources/generated/ /src/rust/temporal_sources/generated/",
 		"COPY rust/ ./", "COPY schemas/proto/ /src/schemas/proto/",
 		"RUN python3 -B temporal_sources/prepare.py --check", "ENV CARGO_TARGET_DIR=/src/rust/target-provenance", "ARG VERSION",
-		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl && python3 -B temporal_sources/produce.py "$VERSION"`,
+		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --offline --release --manifest-path Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot --message-format=json-render-diagnostics > /kanz-source-evidence/compiler.jsonl`,
+		"ARG SOURCE_REVISION=$VERSION", `RUN python3 -B temporal_sources/produce.py "$SOURCE_REVISION"`,
 	}
 	evidence := []string{"FROM scratch AS rust-source-evidence", "COPY --from=rust-build /kanz-source-evidence/ /"}
 	runtime := []string{
@@ -89,10 +90,11 @@ func lakeHybridCI(raw string) error {
 		return err
 	}
 	fields := map[string]map[string]string{
-		"Install pinned hybrid signature verifier":              {"cosign-release": "v3.0.6"},
-		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake_sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}", "no-cache-filters": "rust-build", "cache-to": ""},
-		"Catalog actual hybrid applications and native runtime": {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
-		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
+		"Install pinned hybrid signature verifier":               {"cosign-release": "v3.0.6"},
+		"Build actual hybrid lake image without publishing":      {"context": ".", "file": "kanz/services/lake_sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}", "no-cache-filters": "rust-build", "cache-to": ""},
+		"Catalog actual hybrid applications and native runtime":  {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
+		"Export temporal evidence from the hybrid image builder": {"context": ".", "file": "kanz/services/lake_sink/Dockerfile", "builder": "${{ steps.lake-builder.outputs.name }}", "target": "rust-source-evidence", "build-args": "VERSION=${{ github.sha }}", "outputs": "type=local,dest=snapshot-owner-proof/builder-evidence", "push": "false"},
+		"Scan actual hybrid runtime before execution":            {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
 	}
 	scripts := map[string][]string{
 		"Verify complete source-bound owner evidence":                     {"check_lake_snapshot_owner_evidence.py --seal"},
@@ -100,7 +102,7 @@ func lakeHybridCI(raw string) error {
 		"Verify synthetic cache probe controls":                           {"test_lake_cache_probe.py"},
 		"Prove joint synthetic source and VERSION dependency cache reuse": {"const env = {};", "['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_CACHE_MODE']", "env.ACTIONS_CACHE_MODE !== 'read'", "'.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE", "'--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER", "'--output', 'snapshot-owner-proof'], {stdio: 'inherit', env}"},
 		"Install reviewed hybrid audit tools":                             {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
-		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
+		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid --builder-evidence snapshot-owner-proof/builder-evidence`},
 		"Actual finite owner on both broker versions without skips":       {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
 		"Stop owned snapshot fixture dependencies and prove absence":      {"label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", `test -z "$image_after$image_volumes_after"`, "image_containers_absent", "image_volumes_absent", `^/kanz-lake-image-$nonce-[0-9]+$`, `^kanz-lake-image-$nonce-[0-9]+$`},
 	}
@@ -131,6 +133,9 @@ func lakeHybridCI(raw string) error {
 		if step.Name == "Install pinned hybrid signature verifier" && step.Uses != "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532" {
 			return fmt.Errorf("hybrid signature verifier identity missing")
 		}
+		if step.Name == "Export temporal evidence from the hybrid image builder" && step.Uses != "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc" {
+			return fmt.Errorf("temporal evidence must use the reviewed image builder")
+		}
 		for key, value := range wanted {
 			if step.With[key] != value {
 				return fmt.Errorf("hybrid action identity missing")
@@ -154,7 +159,7 @@ func lakeHybridCI(raw string) error {
 	}
 	order := []string{
 		"Install pinned hybrid signature verifier", "Install reviewed hybrid audit tools",
-		"Build actual hybrid lake image without publishing", "Bind actual hybrid image identity",
+		"Build actual hybrid lake image without publishing", "Export temporal evidence from the hybrid image builder", "Bind actual hybrid image identity",
 		"Catalog actual hybrid applications and native runtime", "Scan actual hybrid runtime before execution",
 		"Require hybrid binary provenance and fresh Rust and Go audits",
 		"Actual finite owner on both broker versions without skips",
