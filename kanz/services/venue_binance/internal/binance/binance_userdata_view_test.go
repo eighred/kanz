@@ -80,7 +80,7 @@ func TestRecon_AFilledOrderIsNeitherRequeriedNorRehealed(t *testing.T) {
 	_ = ingesterOverView([][]byte{[]byte(filledReport)}, cap, view).Run(context.Background())
 
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"FILLED","executedQty":"1"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"FILLED","executedQty":"1"}`
 	rcap := &reconCapture{}
 	bucket := newWeightBucket(1200, time.Minute, nil)
 	rest := newBinanceREST(restConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Bucket: bucket})

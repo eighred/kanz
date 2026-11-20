@@ -195,10 +195,6 @@ func (r *Reconciler) HealClosures(ctx context.Context) error {
 			}
 			continue
 		}
-		if truth == nil || truth.ClientOrderID != ci.OrderID {
-			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
-			continue
-		}
 		if !binanceTerminal(truth.Status) {
 			pass.FailOrder(ci.OrderID, execution.ErrCloseUnconfirmed)
 			continue
@@ -281,10 +277,6 @@ func (r *Reconciler) reconcileOrders(ctx context.Context) error {
 			if errors.Is(err, ErrRateLimited) || ctx.Err() != nil {
 				break
 			}
-			continue
-		}
-		if truth == nil || truth.ClientOrderID != exp.GetOrderId() {
-			pass.FailOrder(exp.GetOrderId(), execution.ErrReconcileEvidence)
 			continue
 		}
 		healed, drift, err := healedState(exp, truth, r.now())

@@ -47,7 +47,7 @@ func healedFrom(cap *reconCapture) *orderpb.StateHealed {
 // sweep, registry drained.
 func TestBinanceHeal_ConfirmedTerminalNoSweep(t *testing.T) {
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
 	cap := &reconCapture{}
 	reg := NewCloseRegistry()
 	trackedFlatten(reg, "o1", 2*time.Second) // past the 1500ms timeout
@@ -71,7 +71,7 @@ func TestBinanceHeal_ConfirmedTerminalNoSweep(t *testing.T) {
 // there is nothing to sweep and the ledger learns the real fill.
 func TestBinanceHeal_ConfirmedFilledAdoptsVenueTruth(t *testing.T) {
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"FILLED","executedQty":"1.00000000"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"FILLED","executedQty":"1.00000000"}`
 	cap := &reconCapture{}
 	reg := NewCloseRegistry()
 	trackedFlatten(reg, "o1", 2*time.Second)
@@ -91,7 +91,7 @@ func TestBinanceHeal_ConfirmedFilledAdoptsVenueTruth(t *testing.T) {
 // Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
 func TestBinanceHeal_WorkingRemainsPending(t *testing.T) {
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"NEW","executedQty":"0"}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"NEW","executedQty":"0"}`
 	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":9,"clientOrderId":"heal-o1","status":"FILLED","executedQty":"1.00000000"}`
 	f.accountBody = `{"balances":[]}`
 	cap := &reconCapture{}
@@ -110,6 +110,7 @@ func TestBinanceHeal_WorkingRemainsPending(t *testing.T) {
 func TestBinanceHeal_UnresponsiveVenueRemainsPending(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"code":-1001,"msg":"internal error"}` // queryOrder → APIError
+	f.queryStatus = 400
 	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":9,"clientOrderId":"heal-o1","status":"FILLED","executedQty":"1.00000000"}`
 	f.accountBody = `{"balances":[]}`
 	cap := &reconCapture{}
@@ -127,7 +128,7 @@ func TestBinanceHeal_UnresponsiveVenueRemainsPending(t *testing.T) {
 // Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
 func TestBinanceHeal_CancelledRestingOrderNeverSweeps(t *testing.T) {
 	f := newFakeBinance(t)
-	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"NEW","executedQty":"0"}` // stuck
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"NEW","executedQty":"0"}` // stuck
 	f.accountBody = `{"balances":[]}`
 	cap := &reconCapture{}
 	reg := NewCloseRegistry()

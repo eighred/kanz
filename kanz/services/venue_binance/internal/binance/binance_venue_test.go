@@ -225,6 +225,7 @@ func TestBinance_UnrecoverableRejectionSurfaces(t *testing.T) {
 	f.newOrderStatus = 400
 	f.newOrderBody = `{"code":-2010,"msg":"Account has insufficient balance."}`
 	f.queryBody = `{"code":-2013,"msg":"Order does not exist."}` // query confirms it never landed
+	f.queryStatus = http.StatusBadRequest
 	v := venueOverFake(f)
 
 	if _, err := v.Execute(context.Background(), marketOrder("REJ-1")); err == nil {

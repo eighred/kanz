@@ -34,7 +34,7 @@ func TestCloseQueryFailuresRetainOwnershipAndRecover(t *testing.T) {
 					return
 				}
 				gets.Add(1)
-				body := `{"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
+				body := `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
 				if !recovered.Load() {
 					switch fault {
 					case "401":
@@ -55,9 +55,10 @@ func TestCloseQueryFailuresRetainOwnershipAndRecover(t *testing.T) {
 					case "empty":
 						body = "{}"
 					case "missing":
+						w.WriteHeader(http.StatusBadRequest)
 						body = `{"code":-2013,"msg":"missing"}`
 					case "working":
-						body = `{"clientOrderId":"o1","status":"NEW","executedQty":"0"}`
+						body = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"NEW","executedQty":"0"}`
 					case "wrong_order":
 						body = strings.ReplaceAll(body, "o1", "other")
 					case "invalid_quantity":
@@ -105,7 +106,7 @@ func TestReconciliationReportsMixedCoverage(t *testing.T) {
 			w.WriteHeader(503)
 			return
 		}
-		_, _ = fmt.Fprint(w, `{"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`)
+		_, _ = fmt.Fprint(w, `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`)
 	}))
 	defer srv.Close()
 	r.rest.baseURL = srv.URL

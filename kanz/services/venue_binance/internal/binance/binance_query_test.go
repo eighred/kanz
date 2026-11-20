@@ -12,14 +12,76 @@ package binance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 )
+
+func TestBinanceQueryRequiresTheRequestedOrderBeforeUsingAnyVerdict(t *testing.T) {
+	const identity = `"symbol":"BTCUSDT","clientOrderId":"o1","orderId":7`
+	for _, status := range []string{"NEW", "REJECTED", "CANCELED", "EXPIRED", "PARTIALLY_FILLED", "FILLED"} {
+		for _, tc := range []struct{ name, fields string }{
+			{"different symbol", strings.Replace(identity, "BTCUSDT", "ETHUSDT", 1)},
+			{"different client ID", strings.Replace(identity, "o1", "o2", 1)},
+			{"missing exchange ID", strings.TrimSuffix(identity, `,"orderId":7`)},
+			{"zero exchange ID", strings.Replace(identity, ":7", ":0", 1)},
+			{"negative exchange ID", strings.Replace(identity, ":7", ":-1", 1)},
+			{"duplicate client ID", `"clientOrderId":"o2",` + identity},
+			{"wrong case", strings.Replace(identity, "clientOrderId", "clientOrderID", 1)},
+		} {
+			t.Run(status+"/"+tc.name, func(t *testing.T) {
+				f := newFakeBinance(t)
+				f.queryBody = fmt.Sprintf(`{%s,"status":%q,"executedQty":"0"}`, tc.fields, status)
+				view, err := venueOverFake(f).QueryOrder(t.Context(), queryOrderState("o1"))
+				if !errors.Is(err, execution.ErrReconcileEvidence) || view.State != OrderViewIndeterminate || len(view.Fills) != 0 ||
+					f.gets != 1 || f.myTradesCalls != 0 || f.posts != 0 {
+					t.Fatalf("unverified order produced a verdict or further dispatch: view=%v err=%v", view, err)
+				}
+			})
+		}
+	}
+}
+
+func TestBinanceQueryRequiresAnUnambiguousOrderAbsence(t *testing.T) {
+	const missing = `{"code":-2013,"msg":"Order does not exist."}`
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"success status carrying error", missing, http.StatusOK},
+		{"duplicate error code", `{"code":-1001,"code":-2013,"msg":"missing"}`, http.StatusBadRequest},
+		{"order and error together", `{"status":"NEW","code":-2013,"msg":"missing"}`, http.StatusBadRequest},
+		{"error status carrying success", `{"symbol":"BTCUSDT","clientOrderId":"o1","orderId":7,"status":"NEW"}`, http.StatusBadRequest},
+		{"response beyond read limit", missing + strings.Repeat(" ", 1<<20), http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeBinance(t)
+			f.queryBody, f.queryStatus = tc.body, tc.status
+			view, err := venueOverFake(f).QueryOrder(t.Context(), queryOrderState("o1"))
+			if !errors.Is(err, execution.ErrReconcileEvidence) || view.State != OrderViewIndeterminate || f.posts != 0 {
+				t.Fatalf("inconclusive response reported as a venue verdict: %v %v", view, err)
+			}
+		})
+	}
+}
+
+func TestBinanceAmbiguousPlacementCannotAdoptAnotherOrder(t *testing.T) {
+	f := newFakeBinance(t)
+	f.newOrderStatus = http.StatusInternalServerError
+	f.queryBody = fullFill("o2")
+	fills, err := venueOverFake(f).Execute(t.Context(), marketOrder("o1"))
+	if !errors.Is(err, execution.ErrReconcileEvidence) || len(fills) != 0 || f.posts != 1 || f.gets != 1 || f.myTradesCalls != 0 {
+		t.Fatalf("unbound recovery lookup returned fills or placed again: fills=%v err=%v posts=%d gets=%d", fills, err, f.posts, f.gets)
+	}
+}
 
 func queryOrderState(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
@@ -91,8 +153,8 @@ func TestBinanceQuery_ServerErrorIsAnErrorNeverUnknown(t *testing.T) {
 func TestBinanceQuery_RateLimitedIsAnErrorNeverUnknown(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"NEW","executedQty":"0"}`
-	// A bucket with no weight at all: the query costs 2 and cannot be afforded.
-	bucket := newWeightBucket(0, time.Minute, nil)
+	// Three units cannot fund a four-unit order lookup.
+	bucket := newWeightBucket(3, time.Minute, nil)
 	rest := newBinanceREST(restConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Bucket: bucket})
 	v := NewBinanceVenue(BinanceConfig{MIC: "BINANCE", Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"}, REST: rest})
 
@@ -106,6 +168,12 @@ func TestBinanceQuery_RateLimitedIsAnErrorNeverUnknown(t *testing.T) {
 	}
 	if f.gets != 0 {
 		t.Fatalf("%d requests reached Binance for a refused query", f.gets)
+	}
+	rest.bucket = newWeightBucket(4, time.Minute, nil)
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"o1","status":"NEW","executedQty":"0","orderListId":-1,"newField":true}`
+	view, err = v.QueryOrder(t.Context(), queryOrderState("o1"))
+	if err != nil || view.State != OrderViewWorking || f.gets != 1 || rest.bucket.Allow(1) {
+		t.Fatalf("exact query budget and extended valid response: state=%v gets=%d err=%v", view.State, f.gets, err)
 	}
 }
 
@@ -240,7 +308,7 @@ func TestBinanceQuery_RejectedIsAdoptable(t *testing.T) {
 // that did not fill — the ORDINARY terminal state of a time-in-force this
 // platform declares supported (#486) — so every interrupted one froze for a
 // human on an answer the exchange had given in full. Note that no myTrades
-// request fires for it: an untraded withdrawal costs 2 weight, not 22.
+// request fires for it: an untraded withdrawal consumes only the order lookup's four units.
 func TestBinanceQuery_CancelledAndExpiredAreAdoptableWithdrawals(t *testing.T) {
 	for _, tc := range []struct {
 		status string

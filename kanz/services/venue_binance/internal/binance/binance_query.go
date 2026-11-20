@@ -248,9 +248,6 @@ func (v *BinanceVenue) withdrawnView(ctx context.Context, st *orderpb.OrderState
 // So the real trades are fetched, and the fills are built by the SAME v.fills
 // used on the placement path — one construction, so the ids cannot drift apart.
 func (v *BinanceVenue) tradesFor(ctx context.Context, st *orderpb.OrderState, symbol string, resp *orderResponse) ([]*orderpb.Fill, error) {
-	if resp.Symbol != symbol || resp.ClientOrderID != st.GetOrderId() || resp.OrderID <= 0 {
-		return nil, errors.New("binance: trade history order scope is unverified")
-	}
 	trades, err := v.rest.myTrades(ctx, symbol, resp.OrderID)
 	if err != nil {
 		// Including ErrRateLimited: the question could not be finished, and a

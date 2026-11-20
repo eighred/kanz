@@ -202,6 +202,9 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 		defer cancelRecovery()
 		q, qErr := v.rest.queryOrder(recoveryCtx, symbol, st.GetOrderId())
 		if qErr != nil {
+			if errors.Is(qErr, execution.ErrReconcileEvidence) {
+				return nil, qErr
+			}
 			return nil, err
 		}
 		resp = q
