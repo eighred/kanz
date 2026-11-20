@@ -135,6 +135,7 @@ func rustBoundaryFixtureFiles() []string {
 	for _, file := range rustOMSSources {
 		out = append(out, rustOMSPath+"/"+file)
 	}
+	out = append(out, syntheticOMSPath+"/Cargo.toml", syntheticOMSPath+"/src/main.rs", syntheticOMSPath+"/schema.sql")
 	out = append(out, rustOMSStorePath+"/Cargo.toml")
 	for _, file := range rustOMSStoreSources {
 		out = append(out, rustOMSStorePath+"/"+file)

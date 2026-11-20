@@ -1,0 +1,136 @@
+#![forbid(unsafe_code)]
+use base64::{engine::general_purpose::STANDARD, Engine};
+use kanz_oms_store::synthetic_command::{self as owner, Observation, Scope};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{io::Read, str::FromStr, time::Duration};
+use tokio_postgres::{config::Host, Config, NoTls};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    version: u32,
+    op: String,
+    tenant: String,
+    principal: String,
+    portfolio: String,
+    idempotency_key: Option<String>,
+    command_b64: Option<String>,
+    order_id: Option<String>,
+    event_id: Option<String>,
+    effective_seconds: Option<i64>,
+    effective_nanos: Option<i32>,
+    venue_order_id: Option<String>,
+    fill_b64: Option<String>,
+    executed_quantity_b64: Option<String>,
+}
+fn decode(raw: Option<&String>) -> Result<Vec<u8>, &'static str> {
+    STANDARD
+        .decode(raw.ok_or("INVALID")?)
+        .map_err(|_| "INVALID")
+}
+async fn execute(r: Request) -> Result<Value, &'static str> {
+    if r.version != 1 {
+        return Err("UNSUPPORTED_VERSION");
+    }
+    let dsn = std::env::var("SYNTHETIC_OMS_DATABASE_URL").map_err(|_| "STORE_UNAVAILABLE")?;
+    let config = Config::from_str(&dsn).map_err(|_| "STORE_UNAVAILABLE")?;
+    if config.get_dbname() != Some("kanz_synthetic_oms")
+        || config.get_hosts().len() != 1
+        || !config.get_hostaddrs().is_empty()
+        || !matches!(
+            config.get_user(),
+            Some("kanz_synthetic_oms_runtime" | "kanz_synthetic_oms_adapter")
+        )
+    {
+        return Err("UNAUTHORIZED");
+    }
+    match &config.get_hosts()[0] {
+        Host::Tcp(host) if host == "127.0.0.1" || host == "::1" => {}
+        #[cfg(unix)]
+        Host::Unix(_) => {}
+        _ => return Err("UNAUTHORIZED"),
+    }
+    let (mut client, connection) = config
+        .connect(NoTls)
+        .await
+        .map_err(|_| "STORE_UNAVAILABLE")?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let s = Scope {
+        tenant: &r.tenant,
+        principal: &r.principal,
+        portfolio: &r.portfolio,
+    };
+    let receipt = match r.op.as_str() {
+        "submit" => {
+            owner::submit(
+                &mut client,
+                &s,
+                r.idempotency_key.as_deref().ok_or("INVALID")?,
+                &decode(r.command_b64.as_ref())?,
+            )
+            .await
+        }
+        "get" => owner::get(&mut client, &s, r.order_id.as_deref().ok_or("INVALID")?).await,
+        "dispatch" | "ack" | "fill" | "timeout" | "cancel_pending" | "cancelled" => {
+            let body = match r.op.as_str() {
+                "ack" => r
+                    .venue_order_id
+                    .as_deref()
+                    .ok_or("INVALID")?
+                    .as_bytes()
+                    .to_vec(),
+                "fill" => decode(r.fill_b64.as_ref())?,
+                "cancelled" => decode(r.executed_quantity_b64.as_ref())?,
+                _ => vec![],
+            };
+            let event = Observation {
+                operation: &r.op,
+                id: r.event_id.as_deref().ok_or("INVALID")?,
+                seconds: r.effective_seconds.ok_or("INVALID")?,
+                nanos: r.effective_nanos.ok_or("INVALID")?,
+                body: &body,
+            };
+            owner::observe(
+                &mut client,
+                &s,
+                r.order_id.as_deref().ok_or("INVALID")?,
+                &event,
+            )
+            .await
+        }
+        _ => return Err("INVALID"),
+    }
+    .map_err(|e| e.code())?;
+    Ok(
+        json!({"ok":true,"code":receipt.code,"state_b64":STANDARD.encode(receipt.order.state),"order_version":receipt.order.version}),
+    )
+}
+fn main() {
+    let result = (|| {
+        let mut raw = Vec::new();
+        std::io::stdin()
+            .take(131073)
+            .read_to_end(&mut raw)
+            .map_err(|_| "INVALID")?;
+        if raw.len() > 131072 {
+            return Err("INVALID");
+        }
+        let r = serde_json::from_slice(&raw).map_err(|_| "INVALID")?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "STORE_UNAVAILABLE")?
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(8), execute(r))
+                    .await
+                    .map_err(|_| "COMMIT_UNCONFIRMED")?
+            })
+    })();
+    println!(
+        "{}",
+        result.unwrap_or_else(|code| json!({"ok":false,"code":code}))
+    );
+}

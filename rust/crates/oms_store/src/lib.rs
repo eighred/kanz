@@ -21,6 +21,8 @@ pub mod recovery_repository;
 pub mod recovery_wire;
 pub mod relay;
 mod relay_wire;
+#[cfg(feature = "synthetic-command")]
+pub mod synthetic_command;
 use identity::{execution_key, same_execution};
 use kanz_order_core::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
@@ -283,12 +285,16 @@ pub async fn create(
 ) -> Result<(), Error> {
     let st = validate_write(state, records)?;
     let tx = scoped(client, tenant).await?;
+    insert_order(&tx, &st, state).await?;
+    enqueue(&tx, records).await?;
+    commit(tx).await
+}
+async fn insert_order(tx: &Transaction<'_>, st: &OrderState, state: &[u8]) -> Result<(), Error> {
     let count=tx.execute("INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3,$4,$5) ON CONFLICT (tenant_id,order_id) DO NOTHING",&[&st.order_id,&st.status,&state,&st.portfolio_id,&st.parent_order_id]).await?;
     if count == 0 {
         return Err(Error::Exists);
     }
-    enqueue(&tx, records).await?;
-    commit(tx).await
+    Ok(())
 }
 /// Raw canonical state and its version from one row/snapshot; no normalization.
 pub struct Loaded {
