@@ -1,2 +1,3 @@
 statement-*.json -text
+late_quantity/following-r1.json -text
 *.sig binary
