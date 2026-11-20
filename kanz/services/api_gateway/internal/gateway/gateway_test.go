@@ -414,6 +414,16 @@ func ordersFor(tenant string) *fakeClient {
 	}}
 }
 
+func TestOrderHistoryRefusesMixedPortfolioRows(t *testing.T) {
+	fc := ordersFor(testTenant)
+	fc.ordersResp.Orders = append(fc.ordersResp.Orders, &orderpb.OrderState{OrderId: "hidden", PortfolioId: "other"})
+	ts := ordersServer(t, fc, &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}, Portfolios: []string{"PF1"}})
+	code, body := getOrders(t, ts, "/v1/portfolios/PF1/orders")
+	if code != http.StatusNotFound || strings.Contains(body, "hidden") || strings.Contains(body, "o1") {
+		t.Fatalf("misattributed row returned status %d, body %q", code, body)
+	}
+}
+
 func TestOrderHistoryIsReturnedWithItsUnindexedCount(t *testing.T) {
 	fc := ordersFor(testTenant)
 	ts := ordersServer(t, fc, &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
