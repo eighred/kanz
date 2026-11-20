@@ -47,7 +47,7 @@ async function main() {
           if (mode === 'held') return // AbortSignal must release the pending fetch.
           return route.continue()
         })
-        await page.route('**/api/v1/portfolios/fixture/orders', async route => {
+        await page.route('**/api/v1/portfolios/fixture/orders?limit=200', async route => {
           if (mode === 'ready') await page.waitForFunction(() => window.renderProof.instances === 2)
           return route.continue()
         })
@@ -59,10 +59,13 @@ async function main() {
         assert(csp.includes("script-src 'self'")); assert(!csp.includes("'unsafe-eval'")); assert(!csp.includes("'unsafe-inline'")); assert(!csp.includes('blob:'))
         assert.equal(csp.includes("'wasm-unsafe-eval'"), mode !== 'old-csp')
         phaseObserved = 'cells'
-        await page.getByRole('cell', { name: '90071992547409.93', exact: true }).waitFor()
-        await page.getByRole('cell', { name: '0.00', exact: true }).waitFor()
-        await page.getByRole('cell', { name: '1.50 USD', exact: true }).waitFor()
-        await page.getByRole('cell', { name: '9'.repeat(127) + '.99', exact: true }).waitFor()
+        const canonical = page.getByRole('row').filter({ hasText: 'canonical' })
+        for (const value of ['90071992547409.93', '0.25', '1.50', '1.47']) {
+          await canonical.getByRole('cell', { name: value, exact: true }).waitFor()
+        }
+        const legacy = page.getByRole('row').filter({ hasText: 'legacy' })
+        await legacy.getByRole('cell', { name: '9'.repeat(127) + '.99', exact: true }).waitFor()
+        await legacy.getByRole('cell', { name: '0.00', exact: true }).waitFor()
         assert(!(await page.evaluate(() => document.cookie)).includes('kanz_session'))
         phaseObserved = 'calls'
         if (mode === 'ready') assert((await page.evaluate(() => window.renderProof.calls)) >= 3)
