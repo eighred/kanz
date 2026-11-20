@@ -258,7 +258,7 @@ func provePilotBrowser(t *testing.T, ctx context.Context, endpoint, testName, sc
 	probe := exec.CommandContext(ctx, os.Getenv("CUSTODY_PILOT_GATEWAY_PROBE"), "-test.run=^"+testName+"$", "-test.count=1", "-test.v")
 	probe.Stdin = bytes.NewReader(payload)
 	probe.Env = []string{"CUSTODY_PILOT_ACCOUNTING_URL=" + endpoint, "CUSTODY_PILOT_BROWSER_SCRIPT=" + script}
-	for _, k := range []string{"PATH", "SystemRoot", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR"} {
+	for _, k := range []string{"PATH", "SystemRoot", "SystemDrive", "TEMP", "TMP", "TMPDIR", "LOCALAPPDATA", "USERPROFILE", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "CUSTODY_PILOT_BFF_PROBE", "TEST_MFA_NODE", "TEST_MFA_PLAYWRIGHT", "TEST_MFA_STATIC_DIR"} {
 		if v, ok := os.LookupEnv(k); ok {
 			probe.Env = append(probe.Env, k+"="+v)
 		}

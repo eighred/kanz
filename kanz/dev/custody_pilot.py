@@ -32,7 +32,7 @@ def host_environment():
     # Runtime settings for local programs, excluding ambient service URLs,
     # bearer tokens, proxy credentials and database connection variables.
     names = (
-        "PATH", "SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP", "TMPDIR",
+        "PATH", "SystemRoot", "SystemDrive", "ComSpec", "PATHEXT", "TEMP", "TMP", "TMPDIR",
         "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "USER", "LOGNAME",
         "XDG_RUNTIME_DIR", "PLAYWRIGHT_BROWSERS_PATH",
     )
