@@ -290,13 +290,12 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Select XSIM's clock value before execution. Every subsequent
-	// consumer receives its original, unmodified execution evidence.
+	// Select XSIM's clock value before execution so its retained fill stays reproducible.
 	fillTime := time.Now().UTC().Truncate(time.Microsecond).Add(extra)
 	cfg := syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: fillTime, LoseExecuteAck: true, FillOnExecute: !fillOnCancel, ExecutionFee: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1}}}
 	var sends, queries, withdrawals atomic.Int32
 	var withdrawal atomic.Pointer[fundedWithdrawalApproval]
-	var lostWithdrawalAck, terminalApproved atomic.Bool
+	var lostWithdrawalAck, terminalApproved, sentContradiction atomic.Bool
 	count := grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		approval := withdrawal.Load()
 		switch info.FullMethod {
@@ -345,6 +344,23 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 					return nil, status.Errorf(codes.FailedPrecondition, "terminal settlement approval: %v", err)
 				}
 				terminalApproved.Store(true)
+			}
+			if approval.mode == goWithdrawalContradiction && terminalApproved.Load() && view.GetState() == venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED {
+				// The independent approval already describes the real terminal
+				// receipt. Send a different fee over mTLS for the same fill.
+				if sentContradiction.CompareAndSwap(false, true) {
+					changed := proto.Clone(view).(*venuepb.QueryOrderResponse)
+					if len(changed.Fills) != 1 || changed.Fills[0].GetFee().GetAmount().GetCoefficient() != 1 {
+						return nil, errors.New("unexpected XSIM fee fixture")
+					}
+					changed.Fills[0].Fee.Amount.Coefficient = 2
+					return changed, nil
+				}
+				// A new query is the retry after the contradictory response.
+				// Check the held cash and original state before releasing it.
+				if err := approval.checkClaim(ctx); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return reply, nil
@@ -466,6 +482,13 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		successor(t, ctx, s, partial, addr, identity, control.accepted, authorizeWithdrawal)
 		if withdrawalMode != noGoWithdrawal {
 			wantQueries := queriesBefore + 3
+			if withdrawalMode == goWithdrawalContradiction {
+				if !sentContradiction.Load() {
+					t.Fatal("XSIM did not send the contradictory terminal fill")
+				}
+				wantQueries++
+				t.Log("XSIM returned the recorded fill ID with a changed fee over mTLS; the next query observed the original OMS version, withdrawal claim, FACT count and cash holds")
+			}
 			if r := withdrawal.Load().race; r != nil {
 				wantQueries = queriesBefore + 6
 				if r.openViews.Load() != 1 || r.terminalViews.Load() != 2 {

@@ -60,7 +60,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	racing := in.WithdrawalStage == "race-first" || in.WithdrawalStage == "race-second"
 	switch in.WithdrawalStage {
 	case "":
-	case "send", "reconcile", "reconcile-published", "publish", "publish-mark", "race-first", "race-second":
+	case "contradiction", "send", "reconcile", "reconcile-published", "publish", "publish-mark", "race-first", "race-second":
 		if in.WithdrawalEventID == "" {
 			t.Fatal("restart stages require the original withdrawal event")
 		}
@@ -248,8 +248,8 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if in.WithdrawalStage == "" {
-			consumeSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID)
+		if in.WithdrawalStage == "" || in.WithdrawalStage == "contradiction" {
+			consumeSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID, in.WithdrawalStage == "contradiction")
 		} else {
 			restartSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID, in.WithdrawalStage, in.WithdrawalRaceDir)
 		}

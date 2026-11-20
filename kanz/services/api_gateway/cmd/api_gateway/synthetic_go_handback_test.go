@@ -256,6 +256,10 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 		t.Logf("GO_HANDBACK two live Go processes (%d, %d), two independent deliveries of the same withdrawal, one APPLIED, one DUPLICATE, both ACK floors 2", first.pid, second.pid)
 		return
 	}
+	if withdrawal != nil && withdrawal.mode == goWithdrawalContradiction {
+		run("contradiction", 0)
+		return
+	}
 	if withdrawal == nil || withdrawal.mode == goWithdrawal {
 		run("", 0)
 		return

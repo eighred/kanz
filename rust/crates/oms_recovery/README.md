@@ -243,3 +243,11 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 ```
 
 Two Go processes consume the same signed cancellation on separate JetStream durables. The runner holds the winning XSIM cancellation until the other process observes the original working fill. At that point PostgreSQL has one claim and both reservations are still intact. It drops the cancellation acknowledgement and waits for both retries to query XSIM before returning the confirmed terminal view. Both processes attempt settlement. The test requires one `APPLIED`, one `DUPLICATE`, both acknowledgements, one terminal fact and one Accounting debit. The separate working-query probe rejects retained fill IDs with changed fees and incomplete histories through the same history check used before settlement.
+
+### Contradictory terminal reply after handback
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-withdrawal-contradiction
+```
+
+After the lost cancellation acknowledgement, XSIM returns the recorded fill ID with a changed fee over mTLS. Go refuses that reply. Before the next query returns the original receipt, the profile checks the retained partial order and version, pending withdrawal, three outbox records and cash holds. Delivery three settles the cancellation. A fresh durable replays it, and Accounting books the original 126 USD once.

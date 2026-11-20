@@ -137,7 +137,7 @@ func awaitSyntheticCancelAck(t *testing.T, ctx context.Context, commands jetstre
 	t.Fatalf("broker did not acknowledge cancellation at delivery %d", deliveries)
 }
 
-func consumeSyntheticFundedWithdrawal(t *testing.T, ctx context.Context, client *bus.NATSClient, svc *order.Service, broker, eventID string) {
+func consumeSyntheticFundedWithdrawal(t *testing.T, ctx context.Context, client *bus.NATSClient, svc *order.Service, broker, eventID string, contradiction bool) {
 	t.Helper()
 	nc, err := nats.Connect(broker)
 	if err != nil {
@@ -194,6 +194,19 @@ func consumeSyntheticFundedWithdrawal(t *testing.T, ctx context.Context, client 
 	case <-ctx.Done():
 		t.Fatal("missing first withdrawal attempt")
 	}
+	deliveries := uint64(2)
+	if contradiction {
+		select {
+		case err := <-result:
+			if err == nil || !strings.Contains(err.Error(), "synthetic withdrawal has no matching terminal execution history") {
+				t.Fatalf("OMS did not reject the terminal fill history: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("missing contradictory terminal response")
+		}
+		t.Log("GO_HANDBACK OMS refused the terminal fill history on delivery two")
+		deliveries++
+	}
 	select {
 	case err := <-result:
 		if err != nil {
@@ -202,11 +215,11 @@ func consumeSyntheticFundedWithdrawal(t *testing.T, ctx context.Context, client 
 	case <-ctx.Done():
 		t.Fatal("missing broker redelivery after withdrawal acknowledgement loss")
 	}
-	awaitSyntheticCancelAck(t, ctx, commands, subject, group, 2)
+	awaitSyntheticCancelAck(t, ctx, commands, subject, group, deliveries)
 	deliverSyntheticFundedCancel(t, ctx, client, svc, commands, subject, group+"-replay", eventID, 1)
 	after, err := facts.Info(ctx)
 	if err != nil || after.State.Msgs != before.State.Msgs+1 || after.State.LastSeq != before.State.LastSeq+1 {
 		t.Fatalf("withdrawal and replay did not yield exactly one terminal FACT: %v", err)
 	}
-	t.Log("GO_HANDBACK Go lost the XSIM cancel ACK, completed on JetStream delivery two, and ACKed the completed command on a fresh durable")
+	t.Logf("GO_HANDBACK Go lost the XSIM cancel ACK, completed on JetStream delivery %d, and ACKed the completed command on a fresh durable", deliveries)
 }
