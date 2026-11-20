@@ -33,6 +33,11 @@ import (
 // Start a fresh broker for this test so the lifecycle FACT can only affect
 // the test gateway. Never publish a resume on a caller-configured broker.
 func TestSyntheticOrderAuthenticatedIngress(t *testing.T) {
+	signedSyntheticOrder(t)
+}
+
+func signedSyntheticOrder(t *testing.T) *envelopepb.EventFrame {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	broker, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir(), NoSigs: true})
@@ -135,7 +140,16 @@ func TestSyntheticOrderAuthenticatedIngress(t *testing.T) {
 	}
 	// The lifecycle publisher is scoped to this broker's private dynamic port.
 	notice := &lifecyclepb.ModeChanged{Component: halt.ComponentSystem, NewMode: lifecyclepb.OperatingMode_OPERATING_MODE_NORMAL, ChangedBy: "user:synthetic-operator", Reason: "disposable OMS session"}
-	err = producer.Publish(ctx, bus.Event{Subject: halt.SubjectModeChanged, EventType: halt.SubjectModeChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "platform", PayloadSchemaRef: "lifecycle.v1.ModeChanged:1", EventTime: time.Now().UTC(), PartitionKey: notice.Component, TenantID: tenant, Payload: notice})
+	operator, err := bus.DialNATS(ctx, bus.NATSConfig{URL: broker.ClientURL(), Name: "synthetic-halt-operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operator.Close()
+	lifecycle, err := bus.NewProducer(operator, bus.ProducerConfig{Source: "kanz-halt", ProducerVersion: "synthetic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = lifecycle.Publish(ctx, bus.Event{Subject: halt.SubjectModeChanged, EventType: halt.SubjectModeChanged, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "platform", PayloadSchemaRef: "lifecycle.v1.ModeChanged:1", EventTime: time.Now().UTC(), PartitionKey: notice.Component, TenantID: tenant, Payload: notice})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,4 +187,5 @@ func TestSyntheticOrderAuthenticatedIngress(t *testing.T) {
 	if command.GetLimitPrice().GetCoefficient() != 9101 || command.GetLimitPrice().GetExponent() != -2 || command.GetQuantity().GetCoefficient() != 25 || command.GetQuantity().GetExponent() != -1 {
 		t.Fatal("durable command changed exact price or quantity")
 	}
+	return &frame
 }
