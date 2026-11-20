@@ -16,8 +16,9 @@ import (
 
 type historicalStore struct {
 	dateStore
-	t    *testing.T
-	hits int
+	t        *testing.T
+	hits     int
+	bookHits int
 }
 
 func (s *historicalStore) HistoricalReceipt(ctx context.Context, sub custody.Subject, account, id string) (custody.DatedResult, error) {
@@ -26,6 +27,15 @@ func (s *historicalStore) HistoricalReceipt(ctx context.Context, sub custody.Sub
 		s.t.Fatalf("invalid scoped read %v %q %q", sub, account, id)
 	}
 	s.hits++
+	return s.result, nil
+}
+
+func (s *historicalStore) PreviousBookComparison(ctx context.Context, sub custody.Subject, account, anchor string) (custody.DatedResult, error) {
+	s.t.Helper()
+	if bus.TenantIDFromContext(ctx) != "reader" || sub.PortfolioID != "PF1" || sub.CustodianID != "C" || sub.BusinessDate.Format("2006-01-02") != "2020-02-04" || account != "ACC1" || anchor != "saved|run" {
+		s.t.Fatalf("invalid scoped book comparison %v %q %q", sub, account, anchor)
+	}
+	s.bookHits++
 	return s.result, nil
 }
 
@@ -78,4 +88,45 @@ func TestHistoricalCustodyProjection(t *testing.T) {
 	if store.hits != 1 || store.calls != 0 {
 		t.Fatalf("historical=%d current=%d", store.hits, store.calls)
 	}
+
+	t.Run("previous book comparison", func(t *testing.T) {
+		const include = "&include=previous_book_comparison"
+		const prefix int64 = 9007199254740993
+		store.result.Run.RunID = "prior-book"
+		store.result.Run.Basis.JournalPosition = prefix - 1
+		store.result.AccountAssignmentVerified = true
+		store.result.PreviousOfStatementID = store.result.StatementID
+		store.result.PreviousOfJournalPosition = new(prefix)
+		code, body := get("PF1", query+include, "reader", "PF1")
+		var got map[string]any
+		if code != 200 || json.Unmarshal([]byte(body), &got) != nil ||
+			got["state"] != "recorded" || got["run_id"] != "prior-book" || got["statement_id"] != "r1" ||
+			got["tenant_id"] != "reader" || got["account_assignment_verified"] != true ||
+			got["previous_of_run_id"] != "saved|run" || got["previous_of_statement_id"] != "r1" ||
+			got["journal_position"] != "9007199254740992" || got["previous_of_journal_position"] != "9007199254740993" ||
+			got["signed_statement_sha256"] != store.result.SignedStatementSHA256 || strings.Contains(body, "do not disclose") {
+			t.Fatal(code, body)
+		}
+		for _, bad := range []string{base + include, base + "&run_id=" + include, query + include + include, query + include + "&include=previous_comparison", query + include + "&run_id=other"} {
+			if code, _ := get("PF1", bad, "reader", "PF1"); code != 400 {
+				t.Fatal("malformed predecessor lookup", bad, code)
+			}
+		}
+		for _, scope := range [][2]string{{"other", "PF1"}, {"reader", "PF2"}} {
+			if code, body := get("PF1", query+include, scope[0], scope[1]); code != 404 || strings.Contains(body, "prior-book") || strings.Contains(body, "saved|run") {
+				t.Fatal("unauthorized predecessor lookup", code, body)
+			}
+		}
+		if store.bookHits != 1 || store.hits != 1 || store.calls != 0 {
+			t.Fatal("denied selector reached a reader", store.bookHits, store.hits, store.calls)
+		}
+		store.result = custody.DatedResult{State: "unknown"}
+		code, body = get("PF1", query+include, "reader", "PF1")
+		var absent map[string]any
+		if code != 200 || json.Unmarshal([]byte(body), &absent) != nil || absent["state"] != "unknown" ||
+			len(absent) != 5 || absent["tenant_id"] != "reader" || absent["portfolio_id"] != "PF1" ||
+			absent["custodian_id"] != "C" || absent["business_date"] != "2020-02-04" || store.bookHits != 2 || store.hits != 1 {
+			t.Fatal("absent predecessor exposed receipt or anchor", code, body)
+		}
+	})
 }

@@ -23,6 +23,10 @@ type previousCustodyReader interface {
 	PreviousComparison(context.Context, custody.Subject, string, string) (custody.DatedResult, error)
 }
 
+type previousBookCustodyReader interface {
+	PreviousBookComparison(context.Context, custody.Subject, string, string) (custody.DatedResult, error)
+}
+
 type datedCustodyReader interface {
 	DatedResult(context.Context, custody.Subject) (custody.DatedResult, error)
 }
@@ -44,7 +48,7 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		if len(includes) == 1 {
 			include = includes[0]
 		}
-		validInclude := !requested || historical && (include == "reported_execution_figures" || include == "previous_comparison")
+		validInclude := !requested || historical && (include == "reported_execution_figures" || include == "previous_comparison" || include == "previous_book_comparison")
 		validID := !historical || len(ids) == 1 && custody.ValidReceiptID(ids[0])
 		if err != nil || !validID || !validInclude || len(query) != 2 || len(query["business_date"]) != 1 || len(query["custodian_id"]) != 1 {
 			writeJSON(w, 400, map[string]string{"error": "one custodian and business date required"})
@@ -64,19 +68,29 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 		ctx := bus.WithTenantID(r.Context(), principal.Tenant)
 		configured, _ := s.custodyScope.For(portfolio, custodian)
 		result := custody.DatedResult{State: "unknown"}
-		if include == "previous_comparison" {
+		switch {
+		case include == "previous_comparison":
 			if prior, supported := reader.(previousCustodyReader); supported && len(configured) == 1 {
 				for account := range configured {
 					result, err = prior.PreviousComparison(ctx, subject, account, ids[0])
 				}
 			}
-		} else if historical {
+		case include == "previous_book_comparison":
+			if prior, supported := reader.(previousBookCustodyReader); supported && len(configured) == 1 {
+				for account := range configured {
+					result, err = prior.PreviousBookComparison(ctx, subject, account, ids[0])
+				}
+			}
+			if result.State == "recorded" && result.PreviousOfJournalPosition == nil {
+				result = custody.DatedResult{State: "unknown"}
+			}
+		case historical:
 			if prior, supported := reader.(historicalCustodyReader); supported && len(configured) == 1 {
 				for account := range configured {
 					result, err = prior.HistoricalReceipt(ctx, subject, account, ids[0])
 				}
 			}
-		} else {
+		default:
 			result, err = reader.DatedResult(ctx, subject)
 		}
 		if err != nil {
@@ -175,9 +189,12 @@ func (s *Server) datedCustodyResult(reader datedCustodyReader) http.HandlerFunc 
 				response["journal_position"] = strconv.FormatInt(b.JournalPosition, 10)
 			}
 		}
-		if include == "previous_comparison" && result.State == "recorded" {
+		if result.State == "recorded" && (include == "previous_comparison" || include == "previous_book_comparison") {
 			response["previous_of_run_id"] = ids[0]
 			response["previous_of_statement_id"] = result.PreviousOfStatementID
+			if include == "previous_book_comparison" {
+				response["previous_of_journal_position"] = strconv.FormatInt(*result.PreviousOfJournalPosition, 10)
+			}
 		}
 		if include == "reported_execution_figures" && result.State == "recorded" {
 			rows, ok := result.ReportedExecutionFigures()

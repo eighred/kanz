@@ -157,6 +157,35 @@ describe('custody exact review', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('keeps the current receipt on an unavailable earlier book lookup and can open a verified result for revision one', async () => {
+    vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
+    const scope = { portfolio_id: 'P', custodian_id: 'C', business_date: '2020-02-04', tenant_id: 'fixture' }
+    const digest = 'a'.repeat(64), statement = 'custody-batch.v1.source.r1.' + digest
+    const current = { ...scope, state: 'recorded', outcome: 'breaks', run_id: 'after-fee', completed_at: '2020-02-06T00:00:00Z',
+      scope_mode: 'declared', account_assignment_verified: true, statement_id: statement, journal_position: '2', transaction_pass: 'balances_only' }
+    const before = { ...current, outcome: 'clean', run_id: 'before-fee', journal_position: '1', signed_statement_sha256: digest, breaks: [],
+      previous_of_run_id: current.run_id, previous_of_statement_id: statement, previous_of_journal_position: current.journal_position }
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(current).mockResolvedValueOnce({ ...scope, state: 'unknown' }).mockResolvedValueOnce(before)
+    const wrapper = mount(CustodyBreaksView)
+    try {
+      const region = wrapper.get('[aria-label="Dated custody result"]')
+      const form = region.get('form')
+      for (const [i, value] of ['P', 'C', scope.business_date].entries()) await form.findAll('input')[i]!.setValue(value)
+      await form.trigger('submit'); await flushPromises()
+      expect(region.findAll('button').some(b => b.text() === 'View previous statement comparison')).toBe(false)
+      await button(wrapper, 'Find earlier book comparison').trigger('click'); await flushPromises()
+      expect(region.get('[role="alert"]').text()).toBe('No verified earlier book comparison is available.')
+      expect(region.get('output').text()).toContain(current.run_id)
+      expect(form.findAll('input')[3]!.element.value).toBe('')
+      await button(wrapper, 'Find earlier book comparison').trigger('click'); await flushPromises()
+      expect(get.mock.lastCall?.[0]).toContain('run_id=after-fee&include=previous_book_comparison')
+      expect(form.findAll('input')[3]!.element.value).toBe(before.run_id)
+      expect(region.get('output').text()).toContain('Balances agree')
+      expect(region.get('output').text()).toContain(statement)
+      expect(region.find('[role="alert"]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps the signed base download only when optional figures exceed a limit on the same authorized receipt', async () => {
     vi.spyOn(custody, 'queue').mockResolvedValue({ breaks: [] })
     const get = vi.spyOn(api, 'get')

@@ -158,10 +158,17 @@ function validQueueCursor(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9_-]+$/.test(value)
 }
 
+function journalPosition(value: unknown): value is string {
+  return typeof value === 'string' && /^(0|[1-9]\d{0,18})$/.test(value) && BigInt(value) <= 9223372036854775807n
+}
+
+export type ComparisonProjection = boolean | { previousOf: string } | { earlierBookOf: string; journalPosition: string }
+
 export const custody = {
-  async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = '', projection: boolean | { previousOf: string } = false): Promise<DatedCustodyResult> {
+  async dated(subject: CustodySubject, tenant: string, signal?: AbortSignal, runID = '', projection: ComparisonProjection = false): Promise<DatedCustodyResult> {
     const reportedFigures = projection === true
-    const anchor = typeof projection === 'object' ? projection.previousOf : undefined
+    const book = typeof projection === 'object' && 'earlierBookOf' in projection ? projection : undefined
+    const anchor = typeof projection === 'object' && 'previousOf' in projection ? projection.previousOf : book?.earlierBookOf
     const query = new URLSearchParams({ custodian_id: subject.custodian_id, business_date: subject.business_date })
     if (runID) {
       if (!validCustodyRunID(runID)) throw new Error('Invalid saved run ID.')
@@ -171,7 +178,10 @@ export const custody = {
       if (!runID) throw new Error('A saved run is required for source figures.')
       query.set('include', 'reported_execution_figures')
     }
-    if (anchor !== undefined) {
+    if (book) {
+      if (!runID || !signedStatement(anchor) || !journalPosition(book.journalPosition) || book.journalPosition === '0') throw new Error('A verified signed book comparison is required.')
+      query.set('include', 'previous_book_comparison')
+    } else if (anchor !== undefined) {
       if (!runID || !previousStatementPrefix(anchor)) throw new Error('A later signed comparison is required.')
       query.set('include', 'previous_comparison')
     }
@@ -186,10 +196,14 @@ export const custody = {
     const verified = result.state === 'recorded' && fullComparison(result.outcome)
     if (historicalClose(result.outcome) && (result.account_assignment_verified !== true || !signedStatement(result.statement_id))) throw invalid()
     const correction = result.state === 'recorded' && result.outcome === 'historical_quantity_correction'
+    if (result.previous_of_journal_position !== undefined && (!book || result.state !== 'recorded')) throw invalid()
     if (anchor !== undefined && result.state === 'recorded') {
       if (!verified || result.account_assignment_verified !== true || result.previous_of_run_id !== runID || result.previous_of_statement_id !== anchor ||
-          !validCustodyRunID(result.run_id) || result.run_id === runID || !signedStatement(result.statement_id) ||
-          result.statement_id.slice(0, -64) !== previousStatementPrefix(anchor)) throw invalid()
+          !validCustodyRunID(result.run_id) || result.run_id === runID || !signedStatement(result.statement_id)) throw invalid()
+      if (book) {
+        if (result.statement_id !== anchor || result.previous_of_journal_position !== book.journalPosition ||
+            !journalPosition(result.journal_position) || BigInt(result.journal_position) >= BigInt(book.journalPosition)) throw invalid()
+      } else if (result.statement_id.slice(0, -64) !== previousStatementPrefix(anchor)) throw invalid()
     } else if (result.previous_of_run_id !== undefined || result.previous_of_statement_id !== undefined) throw invalid()
     if ((!reportedFigures || !verified) && result.reported_execution_figures !== undefined) throw invalid()
     const correctionID = result.historical_quantity_correction_run_id
@@ -246,8 +260,7 @@ export const custody = {
           (!verified && !['no_statement', 'failed', 'historical_quantity_correction'].some(value => value === result.outcome))) throw invalid()
       if (result.outcome === 'no_statement' && result.statement_id !== undefined) throw invalid()
       const scoped = result.journal_position !== undefined || result.scope_mode !== undefined
-      if (scoped && (!['declared', 'derived'].some(value => value === result.scope_mode) || typeof result.journal_position !== 'string' ||
-          !/^(0|[1-9]\d{0,18})$/.test(result.journal_position) || BigInt(result.journal_position) > 9223372036854775807n)) throw invalid()
+      if (scoped && (!['declared', 'derived'].some(value => value === result.scope_mode) || !journalPosition(result.journal_position))) throw invalid()
       if (verified && (!result.statement_id || !scoped)) throw invalid()
       if (reportedFigures) {
         if (!historical || correction || result.account_assignment_verified !== true || transactions?.transaction_pass !== 'ran') throw invalid()

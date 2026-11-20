@@ -21,6 +21,7 @@ type DatedResult struct {
 	StatementID                       string
 	SignedStatementSHA256             string
 	PreviousOfStatementID             string
+	PreviousOfJournalPosition         *int64
 	reportedTransactions              []recon.Transaction
 	Run                               Run
 }

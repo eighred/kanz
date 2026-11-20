@@ -114,7 +114,22 @@ async function main() {
     }
     stage = 'authorized-reload-details'
     await page.reload()
-    const reopened = await capture(await lookup(original), false)
+    let originalReceipt
+    if (phase === 'corrected') {
+      const latest = await lookup()
+      summary(latest, true)
+      assert.equal(await region.getByLabel('Saved run ID (optional)', { exact: true }).inputValue(), '')
+      const ready = page.waitForResponse(r => r.request().method() === 'GET' &&
+        r.url() === base + query(latest.run_id) + '&include=previous_book_comparison')
+      await region.getByRole('button', { name: 'Find earlier book comparison' }).click()
+      const response = await ready
+      assert.equal(response.status(), 200)
+      originalReceipt = await response.json()
+      assert.deepEqual([originalReceipt.previous_of_run_id, originalReceipt.previous_of_statement_id, originalReceipt.previous_of_journal_position],
+        [latest.run_id, latest.statement_id, latest.journal_position])
+      assert.equal(originalReceipt.statement_id, latest.statement_id)
+    } else originalReceipt = await lookup(original)
+    const reopened = await capture(originalReceipt, false)
     if (phase === 'original') {
       assert.deepEqual(reopened, retained)
       await fs.writeFile(path + '.fee-original', retained, { flag: 'wx', mode: 0o600 })
@@ -126,8 +141,8 @@ async function main() {
       stage = name + '-open-response'
       const denied = await contextFor(name)
       try {
-        for (const id of ['', original, corrected]) {
-          const response = await denied.request.get(base + query(id), { maxRedirects: 0 })
+        for (const path of [query(''), query(original), query(corrected), query(corrected) + '&include=previous_book_comparison']) {
+          const response = await denied.request.get(base + path, { maxRedirects: 0 })
           assert.equal(response.status(), status)
           const text = await response.text()
           for (const privateValue of [original, corrected, statement, 'external-7', 'execution_economics']) assert(!text.includes(privateValue))
