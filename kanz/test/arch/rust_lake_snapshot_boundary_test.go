@@ -46,8 +46,8 @@ protoc-bin-vendored = "=3.3.0"`
 // comments cannot confer an exemption or hide executable tokens.
 var rustLakePinned = map[string]string{
 	"tests/shared_arrow.rs":     "14651a842f19307f88837f48bb534eab275111f968dab44ca648485f1a994ace",
-	"tests/named_zone.rs":       "90e4f3592c8fd20a08304138f1bd52b5dcef8461ee72de6eb81c3783e960c32e",
-	"tests/object_metadata.rs":  "b7ab4ac12aea18cd5e99c369d8272852e53de2be5c969b3c7cb5142177126eec",
+	"tests/named_zone.rs":       "d5d08e8fbc5ed2fa89b18f64850df2e918bcb53d7f6058a748cef5c5fb3cd8ca",
+	"tests/object_metadata.rs":  "5b984bc78d1fa59dd118c57e4b3b8b01b271b6f2c10bba690d8c3f0aa07ec416",
 	"build.rs":                  "b559820e7779ae3d824500f79150c8d41ebf44143a16f1422dfbcb82f42ab5a4",
 	"examples/sandbox-probe.rs": "14cc4f882990c62aa6a374ad4b2c2332a4081bfdb846b84117ce10bfa205461c",
 	"src/main.rs":               "e0a32604d98cf6f72eaf21fbcbe836a59a9a2e389816dfee7bb0c1e23a3f3c12",
