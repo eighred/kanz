@@ -1706,8 +1706,8 @@ data:
 
       # ---- tenant template — one account per tenant ------------------------
       # Per-account JetStream quota (noisy-neighbor bound; MT-01e tightens it).
-      # Streams are provisioned per-account by running the nats-bootstrap script
-      # connected on this account (see README "Per-tenant streams").
+      # Run bootstrap.sh tenant under this account's provisioning identity.
+      # Its 15 domain streams fit the 16-stream cap (README "Per-tenant streams").
       acme {
         jetstream { max_memory: 64MB, max_file: 2GB, max_streams: 16, max_consumers: 256 }
 
