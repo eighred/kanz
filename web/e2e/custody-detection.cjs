@@ -1,0 +1,84 @@
+// The signed-source pilot harness keeps synthetic session cookies on private stdin.
+const assert = require('node:assert/strict')
+const { chromium } = require(process.env.TEST_MFA_PLAYWRIGHT)
+
+async function main() {
+  let raw = ''
+  for await (const chunk of process.stdin) {
+    raw += chunk
+    assert(raw.length < 64 * 1024)
+  }
+  const { base, cookies, expected } = JSON.parse(raw)
+  const origin = new URL(base)
+  assert.equal(origin.protocol, 'http:')
+  assert.equal(origin.hostname, '127.0.0.1')
+  assert.equal(origin.origin, base)
+  assert(origin.port)
+  assert.equal(expected.portfolio_id, 'PF1')
+  assert.equal(expected.custodian_id, 'CUST-A')
+  for (const name of ['break_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(typeof expected[name], 'string')
+  assert.equal(expected.detection.business_date, '2020-02-04')
+  assert.match(expected.detection.statement_id, /^custody-batch\.v1\.synthetic-source\.r1\.[0-9a-f]{64}$/)
+  assert(expected.detection.run_id)
+  const endpoint = base + '/api/v1/custody/breaks'
+  const browser = await chromium.launch({ headless: true, timeout: 10_000 })
+  try {
+    for (const [name, status] of Object.entries({ authorized: 200, foreign: 404, excluded: 200, unfunded: 403 })) {
+      const context = await browser.newContext()
+      try {
+        await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort())
+        await context.addCookies([{ name: 'kanz_session', value: cookies[name], url: base, httpOnly: true, sameSite: 'Lax' }])
+        const page = await context.newPage()
+        page.setDefaultTimeout(5_000)
+        for (const navigation of ['open', 'reload']) {
+          const response = page.waitForResponse(r => r.url() === endpoint && r.request().method() === 'GET')
+          if (navigation === 'open') await page.goto(base + '/custody-breaks')
+          else await page.reload()
+          const received = await response
+          assert.equal(received.status(), status)
+          const data = await received.json()
+          if (name !== 'authorized') {
+            if (name === 'excluded') {
+              assert.equal(data.count, 0)
+              assert.deepEqual(data.breaks, [])
+              await page.getByText('No outstanding custody breaks were returned', { exact: false }).waitFor()
+            } else {
+              await page.getByRole('alert').waitFor()
+              assert.equal(await page.getByRole('table').count(), 0)
+            }
+            for (const secret of [expected.break_id, expected.detection.run_id, expected.detection.statement_id]) {
+              assert(!JSON.stringify(data).includes(secret))
+              assert(!(await page.locator('body').innerText()).includes(secret))
+            }
+            continue
+          }
+          assert.equal(data.actions_enabled, false)
+          const matches = data.breaks.filter(item => item.break_id === expected.break_id)
+          assert.equal(matches.length, 1)
+          const record = matches[0]
+          for (const field of ['portfolio_id', 'custodian_id', 'key', 'ibor', 'custodian', 'difference']) assert.equal(record[field], expected[field])
+          assert.deepEqual(record.detection, expected.detection)
+          assert.equal(record.values_state, 'exact')
+          const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: expected.break_id, exact: true }) })
+          await row.waitFor()
+          assert.equal(await row.getByRole('button', { name: /^(Claim|Explain)$/ }).count(), 0)
+          const table = page.getByRole('table')
+          const headers = await table.getByRole('columnheader').allTextContents()
+          const cells = row.locator(':scope > th, :scope > td')
+          for (const [heading, value] of [['IBOR', expected.ibor], ['Custodian', expected.custodian], ['Difference', expected.difference]]) {
+            assert.equal((await cells.nth(headers.indexOf(heading)).innerText()).trim(), value)
+          }
+          await row.getByText('View detection evidence', { exact: true }).click()
+          const labels = ['Portfolio', 'Custodian ID', 'Business date', 'Reconciliation run', 'Statement', 'Journal position', 'Account scope']
+          const values = [expected.portfolio_id, expected.custodian_id, expected.detection.business_date,
+            expected.detection.run_id, expected.detection.statement_id, expected.detection.journal_position ?? 'Unavailable', expected.detection.scope_mode ?? 'Unavailable']
+          const source = row.locator('details[open]')
+          assert.deepEqual(await source.locator('dt').allInnerTexts(), labels)
+          assert.deepEqual(await source.locator('dd').allInnerTexts(), values)
+        }
+      } finally { await context.close() }
+    }
+  } finally { await browser.close() }
+}
+
+main().catch(() => { process.exitCode = 1 })

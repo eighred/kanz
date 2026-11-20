@@ -7,6 +7,22 @@ afterEach(() => vi.restoreAllMocks())
 const item = { break_id: 'break-1', kind: 'quantity', key: 'BTC-USD', ibor: '1.00000001', custodian: '1', difference: '0.00000001', status: 'OPEN', first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-02T00:00:00Z', status_changed_at: '2026-01-01T00:00:00Z', age_seconds: 86400 }
 
 describe('custody response boundary', () => {
+  const detection = { run_id: 'run-1', statement_id: 'source-r1', business_date: '2020-02-04', journal_position: '9007199254740993', scope_mode: 'declared' }
+  const scoped = { ...item, portfolio_id: 'PF1', custodian_id: 'CUST-A', detection }
+  it('preserves the exact retained source and optional fields', async () => {
+    const get = vi.spyOn(api, 'get')
+    for (const source of [detection, { ...detection, journal_position: '0' }, { run_id: 'r', statement_id: 's', business_date: '2024-02-29' }]) {
+      get.mockResolvedValueOnce({ breaks: [{ ...scoped, detection: source }], count: 1 })
+      expect((await custody.breaks())[0]?.detection).toEqual(source)
+    }
+  })
+  it.each([{ portfolio_id: '' }, { custodian_id: undefined }, { detection: null },
+    ...[{ run_id: '' }, { statement_id: '' }, { business_date: '2025-02-29' }, { journal_position: 1 }, { journal_position: '-1' },
+      { journal_position: '9223372036854775808' }, { scope_mode: [] }].map(fields => ({ detection: { ...detection, ...fields } }))])('refuses malformed detection and scope %#', async fields => {
+    vi.spyOn(api, 'get').mockResolvedValueOnce({ breaks: [{ ...scoped, ...fields }], count: 1 })
+    await expect(custody.breaks()).rejects.toThrow('Invalid custody response.')
+  })
+
   it('preserves exact decimal text', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({ breaks: [item], count: 1 })
     expect((await custody.breaks())[0]?.difference).toBe('0.00000001')
