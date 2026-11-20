@@ -23,26 +23,28 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/fillfact"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
 // executionReport is the Binance user-data "executionReport" event (the fields
 // the ingester reads). Fills are the x=TRADE reports.
 type executionReport struct {
-	Event         string `json:"e"` // "executionReport"
-	Symbol        string `json:"s"`
-	ClientOrderID string `json:"c"`
-	Side          string `json:"S"`
-	ExecType      string `json:"x"` // NEW, TRADE, CANCELED, EXPIRED, REJECTED
-	OrderStatus   string `json:"X"` // NEW, PARTIALLY_FILLED, FILLED, ...
-	LastQty       string `json:"l"` // last executed quantity
-	LastPrice     string `json:"L"` // last executed price
-	Commission    string `json:"n"`
-	CommissionAst string `json:"N"`
-	CumQty        string `json:"z"` // cumulative filled quantity
-	OrderQty      string `json:"q"` // order quantity
-	TradeID       *int64 `json:"t"`
-	TransactTime  int64  `json:"T"`
+	Event           string `json:"e"` // "executionReport"
+	Symbol          string `json:"s"`
+	ClientOrderID   string `json:"c"`
+	ExchangeOrderID int64  `json:"i"`
+	Side            string `json:"S"`
+	ExecType        string `json:"x"` // NEW, TRADE, CANCELED, EXPIRED, REJECTED
+	OrderStatus     string `json:"X"` // NEW, PARTIALLY_FILLED, FILLED, ...
+	LastQty         string `json:"l"` // last executed quantity
+	LastPrice       string `json:"L"` // last executed price
+	Commission      string `json:"n"`
+	CommissionAst   string `json:"N"`
+	CumQty          string `json:"z"` // cumulative filled quantity
+	OrderQty        string `json:"q"` // order quantity
+	TradeID         *int64 `json:"t"`
+	TransactTime    int64  `json:"T"`
 	// EventTime is the stream's OWN clock for this report — when Binance emitted
 	// it, not when the trade matched — and it is the ORDERING TOKEN this adapter
 	// carries onto its view (#1046).
@@ -84,8 +86,9 @@ func tradeTimestamp(ms int64) (*timestamppb.Timestamp, error) {
 // Fills are keyed by a deterministic fill_id (symbol-tradeId) identical to the
 // BinanceVenue synchronous path, so downstream folds dedup the two idempotently.
 type UserDataIngester struct {
-	stream  UserDataStream
-	symbols StaticSymbolMap
+	acknowledge func(context.Context, *orderpb.OrderState, string, int64, orderview.PlacementSource) error
+	stream      UserDataStream
+	symbols     StaticSymbolMap
 	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
 	// enrich the report; written so the fill this ingester just published as a
 	// FACT is also the fill the adapter believes in — see handle.
@@ -117,6 +120,7 @@ type UserDataIngester struct {
 
 // UserDataConfig configures the ingester.
 type UserDataConfig struct {
+	acknowledge   func(context.Context, *orderpb.OrderState, string, int64, orderview.PlacementSource) error
 	provenAccount string
 	Symbols       StaticSymbolMap
 	Stream        UserDataStream
@@ -140,8 +144,8 @@ func newUserDataIngester(cfg UserDataConfig) *UserDataIngester {
 		cfg.Logger = slog.Default()
 	}
 	return &UserDataIngester{
-		account: cfg.provenAccount,
-		stream:  cfg.Stream, symbols: cfg.Symbols, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
+		account: cfg.provenAccount, acknowledge: cfg.acknowledge,
+		stream: cfg.Stream, symbols: cfg.Symbols, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
 		refusal: ReportRefusal{
 			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused,
 			OnDropped: cfg.OnDropped, Logger: cfg.Logger,
@@ -321,6 +325,15 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		// every repeat report, in a reconnect loop that fixes nothing.
 		i.refusal.Refuse(rep.ClientOrderID, herr)
 		return nil
+	}
+	if i.acknowledge != nil {
+		if err := i.acknowledge(ctx, st, rep.Symbol, rep.ExchangeOrderID, orderview.ExecutionReport); err != nil {
+			if errors.Is(err, orderview.ErrPlacementConflict) {
+				i.refusal.Refuse(rep.ClientOrderID, err)
+				return nil
+			}
+			return fmt.Errorf("binance: private placement evidence unavailable: %w", err)
+		}
 	}
 	fill := &orderpb.Fill{
 		FillId:           fmt.Sprintf("%s-%d", rep.Symbol, *rep.TradeID),

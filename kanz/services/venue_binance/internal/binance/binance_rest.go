@@ -26,14 +26,15 @@ import (
 // the endpoints the connector needs are implemented; no vendor SDK is imported,
 // so this compiles cleanly behind the build tag with the stdlib alone.
 type binanceREST struct {
-	baseURL    string
-	apiKey     string
-	apiSecret  []byte
-	recvWindow int
-	httpc      *http.Client
-	bucket     *weightBucket
-	now        func() time.Time
-	onThrottle func() // structural alert hook when the budget is exhausted
+	checkPlacement func(context.Context, string, string, int64) error
+	baseURL        string
+	apiKey         string
+	apiSecret      []byte
+	recvWindow     int
+	httpc          *http.Client
+	bucket         *weightBucket
+	now            func() time.Time
+	onThrottle     func() // structural alert hook when the budget is exhausted
 }
 
 type restConfig struct {
@@ -204,7 +205,14 @@ func (c *binanceREST) queryOrder(ctx context.Context, symbol, origClientOrderID 
 	if err != nil {
 		return nil, err
 	}
-	return decodeBoundOrder(body, status, symbol, origClientOrderID)
+	order, err := decodeBoundOrder(body, status, symbol, origClientOrderID)
+	if err == nil && c.checkPlacement != nil {
+		err = c.checkPlacement(ctx, origClientOrderID, symbol, order.OrderID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return order, nil
 }
 
 // An order lookup can authorize adoption, withdrawal, or a second placement.

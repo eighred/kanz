@@ -85,16 +85,24 @@ func TestVerifiedAccountsShareRawTradeAliasAcrossAdapterRestart(t *testing.T) {
 		if err := store.Record(ctx, missingFee); err != nil {
 			t.Fatal(err)
 		}
+		conflicting := proto.Clone(state).(*orderpb.OrderState)
+		conflicting.OrderId = "conflicting-" + account
+		if err := store.Record(ctx, conflicting); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AcknowledgePlacement(ctx, conflicting, orderview.Placement{AccountUID: strconv.Itoa(uid), Symbol: "BTCUSDT", OrderID: 108}, orderview.PlacementResponse); err != nil {
+			t.Fatal(err)
+		}
 		var submitted atomic.Int32
 		// Each account really returns the same symbol and trade 0. The order
 		// update time differs from the signed per-match time.
 		report := func(order string) string {
-			return fmt.Sprintf(`{"e":"executionReport","E":1700000000001,"s":"BTCUSDT","c":%q,"S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":0,"T":1700000000000,"n":"0.1","N":"USDT"}`, order)
+			return fmt.Sprintf(`{"e":"executionReport","E":1700000000001,"s":"BTCUSDT","c":%q,"i":42,"S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":0,"T":1700000000000,"n":"0.1","N":"USDT"}`, order)
 		}
 		rest, _ := privateAccountStreamFixture(t, uid, func(session context.Context, conn *websocket.Conn) {
 			withoutFee := strings.Replace(report(missingFee.OrderId), `,"n":"0.1"`, "", 1)
 			for _, frame := range []string{confirmed, `{"subscriptionId":0,"event":` + report(legacy.OrderId) + "}",
-				`{"subscriptionId":0,"event":` + withoutFee + "}", `{"subscriptionId":0,"event":` + report(id) + "}"} {
+				`{"subscriptionId":0,"event":` + withoutFee + "}", `{"subscriptionId":0,"event":` + report(conflicting.OrderId) + "}", `{"subscriptionId":0,"event":` + report(id) + "}"} {
 				if err := conn.Write(session, websocket.MessageText, []byte(frame)); err != nil {
 					return
 				}
@@ -204,6 +212,10 @@ func TestVerifiedAccountsShareRawTradeAliasAcrossAdapterRestart(t *testing.T) {
 			rejected, _, ok, err := durable.Get(ctx, legacy.OrderId)
 			if err != nil || !ok || rejected.GetQuarantine() == nil || rejected.GetVenueAccountId() != "" {
 				t.Fatal("legacy order was not retained and held", err)
+			}
+			mismatch, _, ok, err := durable.Get(ctx, conflicting.OrderId)
+			if err != nil || !ok || mismatch.GetQuarantine() == nil || mismatch.GetFilledQuantity().GetCoefficient() != 0 {
+				t.Fatal("conflicting exchange order reached the working fill view", err)
 			}
 			incomplete, _, ok, err := durable.Get(ctx, missingFee.OrderId)
 			if err != nil || !ok || incomplete.GetQuarantine() == nil || incomplete.GetFilledQuantity().GetCoefficient() != 0 {

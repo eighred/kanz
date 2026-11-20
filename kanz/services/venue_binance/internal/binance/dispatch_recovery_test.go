@@ -2,11 +2,15 @@ package binance
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,15 +18,19 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/platform/halt"
+	"github.com/eighred/kanz/internal/testidentity"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/test/backing"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 )
 
 func startBinanceRPC(t *testing.T, open func() *orderview.Postgres, f *fakeBinance) (*execution.GRPCVenue, func()) {
@@ -36,13 +44,30 @@ func startBinanceRPC(t *testing.T, open func() *orderview.Postgres, f *fakeBinan
 	if err != nil || !proof.Verified {
 		t.Fatalf("signed loopback account proof: %v", err)
 	}
-	lis := bufconn.Listen(1 << 20)
-	rpc := grpc.NewServer()
+	domain := spiffeid.RequireTrustDomainFromString("kanz.internal")
+	ca, err := testidentity.NewAuthority(domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := func(name string) (*testidentity.Source, spiffeid.ID) {
+		id := spiffeid.RequireFromString("spiffe://kanz.internal/ns/kanz-services/sa/" + name)
+		source, err := ca.Issue(id, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source, id
+	}
+	oms, omsID := issue("oms")
+	adapter, adapterID := issue("venue-binance")
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpc := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsconfig.MTLSServerConfig(adapter, adapter, tlsconfig.AuthorizeID(omsID)))))
 	venuepb.RegisterVenueAdapterServiceServer(rpc, server.NewWithDispatchEvidence(connector.Venue(), view, view,
 		proof, halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	go func() { _ = rpc.Serve(lis) }()
-	cc, err := grpc.NewClient("passthrough:///fixture", grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }))
+	cc, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(tlsconfig.MTLSClientConfig(oms, oms, tlsconfig.AuthorizeID(adapterID)))))
 	if err != nil {
 		rpc.Stop()
 		t.Fatal(err)
@@ -106,6 +131,10 @@ func TestMissingOrderAfterAdapterRestartCannotAuthorizeASecondPlacement(t *testi
 	if _, err := restarted.Execute(ctx, order); status.Code(err) != codes.FailedPrecondition || f.posts != 1 {
 		t.Fatalf("repeated placement after restart: %v, placements=%d", err, f.posts)
 	}
+	ack, found, err := open().PlacementFor(ctx, order.GetOrderId())
+	if err != nil || found || ack != (orderview.PlacementReceipt{}) {
+		t.Fatalf("unknown POST acquired a durable acknowledgement: %+v %v %v", ack, found, err)
+	}
 	// A different order never reached the adapter. Both independent reads agree.
 	view, err = restarted.QueryOrder(ctx, omsRedispatch("never-dispatched"))
 	if err != nil || view.State != execution.OrderViewUnknown {
@@ -126,6 +155,24 @@ func TestPendingBinanceTradeHistoryAcrossAdapterRestart(t *testing.T) {
 	order := omsRedispatch("pending-history")
 	const partial = `{"symbol":"BTCUSDT","orderId":7,"clientOrderId":"pending-history","status":"PARTIALLY_FILLED","executedQty":"0.6"}`
 	f.newOrderBody, f.queryBody, f.myTradesBody = partial, partial, "[]"
+	witness := open()
+	want := orderview.Placement{AccountUID: "12345678", Symbol: "BTCUSDT", OrderID: 7}
+	f.onRequest = func(r *http.Request) {
+		params := r.URL.Query()
+		signature := params.Get("signature")
+		params.Del("signature")
+		mac := hmac.New(sha256.New, []byte("fixture-secret"))
+		_, _ = mac.Write([]byte(params.Encode()))
+		if r.Header.Get("X-MBX-APIKEY") != "fixture-key" || signature != hex.EncodeToString(mac.Sum(nil)) {
+			t.Error("unsigned synthetic account, placement or history request")
+		}
+	}
+	f.onHistory = func() {
+		got, found, err := witness.PlacementFor(t.Context(), order.GetOrderId())
+		if err != nil || !found || got.Placement != want || got.Source != orderview.PlacementResponse || got.RecordedAt.IsZero() {
+			t.Errorf("history started before committed placement: got=%+v found=%v err=%v", got, found, err)
+		}
+	}
 	first, stop := startBinanceRPC(t, open, f)
 	fills, err := first.Execute(t.Context(), order)
 	stop()
@@ -134,6 +181,21 @@ func TestPendingBinanceTradeHistoryAcrossAdapterRestart(t *testing.T) {
 	}
 	restarted, stop := startBinanceRPC(t, open, f)
 	defer stop()
+	// A new server and SQL pool must refuse another numeric exchange order
+	// even though this positive signed answer echoes our original client ID.
+	f.queryBody = strings.Replace(partial, `"orderId":7`, `"orderId":8`, 1)
+	got, err := restarted.QueryOrder(t.Context(), order)
+	if err != nil || got.State != execution.OrderViewIndeterminate || got.Reason == "" || len(got.Fills) != 0 || f.myTradesCalls != 1 {
+		t.Fatalf("conflicting exchange identity reached history: %+v %v reads=%d", got, err, f.myTradesCalls)
+	}
+	f.queryBody = partial
+	foreign := proto.Clone(order).(*orderpb.OrderState)
+	foreign.PortfolioId = "other-portfolio"
+	previousGets := f.gets
+	got, err = restarted.QueryOrder(t.Context(), foreign)
+	if err != nil || got.State != execution.OrderViewIndeterminate || len(got.Fills) != 0 || f.gets != previousGets {
+		t.Fatalf("foreign portfolio reached persisted order: %+v %v", got, err)
+	}
 	for _, trades := range []string{"[]", `[{"symbol":"BTCUSDT","id":10,"orderId":7,"qty":"0.2","price":"50000","commission":"0.01","commissionAsset":"USD","isBuyer":true,"time":1750000000100}]`} {
 		f.myTradesBody = trades
 		view, err := restarted.QueryOrder(t.Context(), order)
@@ -198,5 +260,37 @@ func TestBinancePlacementRequiresConfirmedRestingOrCompleteMatches(t *testing.T)
 				t.Fatalf("unresolved placement: err=%v fills=%d POSTs=%d", err, len(fills), f.posts)
 			}
 		})
+	}
+}
+
+// A second local client ID must not acquire the first order's exchange identity.
+func TestAcknowledgementConflictStopsBeforeTradeHistory(t *testing.T) {
+	open := backing.VenueStore(t, "../../migrations")
+	f := newFakeBinance(t)
+	f.accountBody = `{"uid":12345678}`
+	rpc, stop := startBinanceRPC(t, open, f)
+	defer stop()
+	first := omsRedispatch("first")
+	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":7,"clientOrderId":"first","status":"NEW","executedQty":"0"}`
+	if _, err := rpc.Execute(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	other := omsRedispatch("second")
+	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":7,"clientOrderId":"second","status":"PARTIALLY_FILLED","executedQty":"0.6"}`
+	fills, err := rpc.Execute(t.Context(), other)
+	if err == nil || len(fills) != 0 || f.posts != 2 || f.myTradesCalls != 0 {
+		t.Fatalf("conflicting response reached trade history: fills=%d posts=%d history=%d err=%v", len(fills), f.posts, f.myTradesCalls, err)
+	}
+	store := open()
+	if _, found, err := store.PlacementFor(t.Context(), other.GetOrderId()); found || err != nil {
+		t.Fatalf("conflicting exchange identity was recorded: %v %v", found, err)
+	}
+	f.queryBody = f.newOrderBody
+	v, err := rpc.QueryOrder(t.Context(), other)
+	if err != nil || v.State != execution.OrderViewIndeterminate || len(v.Fills) != 0 || f.myTradesCalls != 0 {
+		t.Fatalf("unsigned alias adopted another order on query: %+v %v", v, err)
+	}
+	if _, err = rpc.Execute(t.Context(), other); status.Code(err) != codes.FailedPrecondition || f.posts != 2 {
+		t.Fatalf("refused acknowledgement authorized another placement: %v", err)
 	}
 }

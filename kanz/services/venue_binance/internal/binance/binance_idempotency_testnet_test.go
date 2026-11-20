@@ -210,6 +210,7 @@ func TestTestnet_IdempotencyAndAmbiguousTimeoutAgainstRealVenue(t *testing.T) {
 	}
 
 	venue.durableOrders = view
+	venue.placements = view
 	adapter := server.NewWithDispatchEvidence(venue, view, view, proof, halt.OpenGate(nil), slog.Default())
 	defer func() {
 		cleanupCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)

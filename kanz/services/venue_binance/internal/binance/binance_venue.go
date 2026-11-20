@@ -27,12 +27,13 @@ import (
 // come back inline and are returned to the router; a resting LIMIT returns no
 // fills here and is filled asynchronously by the user-data stream (Phase 3.2).
 type BinanceVenue struct {
-	mic             string
-	account         string
-	accountVerified atomic.Bool
-	rest            *binanceREST
-	symbols         SymbolMapper
-	now             func() time.Time
+	mic         string
+	account     string
+	verifiedUID atomic.Pointer[string]
+	placements  placementStore
+	rest        *binanceREST
+	symbols     SymbolMapper
+	now         func() time.Time
 	// The RPC server records every dispatch here before calling Execute.
 	// A memory view can forget the entire history during restart.
 	durableOrders *orderview.Postgres
@@ -56,7 +57,11 @@ func NewBinanceVenue(cfg BinanceConfig) *BinanceVenue {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &BinanceVenue{mic: cfg.MIC, account: cfg.Account, rest: cfg.REST, symbols: cfg.Symbols, now: cfg.Now}
+	v := &BinanceVenue{mic: cfg.MIC, account: cfg.Account, rest: cfg.REST, symbols: cfg.Symbols, now: cfg.Now}
+	if v.rest != nil {
+		v.rest.checkPlacement = v.checkPlacement
+	}
+	return v
 }
 
 // NewBinanceVenueFromSettings assembles the rate bucket + signed REST client +
@@ -85,7 +90,7 @@ func (v *BinanceVenue) Account() string { return v.account }
 // A configured local account label acquires meaning only after Start has
 // checked this same REST credential against the deployment's bound exchange UID.
 func (v *BinanceVenue) provenAccount() string {
-	if v != nil && v.accountVerified.Load() {
+	if v != nil && v.verifiedUID.Load() != nil {
 		return v.account
 	}
 	return ""
@@ -239,6 +244,10 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 	if err := checkOrderAccount(st, v.mic, v.provenAccount()); err != nil {
 		return nil, err
 	}
+	if v.placements == nil {
+		return nil, fmt.Errorf("%w: durable placement acknowledgements require a store", execution.ErrReconcileEvidence)
+	}
+	source := orderview.PlacementResponse
 	resp, err := v.rest.newOrder(ctx, params)
 	if err != nil {
 		// Idempotency recovery: an ambiguous failure (timeout, duplicate) may
@@ -262,7 +271,19 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 			return nil, err
 		}
 		resp = q
+		source = orderview.RecoveryQuery
 		ctx = recoveryCtx
+	}
+	switch resp.Status {
+	case "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "PENDING_CANCEL":
+		// A positive placement survives caller cancellation or a subsequent
+		// failure to obtain complete match history.
+		ackCtx, cancelAck := newPlacementRecoveryContext(ctx)
+		err := v.acknowledge(ackCtx, st, symbol, resp.OrderID, source)
+		cancelAck()
+		if err != nil {
+			return nil, fmt.Errorf("binance: persist placement acknowledgement: %w", err)
+		}
 	}
 	if resp.Status == "NEW" || resp.Status == "FILLED" || resp.Status == "PARTIALLY_FILLED" {
 		// FULL supplies only an order-level time. Placement and later recovery

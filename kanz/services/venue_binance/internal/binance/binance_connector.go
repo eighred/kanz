@@ -42,6 +42,9 @@ type BinanceConnector struct {
 func NewBinanceConnector(settings VenueSettings, wsBase string, orders orderview.Store) *BinanceConnector {
 	venue := NewBinanceVenueFromSettings(settings)
 	venue.durableOrders, _ = orders.(*orderview.Postgres)
+	if venue.durableOrders != nil {
+		venue.placements = venue.durableOrders
+	}
 	endpoint, err := privateStreamEndpoint(settings.BaseURL, wsBase)
 	c := &BinanceConnector{settings: settings, rest: venue.rest, venue: venue, streamConfigErr: err}
 	c.dialUserData = func(ctx context.Context) (UserDataStream, func(), error) {
@@ -155,7 +158,7 @@ func (c *BinanceConnector) Start(ctx context.Context, expectedUID string, deps W
 // verifyAccount binds the local routing account to the UID returned for the
 // same credential used by placement, history and the private subscription.
 func (v *BinanceVenue) verifyAccount(ctx context.Context, expectedUID string, logger *slog.Logger) (execution.AccountProof, error) {
-	v.accountVerified.Store(false)
+	v.verifiedUID.Store(nil)
 	if expectedUID == "" || v.account == "" {
 		return execution.AccountProof{}, fmt.Errorf("%w: a local account and bound BINANCE_VENUE_ACCOUNT_UID or its file mount are required", accountproof.ErrUnverifiable)
 	}
@@ -168,14 +171,16 @@ func (v *BinanceVenue) verifyAccount(ctx context.Context, expectedUID string, lo
 		// an unavailable proof from a confirmed account mismatch.
 		return execution.AccountProof{}, accountproof.ErrUnverifiable
 	}
-	v.accountVerified.Store(proof.Verified)
+	if proof.Verified {
+		v.verifiedUID.Store(&proof.ExchangeAccountID)
+	}
 	return proof, nil
 }
 
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 	ing := newUserDataIngester(UserDataConfig{
-		provenAccount: c.venue.provenAccount(),
-		Symbols:       StaticSymbolMap(c.settings.Symbols), Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
+		provenAccount: c.venue.provenAccount(), acknowledge: c.venue.acknowledge,
+		Symbols: StaticSymbolMap(c.settings.Symbols), Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
 		OnRefused: deps.OnFillRefused, OnDropped: deps.OnFillDropped, Logger: deps.Logger,
 	})
 	// THE RE-DIAL RATE IS THE THING THIS LOOP DECIDES, AND IT IS A VENUE-SAFETY

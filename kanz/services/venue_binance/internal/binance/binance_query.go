@@ -42,6 +42,7 @@ import (
 	"fmt"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
@@ -79,11 +80,23 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 	if err := checkOrderAccount(st, v.mic, v.provenAccount()); err != nil {
 		return OrderView{}, err
 	}
+	if v.durableOrders != nil {
+		current, _, found, err := v.durableOrders.Get(ctx, st.GetOrderId())
+		if err != nil {
+			return OrderView{}, err
+		}
+		if found && !orderview.SamePlacementScope(current, st) {
+			return OrderView{State: OrderViewIndeterminate, Reason: "Binance query conflicts with durable dispatch scope"}, nil
+		}
+	}
 	resp, err := v.rest.queryOrder(ctx, symbol, st.GetOrderId())
 	if err != nil {
 		// THE RATE-LIMIT CHECK IS FIRST AND IS NOT AN APIError. An exhausted
 		// weight budget is this connector refusing to fire a request at all; the
 		// exchange said nothing, so there is nothing to read as a verdict.
+		if errors.Is(err, orderview.ErrPlacementConflict) {
+			return OrderView{State: OrderViewIndeterminate, Reason: "Binance order identity contradicts the durable exchange acknowledgement"}, nil
+		}
 		if errors.Is(err, ErrRateLimited) {
 			return OrderView{}, err
 		}

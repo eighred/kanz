@@ -478,7 +478,8 @@ func TestPrivateStreamReplayOnJetStream(t *testing.T) {
 		t.Fatal("fixture account proof failed", err)
 	}
 	venue := NewBinanceVenue(BinanceConfig{Account: "fixture-account", Symbols: fixtureTradeSymbols(), REST: rest})
-	venue.accountVerified.Store(proof.Verified)
+	venue.verifiedUID.Store(&proof.ExchangeAccountID)
+	venue.placements = fixturePlacements{}
 	historyView, err := venue.QueryOrder(ctx, marketOrder("o1"))
 	if err != nil || len(historyView.Fills) != 1 || historyView.State != OrderViewFilled {
 		t.Fatalf("queried trade: %v %v", historyView, err)

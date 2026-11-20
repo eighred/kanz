@@ -41,6 +41,8 @@ type fakeBinance struct {
 	// aggregate dedups on.
 	myTradesBody  string
 	myTradesCalls int
+	onHistory     func()
+	onRequest     func(*http.Request)
 	cancelBody    string // body for DELETE /api/v3/order
 	// cancelStatus is the HTTP status for DELETE /api/v3/order (0 => 200). A 5xx
 	// here is THE ambiguous cancel: the exchange may or may not have withdrawn the
@@ -56,6 +58,9 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 	f := &fakeBinance{newOrderStatus: 200}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/order", func(w http.ResponseWriter, r *http.Request) {
+		if f.onRequest != nil {
+			f.onRequest(r)
+		}
 		q := r.URL.Query()
 		f.sawSignature = q.Get("signature") != ""
 		f.sawAPIKey = r.Header.Get("X-MBX-APIKEY") != ""
@@ -84,11 +89,20 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 			_, _ = w.Write([]byte(f.queryBody)) // GET: query-order
 		}
 	})
-	mux.HandleFunc("/api/v3/myTrades", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v3/myTrades", func(w http.ResponseWriter, r *http.Request) {
+		if f.onRequest != nil {
+			f.onRequest(r)
+		}
 		f.myTradesCalls++
+		if f.onHistory != nil {
+			f.onHistory()
+		}
 		_, _ = w.Write([]byte(f.myTradesBody))
 	})
-	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, r *http.Request) {
+		if f.onRequest != nil {
+			f.onRequest(r)
+		}
 		_, _ = w.Write([]byte(f.accountBody))
 	})
 	mux.HandleFunc("/api/v3/ticker/price", func(w http.ResponseWriter, r *http.Request) {
