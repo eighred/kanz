@@ -90,7 +90,7 @@ func TestCheckpointRefusalPreservesPriorBytes(t *testing.T) {
 }
 
 func TestCheckpointLegacyAndUnknownVersionRefused(t *testing.T) {
-	for _, version := range []uint32{0, 3, math.MaxUint32} {
+	for _, version := range []uint32{0, 4, math.MaxUint32} {
 		log := newMemLog()
 		source := New(time.Now, nil, WithLog(log, testTenant))
 		deliver(t, source, "seed", evtFilled, filledOrder("one", "fund-alpha", "BTC", orderpb.Side_SIDE_BUY, 1, 100))

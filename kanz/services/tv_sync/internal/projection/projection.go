@@ -168,7 +168,7 @@ func (p *Projection) Rehydrate(ctx context.Context) error {
 	// reaches is the same book either way.
 	folded := 0
 	return p.log.Replay(ctx, after, func(f Fact) error {
-		if _, err := p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge); err != nil {
+		if _, err := p.fold(p.tenant, f); err != nil {
 			return err
 		}
 		p.seq = f.Seq
@@ -226,7 +226,7 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 				p.mu.Unlock()
 				return errors.New("tv-sync: non-increasing durable fact sequence")
 			}
-			deltas, err := p.fold(tenant, f.EventType, f.Payload, f.Knowledge)
+			deltas, err := p.fold(tenant, f)
 			if err != nil {
 				p.mu.Unlock()
 				return err
@@ -241,7 +241,7 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 	}
 
 	p.mu.Lock()
-	deltas, err := p.fold(tenant, env.GetEventType(), payload, know)
+	deltas, err := p.fold(tenant, Fact{EventType: env.GetEventType(), Payload: payload, Knowledge: know})
 	p.mu.Unlock()
 	if err != nil {
 		return err
@@ -280,8 +280,9 @@ func decodeFact(payload []byte, ev proto.Message) bool {
 }
 
 // fold applies one FACT under p.mu and returns the deltas to stream.
-func (p *Projection) fold(tenant, eventType string, payload []byte, know time.Time) ([]Delta, error) {
-	switch eventType {
+func (p *Projection) fold(tenant string, fact Fact) ([]Delta, error) {
+	payload, know := fact.Payload, fact.Knowledge
+	switch fact.EventType {
 	case evtAccepted:
 		var ev orderpb.OrderAccepted
 		if !decodeFact(payload, &ev) {
@@ -293,13 +294,13 @@ func (p *Projection) fold(tenant, eventType string, payload []byte, know time.Ti
 		if !decodeFact(payload, &ev) {
 			return nil, nil
 		}
-		return p.foldOrderFill(tenant, ev.GetOrderId(), ev.GetState(), ev.GetFill(), know)
+		return p.foldOrderFill(tenant, ev.GetOrderId(), ev.GetState(), ev.GetFill(), fact)
 	case evtFilled:
 		var ev orderpb.OrderFilled
 		if !decodeFact(payload, &ev) {
 			return nil, nil
 		}
-		return p.foldOrderFill(tenant, ev.GetOrderId(), ev.GetState(), ev.GetFill(), know)
+		return p.foldOrderFill(tenant, ev.GetOrderId(), ev.GetState(), ev.GetFill(), fact)
 	case evtRouted:
 		var ev orderpb.OrderRouted
 		if !decodeFact(payload, &ev) {
@@ -386,7 +387,7 @@ func (p *Projection) transition(tenant, orderID string, status orderpb.OrderStat
 
 // A historical fill may use the account carried by its own OMS order FACT
 // only when the order, instrument, side and venue explicitly bind that account.
-func (p *Projection) foldOrderFill(tenant, orderID string, st *orderpb.OrderState, fill *orderpb.Fill, know time.Time) ([]Delta, error) {
+func normalizedOrderFill(orderID string, st *orderpb.OrderState, fill *orderpb.Fill) (*orderpb.Fill, error) {
 	if fill != nil && (fill.VenueExecutionId != "" || fill.VenueAccountId != "") {
 		if err := fillfact.Validate(fill); err != nil {
 			return nil, err
@@ -401,16 +402,24 @@ func (p *Projection) foldOrderFill(tenant, orderID string, st *orderpb.OrderStat
 			fill.VenueAccountId = st.VenueAccountId
 		}
 	}
-	d, err := p.appendFill(tenant, st.GetPortfolioId(), fill, know)
+	return fill, nil
+}
+
+func (p *Projection) foldOrderFill(tenant, orderID string, st *orderpb.OrderState, fill *orderpb.Fill, fact Fact) ([]Delta, error) {
+	fill, err := normalizedOrderFill(orderID, st, fill)
 	if err != nil {
 		return nil, err
 	}
-	return append(p.upsertOrder(tenant, st, st.GetStatus(), "", know), d...), nil
+	d, err := p.appendFill(tenant, st.GetPortfolioId(), fill, fact)
+	if err != nil {
+		return nil, err
+	}
+	return append(p.upsertOrder(tenant, st, st.GetStatus(), "", fact.Knowledge), d...), nil
 }
 
 var ErrUnresolvedFillAlias = errors.New("tv-sync: execution alias has incomplete venue-account evidence; verified source history required")
 
-func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know time.Time) ([]Delta, error) {
+func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, fact Fact) ([]Delta, error) {
 	if f == nil || accountID == "" {
 		return nil, nil
 	}
@@ -434,6 +443,15 @@ func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know 
 			}
 			return nil, nil
 		}
+		if len(a.baseline) > 0 && (source != nil || p.scopedFillHistory || a.legacyBaseline) {
+			if a.legacyBaseline || fact.priorFill == nil {
+				return nil, ErrUnresolvedFillAlias
+			}
+			duplicate, err := fact.priorFill(accountID, f)
+			if err != nil || duplicate {
+				return nil, err
+			}
+		}
 		if source != nil {
 			p.scopedFillHistory = true
 		}
@@ -446,7 +464,7 @@ func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know 
 		source: source, fillID: f.GetFillId(), orderID: f.GetOrderId(), instrument: f.GetInstrumentId(),
 		venue: f.GetVenue(), side: f.GetSide(),
 		qty: dec.FromProto(f.GetQuantity()), price: dec.FromProto(f.GetPrice()),
-		fee: feeRat(f), effective: f.GetExecutedAt().AsTime(), knowledge: know,
+		fee: feeRat(f), effective: f.GetExecutedAt().AsTime(), knowledge: fact.Knowledge,
 	}
 	a.execs = append(a.execs, ex)
 	// Maintain the as-of-now fold in the same order the full fold would visit

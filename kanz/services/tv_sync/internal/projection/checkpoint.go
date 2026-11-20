@@ -44,7 +44,8 @@ package projection
 // protected separately by tv_facts's (tenant_id, event_id) primary key; this set
 // is not that. Retention drops an id only in lockstep with the execution it
 // belongs to, never on a schedule of its own, so the dedup horizon is the
-// retention window and is floored in config — see retention.go.
+// retention window. Evicted venue identities are checked against the original
+// durable FACTs before another fill is applied — see execution_lookup.go.
 
 import (
 	"context"
@@ -119,6 +120,9 @@ func (p *Projection) snapshotLocked() (*tvsyncpb.Checkpoint, error) {
 		if err != nil {
 			return nil, err
 		}
+		if as.ExecutionHistoryVerified {
+			cp.ExactEncodingVersion = 3
+		}
 		cp.Accounts = append(cp.Accounts, as)
 	}
 	return cp, nil
@@ -167,6 +171,7 @@ func snapshotAccount(a *account) (*tvsyncpb.AccountSnapshot, error) {
 	// checkpoint that dropped this restores a book that starts when the window
 	// does — and an account that has never been evicted is indistinguishable
 	// from one whose baseline was lost, so the omission would report nothing.
+	out.ExecutionHistoryVerified = !a.legacyBaseline && (len(a.execs) > 0 || len(a.baseline) > 0)
 	if len(a.baseline) > 0 {
 		out.Baseline = make(map[string]*tvsyncpb.Lot, len(a.baseline))
 		for inst, l := range a.baseline {
@@ -213,7 +218,7 @@ func (p *Projection) restore(blob []byte) error {
 	// A legacy checkpoint cannot establish whether digits were already lost.
 	// Refuse before mutating state; rebuilding requires independently verified
 	// complete raw history, never an automatic fallback or marker rewrite.
-	if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 {
+	if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 && cp.GetExactEncodingVersion() != 3 {
 		return ErrCheckpointEncodingVersion
 	}
 	accounts := make(map[string]*account, len(cp.Accounts))
@@ -228,12 +233,24 @@ func (p *Projection) restore(blob []byte) error {
 		accounts[a.id] = a
 	}
 	p.accounts[p.tenant] = accounts
-	p.scopedFillHistory = cp.GetExactEncodingVersion() == 2
+	p.scopedFillHistory = cp.GetExactEncodingVersion() >= 2
 	return nil
 }
 
 func restoreAccount(as *tvsyncpb.AccountSnapshot, version uint32) (*account, error) {
 	a := newAccount(as.GetTenantId(), as.GetAccountId())
+	if as.ExecutionHistoryVerified && version < 3 {
+		return nil, ErrUnresolvedFillAlias
+	}
+	a.legacyBaseline = len(as.Baseline) > 0 && !as.ExecutionHistoryVerified
+	if !as.ExecutionHistoryVerified {
+		for _, execution := range as.Execs {
+			if execution.GetSourceFill() == nil {
+				a.legacyBaseline = true
+				break
+			}
+		}
+	}
 	for _, fid := range as.GetSeenFills() {
 		if _, duplicate := a.seenFills[fid]; duplicate || fid == "" {
 			return nil, ErrUnresolvedFillAlias
@@ -256,7 +273,7 @@ func restoreAccount(as *tvsyncpb.AccountSnapshot, version uint32) (*account, err
 		}
 		key := e.GetFillId()
 		if source := e.GetSourceFill(); source != nil {
-			if version != 2 || !validCheckpointFill(e, source) {
+			if version < 2 || !validCheckpointFill(e, source) {
 				return nil, fillfact.ErrExecutionIdentityConflict
 			}
 			key = fillfact.ExecutionKey(source)

@@ -156,6 +156,9 @@ message AccountSnapshot {
   // refused rather than answered from a window. Absent means nothing has been
   // dropped yet, which is the pre-retention posture and permits every read.
   google.protobuf.Timestamp retained_from = 7;
+  // Resident and evicted history came from an identity-checked fold. An older
+  // alias-only resident row must remain unverified if it is later evicted.
+  bool execution_history_verified = 8;
 }
 
 // Checkpoint is every account's state at one point in this tenant's fact log.
@@ -174,5 +177,6 @@ message Checkpoint {
   // refuse v2 before folding the tail using its alias-only deduplication.
   // 0 is legacy encoding, which may have rounded values. Never relabel or
   // restore it without independently establishing complete source history.
+  // 3 requires durable execution lookup for restored evicted baselines.
   uint32 exact_encoding_version = 5;
 }

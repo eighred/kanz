@@ -99,7 +99,7 @@ func ambiguousAppend(t *testing.T, source Log, retry bool) {
 	assertRecoveredPosition(t, restored)
 	// Independent full log replay, without the checkpoint shortcut.
 	full := New(func() time.Time { return now }, nil)
-	if err := source.Replay(ctx, 0, func(f Fact) error { full.fold(testTenant, f.EventType, f.Payload, f.Knowledge); return nil }); err != nil {
+	if err := source.Replay(ctx, 0, func(f Fact) error { full.fold(testTenant, f); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	assertRecoveredPosition(t, full)

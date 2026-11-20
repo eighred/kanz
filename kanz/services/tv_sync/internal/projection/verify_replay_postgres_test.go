@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,45 +107,38 @@ func TestReplayVerifierPostgresRefusesEmptyCorruptAndOversized(t *testing.T) {
 	if _, err := VerifyPostgresSnapshot(ctx, pool, testTenant, 7*24*time.Hour); !errors.Is(err, ErrReplayInput) {
 		t.Fatal("corrupt checkpoint qualified")
 	}
-	if _, err := pool.Exec(ctx, `UPDATE tv_facts SET payload=decode(repeat('00',65537),'hex') WHERE seq=1`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO tv_facts(event_id,event_type,payload,knowledge_at,seq) VALUES('oversize','order.order.filled',decode(repeat('00',65537),'hex'),now(),40)`); err != nil {
 		t.Fatal("oversized fixture failed")
 	}
 	if _, err := VerifyPostgresSnapshot(ctx, pool, testTenant, 7*24*time.Hour); !errors.Is(err, ErrReplayLimit) {
 		t.Fatal("oversized fact escaped SQL preflight")
 	}
-	if _, err := pool.Exec(ctx, `DELETE FROM tv_facts`); err != nil {
-		t.Fatal("empty fixture failed")
-	}
+	freshSchema(t, pool)
 	if _, err := VerifyPostgresSnapshot(ctx, pool, testTenant, 7*24*time.Hour); !errors.Is(err, ErrReplayNoHistory) {
 		t.Fatal("empty genesis qualified as restored")
 	}
 }
 
 func TestReplayVerifierPostgresBoundsTextBeforeReplay(t *testing.T) {
-	pool := restoredReplayFixture(t)
 	ctx := context.Background()
 	// Invalid payload would produce ErrReplayInput if transferred and decoded;
 	// ErrReplayLimit must instead come from the SQL length-only preflight.
 	for _, column := range []string{"event_id", "event_type"} {
 		t.Run(column, func(t *testing.T) {
-			tx, err := pool.Begin(ctx)
-			if err != nil {
-				t.Fatal("begin fixture failed")
+			pool := restoredReplayFixture(t)
+			id, subject := "bad-text", "order.order.filled"
+			if column == "event_id" {
+				id = strings.Repeat("x", 1025)
+			} else {
+				subject = strings.Repeat("x", 1025)
 			}
-			defer func() { _ = tx.Rollback(ctx) }()
-			if _, err := tx.Exec(ctx, `UPDATE tv_facts SET `+column+`=repeat('x',1025),payload=decode('ff','hex') WHERE seq=1`); err != nil {
-				t.Fatal("text fixture failed")
-			}
-			// Commit to make this corruption visible to the verifier's own snapshot.
-			if err := tx.Commit(ctx); err != nil {
-				t.Fatal("fixture commit failed")
+			if _, err := pool.Exec(ctx, "INSERT INTO tv_facts(event_id,event_type,payload,knowledge_at,seq) VALUES($1,$2,decode('ff','hex'),now(),40)", id, subject); err != nil {
+				t.Fatal("text fixture failed", err)
 			}
 			if _, err := VerifyPostgresSnapshot(ctx, pool, testTenant, 7*24*time.Hour); !errors.Is(err, ErrReplayLimit) {
 				t.Fatal("text escaped SQL bound")
 			}
-			if _, err := pool.Exec(ctx, `UPDATE tv_facts SET event_id='event-one',event_type='order.order.filled' WHERE seq=1`); err != nil {
-				t.Fatal("fixture reset failed")
-			}
+
 		})
 	}
 }
@@ -165,9 +159,8 @@ func TestReplayVerifierPostgresRefusesPermissiveRLS(t *testing.T) {
 	if _, err := VerifyPostgresSnapshot(ctx, pool, testTenant, 7*24*time.Hour); !errors.Is(err, ErrReplayInput) {
 		t.Fatal("foreign facts qualified under permissive RLS")
 	}
-	if _, err := pool.Exec(ctx, `DELETE FROM tv_facts WHERE tenant_id='different-tenant'`); err != nil {
-		t.Fatal("foreign fixture cleanup failed")
-	}
+	freshSchema(t, pool)
+	restoreReplayInputs(t, pool, log, snap)
 	if err := NewPostgresLog(other).SaveCheckpoint(ctx, snap.checkpointSeq, snap.checkpoint); err != nil {
 		t.Fatal("foreign checkpoint fixture failed")
 	}

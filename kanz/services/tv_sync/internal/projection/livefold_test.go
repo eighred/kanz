@@ -261,7 +261,7 @@ func BenchmarkAppendFillByHistoryDepth(b *testing.B) {
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = p.appendFill("acme", "fund-alpha", fill, base)
+				_, _ = p.appendFill("acme", "fund-alpha", fill, Fact{Knowledge: base})
 			}
 		})
 	}

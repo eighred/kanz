@@ -86,8 +86,8 @@ func TestTokyoTVSyncSeparateRolesAndRecovery(t *testing.T) {
 		t.Fatal("grant future application access")
 	}
 	files, err := filepath.Glob("../../migrations/*.sql")
-	if err != nil || len(files) != 2 {
-		t.Fatal("expected both fact and checkpoint migrations")
+	if err != nil || len(files) < 3 {
+		t.Fatal("expected fact, checkpoint and execution lookup migrations")
 	}
 	sort.Strings(files)
 	for _, name := range files {
@@ -124,6 +124,14 @@ func TestTokyoTVSyncSeparateRolesAndRecovery(t *testing.T) {
 	clock := func() time.Time { return fixtureTime }
 	live := New(clock, nil, WithLog(log, testTenant))
 	deliver(t, live, "role-1", evtFilled, filledOrder("role-o1", "fund-alpha", "BTC", orderpb.Side_SIDE_BUY, 2, 100))
+	t.Run("RuntimePreservesExecutionEvidence", func(t *testing.T) {
+		if _, err := app.Exec(ctx, "UPDATE tv_facts SET fill_alias_digest=NULL WHERE event_id='role-1'"); err == nil {
+			t.Fatal("runtime detached execution lookup")
+		}
+		if _, err := app.Exec(ctx, "DELETE FROM tv_facts WHERE event_id='role-1'"); err == nil {
+			t.Fatal("runtime removed historical fill")
+		}
+	})
 	if err = live.Checkpoint(ctx); err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,7 @@ func checkpointPrecisionBoundary(source, schema string) error {
 		"cp, err := p.snapshotLocked()", "if err != nil {", "return err",
 		"ExactEncodingVersion: 1", "d, ok := dec.ToProtoExact(r)",
 		"d, ok := dec.ToProtoExact(r)\n\tif !ok {\n\t\treturn nil, ErrCheckpointValueOutOfDomain\n\t}",
-		"if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 {", "return ErrCheckpointEncodingVersion",
+		"if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 && cp.GetExactEncodingVersion() != 3 {", "return ErrCheckpointEncodingVersion",
 	} {
 		if !strings.Contains(source, token) {
 			return fmt.Errorf("checkpoint exact boundary missing %q", token)
@@ -22,7 +22,7 @@ func checkpointPrecisionBoundary(source, schema string) error {
 	if strings.Contains(source, "dec.ToProtoScaled(") {
 		return fmt.Errorf("rounded checkpoint serializer")
 	}
-	refusal := strings.Index(source, "if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 {")
+	refusal := strings.Index(source, "if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 && cp.GetExactEncodingVersion() != 3 {")
 	mutation := strings.Index(source, "p.accounts[p.tenant] = accounts")
 	if mutation < 0 || refusal > mutation {
 		return fmt.Errorf("encoding refusal must precede restore mutation")
@@ -42,7 +42,7 @@ func TestCheckpointPrecisionBoundary(t *testing.T) {
 		{"rounding", "dec.ToProtoExact(r)", "dec.ToProtoScaled(r)"},
 		{"ignore error", "cp, err := p.snapshotLocked()", "cp, _ := p.snapshotLocked()"},
 		{"missing marker", "ExactEncodingVersion: 1", "ExactEncodingVersion: 0"},
-		{"accept legacy", "if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 {", "if cp.GetExactEncodingVersion() > 1 {"},
+		{"accept legacy", "if cp.GetExactEncodingVersion() != 1 && cp.GetExactEncodingVersion() != 2 && cp.GetExactEncodingVersion() != 3 {", "if cp.GetExactEncodingVersion() > 1 {"},
 		{"silent conversion", "return nil, ErrCheckpointValueOutOfDomain", "return nil, nil"},
 		{"ignore version", "return ErrCheckpointEncodingVersion", "return nil"},
 	} {

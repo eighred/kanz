@@ -249,6 +249,22 @@ func verifyCapturedReplay(ctx context.Context, source Log, tenant string, retent
 	if err != nil {
 		return ReplayProof{}, ErrReplayInput
 	}
+	// Older checkpoints have no post-eviction coverage marker. A bounded
+	// independent full fold still qualifies their original financial state.
+	// Keep the original bytes in the proof and compare all execution terms.
+	var original tvsyncpb.Checkpoint
+	if err := proto.Unmarshal(snap.checkpoint, &original); err != nil {
+		return ReplayProof{}, ErrReplayInput
+	}
+	if original.GetExactEncodingVersion() < 3 {
+		want.ExactEncodingVersion = got.ExactEncodingVersion
+		for _, account := range want.Accounts {
+			account.ExecutionHistoryVerified = false
+		}
+		for _, account := range got.Accounts {
+			account.ExecutionHistoryVerified = false
+		}
+	}
 	if !proto.Equal(want, got) {
 		return ReplayProof{}, ErrReplayMismatch
 	}

@@ -47,12 +47,13 @@ type orderRev struct {
 
 // account holds one trading account's append-only folded history under a tenant.
 type account struct {
-	tenant        string
-	id            string
-	execs         []execution
-	orders        map[string][]orderRev    // order_id -> revisions in fold order
-	seenFills     map[string]*orderpb.Fill // canonical key, or alias for unscoped history
-	scopedAliases map[string]int           // live scoped executions per raw alias
+	tenant         string
+	id             string
+	execs          []execution
+	orders         map[string][]orderRev    // order_id -> revisions in fold order
+	seenFills      map[string]*orderpb.Fill // canonical key, or alias for unscoped history
+	legacyBaseline bool                     // restored aggregate has no provable execution identity coverage
+	scopedAliases  map[string]int           // live scoped executions per raw alias
 
 	// live is foldPositions(execs) — the as-of-NOW fold, maintained as each
 	// execution arrives instead of re-derived per read (#995).

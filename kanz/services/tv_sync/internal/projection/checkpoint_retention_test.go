@@ -66,6 +66,27 @@ func (l *memLog) Replay(_ context.Context, afterSeq int64, fn func(Fact) error) 
 		if f.Seq <= afterSeq {
 			continue
 		}
+		f.priorFill = func(portfolio string, fill *orderpb.Fill) (bool, error) {
+			match := false
+			for _, before := range l.facts {
+				if before.Seq >= f.Seq {
+					break
+				}
+				owner, prior, err := lookupFill(before)
+				if err != nil {
+					return false, err
+				}
+				if prior == nil {
+					continue
+				}
+				duplicate, err := priorExecutionMatch(portfolio, fill, owner, prior)
+				if err != nil {
+					return false, err
+				}
+				match = match || duplicate
+			}
+			return match, nil
+		}
 		if err := fn(f); err != nil {
 			return err
 		}

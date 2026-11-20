@@ -151,8 +151,8 @@ func (p *Projection) evictLocked(cutoff time.Time) EvictionStats {
 // synchronous venue response and the asynchronous websocket echo of the same
 // fill — so an id dropped before its echo arrives is a fill folded twice, which
 // doubles a position the fund does not hold. Tying it to the execution makes the
-// dedup horizon the retention window itself: one number, floored in config,
-// rather than two that can drift apart.
+// resident dedup horizon the retention window. A later scoped fill resolves
+// its identity from original durable FACTs before changing the baseline.
 //
 // AN ORDER IS DROPPED ONLY WHEN IT IS TERMINAL. A working or scheduled order is
 // retained however old it is — it is the blotter an operator acts from, and an

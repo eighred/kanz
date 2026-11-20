@@ -1,9 +1,12 @@
 package projection
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
+
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,6 +19,9 @@ import (
 // the pod actually had, and a schema that gains a field must not silently drop it from
 // every replay thereafter.
 type Fact struct {
+	// priorFill resolves an evicted identity from earlier immutable entries.
+	priorFill func(string, *orderpb.Fill) (bool, error)
+
 	// EventID is the envelope's UUIDv7 — the identity that makes the fold exactly-once.
 	EventID   string
 	EventType string
@@ -119,13 +125,14 @@ func (l *PostgresLog) Append(ctx context.Context, f Fact) (bool, int64, error) {
 	// (#809). ON CONFLICT DO NOTHING returns NO ROW on a redelivery, which is
 	// exactly the fresh=false signal this already reported — pgx.ErrNoRows is the
 	// duplicate, not a failure.
+	alias, key := factLookupKeys(f)
 	var seq int64
 	err = tx.QueryRow(ctx, `
-		INSERT INTO tv_facts (event_id, event_type, payload, knowledge_at)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO tv_facts (event_id, event_type, payload, knowledge_at,fill_alias_digest,execution_key_digest)
+		VALUES ($1, $2, $3, $4,$5,$6)
 		ON CONFLICT (tenant_id, event_id) DO NOTHING
 		RETURNING seq`,
-		f.EventID, f.EventType, f.Payload, f.Knowledge).Scan(&seq)
+		f.EventID, f.EventType, f.Payload, f.Knowledge, alias, key).Scan(&seq)
 	fresh := !errors.Is(err, pgx.ErrNoRows)
 	if err != nil && fresh {
 		return false, 0, err
@@ -144,26 +151,61 @@ const factAppendLockSQL = `SELECT pg_advisory_xact_lock(hashtext('tv-sync.fact-a
 // folded. The fold is order-dependent — an average-cost basis depends on which fill came
 // first — so a replay that reordered them would rebuild a DIFFERENT book than the pod had.
 func (l *PostgresLog) Replay(ctx context.Context, afterSeq int64, fn func(Fact) error) error {
-	rows, err := l.db.Query(ctx, `
-		SELECT event_id, event_type, payload, knowledge_at, seq
-		FROM tv_facts
-		WHERE seq > $1
-		ORDER BY seq ASC`, afterSeq)
-	if err != nil {
+	var high int64
+	if err := l.db.QueryRow(ctx, "SELECT COALESCE(MAX(seq),0) FROM tv_facts").Scan(&high); err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var f Fact
-		if err := rows.Scan(&f.EventID, &f.EventType, &f.Payload, &f.Knowledge, &f.Seq); err != nil {
+	for afterSeq < high {
+		// Close each bounded read before consulting earlier fill rows. A replay
+		// verifier may be using a single read-only repeatable-read transaction.
+		rows, err := l.db.Query(ctx, `
+			WITH candidates AS (
+				SELECT event_id,event_type,payload,knowledge_at,seq,fill_alias_digest,execution_key_digest,
+				       octet_length(payload)::bigint+octet_length(event_id)+octet_length(event_type) AS size,
+				       ($3::boolean OR (octet_length(payload)<=$4 AND octet_length(event_id)<=1024 AND octet_length(event_type)<=1024)) AS allowed
+				FROM tv_facts WHERE seq > $1 AND seq <= $2 ORDER BY seq LIMIT 64
+			), page AS (
+				SELECT *, SUM(size) OVER (ORDER BY seq) AS page_bytes,ROW_NUMBER() OVER (ORDER BY seq) AS ordinal FROM candidates
+			)
+			SELECT CASE WHEN allowed THEN event_id ELSE '' END,CASE WHEN allowed THEN event_type ELSE '' END,
+			       CASE WHEN allowed THEN payload END,knowledge_at,seq,fill_alias_digest,execution_key_digest,allowed
+			FROM page WHERE ordinal=1 OR page_bytes<=1048576 ORDER BY seq`, afterSeq, high, l.writer != nil, ReplayMaxFactBytes)
+		if err != nil {
 			return err
 		}
-		if err := fn(f); err != nil {
+		batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Fact, error) {
+			var f Fact
+			var alias, key []byte
+			var allowed bool
+			err := row.Scan(&f.EventID, &f.EventType, &f.Payload, &f.Knowledge, &f.Seq, &alias, &key, &allowed)
+			if err == nil && !allowed {
+				return Fact{}, ErrReplayLimit
+			}
+			if err == nil && (alias != nil || key != nil) {
+				wantAlias, wantKey := factLookupKeys(f)
+				if !bytes.Equal(alias, wantAlias) || !bytes.Equal(key, wantKey) {
+					return Fact{}, ErrUnresolvedFillAlias
+				}
+			}
+			return f, err
+		})
+		if err != nil {
 			return err
+		}
+		if len(batch) == 0 {
+			return errors.New("projection: captured fact watermark disappeared")
+		}
+		for _, f := range batch {
+			f.priorFill = func(portfolio string, fill *orderpb.Fill) (bool, error) {
+				return l.priorExecution(ctx, f.Seq, portfolio, fill)
+			}
+			if err := fn(f); err != nil {
+				return err
+			}
+			afterSeq = f.Seq
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 // SaveCheckpoint replaces this tenant's fold checkpoint (#809).

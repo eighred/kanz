@@ -40,6 +40,10 @@ const testTenant = "acme"
 
 func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	t.Helper()
+	return poolForTVSchema(t, tenant, testSchema)
+}
+func poolForTVSchema(t *testing.T, tenant, schema string) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run the tv-sync fact-log integration tests")
@@ -51,7 +55,7 @@ func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	// Every connection lands in this schema and carries the tenant GUC — the same
 	// authenticated-session-GUC posture the service runs under (internal/pg.NewTenantPool).
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		if _, err := conn.Exec(ctx, "SET search_path TO "+testSchema); err != nil {
+		if _, err := conn.Exec(ctx, "SET search_path TO "+pgx.Identifier{schema}.Sanitize()); err != nil {
 			return err
 		}
 		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
@@ -65,8 +69,10 @@ func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	return pool
 }
 
-func freshSchema(t *testing.T, pool *pgxpool.Pool) {
+func freshSchema(t *testing.T, pool *pgxpool.Pool) { t.Helper(); freshTVSchema(t, pool, testSchema) }
+func freshTVSchema(t *testing.T, pool *pgxpool.Pool, schema string) {
 	t.Helper()
+	quoted := pgx.Identifier{schema}.Sanitize()
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, os.Getenv("TEST_POSTGRES_URL"))
@@ -74,10 +80,10 @@ func freshSchema(t *testing.T, pool *pgxpool.Pool) {
 		t.Fatalf("admin connect: %v", err)
 	}
 	defer admin.Close()
-	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+testSchema+` CASCADE`); err != nil {
+	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+quoted+` CASCADE`); err != nil {
 		t.Fatalf("drop schema: %v", err)
 	}
-	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+testSchema); err != nil {
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+quoted); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join("../../migrations", "*.sql"))

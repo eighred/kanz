@@ -121,10 +121,11 @@ verified image. No activation manifest is changed by this prerequisite.
 
 ### Exact checkpoint encoding and controlled upgrade
 
-Checkpoints use encoding version 1 for alias-only books and version 2 once the
-fold has received venue execution identity evidence. Version 2 retains the fill
+Version 1 checkpoints retain fill aliases. Version 2 also retains the fill
 terms used to deduplicate across venue, account, instrument and execution ID.
-A version 1 reader refuses a version 2 checkpoint. A scoped broker execution
+Current writers use version 3 for execution history with established origin,
+including resident rows that may later move into the evicted baseline.
+Older readers refuse a version beyond their supported range. A scoped broker execution
 returns its stable ID and the original venue alias in `venueFillId`.
 
 Retained execution quantities, prices and fees are encoded through
@@ -140,7 +141,17 @@ can supply it when the order, portfolio, venue, instrument and side agree.
 If a retained alias overlaps a scoped fill and the original identity cannot
 be established, the fold refuses the event before advancing the watermark.
 A verified full replay can use the original order and fill terms that a version
-1 checkpoint omitted.
+1 checkpoint omitted. After eviction the lookup uses the original tenant-scoped
+FACT bytes. The append stores lookup digests in the same row. A late duplicate
+therefore needs no lifetime in-memory identity set. Historical rows without
+those digests are compared within a 128-candidate, 64 KiB per-FACT bound.
+An older aggregate with no identity coverage refuses the affected tail.
+When the candidate limit is exceeded, read-only replay leaves the original
+rows unindexed. Preserve the original log and checkpoint. After independently
+verifying complete source history, replay those immutable FACTs through the
+current append path into a separate empty projection, preserving tenant,
+event IDs, original sequence order, payload bytes and knowledge times. Verify
+the replacement against that history before handing off the writer.
 
 Version 0 checkpoints may already have lost precision through the former
 scale-eight conversion. Version 0 and unknown versions now refuse startup before

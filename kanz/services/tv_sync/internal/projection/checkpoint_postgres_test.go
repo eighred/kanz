@@ -325,7 +325,7 @@ func (p *Projection) replayEverythingForTest(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.log.Replay(ctx, 0, func(f Fact) error {
-		p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge)
+		p.fold(p.tenant, f)
 		p.seq = f.Seq
 		return nil
 	})
