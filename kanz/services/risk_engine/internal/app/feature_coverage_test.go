@@ -12,7 +12,10 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/state"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	inferencepb "github.com/eighred/kanz/kanz-schemas-go/inference/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/risk_engine/internal/app"
@@ -144,6 +147,62 @@ func TestPublishFeaturesOnLegacyMeasureCoverage(t *testing.T) {
 			got := publishedPortfolioRisk(t, ms)
 			if (got != nil) != tc.wantFact {
 				t.Fatalf("published = %v, want feature FACT = %t", got, tc.wantFact)
+			}
+		})
+	}
+}
+
+func TestFeaturePublicationForUnvaluedBaseCurrencyPositions(t *testing.T) {
+	at := timestamppb.New(time.Unix(100, 0))
+	for _, tc := range []struct {
+		name  string
+		first *commonpb.Money
+		other bool
+		want  bool
+	}{
+		{"missing", &commonpb.Money{CurrencyCode: "USD"}, false, false},
+		{"missing alongside a measured holding", &commonpb.Money{CurrencyCode: "USD"}, true, false},
+		{"observed zero", money(0, "USD"), false, true},
+		{"observed zero alongside a measured holding", money(0, "USD"), true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := &domainpb.PortfolioSnapshot{Portfolio: &domainpb.PortfolioState{PortfolioId: "fund", BaseCurrency: "USD", AsOf: at},
+				Positions: []*domainpb.PositionState{{PortfolioId: "fund", InstrumentId: "A", MarketValue: tc.first, AsOf: at}}}
+			if tc.other {
+				in.Positions = append(in.Positions, &domainpb.PositionState{PortfolioId: "fund", InstrumentId: "B", MarketValue: money(100, "USD"), AsOf: at})
+			}
+			st := state.NewStore()
+			if err := st.ApplyPortfolioSnapshot(t.Context(), &envelopepb.Envelope{IdempotencyKey: "source"}, in); err != nil {
+				t.Fatal(err)
+			}
+			p, ok := st.Snapshot("fund")
+			if !ok {
+				t.Fatal("missing portfolio")
+			}
+			ms := compute.ComputeMeasuresContext(t.Context(), p, compute.DefaultRegistry(), []v1.MeasureName{compute.MeasureGrossExposure, compute.MeasureVaR99})
+			got := publishedPortfolioRisk(t, ms)
+			if !tc.want {
+				if got != nil {
+					t.Fatalf("published absent base-currency amount as a measured feature: %v", got.GetValues())
+				}
+				wantCount := 0
+				if tc.other {
+					wantCount = 1
+				}
+				for _, n := range []v1.MeasureName{compute.MeasureGrossExposure, compute.MeasureVaR99} {
+					m, _ := ms.Lookup(n)
+					if m.Coverage.Contributed != wantCount || m.Coverage.ExcludedCount != 1 || !slices.Equal(m.Coverage.Exclusions, []v1.InputExclusion{{InstrumentID: "A", Reason: compute.SkipNoMarketValue}}) {
+						t.Fatalf("%s missing mark coverage %+v", n, m.Coverage)
+					}
+				}
+				return
+			}
+			wantGross, wantVar := 0., 0.
+			if tc.other {
+				wantGross, wantVar = 100, 1
+			}
+			if got == nil || got.Values["GrossExposure"].GetScalar() != wantGross || got.Values["VaR99"].GetScalar() != wantVar {
+				t.Fatalf("feature: %v", got)
 			}
 		})
 	}

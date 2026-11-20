@@ -209,16 +209,13 @@ const (
 // Uncertainty is propagated as the independent-sum of per-position
 // MarketValueUncertainty (RISK-08).
 func GrossExposure(p *domain.Portfolio) v1.Measure {
+	value, coverage := measuredBaseCurrencySum(p, true)
 	return v1.Measure{
 		Name:           MeasureGrossExposure,
-		Value:          sumInBaseCurrency(p, true /*absolute*/),
+		Value:          value,
+		Coverage:       coverage,
 		UncertaintyAbs: sumUncertaintyInBaseCurrency(p),
-		// ARITHMETIC, NOT A MODEL, and saying so is not a formality. This
-		// measure can never report InputCoverage — there is no provider to
-		// decline — so provenance is the only field on it a consumer can read
-		// to tell it apart from the illustrative constants below, which are
-		// coverage-less for the same reason and are NOT arithmetic the engine
-		// stands behind (#1037).
+
 		Provenance: v1.MeasureProvenance{Method: v1.MethodPortfolioArithmetic},
 	}
 }
@@ -249,11 +246,12 @@ var var1pctOfGross = &commonpb.Decimal{Coefficient: 1, Exponent: -2} // 0.01
 // Uncertainty propagation uses the scalar rule (RISK-08):
 // σ(VaR) = 0.01 × σ(Gross).
 func VaR99(p *domain.Portfolio) v1.Measure {
-	gross := sumInBaseCurrency(p, true)
+	gross, coverage := measuredBaseCurrencySum(p, true)
 	grossUnc := sumUncertaintyInBaseCurrency(p)
 	return v1.Measure{
 		Name:           MeasureVaR99,
 		Value:          mulDecimal(gross, var1pctOfGross),
+		Coverage:       coverage,
 		UncertaintyAbs: PropagateScalar(var1pctOfGross, grossUnc),
 		// THE PLACEHOLDER DECLARES ITSELF, ON EVERY RESPONSE (#1037).
 		//
@@ -321,13 +319,27 @@ func Delta(p *domain.Portfolio) v1.Measure {
 // function Portfolio.CurrencyExclusions uses to report what it drops,
 // so what is excluded here and what is reported excluded cannot diverge.
 func sumInBaseCurrency(p *domain.Portfolio, abs bool) *commonpb.Decimal {
+	value, _ := measuredBaseCurrencySum(p, abs)
+	return value
+}
+
+func measuredBaseCurrencySum(p *domain.Portfolio, abs bool) (*commonpb.Decimal, v1.InputCoverage) {
+	var coverage Coverage
 	base := p.BaseCurrency()
 	var sum decAccum // O(1) allocs — see decAccum (LATENCY-01c)
 	for _, pos := range p.Positions() {
 		if !pos.InBaseCurrency(base) {
 			continue
 		}
+		// The currency can be known before a valuation arrives. The sum still
+		// represents the measured holdings, and a model requiring the entire book
+		// must be able to distinguish the missing mark from an explicit zero.
+		if pos.MarketValue.Amount == nil {
+			coverage.Exclude(pos.InstrumentID, SkipNoMarketValue)
+			continue
+		}
+		coverage.Contributed++
 		sum.add(pos.MarketValue.Amount, abs)
 	}
-	return sum.decimal()
+	return sum.decimal(), coverage.Result()
 }
