@@ -10,6 +10,8 @@ buf lint
 bash check-breaking.sh  # compare with origin/main, including its pre-move layout
 ```
 
+Assembly checks the normal Accounting, API Gateway and Web BFF executables against the assembled Go SDK in an isolated module cache. It verifies the module version and sum recorded in each executable and runs the custody HTTP contract before retaining the package set. The signed and immutable release remains the source for released consumers.
+
 ## Use the published SDKs in an isolated checkout
 
 Version `0.1.0` comes from the private `eighred/kanz-schemas-go` release. The offline consumer check builds the accounting, API gateway and web BFF binaries, tests the accounting custody read and tenant refusal, exercises the Python inference and interactive servicer tests, and builds and tests the TypeScript bus package with its Go serialization fixtures. The release manifest and canonical schemas are pinned. Changing the schema requires a new compatible SDK release.
