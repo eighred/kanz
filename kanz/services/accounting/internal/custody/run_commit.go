@@ -300,11 +300,6 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 				return Run{}, ErrBookBasisChanged
 			}
 		}
-		if run.RequestID != "" {
-			if err := confirmManualStatement(ctx, tx, run); err != nil {
-				return Run{}, err
-			}
-		}
 		if run.compared != nil {
 			current, err := staged.LatestStatement(ctx, run.Subject)
 			if err := run.confirmStatement(current, err); err != nil {

@@ -103,8 +103,14 @@ func TestManualDatedComparisonRequiresMatchingSignedWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertRefused(legacy.StatementID)
+	// A plausible reserved ID also needs its own immutable receipt.
+	fakeID := batchStatementPrefix + "unreceipted"
+	if _, err := pool.Exec(ctx, "UPDATE custody_statements SET statement_id=$1 WHERE statement_id=$2", fakeID, legacy.StatementID); err != nil {
+		t.Fatal(err)
+	}
+	assertRefused(fakeID)
 	// Simulate materialized rows inherited from an earlier deployment or restore.
-	if _, err := pool.Exec(ctx, "UPDATE custody_statements SET received_at=$1 WHERE statement_id=$2", t0, legacy.StatementID); err != nil {
+	if _, err := pool.Exec(ctx, "UPDATE custody_statements SET received_at=$1 WHERE statement_id=$2", t0, fakeID); err != nil {
 		t.Fatal(err)
 	}
 	corrected := signed(9, -100)
