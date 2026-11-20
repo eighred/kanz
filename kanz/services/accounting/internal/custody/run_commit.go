@@ -237,8 +237,14 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 			return prior, tx.Commit(ctx)
 		}
 		var payload []byte
-		err := tx.QueryRow(ctx, `SELECT payload FROM outbox WHERE producer_service=$1 AND event_type=$2 AND correlation_id=$3 ORDER BY id LIMIT 1`, outbox.ServiceAccounting, SubjectRun, run.RunID).Scan(&payload)
-		if errors.Is(err, pgx.ErrNoRows) {
+		// Older scheduled runs kept their only completion in the relay. Never
+		// reconstruct their figures from the current, mutable break queue.
+		var basis *RunBasis
+		err := tx.QueryRow(ctx, `SELECT COALESCE(manual_receipt, (
+			SELECT payload FROM outbox WHERE producer_service=$1 AND event_type=$2 AND correlation_id=$3 ORDER BY id LIMIT 1
+		)), book_basis FROM custody_runs WHERE tenant_id=app_current_tenant() AND run_id=$3`,
+			outbox.ServiceAccounting, SubjectRun, run.RunID).Scan(&payload, &basis)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && payload == nil) {
 			return Run{}, ErrRunCompletionMissing
 		}
 		if err != nil {
@@ -248,12 +254,10 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		if err != nil {
 			return Run{}, err
 		}
-		if prior.RunID != run.RunID || prior.Subject.Key() != run.Subject.Key() {
+		if prior.RunID != run.RunID || prior.Subject.Key() != run.Subject.Key() || prior.RequestID != "" {
 			return Run{}, ErrRunIdentityConflict
 		}
-		if err := tx.QueryRow(ctx, `SELECT book_basis FROM custody_runs WHERE run_id=$1`, prior.RunID).Scan(&prior.Basis); err != nil {
-			return Run{}, err
-		}
+		prior.Basis = basis
 		return prior, tx.Commit(ctx)
 	}
 	// Existing store operations open SAVEPOINTs on this handle. Their local
@@ -332,21 +336,12 @@ func (p *Postgres) CommitRun(ctx context.Context, run Run) (Run, error) {
 		}
 		run.Breaks = breaksForSubject(stored, run.Subject)
 	}
-	if err := staged.saveRun(ctx, run, signedDigest); err != nil {
-		return Run{}, err
-	}
 	record, err := runRecord(ctx, tenant, run)
 	if err != nil {
 		return Run{}, err
 	}
-	if run.RequestID != "" {
-		tag, err := tx.Exec(ctx, `UPDATE custody_runs SET manual_receipt=$2 WHERE tenant_id=app_current_tenant() AND run_id=$1 AND manual_receipt IS NULL`, run.RunID, record.Payload)
-		if err != nil {
-			return Run{}, err
-		}
-		if tag.RowsAffected() != 1 {
-			return Run{}, ErrManualRequestConflict
-		}
+	if err := staged.saveRun(ctx, run, signedDigest, record.Payload); err != nil {
+		return Run{}, err
 	}
 	if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, record); err != nil {
 		return Run{}, err
