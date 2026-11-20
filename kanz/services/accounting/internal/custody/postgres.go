@@ -83,9 +83,6 @@ WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := lockCustodyPair(ctx, tx, s.Subject()); err != nil {
-		return err
-	}
 	result, err := tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
@@ -96,6 +93,12 @@ WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
 	// evaluated. Checking identity in a separate read would race another insert.
 	if result.RowsAffected() == 0 {
 		return ErrStatementIdentityConflict
+	}
+	// The unique index arbitrates statement identity first. Independent source
+	// writers can share this lock, while a comparison holds it exclusively
+	// from validating its input until committing the corresponding break.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(`+custodyPairLockKeySQL+`)`, pairKey(s.PortfolioID, s.CustodianID)); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

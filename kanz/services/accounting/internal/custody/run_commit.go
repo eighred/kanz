@@ -28,10 +28,12 @@ var ErrRunIdentityConflict = errors.New("custody: run ID belongs to another subj
 var ErrHistoricalLifecycle = errors.New("custody: a later business date already controls outstanding breaks")
 var ErrStatementChanged = errors.New("custody: the authoritative statement changed during comparison")
 
+const custodyPairLockKeySQL = `hashtextextended(app_current_tenant() || ':custody-run:' || $1,0)`
+
 func lockCustodyPair(ctx context.Context, tx pgx.Tx, subject Subject) (string, error) {
 	var tenant string
 	var locked bool
-	err := tx.QueryRow(ctx, `SELECT app_current_tenant(), pg_try_advisory_xact_lock(hashtextextended(app_current_tenant() || ':custody-run:' || $1,0))`, pairKey(subject.PortfolioID, subject.CustodianID)).Scan(&tenant, &locked)
+	err := tx.QueryRow(ctx, `SELECT app_current_tenant(), pg_try_advisory_xact_lock(`+custodyPairLockKeySQL+`)`, pairKey(subject.PortfolioID, subject.CustodianID)).Scan(&tenant, &locked)
 	if err == nil && !locked {
 		err = ErrRunBusy
 	}
