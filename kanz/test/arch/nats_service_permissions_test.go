@@ -7,10 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/nats-io/nats-server/v2/server"
 )
 
 // SEC-M3e: tenancy.yaml's `permissions` blocks are hand-derived from the code —
@@ -65,6 +68,9 @@ func TestServicePublishesOnlySubjectsItsTenancyPermissionsAllow(t *testing.T) {
 	}
 
 	rc := newResolveCache(root)
+	const statement = "accounting.custody.statement"
+	batchPerm := custodyBatchPublishGrant(t, root, statement)
+	foundBatchStatement := false
 
 	var problems []string
 	checked := 0
@@ -85,18 +91,19 @@ func TestServicePublishesOnlySubjectsItsTenancyPermissionsAllow(t *testing.T) {
 		}
 		checked++
 
-		subjects := servicePublishedSubjects(t, rc, root, svc)
-		var files sortedSubjects
-		for subj, sites := range subjects {
-			files = append(files, subjectSites{subject: subj, sites: sites})
+		if svc == "accounting" && !subjectAllowed(statement, perm.deny) && (len(perm.allow) == 0 || subjectAllowed(statement, perm.allow)) {
+			problems = append(problems, svid+" must not publish "+statement+"; the signed importer owns this subject")
 		}
-		sort.Sort(files)
-		for _, ss := range files {
-			if permDenies(ss.subject, perm) || !covered(ss.subject, perm.allow) {
-				problems = append(problems, svc+": publishes "+strconv.Quote(ss.subject)+" ("+strings.Join(ss.sites, ", ")+
-					") but tenancy.yaml's permissions.publish for "+svid+" does not allow it — the service will "+
-					"authenticate fine and then be DENIED at publish time (a NATS permissions violation), which "+
-					"looks like a broken feature, not a missing grant")
+		for _, event := range servicePublishedSubjects(t, rc, root, svc) {
+			owner, grant := svid, perm
+			if event.custodyBatch {
+				owner, grant = "custody-batch", batchPerm
+				if event.subject == statement {
+					foundBatchStatement = true
+				}
+			}
+			if subjectAllowed(event.subject, grant.deny) || !subjectAllowed(event.subject, grant.allow) {
+				problems = append(problems, owner+" cannot publish "+strconv.Quote(event.subject)+" constructed at "+event.site)
 			}
 		}
 	}
@@ -108,12 +115,42 @@ func TestServicePublishesOnlySubjectsItsTenancyPermissionsAllow(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("checked zero services against tenancy.yaml permissions — the scanner or the service list is broken")
 	}
+	if !foundBatchStatement {
+		t.Error("no signed custody statement publication resolved for the dedicated batch principal")
+	}
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		t.Fatalf("%d service(s) publish a subject tenancy.yaml does not permit:\n\n  %s",
+		t.Fatalf("%d publisher permission mismatch(es):\n\n  %s",
 			len(problems), strings.Join(problems, "\n  "))
 	}
+}
+
+// The isolated pilot provisions this fragment inside a dedicated user. It is
+// intentionally absent from the ordinary __system__ service account inventory.
+func custodyBatchPublishGrant(t *testing.T, root, statement string) publishPerm {
+	t.Helper()
+	fragment := readFile(t, filepath.Join(root, "infra", "nats", "custody_batch_permissions.conf"))
+	var opts server.Options
+	if err := opts.ProcessConfigString("authorization { users: [{ user: custody-source\n" + fragment + "\n}] }"); err != nil {
+		t.Fatalf("parse custody publisher grant: %v", err)
+	}
+	if len(opts.Users) != 1 || opts.Users[0].Permissions == nil {
+		t.Fatal("expected one restricted custody batch user")
+	}
+	p := opts.Users[0].Permissions
+	const inbox = "_INBOX.custody_batch.>"
+	if p.Publish == nil || !slices.Equal(p.Publish.Allow, []string{statement}) ||
+		p.Subscribe == nil || !slices.Equal(p.Subscribe.Allow, []string{inbox}) ||
+		p.Response != nil {
+		t.Fatal("custody batch requires statement-only publication and its own reply inbox")
+	}
+	for _, deny := range p.Subscribe.Deny {
+		if subjectsOverlap(inbox, deny) {
+			t.Fatalf("custody batch reply inbox is blocked by %q", deny)
+		}
+	}
+	return publishPerm{allow: p.Publish.Allow, deny: p.Publish.Deny}
 }
 
 type subjectSites struct {
@@ -742,7 +779,7 @@ var crossPackagePublishSurfaces = map[string][]string{
 // estate constructs a bus.Event; bus.Message is the Kafka/wire-receive shape.
 // Restricting to it is what keeps this guard from flagging archiver's Kafka
 // topic name as an unauthorized NATS subject.
-func servicePublishedSubjects(t *testing.T, rc *resolveCache, root, svc string) map[string][]string {
+func servicePublishedSubjects(t *testing.T, rc *resolveCache, root, svc string) []publishedEvent {
 	t.Helper()
 	dirs := []string{filepath.Join(root, "services", sourceDirectoryName(svc))}
 	for _, extra := range crossPackagePublishSurfaces[svc] {
@@ -755,17 +792,44 @@ func servicePublishedSubjects(t *testing.T, rc *resolveCache, root, svc string) 
 // factored out so nats_jetstream_machinery_test.go's operator-CLI scan (cmd/
 // trees, not services/) can reuse the exact same bus.Event{Subject: ...}
 // resolution instead of a second walker.
-func publishedSubjectsIn(t *testing.T, rc *resolveCache, dirs []string) map[string][]string {
+func publishedSubjectsIn(t *testing.T, rc *resolveCache, dirs []string) []publishedEvent {
 	t.Helper()
-	out := map[string][]string{}
+	var out []publishedEvent
 	for _, scanDir := range dirs {
-		scanDirForPublishedSubjects(t, rc, scanDir, out)
+		out = append(out, scanDirForPublishedSubjects(t, rc, scanDir)...)
 	}
 	return out
 }
 
-func scanDirForPublishedSubjects(t *testing.T, rc *resolveCache, serviceDir string, out map[string][]string) {
+type publishedEvent struct {
+	subject, site string
+	custodyBatch  bool
+}
+
+func TestCustodyPublishSitesRetainBothPrincipals(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, filepath.FromSlash(custodyBatchOutboxFile))
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const source = `package custody
+import "github.com/eighred/kanz/pkg/bus"
+type BatchImporter struct{}
+func (*BatchImporter) append() bus.Event { return bus.Event{Subject: "accounting.custody.statement"} }
+func ordinary() bus.Event { return bus.Event{Subject: "accounting.custody.statement"} }
+`
+	if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sites := scanDirForPublishedSubjects(t, newResolveCache(root), filepath.Dir(path))
+	if len(sites) != 2 || !sites[0].custodyBatch || sites[1].custodyBatch {
+		t.Fatalf("expected the same subject to be checked for both publishers, got %+v", sites)
+	}
+}
+
+func scanDirForPublishedSubjects(t *testing.T, rc *resolveCache, serviceDir string) []publishedEvent {
 	t.Helper()
+	var out []publishedEvent
 	err := filepath.WalkDir(serviceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -787,8 +851,17 @@ func scanDirForPublishedSubjects(t *testing.T, rc *resolveCache, serviceDir stri
 		if f == nil {
 			return nil
 		}
+		modulePath, err := filepath.Rel(rc.root, path)
+		if err != nil {
+			return err
+		}
+		relPath := filepath.ToSlash(modulePath)
 		for _, decl := range f.Decls {
 			fn, _ := decl.(*ast.FuncDecl)
+			// Account for each construction site, even when two principals
+			// name the same subject in this shared accounting package.
+			batch := strings.HasPrefix(relPath, "services/accounting/cmd/custody_batch/") ||
+				(relPath == custodyBatchOutboxFile && fn != nil && fn.Name.Name == "append" && receiverIs(fn, "BatchImporter"))
 			ast.Inspect(decl, func(n ast.Node) bool {
 				cl, ok := n.(*ast.CompositeLit)
 				if !ok {
@@ -821,7 +894,7 @@ func scanDirForPublishedSubjects(t *testing.T, rc *resolveCache, serviceDir stri
 						if !subjectShape.MatchString(subj) || protoTypeRef.MatchString(subj) {
 							continue
 						}
-						out[subj] = append(out[subj], site)
+						out = append(out, publishedEvent{subject: subj, site: site, custodyBatch: batch})
 					}
 				}
 				return true
@@ -832,6 +905,7 @@ func scanDirForPublishedSubjects(t *testing.T, rc *resolveCache, serviceDir stri
 	if err != nil {
 		t.Fatalf("walk %s: %v", serviceDir, err)
 	}
+	return out
 }
 
 func dedupStrings(in []string) []string {

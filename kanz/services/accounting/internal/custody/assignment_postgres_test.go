@@ -81,26 +81,63 @@ func TestDeclaredAccountIsProvenByDatedIndependentAuthorities(t *testing.T) {
 	if _, err := st.ProvenAssignments(bus.WithTenantID(t.Context(), "other"), sub, ids); !errors.Is(err, ErrUnprovenAssignment) {
 		t.Fatal("tenant", err)
 	}
-	// Changing the session tenant alone cannot grant a different issuer scope.
-	conn, err := reader.Acquire(ctx)
-	if err != nil {
+	// Seed another tenant's actual registry rows. Both issuer logins and the
+	// reader must keep their own authority when selecting a different tenant.
+	if _, err := admin.Exec(ctx, `INSERT INTO custody_assignment_readers VALUES('foreign_reader','other');
+ INSERT INTO custody_proof_issuers VALUES('foreign_issuer','venue_identity','other','foreign-authority',sha256('foreign'::bytea));
+ INSERT INTO custody_proof_scopes(login_role,tenant_id,venue,account_id,exchange_account_id)
+ VALUES('foreign_issuer','other','XSIM','foreign-account','foreign-exchange')`); err != nil {
 		t.Fatal(err)
 	}
-	func() {
-		defer conn.Release()
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		if _, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id','other',true)"); err != nil {
-			t.Fatal(err)
-		}
-		var n int
-		if err := tx.QueryRow(ctx, "SELECT count(*) FROM custody_account_proofs").Scan(&n); err != nil || n != 0 {
-			t.Fatal("foreign rows", n, err)
-		}
-	}()
+	for _, tc := range []struct {
+		name    string
+		pool    *pgxpool.Pool
+		issuers []string
+		readers []string
+	}{
+		{"reader", reader, []string{"pilot_custody_assignment", "pilot_venue_proof"}, []string{"pilot_assignment_reader"}},
+		{"venue issuer", venue, []string{"pilot_venue_proof"}, nil},
+		{"assignment issuer", governance, []string{"pilot_custody_assignment"}, nil},
+	} {
+		t.Run("registry/"+tc.name, func(t *testing.T) {
+			tx, err := tc.pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			for _, selected := range []string{tenant, "other"} {
+				if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id',$1,true)", selected); err != nil {
+					t.Fatal(err)
+				}
+				var issuers, scopes, readers []string
+				var enrolled, canProvision bool
+				err := tx.QueryRow(ctx, `SELECT
+ ARRAY(SELECT login_role::text FROM custody_proof_issuers ORDER BY 1),
+ ARRAY(SELECT login_role::text FROM custody_proof_scopes ORDER BY 1),
+ ARRAY(SELECT login_role::text FROM custody_assignment_readers ORDER BY 1),
+ custody_assignment_reader_enrolled(),
+ EXISTS(SELECT FROM unnest(ARRAY['custody_proof_issuers','custody_proof_scopes','custody_assignment_readers']) AS r(name)
+ WHERE has_table_privilege(current_user,r.name,'INSERT,UPDATE,DELETE,TRUNCATE'))`).Scan(&issuers, &scopes, &readers, &enrolled, &canProvision)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantIssuers := tc.issuers
+				if selected != tenant {
+					wantIssuers = nil
+				}
+				if !slices.Equal(issuers, wantIssuers) || !slices.Equal(scopes, wantIssuers) || !slices.Equal(readers, tc.readers) ||
+					enrolled != (tc.pool == reader && selected == tenant) || canProvision {
+					t.Fatalf("tenant %s: issuers %v scopes %v readers %v enrolled %v provision %v", selected, issuers, scopes, readers, enrolled, canProvision)
+				}
+				if tc.pool == reader && selected != tenant {
+					var proofs, assignments int
+					if err := tx.QueryRow(ctx, "SELECT (SELECT count(*) FROM custody_account_proofs),(SELECT count(*) FROM custody_account_assignments)").Scan(&proofs, &assignments); err != nil || proofs != 0 || assignments != 0 {
+						t.Fatal("foreign custody evidence", proofs, assignments, err)
+					}
+				}
+			}
+		})
+	}
 	basis := &RunBasis{Mode: BasisDeclared, Accounts: map[string][]string{"CUST-A": ids}, Assignments: original}
 	historic := func(wantCurrent bool) {
 		t.Helper()

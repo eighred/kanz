@@ -203,11 +203,8 @@ fi
 #    bare count — a count alone cannot say WHICH table lost FORCE RLS.
 # The tenant-scoped tables this step KNOWINGLY does not verify, and why.
 #
-# NINE services declare FORCE ROW LEVEL SECURITY; this step checks the five
-# tables in kanz-risk and kanz-books. It used to check those five and say
-# nothing about the rest, so a tenant was handed over as "isolation verified"
-# with most of the tenant-scoped estate never confirmed live — under-coverage
-# the operator had no way to see.
+# This step checks the tables assigned to kanz-risk and kanz-books.
+# Other tenant-scoped services are listed below until their placement is known.
 #
 # These are NOT verified here because ONBOARD-M6 is unresolved: the repo gives
 # several answers for which DATABASE (and, for oms/tv-sync/venue-*, which
@@ -251,8 +248,8 @@ if step storage; then
     # `FORCE  ROW LEVEL SECURITY` with TWO SPACES, in a `FOREACH t IN ARRAY
     # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
     case "$c" in
-      kanz-risk)  tables="portfolios positions applied_keys risk_model_artifacts risk_input_objects risk_evaluations risk_evaluation_inputs"; db="$RISK_DB_NAME" ;;
-      kanz-books) tables="ledger_entries ledger_snapshots ledger_heads ledger_append_positions cash_commit_heads cash_commit_debits cash_commit_history outbox custody_statements custody_runs custody_breaks custody_actions collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots collateral_allocation_proofs cash_commands execution_fee_revisions"; db="$BOOKS_DB_NAME" ;;
+      kanz-risk)  tables="portfolios positions applied_keys risk_model_artifacts risk_input_objects risk_evaluations risk_evaluation_inputs"; db="$RISK_DB_NAME"; anchor="portfolios" ;;
+      kanz-books) tables="ledger_entries ledger_snapshots ledger_heads ledger_append_positions cash_commit_heads cash_commit_debits cash_commit_history outbox custody_statements custody_runs custody_breaks custody_actions custody_batch_receipts custody_break_detections custody_account_proofs custody_account_assignments custody_execution_quantity_observations collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots collateral_allocation_proofs cash_commands execution_fee_revisions"; db="$BOOKS_DB_NAME"; anchor="ledger_entries" ;;
       *) echo "FATAL: no table set declared for $c" >&2; exit 1 ;;
     esac
     expected="$(set -- $tables; echo $#)"
@@ -262,9 +259,14 @@ if step storage; then
       in_list="${in_list:+$in_list,}'$t'"
     done
 
+    # Locate the service schema through its owning table. A second anchor makes
+    # the scalar query ambiguous and psql refuses the check; the operator's
+    # search_path cannot select a different copy of a service table.
     present="$(k -n "$DATA_NS" exec "$c-1" -- psql -d "$db" -tAc \
-      "select relname from pg_class where relname in ($in_list) and relrowsecurity and relforcerowsecurity order by relname")" \
-      || { echo "FATAL: could not run the RLS check on $c — kubectl exec or psql failed (see the error above); this is NOT a verdict on RLS, it means the check could not be run. Fix the underlying infrastructure (namespace/pod/DB reachability) and retry" >&2; exit 1; }
+      "select relname from pg_catalog.pg_class where relname in ($in_list)
+       and relnamespace = (select relnamespace from pg_catalog.pg_class where relname = '$anchor' and relkind in ('r','p'))
+       and relkind in ('r','p') and relrowsecurity and relforcerowsecurity order by relname")" \
+      || { echo "FATAL: could not run the RLS check on $c — kubectl exec or psql failed (see the error above); this is NOT a verdict on RLS, it means the check could not be run. Verify namespace/pod/DB reachability and that a single $anchor table identifies the service schema before retrying" >&2; exit 1; }
 
     missing=""
     found_count=0
