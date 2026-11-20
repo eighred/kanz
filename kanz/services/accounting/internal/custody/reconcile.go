@@ -380,6 +380,12 @@ func (r *Reconciler) reconcile(ctx context.Context, run Run, subject Subject) (R
 	r.stateLeg(subject, stmt, leg, len(executions))
 	if basis != nil {
 		basis = basis.clone()
+		if len(run.measured) > 0 {
+			basis.MeasuredEntries = make(map[string]string, len(run.measured))
+			for _, m := range run.measured {
+				basis.MeasuredEntries[m.EntryID] = m.ExternalRef
+			}
+		}
 		switch {
 		case leg == recon.LegBalancesOnly:
 			basis.Transactions = &TransactionComparison{Pass: leg.String()}

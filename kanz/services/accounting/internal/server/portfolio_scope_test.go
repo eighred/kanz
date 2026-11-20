@@ -201,7 +201,7 @@ func TestAccountingVolatileActionScope(t *testing.T) {
 
 type scopeUnownedStore struct{ *custody.MemoryStore }
 
-func (scopeUnownedStore) OutstandingBreaks(context.Context) ([]custody.Break, error) {
+func (scopeUnownedStore) OutstandingBreaks(context.Context, ...string) ([]custody.Break, error) {
 	return []custody.Break{{BreakID: "PF-A|C|quantity|unattributed", Status: custody.BreakOpen, IBOR: big.NewRat(777, 1), Custodian: big.NewRat(1, 1), Diff: big.NewRat(776, 1), ValuesVerified: true}}, nil
 }
 

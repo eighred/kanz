@@ -151,7 +151,7 @@ describe('custody exact review', () => {
   })
 
   it('shows the reference, instrument and exact working figures without write actions', async () => {
-    const quantity = { ...row, kind: 'execution_quantity', key: 'external-7', instrument_id: 'SYN', revision: undefined,
+    const quantity = { ...row, kind: 'execution_quantity', late_correction_statement_id: 'signed-late-r2', key: 'external-7', instrument_id: 'SYN', revision: undefined,
       portfolio_id: 'PF1', custodian_id: 'CUST-A', detection: { run_id: 'original', statement_id: 'signed-r1', business_date: '2020-02-04', scope_mode: 'declared', journal_position: '1' },
       ibor: '-10.5', custodian: '0', difference: '-10.5' }
     const get = vi.spyOn(api, 'get').mockResolvedValue({ breaks: [quantity], count: 1, actions_enabled: true })
@@ -161,6 +161,7 @@ describe('custody exact review', () => {
       const item = wrapper.get('tbody tr')
       expect(item.text()).toContain('external-7')
       expect(item.text()).toContain('Instrument SYN')
+      expect(item.text()).toContain('Signed revision signed-late-r2 awaits historical quantity review.')
       expect(item.text()).toContain('signed-r1')
       expect(item.findAll('td').slice(2, 5).map(cell => cell.text())).toEqual(['-10.5', '0', '-10.5'])
       expect(item.find('button').exists()).toBe(false)

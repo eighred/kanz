@@ -9,7 +9,7 @@ export interface CustodyDetection {
 }
 
 export interface CustodyBreak {
-  portfolio_id?: string; custodian_id?: string; detection?: CustodyDetection; instrument_id?: string
+  portfolio_id?: string; custodian_id?: string; detection?: CustodyDetection; instrument_id?: string; late_correction_statement_id?: string
   break_id: string; kind: string; key: string; ibor: string; custodian: string; difference: string
   status: string; assignee?: string; explanation?: string; first_seen_at: string
   last_seen_at: string; status_changed_at: string; age_seconds: number
@@ -60,6 +60,7 @@ function parseBreak(value: unknown): CustodyBreak {
   if ((row.portfolio_id !== undefined || row.custodian_id !== undefined || row.detection !== undefined) &&
       (!nonempty(row.portfolio_id) || !nonempty(row.custodian_id))) throw new Error('Invalid custody response.')
   if (row.detection !== undefined && !validDetection(row.detection)) throw new Error('Invalid custody response.')
+  if (row.late_correction_statement_id !== undefined && (row.kind !== 'execution_quantity' || !nonempty(row.late_correction_statement_id))) throw new Error('Invalid custody response.')
   if (row.kind === 'execution_quantity' && (typeof row.instrument_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(row.instrument_id) ||
       row.values_state !== 'exact' || !validDetection(row.detection) || row.revision !== undefined || row.status !== 'open')) throw new Error('Invalid custody response.')
   return row as unknown as CustodyBreak

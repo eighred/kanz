@@ -349,14 +349,20 @@ LEFT JOIN custody_runs d
  AND d.outcome='breaks' AND d.statement_id<>'' `
 
 // OutstandingBreaks implements Store.
-func (p *Postgres) balanceAndMembershipBreaks(ctx context.Context) ([]Break, error) {
-	const q = selectCustodyBreaks + `WHERE b.status IN ('open','assigned','explained') ORDER BY b.break_id`
+func (p *Postgres) balanceAndMembershipBreaks(ctx context.Context, portfolios ...string) ([]Break, error) {
+	q := selectCustodyBreaks + `WHERE b.status IN ('open','assigned','explained')`
+	var args []any
+	if len(portfolios) > 0 {
+		q += " AND b.portfolio_id=ANY($1)"
+		args = append(args, portfolios)
+	}
+	q += " ORDER BY b.break_id"
 	var rows pgx.Rows
 	var err error
 	if p.tx != nil {
-		rows, err = p.tx.Query(ctx, q)
+		rows, err = p.tx.Query(ctx, q, args...)
 	} else {
-		rows, err = p.pool.Query(ctx, q)
+		rows, err = p.pool.Query(ctx, q, args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("custody: outstanding breaks: %w", err)
