@@ -1,5 +1,6 @@
 // The signed-source pilot harness keeps synthetic session cookies on private stdin.
 const assert = require('node:assert/strict')
+const { comparisonDownload } = require('./custody-comparison-receipt.cjs')
 const { chromium } = require(process.env.TEST_MFA_PLAYWRIGHT)
 
 let stage = 'input'
@@ -32,6 +33,7 @@ async function main() {
         await context.addCookies([{ name: 'kanz_session', value: cookies[name], url: base, httpOnly: true, sameSite: 'Lax' }])
         const page = await context.newPage()
         page.setDefaultTimeout(5_000)
+        let priorReceipt
         for (const navigation of ['open', 'reload']) {
           stage = name + '-' + navigation + '-response'
           const response = page.waitForResponse(r => r.url() === endpoint && r.request().method() === 'GET')
@@ -81,6 +83,25 @@ async function main() {
           const source = row.locator('details[open]')
           assert.deepEqual(await source.locator('dt').allInnerTexts(), labels)
           assert.deepEqual(await source.locator('dd').allInnerTexts(), values)
+          // Read the comparison independently of the outstanding-break queue.
+          const dated = page.getByRole('region', { name: 'Dated custody result' })
+          await dated.getByLabel('Portfolio ID', { exact: true }).fill(expected.portfolio_id)
+          await dated.getByLabel('Custodian ID', { exact: true }).fill(expected.custodian_id)
+          await dated.getByLabel('Business date', { exact: true }).fill(expected.detection.business_date)
+          const request = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/portfolios/PF1/custody/comparison')
+          await dated.getByRole('button', { name: 'View dated result' }).click()
+          const reply = await request
+          assert.equal(reply.status(), 200)
+          const comparison = await reply.json()
+          assert.equal(comparison.tenant_id, 'synthetic-custody-pilot')
+          assert.equal(comparison.run_id, expected.detection.run_id)
+          assert.equal(comparison.statement_id, expected.detection.statement_id)
+          assert.equal(comparison.outcome, 'breaks')
+          assert.equal(comparison.transaction_pass, 'ran')
+          assert.deepEqual([comparison.statement_reference_count, comparison.book_reference_count, comparison.unreferenced_book_trades], ['1', '1', '0'])
+          const bytes = await comparisonDownload(page, dated, comparison)
+          if (priorReceipt) assert.deepEqual(bytes, priorReceipt)
+          priorReceipt = bytes
         }
       } finally { await context.close() }
     }

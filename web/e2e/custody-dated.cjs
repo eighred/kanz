@@ -1,5 +1,6 @@
 // All principals and dates come from the isolated signed pilot fixture.
 const assert = require('node:assert/strict')
+const { comparisonDownload } = require('./custody-comparison-receipt.cjs')
 const { chromium } = require(process.env.TEST_MFA_PLAYWRIGHT)
 
 let stage = 'input'
@@ -42,6 +43,7 @@ async function main() {
             assert.equal(reply.status, status)
             for (const secret of [clean_run, statement, missing_run]) assert(!reply.body.includes(secret))
           }
+          assert.equal(await page.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
           continue
         }
         for (const [date, state, outcome, label, run] of [
@@ -62,6 +64,7 @@ async function main() {
           assert.equal(response.status(), 200)
           stage = name + '-open-payload'
           const receipt = await response.json()
+          assert.equal(receipt.tenant_id, 'synthetic-custody-pilot')
           assert.equal(receipt.state, state)
           assert.equal(receipt.outcome, outcome)
           assert.equal(receipt.run_id, run)
@@ -77,8 +80,18 @@ async function main() {
           if (run) assert(text.includes(run))
           if (outcome === 'clean') {
             assert.equal(receipt.journal_position, '1')
+            assert.equal(receipt.transaction_pass, 'ran')
+            assert.equal(receipt.book_reference_count, '1')
+            assert.equal(receipt.statement_reference_count, '1')
+            assert.equal(receipt.unreferenced_book_trades, '0')
+            assert(text.includes('Independent reference comparison'))
             assert(text.includes(statement))
-          } else assert(!text.includes(statement))
+          } else {
+            assert.equal(receipt.transaction_pass, undefined)
+            assert(!text.includes(statement))
+          }
+          if (run) await comparisonDownload(page, region, receipt)
+          else assert.equal(await region.getByRole('button', { name: 'Download comparison receipt' }).count(), 0)
         }
         // Even on a gateway with registered financial/action routes, the very
         // same customer session must be refused before entering those handlers.
