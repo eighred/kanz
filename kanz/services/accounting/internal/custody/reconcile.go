@@ -294,11 +294,20 @@ func NewReconciler(store Store, book BookLoader, publisher Publisher, tolerance 
 // evidence, and returning only the run would let a caller treat a failure as a
 // verdict about the book.
 func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error) {
+	return r.reconcile(ctx, Run{Subject: subject})
+}
+
+func (r *Reconciler) reconcile(ctx context.Context, run Run) (Run, error) {
+	subject := run.Subject
 	if err := subject.Validate(); err != nil {
 		return Run{}, err
 	}
 	subject.BusinessDate = BusinessDay(subject.BusinessDate)
 	now := r.now().UTC()
+	run.Subject, run.CompletedAt, run.Tolerance = subject, now, r.tolerance
+	if run.RunID == "" {
+		run.RunID = runID(subject, now)
+	}
 
 	stmt, err := r.store.LatestStatement(ctx, subject)
 	switch {
@@ -307,15 +316,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		// silence, and it is emitted as a first-class outcome rather than
 		// skipped: an empty statement would reconcile as "the custodian holds
 		// nothing" and manufacture a break for every position the book holds.
-		return r.record(ctx, Run{
-			RunID:       runID(subject, now),
-			Subject:     subject,
-			Outcome:     OutcomeNoStatement,
-			Tolerance:   r.tolerance,
-			CompletedAt: now,
-		})
+		run.Outcome, run.observedMissing = OutcomeNoStatement, true
+		return r.record(ctx, run)
 	case err != nil:
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("load statement: %w", err))
+		return r.recordFailure(ctx, run, fmt.Errorf("load statement: %w", err))
 	}
 
 	// BOTH GRAINS OUT OF ONE CALL, and the pair is bound here rather than
@@ -323,7 +327,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	// slice of the journal the custodian is scoped to.
 	book, executions, basis, err := r.book(ctx, subject)
 	if err != nil {
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("materialize book: %w", err))
+		return r.recordFailure(ctx, run, fmt.Errorf("materialize book: %w", err))
 	}
 
 	detected, leg, err := recon.Reconcile(book, executions, recon.Statement{
@@ -335,7 +339,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		Grain:        stmt.Grain,
 	}, r.tolerance)
 	if err != nil {
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("compare executions: %w", err))
+		return r.recordFailure(ctx, run, fmt.Errorf("compare executions: %w", err))
 	}
 	r.stateLeg(subject, stmt, leg, len(executions))
 
@@ -348,21 +352,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 	// FirstSeenAt an operator has been working against — and publishing the
 	// freshly built ones would announce every break as OPEN and one run old, so
 	// any consumer of the FACT would see an aging problem reset to zero daily.
-	run, err := r.record(ctx, Run{
-		compared:    &stmt,
-		RunID:       runID(subject, now),
-		Subject:     subject,
-		Outcome:     outcome,
-		StatementID: stmt.StatementID,
-		Basis:       basis,
-		Breaks:      FromRecon(subject, detected, now),
-		Tolerance:   r.tolerance,
-		CompletedAt: now,
-	})
+	run.compared, run.Outcome, run.StatementID, run.Basis = &stmt, outcome, stmt.StatementID, basis
+	run.Breaks = FromRecon(subject, detected, now)
+	stored, err := r.record(ctx, run)
 	if err != nil && !errors.Is(err, ErrPublicationPending) {
-		return r.recordFailure(ctx, subject, now, fmt.Errorf("commit reconciliation: %w", err))
+		// Transient contention or invalidated observations must not consume an
+		// operator's idempotency key as a permanently failed comparison.
+		if run.RequestID != "" && !errors.Is(err, ErrHistoricalLifecycle) {
+			return Run{}, err
+		}
+		return r.recordFailure(ctx, run, fmt.Errorf("commit reconciliation: %w", err))
 	}
-	return run, err
+	return stored, err
 }
 
 // stateLeg says, once per run, whether the TRANSACTION pass actually happened
@@ -399,15 +400,14 @@ func (r *Reconciler) stateLeg(subject Subject, stmt Statement, leg recon.LegStat
 // reconciliation which could not run looks exactly like one that never came due.
 // The estate must be able to tell "the book would not materialize for three days"
 // from "nothing was scheduled".
-func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now time.Time, reason error) (Run, error) {
-	run, err := r.record(ctx, Run{
-		RunID:         runID(subject, now),
-		Subject:       subject,
-		Outcome:       OutcomeFailed,
-		Tolerance:     r.tolerance,
-		CompletedAt:   now,
-		FailureReason: reason.Error(),
-	})
+func (r *Reconciler) recordFailure(ctx context.Context, run Run, reason error) (Run, error) {
+	run.compared, run.Breaks, run.Outcome, run.FailureReason = nil, nil, OutcomeFailed, reason.Error()
+	if run.RequestID == "" {
+		run.StatementID, run.Basis = "", nil
+	} else if errors.Is(reason, ErrHistoricalLifecycle) {
+		run.FailureReason = ErrHistoricalLifecycle.Error()
+	}
+	run, err := r.record(ctx, run)
 	if err != nil {
 		return run, errors.Join(reason, err)
 	}
@@ -424,6 +424,9 @@ func (r *Reconciler) recordFailure(ctx context.Context, subject Subject, now tim
 func (r *Reconciler) record(ctx context.Context, run Run) (Run, error) {
 	stored, err := r.store.CommitRun(ctx, run)
 	if err != nil {
+		if run.RequestID != "" {
+			return Run{}, fmt.Errorf("custody: commit manual run: %w", err)
+		}
 		return run, fmt.Errorf("custody: commit run: %w", err)
 	}
 	run = stored
@@ -466,6 +469,8 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 	}
 	out := &accountingpb.ReconciliationRun{
 		RunId:         run.RunID,
+		RequestId:     run.RequestID,
+		Actor:         run.Actor,
 		PortfolioId:   run.Subject.PortfolioID,
 		CustodianId:   run.Subject.CustodianID,
 		BusinessDate:  timestamppb.New(BusinessDay(run.Subject.BusinessDate)),
