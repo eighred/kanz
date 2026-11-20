@@ -17,9 +17,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func goOriginResult(t *testing.T, ctx context.Context, wire []byte, want string) {
+func goOriginResult(t *testing.T, ctx context.Context, wire []byte, want string, options ...string) {
 	t.Helper()
-	child := exec.CommandContext(ctx, "/fixture/go-admit")
+	child := exec.CommandContext(ctx, "/fixture/go-admit", options...)
 	child.Env = []string{"SYNTHETIC_OMS_DATABASE_URL=" + os.Getenv("SYNTHETIC_OMS_RUNTIME_URL")}
 	child.Stdin = bytes.NewReader(wire)
 	output, err := child.Output()

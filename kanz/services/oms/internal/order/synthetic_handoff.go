@@ -12,9 +12,11 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/outbox"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/internal/capital"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/protobuf/proto"
@@ -31,6 +33,16 @@ func syntheticWriterID(s string) bool {
 // The independent control role must already have authorized this exact broker
 // frame. Record its original bytes in the same transaction as the acceptance.
 func (p *Postgres) CreateSyntheticHandoff(ctx context.Context, wire []byte) error {
+	return p.createSyntheticHandoff(ctx, wire, false)
+}
+
+// CreateFundedSyntheticHandoff requests the isolated XSIM spot fee schedule.
+// A separate funding principal must authorize the exact resulting debits.
+func (p *Postgres) CreateFundedSyntheticHandoff(ctx context.Context, wire []byte) error {
+	return p.createSyntheticHandoff(ctx, wire, true)
+}
+
+func (p *Postgres) createSyntheticHandoff(ctx context.Context, wire []byte, funded bool) error {
 	invalid := errors.New("unsupported synthetic admission")
 	var frame envelopepb.EventFrame
 	if len(wire) == 0 || len(wire) > 131072 || proto.Unmarshal(wire, &frame) != nil {
@@ -72,6 +84,17 @@ func (p *Postgres) CreateSyntheticHandoff(ctx context.Context, wire []byte) erro
 	}
 	st.VenueAccountId = "synthetic-spot"
 	st.AcceptedAnnouncedAt = st.AsOf
+	var amounts []string
+	if funded {
+		debits, err := capital.PhysicalDebits(st, "SYN", "USD", []*commonpb.Money{
+			{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 2}},
+			{CurrencyCode: "BNB", Amount: &commonpb.Decimal{Coefficient: 1}},
+		})
+		if err != nil || len(debits) != 2 || debits[0].CurrencyCode != "BNB" || debits[1].CurrencyCode != "USD" {
+			return invalid
+		}
+		amounts = []string{dec.FromProto(debits[0].Amount).RatString(), dec.FromProto(debits[1].Amount).RatString()}
+	}
 	ctx = bus.WithTraceContext(bus.WithCausationID(bus.WithCorrelationID(ctx, env.EventId), env.EventId), env.TraceContext)
 	fact, err := NewEmitter(nil).AcceptedFact(ctx, st)
 	if err != nil {
@@ -79,12 +102,12 @@ func (p *Postgres) CreateSyntheticHandoff(ctx context.Context, wire []byte) erro
 	}
 	err = p.create(ctx, st, []outbox.Record{fact}, nil, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `INSERT INTO public.synthetic_oms_commands
-			(order_id,principal_id,portfolio_id,idempotency_key,command_sha256,command,evidence_ids,go_gateway_frame)
+			(order_id,principal_id,portfolio_id,idempotency_key,command_sha256,command,evidence_ids,go_gateway_frame,go_funding_amounts)
 			SELECT $1,$2,$3,$4,sha256($5),$5,ARRAY(SELECT e.source_id FROM public.synthetic_oms_evidence e WHERE
 				(e.tenant_id,e.order_id,e.principal_id,e.portfolio_id,e.command_sha256,e.instrument_id)=
-				($7,$1,$2,$3,sha256($5),'SYNTH-USD') ORDER BY e.kind),$6
+				($7,$1,$2,$3,sha256($5),'SYNTH-USD') ORDER BY e.kind),$6,$8::text[]
 			WHERE current_database()='kanz_synthetic_oms' AND public.app_current_tenant()=$7`,
-			cmd.OrderId, meta.Issuer, cmd.PortfolioId, env.IdempotencyKey, frame.Payload, wire, env.TenantId)
+			cmd.OrderId, meta.Issuer, cmd.PortfolioId, env.IdempotencyKey, frame.Payload, wire, env.TenantId, amounts)
 		if err == nil && tag.RowsAffected() != 1 {
 			return invalid
 		}
@@ -99,8 +122,8 @@ func (p *Postgres) CreateSyntheticHandoff(ctx context.Context, wire []byte) erro
 	var epoch int64
 	var same bool
 	err = p.pool.QueryRow(ctx, `SELECT public.synthetic_oms_assert_writer(), EXISTS(SELECT FROM public.synthetic_oms_commands
-		WHERE tenant_id=$1 AND go_gateway_frame=$2 AND command=$3 AND order_id=$4 AND principal_id=$5 AND idempotency_key=$6)`,
-		env.TenantId, wire, frame.Payload, cmd.OrderId, meta.Issuer, env.IdempotencyKey).Scan(&epoch, &same)
+		WHERE tenant_id=$1 AND go_gateway_frame=$2 AND command=$3 AND order_id=$4 AND principal_id=$5 AND idempotency_key=$6 AND go_funding_amounts IS NOT DISTINCT FROM $7::text[])`,
+		env.TenantId, wire, frame.Payload, cmd.OrderId, meta.Issuer, env.IdempotencyKey, amounts).Scan(&epoch, &same)
 	if err != nil || epoch < 1 || !same {
 		return invalid
 	}

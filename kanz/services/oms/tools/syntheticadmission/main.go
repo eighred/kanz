@@ -43,7 +43,15 @@ func main() {
 		return
 	}
 	defer pool.Close()
-	switch err := order.NewPostgres(pool).CreateSyntheticHandoff(bus.WithTenantID(ctx, tenant), wire); {
+	admit := order.NewPostgres(pool).CreateSyntheticHandoff
+	if len(os.Args) != 1 {
+		if len(os.Args) != 2 || os.Args[1] != "--funded" {
+			fmt.Println("REFUSED")
+			return
+		}
+		admit = order.NewPostgres(pool).CreateFundedSyntheticHandoff
+	}
+	switch err := admit(bus.WithTenantID(ctx, tenant), wire); {
 	case err == nil:
 		fmt.Println("ACCEPTED")
 	case errors.Is(err, order.ErrExists):
