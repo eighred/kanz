@@ -145,7 +145,19 @@ BEGIN
           WHERE a.grantee NOT IN (guard,adapter) OR (a.grantee=adapter AND a.is_grantable))
        OR NOT EXISTS (SELECT FROM pg_roles WHERE oid=guard AND NOT
           (rolcanlogin OR rolinherit OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))
-       OR NOT EXISTS (SELECT FROM pg_class WHERE oid='public.synthetic_oms_settlement_authorizations'::regclass AND relrowsecurity AND relforcerowsecurity)
+       OR NOT EXISTS (
+          SELECT FROM pg_class a JOIN pg_class funding ON a.relowner=funding.relowner
+              JOIN pg_class writer ON a.relowner=writer.relowner
+              JOIN pg_roles owner_role ON owner_role.oid=a.relowner
+          WHERE a.oid='public.synthetic_oms_settlement_authorizations'::regclass AND a.relrowsecurity AND a.relforcerowsecurity
+            AND funding.oid='public.synthetic_oms_funding_authorizations'::regclass AND writer.oid='public.synthetic_oms_writer_history'::regclass
+            AND NOT starts_with(owner_role.rolname,'kanz_synthetic_'))
+       OR (SELECT count(*) FROM pg_policy WHERE polrelid='public.synthetic_oms_settlement_authorizations'::regclass)<>1
+       OR NOT EXISTS (
+          SELECT FROM pg_policy WHERE polrelid='public.synthetic_oms_settlement_authorizations'::regclass
+            AND polname='tenant_isolation' AND polcmd='*' AND polpermissive AND polroles=ARRAY[0]::oid[]
+            AND pg_get_expr(polqual,polrelid)='(tenant_id = app_current_tenant())'
+            AND pg_get_expr(polwithcheck,polrelid)='(tenant_id = app_current_tenant())')
        OR EXISTS (SELECT FROM pg_auth_members WHERE roleid=guard OR member=guard)
        OR EXISTS (SELECT FROM pg_class c, LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
                   WHERE c.oid='public.synthetic_oms_settlement_authorizations'::regclass AND a.grantee<>c.relowner

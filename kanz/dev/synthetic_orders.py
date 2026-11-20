@@ -362,6 +362,12 @@ def upgrade_retained_settlement(container, current):
         (f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC", "incomplete synthetic settlement authority"),
         ("GRANT INSERT ON public.synthetic_oms_settlement_authorizations TO kanz_synthetic_oms_adapter",
          "incomplete synthetic settlement authority"),
+        ("ALTER TABLE public.synthetic_oms_settlement_authorizations OWNER TO kanz_synthetic_oms_control",
+         "incomplete synthetic settlement authority"),
+        ("ALTER POLICY tenant_isolation ON public.synthetic_oms_settlement_authorizations WITH CHECK (true)",
+         "incomplete synthetic settlement authority"),
+        ("CREATE POLICY other_scope ON public.synthetic_oms_settlement_authorizations USING (true)",
+         "incomplete synthetic settlement authority"),
         ("ALTER TABLE public.orders DISABLE TRIGGER hold_synthetic_funded_lifecycle",
          "incomplete synthetic settlement mutation guards"),
         (f"DO $$ BEGIN EXECUTE replace(pg_get_functiondef('{signature}'::regprocedure),"
@@ -392,7 +398,7 @@ def upgrade_retained_settlement(container, current):
             RAISE EXCEPTION 'settlement upgrade changed retained evidence or authority';
           END IF;
         END $$;""", DB)
-    print("Prior settlement upgraded with all retained rows, function OID, owner and privileges preserved", flush=True)
+    print("Prior settlement upgraded with checked order, evidence, cash and outbox rows, function OID, owner and privileges preserved", flush=True)
 
 
 def run(stage, native, prior_accounting=None, browser=False, upgrade_settlement=False):
