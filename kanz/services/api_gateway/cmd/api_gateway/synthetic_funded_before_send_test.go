@@ -52,7 +52,7 @@ func testFundedDispatchBeforeSend(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg := syntheticvenue.Config{Tenant: tenant, Portfolio: portfolio, FillTime: time.Now().UTC(), FillOnExecute: true}
-		control := fundedVenueControl{order: o, proof: proof, issuer: syntheticPool(t, ctx, "CONTROL", tenant)}
+		control := fundedVenueControl{order: o, proof: proof, issuer: syntheticPool(t, ctx, "CONTROL", tenant), adapter: journal}
 		get := nativeSubmit{Version: 1, Op: "get", Tenant: tenant, Portfolio: portfolio, OrderID: fundedFirst, Principal: o.request.Principal}
 		var accepted []byte
 		var quarantined syntheticvenue.Receipt
