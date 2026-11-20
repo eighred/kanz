@@ -1,0 +1,98 @@
+"""Exercise the proposed object_store duration change against the API used by the Kanz lake worker."""
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import uuid
+
+from run import IMAGE
+
+
+ROOT = Path(__file__).resolve().parents[2]
+UPSTREAM = "https://github.com/apache/arrow-rs-object-store.git"
+RELEASE = "7a65b75b0d26fd8a282999462cb7030fb85fdcc3"
+DURATION_CHANGE = "67985f7e58ee8246d9f2771e9f52665f97171869"
+BACKPORT_TREE = "668613c259250fb3605f47846e4ac686af99a549"
+
+
+def git(directory, *args):
+    return subprocess.check_output(["git", "-c", "core.autocrlf=false", "-C", str(directory), *args], timeout=180)
+
+
+def replace_once(source, old, new):
+    if source.count(old) != 1:
+        raise ValueError("unexpected upstream source at the adaptation point")
+    return source.replace(old, new)
+
+
+def prepare(work, inputs):
+    checkout = work / "apache"
+    checkout.mkdir()
+    git(checkout, "init", "--quiet")
+    git(checkout, "fetch", "--no-tags", "--depth=1", UPSTREAM, RELEASE, DURATION_CHANGE)
+    git(checkout, "checkout", "--quiet", "--detach", RELEASE)
+    # The 0.13 client imports HeaderValue through reqwest. The later release imports http.
+    config = git(checkout, "show", DURATION_CHANGE + ":src/config.rs")
+    config = replace_once(config, b"use http::header::HeaderValue;\nuse jiff::fmt::friendly::SpanPrinter;",
+                          b"use jiff::fmt::friendly::SpanPrinter;\nuse reqwest::header::HeaderValue;")
+    (checkout / "src/config.rs").write_bytes(config)
+    manifest = (checkout / "Cargo.toml").read_bytes()
+    manifest = replace_once(manifest, b'humantime = "2.1"',
+                            b'jiff = { version = "=1.0.1", default-features = false, features = ["std"], optional = true }')
+    manifest = replace_once(manifest, b'"chrono/serde", "base64"', b'"chrono/serde", "dep:jiff", "base64"')
+    (checkout / "Cargo.toml").write_bytes(manifest)
+    git(checkout, "add", "--", "Cargo.toml", "src/config.rs")
+    if git(checkout, "write-tree").decode().strip() != BACKPORT_TREE:
+        raise ValueError("backported object_store source tree differs")
+    git(checkout, "archive", "--format=tar", "--output=" + str(inputs / "object.tar"), BACKPORT_TREE)
+    git(ROOT, "archive", "--format=tar", "--output=" + str(inputs / "kanz.tar"), "HEAD",
+        "rust/services/lake_snapshot", "rust/Cargo.lock", "schemas/proto/envelope", "schemas/proto/lake")
+    # Do not mount either repository or its Git configuration inside the compiler.
+    (inputs / "verify.sh").write_bytes(Path(__file__).with_name("object_store.sh").read_bytes())
+    for path in inputs.iterdir():
+        path.chmod(0o644)
+    inputs.chmod(0o755)
+
+
+def qualify():
+    with tempfile.TemporaryDirectory(prefix="kanz-object-store-") as temp:
+        root = Path(temp).resolve()
+        inputs = root / "inputs"
+        inputs.mkdir()
+        prepare(root, inputs)
+        volume = "kanz-object-store-" + uuid.uuid4().hex
+        mount = "type=volume,source=" + volume + ",target=/work"
+        args = ["docker", "create", "--pull", "never", "--read-only", "--platform", "linux/amd64",
+                "--label", "kanz.jiff=" + volume,
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--memory", "5g", "--cpus", "3", "--pids-limit", "220",
+                "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
+                "--mount", mount]
+        subprocess.run(["docker", "volume", "create", "--label", "kanz.jiff=" + volume, volume], check=True)
+        try:
+            run_container([*args, "--network", "none", "--user", "0:0", "--cap-add", "CHOWN",
+                           IMAGE, "chown", "65532:65532", "/work"], timeout=30)
+            for phase, network in (("fetch", "bridge"), ("test", "none")):
+                run_container([*args, "--network", network, "--user", "65532:65532",
+                               "--mount", f"type=bind,src={inputs},dst=/inputs,readonly",
+                               IMAGE, "sh", "/inputs/verify.sh", phase], timeout=1200)
+        finally:
+            label = subprocess.check_output(["docker", "volume", "inspect", "--format",
+                                             '{{index .Labels "kanz.jiff"}}', volume], text=True).strip()
+            if label != volume:
+                raise RuntimeError("refusing to remove a volume with a different owner")
+            subprocess.run(["docker", "volume", "rm", volume], check=True)
+
+
+def run_container(args, *, timeout):
+    cid = subprocess.check_output(args, text=True).strip()
+    if not re.fullmatch("[0-9a-f]{64}", cid):
+        raise RuntimeError("Docker returned an invalid container ID")
+    try:
+        subprocess.run(["docker", "start", "--attach", cid], check=True, timeout=timeout)
+    finally:
+        subprocess.run(["docker", "rm", "--force", "--volumes", cid], check=True)
+
+
+if __name__ == "__main__":
+    qualify()
