@@ -48,8 +48,13 @@ After that commit, the fixture scales the broker to zero and waits for the
 original pod to disappear. An offline Job mounts its data claim read-only and
 archives the broker state onto a separate PVC. Another Job restores the archive
 onto a fresh claim. Neither Job mounts SPIRE credentials. The verifier checks
-the archive digest, distinct volume and pod identities, then requires the new
-broker to serve both original sequences, the committed group offset of 2 and
+the archive digest and distinct volume and pod identities. Before taking storage
+offline it compares both topic ranges to the producer Jobs' acknowledged offsets
+and SHA-256 hashes of their original wire frames. Each synthetic frame carries a
+fresh correlation ID. The driver holds the observations outside the three PVCs
+and records the consumer's committed next offset after resume. It requires the
+new broker to serve the same keyed frames at the same offsets, the same observed
+group position on partition zero of `proof-a`, and
 the original denials for an ungranted identity. These checks cover a cold
 same-cluster restore of this single-broker fixture.
 
