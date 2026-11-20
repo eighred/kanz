@@ -3,12 +3,13 @@ package storeconformance
 import (
 	"bytes"
 	"fmt"
-	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
-	"github.com/eighred/kanz/services/oms/internal/order"
-	"google.golang.org/protobuf/proto"
 	"strings"
 	"testing"
 	"time"
+
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"github.com/eighred/kanz/services/oms/internal/order"
+	"google.golang.org/protobuf/proto"
 )
 
 func queryStates(t *testing.T, r fixtureResult, want []*orderpb.OrderState) {
@@ -29,10 +30,23 @@ func (f *fixture) query(mode string, extra map[string]any) fixtureResult {
 	}
 	return runResult(f.t, req)
 }
+func (f *fixture) createQueryParent(id, portfolio string) *orderpb.OrderState {
+	f.t.Helper()
+	parent := f.initial()
+	parent.OrderId = id
+	parent.PortfolioId = portfolio
+	parent.Status = orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED
+	if err := order.NewPostgres(f.pool).Create(f.ctx, parent, nil); err != nil {
+		f.t.Fatal(err)
+	}
+	return parent
+}
+
 func TestRustRepositoryQueries(t *testing.T) {
 	t.Run("list-status-parent-exact", func(t *testing.T) {
 		f := newFixture(t)
 		store := order.NewPostgres(f.pool)
+		parent := f.createQueryParent("parent", f.initial().PortfolioId)
 		for i := 4; i >= 0; i-- {
 			s := f.initial()
 			s.OrderId = fmt.Sprintf("order-%d", i)
@@ -41,7 +55,7 @@ func TestRustRepositoryQueries(t *testing.T) {
 				s.Status = orderpb.OrderStatus(999)
 			}
 			if i%2 == 0 {
-				s.ParentOrderId = "parent"
+				s.ParentOrderId = parent.OrderId
 			}
 			if i%2 == 0 {
 				if e := store.Create(f.ctx, s, nil); e != nil {
@@ -132,10 +146,11 @@ func TestRustRepositoryQueries(t *testing.T) {
 		b.tenant = "tenant-b"
 		b.pool = f.open(b.tenant)
 		s := b.initial()
-		s.ParentOrderId = "b-parent"
+		parent := b.createQueryParent("b-parent", s.PortfolioId)
+		s.ParentOrderId = parent.OrderId
 		expect(t, run(t, b.createRequest(s)), "committed")
 		queryStates(t, f.query("list", nil), []*orderpb.OrderState{a})
-		queryStates(t, b.query("list", nil), []*orderpb.OrderState{s})
+		queryStates(t, b.query("list", nil), []*orderpb.OrderState{parent, s})
 		queryStates(t, f.query("list-by-parent", map[string]any{"parent_id": "b-parent"}), nil)
 		r := f.query("list-by-portfolio", map[string]any{"portfolio_id": s.PortfolioId})
 		queryStates(t, r, nil)
@@ -190,8 +205,9 @@ func TestRustRepositoryQueries(t *testing.T) {
 		s := f.initial()
 		s.OrderId = "selected"
 		s.Status = 777
-		s.ParentOrderId = "selected-parent"
 		s.PortfolioId = "selected-portfolio"
+		parent := f.createQueryParent("selected-parent", s.PortfolioId)
+		s.ParentOrderId = parent.OrderId
 		expect(t, run(t, f.createRequest(s)), "committed")
 		if _, e := f.pool.Exec(f.ctx, "ANALYZE orders"); e != nil {
 			t.Fatal(e)
@@ -214,7 +230,7 @@ func TestRustRepositoryQueries(t *testing.T) {
 		}
 		queryStates(t, f.query("list-by-status", map[string]any{"statuses": []int{777}}), []*orderpb.OrderState{s})
 		queryStates(t, f.query("list-by-parent", map[string]any{"parent_id": "selected-parent"}), []*orderpb.OrderState{s})
-		queryStates(t, f.query("list-by-portfolio", map[string]any{"portfolio_id": "selected-portfolio"}), []*orderpb.OrderState{s})
+		queryStates(t, f.query("list-by-portfolio", map[string]any{"portfolio_id": "selected-portfolio"}), []*orderpb.OrderState{s, parent})
 	})
 	t.Run("sql-failure-no-prefix", func(t *testing.T) {
 		f := newFixture(t)

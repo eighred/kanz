@@ -120,9 +120,7 @@ func (s *Service) withdrawSyntheticHandoff(ctx context.Context, store *Postgres,
 	if err != nil {
 		return err
 	}
-	if view.State != execution.OrderViewCancelled || len(view.Fills) != 1 || !proto.Equal(view.Fills[0], &retained) ||
-		!dec.InDomain(view.ExecutedQuantity) || !dec.InDomain(st.GetFilledQuantity()) ||
-		dec.Cmp(view.ExecutedQuantity, st.GetFilledQuantity()) != 0 {
+	if view.State != execution.OrderViewCancelled || !MatchesRetainedSyntheticExecution(view, st, &retained) {
 		return errors.New("oms: synthetic withdrawal has no matching terminal execution history")
 	}
 	effective := at.AsTime()
@@ -136,6 +134,15 @@ func (s *Service) withdrawSyntheticHandoff(ctx context.Context, store *Postgres,
 	}
 	_, err = s.relay.Flush(ctx, st.GetOrderId())
 	return err
+}
+
+// MatchesRetainedSyntheticExecution verifies the complete single-fill history
+// required by the funded synthetic handback before adoption or settlement.
+func MatchesRetainedSyntheticExecution(view execution.OrderView, st *orderpb.OrderState, retained *orderpb.Fill) bool {
+	total, filled, quantity := view.ExecutedQuantity, st.GetFilledQuantity(), retained.GetQuantity()
+	return retained != nil && len(view.Fills) == 1 && proto.Equal(view.Fills[0], retained) &&
+		dec.InDomain(total) && dec.InDomain(filled) && dec.InDomain(quantity) && dec.IsPositive(quantity) &&
+		dec.Cmp(total, filled) == 0 && dec.Cmp(total, quantity) == 0
 }
 
 func (s *Service) finishSyntheticWithdrawal(ctx context.Context, store *Postgres, st *orderpb.OrderState, view execution.OrderView,
@@ -166,5 +173,6 @@ func (s *Service) finishSyntheticWithdrawal(ctx context.Context, store *Postgres
 	if decision != "APPLIED" && decision != "DUPLICATE" {
 		return errors.New("oms: synthetic withdrawal completion lacks settlement authority")
 	}
+	s.logger.Info("oms synthetic withdrawal settlement", "order_id", st.GetOrderId(), "result", decision)
 	return nil
 }

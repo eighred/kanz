@@ -24,6 +24,7 @@ import (
 // state seen at handoff. Its terminal approval additionally requires the actual
 // XSIM query and the original execution journal bytes.
 type fundedWithdrawalApproval struct {
+	race       *fundedWithdrawalRace
 	mode       goWithdrawalMode
 	control    *fundedVenueControl
 	event      *envelopepb.Envelope
@@ -103,8 +104,8 @@ func (a *fundedWithdrawalApproval) checkClaim(ctx context.Context) error {
 		return err
 	}
 	var claimed bool
-	err := a.control.proof.QueryRow(ctx, `SELECT EXISTS(SELECT FROM synthetic_oms_observations
-		WHERE order_id=$1 AND writer_epoch=$2 AND operation='cancel_pending' AND event_id=$3)
+	err := a.control.proof.QueryRow(ctx, `SELECT (SELECT count(*)=1 AND bool_and(operation='cancel_pending' AND event_id=$3) FROM synthetic_oms_observations
+		WHERE order_id=$1 AND writer_epoch=$2)
 		AND (SELECT count(*) FROM outbox WHERE partition_key=$1)=3`,
 		a.control.order.command.OrderId, a.generation, a.event.EventId).Scan(&claimed)
 	if err != nil {
@@ -302,8 +303,13 @@ func (a *fundedWithdrawalApproval) verifyBrokerBeforePublish(t *testing.T, ctx c
 
 func (a *fundedWithdrawalApproval) verifyWithdrawalDelivery(t *testing.T, ctx context.Context, s syntheticSession, delivery, ackFloor uint64, pending int) {
 	t.Helper()
+	a.verifyWithdrawalGroup(t, ctx, s, "synthetic-go-funded-withdrawal", delivery, ackFloor, pending)
+}
+
+func (a *fundedWithdrawalApproval) verifyWithdrawalGroup(t *testing.T, ctx context.Context, s syntheticSession, group string, delivery, ackFloor uint64, pending int) {
+	t.Helper()
 	subject := bus.TenantRoutedSubject(a.event.TenantId, "order.order.cancel")
-	durable := "synthetic-go-funded-withdrawal-" + strings.ReplaceAll(subject, ".", "_")
+	durable := group + "-" + strings.ReplaceAll(subject, ".", "_")
 	consumer, err := s.js.Consumer(ctx, "SYNTHETIC_ORDERS", durable)
 	if err != nil {
 		t.Fatal(err)

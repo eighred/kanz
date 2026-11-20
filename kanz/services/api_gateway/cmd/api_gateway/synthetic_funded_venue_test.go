@@ -298,6 +298,7 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 	var withdrawal atomic.Pointer[fundedWithdrawalApproval]
 	var lostWithdrawalAck, terminalApproved atomic.Bool
 	count := grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		approval := withdrawal.Load()
 		switch info.FullMethod {
 		case venuepb.VenueAdapterService_Execute_FullMethodName:
 			sends.Add(1)
@@ -305,14 +306,18 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			queries.Add(1)
 		case venuepb.VenueAdapterService_CancelOrder_FullMethodName:
 			withdrawals.Add(1)
-			if approval := withdrawal.Load(); approval != nil {
+			if approval != nil {
 				if err := approval.checkClaim(ctx); err != nil {
 					return nil, status.Errorf(codes.FailedPrecondition, "missing durable claim before XSIM withdrawal: %v", err)
 				}
 			}
 		}
+		if approval != nil && approval.race != nil && approval.race.armed.Load() {
+			if err := approval.race.beforeRPC(ctx, info.FullMethod); err != nil {
+				return nil, err
+			}
+		}
 		reply, err := handler(ctx, request)
-		approval := withdrawal.Load()
 		if err != nil || approval == nil {
 			return reply, err
 		}
@@ -323,10 +328,18 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 					return nil, status.Errorf(codes.FailedPrecondition, "withdrawal claim before acknowledgement: %v", err)
 				}
 				lostWithdrawalAck.Store(true)
+				if approval.race != nil {
+					close(approval.race.ackLost)
+				}
 				return nil, status.Error(codes.DeadlineExceeded, "lost XSIM withdrawal acknowledgement")
 			}
 		case venuepb.VenueAdapterService_QueryOrder_FullMethodName:
 			view := reply.(*venuepb.QueryOrderResponse)
+			if approval.race != nil && approval.race.armed.Load() {
+				if err := approval.race.observeQuery(ctx, approval, view); err != nil {
+					return nil, err
+				}
+			}
 			if lostWithdrawalAck.Load() && view.GetState() == venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED && !terminalApproved.Load() {
 				if err := approval.recordTerminal(ctx, view); err != nil {
 					return nil, status.Errorf(codes.FailedPrecondition, "terminal settlement approval: %v", err)
@@ -443,14 +456,27 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			authorizeWithdrawal = func(generation int) *fundedWithdrawalApproval {
 				approval := control.prepareGoWithdrawal(t, ctx, s, partial, generation)
 				approval.mode = withdrawalMode
+				if withdrawalMode == goWithdrawalRace {
+					approval.race = newFundedWithdrawalRace()
+				}
 				withdrawal.Store(approval)
 				return approval
 			}
 		}
 		successor(t, ctx, s, partial, addr, identity, control.accepted, authorizeWithdrawal)
 		if withdrawalMode != noGoWithdrawal {
-			if !lostWithdrawalAck.Load() || !terminalApproved.Load() || sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != queriesBefore+3 {
+			wantQueries := queriesBefore + 3
+			if r := withdrawal.Load().race; r != nil {
+				wantQueries = queriesBefore + 6
+				if r.openViews.Load() != 1 || r.terminalViews.Load() != 2 {
+					t.Fatalf("racing query views: open=%d terminal=%d", r.openViews.Load(), r.terminalViews.Load())
+				}
+			}
+			if !lostWithdrawalAck.Load() || !terminalApproved.Load() || sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != wantQueries {
 				t.Fatalf("Go withdrawal after ACK loss: sends=%d cancels=%d queries=%d (previously %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
+			}
+			if r := withdrawal.Load().race; r != nil {
+				t.Logf("XSIM race: %d Execute, %d CancelOrder, %d post-handoff QueryOrder; %d in-flight working view and %d terminal views", sends.Load(), withdrawals.Load(), queries.Load()-queriesBefore, r.openViews.Load(), r.terminalViews.Load())
 			}
 			return verifyGoWithdrawalBooking(t, ctx, s, control, withdrawal.Load())
 		}

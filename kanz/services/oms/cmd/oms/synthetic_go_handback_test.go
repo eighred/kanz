@@ -13,11 +13,11 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/halt"
@@ -42,6 +42,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		CancelEventID                    string
 		WithdrawalEventID                string
 		WithdrawalStage                  string
+		WithdrawalRaceDir                string
 		State                            []byte
 		Version                          int64
 		Generation                       int
@@ -56,14 +57,24 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if in.WithdrawalEventID != "" && !working {
 		t.Fatal("a new withdrawal requires the isolated funded working profile")
 	}
+	racing := in.WithdrawalStage == "race-first" || in.WithdrawalStage == "race-second"
 	switch in.WithdrawalStage {
 	case "":
-	case "send", "reconcile", "reconcile-published", "publish", "publish-mark":
+	case "send", "reconcile", "reconcile-published", "publish", "publish-mark", "race-first", "race-second":
 		if in.WithdrawalEventID == "" {
 			t.Fatal("restart stages require the original withdrawal event")
 		}
 	default:
 		t.Fatal("invalid withdrawal restart stage")
+	}
+	if racing {
+		dir := in.WithdrawalRaceDir
+		info, err := os.Stat(dir)
+		if !strings.HasPrefix(dir, "/tmp/") || filepath.Clean(dir) != dir || err != nil || !info.IsDir() {
+			t.Fatal("simultaneous withdrawal requires a disposable rendezvous directory")
+		}
+	} else if in.WithdrawalRaceDir != "" {
+		t.Fatal("unexpected withdrawal rendezvous directory")
 	}
 	switch {
 	case in.CancelEventID == "" && tenant == "synthetic-go-handback" && in.Generation == 2:
@@ -150,6 +161,9 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if in.WithdrawalStage != "" {
 		brokerConfig.ConsumerTuning.AckWait = 3 * time.Second
 	}
+	if racing {
+		brokerConfig.ConsumerTuning.AckWait = 15 * time.Second
+	}
 	client, e := bus.DialNATS(ctx, brokerConfig)
 	if e != nil {
 		t.Fatal(e)
@@ -181,7 +195,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if working {
 		wantClaims, wantPending := 3, 2
 		switch in.WithdrawalStage {
-		case "reconcile", "reconcile-published":
+		case "reconcile", "reconcile-published", "race-second":
 			wantPending = 0
 		case "publish", "publish-mark":
 			wantClaims, wantPending = 4, 1
@@ -237,7 +251,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		if in.WithdrawalStage == "" {
 			consumeSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID)
 		} else {
-			restartSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID, in.WithdrawalStage)
+			restartSyntheticFundedWithdrawal(t, ctx, client, withdrawal, in.Broker, in.WithdrawalEventID, in.WithdrawalStage, in.WithdrawalRaceDir)
 		}
 	}
 }
@@ -265,9 +279,7 @@ func (v fundedWorkingRecoveryVenue) QueryOrder(ctx context.Context, st *orderpb.
 	}
 	// Ordinary adoption skips an already-applied raw fill ID. Establish
 	// content equality and a complete cumulative total before it can do so.
-	if view.State != execution.OrderViewPartiallyFilled || len(view.Fills) != 1 || !proto.Equal(view.Fills[0], v.fill) ||
-		!dec.InDomain(view.ExecutedQuantity) || !dec.InDomain(st.GetFilledQuantity()) ||
-		dec.FromProto(view.ExecutedQuantity).Cmp(dec.FromProto(st.GetFilledQuantity())) != 0 {
+	if view.State != execution.OrderViewPartiallyFilled || !order.MatchesRetainedSyntheticExecution(view, st, v.fill) {
 		return execution.OrderView{}, errors.New("working venue view contradicts the retained execution")
 	}
 	return view, nil
@@ -297,6 +309,7 @@ func TestFundedWorkingQueryRejectsConflictingExecution(t *testing.T) {
 		{"same_id_changed_fee", execution.OrderViewPartiallyFilled, qty, conflict, false},
 		{"unreconciled_total", execution.OrderViewPartiallyFilled, &commonpb.Decimal{Coefficient: 1}, fill, false},
 		{"missing_total", execution.OrderViewPartiallyFilled, nil, fill, false},
+		{"missing_execution", execution.OrderViewPartiallyFilled, qty, nil, false},
 		{"unexpected_terminal", execution.OrderViewFilled, qty, fill, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

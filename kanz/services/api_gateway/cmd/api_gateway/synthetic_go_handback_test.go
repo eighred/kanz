@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -186,17 +187,36 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 	if withdrawal != nil {
 		args["withdrawalEventID"] = withdrawal.event.EventId
 	}
-	run := func(stage string, wantExit int) {
+	childCtx, stopChildren := context.WithCancel(ctx)
+	defer stopChildren()
+	launch := func(stage string) *goWithdrawalChild {
 		t.Helper()
 		args["withdrawalStage"] = stage
 		input, err := json.Marshal(args)
 		if err != nil {
 			t.Fatal(err)
 		}
-		child := exec.CommandContext(ctx, "/fixture/oms", "-test.run=^TestSyntheticRecoveredGoStartup$", "-test.count=1", "-test.v")
-		child.Env = []string{"KANZ_SYNTHETIC_GO_HANDBACK=1", "SYNTHETIC_OMS_NEXT_RUNTIME_URL=" + goDSN}
-		child.Stdin = bytes.NewReader(input)
-		output, err := child.CombinedOutput()
+		cmd := exec.CommandContext(childCtx, "/fixture/oms", "-test.run=^TestSyntheticRecoveredGoStartup$", "-test.count=1", "-test.v")
+		cmd.Env = []string{"KANZ_SYNTHETIC_GO_HANDBACK=1", "SYNTHETIC_OMS_NEXT_RUNTIME_URL=" + goDSN}
+		cmd.Stdin = bytes.NewReader(input)
+		var output bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &output, &output
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		child := &goWithdrawalChild{pid: cmd.Process.Pid, done: done}
+		go func() {
+			child.err = cmd.Wait()
+			child.output = output.Bytes()
+			close(done)
+		}()
+		return child
+	}
+	finish := func(child *goWithdrawalChild, stage string, wantExit int) {
+		t.Helper()
+		<-child.done
+		err, output := child.err, child.output
 		if wantExit != 0 {
 			var exited *exec.ExitError
 			if !errors.As(err, &exited) || exited.ExitCode() != wantExit {
@@ -211,6 +231,30 @@ func startSyntheticGoSuccessor(t *testing.T, ctx context.Context, s syntheticSes
 				t.Log("GO_HANDBACK " + message)
 			}
 		}
+	}
+	run := func(stage string, wantExit int) { t.Helper(); finish(launch(stage), stage, wantExit) }
+	if withdrawal != nil && withdrawal.mode == goWithdrawalRace {
+		dir := t.TempDir()
+		args["withdrawalRaceDir"] = dir
+		first := launch("race-first")
+		awaitWithdrawalChild(t, ctx, first, filepath.Join(dir, "ready-first"))
+		second := launch("race-second")
+		awaitWithdrawalChild(t, ctx, second, filepath.Join(dir, "ready-second"))
+		if first.pid == second.pid {
+			t.Fatal("race requires two simultaneous OMS processes")
+		}
+		withdrawal.race.armed.Store(true)
+		if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		finish(first, "race-first", 0)
+		finish(second, "race-second", 0)
+		verifyRaceSettlementResults(t, first.output, second.output)
+		for _, stage := range []string{"race-first", "race-second"} {
+			withdrawal.verifyWithdrawalGroup(t, ctx, s, "synthetic-go-funded-withdrawal-"+stage, 2, 2, 0)
+		}
+		t.Logf("GO_HANDBACK two live Go processes (%d, %d), two independent deliveries of the same withdrawal, one APPLIED, one DUPLICATE, both ACK floors 2", first.pid, second.pid)
+		return
 	}
 	if withdrawal == nil || withdrawal.mode == goWithdrawal {
 		run("", 0)

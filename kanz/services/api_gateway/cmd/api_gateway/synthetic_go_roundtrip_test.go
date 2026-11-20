@@ -61,6 +61,13 @@ func TestSyntheticFundedWithdrawalPublishMarkGoRustGo(t *testing.T) {
 	exerciseGoRustGo(t, fundedWorkingTenant, goWithdrawalPublishMark)
 }
 
+func TestSyntheticFundedWithdrawalRaceGoRustGo(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WITHDRAWAL_RACE") != "1" {
+		t.Skip("requires the two-process funded withdrawal fixture")
+	}
+	exerciseGoRustGo(t, fundedWorkingTenant, goWithdrawalRace)
+}
+
 type goWithdrawalMode int
 
 const (
@@ -68,6 +75,7 @@ const (
 	goWithdrawal
 	goWithdrawalRestart
 	goWithdrawalPublishMark
+	goWithdrawalRace
 )
 
 func exerciseGoRustGo(t *testing.T, tenant string, withdrawalMode goWithdrawalMode) {

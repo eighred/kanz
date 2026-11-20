@@ -235,3 +235,11 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 ```
 
 Go and Rust relay attempts use the row's persisted UUIDv7 as the JetStream message ID. The new process retries the same terminal row, marks it published, and acknowledges delivery three. The proof requires the original JetStream sequence, UUID and frame bytes to survive the retry and verifies one Accounting debit. This broker suppression applies within the stream's duplicate window. Consumer idempotency still applies after that window. Before upgrading an existing publisher estate, reconcile pending rows that an older publisher might already have sent under a per-attempt UUID. Such an identity cannot be reconstructed from the old SQL row.
+
+### Concurrent delivery after funded handback
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-withdrawal-race
+```
+
+Two Go processes consume the same signed cancellation on separate JetStream durables. The runner holds the winning XSIM cancellation until the other process observes the original working fill. At that point PostgreSQL has one claim and both reservations are still intact. It drops the cancellation acknowledgement and waits for both retries to query XSIM before returning the confirmed terminal view. Both processes attempt settlement. The test requires one `APPLIED`, one `DUPLICATE`, both acknowledgements, one terminal fact and one Accounting debit. The separate working-query probe rejects retained fill IDs with changed fees and incomplete histories through the same history check used before settlement.
