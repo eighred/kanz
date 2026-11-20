@@ -219,17 +219,7 @@ func TestSyntheticFundedVenueLifecycle(t *testing.T) {
 	t.Run("claim_before_venue_send", testFundedDispatchBeforeSend)
 }
 
-type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.EventFrame)
-
-// Start with a Go-admitted order after transfer to Rust, with its acceptance
-// still in the OMS outbox. The successor drains the terminal FACTs on startup.
-func exerciseRetainedFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, o fundedOrder, successor fundedGoSuccessor) syntheticvenue.Receipt {
-	t.Helper()
-	if successor == nil {
-		t.Fatal("funded handback requires a Go successor")
-	}
-	return exerciseFundedVenue(t, ctx, s, o, 0, true, successor)
-}
+type fundedGoSuccessor func(*testing.T, context.Context, syntheticSession, syntheticvenue.Receipt, string, *testidentity.Source, *envelopepb.Envelope)
 
 func refuseFundedPartialHandback(t *testing.T, ctx context.Context, tenant string) {
 	t.Helper()
@@ -245,12 +235,12 @@ func refuseFundedPartialHandback(t *testing.T, ctx context.Context, tenant strin
 	}
 }
 
-func requireFundedPendingFacts(t *testing.T, ctx context.Context, proof *pgxpool.Pool, orderID string, want []string) {
+func requireFundedPendingFacts(t *testing.T, ctx context.Context, proof *pgxpool.Pool, orderID string, wantTotal int, want []string) {
 	t.Helper()
 	var pending []string
 	var total int
 	err := proof.QueryRow(ctx, "SELECT count(*),array_agg(subject ORDER BY subject) FILTER (WHERE published_at IS NULL) FROM outbox WHERE partition_key=$1 AND producer_service='oms'", orderID).Scan(&total, &pending)
-	if err != nil || total != 4 || !slices.Equal(pending, want) {
+	if err != nil || total != wantTotal || !slices.Equal(pending, want) {
 		t.Fatalf("retained OMS FACTs total=%d pending=%v want=%v: %v", total, pending, want, err)
 	}
 }
@@ -357,6 +347,9 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 				t.Fatal(e)
 			}
 			checkVenueCash(t, ctx, proof, o, 1000, 252, 252, 1, 0, 0)
+			if successor != nil {
+				refuseFundedPartialHandback(t, ctx, tenant)
+			}
 		} else {
 			if e != nil || st.Quarantine != nil || st.VenueAckAt == nil || sends.Load() != 1 || queries.Load() == 0 {
 				t.Fatalf("XSIM reconciliation: %v", e)
@@ -378,6 +371,20 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 				checkFundedExecutionFactClaims(t, ctx, proof, tenant, orderID)
 			}
 		}
+	}
+	if successor != nil && !fillOnCancel {
+		_, partial := get()
+		requireFundedPendingFacts(t, ctx, proof, orderID, 3, []string{"order.order.partially_filled", "order.order.routed"})
+		queriesBefore := queries.Load()
+		successor(t, ctx, s, partial, addr, identity, control.accepted)
+		if sends.Load() != 1 || withdrawals.Load() != 0 || queries.Load() != queriesBefore+1 {
+			t.Fatalf("Go working recovery: got %d sends, %d withdrawals, %d queries (was %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
+		}
+		requireFundedPendingFacts(t, ctx, proof, orderID, 3, nil)
+		checkVenueCash(t, ctx, proof, o, 1000, 252, 252, 1, 126, 0)
+		applyVenueAccounting(t, ctx, s, proof, o, 252, 1)
+		t.Log("XSIM open partial retained: one placement, one execution, no withdrawal; after booking 126 USD once, balance 874 USD, remaining holds 126 USD and 1 BNB")
+		return partial
 	}
 	frame := s.cancelOrder(orderID, "cancel-remote", "synthetic-trader", portfolio)
 	cancelFrom := orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
@@ -465,7 +472,7 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 	}
 	checkVenueCash(t, ctx, proof, o, 1000, 126, 126, 0, 126, 0)
 	if successor != nil {
-		requireFundedPendingFacts(t, ctx, proof, orderID, []string{"order.order.cancelled", "order.order.partially_filled", "order.order.routed"})
+		requireFundedPendingFacts(t, ctx, proof, orderID, 4, []string{"order.order.cancelled", "order.order.partially_filled", "order.order.routed"})
 		cash, err := s.js.Stream(ctx, "SYNTHETIC_CASH")
 		if err != nil {
 			t.Fatal(err)
@@ -475,14 +482,33 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			t.Fatalf("expected only the accounting opening balance before Go startup: %v", err)
 		}
 		queriesBefore := queries.Load()
-		successor(t, ctx, s, terminal, addr, identity, frame)
+		successor(t, ctx, s, terminal, addr, identity, frame.Envelope)
 		if sends.Load() != 1 || withdrawals.Load() != 1 || queries.Load() != queriesBefore {
 			t.Fatalf("Go terminal replay changed XSIM calls: %d sends, %d withdrawals, %d queries (was %d)", sends.Load(), withdrawals.Load(), queries.Load(), queriesBefore)
 		}
-		requireFundedPendingFacts(t, ctx, proof, orderID, nil)
+		requireFundedPendingFacts(t, ctx, proof, orderID, 4, nil)
 	} else if n, e := relay.Flush(ctx, orderID); e != nil || n != 3 {
 		t.Fatalf("publish routed, partially filled, cancelled FACTs: %d %v", n, e)
 	}
+	booked := applyVenueAccounting(t, ctx, s, proof, o, 126, 0)
+	if successor == nil {
+		later := signedFundedOrder(t, ctx, s, fundedNext, false)
+		later.authorize(t, ctx, later.request.Principal, time.Now().Add(time.Minute))
+		requireFundedReason(t, ctx, later, "FUNDING_UNKNOWN")
+	}
+	checkVenueCash(t, ctx, proof, o, 874, 126-booked, 126, 0, 126, booked)
+	var receipts, executions int
+	err = syntheticPool(t, ctx, "VENUE", tenant).QueryRow(ctx, "SELECT count(*),count(execution) FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3", tenant, portfolio, orderID).Scan(&receipts, &executions)
+	if err != nil || receipts != 1 || executions != 1 || sends.Load() != 1 {
+		t.Fatalf("XSIM receipts=%d executions=%d Execute calls=%d: %v", receipts, executions, sends.Load(), err)
+	}
+	t.Logf("XSIM cash result tenant=%s total_USD=874 reserved_USD=%d booked_USD=%d reserved_BNB=0; one Execute, one retained execution", tenant, 126-booked, booked)
+	return terminal
+}
+
+func applyVenueAccounting(t *testing.T, ctx context.Context, s syntheticSession, proof *pgxpool.Pool, o fundedOrder, usdRequired, bnbRequired int64) int64 {
+	t.Helper()
+	tenant, portfolio, orderID := o.request.Tenant, o.request.Portfolio, o.command.OrderId
 	cashFrames := bookSyntheticFill(t, ctx, s, tenant, orderID)
 	apply := syntheticvenue.CapitalCashHandler(syntheticPool(t, ctx, "CASH", tenant), tenant)
 	if len(cashFrames) != 2 {
@@ -499,7 +525,7 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 			if err := apply(bus.WithTenantID(ctx, tenant), frame.Envelope, frame.Payload); err != nil {
 				t.Fatal(err)
 			}
-			checkVenueCash(t, ctx, proof, o, 874, 126-booked, 126, 0, 126, booked)
+			checkVenueCash(t, ctx, proof, o, 874, usdRequired-booked, usdRequired, bnbRequired, 126, booked)
 		}
 	}
 	var healthy bool
@@ -507,26 +533,14 @@ func exerciseFundedVenue(t *testing.T, ctx context.Context, s syntheticSession, 
 		t.Fatal("cash FACT quarantined its source", err)
 	}
 	var incompleteFresh bool
-	err = proof.QueryRow(ctx, `SELECT NOT coverage_complete AND NOT conflicted AND gap_revision=0
+	err := proof.QueryRow(ctx, `SELECT NOT coverage_complete AND NOT conflicted AND gap_revision=0
 	AND observed_at_ns BETWEEN (extract(epoch FROM (clock_timestamp()-interval '60 seconds'))*1e9)::bigint
 		AND (extract(epoch FROM clock_timestamp())*1e9)::bigint
 	FROM capital_balances WHERE portfolio_id=$1 AND currency='USD'`, portfolio).Scan(&incompleteFresh)
 	if err != nil || !incompleteFresh {
 		t.Fatalf("expected a current, incomplete USD coverage report: %v", err)
 	}
-	if successor == nil {
-		later := signedFundedOrder(t, ctx, s, fundedNext, false)
-		later.authorize(t, ctx, later.request.Principal, time.Now().Add(time.Minute))
-		requireFundedReason(t, ctx, later, "FUNDING_UNKNOWN")
-	}
-	checkVenueCash(t, ctx, proof, o, 874, 126-booked, 126, 0, 126, booked)
-	var receipts, executions int
-	err = syntheticPool(t, ctx, "VENUE", tenant).QueryRow(ctx, "SELECT count(*),count(execution) FROM synthetic_venue.receipts WHERE tenant_id=$1 AND portfolio_id=$2 AND order_id=$3", tenant, portfolio, orderID).Scan(&receipts, &executions)
-	if err != nil || receipts != 1 || executions != 1 || sends.Load() != 1 {
-		t.Fatalf("XSIM receipts=%d executions=%d Execute calls=%d: %v", receipts, executions, sends.Load(), err)
-	}
-	t.Logf("XSIM cash result tenant=%s total_USD=874 reserved_USD=%d booked_USD=%d reserved_BNB=0; one Execute, one retained execution", tenant, 126-booked, booked)
-	return terminal
+	return booked
 }
 
 // Two actual XSIM orders execute within one database microsecond. The ledger

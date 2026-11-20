@@ -4,7 +4,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,9 +16,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/halt"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/internal/config"
@@ -44,11 +48,13 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatal("invalid synthetic startup input")
 	}
 	tenant := in.Tenant
-	funded := tenant == "synthetic-funded-cancel-fill"
+	terminal := tenant == "synthetic-funded-cancel-fill"
+	working := tenant == "synthetic-go-funded-working"
 	switch {
 	case in.CancelEventID == "" && tenant == "synthetic-go-handback" && in.Generation == 2:
 	case in.CancelEventID == "" && tenant == "synthetic-go-roundtrip" && in.Generation == 3:
-	case in.CancelEventID != "" && funded && in.Generation == 3:
+	case in.CancelEventID != "" && terminal && in.Generation == 3:
+	case in.CancelEventID == "" && working && in.Generation == 3:
 	default:
 		t.Fatal("expected an isolated handback tenant and generation")
 	}
@@ -65,8 +71,10 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatal("a verified XSIM order is required")
 	}
 	wantStatus, wantSweep := orderpb.OrderStatus_ORDER_STATUS_ROUTED, 1
-	if funded {
+	if terminal {
 		wantStatus, wantSweep = orderpb.OrderStatus_ORDER_STATUS_CANCELLED, 0
+	} else if working {
+		wantStatus = orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
 	}
 	if state.Status != wantStatus {
 		t.Fatalf("expected %s retained state, got %s", wantStatus, state.Status)
@@ -97,6 +105,22 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if len(venues) != 1 {
 		t.Fatalf("discovered %d venues", len(venues))
 	}
+	if working {
+		var rawFill []byte
+		if err := pool.QueryRow(ctx, "SELECT fill FROM order_executions WHERE order_id=$1", state.OrderId).Scan(&rawFill); err != nil {
+			t.Fatalf("load retained working execution: %v", err)
+		}
+		var fill orderpb.Fill
+		venue, err := execution.NewRouter(venues).Route(&state)
+		if err != nil {
+			t.Fatalf("route retained working order: %v", err)
+		}
+		querier, ok := venue.(execution.Querier)
+		if proto.Unmarshal(rawFill, &fill) != nil || !ok {
+			t.Fatal("working recovery needs one retained execution and typed venue query")
+		}
+		venues[0] = fundedWorkingRecoveryVenue{Venue: venue, query: querier, fill: &fill}
+	}
 	client, e := bus.DialNATS(ctx, bus.NATSConfig{Name: "oms", URL: in.Broker})
 	if e != nil {
 		t.Fatal(e)
@@ -108,7 +132,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	}
 	store := order.NewPostgres(pool)
 	opts := []order.ServiceOption{order.WithHaltGate(halt.NewGate(nil))}
-	if funded {
+	if terminal {
 		opts = append(opts, order.WithSyntheticHandoffCancellationRecovery(store))
 	}
 	svc, e := order.NewService(tenant, store, order.NewEmitter(publisher), nil, execution.NewRouter(venues), nil, logger, opts...)
@@ -119,8 +143,11 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if e = pool.QueryRow(ctx, "SELECT count(*), count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE partition_key=$1", state.OrderId).Scan(&claims, &pending); e != nil || claims < 1 {
 		t.Fatalf("retained outbox: %d / %d: %v", claims, pending, e)
 	}
-	if funded && (claims != 4 || pending != 3) {
+	if terminal && (claims != 4 || pending != 3) {
 		t.Fatalf("funded recovery requires a retained accepted fact and three pending facts, got %d / %d", claims, pending)
+	}
+	if working && (claims != 3 || pending != 2) {
+		t.Fatalf("working recovery requires a retained accepted fact and two pending facts, got %d / %d", claims, pending)
 	}
 	if n, err := svc.Outbox().DrainOnce(ctx); err != nil || n != pending {
 		t.Fatalf("startup outbox drain: got %d, expected %d: %v", n, pending, err)
@@ -128,7 +155,7 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 	if n, err := svc.SweepInterrupted(ctx); err != nil || n != wantSweep {
 		t.Fatalf("startup sweep: got %d: %v", n, err)
 	}
-	if funded {
+	if terminal {
 		replaySyntheticFundedCancel(t, ctx, client, svc, in.Broker, in.CancelEventID)
 	}
 	var wire []byte
@@ -141,4 +168,73 @@ func TestSyntheticRecoveredGoStartup(t *testing.T) {
 		t.Fatalf("unexpected order facts after sweep: %d / %d: %v", facts, unpublished, e)
 	}
 	t.Logf("GO_HANDBACK Go generation %d drained %d retained FACTs, swept %d working orders and preserved native version %d and %d outbox rows", in.Generation, pending, wantSweep, version, facts)
+}
+
+// This profile has qualified recovery of one retained execution. It does not
+// enroll a writer for new funded executions or live venue cancellations.
+type fundedWorkingRecoveryVenue struct {
+	execution.Venue
+	query execution.Querier
+	fill  *orderpb.Fill
+}
+
+func (v fundedWorkingRecoveryVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	return nil, errors.New("working recovery profile does not send orders")
+}
+
+func (v fundedWorkingRecoveryVenue) CancelOrder(context.Context, *orderpb.OrderState) error {
+	return errors.New("working recovery profile does not dispatch cancellations")
+}
+
+func (v fundedWorkingRecoveryVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (execution.OrderView, error) {
+	view, err := v.query.QueryOrder(ctx, st)
+	if err != nil {
+		return execution.OrderView{}, err
+	}
+	// Ordinary adoption skips an already-applied raw fill ID. Establish
+	// content equality and a complete cumulative total before it can do so.
+	if view.State != execution.OrderViewPartiallyFilled || len(view.Fills) != 1 || !proto.Equal(view.Fills[0], v.fill) ||
+		!dec.InDomain(view.ExecutedQuantity) || !dec.InDomain(st.GetFilledQuantity()) ||
+		dec.FromProto(view.ExecutedQuantity).Cmp(dec.FromProto(st.GetFilledQuantity())) != 0 {
+		return execution.OrderView{}, errors.New("working venue view contradicts the retained execution")
+	}
+	return view, nil
+}
+
+type workingQuery struct{ view execution.OrderView }
+
+func (q workingQuery) QueryOrder(context.Context, *orderpb.OrderState) (execution.OrderView, error) {
+	return q.view, nil
+}
+
+func TestFundedWorkingQueryRejectsConflictingExecution(t *testing.T) {
+	qty := &commonpb.Decimal{Coefficient: 625, Exponent: -3}
+	fill := &orderpb.Fill{FillId: "retained", Quantity: qty, Fee: &commonpb.Money{
+		CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 1},
+	}}
+	conflict := proto.CloneOf(fill)
+	conflict.Fee.Amount.Coefficient = 2
+	for _, tc := range []struct {
+		name  string
+		state execution.OrderViewState
+		total *commonpb.Decimal
+		fill  *orderpb.Fill
+		valid bool
+	}{
+		{"exact", execution.OrderViewPartiallyFilled, qty, fill, true},
+		{"same_id_changed_fee", execution.OrderViewPartiallyFilled, qty, conflict, false},
+		{"unreconciled_total", execution.OrderViewPartiallyFilled, &commonpb.Decimal{Coefficient: 1}, fill, false},
+		{"missing_total", execution.OrderViewPartiallyFilled, nil, fill, false},
+		{"unexpected_terminal", execution.OrderViewFilled, qty, fill, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := fundedWorkingRecoveryVenue{fill: fill, query: workingQuery{execution.OrderView{
+				State: tc.state, ExecutedQuantity: tc.total, Fills: []*orderpb.Fill{tc.fill},
+			}}}
+			_, err := v.QueryOrder(t.Context(), &orderpb.OrderState{FilledQuantity: qty})
+			if (err == nil) != tc.valid {
+				t.Fatalf("working query acceptance: %v", err)
+			}
+		})
+	}
 }

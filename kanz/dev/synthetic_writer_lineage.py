@@ -21,8 +21,11 @@ TEST = "TestSyntheticGoWriterLineageHandoff"
 ROLES = ("RUNTIME", "NEXT_RUNTIME", "SWITCH", "RELAY")
 
 
-def provision_funded(container, env, roundtrip):
-    tenants = ("synthetic-funded-cancel-fill",) if roundtrip else ("synthetic-go-funded-forward", "synthetic-go-funded-mismatch")
+def provision_funded(container, env, mode):
+    roundtrip = mode != "funded-forward"
+    working = mode == "funded-working"
+    tenant = "synthetic-go-funded-working" if working else "synthetic-funded-cancel-fill"
+    tenants = (tenant,) if roundtrip else ("synthetic-go-funded-forward", "synthetic-go-funded-mismatch")
     fixture.sql(container, """
         GRANT SELECT ON capital_balances,capital_commitments,capital_members,orders,
             synthetic_oms_commands,synthetic_oms_observations,outbox TO kanz_synthetic_oms_proof;
@@ -41,17 +44,23 @@ def provision_funded(container, env, roundtrip):
         for migration in ("cancellation.sql", "settlement.sql", "go_writer.sql"):
             path = fixture.ROOT / "rust/services/synthetic_oms" / migration
             fixture.sql(container, path.read_text(encoding="utf-8"), fixture.DB)
-        fixture.sql(container, """
-            GRANT kanz_synthetic_oms_go_funded_runtime TO kanz_synthetic_oms_runtime_g3;
+        role = "kanz_synthetic_oms_go_working_runtime" if working else "kanz_synthetic_oms_go_funded_runtime"
+        fixture.sql(container, f"""
+            GRANT {role} TO kanz_synthetic_oms_runtime_g3;
             GRANT SELECT, UPDATE(published_at,attempts,last_error) ON outbox TO kanz_synthetic_oms_runtime_g3;
         """, fixture.DB)
+        if working:
+            fixture.sql(container, """
+                GRANT SELECT (order_id,fill_id,raw_fill_id) ON order_fills TO kanz_synthetic_oms_runtime_g3;
+                GRANT SELECT (order_id,fill) ON order_executions TO kanz_synthetic_oms_runtime_g3;
+            """, fixture.DB)
         fixture.grant_cash_projection(container, fixture.DB)
         fixture.provision_accounting(container, env)
 
 
 def run(stage, native, mode):
-    roundtrip = mode in ("roundtrip", "funded-roundtrip")
-    funded = mode in ("funded-forward", "funded-roundtrip")
+    roundtrip = mode in ("roundtrip", "funded-roundtrip", "funded-working")
+    funded = mode in ("funded-forward", "funded-roundtrip", "funded-working")
     targets = ["services/api_gateway/cmd/api_gateway"]
     if mode == "lineage":
         targets.append("services/oms/internal/order")
@@ -112,8 +121,11 @@ def run(stage, native, mode):
             for migration in ("funding.sql", "go_admission.sql"):
                 fixture.sql(container, (fixture.ROOT / "rust/services/synthetic_oms" / migration).read_text(encoding="utf-8"), fixture.DB)
         if funded:
-            provision_funded(container, env, roundtrip)
-            if roundtrip:
+            provision_funded(container, env, mode)
+            if mode == "funded-working":
+                env["KANZ_SYNTHETIC_GO_FUNDED_WORKING"] = "1"
+                test = "TestSyntheticFundedWorkingGoRustGo"
+            elif roundtrip:
                 env["KANZ_SYNTHETIC_GO_FUNDED_ROUNDTRIP"] = "1"
                 test = "TestSyntheticFundedGoRustGoRoundTrip"
             else:
@@ -168,6 +180,8 @@ if __name__ == "__main__":
                        help="qualify atomic Go admission and transfer of a funded order")
     group.add_argument("--funded-roundtrip", action="store_const", dest="mode", const="funded-roundtrip",
                        help="recover a single funded partial execution and cancellation across Go, Rust and Go")
+    group.add_argument("--funded-working", action="store_const", dest="mode", const="funded-working",
+                       help="recover a single open funded order after its partial execution")
     parser.set_defaults(mode="lineage")
     args = parser.parse_args()
     if not args.native.is_file():

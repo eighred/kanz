@@ -30,6 +30,15 @@ func TestSyntheticFundedGoRustGoRoundTrip(t *testing.T) {
 	exerciseGoRustGo(t, "synthetic-funded-cancel-fill", true)
 }
 
+const fundedWorkingTenant = "synthetic-go-funded-working"
+
+func TestSyntheticFundedWorkingGoRustGo(t *testing.T) {
+	if os.Getenv("KANZ_SYNTHETIC_GO_FUNDED_WORKING") != "1" {
+		t.Skip("requires a disposable funded working-order handback")
+	}
+	exerciseGoRustGo(t, fundedWorkingTenant, true)
+}
+
 func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
 	t.Helper()
 	exerciseSyntheticSession(t, tenant, func(ctx context.Context, s syntheticSession) {
@@ -97,7 +106,7 @@ func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
 		}
 
 		if funded {
-			exerciseRetainedFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, exerciseFundedGoSuccessor)
+			exerciseFundedVenue(t, ctx, s, fundedOrder{&cmd, request}, 0, tenant != fundedWorkingTenant, exerciseFundedGoSuccessor)
 			requireNativeReceipt(t, ctx, request, "WRITER_FENCED")
 		} else {
 			exerciseSyntheticGoHandback(t, ctx, s, &cmd, request, 2)
@@ -114,32 +123,36 @@ func exerciseGoRustGo(t *testing.T, tenant string, funded bool) {
 	})
 }
 
-func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, terminal syntheticvenue.Receipt,
-	addr string, identity *testidentity.Source, cancel *envelopepb.EventFrame,
+func exerciseFundedGoSuccessor(t *testing.T, ctx context.Context, s syntheticSession, receipt syntheticvenue.Receipt,
+	addr string, identity *testidentity.Source, event *envelopepb.Envelope,
 ) {
 	t.Helper()
-	tenant := cancel.Envelope.TenantId
+	tenant := event.TenantId
 	operator := syntheticPool(t, ctx, "SWITCH", tenant)
 	var generation int
 	if err := operator.QueryRow(ctx, "SELECT synthetic_test_recovery_handoff()").Scan(&generation); err != nil || generation != 3 {
 		t.Fatalf("funded Rust-to-Go handback: epoch %d: %v", generation, err)
 	}
 	var state orderpb.OrderState
-	if err := proto.Unmarshal(terminal.State, &state); err != nil {
+	if err := proto.Unmarshal(receipt.State, &state); err != nil {
 		t.Fatal(err)
 	}
-	at := cancel.Envelope.EventTime
+	at := event.EventTime
+	op, cancelEventID := "dispatch", ""
+	if state.Status == orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
+		op, cancelEventID = "cancel_pending", event.EventId
+	}
 	replayed, err := callSyntheticOwner(ctx, os.Getenv("SYNTHETIC_OMS_ADAPTER_URL"), struct {
 		Version int `json:"version"`
 		syntheticvenue.Command
 	}{1, syntheticvenue.Command{
-		Op: "cancel_pending", Tenant: tenant, Portfolio: state.PortfolioId, OrderID: state.OrderId,
-		Principal: syntheticvenue.OMSIdentity, EventID: cancel.Envelope.EventId,
+		Op: op, Tenant: tenant, Portfolio: state.PortfolioId, OrderID: state.OrderId,
+		Principal: syntheticvenue.OMSIdentity, EventID: event.EventId,
 		EffectiveSeconds: at.Seconds, EffectiveNanos: at.Nanos,
 	}})
 	if err != nil || replayed.OK || replayed.Code != "WRITER_FENCED" {
 		t.Fatalf("retired Rust funded adapter: %s %v", replayed.Code, err)
 	}
-	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, terminal, generation,
-		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancel.Envelope.EventId)
+	startSyntheticGoSuccessor(t, ctx, s, tenant, addr, identity, receipt, generation,
+		os.Getenv("SYNTHETIC_OMS_RECOVERY_RUNTIME_URL"), cancelEventID)
 }

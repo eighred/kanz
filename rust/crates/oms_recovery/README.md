@@ -199,3 +199,13 @@ python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-
 This profile uses the same signed Go admission and retains the original funded reservation with the order. Rust applies one partial execution and confirms withdrawal of the remainder through XSIM. The database refuses handback while withdrawal is unresolved. The funded recovery role can activate Go after terminal confirmation when the signed withdrawal, settlement authorization, execution journal, queued facts and unbooked cash obligations agree.
 
 Go starts its ordinary outbox relay, startup sweep and JetStream command consumer. The tagged XSIM successor verifies the original gateway withdrawal against the published receipt inside the ordinary OMS cancellation handler. A real redelivery and a fresh consumer both acknowledge that command without another XSIM call or publication. A withdrawal without an exact matching receipt fails closed in this profile. Accounting books 126 USD once, leaving 874 USD and releasing all remaining holds. Both retired Rust logins are fenced. This profile covers the synthetic terminal state with one partial execution before accounting has booked it. Deployment and other funded recovery states require their own acceptance evidence.
+
+### Funded order still working after a partial fill
+
+```sh
+python3 -B kanz/dev/synthetic_writer_lineage.py --native rust/target/debug/kanz-synthetic-oms --funded-working
+```
+
+The first send loses its acknowledgement and the transfer is refused while the remote result is unknown. Rust recovers one 0.625-unit fill, leaving 0.625 units working. The dedicated Go recovery role requires an acknowledged working order with the outgoing writer's exact fill and no retained withdrawal claim. It checks the queued routed and partial-fill facts and preserves the 252 USD and 1 BNB holds at transfer.
+
+Go drains the two retained facts and runs its startup sweep against the verified XSIM account. The recovery profile validates the cumulative quantity and complete execution against the journal before adoption can skip the existing fill. It blocks venue mutations and does not start trading subscriptions. Accounting then books 126 USD once, leaving 874 USD total and holds of 126 USD and 1 BNB while the order remains working. New fills or withdrawals after transfer require separate qualification.

@@ -35,7 +35,7 @@ func TestSyntheticSettlementJournal(t *testing.T) {
 	tenant := os.Getenv("SYNTHETIC_BOOK_TENANT")
 	switch tenant {
 	case "synthetic-funded-venue", "synthetic-funded-venue-nanos", "synthetic-funded-venue-pair",
-		"synthetic-funded-cancel-fill", "synthetic-cash-clock-mismatch", "synthetic-cash-clock":
+		"synthetic-funded-cancel-fill", "synthetic-go-funded-working", "synthetic-cash-clock-mismatch", "synthetic-cash-clock":
 	default:
 		t.Fatal("expected a funded XSIM fixture tenant")
 	}
