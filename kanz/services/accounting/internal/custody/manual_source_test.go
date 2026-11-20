@@ -37,10 +37,14 @@ func manualSignedFeed(t *testing.T, ctx context.Context, st *Postgres) func(int,
 
 func signedStatementFeed(t *testing.T, ctx context.Context, st *Postgres) func(json.RawMessage) string {
 	t.Helper()
+	return signedStatementFeedForAccount(t, ctx, st, "ACC1")
+}
+func signedStatementFeedForAccount(t *testing.T, ctx context.Context, st *Postgres, account string) func(json.RawMessage) string {
+	t.Helper()
 	tenant := bus.TenantIDFromContext(ctx)
 	a, key := exampleAuthority(t, tenant)
-	a.Account, a.Instruments = "ACC1", []string{"AAPL"}
-	importer, err := NewBatchImporter(a, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:ACC1", st.pool, &capturePublisher{}, testLogger())
+	a.Account, a.Instruments = account, []string{"AAPL"}
+	importer, err := NewBatchImporter(a, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:"+account, st.pool, &capturePublisher{}, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
