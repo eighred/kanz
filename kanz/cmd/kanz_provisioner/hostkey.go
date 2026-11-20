@@ -1,11 +1,13 @@
 package main
 
 import (
+	"crypto/fips140"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -89,7 +91,7 @@ var warnOut io.Writer = os.Stderr
 // does. That is the intended state. A provisioner that refuses to run is an outage in a
 // feature; a provisioner that hands the cluster-admission token to strangers is an
 // outage in the estate, and only one of the two announces itself.
-func hostKeyCallback() (ssh.HostKeyCallback, error) {
+func hostKeyCallback(cfg *ssh.ClientConfig) (ssh.HostKeyCallback, error) {
 	knownHostsFile := os.Getenv(envKnownHostsFile)
 	hostKey := os.Getenv(envHostKey)
 
@@ -142,7 +144,7 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 	case knownHostsFile != "":
 		return knownHostsCallback(knownHostsFile)
 	default:
-		return fixedHostKeyCallback(hostKey)
+		return fixedHostKeyCallback(cfg, hostKey)
 	}
 }
 
@@ -215,10 +217,28 @@ func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
 // fixedHostKeyCallback pins the single public key in line, which is authorized_keys
 // format — the verbatim contents of the target's /etc/ssh/ssh_host_ed25519_key.pub, or a
 // line of `ssh-keyscan` output with the leading host field removed.
-func fixedHostKeyCallback(line string) (ssh.HostKeyCallback, error) {
+func fixedHostKeyCallback(cfg *ssh.ClientConfig, line string) (ssh.HostKeyCallback, error) {
 	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w (want authorized_keys format, e.g. \"ssh-ed25519 AAAA...\")", envHostKey, err)
+	}
+	// A normal server offers several keys. Negotiating a different type first
+	// would make the exact pin fail before user authentication. RSA key formats
+	// have multiple signature algorithms, including SHA-1 only outside FIPS
+	// mode in the pinned x/crypto release. Keep its preference and FIPS policy.
+	kind := pub.Type()
+	switch kind {
+	case ssh.KeyAlgoRSA:
+		cfg.HostKeyAlgorithms = []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512}
+	case ssh.CertAlgoRSAv01:
+		cfg.HostKeyAlgorithms = []string{ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSASHA512v01}
+	default:
+		if slices.Contains(ssh.SupportedAlgorithms().HostKeys, kind) {
+			cfg.HostKeyAlgorithms = []string{kind}
+		}
+	}
+	if (kind == ssh.KeyAlgoRSA || kind == ssh.CertAlgoRSAv01) && !fips140.Enabled() {
+		cfg.HostKeyAlgorithms = append(cfg.HostKeyAlgorithms, kind)
 	}
 	fixed := ssh.FixedHostKey(pub)
 

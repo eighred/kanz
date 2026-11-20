@@ -37,6 +37,50 @@ Use `kind: "branch"` for branch recovery. Supply this only after reviewing the
 actual diff and current ownership. It breaks otherwise equal selection ranks;
 it cannot clear a blocker, authorize delivery or replace current-head checks.
 
+## Resolve engineering decisions during work selection
+
+Include `decision-needed` issues when selecting work. Identify the choice and
+who can make it from the user's request, the owning contract and any recorded
+decision. When the choice falls within delegated engineering authority, make it.
+Compare viable options against the institutional workflow they serve. Consider
+how quickly operators can act and the system can respond, correctness under
+failure and replay, the evidence an auditor can reconstruct, operating burden,
+and what the team can implement and verify with available inputs. Use measured
+results when available and state material assumptions.
+
+Record the choice, decisive trade-off and acceptance check in the owning issue
+or its existing decision record. Carry the choice through implementation,
+review and merged-main verification under the normal delivery rules.
+
+For mixed decisions, identify the precise action that needs separate authority,
+such as setting financial policy, buying licensed data, publishing a signed
+release or changing a live estate. Keep that action with its authorized owner
+and continue any independently authorized design, implementation and disposable
+verification. Count the issue only when its full acceptance is met.
+
+## Select work for a customer workflow
+
+For a launch or revenue request, name the customer role, the first operation
+they can complete, its input authority and the observable result. Trace the
+normal interface through its service, store and audit evidence on current main.
+Distinguish results from disposable test data, customer acceptance on authorized
+data, and a commercial agreement or payment. Reference the separate owner for
+each missing result. Keep contractual terms and customer data out of public issues.
+
+When reviewing the whole repository, inventory tracked files at a fixed revision
+and reconcile every open issue and PR with its owner and acceptance. Give each
+open issue a disposition. For overlaps, transfer every outstanding acceptance
+check to its continuing owner before closing a duplicate. Record a deferred
+product choice and its re-entry condition. Preserve independent financial,
+security and recovery controls even when they share a PR.
+
+For equivalent executable tasks the graph accepts one optional
+`customer_workflow` with `actor`, `outcome`, an `acceptance` reference and
+`steps` mapping task IDs to evidence that each is needed. It gives that
+workflow precedence within its existing priority, after shared gate recovery.
+Report the first missing step that can be completed, the last verified user
+operation and the evidence still required from an external party.
+
 ## Stop repeating unchanged failures
 
 Read the owning issue's latest substantive evidence before reproducing a known

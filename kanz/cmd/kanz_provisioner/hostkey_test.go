@@ -2,15 +2,40 @@ package main
 
 import (
 	"bytes"
+	"crypto/fips140"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+func TestRSAPinPreservesSignaturePolicy(t *testing.T) {
+	clearHostKeyEnv(t)
+	signer := newHostKey(t)
+	t.Setenv(envHostKey, string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	cfg := &ssh.ClientConfig{}
+	if _, err := hostKeyCallback(cfg); err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512}
+	if !fips140.Enabled() {
+		expected = append(expected, ssh.KeyAlgoRSA)
+	}
+	if !slices.Equal(cfg.HostKeyAlgorithms, expected) {
+		t.Fatalf("RSA pin negotiated %v, want %v", cfg.HostKeyAlgorithms, expected)
+	}
+	t.Setenv(envHostKey, "")
+	t.Setenv(envKnownHostsFile, writeKnownHosts(t, "host:22", signer.PublicKey()))
+	cfg = &ssh.ClientConfig{}
+	if _, err := hostKeyCallback(cfg); err != nil || cfg.HostKeyAlgorithms != nil {
+		t.Fatalf("known_hosts must retain the SSH client's default negotiation: %v, %v", err, cfg.HostKeyAlgorithms)
+	}
+}
 
 // clearHostKeyEnv unsets all three policy vars.
 //
@@ -38,7 +63,7 @@ func writeKnownHosts(t *testing.T, addr string, key ssh.PublicKey) string {
 func TestHostKeyCallbackFailsClosedWhenUnconfigured(t *testing.T) {
 	clearHostKeyEnv(t)
 
-	cb, err := hostKeyCallback()
+	cb, err := hostKeyCallback(&ssh.ClientConfig{})
 	if err == nil {
 		t.Fatal("unconfigured host key policy returned a callback — the default must never be permissive")
 	}
@@ -63,7 +88,7 @@ func TestHostKeyCallbackRejectsConflictingPolicy(t *testing.T) {
 	// The dangerous resolution is "insecure wins" (or "known_hosts wins" while the
 	// insecure flag sits there unread). Either way one of the two settings is silently
 	// discarded, so this must refuse rather than choose.
-	if _, err := hostKeyCallback(); err == nil {
+	if _, err := hostKeyCallback(&ssh.ClientConfig{}); err == nil {
 		t.Fatal("a known_hosts file AND the insecure skip were both accepted")
 	} else if !strings.Contains(err.Error(), "conflicting") {
 		t.Errorf("err = %v, want a conflict error", err)
@@ -76,7 +101,7 @@ func TestHostKeyCallbackRejectsMissingKnownHostsFile(t *testing.T) {
 
 	// A Secret that failed to mount looks exactly like this. It must be an outage, not
 	// a downgrade — this is the path by which the original defect would return unseen.
-	cb, err := hostKeyCallback()
+	cb, err := hostKeyCallback(&ssh.ClientConfig{})
 	if err == nil {
 		t.Fatal("a missing known_hosts file was tolerated — it must never fall back to trusting anyone")
 	}
@@ -91,7 +116,7 @@ func TestHostKeyCallbackRejectsUnparseableInsecureFlag(t *testing.T) {
 
 	// Fail-closed on garbage is safe, but silently so; the operator must be told the
 	// var they set was not understood rather than debugging a handshake failure.
-	if _, err := hostKeyCallback(); err == nil {
+	if _, err := hostKeyCallback(&ssh.ClientConfig{}); err == nil {
 		t.Fatal("an unparseable insecure-skip value was accepted")
 	}
 }
@@ -105,7 +130,7 @@ func TestHostKeyCallbackInsecureSkipIsOptInAndWarns(t *testing.T) {
 	warnOut = &warned
 	t.Cleanup(func() { warnOut = old })
 
-	cb, err := hostKeyCallback()
+	cb, err := hostKeyCallback(&ssh.ClientConfig{})
 	if err != nil {
 		t.Fatalf("explicit opt-in should be honoured: %v", err)
 	}
@@ -129,7 +154,7 @@ func TestHostKeyCallbackKnownHostsDistinguishesUnknownFromMismatch(t *testing.T)
 	_, other := newTestHostKey(t)
 	t.Setenv(envKnownHostsFile, writeKnownHosts(t, "10.0.0.5:22", pinned))
 
-	cb, err := hostKeyCallback()
+	cb, err := hostKeyCallback(&ssh.ClientConfig{})
 	if err != nil {
 		t.Fatalf("hostKeyCallback: %v", err)
 	}
@@ -168,7 +193,7 @@ func TestHostKeyCallbackFixedKeyPinsExactlyOne(t *testing.T) {
 	_, other := newTestHostKey(t)
 	t.Setenv(envHostKey, string(ssh.MarshalAuthorizedKey(pinned)))
 
-	cb, err := hostKeyCallback()
+	cb, err := hostKeyCallback(&ssh.ClientConfig{})
 	if err != nil {
 		t.Fatalf("hostKeyCallback: %v", err)
 	}
@@ -188,7 +213,7 @@ func TestHostKeyCallbackRejectsUnparseableHostKey(t *testing.T) {
 	clearHostKeyEnv(t)
 	t.Setenv(envHostKey, "this is not a public key")
 
-	if _, err := hostKeyCallback(); err == nil {
+	if _, err := hostKeyCallback(&ssh.ClientConfig{}); err == nil {
 		t.Fatal("a malformed PROVISION_HOST_KEY was accepted")
 	}
 }
