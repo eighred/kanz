@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
+import { useSession } from '../stores/session'
 import { custody, type CustodyRerunReceipt, type CustodyRerunRequest } from '../api/custody'
 import { ApiError } from '../api/client'
 
@@ -9,6 +10,10 @@ const portfolio = ref('')
 const custodian = ref('')
 const day = ref('')
 const reviewed = ref<CustodyRerunRequest | null>(null)
+let active: AbortController | undefined
+const session = useSession()
+watch(() => session.identity, () => { active?.abort(); reset(); uncertain.value = false; error.value = '' }, { deep: true, flush: 'sync' })
+onUnmounted(() => active?.abort())
 const sending = ref(false)
 const uncertain = ref(false)
 const error = ref('')
@@ -24,14 +29,18 @@ function reset() {
 }
 async function submit() {
   if (!reviewed.value || sending.value) return
+  const request = new AbortController()
+  active = request
   sending.value = true
   error.value = ''
   try {
-    const receipt = await custody.rerun(reviewed.value, props.actor)
+    const receipt = await custody.rerun(reviewed.value, props.actor, request.signal)
+    if (request.signal.aborted) return
     uncertain.value = false
     emit('reviewing', false)
     emit('completed', receipt)
   } catch (e) {
+    if (request.signal.aborted) return
     if (e instanceof ApiError && [400, 403, 404, 409].includes(e.status)) {
       error.value = e.status === 409 ? 'The request conflicts with retained comparison history. Review the scope before starting a new request.' : 'The comparison was refused. Check your permission, scope and business date.'
       reset()

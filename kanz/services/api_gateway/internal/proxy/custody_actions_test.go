@@ -35,3 +35,33 @@ func TestCustodyActionsRequireFundAndForwardVerifiedActor(t *testing.T) {
 		})
 	}
 }
+
+func TestCustodyCustomerReadRequiresScopeAndCannotWrite(t *testing.T) {
+	const read = "custody-reader"
+	for _, tc := range []struct {
+		role         string
+		scope        []string
+		method, path string
+		code         int
+	}{
+		{read, []string{"PF1"}, "GET", "/v1/custody/breaks", 200},
+		{read, []string{"PF1"}, "GET", "/v1/portfolios/PF1/custody/comparison?custodian_id=C&business_date=2020-02-04", 200},
+		{"fund", nil, "GET", "/v1/custody/breaks", 200},
+		{read, nil, "GET", "/v1/custody/breaks", 403},
+		{"baseline", []string{"PF1"}, "GET", "/v1/custody/breaks", 403},
+		{read, []string{"PF1"}, "POST", "/v1/custody/breaks/b1/actions", 403},
+		{read, []string{"PF1"}, "POST", "/v1/portfolios/PF1/custody/reruns", 403},
+		{read, []string{"PF1"}, "POST", "/v1/portfolios/PF1/cash-movements", 403},
+	} {
+		be := &fakeBackend{resp: Response{Status: 200}}
+		m := authz.NewMux(authz.Grants{read: {authz.CustodyRead}, "fund": {authz.Fund, authz.CustodyRead}, "baseline": {authz.Read}}, nil)
+		New(be, Roles{CustodyRead: read, Fund: "fund", CustodyRerun: "rerunner"}).Routes(m)
+		r := httptest.NewRequest(tc.method, tc.path, nil)
+		r = r.WithContext(middleware.WithPrincipal(r.Context(), &middleware.Principal{Subject: "operator", Tenant: "fixture", Roles: []string{tc.role}, Portfolios: tc.scope}))
+		w := httptest.NewRecorder()
+		m.ServeHTTP(w, r)
+		if w.Code != tc.code || (tc.code != 200 && be.last.Service != "") {
+			t.Fatalf("%s %s %s: %d", tc.role, tc.method, tc.path, w.Code)
+		}
+	}
+}

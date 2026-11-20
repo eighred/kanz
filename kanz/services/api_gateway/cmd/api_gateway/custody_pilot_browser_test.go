@@ -72,10 +72,7 @@ func custodyBrowser(t *testing.T, rerun bool) {
 		t.Fatal("synthetic revocations unavailable")
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := config.Config{RequiredRole: baselineRole, FundRole: treasuryRole}
-	if rerun {
-		cfg.CustodyRerunRole = "custody-pilot-rerun"
-	}
+	cfg := config.Config{RequiredRole: baselineRole, FundRole: treasuryRole, CustodyRerunRole: "custody-pilot-rerun", CustodyReadRole: "custody-pilot-read"}
 	hc := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer hc.CloseIdleConnections()
 	be := proxy.NewMeshBackend(map[proxy.Service]string{proxy.ServiceAccounting: backendURL}, hc)
@@ -90,8 +87,10 @@ func custodyBrowser(t *testing.T, rerun bool) {
 	mint := func(name, tenant, portfolio string, fund bool) string {
 		t.Helper()
 		roles := []string{baselineRole}
-		if fund {
+		if fund && rerun {
 			roles = append(roles, treasuryRole)
+		} else if fund {
+			roles = append(roles, cfg.CustodyReadRole)
 		}
 		subject := "custody-pilot-reader"
 		if rerun {
