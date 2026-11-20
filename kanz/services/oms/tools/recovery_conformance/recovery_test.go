@@ -1,6 +1,7 @@
 package recoveryconformance
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -70,9 +71,11 @@ func (f *fixture) service(t *testing.T, tr *transport) *order.Service {
 	}
 	return svc
 }
+const futureStateField protowire.Number = 50_000
+
 func initial() *orderpb.OrderState {
 	st := &orderpb.OrderState{OrderId: "recovery-order", PortfolioId: "fixture-portfolio", Venue: "MOCK", VenueAccountId: "fixture-account", InstrumentId: "fixture-instrument", Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED, OrderedQuantity: &commonpb.Decimal{Coefficient: 4}}
-	st.ProtoReflect().SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, 33, protowire.VarintType), 77))
+	st.ProtoReflect().SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, futureStateField, protowire.VarintType), 77))
 	st.OrderedQuantity.ProtoReflect().SetUnknown(protowire.AppendBytes(protowire.AppendTag(nil, 100, protowire.BytesType), []byte("synthetic-quantity-sidecar")))
 	return st
 }
@@ -86,6 +89,11 @@ func history(st *orderpb.OrderState) *venuepb.QueryOrderResponse {
 	return &venuepb.QueryOrderResponse{State: venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED, Fills: fills, ExecutedQuantity: &commonpb.Decimal{Coefficient: 2}}
 }
 func TestRustRecoveryObservation(t *testing.T) {
+	state := initial()
+	if state.ProtoReflect().Descriptor().Fields().ByNumber(futureStateField) != nil ||
+		state.OrderedQuantity.ProtoReflect().Descriptor().Fields().ByNumber(100) != nil {
+		t.Fatal("recovery fixture requires unassigned root and nested quantity fields")
+	}
 	for _, name := range []string{"complete-terminal-history", "complete-sub-eight-place-quantities", "complete-raw-observation-unknown", "complete-large-history-small-facts", "complete-single-round-weighted-average", "complete-identical-redelivery-history", "missing-order-blocked", "conflicting-observation-blocked", "incomplete-total-blocked", "missing-total-blocked", "unknown-view-blocked", "duplicate-execution-conflict-blocked"} {
 		t.Run(name, func(t *testing.T) {
 			count, filled, leaves := 2, int64(2), int64(2)
@@ -227,6 +235,10 @@ func TestRustRecoveryObservation(t *testing.T) {
 					got, _, err := store.Load(f.ctx, st.OrderId)
 					if err != nil {
 						t.Fatal("recovered order missing")
+					}
+					if !bytes.Equal(got.ProtoReflect().GetUnknown(), st.ProtoReflect().GetUnknown()) ||
+						!bytes.Equal(got.GetOrderedQuantity().ProtoReflect().GetUnknown(), st.OrderedQuantity.ProtoReflect().GetUnknown()) {
+						t.Fatal("recovered order lost its root or nested quantity evidence")
 					}
 					// Independent arithmetic: ordinary(100+101)/2=100.5. Weighted
 					// (1*1+2*2+3*1)/6=1.33333333 at1e-8; rounded incremental
