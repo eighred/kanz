@@ -305,9 +305,43 @@ def validate_observation(result, sa, mode, sha):
     dn = result.get('subjectDN', '')
     if not isinstance(dn, str) or not re.fullmatch(subject_pattern(sa), dn):
         raise ValueError('unexpected observed workload subject')
-    if result != {'passed':True, 'mode':mode, 'identity':identity(sa), 'subjectDN':dn,
-                  'renewed':mode=='publish', 'boundedReplay':mode=='publish', 'sourceVersion':sha}:
+    expected = {'passed':True, 'mode':mode, 'identity':identity(sa), 'subjectDN':dn,
+                'renewed':mode=='publish', 'boundedReplay':mode=='publish', 'sourceVersion':sha}
+    if mode in ('publish', 'verify'):
+        topics = {sa} if mode == 'publish' else {'proof-a', 'proof-b'}
+        frames = result.get('frames')
+        if not isinstance(frames, dict) or set(frames) != topics:
+            raise ValueError('missing fixture topic receipts')
+        for rows in frames.values():
+            if not isinstance(rows, list) or len(rows) != 2:
+                raise ValueError('incomplete fixture partition')
+            for offset, row in enumerate(rows):
+                if (not isinstance(row, dict) or set(row) != {'offset', 'frameSHA256'}
+                        or type(row['offset']) is not int or row['offset'] != offset
+                        or not isinstance(row['frameSHA256'], str)
+                        or not re.fullmatch(r'[0-9a-f]{64}', row['frameSHA256'])):
+                    raise ValueError('invalid fixture frame receipt')
+        expected['frames'] = frames
+    if mode in ('resume', 'restored-offset'):
+        if type(result.get('groupNextOffset')) is not int or result['groupNextOffset'] != 2:
+            raise ValueError('missing observed committed next offset')
+        expected['groupNextOffset'] = 2
+    if result != expected:
         raise ValueError('missing exact positive identity evidence')
+
+
+def reconcile_recovery(observations, *, restored):
+    # The expected frames come from the producing Jobs, outside every broker
+    # PVC. Consumer position is independently sampled after its actual commit.
+    by_case = {row['case']: row for row in observations}
+    source = {topic: by_case[case]['frames'][topic]
+              for topic, case in [('proof-a', 'client-a'), ('proof-b', 'client-b')]}
+    for case in ('verify', 'verify-reprovision', 'verify-after-restart'):
+        if by_case[case]['frames'] != source:
+            raise ValueError('source broker differs from producer acknowledgements')
+    if restored and (by_case['verify-after-restore']['frames'] != source
+                     or by_case['restored-offset']['groupNextOffset'] != by_case['resume']['groupNextOffset']):
+        raise ValueError('restored broker differs from independent recovery point')
 
 
 def broker_restart_evidence(before, after):
@@ -396,6 +430,7 @@ def validate_report(evidence, sha):
                 or capacity['producerReserveBytes'] <= 0 or capacity['requiredHeadroomBytes'] != HEADROOM):
             raise ValueError('inconsistent capacity evidence')
         require_capacity(capacity, capacity['producerReserveBytes'])
+    reconcile_recovery(observations, restored=True)
 
 
 def main():
@@ -440,6 +475,8 @@ def main():
                     evidence['stage'] = 'restart disposable broker'
                     evidence['brokerRestart'] = restart_broker(k)
                 if case == 'verify-after-restore':
+                    evidence['stage'] = 'reconcile acknowledged frames before backup'
+                    reconcile_recovery(evidence['observations'], restored=False)
                     evidence['stage'] = 'restore offline backup into new storage'
                     evidence['coldRestore'] = cold_restore.recover(k, shared.PINS['busybox:1.36'])
                 evidence['stage']='storage preflight '+case
@@ -451,6 +488,9 @@ def main():
                 result=json.loads(k('-n','kanz-services','logs','job/'+case))
                 validate_observation(result, sa, mode, sha)
                 evidence['observations'].append(dict(result,case=case))
+                if case == 'restored-offset':
+                    evidence['stage'] = 'reconcile restored frames and group position'
+                    reconcile_recovery(evidence['observations'], restored=True)
             pods=json.loads(k('get','pods','-A','-o','json'))['items']
             evidence['runningImages']=[{'namespace':p['metadata']['namespace'],'pod':p['metadata']['name'],'images':[{'name':c['name'],'imageID':c.get('imageID','')} for c in p.get('status',{}).get('containerStatuses',[])]} for p in pods]
             evidence['passed']=True
