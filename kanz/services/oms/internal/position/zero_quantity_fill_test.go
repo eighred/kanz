@@ -63,6 +63,7 @@ func TestBookApplyStillFoldsAPositiveFill(t *testing.T) {
 	got, err := b.Apply(context.Background(), "p1", &orderpb.Fill{FillId: "F-zero",
 		Venue:        "XBIN",
 		InstrumentId: "BTC-USD",
+		Side:         orderpb.Side_SIDE_BUY,
 		Quantity:     &commonpb.Decimal{Coefficient: 2, Exponent: 0},
 		Price:        &commonpb.Decimal{Coefficient: 50000, Exponent: 0},
 	}, time.Now(), nil)

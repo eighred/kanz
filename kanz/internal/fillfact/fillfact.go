@@ -97,6 +97,9 @@ var ErrHasNoVenue = errors.New("fill has no venue — a holding that belongs to 
 // ABSENT quantity, not just a literal 0.
 var ErrQuantityNotPositive = errors.New("fill quantity must be > 0 — a fill that moves nothing cannot be folded")
 
+// ErrUnknownSide prevents either book from assigning a direction to an unknown execution.
+var ErrUnknownSide = errors.New("fill side must be BUY or SELL")
+
 // Validate reports whether a fill FACT may be folded into a book of record.
 //
 // REFUSING IS RIGHT RATHER THAN SKIPPING, and the distinction is the whole
@@ -118,5 +121,10 @@ func Validate(f *orderpb.Fill) error {
 	if !dec.IsPositive(f.GetQuantity()) {
 		return ErrQuantityNotPositive
 	}
-	return nil
+	switch f.GetSide() {
+	case orderpb.Side_SIDE_BUY, orderpb.Side_SIDE_SELL:
+		return nil
+	default:
+		return ErrUnknownSide
+	}
 }
