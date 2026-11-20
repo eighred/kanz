@@ -32,6 +32,7 @@ type pilotBreak struct {
 	PortfolioID string            `json:"portfolio_id"`
 	CustodianID string            `json:"custodian_id"`
 	Key         string            `json:"key"`
+	Kind        string            `json:"kind"`
 	IBOR        string            `json:"ibor"`
 	Custodian   string            `json:"custodian"`
 	Difference  string            `json:"difference"`
@@ -65,6 +66,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 		t.Skip("requires a fresh provisioned synthetic custody pilot")
 	}
 	var observations []pilotObservation
+	var firstDetection pilotBreak
 	checkSignedPilotCommand(t, 2*time.Minute, func(ctx context.Context, pool *pgxpool.Pool, statement custody.Statement, revision int, broker pilotBroker) {
 		const tenant = "synthetic-custody-pilot"
 		ctx = bus.WithTenantID(ctx, tenant)
@@ -162,10 +164,11 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 					t.Fatal("scheduled missing statement did not produce a distinct dated outcome")
 				}
 				baseline := pilotFinancialSnapshot(t, ctx, pool)
-				provePilotBrowser(t, ctx, site.URL, "TestSignedCustodyOperatorBrowser", os.Getenv("CUSTODY_PILOT_DATED_SCRIPT"), map[string]string{
+				provePilotBrowser(t, ctx, site.URL, "TestSignedCustodyOperatorBrowser", os.Getenv("CUSTODY_PILOT_DATED_SCRIPT"), map[string]any{
 					"portfolio": subject.PortfolioID, "custodian": subject.CustodianID, "clean_date": day.Format(time.DateOnly),
 					"clean_run": run.RunID, "statement": run.StatementID, "missing_date": missing.BusinessDate.Format(time.DateOnly),
 					"missing_run": absent.RunID, "unobserved_date": day.AddDate(0, 0, 2).Format(time.DateOnly),
+					"prior_detection": firstDetection,
 				})
 				info, err := broker.completions.Info(ctx)
 				if err != nil || info.State.Msgs != 3 || baseline != pilotFinancialSnapshot(t, ctx, pool) {
@@ -186,6 +189,7 @@ func checkPilotReadback(t *testing.T, rerun bool) {
 		if b.Detection != expected || b.PortfolioID != "PF1" || b.CustodianID != "CUST-A" || b.Key != "SYN" || b.IBOR != "10.5" || b.Custodian != "9.5" || b.Difference != "1" {
 			t.Fatalf("unexpected accounting evidence: %+v", b)
 		}
+		firstDetection = b
 		if !rerun {
 			const id = "c9cb9d52-3414-4081-bb01-718183d12647"
 			result, err := r.ReconcileManual(ctx, subject, id, "synthetic-operator")
