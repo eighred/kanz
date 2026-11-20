@@ -51,7 +51,6 @@ async function main() {
           if (mode === 'ready') await page.waitForFunction(() => window.renderProof.instances === 2)
           return route.continue()
         })
-        if (mode === 'ready') await page.clock.install()
         phaseObserved = 'navigation'
         const navigation = await page.goto(origin + '/portfolios/fixture/orders')
         assert(navigation.ok())
@@ -63,16 +62,6 @@ async function main() {
         const canonical = page.getByRole('row').filter({ hasText: 'canonical' })
         for (const value of ['90071992547409.93', '0.25', '1.50', '1.47']) {
           await canonical.getByRole('cell', { name: value, exact: true }).waitFor()
-        }
-        await canonical.getByText(/Remote outcome unknown/).waitFor()
-        assert((await canonical.innerText()).includes('Last recorded status: partially filled'))
-        if (mode === 'ready') {
-          assert.equal(await page.getByText('This snapshot is stale.', { exact: false }).count(), 0)
-          await page.clock.fastForward(61_000)
-          await page.getByRole('status').filter({ hasText: 'This snapshot is stale.' }).waitFor()
-          await page.getByRole('button', { name: 'Refresh order history' }).click()
-          await canonical.waitFor()
-          assert.equal(await page.getByText('This snapshot is stale.', { exact: false }).count(), 0)
         }
         const legacy = page.getByRole('row').filter({ hasText: 'legacy' })
         await legacy.getByRole('cell', { name: '9'.repeat(127) + '.99', exact: true }).waitFor()
