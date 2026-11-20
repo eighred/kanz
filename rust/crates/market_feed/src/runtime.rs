@@ -28,15 +28,39 @@ struct Health {
     connected: AtomicBool,
     publications: AtomicU64,
     validity: source::Validity,
-    book_epoch: AtomicU64,
-    venue_time: Mutex<Option<prost_types::Timestamp>>,
+    clock: Mutex<BookClock>,
+}
+#[derive(Default)]
+struct BookClock {
+    observed: Option<prost_types::Timestamp>,
+    acknowledged: Option<(u64, prost_types::Timestamp)>,
 }
 impl Health {
+    fn observe(&self, time: Option<prost_types::Timestamp>) -> Result<()> {
+        self.clock
+            .lock()
+            .map_err(|_| "health lock poisoned")?
+            .observed = time;
+        Ok(())
+    }
+
+    fn acknowledge(&self, epoch: u64, time: Option<prost_types::Timestamp>) -> Result<()> {
+        self.clock
+            .lock()
+            .map_err(|_| "health lock poisoned")?
+            .acknowledged = time.map(|time| (epoch, time));
+        Ok(())
+    }
+
     fn is_ready(&self, wall: prost_types::Timestamp) -> bool {
         self.ready.load(Ordering::Relaxed)
             && self.connected.load(Ordering::Relaxed)
-            && source::valid_epoch(&self.validity, self.book_epoch.load(Ordering::SeqCst))
-            && self.venue_time.lock().is_ok_and(|time| fresh(*time, wall))
+            && self.clock.lock().is_ok_and(|clock| {
+                fresh(clock.observed, wall)
+                    && clock.acknowledged.is_some_and(|(epoch, time)| {
+                        source::valid_epoch(&self.validity, epoch) && fresh(Some(time), wall)
+                    })
+            })
     }
 }
 pub struct Config {
@@ -189,6 +213,13 @@ fn fresh(venue: Option<prost_types::Timestamp>, wall: prost_types::Timestamp) ->
     let Some(venue) = venue else {
         return false;
     };
+    let valid = |time: prost_types::Timestamp| {
+        (-62_135_596_800..=253_402_300_799).contains(&time.seconds)
+            && (0..1_000_000_000).contains(&time.nanos)
+    };
+    if !valid(venue) || !valid(wall) {
+        return false;
+    }
     // Work on elapsed time directly. Protobuf's final valid day extends beyond
     // Jiff's absolute Timestamp range, but its differences fit in SignedDuration.
     let Some(seconds) = wall.seconds.checked_sub(venue.seconds) else {
@@ -286,15 +317,12 @@ where
                     if !source::valid_epoch(&health.validity, epoch) { continue; }
                     if book.apply_snapshot(&snapshot).is_err() { break Err("snapshot fold refused".into()); }
                     book_epoch = epoch; anchored = true;
-                    health.book_epoch.store(epoch, Ordering::SeqCst);
-                    if let Ok(mut time) = health.venue_time.lock() { *time = snapshot.event_time; }
-                    else { break Err("health lock poisoned".into()); }
+                    if let Err(error) = health.observe(snapshot.event_time) { break Err(error); }
                 }
                 Some(Event::Delta(epoch, delta)) => {
                     if epoch != book_epoch || !source::valid_epoch(&health.validity, epoch) { continue; }
                     if book.apply_delta_observed(&delta).is_err() { break Err("observed delta fold refused".into()); }
-                    if let Ok(mut time) = health.venue_time.lock() { *time = book.snapshot(1).event_time; }
-                    else { break Err("health lock poisoned".into()); }
+                    if let Err(error) = health.observe(book.snapshot(1).event_time) { break Err(error); }
                 }
                 None => break Err("depth source stopped".into()),
             },
@@ -307,6 +335,7 @@ where
                 if snapshot.bids.is_empty() && snapshot.asks.is_empty() { health.ready.store(false, Ordering::Relaxed); continue; }
                 let frames = match framer.frames(&snapshot, wall) { Ok(frames) => frames, Err(error) => break Err(error) };
                 if let Err(error) = publisher::publish(&js, frames, &health.validity, book_epoch).await { break Err(error); }
+                if let Err(error) = health.acknowledge(book_epoch, snapshot.event_time) { break Err(error); }
                 health.publications.fetch_add(1, Ordering::Relaxed);
                 health.ready.store(source::valid_epoch(&health.validity, book_epoch)
                     && fresh(snapshot.event_time, publisher::now())
@@ -434,11 +463,12 @@ mod tests {
         health.ready.store(true, Ordering::Relaxed);
         health.connected.store(true, Ordering::Relaxed);
         health.validity.store(1, Ordering::SeqCst);
-        health.book_epoch.store(1, Ordering::SeqCst);
-        *health.venue_time.lock().unwrap() = Some(prost_types::Timestamp {
+        let time = Some(prost_types::Timestamp {
             seconds: 100,
             nanos: 0,
         });
+        health.observe(time).unwrap();
+        health.acknowledge(1, time).unwrap();
         assert!(health.is_ready(prost_types::Timestamp {
             seconds: 101,
             nanos: 0
@@ -461,13 +491,44 @@ mod tests {
             seconds: 101,
             nanos: 0
         }));
-        health.book_epoch.store(2, Ordering::SeqCst);
+        health.acknowledge(2, time).unwrap();
         health.connected.store(false, Ordering::Relaxed);
         assert!(!health.is_ready(prost_types::Timestamp {
             seconds: 101,
             nanos: 0
         }));
     }
+    #[test]
+    fn unacknowledged_update_cannot_extend_readiness() {
+        let at = |seconds, nanos| prost_types::Timestamp { seconds, nanos };
+        let health = Health::default();
+        health.connected.store(true, Ordering::Relaxed);
+        health.ready.store(true, Ordering::Relaxed);
+        health.validity.store(1, Ordering::SeqCst);
+        health.observe(Some(at(100, 0))).unwrap();
+        health.acknowledge(1, Some(at(100, 0))).unwrap();
+
+        // A later book has been folded but the broker is still acknowledging its frames.
+        health.observe(Some(at(105, 0))).unwrap();
+        assert!(health.is_ready(at(105, 0)));
+        assert!(!health.is_ready(at(105, 1)));
+        health.acknowledge(1, Some(at(105, 0))).unwrap();
+        assert!(health.is_ready(at(105, 1)));
+
+        // A new generation must earn its own acknowledgement even with the same venue time.
+        health.validity.store(2, Ordering::SeqCst);
+        health.observe(Some(at(105, 0))).unwrap();
+        assert!(!health.is_ready(at(105, 1)));
+        health.acknowledge(2, Some(at(105, 0))).unwrap();
+        assert!(health.is_ready(at(105, 1)));
+
+        // A fresh acknowledgement cannot hide bad or absent time on the current book.
+        for current in [None, Some(at(99, 0)), Some(at(107, 0))] {
+            health.observe(current).unwrap();
+            assert!(!health.is_ready(at(105, 1)));
+        }
+    }
+
     #[test]
     fn stale_missing_and_future_venue_clocks_refuse_readiness() {
         let wall = prost_types::Timestamp {
@@ -496,6 +557,25 @@ mod tests {
             }),
             wall
         ));
+    }
+
+    #[test]
+    fn malformed_clocks_do_not_normalize_into_a_fresh_interval() {
+        use prost_types::Timestamp;
+        for (seconds, nanos, valid_seconds) in [
+            (100, -1, 100),
+            (100, 1_000_000_000, 101),
+            (-62_135_596_801, 0, -62_135_596_800),
+            (253_402_300_800, 0, 253_402_300_799),
+        ] {
+            let bad = Timestamp { seconds, nanos };
+            let valid = Timestamp {
+                seconds: valid_seconds,
+                nanos: 0,
+            };
+            assert!(!fresh(Some(bad), valid));
+            assert!(!fresh(Some(valid), bad));
+        }
     }
 
     #[test]
