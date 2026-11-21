@@ -16,7 +16,8 @@ const instrument = ref('BTC-USDT')
 const source = ref(''),
   error = ref(''),
   busy = ref(false)
-const result = ref<Awaited<ReturnType<typeof priceDepth>>>()
+const read = ref<Awaited<ReturnType<typeof priceDepth>>>()
+const result = computed(() => read.value?.result)
 let active: AbortController | undefined,
   generation = 0,
   fileRead = 0
@@ -24,7 +25,7 @@ function invalidate() {
   generation++
   active?.abort()
   busy.value = false
-  result.value = undefined
+  read.value = undefined
   error.value = ''
 }
 function reset() {
@@ -130,7 +131,7 @@ async function calculate() {
   busy.value = true
   try {
     const reply = await priceDepth(id.value, session.identity.tenant, inputs.value, active.signal)
-    if (seq === generation) result.value = reply
+    if (seq === generation) read.value = reply
   } catch (e) {
     if (seq === generation) error.value = e instanceof Error ? e.message : 'Scenario unavailable.'
   } finally {
@@ -242,6 +243,18 @@ async function calculate() {
   </form>
   <section v-if="result" aria-live="polite">
     <h2>Scenario results</h2>
+    <template v-if="read?.serviceTiming">
+      <p>Risk service pricing and portfolio lookup took {{ elapsedMillis(read.serviceTiming.started_at, read.serviceTiming.completed_at) }}.</p>
+      <table v-if="liveCapture && inputs">
+        <caption>Book age when the risk service finished pricing</caption>
+        <thead><tr><th>Venue</th><th>Since venue event</th><th>Since risk receipt</th></tr></thead>
+        <tbody><tr v-for="v in inputs.venues" :key="v.venue">
+          <th scope="row">{{ v.venue }}</th>
+          <td>{{ elapsedMillis(v.observed, read.serviceTiming.completed_at) }}</td>
+          <td>{{ elapsedMillis(v.received, read.serviceTiming.completed_at) }}</td>
+        </tr></tbody>
+      </table>
+    </template>
     <p class="muted">
       Net includes the assumed rebalance cost and values any remaining base asset at the buy venue’s best bid. Stress P&amp;L uses the
       shocked mark and excludes liquidation fees and rebalancing.
@@ -409,6 +422,7 @@ async function calculate() {
           source,
           inputs,
           result,
+          service_timing: read?.serviceTiming,
         })
       "
     >

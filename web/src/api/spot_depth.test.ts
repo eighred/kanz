@@ -148,7 +148,12 @@ describe('operator spot depth', () => {
     const raw = { portfolio_id: 'portfolio', owner_tenant: 'owner', spot_depth: result }
     const post = vi.spyOn(api, 'post').mockResolvedValue(raw)
     const read = () => priceDepth('portfolio', 'owner', input, new AbortController().signal)
-    await expect(read()).resolves.toEqual(result)
+    await expect(read()).resolves.toEqual({ result, serviceTiming: undefined })
+    const timing = { started_at: input.cutoff, completed_at: '2026-11-21T08:00:01.000000002Z' }
+    post.mockResolvedValueOnce({ ...raw, spot_depth_timing: timing })
+    await expect(read()).resolves.toEqual({ result, serviceTiming: timing })
+    post.mockResolvedValueOnce({ ...raw, spot_depth_timing: { ...timing, completed_at: '2020-01-01T00:00:00Z' } })
+    await expect(read()).resolves.toEqual({ result, serviceTiming: undefined })
     for (const mismatch of [
       { ...raw, owner_tenant: 'other' },
       { ...raw, portfolio_id: 'other' },

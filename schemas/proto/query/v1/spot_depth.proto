@@ -168,6 +168,13 @@ message SpotDepthDirection {
   SpotLocalUnwind local_unwind = 26;
 }
 
+message SpotDepthTiming {
+  // Risk-service wall clock just before evaluating the supplied depth.
+  google.protobuf.Timestamp started_at = 1;
+  // After pricing and the portfolio lookup, before returning the gRPC response.
+  google.protobuf.Timestamp completed_at = 2;
+}
+
 message SpotDepthResult {
   string instrument_id = 1;
   string base_currency = 2;

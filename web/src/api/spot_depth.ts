@@ -423,7 +423,12 @@ export async function priceDepth(portfolio: string, tenant: string, input: Depth
     !r.directions.every((v, i) => validDirection(v, input.venues[i]!, input.venues[1 - i]!, !!input.oneLegLossLimit))
   )
     throw new Error('The portfolio scenario response could not be verified.')
-  return r as unknown as Result
+  const timing = raw.spot_depth_timing
+  const serviceTiming = record(timing) && isTimestamp(timing.started_at) && isTimestamp(timing.completed_at) &&
+    timestampNanos(timing.completed_at) >= timestampNanos(timing.started_at)
+    ? { started_at: timing.started_at, completed_at: timing.completed_at }
+    : undefined
+  return { result: r as unknown as Result, serviceTiming }
 }
 export function amount(value: Decimal | undefined, unit: string) {
   const s = formatDecimal(value)

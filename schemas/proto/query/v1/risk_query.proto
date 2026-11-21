@@ -260,6 +260,8 @@ message EvaluateScenarioResponse {
   string owner_tenant = 4;
   SpotDepthResult spot_depth = 5;
   SpotBookObservation spot_books = 6;
+  // Service timing for this read. Replaying the same inputs has its own timing.
+  SpotDepthTiming spot_depth_timing = 7;
 }
 
 // ScenarioShock is one perturbation. The oneof is the proto mirror of the

@@ -218,6 +218,7 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 			return nil, status.Error(codes.InvalidArgument, "spot depth requires its named scenario and cannot be combined with other shocks")
 		}
 		// Input diagnostics are independent of portfolio existence.
+		started := timestamppb.Now()
 		result, err := scenario.EvaluateSpotDepth(req.SpotDepth)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -229,7 +230,8 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 			return nil, mapError(err)
 		}
 		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
-			QualityFlags: protoFlags(portfolio.QualityFlags), SpotDepth: result}, nil
+			QualityFlags: protoFlags(portfolio.QualityFlags), SpotDepth: result,
+			SpotDepthTiming: &querypb.SpotDepthTiming{StartedAt: started, CompletedAt: timestamppb.Now()}}, nil
 	}
 	shocks, err := scenarioShocks(req)
 	if err != nil {
