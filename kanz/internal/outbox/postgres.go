@@ -9,6 +9,7 @@ import (
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -99,6 +100,17 @@ func Enqueue(ctx context.Context, tx pgx.Tx, service string, records ...Record) 
 // that is a decision, not a convenience — see the RLS argument on Relay.
 type Postgres struct {
 	pool *pgxpool.Pool
+	postgresRecords
+}
+
+// A pool supports standalone queue operations. During a drain its pinned
+// connection serves every query until the advisory lock has been released.
+type postgresRecords struct {
+	db interface {
+		Query(context.Context, string, ...any) (pgx.Rows, error)
+		QueryRow(context.Context, string, ...any) pgx.Row
+		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	}
 	// service scopes durable rows and the advisory lock. Relay's doc named this as the one
 	// thing that changes when a second service adopts the outbox, and #410 is
 	// that second service.
@@ -120,7 +132,7 @@ func NewPostgres(pool *pgxpool.Pool, service string) *Postgres {
 	if !validService(service) {
 		panic(ErrInvalidService)
 	}
-	return &Postgres{pool: pool, service: service}
+	return &Postgres{pool: pool, postgresRecords: postgresRecords{db: pool, service: service}}
 }
 
 // The SQL prefix resolves the physical table through this connection's search
@@ -136,9 +148,9 @@ var _ Queue = (*Postgres)(nil)
 // The migration rejects new unowned writes. A successful check therefore cannot
 // race a legacy writer inserting another ambiguous row; a verified operator
 // reconciliation can only reduce this backlog. Tenant RLS scopes the check.
-func (p *Postgres) requireOwnedPending(ctx context.Context) error {
+func (p *postgresRecords) requireOwnedPending(ctx context.Context) error {
 	var unowned bool
-	if err := p.pool.QueryRow(ctx, `SELECT EXISTS (
+	if err := p.db.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM outbox WHERE published_at IS NULL AND producer_service IS NULL
 	)`).Scan(&unowned); err != nil {
 		return fmt.Errorf("outbox: check legacy ownership: %w", err)
@@ -240,9 +252,14 @@ func (p *Postgres) PendingKeys(ctx context.Context, limit int) ([]string, error)
 // next FACT for the same order directly and must not do that while an earlier
 // one is still in the table.
 func (p *Postgres) LockKey(ctx context.Context, key string, wait bool) (func(), bool, error) {
+	lease, ok, err := p.lockDrain(ctx, key, wait)
+	return lease.release, ok, err
+}
+
+func (p *Postgres) lockDrain(ctx context.Context, key string, wait bool) (drainLease, bool, error) {
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("outbox: acquire connection for the %s drain lock: %w", key, err)
+		return drainLease{}, false, fmt.Errorf("outbox: acquire connection for the %s drain lock: %w", key, err)
 	}
 	if wait {
 		// pg_advisory_lock has no boolean result; it returns void and blocks.
@@ -252,22 +269,25 @@ func (p *Postgres) LockKey(ctx context.Context, key string, wait bool) (func(), 
 			`SELECT pg_advisory_lock(hashtext(`+drainLockScope+`), hashtext($1))`,
 			key, p.lockNamespace()); err != nil {
 			conn.Release()
-			return nil, false, fmt.Errorf("outbox: wait for the %s drain lock: %w", key, err)
+			return drainLease{}, false, fmt.Errorf("outbox: wait for the %s drain lock: %w", key, err)
 		}
-		return func() { p.unlock(conn, key) }, true, nil
+	} else {
+		var won bool
+		if err := conn.QueryRow(ctx,
+			`SELECT pg_try_advisory_lock(hashtext(`+drainLockScope+`), hashtext($1))`,
+			key, p.lockNamespace()).Scan(&won); err != nil {
+			conn.Release()
+			return drainLease{}, false, fmt.Errorf("outbox: try the %s drain lock: %w", key, err)
+		}
+		if !won {
+			conn.Release()
+			return drainLease{}, false, nil
+		}
 	}
-	var won bool
-	if err := conn.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext(`+drainLockScope+`), hashtext($1))`,
-		key, p.lockNamespace()).Scan(&won); err != nil {
-		conn.Release()
-		return nil, false, fmt.Errorf("outbox: try the %s drain lock: %w", key, err)
-	}
-	if !won {
-		conn.Release()
-		return nil, false, nil
-	}
-	return func() { p.unlock(conn, key) }, true, nil
+	return drainLease{
+		drainRecords: &postgresRecords{db: conn, service: p.service},
+		release:      func() { p.unlock(conn, key) },
+	}, true, nil
 }
 
 // unlock releases the drain lock and returns the connection to the pool.
@@ -297,14 +317,14 @@ func (p *Postgres) unlock(conn *pgxpool.Conn, key string) {
 // Pending returns one key's unpublished records in ID order — the order they
 // were committed in, which for a single key is the order the lifecycle happened
 // in (see Queue).
-func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pending, error) {
+func (p *postgresRecords) Pending(ctx context.Context, key string, limit int) ([]Pending, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	if err := p.requireOwnedPending(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := p.pool.Query(ctx, `
+	rows, err := p.db.Query(ctx, `
 		SELECT `+pendingColumns+`
 		FROM outbox
 		WHERE published_at IS NULL AND partition_key = $1 AND producer_service = $3
@@ -344,8 +364,8 @@ func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pendin
 // each fill_id before folding). The other direction — marking before publishing
 // — would lose the FACT outright, which is the failure this whole package
 // exists to remove.
-func (p *Postgres) MarkPublished(ctx context.Context, id int64) error {
-	tag, err := p.pool.Exec(ctx,
+func (p *postgresRecords) MarkPublished(ctx context.Context, id int64) error {
+	tag, err := p.db.Exec(ctx,
 		`UPDATE outbox SET published_at = COALESCE(published_at, now()), last_error = ''
 		 WHERE id = $1 AND producer_service = $2`, id, p.service)
 	if err != nil {
@@ -369,10 +389,10 @@ func (p *Postgres) MarkPublished(ctx context.Context, id int64) error {
 // Pending as LastError and the relay logs it beside the live error, so the
 // replica that inherits a stalled key reports the refusal that started it rather
 // than only the symptom it just saw (#817).
-func (p *Postgres) MarkFailed(ctx context.Context, id int64, cause error) error {
+func (p *postgresRecords) MarkFailed(ctx context.Context, id int64, cause error) error {
 	msg := boundedCause(cause)
 	var owned bool
-	err := p.pool.QueryRow(ctx, `
+	err := p.db.QueryRow(ctx, `
 		WITH owned AS (
 			SELECT id FROM outbox WHERE id = $1 AND producer_service = $3
 		), updated AS (
