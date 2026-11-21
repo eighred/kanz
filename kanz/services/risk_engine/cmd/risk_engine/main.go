@@ -884,15 +884,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		// from the local cache or reported as not-found (#110).
 		engineOpts = append(engineOpts, engine.WithEvaluator(evaluator))
 		engineImpl := engine.New(store, registry, cache, risk.NewDetector(), engineOpts...)
-		books := spotbooks.New(cfg.Tenant, cfg.SpotBooks)
-		if books != nil {
-			go func() {
-				if err := consumer.SubscribeBroadcast(ctx, spotbooks.Subject, books.Handle); err != nil && ctx.Err() == nil {
-					logger.Error("spot book observations unavailable", "err", err)
-				}
-			}()
-		}
-		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, books, logger)
+		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, startSpotBooks(ctx, cfg, consumer, logger), logger)
 		if err != nil {
 			return err
 		}
@@ -900,6 +892,18 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 
 	return a.Run(ctx)
+}
+
+func startSpotBooks(ctx context.Context, cfg config.Config, consumer *bus.Consumer, logger *slog.Logger) *spotbooks.Store {
+	books := spotbooks.New(cfg.Tenant, cfg.SpotBooks)
+	if books != nil {
+		go func() {
+			if err := consumer.SubscribeBroadcast(ctx, spotbooks.Subject, books.Handle); err != nil && ctx.Err() == nil {
+				logger.Error("spot book observations unavailable", "err", err)
+			}
+		}()
+	}
+	return books
 }
 
 func registerPortfolioInventory(reg prometheus.Registerer, store *state.Store) {

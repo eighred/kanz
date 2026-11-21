@@ -20,8 +20,11 @@ per venue and instrument. `known_at` is the first local risk-service receipt of
 that book revision. Exports include the venue event times, sequences, FACT IDs,
 source, producer release and data rights reference. For each returned venue,
 `portfolio_account_ref` comes from the exact tenant, resolved portfolio and
-MIC in `RISK_ENGINE_VENUE_ACCOUNTS`. An empty reference indicates no configured
-binding. Private venue balances and fee tiers require separate observations.
+MIC in `RISK_ENGINE_VENUE_ACCOUNTS`. Market names BINANCE and OKX can resolve
+to the deployed adapter MICs XBIN and XOKX. Ambiguous mappings withhold the
+reference. On the Tokyo topology the OMS owns the PF1 bindings and its private
+demo funds read supplies them independently. This keeps market-book capture
+available when the deployment has no market-data database for margin measures.
 
 `RISK_ENGINE_SPOT_BOOK_GRANTS` is a JSON array. Each entry binds a canonical
 crypto spot pair to one exact publisher and release in `RISK_ENGINE_TENANT`.

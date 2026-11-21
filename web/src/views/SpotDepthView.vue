@@ -10,6 +10,7 @@ const route = useRoute(),
 const id = computed(() => String(route.params.id ?? ''))
 const inputs = ref<DepthInput>()
 const liveCapture = ref(false)
+const requestedDemoFunds = ref(false)
 const instrument = ref('BTC-USDT')
 const source = ref(''),
   error = ref(''),
@@ -30,6 +31,7 @@ function reset() {
   invalidate()
   inputs.value = undefined
   liveCapture.value = false
+  requestedDemoFunds.value = false
   source.value = ''
 }
 watch(() => [id.value, session.identity, session.identity?.tenant, session.identity?.subject], reset, {
@@ -44,7 +46,7 @@ function loadExample() {
     source.value = 'Synthetic worked example'
   }
 }
-async function loadObserved() {
+async function loadObserved(includeDemoFunds: boolean) {
   if (!session.identity) return
   const requested = instrument.value.trim()
   const previous = inputs.value
@@ -54,7 +56,7 @@ async function loadObserved() {
   active = new AbortController()
   busy.value = true
   try {
-    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal)
+    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal, includeDemoFunds)
     if (seq !== generation) return
     if (
       liveCapture.value && previous?.observation &&
@@ -73,6 +75,7 @@ async function loadObserved() {
     }
     inputs.value = next
     liveCapture.value = true
+    requestedDemoFunds.value = includeDemoFunds
     source.value = 'Observed by the risk service · ' + next.observation!.source
   } catch (e) {
     if (seq === generation) {
@@ -95,6 +98,9 @@ async function loadFile(event: Event) {
     const parsed: unknown = JSON.parse(await file.text())
     if (seq !== fileRead) return
     if (!isDepthInput(parsed)) throw new Error('Invalid scenario file. Use the example inputs as a template.')
+    // Imported amounts are editable assumptions in this session. A subsequent
+    // export must not attribute an edited value to a private venue read.
+    for (const v of parsed.venues) delete v.fundsObservation
     inputs.value = parsed
     source.value = 'Imported scenario · ' + file.name
   } catch (e) {
@@ -131,14 +137,15 @@ async function calculate() {
     <RouterLink :to="{ name: 'exposure', params: { id } }">{{ id }}</RouterLink>
   </p>
   <p>
-    Price both trading directions against dated books. Enter available balances, fees and order limits as
-    scenario assumptions for each capture.
+    Price both trading directions against dated books. Capture available demo balances or enter a balance
+    assumption. Fees and order limits are scenario inputs.
   </p>
   <div class="actions">
     <label>Spot instrument <input v-model="instrument" maxlength="128" :disabled="busy" /></label>
-    <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved">
+    <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(false)">
       Capture current books
     </button>
+    <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(true)">Capture books and demo balances</button>
     <button type="button" @click="loadExample">Load synthetic example</button>
     <label>Import scenario JSON <input type="file" accept=".json,application/json" @change="loadFile" /></label>
   </div>
@@ -163,15 +170,19 @@ async function calculate() {
         <div class="fields">
           <label v-if="liveCapture && v.portfolioAccount">Portfolio account <input :value="v.portfolioAccount" readonly /></label>
           <label v-else>Scenario account <input v-model="v.account" required /></label>
-          <label>Base available <input v-model="v.baseBalance" /></label>
-          <label>Quote available <input v-model="v.quoteBalance" /></label>
+          <label>Base available <input v-model="v.baseBalance" :readonly="liveCapture && !!v.fundsObservation" /></label>
+          <label>Quote available <input v-model="v.quoteBalance" :readonly="liveCapture && !!v.fundsObservation" /></label>
           <label>Fee (bps) <input v-model="v.feeBps" /></label>
           <label>Fee currency <input v-model="v.feeCurrency" /></label>
           <label>Quantity step <input v-model="v.step" /></label>
           <label>Minimum quantity <input v-model="v.minQty" /></label>
           <label>Minimum notional <input v-model="v.minNotional" /></label>
         </div>
-        <p v-if="liveCapture && !v.portfolioAccount" class="muted">No account binding is configured for this venue and portfolio.</p>
+        <p v-if="liveCapture && v.fundsObservation" class="muted">
+          {{ v.fundsObservation.source }} · Read {{ v.fundsObservation.request_started_at }} to {{ v.fundsObservation.received_at }}
+        </p>
+        <p v-else-if="requestedDemoFunds" class="muted">Demo balances unavailable for this capture. Entered balances are assumptions.</p>
+        <p v-if="liveCapture && !v.portfolioAccount" class="muted">No portfolio account reference was available in this capture.</p>
       </fieldset>
     </div>
     <div class="actions">

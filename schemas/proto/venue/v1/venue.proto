@@ -32,6 +32,7 @@ package venue.v1;
 
 import "order/v1/order.proto";
 import "common/v1/decimal.proto";
+import "google/protobuf/timestamp.proto";
 import "order/v1/order_events.proto";
 
 // VenueAdapterService is one exchange, out of process. One adapter serves one venue;
@@ -41,6 +42,8 @@ import "order/v1/order_events.proto";
 // silent fall back to the simulator. An OMS that quietly simulates while
 // believing it is trading is the worst failure this system has.
 service VenueAdapterService {
+  // Read-only cash availability on the adapter's verified demo account.
+  rpc ReadDemoSpotFunds(ReadDemoSpotFundsRequest) returns (ReadDemoSpotFundsResponse);
   // Execute works the order and returns the fills it produced.
   //
   // Zero fills is a VALID, non-error response: a resting limit order that did
@@ -139,6 +142,28 @@ service VenueAdapterService {
   // this is a read, and it is the read an operator most needs while the platform
   // is stopped — the same boundary CancelOrder sits on.
   rpc QueryOrder(QueryOrderRequest) returns (QueryOrderResponse);
+}
+
+message ReadDemoSpotFundsRequest {
+  string tenant_id = 1;
+  string venue_account_id = 2;
+  string mic = 3;
+  string instrument_id = 4;
+}
+
+message ReadDemoSpotFundsResponse {
+  string owner_tenant = 1;
+  string venue_account_id = 2;
+  string mic = 3;
+  string instrument_id = 4;
+  string venue_symbol = 5;
+  string base_currency = 6;
+  string quote_currency = 7;
+  common.v1.Decimal available_base = 8;
+  common.v1.Decimal available_quote = 9;
+  // Adapter clock bounding the signed reads. Neither is a venue update time.
+  google.protobuf.Timestamp request_started_at = 10;
+  google.protobuf.Timestamp received_at = 11;
 }
 
 message DescribeRequest {}
@@ -446,6 +471,22 @@ message VenueInstrument {
 // capital.
 service VenueQueryService {
   rpc ListTradeableInstruments(ListTradeableInstrumentsRequest) returns (ListTradeableInstrumentsResponse);
+  rpc ReadPortfolioDemoSpotFunds(ReadPortfolioDemoSpotFundsRequest) returns (ReadPortfolioDemoSpotFundsResponse);
+}
+
+message ReadPortfolioDemoSpotFundsRequest {
+  string tenant_id = 1;
+  string portfolio_id = 2;
+  string market_venue = 3;
+  string instrument_id = 4;
+}
+
+message ReadPortfolioDemoSpotFundsResponse {
+  string owner_tenant = 1;
+  string portfolio_id = 2;
+  ReadDemoSpotFundsResponse funds = 3;
+  // Market-feed venue. funds.mic is the independently bound adapter routing MIC.
+  string market_venue = 4;
 }
 
 message ListTradeableInstrumentsRequest {}

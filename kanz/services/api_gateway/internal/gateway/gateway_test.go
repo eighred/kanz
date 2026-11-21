@@ -50,6 +50,7 @@ type fakeClient struct {
 	listResp     *querypb.ListPortfoliosResponse
 	ordersResp   *orderpb.ListOrdersResponse
 	instrResp    *venuepb.ListTradeableInstrumentsResponse
+	fundsResp    *venuepb.ReadPortfolioDemoSpotFundsResponse
 	err          error
 
 	gotOrders   *orderpb.ListOrdersRequest
@@ -85,6 +86,9 @@ func (f *fakeClient) ListPendingApprovals(_ context.Context, in *orderpb.ListPen
 }
 func (f *fakeClient) ListTradeableInstruments(context.Context, *venuepb.ListTradeableInstrumentsRequest, ...grpc.CallOption) (*venuepb.ListTradeableInstrumentsResponse, error) {
 	return f.instrResp, f.err
+}
+func (f *fakeClient) ReadPortfolioDemoSpotFunds(context.Context, *venuepb.ReadPortfolioDemoSpotFundsRequest, ...grpc.CallOption) (*venuepb.ReadPortfolioDemoSpotFundsResponse, error) {
+	return f.fundsResp, f.err
 }
 func (f *fakeClient) ListPortfolios(context.Context, *querypb.ListPortfoliosRequest, ...grpc.CallOption) (*querypb.ListPortfoliosResponse, error) {
 	return f.listResp, f.err
@@ -555,6 +559,28 @@ func TestInstrumentsDoNotRequireAPortfolioClaim(t *testing.T) {
 
 	if code, body := getOrders(t, ts, "/v1/instruments"); code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — the catalogue is not portfolio-scoped: %s", code, body)
+	}
+}
+
+func TestDemoSpotFundsRequiresPortfolioAndTenantOwnership(t *testing.T) {
+	fc := &fakeClient{fundsResp: &venuepb.ReadPortfolioDemoSpotFundsResponse{
+		OwnerTenant: testTenant, PortfolioId: "PF1", MarketVenue: "OKX", Funds: &venuepb.ReadDemoSpotFundsResponse{
+			OwnerTenant: testTenant, Mic: "OKX", InstrumentId: "BTC-USDT", VenueAccountId: "scoped-account",
+		},
+	}}
+	ts := instrumentServer(t, fc, []string{"PF1"})
+	const path = "/v1/portfolios/PF1/demo-spot-funds/OKX?instrument=BTC-USDT"
+	if code, body := getOrders(t, ts, path); code != http.StatusOK || !strings.Contains(body, "scoped-account") {
+		t.Fatal("scoped account response unavailable")
+	}
+	for _, changed := range []string{strings.Replace(path, "PF1", "PF2", 1), strings.Replace(path, "/OKX", "/BINANCE", 1)} {
+		if code, body := getOrders(t, ts, changed); code != http.StatusNotFound || strings.Contains(body, "scoped-account") {
+			t.Fatal("unexpected disallowed portfolio or venue response")
+		}
+	}
+	fc.fundsResp.Funds.OwnerTenant = "other"
+	if code, body := getOrders(t, ts, path); code != http.StatusNotFound || strings.Contains(body, "scoped-account") {
+		t.Fatal("unexpected nested owner response")
 	}
 }
 

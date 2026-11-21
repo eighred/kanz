@@ -230,6 +230,10 @@ type evictionExemption struct {
 // arm caught it on the first run. An exemption nobody checks is worse than no
 // exemption, because it reads as a decision somebody made.
 var mapEvictionExempt = map[string]evictionExemption{
+	"services/risk_engine/internal/spotbooks: Store.grants": {boundedByConstruction,
+		"New clones at most 128 instrument grants at startup. No event can add a grant.", ""},
+	"services/risk_engine/internal/spotbooks: Store.latest": {boundedByConstruction,
+		"Handle requires a configured grant and either BINANCE or OKX before writing. At most 256 current slots exist per store.", ""},
 	// ─── BEHIND A POINTER VALUE (#951) ──────────────────────────────────────
 	//
 	// Seventeen members, every one read during the calibration pass rather than
@@ -288,7 +292,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 	"internal/risk/factormodel: Model.index":           factorModelArtifact("the instrument-to-row index over the same universe"),
 
 	"services/accounting/internal/ledger: Snapshot.Positions": ledgerSnapshot("open positions, keyed by instrument"),
-	"services/accounting/internal/ledger: Snapshot.Cash":      ledgerSnapshot("cash, keyed by currency"),
 	"services/accounting/internal/ledger: Snapshot.Accrued":   ledgerSnapshot("accruals, keyed by currency"),
 	// The SETTLED half of the same checkpoint (#1043). Identical shape, identical
 	// bound: one map per instrument held and one per currency settled in, rebuilt
@@ -679,6 +682,9 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by (portfolio, venue, instrument), created only by a fill that already passed OMS " +
 			"admission. A flat lot is retained deliberately: it carries cumulative realised P&L, and " +
 			"nothing re-derives that if the entry goes.", ""},
+	"services/oms/internal/position: Book.quotes": {isTheStore,
+		"One quote currency per retained lot. Both maps are written together for the same accepted fill key. " +
+			"The currency denominates the cumulative realised P&L even after the position is flat.", ""},
 	"services/oms/internal/position: Book.appliedFills": {isTheStore,
 		"the scoped execution claim and immutable evidence, capped at maxPositionReplay total entries. " +
 			"Evicting a claim would double-book a later redelivery; the capacity test proves refusal " +

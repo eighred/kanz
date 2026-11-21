@@ -142,6 +142,9 @@ func okxAccount(ctx context.Context, cred Credential, opt Options) (AccountInfo,
 	if out.Code != "0" {
 		return AccountInfo{}, &execution.APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
 	}
+	if len(out.Data) > 1 {
+		return AccountInfo{}, errors.New("exchangeauth: ambiguous OKX account configuration")
+	}
 	if len(out.Data) == 0 || out.Data[0].UID == "" {
 		return AccountInfo{}, errors.New("exchangeauth: okx: GET /api/v5/account/config carried no uid — the exchange did not " +
 			"say which account this API key belongs to, so it cannot be verified")

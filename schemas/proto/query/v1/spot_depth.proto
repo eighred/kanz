@@ -98,6 +98,7 @@ message ObservedVenueBook {
   // Current deployment binding for this portfolio and MIC at capture. Empty
   // when unbound. Independent of the market fact, balances and venue access.
   string portfolio_account_ref = 4;
+  string portfolio_account_mic = 5;
 }
 
 message SpotBookObservation {

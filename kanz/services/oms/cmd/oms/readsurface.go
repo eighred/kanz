@@ -8,7 +8,6 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/oms/internal/config"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
@@ -45,7 +44,7 @@ import (
 // goroutine and logging the error would leave the pod Ready with no read surface
 // — an outage that looks like a routing bug, which is the shape web-bff's static
 // root refuses for the same reason.
-func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store, catalogue []execution.VenueInstrument, logger *slog.Logger) (func(), error) {
+func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store, venueReads *venuesrv.Server, logger *slog.Logger) (func(), error) {
 	var opts []grpc.ServerOption
 	if mesh.Enabled() {
 		opts = append(opts, transport.ServerOption(mesh.Source, transport.AuthorizeMesh()))
@@ -66,7 +65,7 @@ func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store,
 	// can see one — building the read surface without it would hold orders
 	// nobody could find, which is the drop the control exists to end.
 	grpcsrv.New(store, store.Proposals(), time.Now, cfg.Tenant).Register(srv)
-	venuesrv.New(catalogue, cfg.Tenant).Register(srv)
+	venueReads.Register(srv)
 
 	go func() {
 		logger.Info("order query gRPC listening", "addr", cfg.GRPCListen)

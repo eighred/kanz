@@ -20,6 +20,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
+	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -81,13 +82,18 @@ type Store struct {
 }
 
 func New(tenant string, grants map[string]Grant) *Store {
-	if tenant == "" || len(grants) == 0 {
+	if tenant == "" || len(grants) == 0 || len(grants) > 128 {
 		return nil
 	}
 	return &Store{tenant: tenant, grants: maps.Clone(grants), latest: make(map[bookKey]*querypb.ObservedVenueBook), now: time.Now}
 }
 
 func (s *Store) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// This broadcast carries other tenants' data. A foreign observation is
+	// acknowledged and ignored. Even __system__ honors its exact book grant.
+	if err := bus.RequireTenantScope(env.GetTenantId(), s.tenant); err != nil {
+		return nil
+	}
 	g, ok := s.grants[env.GetPartitionKey()]
 	if !ok || env.GetTenantId() != s.tenant || env.Source != g.Source || env.ProducerVersion != g.Version {
 		return nil
@@ -177,7 +183,10 @@ func (s *Store) Observe(tenant, portfolio, id string, accounts *execution.Accoun
 	out.ProductType = g.ProductType
 	for _, o := range pair {
 		book := proto.CloneOf(o)
-		book.PortfolioAccountRef, _ = accounts.Account(tenant, portfolio, book.Book.Mic)
+		if a, found := accounts.SpotAccount(tenant, portfolio, book.Book.Mic); found {
+			book.PortfolioAccountRef = a.Account
+			book.PortfolioAccountMic = a.MIC
+		}
 		out.Venues = append(out.Venues, book)
 	}
 	return out

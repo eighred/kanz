@@ -7,6 +7,14 @@ export interface VenueInput {
   account: string
   // Captured deployment reference, retained with saved scenario inputs.
   portfolioAccount?: string
+  portfolioAccountMic?: string
+  fundsObservation?: {
+    request_started_at: string
+    received_at: string
+    available_base: string
+    available_quote: string
+    source: 'Binance Spot Testnet account' | 'OKX Demo spot cash capacity'
+  }
   symbol: string
   observed: string
   received: string
@@ -244,9 +252,12 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput): boolean 
 }
 // Date.parse gives the absolute millisecond, including the UTC offset. Compare
 // the remaining digits as well so distinct book cutoffs cannot match.
+function timestampNanos(value: string): bigint {
+  const submillis = (value.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0').slice(3)
+  return BigInt(Date.parse(value)) * 1_000_000n + BigInt(submillis)
+}
 function sameCutoff(reply: string, requested: string): boolean {
-  const submillis = (value: string) => (value.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0').slice(3)
-  return Date.parse(reply) === Date.parse(requested) && submillis(reply) === submillis(requested)
+  return isTimestamp(requested) && timestampNanos(reply) === timestampNanos(requested)
 }
 
 export async function priceDepth(portfolio: string, tenant: string, input: DepthInput, signal: AbortSignal) {
@@ -297,9 +308,17 @@ export async function captureDepth(
   tenant: string,
   instrument: string,
   signal: AbortSignal,
+  includeDemoFunds = false,
 ): Promise<DepthInput> {
+  const path = '/api/v1/portfolios/' + encodeURIComponent(portfolio)
+  // Private reads must already be known when the risk service freezes the books.
+  const funds = includeDemoFunds
+    ? await Promise.allSettled(['BINANCE', 'OKX'].map((mic) =>
+        api.get<unknown>(path + '/demo-spot-funds/' + mic + '?instrument=' + encodeURIComponent(instrument), { signal }),
+      ))
+    : []
   const raw = await api.post<unknown>(
-    '/api/v1/portfolios/' + encodeURIComponent(portfolio) + '/scenario',
+    path + '/scenario',
     { scenario_name: 'OPERATOR_SPOT_BOOKS', spot_book_instrument: instrument },
     200,
     signal,
@@ -350,7 +369,9 @@ export async function captureDepth(
     ids.push(entry.event_id)
     const account = entry.portfolio_account_ref ?? ''
     if (typeof account !== 'string' || account.trim() !== account) throw new Error('Invalid portfolio account reference.')
-    return {
+    const routingMic = entry.portfolio_account_mic ?? ''
+    if (typeof routingMic !== 'string') throw new Error('Invalid portfolio routing MIC.')
+    const input: VenueInput = {
       venue,
       symbol: b.symbol,
       productType: 'CRYPTO_SPOT',
@@ -363,6 +384,7 @@ export async function captureDepth(
       asks: capturedSide(b.asks),
       account,
       portfolioAccount: account,
+      portfolioAccountMic: routingMic,
       baseBalance: '',
       quoteBalance: '',
       feeBps: '',
@@ -371,6 +393,10 @@ export async function captureDepth(
       minQty: '',
       minNotional: '',
     }
+    const read = funds[i]
+    if (read?.status === 'fulfilled')
+      applyCapturedFunds(input, read.value, portfolio, tenant, instrument, o.as_of as string)
+    return input
   })
   return {
     instrument,
@@ -389,5 +415,34 @@ export async function captureDepth(
       event_ids: ids,
       known_at_clock: 'risk_service_receipt',
     },
+  }
+}
+
+function applyCapturedFunds(v: VenueInput, raw: unknown, portfolio: string, tenant: string, instrument: string, cutoff: string) {
+  if (!record(raw) || raw.owner_tenant !== tenant || raw.portfolio_id !== portfolio ||
+      raw.market_venue !== v.venue || !record(raw.funds)) return
+  const f = raw.funds
+  if (f.owner_tenant !== tenant || typeof f.venue_account_id !== 'string' || !f.venue_account_id.trim() ||
+      (v.portfolioAccount && f.venue_account_id !== v.portfolioAccount) ||
+      (f.mic !== v.venue && f.mic !== (v.venue === 'BINANCE' ? 'XBIN' : 'XOKX')) ||
+      (v.portfolioAccountMic && v.portfolioAccountMic !== f.mic) ||
+      f.venue_symbol !== v.symbol || f.instrument_id !== instrument ||
+      typeof f.base_currency !== 'string' || typeof f.quote_currency !== 'string' ||
+      f.base_currency + '-' + f.quote_currency !== instrument ||
+      !isTimestamp(f.request_started_at) || !isTimestamp(f.received_at) ||
+      !wireAmount(f.available_base) || !wireAmount(f.available_quote)) return
+  const start = timestampNanos(f.request_started_at), end = timestampNanos(f.received_at), at = timestampNanos(cutoff)
+  // The exchange may have observed funds any time after the signed read began.
+  if (end < start || at < end || at - start > 6_000_000_000n) return
+  const base = formatDecimal(f.available_base as Decimal), quote = formatDecimal(f.available_quote as Decimal)
+  if (base === null || quote === null || base.startsWith('-') || quote.startsWith('-')) return
+  v.portfolioAccount = v.account = f.venue_account_id
+  v.portfolioAccountMic = f.mic as string
+  v.baseBalance = base
+  v.quoteBalance = quote
+  v.fundsObservation = {
+    request_started_at: f.request_started_at, received_at: f.received_at,
+    available_base: base, available_quote: quote,
+    source: v.venue === 'BINANCE' ? 'Binance Spot Testnet account' : 'OKX Demo spot cash capacity',
   }
 }

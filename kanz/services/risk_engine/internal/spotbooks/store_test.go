@@ -23,7 +23,7 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 		t.Fatal("another tenant accepted the grant")
 	}
 	s := New("pilot", grants)
-	accounts, err := execution.ParseBindings("pilot/alpha@BINANCE=bn-alpha,pilot/alpha@OKX=ok-alpha,pilot/beta@OKX=ok-beta,foreign/beta@BINANCE=bn-other")
+	accounts, err := execution.ParseBindings("pilot/alpha@XBIN=bn-alpha,pilot/alpha@XOKX=ok-alpha,pilot/beta@OKX=ok-beta,foreign/beta@BINANCE=bn-other")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,8 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	want("foreign", "UNKNOWN")
 	initial := s.Observe("pilot", "alpha", "BTC-USDT", accounts)
 	beta := s.Observe("pilot", "beta", "BTC-USDT", accounts)
-	if initial.Venues[0].PortfolioAccountRef != "bn-alpha" || initial.Venues[1].PortfolioAccountRef != "ok-alpha" ||
+	if initial.Venues[0].PortfolioAccountRef != "bn-alpha" || initial.Venues[0].PortfolioAccountMic != "XBIN" ||
+		initial.Venues[1].PortfolioAccountRef != "ok-alpha" || initial.Venues[1].PortfolioAccountMic != "XOKX" ||
 		beta.Venues[0].PortfolioAccountRef != "" || beta.Venues[1].PortfolioAccountRef != "ok-beta" {
 		t.Fatal("book projections did not isolate the tenant, portfolio and venue")
 	}

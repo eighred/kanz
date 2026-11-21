@@ -56,12 +56,13 @@ func requireDecimalDomain(req proto.Message) error {
 type Server struct {
 	venuepb.UnimplementedVenueAdapterServiceServer
 
-	venue  execution.Venue
-	closer execution.Closer
-	view   orderview.Store
-	closes execution.CloseTracker
-	proof  execution.AccountProof
-	logger *slog.Logger
+	venue           execution.Venue
+	closer          execution.Closer
+	view            orderview.Store
+	closes          execution.CloseTracker
+	proof           execution.AccountProof
+	spotFundsTenant string
+	logger          *slog.Logger
 	// halted is the platform kill-switch (#635). THIS IS THE LAST LINE: everything
 	// upstream of it — the gateway's 423, the OMS refusing admission — can be
 	// bypassed by a path that does not go through them, and this cannot, because

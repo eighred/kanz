@@ -28,6 +28,16 @@ available balances, fees, order limits and inventory restoration cost for each
 new capture. The export records the tenant, portfolio, configured references and
 scenario inputs at that cutoff.
 
+**Capture books and demo balances** reads private funds through the portfolio’s
+OMS account bindings before capturing the market books. The gateway and the
+OMS use authenticated service identities. The Binance Spot Testnet adapter
+reads the selected assets’ free balances. The OKX Demo adapter checks the
+account is in spot mode and requests cash-mode available buy and sell amounts
+for the selected symbol. A confirmed zero remains visible. Missing, stale or
+conflicting observations leave the affected venue’s fields open for assumptions.
+The account, routing MIC, units, quantities and local request/receipt times
+travel with the saved inputs. Fees and inventory restoration costs are separate.
+
 ## Development
 
 Run the commands below from `web/`, using Node from `.nvmrc`, npm and the pinned

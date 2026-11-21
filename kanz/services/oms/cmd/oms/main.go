@@ -44,6 +44,7 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/position"
 	"github.com/eighred/kanz/services/oms/internal/riskview"
 	"github.com/eighred/kanz/services/oms/internal/server"
+	"github.com/eighred/kanz/services/oms/internal/venuesrv"
 )
 
 func main() {
@@ -608,7 +609,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// workload identity and the transport package is explicit that it should not
 	// be built twice.
 	if cfg.GRPCListen != "" {
-		stopGRPC, gerr := serveOrderQuery(cfg, mesh, store, catalogue, logger)
+		venueReads := venuesrv.New(catalogue, cfg.Tenant).WithDemoSpotFunds(venues, bindings)
+		stopGRPC, gerr := serveOrderQuery(cfg, mesh, store, venueReads, logger)
 		if gerr != nil {
 			return false, gerr
 		}
