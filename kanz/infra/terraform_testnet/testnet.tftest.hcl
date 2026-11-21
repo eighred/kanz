@@ -83,8 +83,24 @@ run "cost_and_security_envelope" {
   }
 
   assert {
-    condition     = length(aws_ecr_repository.capital_path) == 15 && contains(keys(aws_ecr_repository.capital_path), "tv-sync") && alltrue([for repository in aws_ecr_repository.capital_path : repository.image_tag_mutability == "IMMUTABLE"])
-    error_message = "Every and only capital-path image repository must reject mutable tags."
+    condition = (
+      toset(keys(aws_ecr_repository.capital_path)) == toset([
+        "accounting", "api-gateway", "audit", "cloudflared", "compliance", "identity",
+        "kanz-capitalpath", "kanz-migrate", "market-ingest", "oms", "prometheus",
+        "risk-engine", "tv-sync", "venue-binance", "venue-okx", "web-bff",
+      ]) &&
+      alltrue([for repository in aws_ecr_repository.capital_path :
+        repository.image_tag_mutability == "IMMUTABLE" && one(repository.image_scanning_configuration).scan_on_push
+      ])
+    )
+    error_message = "Provision the exact Tokyo workload repositories with immutable tags and scanning on push."
+  }
+
+  assert {
+    condition = alltrue([for policy in [aws_iam_role_policy.github_ecr_publish, aws_iam_role_policy.node_ecr_pull] :
+      toset(jsondecode(policy.policy).Statement[1].Resource) == toset([for repository in aws_ecr_repository.capital_path : repository.arn])
+    ])
+    error_message = "The main publisher and node pull policies must target the exact provisioned repositories."
   }
 
   assert {
