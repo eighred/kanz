@@ -108,7 +108,8 @@ type okxAccountConfig struct {
 		UID string `json:"uid"`
 		// AcctLv is OKX's account mode: 1 spot, 2 futures/single-currency,
 		// 3 multi-currency margin, 4 portfolio margin.
-		AcctLv string `json:"acctLv"`
+		AcctLv  string `json:"acctLv"`
+		FeeType string `json:"feeType"`
 	} `json:"data"`
 }
 
@@ -142,11 +143,14 @@ func okxAccount(ctx context.Context, cred Credential, opt Options) (AccountInfo,
 	if out.Code != "0" {
 		return AccountInfo{}, &execution.APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
 	}
+	if len(out.Data) > 1 {
+		return AccountInfo{}, errors.New("exchangeauth: ambiguous OKX account configuration")
+	}
 	if len(out.Data) == 0 || out.Data[0].UID == "" {
 		return AccountInfo{}, errors.New("exchangeauth: okx: GET /api/v5/account/config carried no uid — the exchange did not " +
 			"say which account this API key belongs to, so it cannot be verified")
 	}
-	return AccountInfo{ID: out.Data[0].UID, AccountLevel: out.Data[0].AcctLv}, nil
+	return AccountInfo{ID: out.Data[0].UID, AccountLevel: out.Data[0].AcctLv, SpotFeeType: out.Data[0].FeeType}, nil
 }
 
 // atoiSafe parses an OKX string code to int (0 on empty/parse failure).

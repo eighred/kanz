@@ -164,8 +164,9 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// only route here that is not portfolio-scoped, because there is no
 		// per-portfolio answer to the question: the answer is a property of the
 		// deployment. The tenant gate still applies through writeOwned (#406).
-		"GET /v1/instruments": authz.Read,
-		"GET /v1/health":      authz.Read,
+		"GET /v1/instruments":                           authz.Read,
+		"GET /v1/portfolios/{id}/demo-spot-funds/{mic}": authz.Read,
+		"GET /v1/health":                                authz.Read,
 
 		// THE CAPITAL PATH.
 		"POST /v1/orders":             authz.Trade,

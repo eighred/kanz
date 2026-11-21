@@ -143,6 +143,29 @@ func (b *AccountBindings) Account(tenant, portfolio, mic string) (string, bool) 
 	return a, ok
 }
 
+// SpotAccount resolves the market-feed name against the portfolio's routing
+// MICs. Tokyo uses XBIN and XOKX. Two bindings for one book are ambiguous.
+func (b *AccountBindings) SpotAccount(tenant, portfolio, market string) (VenueAccount, bool) {
+	var routingMIC string
+	switch market {
+	case "BINANCE":
+		routingMIC = "XBIN"
+	case "OKX":
+		routingMIC = "XOKX"
+	default:
+		return VenueAccount{}, false
+	}
+	account, direct := b.Account(tenant, portfolio, market)
+	routedAccount, routed := b.Account(tenant, portfolio, routingMIC)
+	if direct == routed {
+		return VenueAccount{}, false
+	}
+	if routed {
+		return VenueAccount{MIC: routingMIC, Account: routedAccount}, true
+	}
+	return VenueAccount{MIC: market, Account: account}, true
+}
+
 // Empty reports whether nothing is bound at all.
 func (b *AccountBindings) Empty() bool { return b == nil || len(b.byKey) == 0 }
 

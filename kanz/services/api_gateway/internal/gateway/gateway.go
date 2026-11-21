@@ -112,6 +112,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	}
 	if h.instruments != nil {
 		mux.Handle(authz.Read, "GET /v1/instruments", h.listInstruments)
+		mux.Handle(authz.Read, "GET /v1/portfolios/{id}/demo-spot-funds/{mic}", h.demoSpotFunds)
 	}
 	// THE QUEUE AN APPROVER ACTS FROM (#539). Without it the approve route is
 	// answerable by nobody in practice: a held order is deliberately absent from
@@ -357,6 +358,30 @@ func (h *Handler) measures(w http.ResponseWriter, r *http.Request) {
 		AsOf:        asOf,
 		Measures:    r.URL.Query()["measure"], // repeatable ?measure=VaR99&measure=Delta
 	})
+	h.writeOwned(w, r, resp, err)
+}
+
+func (h *Handler) demoSpotFunds(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	portfolio, ok := h.portfolioInScope(w, r)
+	if !ok {
+		return
+	}
+	tenant := middleware.PrincipalFromContext(r.Context()).Tenant
+	mic, instrument := r.PathValue("mic"), r.URL.Query().Get("instrument")
+	if tenant == "" || (mic != "BINANCE" && mic != "OKX") || instrument == "" || len(instrument) > 128 {
+		writeError(w, http.StatusNotFound, notFoundMsg)
+		return
+	}
+	resp, err := h.instruments.ReadPortfolioDemoSpotFunds(r.Context(), &venuepb.ReadPortfolioDemoSpotFundsRequest{
+		TenantId: tenant, PortfolioId: portfolio, MarketVenue: mic, InstrumentId: instrument,
+		IncludeTakerSchedule: r.URL.Query().Get("taker_fees") == "true",
+	})
+	if err == nil && (resp.GetPortfolioId() != portfolio || resp.GetFunds().GetOwnerTenant() != tenant ||
+		resp.GetMarketVenue() != mic || resp.GetFunds().GetMic() == "" || resp.GetFunds().GetInstrumentId() != instrument) {
+		writeError(w, http.StatusNotFound, notFoundMsg)
+		return
+	}
 	h.writeOwned(w, r, resp, err)
 }
 
