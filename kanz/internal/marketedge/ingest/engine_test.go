@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -139,19 +140,22 @@ func TestOnChangeCoalescesFoldsAndRetriesOnlyTheFailedFact(t *testing.T) {
 						EventTime: tsOf(time.Now()), Bids: []*marketpb.PriceLevel{lvl("10", "2")}, Asks: []*marketpb.PriceLevel{lvl("11", "3")}}}
 					synctest.Wait()
 				}
-				count := func(want int) {
+				count := func(want int) []bus.Event {
 					t.Helper()
+					pub.mu.Lock()
+					defer pub.mu.Unlock()
 					if len(pub.events) != want {
 						t.Fatalf("published %d facts, want %d", len(pub.events), want)
 					}
+					return slices.Clone(pub.events)
 				}
 				snapshot(1)
 				count(1) // one leg succeeded without waiting for a periodic tick
 				step(time.Second - time.Nanosecond)
 				count(1)
 				step(time.Nanosecond)
-				count(2)
-				if pub.events[0].Subject == pub.events[1].Subject {
+				events := count(2)
+				if events[0].Subject == events[1].Subject {
 					t.Fatal("retried an already published fact")
 				}
 				snapshot(2)
@@ -159,8 +163,8 @@ func TestOnChangeCoalescesFoldsAndRetriesOnlyTheFailedFact(t *testing.T) {
 				step(time.Second - time.Nanosecond)
 				count(2)
 				step(time.Nanosecond)
-				count(4)
-				got := pub.events[2].Payload.(*marketpb.OrderBookSnapshot)
+				events = count(4)
+				got := events[2].Payload.(*marketpb.OrderBookSnapshot)
 				if got.LastUpdateSequence != 3 {
 					t.Fatalf("published sequence %d", got.LastUpdateSequence)
 				}
