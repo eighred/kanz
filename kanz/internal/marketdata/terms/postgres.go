@@ -308,6 +308,10 @@ func scanRecord(s scanner) (Record, error) {
 	if err := s.Scan(&rec.InstrumentID, &rec.AsOf, &underlying, &kind, &blob); err != nil {
 		return Record{}, err
 	}
+	return decodeRecord(rec, underlying, kind, blob)
+}
+
+func decodeRecord(rec Record, underlying *string, kind string, blob []byte) (Record, error) {
 	rec.UnderlyingID = derefString(underlying)
 	rec.Kind = Kind(kind)
 	rec.Terms = &referencepb.ContractTerms{}
