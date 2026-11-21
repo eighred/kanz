@@ -115,7 +115,7 @@ func simulate(ctx context.Context, bars []bar) (report, error) {
 		WarmupBars: warmupBars, DayBars: len(bars) - warmupBars, Initial: initial.FloatString(2), FeeBPS: feeBPS, SlippageBPS: slippageBPS, Fills: []fill{}}
 	for i, b := range bars[warmupBars:] {
 		decision := replayed.Decisions[i] // decision from the preceding completed bar
-		if !decision.AsOf.Equal(b.start.Add(-time.Millisecond)) {
+		if b.start.Sub(decision.AsOf) != time.Millisecond {
 			return report{}, fmt.Errorf("signal and fill times do not align")
 		}
 		long := decision.Action == "long"
