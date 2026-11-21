@@ -106,13 +106,17 @@ async fn lots(
     portfolio: &str,
     instrument: Option<&str>,
 ) -> Result<Vec<(String, Vec<Lot>)>, Error> {
-    let rows=tx.query("SELECT CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(instrument_id)<=4096 THEN instrument_id END,CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(quantity)<=4096 THEN quantity END,CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(average_price)<=4096 THEN average_price END,CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(realized_pnl)<=4096 THEN realized_pnl END FROM (SELECT instrument_id,quantity,average_price,realized_pnl,count(*) OVER() n,sum(octet_length(instrument_id)::bigint+octet_length(quantity)+octet_length(average_price)+octet_length(realized_pnl)) OVER() bytes FROM positions WHERE portfolio_id=$1 AND ($2::text IS NULL OR instrument_id=$2)) bounded ORDER BY instrument_id LIMIT 10001",&[&portfolio,&instrument]).await?;
+    // Native fee lots require the authoritative Go replay and unit-aware projection.
+    let rows=tx.query("SELECT CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(instrument_id)<=4096 THEN instrument_id END,CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(quantity)<=4096 THEN quantity END,CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(average_price)<=4096 THEN average_price END,CASE WHEN n<=10000 AND bytes<=1048576 AND octet_length(realized_pnl)<=4096 THEN realized_pnl END,COALESCE(spot_quote,'')<>'' FROM (SELECT instrument_id,quantity,average_price,realized_pnl,spot_quote,count(*) OVER() n,sum(octet_length(instrument_id)::bigint+octet_length(quantity)+octet_length(average_price)+octet_length(realized_pnl)) OVER() bytes FROM positions WHERE portfolio_id=$1 AND ($2::text IS NULL OR instrument_id=$2)) bounded ORDER BY instrument_id LIMIT 10001",&[&portfolio,&instrument]).await?;
     if rows.len() > MAX_ROWS {
         return Err(Error::Capacity);
     }
     let mut out: Vec<(String, Vec<Lot>)> = Vec::new();
     let mut indices: BTreeMap<String, usize> = BTreeMap::new();
     for row in rows {
+        if row.try_get::<_, bool>(4)? {
+            return Err(Error::PositionHistoryUnknown);
+        }
         let get = |n| -> Result<String, Error> {
             row.try_get::<_, Option<String>>(n)?.ok_or(Error::Capacity)
         };
@@ -153,6 +157,9 @@ where
     timestamp(as_of)?;
     let wire = FillWire::decode(raw)?;
     let f = wire.value();
+    if !f.spot_venue_symbol.is_empty() {
+        return Err(Error::PositionHistoryUnknown);
+    }
     if [
         &f.fill_id,
         &f.order_id,

@@ -50,6 +50,7 @@ type lot = costbasis.Lot
 type Book struct {
 	mu      sync.Mutex
 	lots    map[key]*lot
+	quotes  map[key]string
 	baseCcy string
 	queue   *outbox.Memory
 	// appliedFills is position_fills (#818): the fills already folded into these
@@ -101,6 +102,7 @@ func NewBook(baseCcy string, opts ...BookOption) *Book {
 	}
 	b := &Book{
 		lots:         make(map[key]*lot),
+		quotes:       make(map[key]string),
 		appliedFills: make(map[string]memoryExecution),
 		histories:    make(map[key][]memoryExecution),
 		baseCcy:      baseCcy,
@@ -133,6 +135,10 @@ func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill
 	if err := fillfact.Validate(fill); err != nil {
 		return nil, err
 	}
+	trade, err := tradeOf(fill)
+	if err != nil {
+		return nil, err
+	}
 	scopedFillID := fillfact.ExecutionKey(fill)
 	original, duplicate := b.appliedFills[scopedFillID]
 	// The ephemeral implementation retains proof rather than evicting financial
@@ -142,7 +148,7 @@ func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill
 	}
 	var revisedHistory []*orderpb.Fill
 	if duplicate {
-		if original.portfolio != portfolioID {
+		if original.portfolio != portfolioID || original.fill.GetSpotVenueSymbol() != fill.GetSpotVenueSymbol() {
 			return nil, fillfact.ErrExecutionIdentityConflict
 		}
 		if fill.GetRecovery().GetFeeApproval() != nil {
@@ -169,6 +175,9 @@ func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill
 		}
 	}
 	k := key{portfolioID, fill.GetVenue(), fill.GetInstrumentId()}
+	if _, exists := b.lots[k]; exists && b.quotes[k] != trade.quote {
+		return nil, ErrPositionHistoryUnknown
+	}
 	current := b.lots[k]
 	next := zeroLot()
 	if current != nil {
@@ -205,37 +214,79 @@ func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill
 			}
 			replay = append(append([]memoryExecution(nil), history...), pending)
 			sort.Slice(replay, func(i, j int) bool { return memoryExecutionBefore(replay[i], replay[j]) })
-			next = zeroLot()
-			for _, execution := range replay {
-				foldExecution(next, execution.fill)
-			}
-			latest := replay[len(replay)-1]
-			price = dec.FromProto(latest.fill.GetPrice())
-			if asOf.Before(latest.at) {
-				asOf = latest.at
-			}
 		} else {
-			foldExecution(next, fill)
+			costbasis.Fold(next, trade.quantity, trade.price)
 		}
-	} else if len(history) > 0 {
-		latest := history[len(history)-1]
+	} else if revisedHistory != nil && trade.quote != "" && fill.GetFee().GetCurrencyCode() != trade.quote {
+		if len(history) == 0 || !history[len(history)-1].complete {
+			return nil, ErrPositionHistoryUnknown
+		}
+		replay = history
+	}
+	if replay != nil {
+		next = zeroLot()
+		for _, execution := range replay {
+			head := execution.fill
+			if execution.key == scopedFillID {
+				head = fill
+			} else if existing, ok := b.appliedFills[execution.key]; ok {
+				head = fillfact.MemoryFeeHead(existing.fill, existing.revisions)
+			}
+			item, err := tradeOf(head)
+			if err != nil {
+				return nil, err
+			}
+			if item.quote != trade.quote {
+				return nil, ErrPositionHistoryUnknown
+			}
+			costbasis.Fold(next, item.quantity, item.price)
+		}
+	}
+	latest := pending
+	if replay != nil || duplicate && len(history) > 0 {
+		ordered := history
+		if replay != nil {
+			ordered = replay
+		}
+		latest = ordered[len(ordered)-1]
 		price = dec.FromProto(latest.fill.GetPrice())
 		if asOf.Before(latest.at) {
 			asOf = latest.at
 		}
 	}
-	venueState, err := b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), next, price, asOf)
+	if trade.quote != "" {
+		asOf = latest.at
+	}
+	aggregateMark := latest
+	currency := trade.currency(b.baseCcy)
+	venueState, err := positionState(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), next, price, asOf, currency)
 	if err != nil {
 		return nil, err
 	}
 	aggregate := costbasis.NewAggregator()
 	for existingKey, existing := range b.lots {
 		if existingKey != k && existingKey.portfolio == portfolioID && existingKey.instrument == fill.GetInstrumentId() {
+			if b.quotes[existingKey] != trade.quote {
+				return nil, ErrPositionHistoryUnknown
+			}
+			if trade.quote != "" {
+				other := b.histories[existingKey]
+				if len(other) == 0 {
+					return nil, ErrPositionHistoryUnknown
+				}
+				if memoryExecutionBefore(aggregateMark, other[len(other)-1]) {
+					aggregateMark = other[len(other)-1]
+				}
+			}
 			aggregate.Add(existing)
 		}
 	}
 	aggregate.Add(next)
-	aggState, err := b.stateOf(portfolioID, "", fill.GetInstrumentId(), aggregate.Lot(), price, asOf)
+	aggregatePrice, aggregateTime := price, asOf
+	if trade.quote != "" {
+		aggregatePrice, aggregateTime = dec.FromProto(aggregateMark.fill.GetPrice()), aggregateMark.at
+	}
+	aggState, err := positionState(portfolioID, "", fill.GetInstrumentId(), aggregate.Lot(), aggregatePrice, aggregateTime, currency)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +305,11 @@ func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill
 		original.revisions = revisedHistory
 		b.appliedFills[scopedFillID] = original
 	}
+	if duplicate && replay != nil {
+		b.lots[k] = next
+	}
 	if !duplicate {
+		b.quotes[k] = trade.quote
 		b.lots[k] = next
 		b.appliedFills[scopedFillID] = pending
 		if replay != nil {
@@ -297,6 +352,10 @@ func (b *Book) aggregate(portfolioID, instrument string) *lot {
 // stateOf marks at the fill price (the latest trade). An empty venue is the fund-level
 // aggregate: it belongs to no single exchange.
 func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
+	return positionState(portfolioID, venue, instrument, l, price, asOf, b.baseCcy)
+}
+
+func positionState(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time, currency string) (*domainpb.PositionState, error) {
 	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.AvgCost), l.Qty)
 	qty, ok := dec.ToProtoExact(l.Qty)
 	if !ok {
@@ -306,15 +365,15 @@ func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
 	}
-	marketValue, err := projectionMark(new(big.Rat).Mul(price, l.Qty), b.baseCcy)
+	marketValue, err := projectionMark(new(big.Rat).Mul(price, l.Qty), currency)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
 	}
-	realized, err := b.money(l.Realized)
+	realized, err := projectionMoney(l.Realized, currency)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s realized pnl: %w", portfolioID, instrument, err)
 	}
-	unrealized, err := b.money(unreal)
+	unrealized, err := projectionMoney(unreal, currency)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s unrealized pnl: %w", portfolioID, instrument, err)
 	}
@@ -356,6 +415,9 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 	for k := range b.lots {
 		if k.portfolio != portfolioID || seen[k.instrument] {
 			continue
+		}
+		if quote := b.quotes[k]; quote != "" && quote != b.baseCcy {
+			return nil, missingPositionFX(quote, b.baseCcy)
 		}
 		seen[k.instrument] = true
 		l := b.aggregate(portfolioID, k.instrument)

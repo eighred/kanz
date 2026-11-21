@@ -64,8 +64,9 @@ type Store interface {
 // transaction. Storing the aggregate separately would be a second copy of the truth, and the
 // day the two disagreed nobody could say which one the fund actually held.
 type Applied struct {
-	Venue     *domainpb.PositionState
-	Aggregate *domainpb.PositionState
+	Venue          *domainpb.PositionState
+	Aggregate      *domainpb.PositionState
+	RestatedVenues []*domainpb.PositionState
 }
 
 // Announcer renders the folded book as the FACTs that must become true at the
@@ -159,7 +160,11 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		return nil, err
 	}
 	venue, instrument := fill.GetVenue(), fill.GetInstrumentId()
-	price := dec.FromProto(fill.GetPrice())
+	trade, err := tradeOf(fill)
+	if err != nil {
+		return nil, err
+	}
+	price := trade.price
 
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -171,6 +176,10 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		return nil, err
 	}
 
+	restated, err := alignSpotLots(ctx, tx, portfolioID, venue, instrument, trade.quote)
+	if err != nil {
+		return nil, err
+	}
 	claim, err := tx.Exec(ctx,
 		`INSERT INTO position_fills (fill_id,raw_fill_id) VALUES ($1,$2) ON CONFLICT (tenant_id,fill_id) DO NOTHING`, fillfact.ExecutionKey(fill), fill.GetFillId())
 	if err != nil {
@@ -182,44 +191,39 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		return nil, err
 	}
 
-	// Already folded by somebody else: return the book as it stands, do NOT count it again.
+	var fold *executionFold
 	if claim.RowsAffected() > 0 {
-		fold, err := recordExecution(ctx, tx, portfolioID, fill, asOf, l)
-		if err != nil {
-			return nil, err
-		}
-		l, price = fold.lot, fold.price
-		if asOf.Before(fold.asOf) {
-			asOf = fold.asOf
-		}
-
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO positions (portfolio_id, venue, instrument_id, quantity, average_price, realized_pnl)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (tenant_id, portfolio_id, venue, instrument_id) DO UPDATE
-			SET quantity = EXCLUDED.quantity,
-			    average_price = EXCLUDED.average_price,
-			    realized_pnl = EXCLUDED.realized_pnl,
-			    updated_at = now()`,
-			portfolioID, venue, instrument, l.Qty.RatString(), l.AvgCost.RatString(), l.Realized.RatString()); err != nil {
-			return nil, fmt.Errorf("position: upsert %s/%s/%s: %w", portfolioID, venue, instrument, err)
-		}
+		fold, err = recordExecution(ctx, tx, portfolioID, fill, asOf, l, trade)
 	} else {
-		if err := verifyPositionDuplicate(ctx, tx, portfolioID, fill); err != nil {
-			return nil, err
+		var fresh bool
+		fresh, err = verifyPositionDuplicate(ctx, tx, portfolioID, fill)
+		if err == nil && fresh && trade.quote != "" && fill.GetFee().GetCurrencyCode() != trade.quote {
+			fold, err = replayExecutions(ctx, tx, portfolioID, venue, instrument, trade.quote)
 		}
-		latestPrice, latestTime, err := latestExecutionMark(ctx, tx, portfolioID, fill)
-		if err != nil {
-			return nil, err
-		}
-		if latestPrice != nil {
-			price = latestPrice
-		}
-		if asOf.Before(latestTime) {
-			asOf = latestTime
+		if err == nil && fold == nil {
+			var latestPrice *big.Rat
+			var latestTime time.Time
+			latestPrice, latestTime, err = latestExecutionMark(ctx, tx, portfolioID, instrument, venue)
+			if latestPrice != nil {
+				price = latestPrice
+			}
+			if trade.quote != "" || asOf.Before(latestTime) {
+				asOf = latestTime
+			}
 		}
 	}
-
+	if err != nil {
+		return nil, err
+	}
+	if fold != nil {
+		l, price = fold.lot, fold.price
+		if trade.quote != "" || asOf.Before(fold.asOf) {
+			asOf = fold.asOf
+		}
+		if err := saveLot(ctx, tx, portfolioID, venue, instrument, trade.quote, l); err != nil {
+			return nil, err
+		}
+	}
 	agg, err := aggregateLot(ctx, tx, portfolioID, instrument)
 	if err != nil {
 		return nil, err
@@ -229,15 +233,25 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 	// RELEASES the advisory lock. They were built after it, and that was the
 	// whole of #795: the numbers were still correct, and the ANNOUNCEMENT of them
 	// was outside the mutual exclusion that made them true.
-	venueState, err := p.stateOf(portfolioID, venue, instrument, l, price, asOf)
+	venueState, err := positionState(portfolioID, venue, instrument, l, price, asOf, trade.currency(p.baseCcy))
 	if err != nil {
 		return nil, err
 	}
-	aggState, err := p.stateOf(portfolioID, "", instrument, agg, price, asOf)
+	aggregatePrice, aggregateTime := price, asOf
+	if trade.quote != "" {
+		aggregatePrice, aggregateTime, err = latestExecutionMark(ctx, tx, portfolioID, instrument, "")
+		if err != nil {
+			return nil, err
+		}
+		if aggregatePrice == nil {
+			return nil, ErrPositionHistoryUnknown
+		}
+	}
+	aggState, err := positionState(portfolioID, "", instrument, agg, aggregatePrice, aggregateTime, trade.currency(p.baseCcy))
 	if err != nil {
 		return nil, err
 	}
-	applied := &Applied{Venue: venueState, Aggregate: aggState}
+	applied := &Applied{Venue: venueState, Aggregate: aggState, RestatedVenues: restated}
 
 	// THE FACT AND THE FOLD COMMIT TOGETHER (#292, #795). A record enqueued here
 	// is ordered by the same lock that ordered the fold, so the relay — which
@@ -323,7 +337,7 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 // failure direction this repo asks for — but it is a coupling, so it is written down.
 func lockInstrument(ctx context.Context, tx pgx.Tx, portfolioID, instrument string) error {
 	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext(app_current_tenant() || '/' || $1), hashtext($2))`,
+		`SELECT pg_advisory_xact_lock(hashtext(app_current_tenant() || '/' || $1), hashtext($2)), set_config('app.position_native_fees_v1','on',true)`,
 		portfolioID, instrument); err != nil {
 		return fmt.Errorf("position: lock %s/%s: %w", portfolioID, instrument, err)
 	}
@@ -416,8 +430,16 @@ func lotFrom(qty, avg, realized string) (*lot, error) {
 // concentration limit; giving the gate two rows would let it check a limit against a
 // fraction of the fund's actual holding. Marked at average cost, as the in-memory book does.
 func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.Time) (*domainpb.PortfolioSnapshot, error) {
-	rows, err := p.pool.Query(ctx, `
-		SELECT instrument_id, quantity, average_price, realized_pnl
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := checkUnclassified(ctx, tx, portfolioID, ""); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT instrument_id, quantity, average_price, realized_pnl, COALESCE(spot_quote,'')
 		FROM positions
 		WHERE portfolio_id = $1
 		ORDER BY instrument_id`, portfolioID)
@@ -428,24 +450,33 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 
 	// instrument → the fund's summed lot, plus the cost/abs-qty running totals the
 	// cost-weighted average price needs.
-	type acc struct{ agg *costbasis.Aggregator }
+	type acc struct {
+		agg   *costbasis.Aggregator
+		quote string
+	}
 	byInstrument := map[string]*acc{}
 	var order []string
 
 	for rows.Next() {
-		var instrument, q, a, r string
-		if err := rows.Scan(&instrument, &q, &a, &r); err != nil {
+		var instrument, q, a, r, quote string
+		if err := rows.Scan(&instrument, &q, &a, &r, &quote); err != nil {
 			return nil, fmt.Errorf("position: scan %s: %w", portfolioID, err)
 		}
 		l, err := lotFrom(q, a, r)
 		if err != nil {
 			return nil, fmt.Errorf("position: %s/%s: %w", portfolioID, instrument, err)
 		}
+		if quote != "" && quote != p.baseCcy {
+			return nil, missingPositionFX(quote, p.baseCcy)
+		}
 		x := byInstrument[instrument]
 		if x == nil {
-			x = &acc{agg: costbasis.NewAggregator()}
+			x = &acc{agg: costbasis.NewAggregator(), quote: quote}
 			byInstrument[instrument] = x
 			order = append(order, instrument)
+		}
+		if x.quote != quote {
+			return nil, ErrPositionHistoryUnknown
 		}
 		x.agg.Add(l)
 	}
@@ -501,44 +532,6 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 			AsOf:             ts,
 		},
 		Positions: positions,
-	}, nil
-}
-
-// stateOf builds a published PositionState, marked at the fill price (the latest trade) —
-// the same marking the in-memory book applies. An empty venue means the fund-level
-// aggregate: it belongs to no single exchange.
-func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
-	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.AvgCost), l.Qty)
-	qty, ok := dec.ToProtoExact(l.Qty)
-	if !ok {
-		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
-	}
-	avg, ok := dec.ToProtoScaled(l.AvgCost)
-	if !ok {
-		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
-	}
-	marketValue, err := projectionMark(new(big.Rat).Mul(price, l.Qty), p.baseCcy)
-	if err != nil {
-		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
-	}
-	realized, err := p.money(l.Realized)
-	if err != nil {
-		return nil, fmt.Errorf("position %s/%s realized pnl: %w", portfolioID, instrument, err)
-	}
-	unrealized, err := p.money(unreal)
-	if err != nil {
-		return nil, fmt.Errorf("position %s/%s unrealized pnl: %w", portfolioID, instrument, err)
-	}
-	return &domainpb.PositionState{
-		PortfolioId:   portfolioID,
-		Venue:         venue,
-		InstrumentId:  instrument,
-		Quantity:      qty,
-		AveragePrice:  avg,
-		MarketValue:   marketValue,
-		RealizedPnl:   realized,
-		UnrealizedPnl: unrealized,
-		AsOf:          timestamppb.New(asOf.UTC()),
 	}, nil
 }
 

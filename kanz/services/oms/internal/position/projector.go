@@ -164,7 +164,15 @@ func (p *Projector) records(ctx context.Context, key, portfolioID string, fill *
 	if err != nil {
 		return nil, err
 	}
-	return []outbox.Record{agg, venue}, nil
+	records := []outbox.Record{agg, venue}
+	for _, state := range a.RestatedVenues {
+		record, err := p.record(ctx, key, subject.VenuePositionFor(p.tenant, portfolioID, state.GetVenue(), state.GetInstrumentId()), subject.VenuePositionChanged, state)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 // record captures one PositionState FACT for the outbox.
