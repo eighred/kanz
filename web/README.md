@@ -17,6 +17,12 @@ A blank cost leaves that direction’s net return unknown. The comparison
 requires both observations within two seconds of the chosen cutoff, at most
 one second apart, and received by that cutoff.
 
+Select **Read demo accounts** to read the bound accounts independently of
+market depth. Each venue shows its observed spendable amounts, native fee
+schedule and read times as soon as its own request completes. The OKX rate
+is the account’s fee group schedule. These dated reads are separate from
+the funds captured and checked at a pricing cutoff.
+
 Choose the maximum book age before capture (1–2000 ms, initially 250 ms).
 With the one-second wait enabled, the service waits for both venues to meet
 that limit. After calculating the scenario, the risk service

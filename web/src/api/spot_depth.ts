@@ -506,9 +506,7 @@ export async function captureDepth(
   const path = '/api/v1/portfolios/' + encodeURIComponent(portfolio)
   // Private reads must already be known when the risk service freezes the books.
   const funds = includeDemoFunds
-    ? await Promise.allSettled(['BINANCE', 'OKX'].map((mic) =>
-        api.get<unknown>(path + '/demo-spot-funds/' + mic + '?instrument=' + encodeURIComponent(instrument) + '&taker_fees=true', { signal }),
-      ))
+    ? await Promise.allSettled(demoSpotVenues.map(venue => readDemoAccountTerms(portfolio, tenant, instrument, venue, signal)))
     : []
   const raw = await api.post<unknown>(
     path + '/scenario',
@@ -600,8 +598,7 @@ export async function captureDepth(
       minNotional: '',
     }
     const read = funds[i]
-    if (read?.status === 'fulfilled')
-      applyCapturedFunds(input, read.value, portfolio, tenant, instrument, o.as_of as string)
+    if (read?.status === 'fulfilled') applyCapturedFunds(input, read.value, o.as_of as string)
     return input
   })
   return {
@@ -624,37 +621,48 @@ export async function captureDepth(
   }
 }
 
-function applyCapturedFunds(v: VenueInput, raw: unknown, portfolio: string, tenant: string, instrument: string, cutoff: string) {
+export const demoSpotVenues = ['BINANCE', 'OKX'] as const
+export type DemoSpotVenue = typeof demoSpotVenues[number]
+
+export interface DemoAccountTerms {
+  venue: DemoSpotVenue
+  account: string
+  mic: string
+  symbol: string
+  base: string
+  quote: string
+  funds: NonNullable<VenueInput['fundsObservation']>
+  fees?: NonNullable<VenueInput['feeObservation']>
+}
+
+export async function readDemoAccountTerms(portfolio: string, tenant: string, instrument: string, venue: DemoSpotVenue,
+  signal: AbortSignal): Promise<DemoAccountTerms> {
+  const path = '/api/v1/portfolios/' + encodeURIComponent(portfolio) + '/demo-spot-funds/' + venue
+  const raw = await api.get<unknown>(path + '?instrument=' + encodeURIComponent(instrument) + '&taker_fees=true', { signal, expectedStatus: 200 })
+  const invalid = 'Could not verify the portfolio account observation.'
   if (!record(raw) || raw.owner_tenant !== tenant || raw.portfolio_id !== portfolio ||
-      raw.market_venue !== v.venue || !record(raw.funds)) return
+      raw.market_venue !== venue || !record(raw.funds)) throw new Error(invalid)
   const f = raw.funds
   if (f.owner_tenant !== tenant || typeof f.venue_account_id !== 'string' || !f.venue_account_id.trim() ||
-      (v.portfolioAccount && f.venue_account_id !== v.portfolioAccount) ||
-      (f.mic !== v.venue && f.mic !== (v.venue === 'BINANCE' ? 'XBIN' : 'XOKX')) ||
-      (v.portfolioAccountMic && v.portfolioAccountMic !== f.mic) ||
-      f.venue_symbol !== v.symbol || f.instrument_id !== instrument ||
-      typeof f.base_currency !== 'string' || typeof f.quote_currency !== 'string' ||
-      f.base_currency + '-' + f.quote_currency !== instrument ||
+      typeof f.mic !== 'string' || (f.mic !== venue && f.mic !== (venue === 'BINANCE' ? 'XBIN' : 'XOKX')) ||
+      typeof f.base_currency !== 'string' || !f.base_currency || typeof f.quote_currency !== 'string' ||
+      !f.quote_currency || f.base_currency === f.quote_currency || f.base_currency + '-' + f.quote_currency !== instrument ||
+      f.instrument_id !== instrument || typeof f.venue_symbol !== 'string' || f.venue_symbol !== (venue === 'OKX' ? instrument : f.base_currency + f.quote_currency) ||
       !isTimestamp(f.request_started_at) || !isTimestamp(f.received_at) ||
-      !wireAmount(f.available_base) || !wireAmount(f.available_quote)) return
-  const start = timestampNanos(f.request_started_at), end = timestampNanos(f.received_at), at = timestampNanos(cutoff)
-  // The exchange may have observed funds any time after the signed read began.
-  if (end < start || at < end || at - start > 6_000_000_000n) return
+      !wireAmount(f.available_base) || !wireAmount(f.available_quote)) throw new Error(invalid)
+  const start = timestampNanos(f.request_started_at), end = timestampNanos(f.received_at)
+  if (end < start || end - start > 6_000_000_000n) throw new Error(invalid)
   const base = formatDecimal(f.available_base as Decimal), quote = formatDecimal(f.available_quote as Decimal)
-  if (base === null || quote === null || base.startsWith('-') || quote.startsWith('-')) return
-  v.portfolioAccount = v.account = f.venue_account_id
-  v.portfolioAccountMic = f.mic as string
-  v.baseBalance = base
-  v.quoteBalance = quote
-  v.fundsObservation = {
-    request_started_at: f.request_started_at, received_at: f.received_at,
-    available_base: base, available_quote: quote,
-    source: v.venue === 'BINANCE' ? 'Binance Spot Testnet account' : 'OKX Demo spot cash capacity',
+  if (base === null || quote === null || base.startsWith('-') || quote.startsWith('-')) throw new Error(invalid)
+  const observation: DemoAccountTerms = {
+    venue, account: f.venue_account_id, mic: f.mic, symbol: f.venue_symbol, base: f.base_currency, quote: f.quote_currency,
+    funds: { request_started_at: f.request_started_at, received_at: f.received_at, available_base: base, available_quote: quote,
+      source: venue === 'BINANCE' ? 'Binance Spot Testnet account' : 'OKX Demo spot cash capacity' },
   }
   const schedule = f.taker_schedule
-  if (!record(schedule) || !isTimestamp(schedule.request_started_at) || !isTimestamp(schedule.received_at)) return
+  if (!record(schedule) || !isTimestamp(schedule.request_started_at) || !isTimestamp(schedule.received_at)) return observation
   const feeStart = timestampNanos(schedule.request_started_at), feeEnd = timestampNanos(schedule.received_at)
-  if (feeStart < end || feeEnd < feeStart || feeEnd > at) return
+  if (feeStart < end || feeEnd < feeStart || feeEnd - start > 6_000_000_000n) return observation
   const side = (raw: unknown) => {
     if (!record(raw) || typeof raw.currency !== 'string' ||
         (raw.currency !== f.base_currency && raw.currency !== f.quote_currency) || !wireAmount(raw.bps)) return
@@ -663,12 +671,29 @@ function applyCapturedFunds(v: VenueInput, raw: unknown, portfolio: string, tena
     return { bps, currency: raw.currency }
   }
   const buy = side(schedule.buy), sell = side(schedule.sell)
-  if (!buy || !sell) return
-  v.feeObservation = {
+  if (!buy || !sell) return observation
+  observation.fees = {
     request_started_at: schedule.request_started_at, received_at: schedule.received_at,
     buyBps: buy.bps, buyCurrency: buy.currency, sellBps: sell.bps, sellCurrency: sell.currency,
-    source: v.venue === 'BINANCE' ? 'Binance account commission' : 'OKX account fee group',
+    source: venue === 'BINANCE' ? 'Binance account commission' : 'OKX account fee group',
   }
+  return observation
+}
+
+function applyCapturedFunds(v: VenueInput, observation: DemoAccountTerms, cutoff: string) {
+  const { funds, fees } = observation
+  const at = timestampNanos(cutoff)
+  if (observation.venue !== v.venue || observation.symbol !== v.symbol ||
+      (v.portfolioAccount && observation.account !== v.portfolioAccount) ||
+      (v.portfolioAccountMic && observation.mic !== v.portfolioAccountMic) ||
+      timestampNanos(funds.received_at) > at || at - timestampNanos(funds.request_started_at) > 6_000_000_000n) return
+  v.portfolioAccount = v.account = observation.account
+  v.portfolioAccountMic = observation.mic
+  v.baseBalance = funds.available_base
+  v.quoteBalance = funds.available_quote
+  v.fundsObservation = funds
+  if (!fees || timestampNanos(fees.received_at) > at) return
+  v.feeObservation = fees
   // OKX omits zero-fee campaigns from this API. Its group rate may be
   // selected as an assumption, never automatically as the applicable fee.
   if (v.venue === 'BINANCE') useScheduledFees(v)

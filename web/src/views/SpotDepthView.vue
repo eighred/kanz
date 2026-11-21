@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { useSession } from '../stores/session'
 import { amount, captureDepth, elapsedMillis, fundingRate, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
 import example from '../api/spot_depth_example.json'
+import DemoSpotAccounts from '../components/DemoSpotAccounts.vue'
 import SpotTermsComparison from '../components/SpotTermsComparison.vue'
 
 const route = useRoute(),
@@ -175,6 +176,7 @@ async function calculate() {
     <button type="button" @click="loadExample">Load synthetic example</button>
     <label>Import scenario JSON <input type="file" accept=".json,application/json" @change="loadFile" /></label>
   </div>
+  <DemoSpotAccounts v-if="session.identity" :identity="session.identity" :portfolio="id" :instrument="instrument" />
   <p v-if="error" role="alert" class="error">{{ error }}</p>
   <form v-if="inputs" @submit.prevent="calculate">
     <h2>{{ inputs.instrument }}</h2>
