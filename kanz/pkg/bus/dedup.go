@@ -98,6 +98,19 @@ const _ = uint(dedupClaimLease - maxTunedAckWait - 1)
 //
 // Implementations: the in-memory per-instance DedupWindow (default) and the
 // distributed RedisDedup (DEBT-02a, opt-in via WithDeduper) for cross-pod dedup.
+//
+// Consumer supplies opaque dispatch:v1 keys, scoped by tenant, subscription
+// subject and group. Callers sharing a Deduper therefore share work only for
+// the same logical dispatch; envelope and broker identities remain canonical.
+// Direct Deduper users still own the namespace of the keys they pass.
+//
+// Older Consumers used raw envelope keys. A command key may itself look like
+// a dispatch:v1 key. Never run old and new Consumers against the same shared
+// backend generation. Quiesce the old Consumers and wait for all their claims
+// and committed keys to expire before reusing that generation, or isolate the
+// new Consumers in a separate backend generation. Handlers must remain
+// idempotent because a redelivery can cross the transition. A fallback to raw
+// keys could suppress an independently required dispatch.
 type Deduper interface {
 	// Claim atomically takes key for processing. It reports true when the caller
 	// now owns the key, and false when the key is already claimed (a concurrent
