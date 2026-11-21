@@ -18,6 +18,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/exchange/netdial"
+	"github.com/eighred/kanz/internal/marketedge/book"
 )
 
 // BinanceSource is the live Binance Spot L2 depth feed — a DepthSource over the
@@ -61,9 +62,9 @@ type BinanceSource struct {
 	lastEventMS int64
 	// needSnap forces the next Recv to (re)anchor on a REST snapshot.
 	needSnap bool
-	// firstAfterSnap relaxes the chain rule for exactly one event — the one that
-	// must straddle the snapshot anchor.
-	firstAfterSnap bool
+	// The REST response has no venue time. Keep its levels private until a
+	// sequenced WebSocket update establishes both the book and its clock.
+	anchor *binanceDepthSnapshot
 }
 
 // BinanceConfig configures a BinanceSource.
@@ -123,6 +124,7 @@ type binanceDepthSnapshot struct {
 // venue sequence chain breaks. It never returns a delta the book cannot fold in
 // order.
 func (s *BinanceSource) Recv(ctx context.Context) (Update, error) {
+	var gapFrame *binanceDepthEvent
 	for {
 		if err := ctx.Err(); err != nil {
 			return Update{}, err
@@ -141,27 +143,35 @@ func (s *BinanceSource) Recv(ctx context.Context) (Update, error) {
 				return Update{}, err
 			}
 			s.lastSeq = snap.LastUpdateID
-			s.needSnap, s.firstAfterSnap = false, true
-			return Update{Snapshot: s.snapshotProto(snap)}, nil
+			s.needSnap, s.anchor = false, snap
 		}
 
-		ev, err := s.readEvent(ctx)
-		if err != nil {
-			s.needSnap = true
-			return Update{}, err
-		}
-		switch {
-		case ev.FinalID <= s.lastSeq:
-			continue // wholly predates the anchor — already in the snapshot
-		case s.firstAfterSnap:
-			if ev.FirstID > s.lastSeq+1 {
-				// Updates were lost between the snapshot and the stream.
+		ev := gapFrame
+		if ev == nil {
+			var err error
+			ev, err = s.readEvent(ctx)
+			if err != nil {
 				s.needSnap = true
-				continue
+				return Update{}, err
 			}
-		case ev.FirstID != s.lastSeq+1:
-			// A hole in the live chain. Re-anchor rather than fold out of order.
+		}
+		if ev.Event != "depthUpdate" || !strings.EqualFold(ev.Symbol, s.symbol) || ev.FirstID == 0 || ev.FirstID > ev.FinalID {
 			s.needSnap = true
+			return Update{}, fmt.Errorf("binance depth: invalid stream identity or sequence range for %s", s.symbol)
+		}
+		if ev.FinalID <= s.lastSeq {
+			gapFrame = nil
+			continue // wholly predates the anchor — already in the snapshot
+		}
+		next := s.lastSeq + 1
+		if ev.FirstID > next || (s.anchor == nil && ev.FirstID != next) {
+			// A fresh anchor can turn this exact frame into the valid straddler.
+			// Retry it once; two incompatible anchors cannot establish a book.
+			s.needSnap = true
+			if gapFrame != nil {
+				return Update{}, fmt.Errorf("binance depth: refreshed anchor %d does not bridge update %d..%d", s.lastSeq, ev.FirstID, ev.FinalID)
+			}
+			gapFrame = ev
 			continue
 		}
 
@@ -175,9 +185,19 @@ func (s *BinanceSource) Recv(ctx context.Context) (Update, error) {
 			return Update{}, fmt.Errorf("binance depth: venue event time regressed from %d to %d at sequence %d", s.lastEventMS, ev.EventMS, ev.FinalID)
 		}
 		prev := s.lastSeq
+		delta := s.deltaProto(ev, prev, ts)
+		update := Update{Delta: delta}
+		if s.anchor != nil {
+			snapshot, err := s.clockedSnapshot(s.anchor, delta)
+			if err != nil {
+				s.needSnap = true
+				return Update{}, err
+			}
+			update = Update{Snapshot: snapshot}
+			s.anchor = nil
+		}
 		s.lastSeq, s.lastEventMS = ev.FinalID, ev.EventMS
-		s.firstAfterSnap = false
-		return Update{Delta: s.deltaProto(ev, prev, ts)}, nil
+		return update, nil
 	}
 }
 
@@ -248,16 +268,26 @@ func (s *BinanceSource) snapshot(ctx context.Context) (*binanceDepthSnapshot, er
 	return &snap, nil
 }
 
-func (s *BinanceSource) snapshotProto(snap *binanceDepthSnapshot) *marketpb.OrderBookSnapshot {
-	return &marketpb.OrderBookSnapshot{
+func (s *BinanceSource) clockedSnapshot(snap *binanceDepthSnapshot, delta *marketpb.OrderBookDelta) (*marketpb.OrderBookSnapshot, error) {
+	// Only the fully folded state leaves this function. Use the same exact
+	// level replacement and deletion semantics as every downstream consumer.
+	b := book.New(s.instrumentID, s.symbol, s.mic)
+	err := b.ApplySnapshot(&marketpb.OrderBookSnapshot{
 		InstrumentId:       s.instrumentID,
 		Symbol:             s.symbol,
 		Mic:                s.mic,
-		EventTime:          timestamppb.New(time.Now().UTC()),
+		EventTime:          delta.GetEventTime(),
 		LastUpdateSequence: snap.LastUpdateID,
 		Bids:               binanceLevels(snap.Bids),
 		Asks:               binanceLevels(snap.Asks),
+	})
+	if err != nil {
+		return nil, err
 	}
+	if err := b.ApplyDelta(delta); err != nil {
+		return nil, err
+	}
+	return b.Snapshot(0), nil
 }
 
 func (s *BinanceSource) deltaProto(ev *binanceDepthEvent, prev uint64, ts *timestamppb.Timestamp) *marketpb.OrderBookDelta {

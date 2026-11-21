@@ -15,6 +15,35 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 )
 
+func TestBinanceSourceWithholdsUnconfirmedRESTAnchor(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame string
+	}{
+		{name: "no update"},
+		{name: "wrong instrument", frame: `{"e":"depthUpdate","E":1000,"s":"ETHUSDT","U":101,"u":101}`},
+		{name: "wrong stream", frame: `{"e":"trade","E":1000,"s":"BTCUSDT","U":101,"u":101}`},
+		{name: "missing first sequence", frame: `{"e":"depthUpdate","E":1000,"s":"BTCUSDT","u":101}`},
+		{name: "reversed sequence", frame: `{"e":"depthUpdate","E":1000,"s":"BTCUSDT","U":102,"u":101}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			if tc.frame != "" {
+				events = []string{tc.frame}
+			}
+			f := newFakeBinanceDepth(t, []string{`{"lastUpdateId":100,"bids":[["101","2"]]}`}, events)
+			s := binanceSourceOver(f)
+			defer func() { _ = s.Close() }()
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			update, err := s.Recv(ctx)
+			if err == nil || update.Snapshot != nil || update.Delta != nil || f.calls() != 1 {
+				t.Fatalf("unconfirmed REST anchor: update=%v err=%v REST requests=%d", update, err, f.calls())
+			}
+		})
+	}
+}
+
 func TestBinanceSourceRefusesInvalidVenueClockAndReanchors(t *testing.T) {
 	for _, stamp := range []string{"", `"E":null,`, `"E":0,`, `"E":-1,`, `"E":253402300800000,`, `"E":"1",`, `"E":999,`} {
 		t.Run("field="+stamp, func(t *testing.T) {
@@ -29,12 +58,6 @@ func TestBinanceSourceRefusesInvalidVenueClockAndReanchors(t *testing.T) {
 				})
 			s := binanceSourceOver(f)
 			defer func() { _ = s.Close() }()
-			requireAnchor := func(want uint64) {
-				t.Helper()
-				if got := recvOK(t, s).Snapshot.GetLastUpdateSequence(); got != want {
-					t.Fatalf("snapshot sequence = %d, want %d", got, want)
-				}
-			}
 			requireRefusal := func() {
 				t.Helper()
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -44,16 +67,13 @@ func TestBinanceSourceRefusesInvalidVenueClockAndReanchors(t *testing.T) {
 					t.Fatalf("expected a clock refusal without an update: %+v, %v", u, err)
 				}
 			}
-			requireAnchor(100)
-			if d := recvOK(t, s).Delta; d.GetLastUpdateSequence() != 101 || d.GetEventTime().AsTime().UnixMilli() != 1000 {
-				t.Fatalf("first valid venue delta = %v", d)
+			if snap := recvOK(t, s).Snapshot; snap.GetLastUpdateSequence() != 101 || snap.GetEventTime().AsTime().UnixMilli() != 1000 {
+				t.Fatalf("first clocked book = %v", snap)
 			}
 			requireRefusal()
-			requireAnchor(200)
-			requireRefusal() // A new REST anchor cannot replace the last venue clock.
-			requireAnchor(300)
-			if d := recvOK(t, s).Delta; d.GetPrevUpdateSequence() != 300 || d.GetEventTime().AsTime().UnixMilli() != 1000 {
-				t.Fatalf("same-millisecond delta after recovery = %v", d)
+			requireRefusal() // The REST anchor at 200 cannot replace the venue clock.
+			if snap := recvOK(t, s).Snapshot; snap.GetLastUpdateSequence() != 301 || snap.GetEventTime().AsTime().UnixMilli() != 1000 {
+				t.Fatalf("same-millisecond book after recovery = %v", snap)
 			}
 		})
 	}
@@ -67,14 +87,11 @@ func TestBinanceSourcePreservesVenueClockAcrossReconnect(t *testing.T) {
 		})
 	s := binanceSourceOver(f)
 	defer func() { _ = s.Close() }()
-	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 100 || recvOK(t, s).Delta.GetLastUpdateSequence() != 101 {
+	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 101 {
 		t.Fatal("first connection did not establish its venue clock")
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 200 {
-		t.Fatal("reconnected stream did not re-anchor")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -169,27 +186,23 @@ func TestBinanceSource_AnchorsAndChains(t *testing.T) {
 
 	snap := recvOK(t, s).Snapshot
 	if snap == nil {
-		t.Fatal("first Recv must be the REST-anchored snapshot")
+		t.Fatal("first Recv must include the venue update")
 	}
-	if snap.GetLastUpdateSequence() != 100 {
-		t.Fatalf("anchor = %d, want 100", snap.GetLastUpdateSequence())
+	if snap.GetLastUpdateSequence() != 101 || snap.GetEventTime().AsTime().UnixMilli() != 2 {
+		t.Fatalf("first visible book has wrong sequence or event time: %v", snap)
 	}
 	if snap.GetMic() != "BINANCE" || snap.GetInstrumentId() != "BTC-USD" {
 		t.Fatalf("snapshot identity = %s/%s, want BINANCE/BTC-USD", snap.GetMic(), snap.GetInstrumentId())
 	}
 
-	// The stale event is skipped; the straddling event is the first delta.
-	d1 := recvOK(t, s).Delta
-	if d1 == nil {
-		t.Fatal("want the straddling delta, got no delta (was the stale event folded?)")
-	}
-	if d1.GetPrevUpdateSequence() != 100 || d1.GetLastUpdateSequence() != 101 {
-		t.Fatalf("delta chain = prev %d last %d, want prev 100 last 101",
-			d1.GetPrevUpdateSequence(), d1.GetLastUpdateSequence())
-	}
-	// Exactness: the price survives as an exact rational, never a float.
-	if got := dec.FromProto(d1.GetBids()[0].GetPrice()); got.Cmp(big.NewRat(50001, 1)) != 0 {
-		t.Fatalf("bid price = %s, want exactly 50001", got.RatString())
+	// The published book contains both the REST levels and the straddling update.
+	// The old buffered event must not add its bid.
+	if len(snap.Bids) != 2 || len(snap.Asks) != 1 ||
+		dec.FromProto(snap.Bids[0].Price).Cmp(big.NewRat(50001, 1)) != 0 ||
+		dec.FromProto(snap.Bids[0].Size).Cmp(big.NewRat(3, 1)) != 0 ||
+		dec.FromProto(snap.Bids[1].Price).Cmp(big.NewRat(50000, 1)) != 0 ||
+		dec.FromProto(snap.Asks[0].Price).Cmp(big.NewRat(50010, 1)) != 0 {
+		t.Fatalf("wrong merged levels: %v", snap)
 	}
 
 	d2 := recvOK(t, s).Delta
@@ -214,15 +227,13 @@ func TestBinanceSource_SequenceGapReAnchors(t *testing.T) {
 			`{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":101,"u":101,"b":[["50001.00","3"]],"a":[]}`,
 			// GAP: U=150, but the chain expects 102.
 			`{"e":"depthUpdate","E":2,"s":"BTCUSDT","U":150,"u":151,"b":[["50002.00","3"]],"a":[]}`,
+			`{"e":"depthUpdate","E":3,"s":"BTCUSDT","U":201,"u":201,"b":[],"a":[["50501","4"]]}`,
 		})
 	s := binanceSourceOver(f)
 	defer func() { _ = s.Close() }()
 
-	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 100 {
-		t.Fatal("want the first anchor at 100")
-	}
-	if d := recvOK(t, s).Delta; d == nil || d.GetLastUpdateSequence() != 101 {
-		t.Fatalf("want the in-chain delta at 101, got %+v", d)
+	if recvOK(t, s).Snapshot.GetLastUpdateSequence() != 101 {
+		t.Fatal("want the first clocked book at 101")
 	}
 
 	// The gapped event must NOT surface as a delta — it must re-anchor.
@@ -231,18 +242,38 @@ func TestBinanceSource_SequenceGapReAnchors(t *testing.T) {
 		t.Fatalf("a gapped delta was emitted (prev=%d) — the book would fold out of order",
 			u.Delta.GetPrevUpdateSequence())
 	}
-	if u.Snapshot == nil || u.Snapshot.GetLastUpdateSequence() != 200 {
-		t.Fatalf("want a re-anchoring snapshot at 200, got %+v", u.Snapshot)
+	if u.Snapshot == nil || u.Snapshot.GetLastUpdateSequence() != 201 || u.Snapshot.EventTime.AsTime().UnixMilli() != 3 ||
+		len(u.Snapshot.Bids) != 1 || dec.FromProto(u.Snapshot.Bids[0].Price).Cmp(big.NewRat(50500, 1)) != 0 || len(u.Snapshot.Asks) != 1 {
+		t.Fatalf("want a re-anchoring merged snapshot at 201, got %+v", u.Snapshot)
 	}
 	if f.calls() != 2 {
 		t.Fatalf("REST anchor fetched %d times, want 2 (the gap must force a re-anchor)", f.calls())
 	}
 }
 
+func TestBinanceSourceFoldsGapFrameIntoRefreshedAnchor(t *testing.T) {
+	f := newFakeBinanceDepth(t,
+		[]string{`{"lastUpdateId":100}`, `{"lastUpdateId":149,"bids":[["2","8"]]}`},
+		[]string{
+			`{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":101,"u":101}`,
+			`{"e":"depthUpdate","E":2,"s":"BTCUSDT","U":150,"u":151,"b":[["2","3"]]}`,
+		})
+	s := binanceSourceOver(f)
+	defer func() { _ = s.Close() }()
+	if got := recvOK(t, s).Snapshot.GetLastUpdateSequence(); got != 101 {
+		t.Fatalf("initial sequence = %d", got)
+	}
+	snap := recvOK(t, s).Snapshot
+	if snap.GetLastUpdateSequence() != 151 || snap.GetEventTime().AsTime().UnixMilli() != 2 || len(snap.Bids) != 1 ||
+		dec.FromProto(snap.Bids[0].Size).Cmp(big.NewRat(3, 1)) != 0 || f.calls() != 2 {
+		t.Fatalf("gap frame failed to confirm refreshed anchor: %v", snap)
+	}
+}
+
 // A size of 0 is the venue's "remove this level" instruction and must be
 // preserved, not filtered out as noise — dropping it would leave a phantom level
 // resting in the book forever.
-func TestBinanceSource_ZeroSizeLevelPreserved(t *testing.T) {
+func TestBinanceSource_ZeroSizeLevelDeletesAnchorBid(t *testing.T) {
 	f := newFakeBinanceDepth(t,
 		[]string{`{"lastUpdateId":100,"bids":[["50000.00","1"]],"asks":[]}`},
 		[]string{`{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":101,"u":101,"b":[["50000.00","0"]],"a":[]}`},
@@ -250,12 +281,8 @@ func TestBinanceSource_ZeroSizeLevelPreserved(t *testing.T) {
 	s := binanceSourceOver(f)
 	defer func() { _ = s.Close() }()
 
-	_ = recvOK(t, s) // snapshot
-	d := recvOK(t, s).Delta
-	if d == nil || len(d.GetBids()) != 1 {
-		t.Fatalf("the zero-size level was dropped: %+v", d)
-	}
-	if !dec.IsZero(d.GetBids()[0].GetSize()) {
-		t.Fatal("want size 0 (the remove-level instruction) preserved on the wire")
+	snap := recvOK(t, s).Snapshot
+	if snap == nil || len(snap.Bids) != 0 || snap.LastUpdateSequence != 101 {
+		t.Fatalf("deleted bid still present or anchor escaped: %v", snap)
 	}
 }

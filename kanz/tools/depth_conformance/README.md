@@ -87,12 +87,11 @@ Wire fields are integer byte arrays, not base64. Identities are BTC-USD/BTCUSDT/
 BINANCE; book depth is unbounded. Eligibility is hand-specified and checked
 against a test-only copy of the existing ingestion predicate.
 
-Go assigns local time to REST anchors. The oracle replaces that nondeterministic
-field with `snapshotUnixMs` before folding; this is normalization, not evidence
-of venue observation time. A source that privately folds the REST anchor and
-first accepted websocket delta must compare the resulting post-straddler book,
-whose timestamp is websocket `E`, rather than publish the normalized anchor.
-The kernel can independently replay every canonical step.
+Binance REST anchors have no venue timestamp. Go folds each anchor privately with
+its first contiguous WebSocket update. The emitted snapshot carries the update's
+final sequence and exchange time, including after gap recovery. The corpus
+preserves that time on the wire without rewriting it. The kernel can independently
+replay every canonical step.
 
 Cases cover numeric sorting, equivalent price forms, last-positive snapshot
 duplicates, last-write delta duplicates, zero/negative deletion, short and
