@@ -109,7 +109,7 @@ func TestOKXUserDataFillEmitsAValidEnvelope(t *testing.T) {
 	prod, cc := realOKXProducer(t)
 	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1",` +
 		`"state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-		`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+		`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 
 	ing := newOKXUserDataIngester(OKXUserDataConfig{
 		Stream: &okxStream{frames: [][]byte{[]byte(frame)}}, Orders: newOKXOrders("o1"), Pub: prod,

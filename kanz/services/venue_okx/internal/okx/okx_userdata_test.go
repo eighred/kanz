@@ -102,7 +102,7 @@ func okxIngesterOver(frames [][]byte, cap *okxCapture) *OKXUserDataIngester {
 
 func TestOKXUserData_FillBecomesOrderFilled(t *testing.T) {
 	cap := &okxCapture{}
-	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
 
 	var ev *orderpb.OrderFilled
@@ -134,7 +134,7 @@ func TestOKXUserData_PartialAndNoiseHandling(t *testing.T) {
 		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"live","fillSz":"0"}]}`),                      // state change, not a fill
 		[]byte(`{"arg":{"channel":"account"},"data":[{"ccy":"USDT"}]}`),                                                                       // unrelated channel
 		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"unknown","state":"filled","fillSz":"1","tradeId":"9"}]}`), // unknown order
-		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"partially_filled","fillSz":"0.5","fillPx":"50000","accFillSz":"0.5","tradeId":"8","uTime":"1700000000000"}]}`),
+		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"partially_filled","fillSz":"0.5","fillPx":"50000","accFillSz":"0.5","tradeId":"8","fillTime":"1700000000000","uTime":"1700000000000"}]}`),
 	}
 	_ = okxIngesterOver(frames, cap).Run(context.Background())
 
@@ -223,10 +223,10 @@ func TestOKXUserData_AGarbledFillNumberIsRefusedNotZeroed(t *testing.T) {
 		name  string
 		frame string
 	}{
-		{"unparseable price", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"","accFillSz":"1","tradeId":"7","uTime":"1700000000000"}]}`},
-		{"garbage price", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"null","accFillSz":"1","tradeId":"7","uTime":"1700000000000"}]}`},
-		{"garbage accFillSz", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"n/a","tradeId":"7","uTime":"1700000000000"}]}`},
-		{"garbage fee", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"??","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`},
+		{"unparseable price", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"","accFillSz":"1","tradeId":"7","fillTime":"1700000000000","uTime":"1700000000000"}]}`},
+		{"garbage price", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"null","accFillSz":"1","tradeId":"7","fillTime":"1700000000000","uTime":"1700000000000"}]}`},
+		{"garbage accFillSz", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"n/a","tradeId":"7","fillTime":"1700000000000","uTime":"1700000000000"}]}`},
+		{"garbage fee", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"??","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cap := &okxCapture{}
@@ -279,7 +279,7 @@ func TestOKXUserData_ALargeFillIsNotWrapped(t *testing.T) {
 		t.Fatalf("seed the view: %v", err)
 	}
 	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"` +
-		qty + `","fillPx":"0.00001","accFillSz":"` + qty + `","tradeId":"7","uTime":"1700000000000"}]}`
+		qty + `","fillPx":"0.00001","accFillSz":"` + qty + `","tradeId":"7","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 	_ = newOKXUserDataIngester(OKXUserDataConfig{
 		Stream: &okxStream{frames: [][]byte{[]byte(frame)}}, Orders: view, Pub: cap,
 		Venue: "OKX", Tenant: "fund-alpha",
@@ -323,7 +323,7 @@ func TestUserData_ATriggeredStopsFillIsAttributedByAlgoClOrdId(t *testing.T) {
 	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"3833848820050333696",` +
 		`"clOrdId":"O3833848819892766720","algoClOrdId":"o1","state":"filled","fillSz":"1",` +
 		`"fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT",` +
-		`"uTime":"1700000000000"}]}`
+		`"fillTime":"1700000000000","uTime":"1700000000000"}]}`
 	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
 
 	var ev *orderpb.OrderFilled
@@ -350,7 +350,7 @@ func TestUserData_AnOrdinaryFillIsStillAttributedByClOrdId(t *testing.T) {
 	cap := &okxCapture{}
 	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1",` +
 		`"algoClOrdId":"","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1",` +
-		`"tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+		`"tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
 
 	for _, e := range cap.events {

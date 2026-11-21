@@ -38,8 +38,8 @@ import (
 func TestOKXUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives(t *testing.T) {
 	cap := &okxCapture{}
 	frames := [][]byte{
-		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"partially_filled","fillSz":"0.4","fillPx":"50000","accFillSz":"0.4","tradeId":"11","fillFee":"-0.02","fillFeeCcy":"USDT","uTime":"1700000001000"}]}`),
-		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"0.6","fillPx":"50100","accFillSz":"1","tradeId":"12","fillFee":"-0.03","fillFeeCcy":"USDT","uTime":"1700000002000"}]}`),
+		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"partially_filled","fillSz":"0.4","fillPx":"50000","accFillSz":"0.4","tradeId":"11","fillFee":"-0.02","fillFeeCcy":"USDT","fillTime":"1700000001000","uTime":"1700000001000"}]}`),
+		[]byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"0.6","fillPx":"50100","accFillSz":"1","tradeId":"12","fillFee":"-0.03","fillFeeCcy":"USDT","fillTime":"1700000002000","uTime":"1700000002000"}]}`),
 	}
 	_ = okxIngesterOverView(frames, cap, newOKXOrders("o1")).Run(context.Background())
 
@@ -89,8 +89,8 @@ func TestOKXUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives(t *tes
 func TestOKXUserData_AReplayedPushDoesNotRunTheViewBackwards(t *testing.T) {
 	cap := &okxCapture{}
 	view := newOKXOrders("o1")
-	first := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"partially_filled","fillSz":"0.4","fillPx":"50000","accFillSz":"0.4","tradeId":"21","fillFee":"-0.02","fillFeeCcy":"USDT","uTime":"1700000001000"}]}`
-	second := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"partially_filled","fillSz":"0.5","fillPx":"50100","accFillSz":"0.9","tradeId":"22","fillFee":"-0.02","fillFeeCcy":"USDT","uTime":"1700000002000"}]}`
+	first := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"partially_filled","fillSz":"0.4","fillPx":"50000","accFillSz":"0.4","tradeId":"21","fillFee":"-0.02","fillFeeCcy":"USDT","fillTime":"1700000001000","uTime":"1700000001000"}]}`
+	second := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"partially_filled","fillSz":"0.5","fillPx":"50100","accFillSz":"0.9","tradeId":"22","fillFee":"-0.02","fillFeeCcy":"USDT","fillTime":"1700000002000","uTime":"1700000002000"}]}`
 	_ = okxIngesterOverView([][]byte{[]byte(first), []byte(second), []byte(first)}, cap, view).Run(context.Background())
 
 	held := view.get(t, "o1")
@@ -117,7 +117,7 @@ func TestOKXUserData_AReplayedPushDoesNotRunTheViewBackwards(t *testing.T) {
 func TestOKXUserData_AsOfCarriesUTime(t *testing.T) {
 	cap := &okxCapture{}
 	view := newOKXOrders("o1")
-	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"31","fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000009000"}]}`
+	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"31","fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000009000","uTime":"1700000009000"}]}`
 	_ = okxIngesterOverView([][]byte{[]byte(frame)}, cap, view).Run(context.Background())
 
 	if got := view.get(t, "o1").GetAsOf().AsTime().UnixMilli(); got != 1700000009000 {

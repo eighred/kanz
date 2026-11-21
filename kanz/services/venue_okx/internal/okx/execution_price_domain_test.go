@@ -22,7 +22,7 @@ import (
 )
 
 func priceDomainReport(id, status, price, fee string) []byte {
-	return []byte(fmt.Sprintf(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":%q,"state":%q,"fillSz":"1","fillPx":%q,"accFillSz":"1","tradeId":"7","fillFee":%q,"fillFeeCcy":"USDT","uTime":"1700000000000"}]}`, id, status, price, fee))
+	return []byte(fmt.Sprintf(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":%q,"state":%q,"fillSz":"1","fillPx":%q,"accFillSz":"1","tradeId":"7","fillFee":%q,"fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`, id, status, price, fee))
 }
 
 func TestExecutedPriceUserDataRefusesBeforeEffects(t *testing.T) {
@@ -71,7 +71,7 @@ func TestExecutedPriceRESTRefusesWholeConversion(t *testing.T) {
 	for _, price := range []string{"0", "-1", "-0.000000001"} {
 		t.Run(price, func(t *testing.T) {
 			fills, err := v.fills([]okxFill{
-				{TradeID: "1", FillSz: "1", FillPx: "100"},
+				{TradeID: "1", FillTime: "1700000000000", FillSz: "1", FillPx: "100"},
 				{TradeID: "2", FillSz: "1", FillPx: price},
 			}, okxKanzOrder("o1"), "BTC-USDT")
 			if err == nil || fills != nil {
@@ -88,7 +88,7 @@ func TestExecutedPriceExactPositiveAndNonExecutionControls(t *testing.T) {
 		"1000000000000": big.NewRat(1000000000000, 1),
 	} {
 		t.Run(text, func(t *testing.T) {
-			fills, err := v.fills([]okxFill{{TradeID: "fee-only", FillSz: "0", FillPx: ""}, {TradeID: "1", FillSz: "1", FillPx: text}}, okxKanzOrder("o1"), "BTC-USDT")
+			fills, err := v.fills([]okxFill{{TradeID: "fee-only", FillSz: "0", FillPx: ""}, {TradeID: "1", FillTime: "1700000000000", FillSz: "1", FillPx: text}}, okxKanzOrder("o1"), "BTC-USDT")
 			if err != nil || len(fills) != 1 || dec.FromProto(fills[0].GetPrice()).Cmp(want) != 0 {
 				t.Fatalf("exact positive price after fee-only row: %v, %v", fills, err)
 			}
@@ -127,7 +127,7 @@ func TestOKXFeeZeroCurrencyAndUnsupportedControls(t *testing.T) {
 	for _, raw := range []string{"-9223372036854775808", "1.1234567890123456789", "not-a-number"} {
 		t.Run(raw, func(t *testing.T) {
 			v := &OKXVenue{mic: "OKX", now: time.Now}
-			fills, err := v.fills([]okxFill{{TradeID: "1", FillSz: "1", FillPx: "100"}, {TradeID: "2", FillSz: "1", FillPx: "100", Fee: raw, FeeCcy: "USDT"}}, okxKanzOrder("o1"), "BTC-USDT")
+			fills, err := v.fills([]okxFill{{TradeID: "1", FillTime: "1700000000000", FillSz: "1", FillPx: "100"}, {TradeID: "2", FillSz: "1", FillPx: "100", Fee: raw, FeeCcy: "USDT"}}, okxKanzOrder("o1"), "BTC-USDT")
 			if err == nil || fills != nil {
 				t.Fatalf("unsupported fee returned partial REST output: %v, %v", fills, err)
 			}
@@ -251,7 +251,7 @@ func TestOKXSignedFeeReachesWSRESTAndTCA(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := &OKXVenue{mic: "OKX", now: time.Now}
-			rest, err := v.fills([]okxFill{{TradeID: "7", FillSz: "1", FillPx: "100", Fee: tc.raw, FeeCcy: "USDT"}}, okxKanzOrder("o1"), "BTC-USDT")
+			rest, err := v.fills([]okxFill{{TradeID: "7", FillTime: "1700000000000", FillSz: "1", FillPx: "100", Fee: tc.raw, FeeCcy: "USDT"}}, okxKanzOrder("o1"), "BTC-USDT")
 			if err != nil || len(rest) != 1 {
 				t.Fatalf("REST = %v, %v", rest, err)
 			}

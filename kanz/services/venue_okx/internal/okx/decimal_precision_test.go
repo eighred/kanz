@@ -113,13 +113,13 @@ func TestOKXUnsupportedDecimalRefusesBeforeHTTP(t *testing.T) {
 func TestOKXSubEightPlaceFillAndCommission(t *testing.T) {
 	v := okxVenueOver(newFakeOKX(t))
 	fills, err := v.fills([]okxFill{{TradeID: "7", FillSz: "0.000000001", FillPx: "1.000000009",
-		Fee: "-0.000000003", FeeCcy: "USDT", TS: "1700000000000"}}, preciseOrder(orderpb.OrderType_ORDER_TYPE_MARKET), "BTC-USDT")
+		Fee: "-0.000000003", FeeCcy: "USDT", FillTime: "1700000000000"}}, preciseOrder(orderpb.OrderType_ORDER_TYPE_MARKET), "BTC-USDT")
 	if err != nil || len(fills) != 1 {
 		t.Fatalf("fills: %v, %v", fills, err)
 	}
 	assertPreciseFill(t, fills[0])
 	cap := &okxCapture{}
-	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"partially_filled","fillSz":"0.000000001","fillPx":"1.000000009","accFillSz":"0.000000001","tradeId":"7","fillFee":"-0.000000003","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"partially_filled","fillSz":"0.000000001","fillPx":"1.000000009","accFillSz":"0.000000001","tradeId":"7","fillFee":"-0.000000003","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 	if err := okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background()); len(cap.events) != 1 {
 		t.Fatalf("stream emitted %d events: %v", len(cap.events), err)
 	}
@@ -147,7 +147,7 @@ func assertPreciseFill(t *testing.T, fill *orderpb.Fill) {
 }
 
 func TestOKXUnsupportedFillRefusesWholeReport(t *testing.T) {
-	base := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"partially_filled","fillSz":"0.1","fillPx":"1","accFillSz":"0.1","tradeId":"7","fillFee":"-0.01","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+	base := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"partially_filled","fillSz":"0.1","fillPx":"1","accFillSz":"0.1","tradeId":"7","fillFee":"-0.01","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 	for _, field := range []string{`"fillSz":"0.1"`, `"fillPx":"1"`, `"accFillSz":"0.1"`, `"fillFee":"-0.01"`} {
 		for _, value := range []string{"1e999999999", "1.1234567890123456789"} {
 			cap := &okxCapture{}

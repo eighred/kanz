@@ -18,11 +18,11 @@ import (
 
 const okxFilledFrame = `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312",` +
 	`"clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-	`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+	`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 
 const okxPartialFrame = `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312",` +
 	`"clOrdId":"o1","state":"partially_filled","fillSz":"0.4","fillPx":"50000","accFillSz":"0.4",` +
-	`"tradeId":"7","fillFee":"-0.02","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+	`"tradeId":"7","fillFee":"-0.02","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 
 func okxIngesterOverView(frames [][]byte, cap *okxCapture, view *okxOrders) *OKXUserDataIngester {
 	return newOKXUserDataIngester(OKXUserDataConfig{

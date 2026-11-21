@@ -25,6 +25,10 @@ package okx
 import (
 	"context"
 	"math/big"
+	"strings"
+	"time"
+
+	"github.com/eighred/kanz/internal/fillfact"
 	"testing"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -39,10 +43,10 @@ const (
 		`"sz":"1","accFillSz":"1","avgPx":"50000","fee":"-0.05","feeCcy":"USDT"}]}`
 	oneTradeFillsBody = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT","tradeId":"7","ordId":"312",` +
 		`"clOrdId":"o1","side":"buy","fillPx":"50000","fillSz":"1","fee":"-0.05","feeCcy":"USDT",` +
-		`"ts":"1700000000000"}]}`
+		`"fillTime":"1795219199900","ts":"1795219203900"}]}`
 	oneTradePush = `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312",` +
 		`"clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-		`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+		`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1795219199900","uTime":"1795219200900"}]}`
 )
 
 func TestOKX_OneExecutionHasOneFillIdAcrossEveryPath(t *testing.T) {
@@ -84,6 +88,10 @@ func TestOKX_OneExecutionHasOneFillIdAcrossEveryPath(t *testing.T) {
 	for _, e := range cap.events {
 		if f, ok := e.Payload.(*orderpb.OrderFilled); ok {
 			pushed = f.GetFill()
+			wantUpdate := time.Date(2026, 11, 21, 0, 0, 0, 900_000_000, time.UTC)
+			if !f.GetState().GetAsOf().AsTime().Equal(wantUpdate) {
+				t.Fatalf("order update time = %v, want %v", f.State.AsOf, wantUpdate)
+			}
 		}
 	}
 	if pushed == nil {
@@ -110,6 +118,10 @@ func TestOKX_OneExecutionHasOneFillIdAcrossEveryPath(t *testing.T) {
 	// numbers did not would be worse than a disagreement: the fold would skip the
 	// second sighting and keep whichever quantity arrived first.
 	for _, f := range []*orderpb.Fill{placed[0], view.Fills[0], pushed} {
+		wantTrade := time.Date(2026, 11, 20, 23, 59, 59, 900_000_000, time.UTC)
+		if !f.GetExecutedAt().AsTime().Equal(wantTrade) || !fillfact.SameExecution(f, pushed) {
+			t.Fatalf("execution differs across paths or crosses daily cutoff: %v", f)
+		}
 		if got := dec.FromProto(f.GetQuantity()); got.Cmp(big.NewRat(1, 1)) != 0 {
 			t.Fatalf("fill %s quantity = %s, want 1", f.GetFillId(), got.RatString())
 		}
@@ -144,7 +156,7 @@ func TestOKX_ReQueryingAnUnchangedOrderNamesTheSameFills(t *testing.T) {
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"partially_filled",` +
 		`"sz":"1","accFillSz":"0.4","avgPx":"50000"}]}`
 	f.fillsBody = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT","tradeId":"7","ordId":"312",` +
-		`"clOrdId":"o1","fillPx":"50000","fillSz":"0.4","ts":"1700000000000"}]}`
+		`"clOrdId":"o1","fillPx":"50000","fillSz":"0.4","fillTime":"1700000000000","ts":"1700000000000"}]}`
 	v := okxVenueOver(f)
 
 	first, err := v.QueryOrder(context.Background(), okxLimit("o1"))
@@ -161,8 +173,8 @@ func TestOKX_ReQueryingAnUnchangedOrderNamesTheSameFills(t *testing.T) {
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled",` +
 		`"sz":"1","accFillSz":"1","avgPx":"50000"}]}`
 	f.fillsBody = `{"code":"0","msg":"","data":[` +
-		`{"instId":"BTC-USDT","tradeId":"7","ordId":"312","clOrdId":"o1","fillPx":"50000","fillSz":"0.4","ts":"1700000000000"},` +
-		`{"instId":"BTC-USDT","tradeId":"9","ordId":"312","clOrdId":"o1","fillPx":"50100","fillSz":"0.6","ts":"1700000002000"}]}`
+		`{"instId":"BTC-USDT","tradeId":"7","ordId":"312","clOrdId":"o1","fillPx":"50000","fillSz":"0.4","fillTime":"1700000000000","ts":"1700000000000"},` +
+		`{"instId":"BTC-USDT","tradeId":"9","ordId":"312","clOrdId":"o1","fillPx":"50100","fillSz":"0.6","fillTime":"1700000002000","ts":"1700000002000"}]}`
 
 	second, err := v.QueryOrder(context.Background(), okxLimit("o1"))
 	if err != nil {
@@ -187,5 +199,27 @@ func TestOKX_ReQueryingAnUnchangedOrderNamesTheSameFills(t *testing.T) {
 	}
 	if second.Fills[1].GetFillId() != "BTC-USDT-9" {
 		t.Fatalf("the new fill is named %q, want BTC-USDT-9", second.Fills[1].GetFillId())
+	}
+}
+
+func TestOKXUnusableFillClocks(t *testing.T) {
+	for _, raw := range []string{"", "unknown", "-1", "0", "1.5", "253402300800000", "+1"} {
+		t.Run("fillTime="+raw, func(t *testing.T) {
+			frame := strings.Replace(oneTradePush, `"fillTime":"1795219199900"`, `"fillTime":"`+raw+`"`, 1)
+			cap := &okxCapture{}
+			var refused int
+			ingester := okxIngesterOver([][]byte{[]byte(frame)}, cap)
+			ingester.refusal.OnRefused = func(_, _, _ string) { refused++ }
+			_ = ingester.Run(context.Background())
+			if refused != 1 || len(cap.events) != 0 {
+				t.Fatal("invalid execution time was published or not reported", refused, len(cap.events))
+			}
+			records := []okxFill{{TradeID: "1", FillPx: "100", FillSz: "1", FillTime: "1700000000000"},
+				{TradeID: "2", FillPx: "100", FillSz: "1", FillTime: raw}}
+			fills, err := (&OKXVenue{}).fills(records, okxKanzOrder("o1"), "BTC-USDT")
+			if err == nil || fills != nil {
+				t.Fatalf("invalid history clock returned partial evidence: %v, %v", fills, err)
+			}
+		})
 	}
 }

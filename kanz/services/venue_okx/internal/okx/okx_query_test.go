@@ -132,8 +132,8 @@ func TestOKXQuery_FilledCarriesTheVenuesOwnFillIdentities(t *testing.T) {
 		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"` + tc.state +
 			`","sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
 		f.fillsBody = `{"code":"0","msg":"","data":[` +
-			`{"instId":"BTC-USDT","tradeId":"42","ordId":"1","clOrdId":"o1","fillPx":"50000","fillSz":"0.2","ts":"1750000000000"},` +
-			`{"instId":"BTC-USDT","tradeId":"43","ordId":"1","clOrdId":"o1","fillPx":"50010","fillSz":"0.4","ts":"1750000001000"}]}`
+			`{"instId":"BTC-USDT","tradeId":"42","ordId":"1","clOrdId":"o1","fillPx":"50000","fillSz":"0.2","fillTime":"1750000000000","ts":"1750000000000"},` +
+			`{"instId":"BTC-USDT","tradeId":"43","ordId":"1","clOrdId":"o1","fillPx":"50010","fillSz":"0.4","fillTime":"1750000001000","ts":"1750000001000"}]}`
 
 		view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
 		if err != nil {
@@ -278,7 +278,7 @@ func TestOKXQuery_AWithdrawalThatPartiallyTradedCarriesItsFills(t *testing.T) {
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"canceled",` +
 		`"sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
 	f.fillsBody = `{"code":"0","msg":"","data":[` +
-		`{"instId":"BTC-USDT","tradeId":"42","ordId":"1","clOrdId":"o1","fillPx":"50000","fillSz":"0.6","ts":"1750000000000"}]}`
+		`{"instId":"BTC-USDT","tradeId":"42","ordId":"1","clOrdId":"o1","fillPx":"50000","fillSz":"0.6","fillTime":"1750000000000","ts":"1750000000000"}]}`
 
 	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
 	if err != nil {

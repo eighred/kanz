@@ -8,7 +8,6 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
@@ -399,6 +398,10 @@ func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string
 			// name the user-data stream reads off its own push.
 			inst = instID
 		}
+		executedAt, err := okxReportTime(t.FillTime, "fillTime")
+		if err != nil {
+			return nil, fmt.Errorf("order %s trade %s: %w", st.GetOrderId(), t.TradeID, err)
+		}
 		out = append(out, &orderpb.Fill{
 			FillId:           inst + "-" + t.TradeID,
 			OrderId:          st.GetOrderId(),
@@ -409,12 +412,7 @@ func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string
 			Fee:              feeMoney,
 			Venue:            v.mic,
 			VenueExecutionId: t.TradeID,
-			// THE TRADE'S OWN INSTANT, NOT THIS ONE. The connector clock is right
-			// on the placement path (the trade just happened) and wrong on the
-			// recovery path: an order adopted an hour after it traded would be
-			// timestamped an hour late in every execution-quality measurement that
-			// reads it.
-			ExecutedAt: timestamppb.New(okxMillis(t.TS, v.now)),
+			ExecutedAt:       executedAt,
 		})
 	}
 	return out, nil

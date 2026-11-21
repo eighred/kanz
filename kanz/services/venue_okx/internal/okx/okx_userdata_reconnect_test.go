@@ -31,7 +31,7 @@ func (endlessFills) Recv(ctx context.Context) ([]byte, error) {
 	}
 	return []byte(`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1",` +
 		`"state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-		`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`), nil
+		`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`), nil
 }
 
 // A STORE OUTAGE MUST NOT BECOME AN EXCHANGE BAN (#1047).
@@ -86,7 +86,7 @@ func TestOKXUserDataReconnect_IsRateLimitedWhileTheOrderViewIsDown(t *testing.T)
 func TestOKXUserDataReconnect_OnlyAResolvedReportCountsAsProgress(t *testing.T) {
 	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1",` +
 		`"state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-		`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+		`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`
 
 	healthy := newOKXUserDataIngester(OKXUserDataConfig{
 		Stream: &okxStream{frames: [][]byte{[]byte(frame)}}, Orders: newOKXOrders("o1"),

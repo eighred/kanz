@@ -140,8 +140,8 @@ func TestOKX_MarketOrderFills(t *testing.T) {
 	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","sCode":"0","sMsg":""}]}`
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000","fee":"-0.05","feeCcy":"USDT"}]}`
 	f.fillsBody = `{"code":"0","msg":"","data":[` +
-		`{"instId":"BTC-USDT","tradeId":"7","ordId":"312","clOrdId":"o1","fillPx":"50000","fillSz":"0.6","fee":"-0.03","feeCcy":"USDT","ts":"1700000000000"},` +
-		`{"instId":"BTC-USDT","tradeId":"8","ordId":"312","clOrdId":"o1","fillPx":"50000","fillSz":"0.4","fee":"-0.02","feeCcy":"USDT","ts":"1700000001000"}]}`
+		`{"instId":"BTC-USDT","tradeId":"7","ordId":"312","clOrdId":"o1","fillPx":"50000","fillSz":"0.6","fee":"-0.03","feeCcy":"USDT","fillTime":"1700000000000","ts":"1700000000000"},` +
+		`{"instId":"BTC-USDT","tradeId":"8","ordId":"312","clOrdId":"o1","fillPx":"50000","fillSz":"0.4","fee":"-0.02","feeCcy":"USDT","fillTime":"1700000001000","ts":"1700000001000"}]}`
 	v := okxVenueOver(f)
 
 	fills, err := v.Execute(context.Background(), okxMarket("o1"))
@@ -191,7 +191,7 @@ func TestOKX_DuplicateRecoversViaQuery(t *testing.T) {
 	f.placeBody = `{"code":"1","msg":"","data":[{"ordId":"","clOrdId":"o1","sCode":"51000","sMsg":"Duplicate clOrdId"}]}`
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000"}]}`
 	f.fillsBody = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT","tradeId":"7","ordId":"312",` +
-		`"clOrdId":"o1","fillPx":"50000","fillSz":"1","ts":"1700000000000"}]}`
+		`"clOrdId":"o1","fillPx":"50000","fillSz":"1","fillTime":"1700000000000","ts":"1700000000000"}]}`
 	v := okxVenueOver(f)
 
 	fills, err := v.Execute(context.Background(), okxMarket("o1"))
@@ -294,7 +294,7 @@ func TestOKX_ATradeRowWithoutAnInstIdStillCarriesTheVenueSymbol(t *testing.T) {
 	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","sCode":"0","sMsg":""}]}`
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000"}]}`
 	f.fillsBody = `{"code":"0","msg":"","data":[{"tradeId":"7","ordId":"312","clOrdId":"o1",` +
-		`"fillPx":"50000","fillSz":"1","ts":"1700000000000"}]}`
+		`"fillPx":"50000","fillSz":"1","fillTime":"1700000000000","ts":"1700000000000"}]}`
 
 	fills, err := okxVenueOver(f).Execute(context.Background(), okxMarket("o1"))
 	if err != nil {
@@ -341,8 +341,8 @@ func TestOKX_AZeroSizeRowIsSkippedAndAGarbledOneIsRefused(t *testing.T) {
 		f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","sCode":"0","sMsg":""}]}`
 		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000"}]}`
 		f.fillsBody = `{"code":"0","msg":"","data":[` +
-			`{"instId":"BTC-USDT","tradeId":"6","ordId":"312","fillPx":"0","fillSz":"0","fee":"-0.01","feeCcy":"USDT","ts":"1700000000000"},` +
-			`{"instId":"BTC-USDT","tradeId":"7","ordId":"312","fillPx":"50000","fillSz":"1","ts":"1700000001000"}]}`
+			`{"instId":"BTC-USDT","tradeId":"6","ordId":"312","fillPx":"0","fillSz":"0","fee":"-0.01","feeCcy":"USDT","fillTime":"1700000000000","ts":"1700000000000"},` +
+			`{"instId":"BTC-USDT","tradeId":"7","ordId":"312","fillPx":"50000","fillSz":"1","fillTime":"1700000001000","ts":"1700000001000"}]}`
 
 		fills, err := okxVenueOver(f).Execute(context.Background(), okxMarket("o1"))
 		if err != nil {
@@ -359,7 +359,7 @@ func TestOKX_AZeroSizeRowIsSkippedAndAGarbledOneIsRefused(t *testing.T) {
 		f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","sCode":"0","sMsg":""}]}`
 		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000"}]}`
 		f.fillsBody = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT","tradeId":"7","ordId":"312",` +
-			`"fillPx":"50000","fillSz":"n/a","ts":"1700000000000"}]}`
+			`"fillPx":"50000","fillSz":"n/a","fillTime":"1700000000000","ts":"1700000000000"}]}`
 
 		fills, err := okxVenueOver(f).Execute(context.Background(), okxMarket("o1"))
 		if err == nil {

@@ -66,7 +66,7 @@ func TestOKXUserData_StoreErrorIsNotASkip(t *testing.T) {
 		Stream: &okxStream{frames: [][]byte{[]byte(
 			`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1",` +
 				`"state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-				`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`)}},
+				`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`)}},
 		Orders: view, Pub: cap, Venue: "OKX", Tenant: "fund-alpha",
 		OnDropped: func(mic, orderID, reason string) {
 			dropped = append(dropped, mic+"/"+orderID+"/"+reason)
@@ -128,10 +128,10 @@ func TestOKXUserData_StoreErrorReasonIsNotUsedForAnUnknownOrder(t *testing.T) {
 			`{"arg":{"channel":"orders"},"data":[` +
 				`{"instId":"BTC-USDT","ordId":"311","clOrdId":"somebody-elses","state":"filled",` +
 				`"fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"6",` +
-				`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"},` +
+				`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"},` +
 				`{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled",` +
 				`"fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
-				`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`)}},
+				`"fillFee":"-0.05","fillFeeCcy":"USDT","fillTime":"1700000000000","uTime":"1700000000000"}]}`)}},
 		Orders: view, Pub: cap, Venue: "OKX", Tenant: "fund-alpha",
 		OnDropped: func(mic, orderID, reason string) {
 			dropped = append(dropped, mic+"/"+orderID+"/"+reason)

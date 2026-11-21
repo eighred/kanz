@@ -25,7 +25,7 @@ func TestOKXUserData_NegativeCumulativeIsRefusedAndQuarantined(t *testing.T) {
 			refused := 0
 			ing := newOKXUserDataIngester(OKXUserDataConfig{
 				Stream: &okxStream{frames: [][]byte{[]byte(fmt.Sprintf(
-					`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"negative1620","state":%q,"fillSz":"1","fillPx":"1","accFillSz":"-1","tradeId":"7","uTime":"1700000000000"}]}`, status))}},
+					`{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"negative1620","state":%q,"fillSz":"1","fillPx":"1","accFillSz":"-1","tradeId":"7","fillTime":"1700000000000","uTime":"1700000000000"}]}`, status))}},
 				Orders: view, Pub: capture, Venue: "OKX", Tenant: "fund-alpha",
 				OnRefused: func(mic, id, reason string) {
 					refused++
