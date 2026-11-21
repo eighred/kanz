@@ -50,5 +50,10 @@ export const brokerExecution = {
   "qty": 'decimal',
   "price": 'decimal',
   "fee": 'decimal?',
+  "feeCurrency": 'text?',
+  "baseCurrency": 'text?',
+  "quoteCurrency": 'text?',
+  "inventoryChange": 'decimal?',
+  "cashChange": 'decimal?',
   "time": 'timestamp',
 } as const

@@ -140,7 +140,7 @@ func snapshotAccount(a *account) (*tvsyncpb.AccountSnapshot, error) {
 		}
 		out.Execs = append(out.Execs, &tvsyncpb.Execution{
 			FillId: e.fillID, OrderId: e.orderID, Instrument: e.instrument, Venue: e.venue,
-			Side: e.side, Qty: qty, Price: price, Fee: fee,
+			Side: e.side, Qty: qty, Price: price, Fee: fee, SourceFill: e.source,
 			Effective: timestamppb.New(e.effective), Knowledge: logTime(e.knowledge),
 		})
 	}
@@ -227,6 +227,24 @@ func (p *Projection) restore(blob []byte) error {
 func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
 	a := newAccount(as.GetTenantId(), as.GetAccountId())
 	for _, e := range as.GetExecs() {
+		if e.GetQty() == nil || e.GetPrice() == nil {
+			return nil, fmt.Errorf("checkpoint execution is missing quantity or price: %w", ErrReplayInput)
+		}
+		if f := e.GetSourceFill(); f != nil {
+			// A checkpoint supplies the source for the native receipt and the
+			// scalar fields for the historical fold. They must describe one fill.
+			if _, ok := dec.InDomainDeep(f); !ok || f.GetFillId() != e.FillId ||
+				f.GetOrderId() != e.OrderId || f.GetInstrumentId() != e.Instrument ||
+				f.GetVenue() != e.Venue || f.GetSide() != e.Side ||
+				!f.GetExecutedAt().AsTime().Equal(e.GetEffective().AsTime()) {
+				return nil, fmt.Errorf("execution receipt differs from checkpoint row: %w", ErrReplayMismatch)
+			}
+			for _, pair := range [][2]*commonpb.Decimal{{f.GetQuantity(), e.Qty}, {f.GetPrice(), e.Price}, {f.GetFee().GetAmount(), e.Fee}} {
+				if !dec.InDomain(pair[1]) || dec.Cmp(pair[0], pair[1]) != 0 {
+					return nil, ErrReplayMismatch
+				}
+			}
+		}
 		qty, err := protoToRat(e.GetQty())
 		if err != nil {
 			return nil, fmt.Errorf("exec %s qty: %w", e.GetFillId(), err)
@@ -240,6 +258,7 @@ func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
 			return nil, fmt.Errorf("exec %s fee: %w", e.GetFillId(), err)
 		}
 		a.execs = append(a.execs, execution{
+			source: e.GetSourceFill(),
 			fillID: e.GetFillId(), orderID: e.GetOrderId(), instrument: e.GetInstrument(),
 			venue: e.GetVenue(), side: e.GetSide(), qty: qty, price: price, fee: fee,
 			effective: e.GetEffective().AsTime(), knowledge: e.GetKnowledge().AsTime(),

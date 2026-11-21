@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/instrument"
 )
 
 // OMS FACT subjects the projection folds (mirrors services/oms/internal/order).
@@ -390,6 +391,7 @@ func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know 
 		a.seenFills[fid] = true
 	}
 	ex := execution{
+		source: f,
 		fillID: f.GetFillId(), orderID: f.GetOrderId(), instrument: f.GetInstrumentId(),
 		venue: f.GetVenue(), side: f.GetSide(),
 		qty: dec.FromProto(f.GetQuantity()), price: dec.FromProto(f.GetPrice()),
@@ -668,14 +670,41 @@ func orderDTOAsOf(revs []orderRev, asOf time.Time) (OrderDTO, bool) {
 	return dto, true
 }
 
+// All receipt amounts originate in finite wire decimals, including their
+// sums and products. Preserve every place when a fill is smaller than 1e-8.
+func receiptDecimal(r *big.Rat) string {
+	places, _ := r.FloatPrec()
+	return r.FloatString(places)
+}
+
 func executionDTO(e execution) ExecutionDTO {
 	dto := ExecutionDTO{
 		FillID: e.fillID, OrderID: e.orderID, Instrument: e.instrument, Venue: e.venue,
-		Side: sideString(e.side), Qty: dec.Str(e.qty), Price: dec.Str(e.price),
+		Side: sideString(e.side), Qty: receiptDecimal(e.qty), Price: receiptDecimal(e.price),
 		ExecutedAt: e.effective.UTC().Format(time.RFC3339Nano),
 	}
-	if e.fee != nil && e.fee.Sign() != 0 {
-		dto.Fee = dec.Str(e.fee)
+	if e.source == nil {
+		// Older checkpoints used zero for absent fees and retained no unit.
+		if e.fee != nil && e.fee.Sign() != 0 {
+			dto.Fee = receiptDecimal(e.fee)
+		}
+		return dto
+	}
+	fee := e.source.GetFee()
+	dto.FeeCurrency = fee.GetCurrencyCode()
+	if fee.GetAmount() != nil {
+		dto.Fee = receiptDecimal(dec.FromProto(fee.Amount))
+	}
+	if pair, ok := instrument.SpotPair(e.instrument, e.source.GetSpotVenueSymbol()); ok {
+		dto.BaseCurrency, dto.QuoteCurrency = pair.Base, pair.Quote
+		// An absent fee is ambiguous on a receipt, including an otherwise
+		// complete trade. Only publish net movements for stated charges.
+		if dto.Fee != "" && dto.FeeCurrency != "" {
+			if legs, err := fillfact.SettlementLegs(e.source, ""); err == nil {
+				dto.InventoryChange = receiptDecimal(legs.Quantity)
+				dto.CashChange = receiptDecimal(legs.Cash)
+			}
+		}
 	}
 	return dto
 }

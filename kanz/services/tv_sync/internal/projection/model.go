@@ -20,6 +20,7 @@ import (
 // execution is one folded Fill. Effective = venue execution time; knowledge =
 // when tv-sync folded the FACT.
 type execution struct {
+	source     *orderpb.Fill
 	fillID     string
 	orderID    string
 	instrument string
@@ -197,15 +198,20 @@ type OrderDTO struct {
 
 // ExecutionDTO is one execution report.
 type ExecutionDTO struct {
-	FillID     string `json:"id"`
-	OrderID    string `json:"orderId"`
-	Instrument string `json:"instrument"`
-	Venue      string `json:"venue"`
-	Side       string `json:"side"`
-	Qty        string `json:"qty" broker:"decimal"`
-	Price      string `json:"price" broker:"decimal"`
-	Fee        string `json:"fee,omitempty" broker:"decimal"`
-	ExecutedAt string `json:"time" broker:"timestamp"`
+	FillID          string `json:"id"`
+	OrderID         string `json:"orderId"`
+	Instrument      string `json:"instrument"`
+	Venue           string `json:"venue"`
+	Side            string `json:"side"`
+	Qty             string `json:"qty" broker:"decimal"`
+	Price           string `json:"price" broker:"decimal"`
+	Fee             string `json:"fee,omitempty" broker:"decimal"`
+	FeeCurrency     string `json:"feeCurrency,omitempty"`
+	BaseCurrency    string `json:"baseCurrency,omitempty"`
+	QuoteCurrency   string `json:"quoteCurrency,omitempty"`
+	InventoryChange string `json:"inventoryChange,omitempty" broker:"decimal"`
+	CashChange      string `json:"cashChange,omitempty" broker:"decimal"`
+	ExecutedAt      string `json:"time" broker:"timestamp"`
 }
 
 // StateDTO is the account manager summary (balance/equity/P&L).

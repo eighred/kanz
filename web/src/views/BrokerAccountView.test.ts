@@ -8,6 +8,31 @@ import { ApiError } from '../api/client'
 import BrokerAccountView from './BrokerAccountView.vue'
 const identity = { subject: 'reader', tenant: 'tenant-a', expires_at: '2099-01-01' }
 function detail(id: string): BrokerAccountDetail { return { state: { id, currency: id, balance: '9007199254740993.0000000001', equity: '0', realizedPl: '0', unrealizedPl: '0', openPositions: 0 }, positions: [], orders: [], executions: [] } }
+
+it('shows signed spot receipts and distinguishes a reported zero fee from a missing fee', async () => {
+  const account = detail('A')
+  const buy = {
+    id: 'buy', orderId: 'o1', instrument: 'BTC-USDT', venue: 'OKX', side: 'buy',
+    qty: '1', price: '50000', time: '2026-11-21T09:00:00Z',
+    baseCurrency: 'BTC', quoteCurrency: 'USDT',
+  }
+  account.executions = [
+    { ...buy, fee: '0.0008', feeCurrency: 'BTC', inventoryChange: '0.9992', cashChange: '-50000' },
+    { ...buy, id: 'zero', fee: '0', feeCurrency: 'USDT', inventoryChange: '1', cashChange: '-50000' },
+    { ...buy, id: 'unreported' },
+    { ...buy, id: 'historical', fee: '0.0000000001', baseCurrency: undefined, quoteCurrency: undefined },
+  ]
+  vi.spyOn(broker, 'account').mockResolvedValue(account)
+  const { wrapper } = await setup()
+  await flushPromises()
+  const text = wrapper.text()
+  expect(wrapper.find('dl').text()).not.toContain('Balance')
+  expect(text).toContain('totals are unavailable for reconciliation')
+  for (const expected of ['0.0008 BTC', '0.9992 BTC', '-50000 USDT', '0 USDT', 'Fee unknown', '0.0000000001 (currency unknown)']) {
+    expect(text).toContain(expected)
+  }
+  wrapper.unmount()
+})
 function pending<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((a,b) => { resolve=a;reject=b }); return {promise,resolve,reject} }
 afterEach(() => vi.restoreAllMocks())
 async function setup() {

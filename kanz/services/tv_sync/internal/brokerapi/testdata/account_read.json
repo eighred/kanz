@@ -9,6 +9,6 @@
   }]},
   "executions": {"executions": [{
     "id": "fill-1", "orderId": "order-1", "instrument": "X", "venue": "XNAS", "side": "buy",
-    "qty": "9007199254740993", "price": "3.25", "fee": "0.125", "time": "2026-01-02T03:04:05.123456789Z"
+    "qty": "9007199254740993", "price": "3.25", "fee": "0.125", "feeCurrency": "USD", "time": "2026-01-02T03:04:05.123456789Z"
   }]}
 }

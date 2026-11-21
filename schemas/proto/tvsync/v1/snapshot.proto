@@ -57,6 +57,9 @@ message Execution {
   common.v1.Decimal fee = 8;
   google.protobuf.Timestamp effective = 9;
   google.protobuf.Timestamp knowledge = 10;
+  // Original execution evidence. Older checkpoints cannot establish the
+  // fee denomination or the spot market that produced a retained row.
+  order.v1.Fill source_fill = 11;
 }
 
 // OrderRevision is one revision of an order's materialized state.
