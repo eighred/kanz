@@ -23,6 +23,7 @@ locals {
     "identity",
     "kanz-capitalpath",
     "kanz-migrate",
+    "market-ingest",
     "oms",
     "prometheus",
     "risk-engine",
