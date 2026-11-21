@@ -164,18 +164,32 @@ func (b Bond) Risk(settle time.Time, y float64) BondRisk {
 }
 
 // YieldFromPrice solves for the yield that reprices the bond to dirtyPrice, by
-// bisection (price is monotone decreasing in yield). Returns the yield in
-// [-0.5, 2.0]; a price outside that band clamps to the nearest endpoint.
+// bisection on [-0.5, 2.0]. It returns NaN when the positive dirty price
+// cannot be bracketed or the remaining cashflows do not distinguish yields.
 func (b Bond) YieldFromPrice(settle time.Time, dirtyPrice float64) float64 {
-	if math.IsNaN(dirtyPrice) || math.IsInf(dirtyPrice, 0) {
+	if dirtyPrice <= 0 || math.IsNaN(dirtyPrice) || math.IsInf(dirtyPrice, 0) {
 		return math.NaN()
 	}
 	lo, hi := -0.5, 2.0
+	maxPrice := b.PriceFromYield(settle, lo)
+	minPrice := b.PriceFromYield(settle, hi)
+	if !(minPrice < maxPrice && minPrice <= dirtyPrice && dirtyPrice <= maxPrice) {
+		return math.NaN()
+	}
+	if dirtyPrice == minPrice {
+		return hi
+	}
+	if dirtyPrice == maxPrice {
+		return lo
+	}
 	for i := 0; i < 200; i++ {
 		mid := (lo + hi) / 2
 		price := b.PriceFromYield(settle, mid)
 		if math.IsNaN(price) {
 			return math.NaN()
+		}
+		if price == dirtyPrice {
+			return mid
 		}
 		if price > dirtyPrice {
 			lo = mid // price too high ⇒ yield too low
