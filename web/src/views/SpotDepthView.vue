@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { useSession } from '../stores/session'
 import { amount, captureDepth, elapsedMillis, fundingRate, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
 import example from '../api/spot_depth_example.json'
+import SpotTermsComparison from '../components/SpotTermsComparison.vue'
 
 const route = useRoute(),
   session = useSession()
@@ -265,6 +266,13 @@ async function calculate() {
         </tr></tbody>
       </table>
     </template>
+    <SpotTermsComparison v-if="inputs && session.identity" :portfolio="id" :tenant="session.identity.tenant"
+      :inputs="inputs" :baseline="result"
+      @save="alternative => download('spot-depth-comparison.json', {
+        portfolio: id, tenant: session.identity?.tenant, source,
+        original: { inputs, result, service_timing: read?.serviceTiming, book_check: read?.bookCheck },
+        alternative,
+      })" />
     <p class="muted">
       Net includes the assumed rebalance cost and values any remaining base asset at the buy venue’s best bid. Stress P&amp;L uses the
       shocked mark and excludes liquidation fees and rebalancing.

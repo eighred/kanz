@@ -21,6 +21,12 @@ The screen reports whether the books matched at the displayed check time, a newe
 revision arrived, the age limit expired, or the service could not verify the pair.
 The saved result includes this check separately from the dated financial values.
 
+Select **Compare alternative fees and balances** to reprice both directions
+on the original books with different signed taker fees, fee currencies or
+available balances. Both calculations use the same size, cutoff, venue rules,
+stress and restoration costs. Save both scenarios to retain the inputs, native
+amounts and risk-service results together.
+
 The result shows executable size under those assumptions, residual inventory,
 net quote value and losses under one-leg and partial-sale scenarios. Save the
 inputs and result together to reproduce the calculation. Example and imported
