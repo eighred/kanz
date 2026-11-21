@@ -59,7 +59,11 @@ func main() {
 }
 
 func run() int {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("invalid market-ingest configuration", "err", err)
+		return 2
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -230,6 +234,7 @@ func run() int {
 		VolumeProfile:    volProfile,
 		TradeRetention:   cfg.TradeRetention,
 		SnapshotInterval: cfg.SnapshotInterval,
+		SnapshotOnChange: cfg.SnapshotOnChange,
 		SnapshotDepth:    cfg.SnapshotDepth,
 		Logger:           logger,
 		// Book snapshots publish off a ticker with no inbound envelope, so they

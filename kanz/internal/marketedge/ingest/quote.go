@@ -108,14 +108,13 @@ const SubjectMarketCryptoQuote = "market.crypto.quote"
 // consumer must refuse is a producer that has decided the consumer's guard is
 // the specification. recordTouchLocked's refusal stays exactly as strict.
 //
-// It returns nothing, for publishSnapshot's reason: this runs on a ticker with
-// no caller that has a better answer to a dropped quote than the next tick.
+// A failed publish can be retried at the next allowed publication time.
 // A persistently refused publish is not silent — market-ingest wraps its
 // producer in bus.HealthPublisher, so /readyz goes 503 and says so.
-func (e *Engine) publishQuote(ctx context.Context, snap *marketpb.OrderBookSnapshot) {
+func (e *Engine) publishQuote(ctx context.Context, snap *marketpb.OrderBookSnapshot) bool {
 	bid, ask, ok := topOfBook(snap)
 	if !ok {
-		return
+		return true // This snapshot has no publishable quote.
 	}
 	ev := &marketpb.MarketDataEvent{
 		InstrumentId: snap.GetInstrumentId(),
@@ -151,7 +150,9 @@ func (e *Engine) publishQuote(ctx context.Context, snap *marketpb.OrderBookSnaps
 		e.logger.Warn("top-of-book quote publish failed — the market's width is not reaching the price "+
 			"spine, so every execution-cost attribution for this instrument degrades to TOTAL_ONLY",
 			"instrument", snap.GetInstrumentId(), "subject", SubjectMarketCryptoQuote, "err", err)
+		return false
 	}
+	return true
 }
 
 // topOfBook returns the best bid and best offer levels of a snapshot, and

@@ -119,6 +119,10 @@ spec:
             # The instruments this shard folds. Scaling = another Deployment with a
             # DIFFERENT list here, not a higher replica count.
             - { name: MARKET_INGEST_INSTRUMENTS, value: "BTC-USDT,ETH-USDT" }
+            # MARKET_INGEST_SNAPSHOT_ON_CHANGE=true publishes the first change
+            # after an idle interval immediately. Further changes are coalesced
+            # within MARKET_INGEST_SNAPSHOT_INTERVAL (default 1s) per venue and
+            # instrument. Omit the flag for periodic snapshot and quote publication.
             # THE SYMBOL MAPS ARE WHAT MAKE THIS SERVICE REAL. Every instrument
             # above needs a mapping on at least one venue, or the pod refuses to
             # start rather than invent prices for it. An instrument mapped on both

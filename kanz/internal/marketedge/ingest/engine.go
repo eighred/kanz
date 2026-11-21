@@ -1,9 +1,9 @@
 // Package ingest wires a depth source to the in-memory book and publishes
-// bounded, periodic OrderBookSnapshots on the bus. This is the market-ingest
+// rate-limited OrderBookSnapshots on the bus. This is the market-ingest
 // composition of the off-bus hot path: the fold loop consumes the full-rate
-// feed into memory (never republished at full rate), and a separate,
-// time-driven snapshot loop emits a depth-capped view for durable replay and
-// audit. The native-alpha engines (order-book imbalance, cross-venue arbitrage)
+// feed into memory, and a separate publisher emits a depth-capped view on
+// periodic ticks or, when enabled, on a fold when the interval permits.
+// The native-alpha engines (order-book imbalance, cross-venue arbitrage)
 // will read the same in-memory book and emit signal.v1.StrategySignals with
 // source = NATIVE_ENGINE; this milestone lays the book + snapshot foundation
 // they build on.
@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
@@ -41,6 +43,7 @@ type Engine struct {
 	pub              Publisher
 	logger           *slog.Logger
 	snapshotInterval time.Duration
+	changed          chan struct{}
 	snapshotDepth    int
 	now              func() time.Time
 	tenant           string
@@ -57,7 +60,10 @@ type Config struct {
 	Publisher        Publisher
 	Logger           *slog.Logger
 	SnapshotInterval time.Duration // <=0 ⇒ 1s
-	SnapshotDepth    int           // <=0 ⇒ 20
+	// SnapshotOnChange publishes after a fold, at most once per interval.
+	// The default publishes the current book on every periodic tick.
+	SnapshotOnChange bool
+	SnapshotDepth    int // <=0 ⇒ 20
 	Now              func() time.Time
 	// Tenant is stamped on every book snapshot this engine publishes.
 	//
@@ -91,10 +97,14 @@ func New(cfg Config) *Engine {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	var changed chan struct{}
+	if cfg.SnapshotOnChange {
+		changed = make(chan struct{}, 1)
+	}
 	return &Engine{
 		book: cfg.Book, source: cfg.Source, pub: cfg.Publisher, logger: cfg.Logger,
 		snapshotInterval: cfg.SnapshotInterval, snapshotDepth: cfg.SnapshotDepth, now: cfg.Now,
-		tenant: cfg.Tenant,
+		tenant: cfg.Tenant, changed: changed,
 	}
 }
 
@@ -163,11 +173,12 @@ func (e *Engine) foldLoop(ctx context.Context) error {
 		}
 		switch {
 		case u.Snapshot != nil:
-			if err := e.book.ApplySnapshot(u.Snapshot); errors.Is(err, book.ErrNoVenueTime) {
+			err = e.book.ApplySnapshot(u.Snapshot)
+			if errors.Is(err, book.ErrNoVenueTime) {
 				e.warnNoVenueTime("snapshot")
 			}
 		case u.Delta != nil:
-			err := e.book.ApplyDelta(u.Delta)
+			err = e.book.ApplyDelta(u.Delta)
 			switch {
 			case errors.Is(err, book.ErrSequenceGap):
 				e.logger.Warn("depth sequence gap — awaiting re-snapshot",
@@ -175,6 +186,11 @@ func (e *Engine) foldLoop(ctx context.Context) error {
 			case errors.Is(err, book.ErrNoVenueTime):
 				e.warnNoVenueTime("delta")
 			}
+		default:
+			continue
+		}
+		if err == nil && e.changed != nil {
+			e.wakePublisher()
 		}
 	}
 }
@@ -190,6 +206,10 @@ func (e *Engine) foldLoop(ctx context.Context) error {
 // snapshot FACT and the quote FACT published on the same tick describe the same
 // book and cannot disagree about where the touch was.
 func (e *Engine) snapshotLoop(ctx context.Context) {
+	if e.changed != nil {
+		e.publishChanges(ctx)
+		return
+	}
 	t := time.NewTicker(e.snapshotInterval)
 	defer t.Stop()
 	for {
@@ -211,7 +231,60 @@ func (e *Engine) snapshotLoop(ctx context.Context) {
 	}
 }
 
-func (e *Engine) publishSnapshot(ctx context.Context, snap *marketpb.OrderBookSnapshot) {
+// One pending notification covers every fold until the publisher reads the book.
+// Publishing and waiting for budget both stay outside the fold goroutine.
+func (e *Engine) wakePublisher() {
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (e *Engine) publishChanges(ctx context.Context) {
+	var last *marketpb.OrderBookSnapshot
+	var snapshotOK, quoteOK bool
+	var next time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.changed:
+		}
+		if wait := time.Until(next); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+		// Folds already signalled during the wait are in the snapshot below.
+		select {
+		case <-e.changed:
+		default:
+		}
+		snap := e.book.Snapshot(e.snapshotDepth)
+		if !proto.Equal(last, snap) {
+			last, snapshotOK, quoteOK = snap, false, false
+		}
+		if (snapshotOK && quoteOK) || (len(snap.GetBids()) == 0 && len(snap.GetAsks()) == 0) {
+			continue
+		}
+		next = time.Now().Add(e.snapshotInterval)
+		if !snapshotOK {
+			snapshotOK = e.publishSnapshot(ctx, snap)
+		}
+		if !quoteOK {
+			quoteOK = e.publishQuote(ctx, snap)
+		}
+		if !snapshotOK || !quoteOK {
+			e.wakePublisher()
+		}
+	}
+}
+
+func (e *Engine) publishSnapshot(ctx context.Context, snap *marketpb.OrderBookSnapshot) bool {
 	if err := e.pub.Publish(ctx, bus.Event{
 		Subject:       SubjectBookSnapshot,
 		EventType:     SubjectBookSnapshot,
@@ -230,7 +303,9 @@ func (e *Engine) publishSnapshot(ctx context.Context, snap *marketpb.OrderBookSn
 		Payload:  snap,
 	}); err != nil {
 		e.logger.Warn("book snapshot publish failed", "instrument", snap.GetInstrumentId(), "err", err)
+		return false
 	}
+	return true
 }
 
 // warnNoVenueTime reports a depth source that omits event_time (#957).

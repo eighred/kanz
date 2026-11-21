@@ -174,7 +174,10 @@ func TestFeedsWithNoInstrumentsIsNotAnError(t *testing.T) {
 // failed EVERY publish with "tenant_id required" — while /readyz kept returning
 // 200. It ingested perfectly and emitted nothing.
 func TestConfigCarriesATenant(t *testing.T) {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Tenant == "" {
 		t.Fatal("no tenant configured — bus.Validate rejects every envelope and this service publishes NOTHING while reporting ready")
 	}
