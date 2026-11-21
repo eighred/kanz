@@ -155,8 +155,10 @@ async function main() {
       assert((await region.textContent()).includes(qty), 'exact decimal string lost')
       for (const height of await region.locator('.data-row').evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height))) assert(Math.abs(height - 64) < 1, 'fixed row contract differs')
     }
-    assert.equal(await executions.locator('.data-row').nth(0).locator('td').last().textContent(), '—')
-    assert.equal(await executions.locator('.data-row').nth(1).locator('td').last().textContent(), '0')
+    const feeColumn = await executions.getByRole('columnheader', { name: 'Reported fee' }).evaluate(cell => cell.cellIndex)
+    assert.equal(await executions.locator('.data-row').nth(0).locator('td').nth(feeColumn).textContent(), 'Fee unknown')
+    assert.equal(await executions.locator('.data-row').nth(1).locator('td').nth(feeColumn).textContent(), '0 (currency unknown)')
+    assert.equal(await page.getByText('Realized P&L', { exact: true }).count(), 0, 'incomplete history must not imply reconciled P&L')
     assert((await page.textContent('body')).includes('freshness cannot be established'))
     assert((await page.textContent('body')).includes('Earlier executions are not shown'))
     for (const region of [orders, executions]) {

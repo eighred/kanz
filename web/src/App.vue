@@ -48,5 +48,5 @@ async function signOut() {
     </span>
     <button class="quiet" @click="signOut">Sign out</button>
   </header>
-  <main id="main-content" ref="main" tabindex="-1"><RouterView /></main>
+  <main id="main-content" ref="main" :class="{ 'broker-account-workspace': $route.name === 'broker-account' }" tabindex="-1"><RouterView /></main>
 </template>

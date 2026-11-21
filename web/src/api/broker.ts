@@ -67,6 +67,18 @@ function window<T>(value: unknown, key: string, parse: (row: unknown) => T): { r
   return { rows: list(body[key], parse), retainedFrom: time(body.retainedFrom) }
 }
 
+function executionReceipt(value: unknown): BrokerExecution {
+  const row = readRow(value, brokerExecution)
+  const hasPair = row.baseCurrency !== undefined && row.quoteCurrency !== undefined
+  if ((row.baseCurrency !== undefined) !== (row.quoteCurrency !== undefined) ||
+      (hasPair && (!row.baseCurrency || !row.quoteCurrency || row.baseCurrency === row.quoteCurrency)) ||
+      (row.inventoryChange !== undefined) !== (row.cashChange !== undefined) ||
+      (row.cashChange !== undefined && (!hasPair || row.fee === undefined || !row.feeCurrency))) {
+    throw new Error('Invalid broker execution receipt.')
+  }
+  return row
+}
+
 export const broker = {
   async accounts(): Promise<BrokerAccount[]> {
     const body = object(await api.get<unknown>('/api/v1/broker/accounts'), 'broker accounts')
@@ -80,7 +92,7 @@ export const broker = {
     ])
     const positions = object(positionsBody, 'positions')
     const orders = window(ordersBody, 'orders', row => readRow(row, brokerOrder))
-    const executions = window(executionsBody, 'executions', row => readRow(row, brokerExecution))
+    const executions = window(executionsBody, 'executions', executionReceipt)
     const parsedState = readRow(state, brokerState)
     if (parsedState.id !== id) throw new Error('Broker account identity differs.')
     return {

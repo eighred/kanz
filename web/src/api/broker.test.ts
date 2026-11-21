@@ -8,6 +8,20 @@ afterEach(() => vi.restoreAllMocks())
 const state = { id: 'PF1/account', currency: 'USD', balance: '100.00000001', equity: '99.5', realizedPl: '-1', unrealizedPl: '0.5', openPositions: 1 }
 
 describe('broker response boundary', () => {
+  it.each([
+    { baseCurrency: 'BTC' },
+    { baseCurrency: 'BTC', quoteCurrency: 'BTC' },
+    { inventoryChange: '0.9992' },
+    { cashChange: '-50000', inventoryChange: '0.9992' },
+    { baseCurrency: 'BTC', quoteCurrency: 'USDT', cashChange: '-50000', inventoryChange: '0.9992', feeCurrency: undefined },
+  ])('refuses a partial or unitless settlement receipt', async fields => {
+    vi.spyOn(api, 'get').mockResolvedValueOnce(served.state).mockResolvedValueOnce(served.positions)
+      .mockResolvedValueOnce(served.orders).mockResolvedValueOnce({
+        executions: [{ ...served.executions.executions[0], ...fields }],
+      })
+    await expect(broker.account('fund-a')).rejects.toThrow('Invalid broker execution receipt.')
+  })
+
   it('reads the authorized projection responses without changing financial text or adding absent fields', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch')
     for (const body of [served.accounts, served.state, served.positions, served.orders, served.executions]) {
