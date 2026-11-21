@@ -18,6 +18,7 @@ func OKXFeed(cfg VenueFeedConfig) Feed {
 	}
 	return Feed{
 		InstrumentID: cfg.InstrumentID,
+		Symbol:       cfg.Symbol,
 		MIC:          mic,
 		Depth: depth.NewOKXSource(depth.OKXConfig{
 			InstrumentID: cfg.InstrumentID, InstID: cfg.Symbol, MIC: mic,

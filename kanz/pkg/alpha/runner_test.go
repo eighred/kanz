@@ -28,6 +28,25 @@ type capture struct {
 	events []bus.Event
 }
 
+func TestRunnerPreservesMappedBookSymbols(t *testing.T) {
+	const id = "BTC-USDT"
+	feeds := []Feed{
+		BinanceFeed(VenueFeedConfig{InstrumentID: id, Symbol: "BTCUSDT"}),
+		OKXFeed(VenueFeedConfig{InstrumentID: id, Symbol: "BTC-USDT"}),
+		SimFeed(id),
+	}
+	r, err := New(Config{Publisher: &capture{}, Feeds: feeds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"BTCUSDT", "BTC-USDT", id} {
+		b := r.books[i].Snapshot(1)
+		if b.InstrumentId != id || b.Symbol != want {
+			t.Fatalf("book %d instrument/symbol %q/%q, want %q/%q", i, b.InstrumentId, b.Symbol, id, want)
+		}
+	}
+}
+
 func TestExternalDepthRejectsAmbiguousOrEngineFeeds(t *testing.T) {
 	trade := trades.NewSimSource(trades.SimConfig{Interval: time.Millisecond})
 	for _, tc := range []struct {

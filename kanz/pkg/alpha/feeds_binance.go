@@ -20,6 +20,7 @@ func BinanceFeed(cfg VenueFeedConfig) Feed {
 	}
 	return Feed{
 		InstrumentID: cfg.InstrumentID,
+		Symbol:       cfg.Symbol,
 		MIC:          mic,
 		Depth: depth.NewBinanceSource(depth.BinanceConfig{
 			InstrumentID: cfg.InstrumentID, Symbol: cfg.Symbol, MIC: mic,
