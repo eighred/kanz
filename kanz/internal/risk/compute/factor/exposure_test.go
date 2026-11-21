@@ -103,6 +103,44 @@ func TestSectorExposure_UnclassifiedCatchAll(t *testing.T) {
 	}
 }
 
+func TestIncompleteMarkWithholdsOnlyAffectedExposureBuckets(t *testing.T) {
+	for _, missing := range []string{"AAPL", "MSFT"} {
+		p := portfolio(
+			pos("AAPL", 250, "USD"), pos("MSFT", -40, "USD"),
+			pos("XOM", -12, "USD"), pos("OTHER", 0, "EUR"),
+		)
+		p.SetPosition(domain.Position{InstrumentID: v1.InstrumentID(missing), MarketValue: &commonpb.Money{CurrencyCode: "USD"}})
+		set := factor.ComputeExposure(context.Background(), p, classifier)
+		if !set.HasUnresolvedInputs() {
+			t.Fatal("missing amount produced a fully covered book")
+		}
+		for _, check := range []struct {
+			dimension  domain.ExposureDimension
+			key        string
+			covered    bool
+			gross, net int64
+		}{
+			{domain.ExposureByInstrument, missing, false, 0, 0},
+			{domain.ExposureByCurrency, "USD", false, 0, 0},
+			{domain.ExposureBySector, "GICS:45", false, 0, 0},
+			{domain.ExposureByCurrency, "EUR", true, 0, 0},
+			{domain.ExposureBySector, "GICS:10", true, 12, -12},
+		} {
+			row, ok := sectorBucket(set.ByDimension(check.dimension), check.key)
+			if !ok {
+				t.Fatalf("missing row %s/%s", check.dimension, check.key)
+			}
+			gross, net := row.Gross.GetAmount(), row.Net.GetAmount()
+			if (gross != nil) != check.covered || (net != nil) != check.covered {
+				t.Fatalf("unexpected amount presence in %s/%s: gross=%v net=%v", check.dimension, check.key, gross, net)
+			}
+			if check.covered && (gross.Coefficient != check.gross || net.Coefficient != check.net) {
+				t.Fatalf("wrong measured amount in %s/%s: gross=%v net=%v", check.dimension, check.key, gross, net)
+			}
+		}
+	}
+}
+
 func TestMissingClassifierPreservesOnlyBaseDimensions(t *testing.T) {
 	ctx := context.Background()
 	p := portfolio(pos("AAPL", 300, "USD"), pos("VOD", -100, "EUR"))

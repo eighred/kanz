@@ -10,7 +10,9 @@ import (
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/publish"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/nats-io/nats.go"
@@ -117,4 +119,47 @@ func TestPublishedRiskManifestSurvivesRestart(t *testing.T) {
 	if err := msg.DoubleAck(ctx); err != nil {
 		t.Fatal(err)
 	}
+
+	subject := publish.EventTypeExposureRecomputed
+	bustest.EnsureSubjects(t, ctx, js, name+"-exposure", []string{subject})
+	exposureStream, err := js.StreamNameBySubject(ctx, subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedExposures, err := js.Stream(ctx, exposureStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetPosition(domain.Position{InstrumentID: "UNPRICED", MarketValue: &commonpb.Money{CurrencyCode: "USD"}})
+	set := compute.ComputeExposure(p)
+	if err := publisher.EmitExposure(ctx, set); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := retainedExposures.GetLastMsgForSubject(ctx, subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, body, err = bus.Unframe(raw.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.Validate(env); err != nil {
+		t.Fatal(err)
+	}
+	var fact domainpb.ExposureSet
+	if err := proto.Unmarshal(body, &fact); err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(&fact, publish.ToProtoExposureSet(set)) {
+		t.Fatal("published exposure differs from computed set")
+	}
+	for _, row := range fact.Exposures {
+		if row.Dimension == domainpb.ExposureDimension_EXPOSURE_DIMENSION_CURRENCY && row.Bucket == "USD" {
+			if row.Gross.GetAmount() != nil || row.Net.GetAmount() != nil {
+				t.Fatal("published an incomplete USD total")
+			}
+			return
+		}
+	}
+	t.Fatal("published exposure has no USD bucket")
 }

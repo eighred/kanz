@@ -3,14 +3,18 @@ package replay
 import (
 	"context"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
 	risk "github.com/eighred/kanz/internal/risk"
 	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/engine"
 	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/internal/risk/state"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 	"github.com/eighred/kanz/services/risk_engine/internal/grpcsrv"
 	"google.golang.org/grpc"
@@ -71,5 +75,38 @@ func TestAsOfReplayThroughGRPCWithColdLiveState(t *testing.T) {
 	_, err = client.Measures(ctx, &querypb.MeasuresRequest{PortfolioId: string(p.ID())})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("historical read contaminated current state: %v", err)
+	}
+
+	p.SetPosition(domain.Position{InstrumentID: "B", MarketValue: &commonpb.Money{CurrencyCode: "USD"}})
+	if _, err := e.Compute(ctx, p, nil); err != nil {
+		t.Fatal(err)
+	}
+	read := func(at time.Time) *querypb.ExposureResponse {
+		t.Helper()
+		result, err := client.Exposure(ctx, &querypb.ExposureRequest{PortfolioId: string(p.ID()), AsOf: timestamppb.New(at)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	incomplete := read(evaluationKnowledge(t, a))
+	if !slices.Contains(incomplete.QualityFlags, querypb.QualityFlag_QUALITY_FLAG_INPUTS_UNRESOLVED) {
+		t.Fatalf("missing historical coverage flag: %v", incomplete.QualityFlags)
+	}
+	found := false
+	for _, row := range incomplete.GetSet().GetExposures() {
+		if row.Dimension == domainpb.ExposureDimension_EXPOSURE_DIMENSION_CURRENCY && row.Bucket == "USD" {
+			found = true
+			if row.Gross.GetAmount() != nil || row.Net.GetAmount() != nil {
+				t.Fatal("partial historical USD total")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing historical USD bucket")
+	}
+	earlier := read(cutoff)
+	if len(earlier.QualityFlags) != 0 || !proto.Equal(earlier.Set, publish.ToProtoExposureSet(original.Exposure)) {
+		t.Fatal("later incomplete mark changed the earlier historical exposure")
 	}
 }

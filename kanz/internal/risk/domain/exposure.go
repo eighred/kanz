@@ -50,6 +50,7 @@ type ExposureSet struct {
 	portfolioID v1.PortfolioID
 	asOf        time.Time
 	items       []Exposure
+	unresolved  bool
 }
 
 // NewExposureSet copies the items slice so the returned ExposureSet
@@ -57,8 +58,18 @@ type ExposureSet struct {
 func NewExposureSet(id v1.PortfolioID, asOf time.Time, items []Exposure) *ExposureSet {
 	cp := make([]Exposure, len(items))
 	copy(cp, items)
-	return &ExposureSet{portfolioID: id, asOf: asOf, items: cp}
+	set := &ExposureSet{portfolioID: id, asOf: asOf, items: cp}
+	for _, item := range cp {
+		if item.Gross.GetAmount() == nil || item.Net.GetAmount() == nil {
+			set.unresolved = true
+			break
+		}
+	}
+	return set
 }
+
+// HasUnresolvedInputs reports whether any retained row lacks a gross or net amount.
+func (s *ExposureSet) HasUnresolvedInputs() bool { return s.unresolved }
 
 // AsOf satisfies v1.ExposureSet.
 func (s *ExposureSet) AsOf() time.Time { return s.asOf }

@@ -166,7 +166,7 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 		if err != nil {
 			return v1.ExposureResponse{}, err
 		}
-		return v1.ExposureResponse{PortfolioID: req.PortfolioID, AsOf: result.Exposure.AsOf(), Set: result.Exposure, SourcePosition: result.SourcePosition}, nil
+		return v1.ExposureResponse{PortfolioID: req.PortfolioID, AsOf: result.Exposure.AsOf(), Set: result.Exposure, SourcePosition: result.SourcePosition, QualityFlags: exposureFlags(nil, result.Exposure)}, nil
 	}
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.ExposureResponse{}, err
@@ -184,9 +184,16 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 		PortfolioID:    req.PortfolioID,
 		AsOf:           es.AsOf(),
 		Set:            es,
-		QualityFlags:   flags,
+		QualityFlags:   exposureFlags(flags, es),
 		SourcePosition: pos,
 	}, nil
+}
+
+func exposureFlags(flags []v1.QualityFlag, set *domain.ExposureSet) []v1.QualityFlag {
+	if set.HasUnresolvedInputs() {
+		return append(flags, v1.QualityFlagInputsUnresolved)
+	}
+	return flags
 }
 
 // Measures implements v1.Engine. Always computes (and caches) the full

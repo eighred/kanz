@@ -152,7 +152,7 @@ func TestComputeExposure_MixedCurrenciesProduceSeparateBuckets(t *testing.T) {
 	}
 }
 
-func TestComputeExposure_PositionWithNilMarketValueIsSkipped(t *testing.T) {
+func TestComputeExposure_PositionWithNilMarketValueRemainsUnassessed(t *testing.T) {
 	p := makePortfolio("PORT-1", "USD",
 		domain.Position{InstrumentID: "AAPL", MarketValue: mkMoney(1000, 0, "USD"), AsOf: baseTime},
 		domain.Position{InstrumentID: "UNMARKED", MarketValue: nil, AsOf: baseTime},
@@ -160,9 +160,13 @@ func TestComputeExposure_PositionWithNilMarketValueIsSkipped(t *testing.T) {
 	es := compute.ComputeExposure(p)
 	for _, e := range es.ByDimension(domain.ExposureByInstrument) {
 		if e.Key == "UNMARKED" {
-			t.Error("UNMARKED position emitted despite nil MarketValue")
+			if e.Gross != nil || e.Net != nil || !es.HasUnresolvedInputs() {
+				t.Fatal("unmarked position presented as measured")
+			}
+			return
 		}
 	}
+	t.Fatal("unmarked holding missing from exposure")
 }
 
 func TestComputeExposure_DifferentExponentsSumCorrectly(t *testing.T) {

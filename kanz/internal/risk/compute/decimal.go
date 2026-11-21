@@ -358,8 +358,8 @@ func zeroMoney(currency string) *commonpb.Money {
 
 // absMoney returns |m| in the same currency.
 func absMoney(m *commonpb.Money) *commonpb.Money {
-	if m == nil {
-		return nil
+	if m.GetAmount() == nil {
+		return m
 	}
 	return &commonpb.Money{
 		Amount:       absDecimal(m.Amount),
@@ -399,6 +399,9 @@ func addMoney(a, b *commonpb.Money) *commonpb.Money {
 	}
 	if b == nil {
 		return a
+	}
+	if a.Amount == nil || b.Amount == nil {
+		return &commonpb.Money{CurrencyCode: a.CurrencyCode}
 	}
 	return &commonpb.Money{
 		Amount:       addDecimal(a.Amount, b.Amount),

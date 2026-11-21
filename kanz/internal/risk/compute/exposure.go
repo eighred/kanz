@@ -2,6 +2,7 @@ package compute
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/eighred/kanz/internal/risk/domain"
 )
@@ -26,12 +27,9 @@ import (
 // a sector-lookup function, leaving this signature unchanged for
 // callers that only care about the two canonical dimensions.
 //
-// Positions with nil MarketValue are skipped — the engine has no
-// way to express their exposure until a mark arrives. Zero-quantity
-// positions (kept for audit lineage per RISK-05) flow through
-// because their MarketValue is typically zero, producing a
-// zero-row exposure that is informative (the position still
-// exists) without distorting the aggregate.
+// Positions without a denominated mark retain their instrument row with
+// unavailable amounts. A missing amount in a known currency invalidates
+// that currency's totals. A measured zero still participates in its bucket.
 //
 // AsOf is propagated from the Portfolio so the api/v1 caller can
 // see the freshness of the underlying state.
@@ -48,7 +46,8 @@ func ComputeExposure(p *domain.Portfolio) *domain.ExposureSet {
 
 	for _, pos := range positions {
 		mv := pos.MarketValue
-		if mv == nil {
+		if strings.TrimSpace(mv.GetCurrencyCode()) == "" {
+			items = append(items, domain.Exposure{Dimension: domain.ExposureByInstrument, Key: string(pos.InstrumentID)})
 			continue
 		}
 		items = append(items, domain.Exposure{
@@ -63,6 +62,11 @@ func ComputeExposure(p *domain.Portfolio) *domain.ExposureSet {
 		if !ok {
 			bucket = &ccyBucket{}
 			byCurrency[ccy] = bucket
+		}
+		if mv.Amount == nil {
+			bucket.gross.refused = true
+			bucket.net.refused = true
+			continue
 		}
 		bucket.gross.add(mv.Amount, true /*absolute*/)
 		bucket.net.add(mv.Amount, false /*signed*/)

@@ -3,6 +3,7 @@ package factor
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/domain"
@@ -27,7 +28,7 @@ const UnclassifiedSector = "UNCLASSIFIED"
 // is unavailable. A configured classifier with a missing mapping contributes
 // to the UNCLASSIFIED bucket.
 func SectorExposure(ctx context.Context, p *domain.Portfolio, c Classifier) []domain.Exposure {
-	if c == nil {
+	if c == nil || strings.TrimSpace(string(p.BaseCurrency())) == "" {
 		return nil
 	}
 	base := p.BaseCurrency()

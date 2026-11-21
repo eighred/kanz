@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -75,6 +76,29 @@ func TestExposure_FreshStateNoFlags(t *testing.T) {
 	}
 	if len(resp.QualityFlags) != 0 {
 		t.Errorf("flags=%v want empty (fresh)", resp.QualityFlags)
+	}
+}
+
+func TestExposure_LiveAndCachedReadsFlagAnIncompleteMark(t *testing.T) {
+	now := time.Now().UTC()
+	store := state.NewStore()
+	cache := risk.NewCache()
+	applyPosition(t, store, "PF", "KNOWN", 250, now)
+	if err := store.ApplyPositionChanged(context.Background(),
+		&envelopepb.Envelope{EventId: "missing", IdempotencyKey: "missing"},
+		&domainpb.PositionState{PortfolioId: "PF", InstrumentId: "UNKNOWN", MarketValue: &commonpb.Money{CurrencyCode: "USD"}, AsOf: timestamppb.New(now)},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []*state.Store{store, state.NewStore()} {
+		query := engine.New(source, compute.DefaultRegistry(), cache, risk.NewDetector())
+		reply, err := query.Exposure(context.Background(), v1.ExposureRequest{PortfolioID: "PF"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(reply.QualityFlags, v1.QualityFlagInputsUnresolved) {
+			t.Fatalf("incomplete mark reported with flags %v", reply.QualityFlags)
+		}
 	}
 }
 
