@@ -17,7 +17,6 @@ import (
 	"github.com/eighred/kanz/internal/marketedge/book"
 	"github.com/eighred/kanz/internal/marketedge/depth"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const snapshotMS int64 = 1700000000000
@@ -43,23 +42,27 @@ type corpus struct {
 
 func fixtures() []fixture {
 	return []fixture{
-		{Name: "numeric-sort-duplicates-delete", Snapshots: []string{`{"lastUpdateId":100,"bids":[["2","1"],["10","2"],["10.0","3"],["9","4"],["2","0"]],"asks":[["100","2"],["11","3"],["20","4"]]}`}, Events: []string{
-			`{"E":1700000000001,"U":101,"u":101,"b":[["10.00","0"],["2.0","5"],["9","-1"]],"a":[["11","0"],["12","2"],["12.0","7"]]}`,
-			`{"E":1700000000002,"U":102,"u":102,"b":[],"a":[["12","0"],["20","0"],["100","0"]]}`,
+		{Name: "numeric-sort-duplicates-delete", Snapshots: []string{`{"lastUpdateId":99,"bids":[["2","1"],["10","2"],["10.0","3"],["9","4"],["2","0"]],"asks":[["100","2"],["11","3"],["20","4"]]}`}, Events: []string{
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000000,"U":100,"u":100}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000001,"U":101,"u":101,"b":[["10.00","0"],["2.0","5"],["9","-1"]],"a":[["11","0"],["12","2"],["12.0","7"]]}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000002,"U":102,"u":102,"b":[],"a":[["12","0"],["20","0"],["100","0"]]}`,
 		}, Eligible: []bool{true, true, false}},
-		{Name: "rounding-rescale-invalid", Snapshots: []string{`{"lastUpdateId":200,"bids":[["0.0000000049","1"],["0.000000005","2"],["-0.000000005","3"],["1.234567895","4"],["92233720368.54775807","5"],["92233720368.54775808","6"],["1000000000000","1000000000000"],["1e100","1"],["bad","2"],["3","bad"],["4"],[],["5","6","ignored"]],"asks":[["2000000000000","1"]]}`}, Eligible: []bool{false}},
+		{Name: "rounding-rescale-invalid", Snapshots: []string{`{"lastUpdateId":200,"bids":[["0.0000000049","1"],["0.000000005","2"],["-0.000000005","3"],["1.234567895","4"],["92233720368.54775807","5"],["92233720368.54775808","6"],["1000000000000","1000000000000"],["1e100","1"],["bad","2"],["3","bad"],["4"],[],["5","6","ignored"]],"asks":[["2000000000000","1"]]}`}, Events: []string{`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000000,"U":201,"u":201}`}, Eligible: []bool{false}},
 		{Name: "stale-straddle-gap-reanchor", Snapshots: []string{
-			`{"lastUpdateId":100,"bids":[["10","1"]],"asks":[["11","1"]]}`,
-			`{"lastUpdateId":110,"bids":[["20","1"]],"asks":[["21","1"]]}`,
+			`{"lastUpdateId":99,"bids":[["10","1"]],"asks":[["11","1"]]}`,
+			`{"lastUpdateId":109,"bids":[["20","1"]],"asks":[["21","1"]]}`,
 		}, Events: []string{
-			`{"E":1700000000001,"U":90,"u":99,"b":[["99","1"]]}`,
-			`{"E":1700000000002,"U":99,"u":102,"b":[["10","2"]]}`,
-			`{"E":1700000000003,"U":104,"u":105,"b":[["98","1"]]}`,
-			`{"E":1700000000004,"U":109,"u":111,"a":[["21","2"]]}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000001,"U":90,"u":99,"b":[["99","1"]]}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000002,"U":98,"u":100}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000002,"U":101,"u":102,"b":[["10","2"]]}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000003,"U":104,"u":105,"b":[["98","1"]]}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000004,"U":109,"u":110}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000005,"U":111,"u":111,"a":[["21","2"]]}`,
 		}, Eligible: []bool{true, true, true, true}},
-		{Name: "locked-crossed-nonpositive", Snapshots: []string{`{"lastUpdateId":300,"bids":[["10","1"]],"asks":[["10","1"]]}`}, Events: []string{
-			`{"E":1700000000001,"U":301,"u":301,"b":[["11","1"]]}`,
-			`{"E":1700000000002,"U":302,"u":302,"b":[["11","0"],["10","0"],["0","1"]]}`,
+		{Name: "locked-crossed-nonpositive", Snapshots: []string{`{"lastUpdateId":299,"bids":[["10","1"]],"asks":[["10","1"]]}`}, Events: []string{
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000000,"U":300,"u":300}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000001,"U":301,"u":301,"b":[["11","1"]]}`,
+			`{"e":"depthUpdate","s":"BTCUSDT","E":1700000000002,"U":302,"u":302,"b":[["11","0"],["10","0"],["0","1"]]}`,
 		}, Eligible: []bool{false, false, false}},
 	}
 }
@@ -118,7 +121,6 @@ func evaluate(f *fixture) error {
 		}
 		s := step{QuoteEligible: eligible}
 		if u.Snapshot != nil {
-			u.Snapshot.EventTime = timestamppb.New(time.UnixMilli(snapshotMS))
 			s.Kind = "snapshot"
 			s.Wire, err = wire(u.Snapshot)
 			if err == nil {

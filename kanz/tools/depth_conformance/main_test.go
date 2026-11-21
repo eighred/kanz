@@ -72,8 +72,12 @@ func TestCorpusDeterministicAndBookSemantics(t *testing.T) {
 	}
 	sequence := c.Cases[2].Steps
 	for i, want := range []uint64{100, 102, 110, 111} {
-		if got := decodeBook(t, sequence[i].BookWire).LastUpdateSequence; got != want {
+		book := decodeBook(t, sequence[i].BookWire)
+		if got := book.LastUpdateSequence; got != want {
 			t.Fatalf("sequence[%d]=%d, want%d", i, got, want)
+		}
+		if wantMS := []int64{1700000000002, 1700000000002, 1700000000004, 1700000000005}[i]; book.EventTime.AsTime().UnixMilli() != wantMS {
+			t.Fatalf("step %d did not preserve exchange time %d", i, wantMS)
 		}
 	}
 }
