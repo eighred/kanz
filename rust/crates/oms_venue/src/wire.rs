@@ -367,6 +367,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "ReadDemoSpotFunds",
                 "Execute",
                 "CancelOrder",
                 "Describe",
@@ -374,5 +375,18 @@ mod tests {
                 "QueryOrder"
             ]
         );
+        let funds = service
+            .methods()
+            .find(|method| method.name() == "ReadDemoSpotFunds")
+            .unwrap();
+        assert_eq!(
+            funds.input().full_name(),
+            "venue.v1.ReadDemoSpotFundsRequest"
+        );
+        assert_eq!(
+            funds.output().full_name(),
+            "venue.v1.ReadDemoSpotFundsResponse"
+        );
+        assert!(!funds.is_client_streaming() && !funds.is_server_streaming());
     }
 }
