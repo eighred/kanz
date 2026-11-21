@@ -28,7 +28,7 @@ available balances, fees, order limits and inventory restoration cost for each
 new capture. The export records the tenant, portfolio, configured references and
 scenario inputs at that cutoff.
 
-**Capture books and demo balances** reads private funds through the portfolio’s
+**Capture books, demo balances and fees** reads private funds through the portfolio’s
 OMS account bindings before capturing the market books. The gateway and the
 OMS use authenticated service identities. The Binance Spot Testnet adapter
 reads the selected assets’ free balances. The OKX Demo adapter checks the
@@ -36,7 +36,13 @@ account is in spot mode and requests cash-mode available buy and sell amounts
 for the selected symbol. A confirmed zero remains visible. Missing, stale or
 conflicting observations leave the affected venue’s fields open for assumptions.
 The account, routing MIC, units, quantities and local request/receipt times
-travel with the saved inputs. Fees and inventory restoration costs are separate.
+travel with the saved inputs. Each venue has separate buy and sell taker rates
+and fee currencies. The signed Binance commission schedule covers the symbol's
+standard, tax and special rates. When a BNB discount could change settlement,
+the fee fields remain open. The OKX capture matches the account's spot instrument
+group and fee mode. Its rates exclude zero-fee campaigns, so the operator can
+select them as explicit scenario assumptions. A failed fee lookup preserves the
+balance observation. Older scenario files retain their shared fee on both sides.
 
 ## Development
 

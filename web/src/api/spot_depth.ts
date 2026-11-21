@@ -15,6 +15,15 @@ export interface VenueInput {
     available_quote: string
     source: 'Binance Spot Testnet account' | 'OKX Demo spot cash capacity'
   }
+  feeObservation?: {
+    request_started_at: string
+    received_at: string
+    buyBps: string
+    buyCurrency: string
+    sellBps: string
+    sellCurrency: string
+    source: 'Binance account commission' | 'OKX account fee group'
+  }
   symbol: string
   observed: string
   received: string
@@ -31,6 +40,9 @@ export interface VenueInput {
   minNotional: string
   feeBps: string
   feeCurrency: string
+  // Historical files used the buy fields for both sides.
+  sellFeeBps?: string
+  sellFeeCurrency?: string
 }
 export interface DepthInput {
   observation?: {
@@ -113,6 +125,8 @@ export function isDepthInput(v: unknown): v is DepthInput {
           'feeBps',
           'feeCurrency',
         ]) &&
+        ((x.sellFeeBps === undefined && x.sellFeeCurrency === undefined) ||
+          texts(x, ['sellFeeBps', 'sellFeeCurrency'])) &&
         isTimestamp(x.observed) &&
         isTimestamp(x.received) &&
         /^\d{1,20}$/.test(String(x.sequence)) &&
@@ -120,6 +134,25 @@ export function isDepthInput(v: unknown): v is DepthInput {
         levels(x.asks),
     )
   )
+}
+
+export function separateSellFees(venues: VenueInput[]) {
+  for (const v of venues) {
+    v.sellFeeBps ??= v.feeBps
+    v.sellFeeCurrency ??= v.feeCurrency
+  }
+}
+
+function feeRequest(v: VenueInput) {
+  const sellBps = v.sellFeeBps ?? v.feeBps
+  const sellCurrency = v.sellFeeCurrency ?? v.feeCurrency
+  // Preserve the original protobuf fingerprint when replaying a symmetric schedule.
+  if (sellBps === v.feeBps && sellCurrency === v.feeCurrency)
+    return { fee_bps: decimal(v.feeBps), fee_currency: v.feeCurrency }
+  return {
+    buy_taker_fee: { bps: decimal(v.feeBps), currency: v.feeCurrency },
+    sell_taker_fee: { bps: decimal(sellBps), currency: sellCurrency },
+  }
 }
 
 export function spotRequest(s: DepthInput) {
@@ -144,8 +177,7 @@ export function spotRequest(s: DepthInput) {
         quantity_step: decimal(v.step),
         minimum_quantity: decimal(v.minQty),
         minimum_notional: decimal(v.minNotional),
-        fee_bps: decimal(v.feeBps),
-        fee_currency: v.feeCurrency,
+        ...feeRequest(v),
         book: {
           mic: v.venue,
           instrument_id: s.instrument,
@@ -233,7 +265,7 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput): boolean 
     (
       [
         ['buy_fee', buy.feeCurrency],
-        ['sell_fee', sell.feeCurrency],
+        ['sell_fee', sell.sellFeeCurrency ?? sell.feeCurrency],
       ] as const
     ).every(([key, currency]) => {
       const fee = v[key]
@@ -314,7 +346,7 @@ export async function captureDepth(
   // Private reads must already be known when the risk service freezes the books.
   const funds = includeDemoFunds
     ? await Promise.allSettled(['BINANCE', 'OKX'].map((mic) =>
-        api.get<unknown>(path + '/demo-spot-funds/' + mic + '?instrument=' + encodeURIComponent(instrument), { signal }),
+        api.get<unknown>(path + '/demo-spot-funds/' + mic + '?instrument=' + encodeURIComponent(instrument) + '&taker_fees=true', { signal }),
       ))
     : []
   const raw = await api.post<unknown>(
@@ -389,6 +421,8 @@ export async function captureDepth(
       quoteBalance: '',
       feeBps: '',
       feeCurrency: '',
+      sellFeeBps: '',
+      sellFeeCurrency: '',
       step: '',
       minQty: '',
       minNotional: '',
@@ -445,4 +479,34 @@ function applyCapturedFunds(v: VenueInput, raw: unknown, portfolio: string, tena
     available_base: base, available_quote: quote,
     source: v.venue === 'BINANCE' ? 'Binance Spot Testnet account' : 'OKX Demo spot cash capacity',
   }
+  const schedule = f.taker_schedule
+  if (!record(schedule) || !isTimestamp(schedule.request_started_at) || !isTimestamp(schedule.received_at)) return
+  const feeStart = timestampNanos(schedule.request_started_at), feeEnd = timestampNanos(schedule.received_at)
+  if (feeStart < end || feeEnd < feeStart || feeEnd > at) return
+  const side = (raw: unknown) => {
+    if (!record(raw) || typeof raw.currency !== 'string' ||
+        (raw.currency !== f.base_currency && raw.currency !== f.quote_currency) || !wireAmount(raw.bps)) return
+    const bps = formatDecimal(raw.bps as Decimal)
+    if (bps === null || bps.replace('-', '').split('.')[0]!.length > 4) return
+    return { bps, currency: raw.currency }
+  }
+  const buy = side(schedule.buy), sell = side(schedule.sell)
+  if (!buy || !sell) return
+  v.feeObservation = {
+    request_started_at: schedule.request_started_at, received_at: schedule.received_at,
+    buyBps: buy.bps, buyCurrency: buy.currency, sellBps: sell.bps, sellCurrency: sell.currency,
+    source: v.venue === 'BINANCE' ? 'Binance account commission' : 'OKX account fee group',
+  }
+  // OKX omits zero-fee campaigns from this API. Its group rate may be
+  // selected as an assumption, never automatically as the applicable fee.
+  if (v.venue === 'BINANCE') useScheduledFees(v)
+}
+
+export function useScheduledFees(v: VenueInput) {
+  const fees = v.feeObservation
+  if (!fees) return
+  v.feeBps = fees.buyBps
+  v.feeCurrency = fees.buyCurrency
+  v.sellFeeBps = fees.sellBps
+  v.sellFeeCurrency = fees.sellCurrency
 }

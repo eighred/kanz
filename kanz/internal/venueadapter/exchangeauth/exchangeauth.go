@@ -76,6 +76,7 @@ func Venues() []string {
 type AccountInfo struct {
 	ID           string
 	AccountLevel string
+	SpotFeeType  string
 }
 
 // Account asks the venue which exchange account cred belongs to. An exchange

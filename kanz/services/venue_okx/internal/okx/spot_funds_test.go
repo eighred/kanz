@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/venueadapter/server"
@@ -21,7 +22,9 @@ func TestDemoSpotFundsUsesPairCashCapacityAndVerifiesMode(t *testing.T) {
 	v.account = "portfolio-okx"
 	v.symbols = StaticSymbolMap{"BTC-USDT": "BTC-USDT"}
 	v.rest.baseURL = "https://www.okx.com"
-	config := `{"code":"0","data":[{"uid":"42","acctLv":"1"}]}`
+	config := `{"code":"0","data":[{"uid":"42","acctLv":"1","feeType":"0"}]}`
+	const rates = `{"code":"0","data":[{"instType":"SPOT","taker":"-0.9","feeGroup":[{"groupId":"2","taker":"-0.5"},{"groupId":"1","taker":"-0.00075"}]}]}`
+	fees := rates
 	balances := `{"code":"0","data":[{"instId":"BTC-USDT","availBuy":"325.5","availSell":"0.013","cashBal":"99999"}]}`
 	balanceCalls := 0
 	v.rest.httpc.Transport = diagnosticRoundTrip(func(r *http.Request) (*http.Response, error) {
@@ -34,6 +37,14 @@ func TestDemoSpotFundsUsesPairCashCapacityAndVerifiesMode(t *testing.T) {
 		payload := config
 		switch r.URL.Path {
 		case "/api/v5/account/config":
+		case "/api/v5/account/instruments", "/api/v5/account/trade-fee":
+			if r.URL.RawQuery != "instId=BTC-USDT&instType=SPOT" {
+				t.Fatal("unexpected fee scope")
+			}
+			payload = fees
+			if r.URL.Path == "/api/v5/account/instruments" {
+				payload = `{"code":"0","data":[{"instType":"SPOT","instId":"BTC-USDT","groupId":"1","state":"live","baseCcy":"BTC","quoteCcy":"USDT"}]}`
+			}
 		case "/api/v5/account/max-avail-size":
 			if r.URL.RawQuery != "instId=BTC-USDT&tdMode=cash" {
 				t.Fatal("unexpected pair or trading mode")
@@ -54,6 +65,25 @@ func TestDemoSpotFundsUsesPairCashCapacityAndVerifiesMode(t *testing.T) {
 	if err != nil || got.GetAvailableBase().GetCoefficient() != 13 || got.AvailableBase.Exponent != -3 ||
 		got.GetAvailableQuote().GetCoefficient() != 3255 || got.AvailableQuote.Exponent != -1 {
 		t.Fatalf("cash capacity in wrong units: %v, %v", got, err)
+	}
+	req.IncludeTakerSchedule = true
+	for _, currency := range []string{"BTC", "USDT"} {
+		got, err = read()
+		fee := got.GetTakerSchedule()
+		want, _ := dec.ParseProtoExact("7.5")
+		if err != nil || fee.GetBuy().GetCurrency() != currency || fee.GetSell().GetCurrency() != "USDT" ||
+			dec.Cmp(fee.Buy.Bps, want) != 0 || dec.Cmp(fee.Sell.Bps, want) != 0 {
+			t.Fatalf("wrong OKX group, fee sign or currency: %v, %v", got, err)
+		}
+		config = strings.Replace(config, `"feeType":"0"`, `"feeType":"1"`, 1)
+	}
+	for _, bad := range []string{strings.Replace(rates, `"groupId":"2"`, `"groupId":"1"`, 1),
+		strings.Replace(rates, `"groupId":"1"`, `"groupId":"3"`, 1), strings.Replace(rates, "-0.00075", "", 1)} {
+		fees = bad
+		got, err = read()
+		if err != nil || got.GetAvailableBase() == nil || got.TakerSchedule != nil {
+			t.Fatal("ambiguous group used or funds discarded")
+		}
 	}
 	for _, bad := range []string{
 		strings.Replace(balances, "BTC-USDT", "ETH-USDT", 1),

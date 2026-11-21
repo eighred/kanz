@@ -32,6 +32,7 @@ package venue.v1;
 
 import "order/v1/order.proto";
 import "common/v1/decimal.proto";
+import "common/v1/money.proto";
 import "google/protobuf/timestamp.proto";
 import "order/v1/order_events.proto";
 
@@ -149,6 +150,7 @@ message ReadDemoSpotFundsRequest {
   string venue_account_id = 2;
   string mic = 3;
   string instrument_id = 4;
+  bool include_taker_schedule = 5;
 }
 
 message ReadDemoSpotFundsResponse {
@@ -164,6 +166,15 @@ message ReadDemoSpotFundsResponse {
   // Adapter clock bounding the signed reads. Neither is a venue update time.
   google.protobuf.Timestamp request_started_at = 10;
   google.protobuf.Timestamp received_at = 11;
+  // Optional signed account schedule, observed after verifying spendable funds.
+  DemoSpotTakerSchedule taker_schedule = 12;
+}
+
+message DemoSpotTakerSchedule {
+  common.v1.SpotTakerFee buy = 1;
+  common.v1.SpotTakerFee sell = 2;
+  google.protobuf.Timestamp request_started_at = 3;
+  google.protobuf.Timestamp received_at = 4;
 }
 
 message DescribeRequest {}
@@ -479,6 +490,7 @@ message ReadPortfolioDemoSpotFundsRequest {
   string portfolio_id = 2;
   string market_venue = 3;
   string instrument_id = 4;
+  bool include_taker_schedule = 5;
 }
 
 message ReadPortfolioDemoSpotFundsResponse {

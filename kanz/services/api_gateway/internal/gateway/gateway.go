@@ -375,6 +375,7 @@ func (h *Handler) demoSpotFunds(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.instruments.ReadPortfolioDemoSpotFunds(r.Context(), &venuepb.ReadPortfolioDemoSpotFundsRequest{
 		TenantId: tenant, PortfolioId: portfolio, MarketVenue: mic, InstrumentId: instrument,
+		IncludeTakerSchedule: r.URL.Query().Get("taker_fees") == "true",
 	})
 	if err == nil && (resp.GetPortfolioId() != portfolio || resp.GetFunds().GetOwnerTenant() != tenant ||
 		resp.GetMarketVenue() != mic || resp.GetFunds().GetMic() == "" || resp.GetFunds().GetInstrumentId() != instrument) {

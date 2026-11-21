@@ -162,7 +162,10 @@ func spotWalk(levels []*marketpb.PriceLevel, wanted, budget *big.Rat) (quantity,
 	return
 }
 
-type spotTerms struct{ step, minQty, minCash, rate, baseFactor, quoteFactor, fundingFactor *big.Rat }
+type spotTerms struct {
+	step, minQty, minCash, rate, baseFactor, quoteFactor, fundingFactor *big.Rat
+	feeCurrency                                                         string
+}
 
 func venueTerms(v *querypb.SpotDepthVenue, pair instrument.Pair, buy bool) (spotTerms, error) {
 	t := spotTerms{}
@@ -178,17 +181,29 @@ func venueTerms(v *querypb.SpotDepthVenue, pair instrument.Pair, buy bool) (spot
 	if !dec.IsPositive(v.QuantityStep) {
 		return t, errors.New("quantity step must be positive")
 	}
-	if v.FeeBps == nil || (v.FeeCurrency != pair.Base && v.FeeCurrency != pair.Quote) {
+	bps, currency := v.FeeBps, v.FeeCurrency
+	if v.BuyTakerFee != nil || v.SellTakerFee != nil {
+		if bps != nil || currency != "" {
+			return t, fmt.Errorf("%s has conflicting shared and side-specific fee inputs", v.Book.Mic)
+		}
+		fee := v.SellTakerFee
+		if buy {
+			fee = v.BuyTakerFee
+		}
+		bps, currency = fee.GetBps(), fee.GetCurrency()
+	}
+	if bps == nil || (currency != pair.Base && currency != pair.Quote) {
 		return t, fmt.Errorf("%s fee amount or native denomination unavailable", v.Book.Mic)
 	}
 	t.step, t.minQty, t.minCash = dec.FromProto(v.QuantityStep), dec.FromProto(v.MinimumQuantity), dec.FromProto(v.MinimumNotional)
-	t.rate = spotDiv(dec.FromProto(v.FeeBps), big.NewRat(10000, 1))
+	t.feeCurrency = currency
+	t.rate = spotDiv(dec.FromProto(bps), big.NewRat(10000, 1))
 	one := big.NewRat(1, 1)
 	if new(big.Rat).Abs(t.rate).Cmp(one) >= 0 {
 		return t, errors.New("absolute fee must be below 10000 basis points")
 	}
 	t.baseFactor, t.quoteFactor = one, one
-	if v.FeeCurrency == pair.Base {
+	if currency == pair.Base {
 		if buy {
 			t.baseFactor = spotSub(one, t.rate)
 		} else {
@@ -273,14 +288,14 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	e := spotEncoder{}
 	result.BuyQuantity, result.SellQuantity, result.Shortfall = e.value(buyQty), e.value(sellQty), e.value(spotSub(want, buyQty))
 	result.BuyNotional, result.SellNotional = e.value(cost), e.value(proceeds)
-	fee := func(venue *querypb.SpotDepthVenue, rate, quantity, notional *big.Rat) *commonpb.Money {
+	fee := func(terms spotTerms, quantity, notional *big.Rat) *commonpb.Money {
 		basis := notional
-		if venue.FeeCurrency == pair.Base {
+		if terms.feeCurrency == pair.Base {
 			basis = quantity
 		}
-		return &commonpb.Money{Amount: e.value(spotMul(basis, rate)), CurrencyCode: venue.FeeCurrency}
+		return &commonpb.Money{Amount: e.value(spotMul(basis, terms.rate)), CurrencyCode: terms.feeCurrency}
 	}
-	result.BuyFee, result.SellFee = fee(buy, b.rate, buyQty, cost), fee(sell, v.rate, sellQty, proceeds)
+	result.BuyFee, result.SellFee = fee(b, buyQty, cost), fee(v, sellQty, proceeds)
 	result.CashChange, result.ResidualBase = e.value(cash), e.value(residual)
 	result.BuyVenueChange = &querypb.SpotVenueChange{BaseChange: e.value(acquired), QuoteChange: e.value(new(big.Rat).Neg(buyCash))}
 	result.SellVenueChange = &querypb.SpotVenueChange{BaseChange: e.value(new(big.Rat).Neg(sold)), QuoteChange: e.value(sellCash)}

@@ -29,14 +29,8 @@ import "time"
 // the one path that must never be starved. The defect is that two independent
 // remote budgets were drawn from one local bucket.
 //
-// # Why only fills-history is split out, and why that is not half a fix
-//
-// THE ONLY NUMBERS HERE ARE ONES THIS REPOSITORY ALREADY HAD. /trade/order's
-// 60-per-2s and fills-history's 10-per-2s are both stated in okx_rest.go, the
-// second as the basis for the weight of 6. Every other endpoint's real OKX limit
-// is NOT established anywhere in this tree, and #933 says so explicitly:
-// confirming which endpoints share a limit group is read-only API documentation
-// work that has not been done.
+// Fills history, account instruments and trade fees each have a documented
+// budget. The latter two are used by the portfolio's read-only fee capture.
 //
 // So the remaining endpoints keep sharing one bucket, at exactly the budget and
 // window they have today. That is deliberate and it is the conservative
@@ -59,7 +53,9 @@ type okxBuckets struct {
 	// documented 10-per-2s limit. Calls against it cost 1, not 6: the 6 existed
 	// only to express a 10/2s endpoint in units of a 60/2s bucket, and with a
 	// bucket that is actually 10/2s the translation is the identity.
-	fillsHistory *WeightBucket
+	fillsHistory    *WeightBucket
+	spotInstruments *WeightBucket
+	tradeFees       *WeightBucket
 }
 
 // okxRateFamily names an OKX rate-limit budget. Every REST call declares one.
@@ -74,16 +70,12 @@ const (
 	// familyFillsHistory is GET /api/v5/trade/fills-history: 10 requests per 2
 	// seconds, stated in okx_rest.go, and the reason a fills-history call used to cost 6.
 	familyFillsHistory
+	familySpotInstruments
+	familyTradeFees
 )
 
 // okxFillsHistoryPerWindow and okxFillsHistoryWindow are OKX's documented limit
 // for GET /api/v5/trade/fills-history.
-//
-// THIS IS THE ONE NEW NUMBER IN THIS FILE and it is not new information: it is
-// the limit okx_rest.go already named when it justified charging that endpoint 6
-// units of a 60-unit bucket ("fills-history's own limit is 10 per 2 seconds — six
-// times tighter"). Expressing it as a bucket rather than as a ratio is the whole
-// change.
 const (
 	okxFillsHistoryPerWindow = 10
 	okxFillsHistoryWindow    = 2 * time.Second
@@ -107,6 +99,9 @@ func newOKXBuckets(shared *WeightBucket, now func() time.Time) *okxBuckets {
 	return &okxBuckets{
 		shared:       shared,
 		fillsHistory: NewWeightBucket(okxFillsHistoryPerWindow, okxFillsHistoryWindow, now),
+		// OKX Trading Account: Get instruments (user + type), Get fee rates (user).
+		spotInstruments: NewWeightBucket(20, 2*time.Second, now),
+		tradeFees:       NewWeightBucket(5, 2*time.Second, now),
 	}
 }
 
@@ -118,8 +113,13 @@ func newOKXBuckets(shared *WeightBucket, now func() time.Time) *okxBuckets {
 // do. Falling to shared makes an unnamed endpoint behave exactly as it did before
 // any of this existed.
 func (b *okxBuckets) bucketFor(f okxRateFamily) *WeightBucket {
-	if f == familyFillsHistory {
+	switch f {
+	case familyFillsHistory:
 		return b.fillsHistory
+	case familySpotInstruments:
+		return b.spotInstruments
+	case familyTradeFees:
+		return b.tradeFees
 	}
 	return b.shared
 }

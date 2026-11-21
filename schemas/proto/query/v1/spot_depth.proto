@@ -25,6 +25,10 @@ message SpotDepthVenue {
   string base_asset_ref = 11;
   string quote_asset_ref = 12;
   string product_type = 13;
+  // When either side is specified the legacy shared fee fields must be empty.
+  // An absent side then has unknown terms, even when the other side is free.
+  common.v1.SpotTakerFee buy_taker_fee = 14;
+  common.v1.SpotTakerFee sell_taker_fee = 15;
 }
 
 message SpotDepthScenario {

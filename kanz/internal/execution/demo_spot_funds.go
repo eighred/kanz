@@ -2,17 +2,33 @@ package execution
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/instrument"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
+// ValidSpotTakerFees admits only rates the spot scenario can fund in the two
+// traded assets. A missing rate cannot be treated as an explicitly free leg.
+func ValidSpotTakerFees(schedule *venuepb.DemoSpotTakerSchedule, pair instrument.Pair) bool {
+	for _, fee := range []*commonpb.SpotTakerFee{schedule.GetBuy(), schedule.GetSell()} {
+		if fee.GetBps() == nil || !dec.InDomain(fee.Bps) ||
+			(fee.Currency != pair.Base && fee.Currency != pair.Quote) ||
+			new(big.Rat).Abs(dec.FromProto(fee.Bps)).Cmp(big.NewRat(10000, 1)) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadBoundDemoSpotFunds addresses the exact adapter selected by the OMS binding.
-func ReadBoundDemoSpotFunds(ctx context.Context, venues []Venue, tenant, portfolio, market, id string, bindings *AccountBindings) (*venuepb.ReadDemoSpotFundsResponse, error) {
+func ReadBoundDemoSpotFunds(ctx context.Context, venues []Venue, req *venuepb.ReadPortfolioDemoSpotFundsRequest, bindings *AccountBindings) (*venuepb.ReadDemoSpotFundsResponse, error) {
+	tenant, portfolio, market, id := req.GetTenantId(), req.GetPortfolioId(), req.GetMarketVenue(), req.GetInstrumentId()
 	binding, bound := bindings.SpotAccount(tenant, portfolio, market)
 	account, mic := binding.Account, binding.MIC
 	pair, ok := instrument.ParseID(id)
@@ -31,6 +47,7 @@ func ReadBoundDemoSpotFunds(ctx context.Context, venues []Venue, tenant, portfol
 		defer cancel()
 		funds, err := adapter.client.ReadDemoSpotFunds(readCtx, &venuepb.ReadDemoSpotFundsRequest{
 			TenantId: tenant, VenueAccountId: account, Mic: mic, InstrumentId: id,
+			IncludeTakerSchedule: req.IncludeTakerSchedule,
 		})
 		if err != nil {
 			return nil, status.Error(codes.Unavailable, "demo venue funds unavailable")
@@ -51,6 +68,13 @@ func ReadBoundDemoSpotFunds(ctx context.Context, venues []Venue, tenant, portfol
 		start, end, now := funds.RequestStartedAt.AsTime(), funds.ReceivedAt.AsTime(), time.Now()
 		if end.Before(start) || end.After(now) || now.Sub(start) > 6*time.Second {
 			return nil, status.Error(codes.FailedPrecondition, "demo venue observation outside capture window")
+		}
+		schedule := funds.TakerSchedule
+		if schedule != nil && (!req.IncludeTakerSchedule || !ValidSpotTakerFees(schedule, pair) ||
+			schedule.RequestStartedAt.CheckValid() != nil || schedule.ReceivedAt.CheckValid() != nil ||
+			schedule.RequestStartedAt.AsTime().Before(end) || schedule.ReceivedAt.AsTime().Before(schedule.RequestStartedAt.AsTime()) ||
+			schedule.ReceivedAt.AsTime().After(now)) {
+			funds.TakerSchedule = nil
 		}
 		return funds, nil
 	}

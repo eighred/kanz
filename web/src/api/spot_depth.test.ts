@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './client'
 import example from './spot_depth_example.json'
-import { captureDepth, isDepthInput, priceDepth, spotRequest } from './spot_depth'
+import { captureDepth, isDepthInput, priceDepth, separateSellFees, spotRequest, type DepthInput } from './spot_depth'
 
 function fixture() {
   const input = structuredClone(example)
@@ -57,6 +57,20 @@ describe('operator spot depth', () => {
     expect(wire.rebalance_cost).toEqual({ coefficient: '0', exponent: 0 })
     input.quantity = '9223372036854775808'
     expect(() => spotRequest(input)).toThrow('exact decimal range')
+  })
+
+  it('replays old fee inputs and keeps an absent sell fee distinct from a free buy', () => {
+    const input: DepthInput = fixture()
+    const old = JSON.stringify(spotRequest(input))
+    separateSellFees(input.venues)
+    expect(JSON.stringify(spotRequest(input))).toBe(old)
+    Object.assign(input.venues[0]!, { feeBps: '0', sellFeeBps: '', sellFeeCurrency: 'USDT' })
+    const terms = spotRequest(input).spot_depth.venues[0]!
+    expect(terms.fee_bps).toBeUndefined()
+    expect(terms.buy_taker_fee).toEqual({ bps: { coefficient: '0', exponent: 0 }, currency: 'BTC' })
+    expect(terms.sell_taker_fee).toEqual({ bps: undefined, currency: 'USDT' })
+    delete input.venues[0]!.sellFeeCurrency
+    expect(isDepthInput(input)).toBe(false)
   })
 
   it('binds the reply to the portfolio, tenant and exact observation cutoff', async () => {

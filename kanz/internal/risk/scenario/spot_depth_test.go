@@ -118,6 +118,55 @@ func TestSpotDepthFundingMinimumsAndCoverage(t *testing.T) {
 	}
 }
 
+func TestSpotDepthDirectionalTakerFees(t *testing.T) {
+	s := depthExample()
+	n := func(c int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c} }
+	fee := func(bps int64, currency string) *commonpb.SpotTakerFee {
+		return &commonpb.SpotTakerFee{Bps: n(bps), Currency: currency}
+	}
+	a, b := s.Venues[0], s.Venues[1]
+	for _, v := range s.Venues {
+		v.FeeBps, v.FeeCurrency = nil, ""
+		v.Book.Bids, v.Book.Asks = v.Book.Bids[:1], v.Book.Asks[:1]
+	}
+	a.Book.Bids[0].Price, a.Book.Asks[0].Price = n(9999), n(10000)
+	b.Book.Bids[0].Price, b.Book.Asks[0].Price = n(10010), n(10011)
+	a.BuyTakerFee, a.SellTakerFee = fee(0, "BTC"), fee(-1, "USDT")
+	b.BuyTakerFee, b.SellTakerFee = fee(5, "BTC"), fee(20, "USDT")
+	s.RebalanceCost = n(0)
+	evaluate := func() []*querypb.SpotDepthDirection {
+		t.Helper()
+		out, err := EvaluateSpotDepth(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Directions
+	}
+	d := evaluate()
+	// One BTC costs 10000, sells for 10010 and incurs 20.02 USDT on sale.
+	assertDepthAmount(t, d[0].GrossQuoteCashChange, "10")
+	assertDepthAmount(t, d[0].MarkedNetAfterRebalance, "-10.02")
+	// The reverse buy delivers 0.9995 BTC, earning 9994.0005 plus a
+	// 0.99940005 USDT rebate on sale, against the 10011 USDT purchase.
+	assertDepthAmount(t, d[1].BuyFee.Amount, "0.0005")
+	assertDepthAmount(t, d[1].SellFee.Amount, "-0.99940005")
+	assertDepthAmount(t, d[1].ResidualBase, "0")
+	assertDepthAmount(t, d[1].MarkedNetAfterRebalance, "-16.00009995")
+	if d[1].BuyFee.CurrencyCode != "BTC" || d[1].SellFee.CurrencyCode != "USDT" {
+		t.Fatal(d[1])
+	}
+	b.SellTakerFee = nil
+	d = evaluate()
+	if d[0].Status != "UNKNOWN" || d[0].MarkedNetAfterRebalance != nil || d[1].Status != "SUPPORTED" {
+		t.Fatal(d)
+	}
+	b.FeeBps = n(0)
+	d = evaluate()
+	if d[0].Status != "UNKNOWN" || d[1].Status != "UNKNOWN" {
+		t.Fatal("conflicting shared and side-specific terms accepted")
+	}
+}
+
 func TestSpotDepthRefusesInvalidReferences(t *testing.T) {
 	for name, change := range map[string]func(*querypb.SpotDepthScenario){
 		"stale": func(s *querypb.SpotDepthScenario) { s.AsOf = timestamppb.New(s.AsOf.AsTime().Add(3 * time.Second)) },

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSession } from '../stores/session'
-import { amount, captureDepth, isDepthInput, priceDepth, type DepthInput } from '../api/spot_depth'
+import { amount, captureDepth, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
 import example from '../api/spot_depth_example.json'
 
 const route = useRoute(),
@@ -43,6 +43,7 @@ function loadExample() {
   reset()
   if (isDepthInput(example)) {
     inputs.value = structuredClone(example)
+    separateSellFees(inputs.value.venues)
     source.value = 'Synthetic worked example'
   }
 }
@@ -100,7 +101,11 @@ async function loadFile(event: Event) {
     if (!isDepthInput(parsed)) throw new Error('Invalid scenario file. Use the example inputs as a template.')
     // Imported amounts are editable assumptions in this session. A subsequent
     // export must not attribute an edited value to a private venue read.
-    for (const v of parsed.venues) delete v.fundsObservation
+    for (const v of parsed.venues) {
+      delete v.fundsObservation
+      delete v.feeObservation
+    }
+    separateSellFees(parsed.venues)
     inputs.value = parsed
     source.value = 'Imported scenario · ' + file.name
   } catch (e) {
@@ -138,14 +143,14 @@ async function calculate() {
   </p>
   <p>
     Price both trading directions against dated books. Capture available demo balances or enter a balance
-    assumption. Fees and order limits are scenario inputs.
+    assumption. Compare taker fees for each side and enter the venue order limits.
   </p>
   <div class="actions">
     <label>Spot instrument <input v-model="instrument" maxlength="128" :disabled="busy" /></label>
     <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(false)">
       Capture current books
     </button>
-    <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(true)">Capture books and demo balances</button>
+    <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(true)">Capture books, demo balances and fees</button>
     <button type="button" @click="loadExample">Load synthetic example</button>
     <label>Import scenario JSON <input type="file" accept=".json,application/json" @change="loadFile" /></label>
   </div>
@@ -172,8 +177,10 @@ async function calculate() {
           <label v-else>Scenario account <input v-model="v.account" required /></label>
           <label>Base available <input v-model="v.baseBalance" :readonly="liveCapture && !!v.fundsObservation" /></label>
           <label>Quote available <input v-model="v.quoteBalance" :readonly="liveCapture && !!v.fundsObservation" /></label>
-          <label>Fee (bps) <input v-model="v.feeBps" /></label>
-          <label>Fee currency <input v-model="v.feeCurrency" /></label>
+          <label>Buy taker fee (bps) <input v-model="v.feeBps" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
+          <label>Buy fee currency <input v-model="v.feeCurrency" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
+          <label>Sell taker fee (bps) <input v-model="v.sellFeeBps" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
+          <label>Sell fee currency <input v-model="v.sellFeeCurrency" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
           <label>Quantity step <input v-model="v.step" /></label>
           <label>Minimum quantity <input v-model="v.minQty" /></label>
           <label>Minimum notional <input v-model="v.minNotional" /></label>
@@ -182,6 +189,15 @@ async function calculate() {
           {{ v.fundsObservation.source }} · Read {{ v.fundsObservation.request_started_at }} to {{ v.fundsObservation.received_at }}
         </p>
         <p v-else-if="requestedDemoFunds" class="muted">Demo balances unavailable for this capture. Entered balances are assumptions.</p>
+        <p v-if="liveCapture && v.feeObservation" class="muted">
+          {{ v.feeObservation.source }} · Read {{ v.feeObservation.request_started_at }} to {{ v.feeObservation.received_at }}.
+          Buy {{ v.feeObservation.buyBps }} bps in {{ v.feeObservation.buyCurrency }} · Sell {{ v.feeObservation.sellBps }} bps in {{ v.feeObservation.sellCurrency }}.
+          <template v-if="v.venue === 'OKX'">
+            Zero-fee promotions require separate confirmation.
+            <button type="button" @click="useScheduledFees(v)">Use group fees as scenario assumptions</button>
+          </template>
+        </p>
+        <p v-else class="muted">Fee inputs are scenario assumptions.</p>
         <p v-if="liveCapture && !v.portfolioAccount" class="muted">No portfolio account reference was available in this capture.</p>
       </fieldset>
     </div>

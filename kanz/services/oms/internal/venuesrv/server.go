@@ -67,7 +67,7 @@ func (s *Server) ReadPortfolioDemoSpotFunds(ctx context.Context, req *venuepb.Re
 		(req.GetMarketVenue() != "BINANCE" && req.GetMarketVenue() != "OKX") {
 		return nil, status.Error(codes.NotFound, "spot funds unavailable")
 	}
-	funds, err := execution.ReadBoundDemoSpotFunds(ctx, s.venues, s.ownerTenant, req.PortfolioId, req.MarketVenue, req.InstrumentId, s.bindings)
+	funds, err := execution.ReadBoundDemoSpotFunds(ctx, s.venues, req, s.bindings)
 	if err != nil {
 		return nil, err
 	}

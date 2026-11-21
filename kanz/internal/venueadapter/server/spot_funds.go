@@ -19,6 +19,10 @@ type demoSpotFundsReader interface {
 	DemoSpotFunds(context.Context, execution.InstrumentSymbol, string) (base, quote string, err error)
 }
 
+type demoSpotFeeReader interface {
+	DemoSpotTakerSchedule(context.Context, execution.InstrumentSymbol, string) *venuepb.DemoSpotTakerSchedule
+}
+
 // WithDemoSpotFunds enables the private read on the tenant's authenticated OMS listener.
 func (s *Server) WithDemoSpotFunds(tenant string) *Server {
 	s.spotFundsTenant = tenant
@@ -56,11 +60,22 @@ func (s *Server) ReadDemoSpotFunds(ctx context.Context, req *venuepb.ReadDemoSpo
 		if !bOK || !qOK {
 			return nil, status.Error(codes.FailedPrecondition, "incomplete or unrepresentable available balance")
 		}
-		return &venuepb.ReadDemoSpotFundsResponse{
+		funds := &venuepb.ReadDemoSpotFundsResponse{
 			OwnerTenant: s.spotFundsTenant, VenueAccountId: s.venue.Account(), Mic: s.venue.MIC(),
 			InstrumentId: in.InstrumentID, VenueSymbol: in.VenueSymbol, BaseCurrency: p.Base, QuoteCurrency: p.Quote,
 			AvailableBase: b, AvailableQuote: q, RequestStartedAt: timestamppb.New(start), ReceivedAt: timestamppb.Now(),
-		}, nil
+		}
+		if fees, ok := s.venue.(demoSpotFeeReader); ok && req.IncludeTakerSchedule {
+			feeCtx, done := context.WithDeadline(ctx, start.Add(5*time.Second))
+			feeStart := timestamppb.Now()
+			schedule := fees.DemoSpotTakerSchedule(feeCtx, in, s.proof.ExchangeAccountID)
+			if feeCtx.Err() == nil && execution.ValidSpotTakerFees(schedule, p) {
+				schedule.RequestStartedAt, schedule.ReceivedAt = feeStart, timestamppb.Now()
+				funds.TakerSchedule = schedule
+			}
+			done()
+		}
+		return funds, nil
 	}
 	return nil, status.Error(codes.NotFound, "spot instrument unavailable")
 }

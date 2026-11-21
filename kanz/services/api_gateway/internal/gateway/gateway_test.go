@@ -51,6 +51,7 @@ type fakeClient struct {
 	ordersResp   *orderpb.ListOrdersResponse
 	instrResp    *venuepb.ListTradeableInstrumentsResponse
 	fundsResp    *venuepb.ReadPortfolioDemoSpotFundsResponse
+	fundsRequest *venuepb.ReadPortfolioDemoSpotFundsRequest
 	err          error
 
 	gotOrders   *orderpb.ListOrdersRequest
@@ -87,7 +88,8 @@ func (f *fakeClient) ListPendingApprovals(_ context.Context, in *orderpb.ListPen
 func (f *fakeClient) ListTradeableInstruments(context.Context, *venuepb.ListTradeableInstrumentsRequest, ...grpc.CallOption) (*venuepb.ListTradeableInstrumentsResponse, error) {
 	return f.instrResp, f.err
 }
-func (f *fakeClient) ReadPortfolioDemoSpotFunds(context.Context, *venuepb.ReadPortfolioDemoSpotFundsRequest, ...grpc.CallOption) (*venuepb.ReadPortfolioDemoSpotFundsResponse, error) {
+func (f *fakeClient) ReadPortfolioDemoSpotFunds(_ context.Context, req *venuepb.ReadPortfolioDemoSpotFundsRequest, _ ...grpc.CallOption) (*venuepb.ReadPortfolioDemoSpotFundsResponse, error) {
+	f.fundsRequest = req
 	return f.fundsResp, f.err
 }
 func (f *fakeClient) ListPortfolios(context.Context, *querypb.ListPortfoliosRequest, ...grpc.CallOption) (*querypb.ListPortfoliosResponse, error) {
@@ -572,6 +574,14 @@ func TestDemoSpotFundsRequiresPortfolioAndTenantOwnership(t *testing.T) {
 	const path = "/v1/portfolios/PF1/demo-spot-funds/OKX?instrument=BTC-USDT"
 	if code, body := getOrders(t, ts, path); code != http.StatusOK || !strings.Contains(body, "scoped-account") {
 		t.Fatal("scoped account response unavailable")
+	}
+	if fc.fundsRequest.GetIncludeTakerSchedule() {
+		t.Fatal("unsolicited account schedule")
+	}
+	if code, _ := getOrders(t, ts, path+"&taker_fees=true"); code != http.StatusOK ||
+		!fc.fundsRequest.GetIncludeTakerSchedule() || fc.fundsRequest.GetPortfolioId() != "PF1" ||
+		fc.fundsRequest.GetTenantId() != testTenant {
+		t.Fatal("schedule read lost its portfolio scope")
 	}
 	for _, changed := range []string{strings.Replace(path, "PF1", "PF2", 1), strings.Replace(path, "/OKX", "/BINANCE", 1)} {
 		if code, body := getOrders(t, ts, changed); code != http.StatusNotFound || strings.Contains(body, "scoped-account") {

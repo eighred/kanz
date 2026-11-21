@@ -53,10 +53,11 @@ it('clears private assumptions on recapture and route changes and projects each 
     expect(field(0, 'Portfolio account').element.readOnly).toBe(true)
     await field(0, 'Base available').setValue('7.5')
     await field(1, 'Scenario account').setValue('hypothetical')
-    await field(1, 'Fee (bps)').setValue('2')
+    await field(1, 'Buy taker fee (bps)').setValue('2')
+    expect(field(1, 'Sell taker fee (bps)').element.value).toBe('')
     await capture()
     expect(field(0, 'Base available').element.value).toBe('')
-    expect(field(1, 'Fee (bps)').element.value).toBe('')
+    expect(field(1, 'Buy taker fee (bps)').element.value).toBe('')
     expect(field(1, 'Scenario account').element.value).toBe('')
     await router.push('/portfolios/beta/spot-depth')
     expect(view.find('fieldset').exists()).toBe(false)
@@ -68,19 +69,31 @@ it('clears private assumptions on recapture and route changes and projects each 
       request_started_at: '2026-11-21T08:00:00.100Z', received_at: example.cutoff,
       available_base: { coefficient: '0', exponent: 0 },
       available_quote: { coefficient: '900719925474099301', exponent: -2 },
+      taker_schedule: {
+        request_started_at: example.cutoff, received_at: example.cutoff,
+        buy: { bps: { coefficient: '121', exponent: -1 }, currency: 'BTC' },
+        sell: { bps: { coefficient: '114', exponent: -1 }, currency: 'USDT' },
+      },
     }
     const get = vi.spyOn(api, 'get')
     const fullCapture = async (observation: typeof funds) => {
       get.mockResolvedValueOnce({ portfolio_id: 'beta', owner_tenant: 'pilot', market_venue: 'BINANCE', funds: observation })
         .mockRejectedValueOnce(new Error('OKX demo read unavailable'))
-      await view.findAll('button').find((b) => b.text() === 'Capture books and demo balances')!.trigger('click')
+      await view.findAll('button').find((b) => b.text() === 'Capture books, demo balances and fees')!.trigger('click')
       await flushPromises()
     }
     await fullCapture(funds)
     expect(field(0, 'Quote available').element.value).toBe('9007199254740993.01')
     expect(field(0, 'Base available').element.value).toBe('0')
     expect(field(0, 'Base available').element.readOnly).toBe(true)
+    expect(field(0, 'Buy taker fee (bps)').element.value).toBe('12.1')
+    expect(field(0, 'Sell taker fee (bps)').element.value).toBe('11.4')
+    expect(field(0, 'Buy fee currency').element.readOnly).toBe(true)
+    expect(get.mock.calls[0]?.[0]).toContain('taker_fees=true')
     expect(field(1, 'Base available').element.value).toBe('')
+    await fullCapture({ ...funds, taker_schedule: { ...funds.taker_schedule, received_at: '2026-11-21T08:00:00.500000001Z' } })
+    expect(field(0, 'Base available').element.readOnly).toBe(true)
+    expect(field(0, 'Buy taker fee (bps)').element.value).toBe('')
     for (const change of [
       { received_at: '2026-11-21T08:00:00.500000001Z' },
       { request_started_at: '2026-11-21T07:59:50Z' },
@@ -95,15 +108,20 @@ it('clears private assumptions on recapture and route changes and projects each 
       owner_tenant: 'pilot', portfolio_id: 'beta', market_venue: 'OKX',
       funds: { ...funds, mic: 'XOKX', venue_account_id: 'okx-sub-1', venue_symbol: 'BTC-USDT' },
     })
-    await view.findAll('button').find((b) => b.text() === 'Capture books and demo balances')!.trigger('click')
+    await view.findAll('button').find((b) => b.text() === 'Capture books, demo balances and fees')!.trigger('click')
     await flushPromises()
     expect(field(1, 'Portfolio account').element.value).toBe('okx-sub-1')
     expect(field(1, 'Quote available').element.readOnly).toBe(true)
+    expect(field(1, 'Sell taker fee (bps)').element.value).toBe('')
+    await view.findAll('button').find((b) => b.text() === 'Use group fees as scenario assumptions')!.trigger('click')
+    expect(field(1, 'Buy taker fee (bps)').element.value).toBe('12.1')
+    expect(field(1, 'Sell fee currency').element.value).toBe('USDT')
+    expect(field(1, 'Sell fee currency').element.readOnly).toBe(false)
     const session = useSession(pinia)
     session.forget()
     await flushPromises()
     expect(view.find('fieldset').exists()).toBe(false)
-    expect(post).toHaveBeenCalledTimes(10)
+    expect(post).toHaveBeenCalledTimes(11)
   } finally {
     view.unmount()
   }

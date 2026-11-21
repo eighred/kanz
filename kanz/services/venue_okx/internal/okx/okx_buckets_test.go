@@ -226,6 +226,24 @@ func TestAnUnknownFamilyDrawsFromTheSharedBudget(t *testing.T) {
 	}
 }
 
+func TestSpotFeeReadsUseIndependentAccountBudgets(t *testing.T) {
+	clk := &frozenClock{t: time.Unix(1_700_000_000, 0).UTC()}
+	b := newOKXBuckets(nil, clk.now)
+	for family, limit := range map[okxRateFamily]int{familyTradeFees: 5, familySpotInstruments: 20} {
+		for i := 0; i < limit; i++ {
+			if !b.allow(family, 1) {
+				t.Fatal("premature throttle", family, i)
+			}
+		}
+		if b.allow(family, 1) {
+			t.Fatal("unmetered fee capture", family)
+		}
+	}
+	if !b.allow(familyUnverified, 1) {
+		t.Fatal("fee capture exhausted the shared order budget")
+	}
+}
+
 // A NIL SHARED BUCKET MUST NOT REACH THE ORDER PATH. It would panic on the first
 // Allow, at runtime, on placement.
 func TestNilSharedBucketIsReplacedRatherThanPanicking(t *testing.T) {

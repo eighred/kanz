@@ -8,6 +8,7 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	adapterserver "github.com/eighred/kanz/internal/venueadapter/server"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/oms/internal/venuesrv"
@@ -26,6 +27,13 @@ func (cashFixture) Instruments() []execution.InstrumentSymbol {
 }
 func (cashFixture) DemoSpotFunds(context.Context, execution.InstrumentSymbol, string) (string, string, error) {
 	return "0", "9007199254740993.01", nil
+}
+
+func (cashFixture) DemoSpotTakerSchedule(context.Context, execution.InstrumentSymbol, string) *venuepb.DemoSpotTakerSchedule {
+	return &venuepb.DemoSpotTakerSchedule{
+		Buy:  &commonpb.SpotTakerFee{Bps: &commonpb.Decimal{}, Currency: "BTC"},
+		Sell: &commonpb.SpotTakerFee{Bps: &commonpb.Decimal{Coefficient: 2}, Currency: "USDT"},
+	}
 }
 
 // Exercise both production gRPC services and the peer identity supplied by an
@@ -75,6 +83,15 @@ func TestPortfolioDemoFundsOverMutualTLS(t *testing.T) {
 		result.GetFunds().GetMic() != "XOKX" || result.GetFunds().GetVenueAccountId() != "okx-sub-1" ||
 		result.GetFunds().GetAvailableBase() == nil || result.Funds.AvailableQuote.GetCoefficient() != 900719925474099301 {
 		t.Fatalf("scoped mTLS read: %v, %v", result, err)
+	}
+	if result.Funds.TakerSchedule != nil {
+		t.Fatal("unexpected private schedule")
+	}
+	req.IncludeTakerSchedule = true
+	result, err = client.ReadPortfolioDemoSpotFunds(ctx, req)
+	if err != nil || result.GetFunds().GetTakerSchedule().GetSell().GetBps().GetCoefficient() != 2 ||
+		result.Funds.TakerSchedule.GetBuy().GetCurrency() != "BTC" {
+		t.Fatal(result, err)
 	}
 	untrusted := venuepb.NewVenueQueryServiceClient(dial(addr, adapter, clientID))
 	if result, err := untrusted.ReadPortfolioDemoSpotFunds(ctx, req); result != nil || status.Code(err) != codes.PermissionDenied {
