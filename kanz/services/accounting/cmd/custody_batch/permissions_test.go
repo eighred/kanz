@@ -130,7 +130,10 @@ func TestDedicatedStatementPublisherGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 		select {
-		case <-denied:
+		case err := <-denied:
+			if err == nil {
+				t.Fatal("broker denial had no error")
+			}
 		case <-ctx.Done():
 			t.Fatal("broker did not refuse unauthorized subject")
 		}

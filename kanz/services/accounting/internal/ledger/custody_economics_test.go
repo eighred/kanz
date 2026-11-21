@@ -52,7 +52,11 @@ func TestPostgresCustodyExecutionEconomicsUsesOriginalReceiptPosition(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil {
+			t.Errorf("rollback ledger fixture: %v", err)
+		}
+	}()
 	for _, c := range []struct {
 		pos                  int64
 		e                    *Event

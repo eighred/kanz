@@ -530,7 +530,11 @@ func verifyMixedQueuePages(t *testing.T, ctx context.Context, st *Postgres, quan
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil {
+			t.Errorf("rollback queue fixture: %v", err)
+		}
+	}()
 	const add = `INSERT INTO custody_breaks(break_id,portfolio_id,custodian_id,kind,break_key,ibor,custodian,difference,first_seen_at,last_seen_at,status_changed_at,status,values_verified)
  VALUES($1,$2,'PAGE-C','quantity',$1,'1','2','-1',now(),now(),now(),'open',true)`
 	for _, row := range [][2]string{{"A-before", "PF1"}, {"z-after", "PF1"}, {"00-other", "PF2"}} {
