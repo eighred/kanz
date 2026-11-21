@@ -1,0 +1,248 @@
+syntax = "proto3";
+
+package query.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "common/v1/money.proto";
+import "market/v1/order_book.proto";
+
+// Operator-supplied historical scenario. All balances, fees and limits are
+// assumptions. The calculation performs no account lookup or order admission.
+message SpotDepthVenue {
+  market.v1.OrderBookSnapshot book = 1;
+  google.protobuf.Timestamp known_at = 2;
+  string account_label = 3;
+  common.v1.Decimal available_base = 4;
+  common.v1.Decimal available_quote = 5;
+  common.v1.Decimal quantity_step = 6;
+  common.v1.Decimal minimum_quantity = 7;
+  common.v1.Decimal minimum_notional = 8;
+  common.v1.Decimal fee_bps = 9;
+  string fee_currency = 10;
+  // Identifiers and product classification from the supplied venue mapping.
+  // Equal ticker text alone cannot establish fungible settlement assets.
+  string base_asset_ref = 11;
+  string quote_asset_ref = 12;
+  string product_type = 13;
+  // When either side is specified the legacy shared fee fields must be empty.
+  // An absent side then has unknown terms, even when the other side is free.
+  common.v1.SpotTakerFee buy_taker_fee = 14;
+  common.v1.SpotTakerFee sell_taker_fee = 15;
+  // Additional per-order cap in base units. Absent on historical scenarios.
+  common.v1.Decimal maximum_quantity = 16;
+  // Optional market-order limits assessed at a specified reference price.
+  // The existing minimum_notional independently tests the walked quote value.
+  SpotMarketValueLimit market_value_limit = 17;
+  // Operator-supplied references for the order limits, hashed with the inputs.
+  repeated SpotRuleEvidence rule_evidence = 18;
+  // Supplied inclusive taker bounds in quote units per base unit at cutoff.
+  // Historical inputs without a bound do not assess price-range expiry.
+  SpotExecutionPriceRange buy_price_range = 19;
+  SpotExecutionPriceRange sell_price_range = 20;
+  // Total assumed quote-unit inventory restoration cost if this venue is the
+  // opening buy. Mutually exclusive with the scenario-wide rebalance_cost.
+  common.v1.Decimal rebalance_cost_after_buy = 21;
+}
+
+message SpotExecutionPriceRange {
+  common.v1.Decimal minimum = 1;
+  common.v1.Decimal maximum = 2;
+}
+
+message SpotRuleEvidence {
+  string source = 1;
+  google.protobuf.Timestamp known_at = 2;
+  string response_sha256 = 3;
+}
+
+message SpotMarketValueLimit {
+  // Value currency, also the denomination of the price per unit of base.
+  string currency = 1;
+  common.v1.Decimal reference_price = 2;
+  common.v1.Decimal minimum_value = 3;
+  common.v1.Decimal maximum_value = 4;
+}
+
+message SpotDepthScenario {
+  google.protobuf.Timestamp as_of = 1;
+  common.v1.Decimal requested_buy_quantity = 2;
+  repeated SpotDepthVenue venues = 3;
+  // Quote units for restoring the funded inventory after the paired trade.
+  common.v1.Decimal rebalance_cost = 4;
+  // Fraction of the planned sell filled at the supplied bids, in basis points.
+  common.v1.Decimal sell_fill_bps = 5;
+  // Stress longs below the buy venue's bid and shorts above the sell venue's ask.
+  common.v1.Decimal adverse_move_bps = 6;
+  // Operator's allowed marked loss in quote units when exactly one leg fills.
+  common.v1.Decimal one_leg_loss_limit = 7;
+}
+
+message SpotLegStress {
+  common.v1.Decimal inventory_change = 1;
+  common.v1.Decimal cash_change = 2;
+  common.v1.Decimal mark_price = 3;
+  common.v1.Decimal marked_pnl = 4;
+}
+
+// Signed change at a single venue, after its native fee and before rebalancing.
+message SpotVenueChange {
+  common.v1.Decimal base_change = 1;
+  common.v1.Decimal quote_change = 2;
+}
+
+// Reversal on one venue using the opposite side of its original dated book.
+message SpotUnwindLeg {
+  common.v1.Decimal quantity = 1;
+  common.v1.Decimal notional = 2;
+  common.v1.Money fee = 3;
+  // Includes the original fill and its reversal on this venue.
+  SpotVenueChange change_from_start = 4;
+}
+
+message SpotLocalUnwind {
+  string status = 1;
+  string reason = 2;
+  SpotUnwindLeg sell_back = 3;
+  SpotUnwindLeg buy_back = 4;
+  // Quote required on the original sell venue beyond its settled sale proceeds.
+  common.v1.Decimal extra_quote_required = 5;
+  common.v1.Decimal net_quote_cash = 6;
+  // Net cash plus remaining base on each venue at its own best bid.
+  common.v1.Decimal marked_pnl = 7;
+  // Entry's marked P&L before restoration minus the four-fill marked P&L.
+  common.v1.Decimal cost_vs_entry_mark = 8;
+}
+
+message SpotFunding {
+  // Native amounts required before either fill, excluding future rebates.
+  common.v1.Decimal buy_quote_required = 1;
+  common.v1.Decimal sell_base_required = 2;
+  // Required sell inventory valued at the sell leg's depth-weighted fill price.
+  common.v1.Decimal sell_base_value_quote = 3;
+  common.v1.Decimal funded_capital_quote = 4;
+  common.v1.Decimal gross_turnover_quote = 5;
+  // Both rates use marked_net_after_rebalance. Six fractional basis-point
+  // digits, rounded to nearest, ties away from zero. Denominators above
+  // allow reproduction of both unrounded ratios.
+  common.v1.Decimal return_on_capital_bps = 6;
+  // Signed additional quote cost at each leg's fixed gross notional.
+  // A negative value means costs would have to fall to break even.
+  common.v1.Decimal break_even_cost_per_leg_bps = 7;
+}
+
+message SpotDepthDirection {
+  string buy_venue = 1;
+  string sell_venue = 2;
+  // SUPPORTED, UNSUPPORTED (size/minimum), UNKNOWN (missing terms).
+  string status = 3;
+  string reason = 4;
+  common.v1.Decimal buy_quantity = 5;
+  common.v1.Decimal sell_quantity = 6;
+  common.v1.Decimal shortfall = 7;
+  common.v1.Decimal buy_notional = 8;
+  common.v1.Decimal sell_notional = 9;
+  common.v1.Money buy_fee = 10;
+  common.v1.Money sell_fee = 11;
+  common.v1.Decimal cash_change = 12;
+  common.v1.Decimal residual_base = 13;
+  // Cash plus residual at the buy venue's best bid, less assumed rebalance cost.
+  common.v1.Decimal marked_net_after_rebalance = 14;
+  // Excess purchased base is marked at the shocked bid on the buy venue.
+  // Sold base to replace is marked at the shocked ask on the sell venue.
+  SpotLegStress buy_only = 15;
+  SpotLegStress sell_only = 16;
+  SpotLegStress partial_sell = 17;
+  // Before-fee cash, using the actual gross sizes of the two scenario legs.
+  common.v1.Decimal gross_quote_cash_change = 18;
+  // Signed fees expressed in quote units at each leg's own execution VWAP.
+  common.v1.Decimal total_fees_in_quote = 19;
+  SpotVenueChange buy_venue_change = 20;
+  SpotVenueChange sell_venue_change = 21;
+  SpotFunding funding = 22;
+  // max(0, -buy_only.marked_pnl, -sell_only.marked_pnl), in quote units.
+  common.v1.Decimal worst_one_leg_loss = 23;
+  // UNKNOWN without both a shock and a limit, otherwise WITHIN or EXCEEDED.
+  string one_leg_limit_status = 24;
+  // After native fees and residual marking, before inventory restoration.
+  // An upper bound on net for any nonnegative restoration cost.
+  common.v1.Decimal marked_net_before_rebalance = 25;
+  // Separate what-if after both fills settle, at unchanged book levels.
+  SpotLocalUnwind local_unwind = 26;
+  // The shared or directional cost applied to this opening buy/sell pair.
+  common.v1.Decimal applied_rebalance_cost = 27;
+}
+
+message SpotDepthTiming {
+  // Risk-service wall clock just before evaluating the supplied depth.
+  google.protobuf.Timestamp started_at = 1;
+  // After pricing and the portfolio lookup, before returning the gRPC response.
+  google.protobuf.Timestamp completed_at = 2;
+}
+
+message SpotBookCheckRequest {
+  // In the same order as the two priced venues.
+  repeated string event_ids = 1;
+  uint32 max_age_ms = 2;
+}
+
+enum SpotBookCheckState {
+  SPOT_BOOK_CHECK_STATE_UNSPECIFIED = 0;
+  SPOT_BOOK_CHECK_STATE_CURRENT = 1;
+  SPOT_BOOK_CHECK_STATE_SUPERSEDED = 2;
+  SPOT_BOOK_CHECK_STATE_STALE = 3;
+  SPOT_BOOK_CHECK_STATE_UNVERIFIED = 4;
+}
+
+message SpotBookCheckResult {
+  SpotBookCheckState state = 1;
+  // The instant at which the risk service examined its authorized book cache.
+  google.protobuf.Timestamp checked_at = 2;
+  uint32 max_age_ms = 3;
+}
+
+message SpotDepthResult {
+  string instrument_id = 1;
+  string base_currency = 2;
+  string quote_currency = 3;
+  repeated SpotDepthDirection directions = 4;
+  // SHA-256 over deterministic protobuf encoding of the supplied scenario.
+  string input_sha256 = 5;
+  google.protobuf.Timestamp as_of = 6;
+}
+
+message ObservedVenueBook {
+  market.v1.OrderBookSnapshot book = 1;
+  // When the risk service first observed this revision of the bounded book.
+  google.protobuf.Timestamp known_at = 2;
+  string event_id = 3;
+  // Current deployment binding for this portfolio and MIC at capture. Empty
+  // when unbound. Independent of the market fact, balances and venue access.
+  string portfolio_account_ref = 4;
+  string portfolio_account_mic = 5;
+}
+
+enum SpotBookRefusal {
+  SPOT_BOOK_REFUSAL_UNSPECIFIED = 0;
+  SPOT_BOOK_REFUSAL_MISSING = 1;
+  SPOT_BOOK_REFUSAL_INVALID = 2;
+  SPOT_BOOK_REFUSAL_STALE = 3;
+  SPOT_BOOK_REFUSAL_SKEW = 4;
+}
+
+message SpotBookObservation {
+  string status = 1;
+  string reason = 2;
+  string instrument_id = 3;
+  google.protobuf.Timestamp as_of = 4;
+  repeated ObservedVenueBook venues = 5;
+  string source = 6;
+  string producer_version = 7;
+  string rights_reference = 8;
+  string base_asset_ref = 9;
+  string quote_asset_ref = 10;
+  string product_type = 11;
+  // First blocking check, disclosed only for an active grant of the calling tenant.
+  SpotBookRefusal refusal = 12;
+  string refusal_venue = 13;
+}

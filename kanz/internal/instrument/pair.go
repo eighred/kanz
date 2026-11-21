@@ -131,3 +131,16 @@ func Resolve(instrumentID, venueSymbol string) (Resolution, bool) {
 	res.Mismatched = venueQuote != p.Quote
 	return res, true
 }
+
+// SpotPair verifies the complete execution symbol against a canonical pair.
+func SpotPair(fillID, symbol string) (Pair, bool) {
+	resolution, ok := Resolve(fillID, symbol)
+	pair := resolution.Pair
+	if !ok || !resolution.Known || resolution.Mismatched || pair.Base == pair.Quote {
+		return Pair{}, false
+	}
+	// Resolve also serves venue catalogues using alternate separators. For
+	// spot economics require the observed symbol to match the entire pair in
+	// a supported adapter format (e.g. AB-C and A-BC are different OKX books).
+	return pair, symbol == pair.Base+pair.Quote || symbol == pair.Base+"-"+pair.Quote
+}

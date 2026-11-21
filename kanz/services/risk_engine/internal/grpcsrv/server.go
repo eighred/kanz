@@ -40,10 +40,13 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/publish"
+	"github.com/eighred/kanz/internal/risk/scenario"
 	"github.com/eighred/kanz/internal/risk/scenario/library"
+	"github.com/eighred/kanz/services/risk_engine/internal/spotbooks"
 )
 
 // Server adapts the api/v1.Engine to the generated RiskQueryService gRPC
@@ -58,6 +61,15 @@ type Server struct {
 	// this tenant. It is stamped on the WIRE-02a owner_tenant response field — the
 	// deny-by-default authz-gate input a governed client checks the caller against.
 	ownerTenant string
+	books       *spotbooks.Store
+	accounts    *execution.AccountBindings
+}
+
+// WithSpotBooks binds this server's tenant-scoped read cache at startup.
+func (s *Server) WithSpotBooks(books *spotbooks.Store, accounts *execution.AccountBindings) *Server {
+	s.books = books
+	s.accounts = accounts
+	return s
 }
 
 // New returns a Server over the given Engine, stamping ownerTenant as the owning
@@ -179,10 +191,67 @@ func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*q
 }
 
 func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScenarioRequest) (*querypb.EvaluateScenarioResponse, error) {
-	// The one method that carries caller-supplied Decimals today: every shock's
-	// Pct. See requireDecimalDomain.
+	// Validate caller-supplied financial inputs before either scenario path.
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
+	}
+	if check := req.GetSpotBookCheck(); check != nil {
+		if req.GetScenarioName() != scenario.SpotDepthName || req.GetSpotDepth() == nil || !spotbooks.ValidCheck(check) {
+			return nil, status.Error(codes.InvalidArgument, "book recheck requires a spot depth scenario, two event IDs and a valid age limit")
+		}
+	}
+	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" || req.GetWaitForSpotBooks() || req.SpotBookCaptureMaxAgeMs != nil {
+		if req.GetScenarioName() != spotbooks.ScenarioName || req.GetSpotBookInstrument() == "" || len(req.GetSpotBookInstrument()) > 128 ||
+			req.GetSpotDepth() != nil || len(req.GetShocks()) != 0 {
+			return nil, status.Error(codes.InvalidArgument, "spot book capture requires one instrument and cannot include shocks or supplied books")
+		}
+		maxAge := scenario.SpotBookMaxAge
+		if req.SpotBookCaptureMaxAgeMs != nil {
+			maxAge = time.Duration(req.GetSpotBookCaptureMaxAgeMs()) * time.Millisecond
+			if maxAge <= 0 || maxAge > scenario.SpotBookMaxAge {
+				return nil, status.Error(codes.InvalidArgument, "capture book age must be between 1 and 2000 ms")
+			}
+		}
+		portfolio, err := s.engine.Exposure(ctx, v1.ExposureRequest{PortfolioID: v1.PortfolioID(req.GetPortfolioId())})
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if req.GetPortfolioId() == "" || string(portfolio.PortfolioID) != req.GetPortfolioId() {
+			return nil, status.Error(codes.NotFound, "portfolio unavailable")
+		}
+		books, err := s.books.Capture(ctx, s.ownerTenant, string(portfolio.PortfolioID), req.SpotBookInstrument, s.accounts, req.GetWaitForSpotBooks(), maxAge)
+		if err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
+		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant, SpotBooks: books}, nil
+	}
+	if req.GetSpotDepth() != nil || req.GetScenarioName() == scenario.SpotDepthName {
+		if req.GetScenarioName() != scenario.SpotDepthName || req.GetSpotDepth() == nil || len(req.GetShocks()) != 0 {
+			return nil, status.Error(codes.InvalidArgument, "spot depth requires its named scenario and cannot be combined with other shocks")
+		}
+		// Input diagnostics are independent of portfolio existence.
+		started := timestamppb.Now()
+		result, err := scenario.EvaluateSpotDepth(req.SpotDepth)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		// Resolve the portfolio through this tenant's existing read owner.
+		// Caller-supplied books and scenario account labels assert no ownership.
+		portfolio, err := s.engine.Exposure(ctx, v1.ExposureRequest{PortfolioID: v1.PortfolioID(req.GetPortfolioId())})
+		if err != nil {
+			return nil, mapError(err)
+		}
+		reply := &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
+			QualityFlags: protoFlags(portfolio.QualityFlags), SpotDepth: result,
+			SpotDepthTiming: &querypb.SpotDepthTiming{StartedAt: started, CompletedAt: timestamppb.Now()}}
+		if check := req.GetSpotBookCheck(); check != nil {
+			if reply.PortfolioId == "" || reply.PortfolioId != req.GetPortfolioId() {
+				return nil, status.Error(codes.NotFound, "portfolio unavailable")
+			}
+			current := s.books.Observe(s.ownerTenant, reply.PortfolioId, result.InstrumentId, s.accounts)
+			reply.SpotBookCheck = spotbooks.Check(current, req.SpotDepth, check)
+		}
+		return reply, nil
 	}
 	shocks, err := scenarioShocks(req)
 	if err != nil {

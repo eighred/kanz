@@ -29,9 +29,12 @@ import (
 // fabricated number).
 type Feed struct {
 	InstrumentID string
-	MIC          string
-	Depth        depth.DepthSource
-	Trades       trades.TradeSource
+	// Symbol is the exchange's mapped identifier carried on book snapshots.
+	// Custom feeds without a mapping retain their canonical instrument label.
+	Symbol string
+	MIC    string
+	Depth  depth.DepthSource
+	Trades trades.TradeSource
 	// ExternalDepth selects a trade-only feed when another process owns depth.
 	// It is incompatible with engines and a local Depth source. It is not a lease.
 	ExternalDepth bool
@@ -189,7 +192,11 @@ func New(cfg Config) (*Runner, error) {
 		if f.Depth == nil && !f.ExternalDepth {
 			return nil, fmt.Errorf("alpha: feed %s/%s has no depth source", f.InstrumentID, f.MIC)
 		}
-		b := book.New(f.InstrumentID, f.InstrumentID, f.MIC)
+		symbol := f.Symbol
+		if symbol == "" {
+			symbol = f.InstrumentID
+		}
+		b := book.New(f.InstrumentID, symbol, f.MIC)
 		tp := trades.New(f.InstrumentID, f.MIC, cfg.TradeRetention)
 		r.books = append(r.books, b)
 		r.tapes = append(r.tapes, tp)

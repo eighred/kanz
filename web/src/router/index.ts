@@ -20,6 +20,7 @@ import EstateView from '../views/EstateView.vue'
 import NodesView from '../views/NodesView.vue'
 import ExposureView from '../views/ExposureView.vue'
 import OrdersView from '../views/OrdersView.vue'
+import SpotDepthView from '../views/SpotDepthView.vue'
 import OverridesView from '../views/OverridesView.vue'
 import MandateChangesView from '../views/MandateChangesView.vue'
 import MandateProposalView from '../views/MandateProposalView.vue'
@@ -99,6 +100,7 @@ export const router = createRouter({
     { path: '/invitations', name: 'invitations', component: InvitationsView },
     { path: '/preflight', name: 'preflight', component: PreflightView },
     { path: '/broker-accounts', name: 'broker-accounts', component: BrokerAccountsView },
+    { path: '/portfolios/:id/spot-depth', name: 'spot-depth', component: SpotDepthView },
     { path: '/broker-accounts/:id', name: 'broker-account', component: BrokerAccountView },
     { path: '/custody-breaks', name: 'custody-breaks', component: CustodyBreaksView },
     { path: '/reference-data', name: 'reference-data', component: ReferenceDataView },

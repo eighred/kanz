@@ -11,6 +11,42 @@ From `kanz/`, use `go build ./services/risk_engine/...` and
 cases require their named disposable dependencies; a skipped case proves none
 of those boundaries. Deployment manifests are under `kanz/infra/deploy/`.
 
+## Portfolio spot book capture
+
+The existing portfolio scenario query accepts `OPERATOR_SPOT_BOOKS` and a
+`spot_book_instrument`. Each risk replica subscribes to `market.book.snapshot`
+when its gRPC reader has configured instruments. It retains one current book
+per venue and instrument. An operator can set `wait_for_spot_books` to wait up
+to one second for an eligible pair. Set `spot_book_capture_max_age_ms` to limit
+each venue event age at every capture attempt (1–2000 ms). Omitting it keeps
+the two-second limit. A new snapshot for the selected instrument
+wakes the read. The response cutoff is when the pair was assessed. The same
+age, skew, grant and account checks apply at that time. By default the read
+returns immediately. `known_at` is the first local risk-service receipt of
+that book revision. Exports include the venue event times, sequences, FACT IDs,
+source, producer release and data rights reference. For each returned venue,
+`portfolio_account_ref` comes from the exact tenant, resolved portfolio and
+MIC in `RISK_ENGINE_VENUE_ACCOUNTS`. Market names BINANCE and OKX can resolve
+to the deployed adapter MICs XBIN and XOKX. Ambiguous mappings withhold the
+reference. On the Tokyo topology the OMS owns the PF1 bindings and its private
+demo funds read supplies them independently. This keeps market-book capture
+available when the deployment has no market-data database for margin measures.
+
+`RISK_ENGINE_SPOT_BOOK_GRANTS` is a JSON array. Each entry binds a canonical
+crypto spot pair to one exact publisher and release in `RISK_ENGINE_TENANT`.
+Provision it for a feed whose broker publishing access, venue clocks, underlying
+asset identities and tenant-wide display and export rights have been verified.
+The optional RFC 3339 `valid_until` expires the grant. Example for a local demo:
+
+```json
+[{"tenant":"pilot","instrument":"BTC-USDT","product_type":"CRYPTO_SPOT","source":"market-ingest-demo","producer_version":"example-release","rights_reference":"local-demo-only","base_asset_ref":"demo/bitcoin","quote_asset_ref":"demo/tether-usd"}]
+```
+
+The Binance source needs the exchange-confirmed initial snapshot. The selected
+feed must stamp the configured tenant on its FACTs. A missing grant, missing leg,
+quality flag or expired observation withholds the pair. Balances, fee currency,
+order limits and rebalance costs belong to the separate pricing scenario.
+
 ## Optional Julia calibration comparison
 
 Go remains authoritative. The optional Julia worker receives one detached latest-cache

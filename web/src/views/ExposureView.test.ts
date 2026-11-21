@@ -27,6 +27,7 @@ function router() {
       // in this file at mount with "No match", which is the router telling the
       // truth: a named link with no route is a dead link in the app too.
       { path: '/portfolios/:id/orders', name: 'orders', component: { template: '<div />' } },
+      { path: '/portfolios/:id/spot-depth', name: 'spot-depth', component: { template: '<div />' } },
     ],
   })
 }

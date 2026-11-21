@@ -15,11 +15,13 @@ import (
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/risk_engine/internal/bondshadow"
 	"github.com/eighred/kanz/services/risk_engine/internal/calibrationshadow"
+	"github.com/eighred/kanz/services/risk_engine/internal/spotbooks"
 )
 
 // Config is the risk-engine runtime configuration. Sourced from the
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
+	SpotBooks      map[string]spotbooks.Grant
 	RustBondShadow bondshadow.Config
 	JuliaShadow    calibrationshadow.Config
 	Listen         string
@@ -374,15 +376,21 @@ func Load() (Config, error) {
 	if _, err := execution.ParseBindings(venueAccounts); err != nil {
 		return Config{}, fmt.Errorf("RISK_ENGINE_VENUE_ACCOUNTS is not a safe binding set: %w", err)
 	}
+	tenant := env.Or("RISK_ENGINE_TENANT", "__system__")
+	books, err := spotbooks.ParseGrants(os.Getenv("RISK_ENGINE_SPOT_BOOK_GRANTS"), tenant)
+	if err != nil {
+		return Config{}, fmt.Errorf("RISK_ENGINE_SPOT_BOOK_GRANTS: %w", err)
+	}
 
 	return Config{
+		SpotBooks:        books,
 		JuliaShadow:      shadow,
 		RustBondShadow:   bondShadow,
 		Listen:           env.Or("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),
 		Source:           env.Or("RISK_ENGINE_SOURCE", "risk-engine"),
-		Tenant:           env.Or("RISK_ENGINE_TENANT", "__system__"),
+		Tenant:           tenant,
 		RefData:          refData,
 		DatabaseURL:      databaseURL,
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
