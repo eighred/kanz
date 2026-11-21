@@ -34,6 +34,7 @@ import (
 	"github.com/eighred/kanz/services/market_data/internal/feed"
 	"github.com/eighred/kanz/services/market_data/internal/server"
 	"github.com/eighred/kanz/services/market_data/internal/vwap"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // priceHistoryDurable reports whether the price history survives a restart: 1
@@ -51,6 +52,13 @@ var priceHistoryDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 })
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "option-terms" {
+		if err := readOptionTerms(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
 	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
@@ -421,14 +429,16 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (sto
 		priceHistoryDurable.Set(0)
 		return store.NewMemory(), func() {}, nil
 	}
-	pool, err := pg.NewGlobalPool(ctx, cfg.DatabaseURL,
-		"price_observations is UNIVERSAL MARKET DATA and deliberately carries no RLS — a EURUSD mid is "+
-			"the same fact for every tenant, and the risk engine marks every tenant's positions against "+
-			"this one store. Scoping it per tenant would shard the price history by whoever happened to "+
-			"observe the tick")
+	pool, err := openMarketPool(ctx, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	priceHistoryDurable.Set(1)
 	return store.NewPostgres(pool), pool.Close, nil
+}
+
+func openMarketPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+	return pg.NewGlobalPool(ctx, cfg.DatabaseURL,
+		"price_observations and contract_terms hold common market observations and listed contract "+
+			"specifications independently of which tenant holds the instrument")
 }
