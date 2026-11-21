@@ -9,6 +9,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
+	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -55,14 +56,29 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 			t.Fatal(got)
 		}
 	}
+	refusal := func(tenant string, code querypb.SpotBookRefusal, venue string) {
+		t.Helper()
+		got := s.Observe(tenant, "alpha", "BTC-USDT", accounts)
+		if got.Status != "UNKNOWN" || got.Refusal != code || got.RefusalVenue != venue || len(got.Venues) != 0 ||
+			got.Source != "" || got.RightsReference != "" || got.Reason == "" {
+			t.Fatal(got)
+		}
+		if code == querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED {
+			if got.AsOf != nil || got.Reason != "No authorized current pair of books is available." {
+				t.Fatal("ungranted observation disclosed diagnostics", got)
+			}
+		} else if got.AsOf == nil || !got.AsOf.AsTime().Equal(now) {
+			t.Fatal("missing refusal cutoff", got)
+		}
+	}
 	at := now.Add(-time.Second)
 	send("pilot", "BINANCE", "1.0.1", at, 1, 11)
 	send("foreign", "OKX", "1.0.1", at, 2, 12)
 	send("pilot", "OKX", "wrong", at, 2, 12)
-	want("pilot", "UNKNOWN")
+	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_MISSING, "OKX")
 	send("pilot", "OKX", "1.0.1", at, 2, 12)
 	want("pilot", "SUPPORTED")
-	want("foreign", "UNKNOWN")
+	refusal("foreign", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED, "")
 	initial := s.Observe("pilot", "alpha", "BTC-USDT", accounts)
 	beta := s.Observe("pilot", "beta", "BTC-USDT", accounts)
 	if initial.Venues[0].PortfolioAccountRef != "bn-alpha" || initial.Venues[0].PortfolioAccountMic != "XBIN" ||
@@ -76,19 +92,19 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 		t.Fatal("duplicate refreshed receipt")
 	}
 	send("pilot", "OKX", "1.0.1", at, 2, 13)
-	want("pilot", "UNKNOWN")
+	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_INVALID, "OKX")
 	send("pilot", "OKX", "1.0.1", at.Add(-time.Millisecond), 1, 12)
 	want("pilot", "UNKNOWN")
 	send("pilot", "OKX", "1.0.1", now, 3, 13)
-	want("pilot", "UNKNOWN") // more than one second of venue skew
+	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_SKEW, "")
 	send("pilot", "BINANCE", "1.0.1", now, 4, 11)
 	want("pilot", "SUPPORTED")
 	now = now.Add(time.Second * 3)
-	want("pilot", "UNKNOWN")
+	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_STALE, "BINANCE")
 	now = grants["BTC-USDT"].Until
 	send("pilot", "BINANCE", "1.0.1", now, 5, 11)
 	send("pilot", "OKX", "1.0.1", now, 6, 13)
-	want("pilot", "UNKNOWN")
+	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED, "")
 	for _, bad := range []string{"[]", grant + " {}", `[{"instrument":"BTC-USDT"}]`} {
 		if _, err = ParseGrants(bad, "pilot"); err == nil {
 			t.Fatalf("accepted invalid grant %q", bad)

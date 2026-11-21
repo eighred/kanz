@@ -189,6 +189,14 @@ message ObservedVenueBook {
   string portfolio_account_mic = 5;
 }
 
+enum SpotBookRefusal {
+  SPOT_BOOK_REFUSAL_UNSPECIFIED = 0;
+  SPOT_BOOK_REFUSAL_MISSING = 1;
+  SPOT_BOOK_REFUSAL_INVALID = 2;
+  SPOT_BOOK_REFUSAL_STALE = 3;
+  SPOT_BOOK_REFUSAL_SKEW = 4;
+}
+
 message SpotBookObservation {
   string status = 1;
   string reason = 2;
@@ -201,4 +209,7 @@ message SpotBookObservation {
   string base_asset_ref = 9;
   string quote_asset_ref = 10;
   string product_type = 11;
+  // First blocking check, disclosed only for an active grant of the calling tenant.
+  SpotBookRefusal refusal = 12;
+  string refusal_venue = 13;
 }

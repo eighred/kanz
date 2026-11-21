@@ -20,6 +20,7 @@ import (
 
 const SpotDepthName = "OPERATOR_SPOT_DEPTH"
 const SpotBookSkew = time.Second
+const SpotBookMaxAge = 2 * time.Second
 
 // This historical what-if uses the caller's inputs only. No balance, fee or
 // depth here establishes an entitlement, actionable quote or order approval.
@@ -117,7 +118,7 @@ func ValidateObservedBook(b *marketpb.OrderBookSnapshot, knownAt *timestamppb.Ti
 		return errors.New("venue time, receipt time and sequence are required")
 	}
 	event, known := b.EventTime.AsTime(), knownAt.AsTime()
-	if event.Unix() <= 0 || known.Before(event) || known.After(cutoff) || cutoff.Sub(event) > 2*time.Second {
+	if event.Unix() <= 0 || known.Before(event) || known.After(cutoff) || cutoff.Sub(event) > SpotBookMaxAge {
 		return errors.New("book is unavailable at cutoff or more than two seconds old")
 	}
 	for side, levels := range [][]*marketpb.PriceLevel{b.Bids, b.Asks} {

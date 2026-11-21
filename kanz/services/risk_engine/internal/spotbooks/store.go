@@ -166,18 +166,35 @@ func (s *Store) Observe(tenant, portfolio, id string, accounts *execution.Accoun
 	if !ok || (!g.Until.IsZero() && !now.Before(g.Until)) {
 		return out
 	}
+	// Feed diagnostics describe a tenant's authorized market data. Unbound or
+	// expired grants above keep the generic response without a venue or cutoff.
+	out.AsOf = timestamppb.New(now)
 	var pair []*querypb.ObservedVenueBook
 	for _, venue := range []string{"BINANCE", "OKX"} {
 		o := s.latest[bookKey{id, venue}]
-		if o == nil || o.EventId == "" || scenario.ValidateObservedBook(o.Book, o.KnownAt, now) != nil {
+		if o == nil {
+			out.Refusal, out.RefusalVenue = querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_MISSING, venue
+			out.Reason = "No eligible " + venue + " book has been received."
+			return out
+		}
+		if now.Sub(o.Book.EventTime.AsTime()) > scenario.SpotBookMaxAge {
+			out.Refusal, out.RefusalVenue = querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_STALE, venue
+			out.Reason = venue + " book is older than " + scenario.SpotBookMaxAge.String() + "."
+			return out
+		}
+		if o.EventId == "" || scenario.ValidateObservedBook(o.Book, o.KnownAt, now) != nil {
+			out.Refusal, out.RefusalVenue = querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_INVALID, venue
+			out.Reason = venue + " book failed the clock, quality or revision checks."
 			return out
 		}
 		pair = append(pair, o)
 	}
 	if pair[0].Book.EventTime.AsTime().Sub(pair[1].Book.EventTime.AsTime()).Abs() > scenario.SpotBookSkew {
+		out.Refusal = querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_SKEW
+		out.Reason = "Binance and OKX book times differ by more than " + scenario.SpotBookSkew.String() + "."
 		return out
 	}
-	out.Status, out.Reason, out.AsOf = "SUPPORTED", "", timestamppb.New(now)
+	out.Status, out.Reason = "SUPPORTED", ""
 	out.Source, out.ProducerVersion, out.RightsReference = g.Source, g.Version, g.Rights
 	out.BaseAssetRef, out.QuoteAssetRef = g.BaseRef, g.QuoteRef
 	out.ProductType = g.ProductType

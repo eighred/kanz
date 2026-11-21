@@ -463,7 +463,13 @@ export async function captureDepth(
   )
     throw new Error('Could not verify book ownership.')
   const o = raw.spot_books
-  if (o.status === 'UNKNOWN') throw new Error('No authorized current pair of books is available.')
+  if (o.status === 'UNKNOWN') {
+    const venueRefusal = ['SPOT_BOOK_REFUSAL_MISSING', 'SPOT_BOOK_REFUSAL_INVALID', 'SPOT_BOOK_REFUSAL_STALE'].includes(String(o.refusal))
+    if (((venueRefusal && (o.refusal_venue === 'BINANCE' || o.refusal_venue === 'OKX')) || o.refusal === 'SPOT_BOOK_REFUSAL_SKEW') &&
+        isTimestamp(o.as_of) && typeof o.reason === 'string' && o.reason.length > 0 && o.reason.length <= 160)
+      throw new Error(o.reason)
+    throw new Error('No authorized current pair of books is available.')
+  }
   if (
     o.status !== 'SUPPORTED' ||
     o.product_type !== 'CRYPTO_SPOT' ||

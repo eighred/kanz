@@ -66,6 +66,12 @@ describe('operator spot depth', () => {
     await expect(read()).rejects.toThrow('incomplete')
     post.mockResolvedValueOnce({ ...raw, spot_books: { status: 'UNKNOWN', instrument_id: input.instrument } })
     await expect(read()).rejects.toThrow('No authorized current pair')
+    const refused = { status: 'UNKNOWN', instrument_id: input.instrument, as_of: input.cutoff,
+      refusal: 'SPOT_BOOK_REFUSAL_STALE', refusal_venue: 'OKX', reason: 'OKX book is older than 2s.' }
+    post.mockResolvedValueOnce({ ...raw, spot_books: refused })
+    await expect(read()).rejects.toThrow(refused.reason)
+    post.mockResolvedValueOnce({ ...raw, spot_books: { ...refused, refusal: 'SPOT_BOOK_REFUSAL_UNSPECIFIED' } })
+    await expect(read()).rejects.toThrow('No authorized current pair')
   })
   it('preserves large coefficients, absent fees and explicitly free rebalancing', () => {
     const input = fixture()
