@@ -337,6 +337,33 @@ async function calculate() {
             </dd>
           </div>
         </dl>
+        <section v-if="r.local_unwind">
+          <h4>Restore inventory with trades on each venue</h4>
+          <p class="muted">Assumes both opening fills have settled and the books are unchanged. Sell back on {{ r.buy_venue }} and buy back on {{ r.sell_venue }} at their own prices and fees.</p>
+          <template v-if="r.local_unwind.status === 'SUPPORTED'">
+            <dl class="metric-grid">
+              <div><dt>Marked P&amp;L after four fills</dt><dd>{{ amount(r.local_unwind.marked_pnl, result.quote_currency) }}</dd></div>
+              <div><dt>Net quote cash after four fills</dt><dd>{{ amount(r.local_unwind.net_quote_cash, result.quote_currency) }}</dd></div>
+              <div><dt>Cost versus entry mark</dt><dd>{{ amount(r.local_unwind.cost_vs_entry_mark, result.quote_currency) }}</dd></div>
+            </dl>
+            <div class="stress-table">
+              <table>
+                <thead><tr><th>Closing leg</th><th>Size</th><th>Native fee</th><th>Base change from start</th><th>Cash change from start</th></tr></thead>
+                <tbody><tr v-for="[label, leg] in [
+                  ['Sell on ' + r.buy_venue, r.local_unwind.sell_back], ['Buy on ' + r.sell_venue, r.local_unwind.buy_back],
+                ] as const" :key="label">
+                  <th>{{ label }}</th><td>{{ amount(leg.quantity, result.base_currency) }}</td>
+                  <td>{{ amount(leg.fee.amount, leg.fee.currency_code) }}</td>
+                  <td>{{ amount(leg.change_from_start.base_change, result.base_currency) }}</td>
+                  <td>{{ amount(leg.change_from_start.quote_change, result.quote_currency) }}</td>
+                </tr></tbody>
+              </table>
+            </div>
+            <small>Remaining base quantities are marked at each venue’s best bid. The four-fill calculation uses the closing trades in place of the entered rebalance cost.</small>
+          </template>
+          <p v-else>{{ r.local_unwind.status }} · {{ r.local_unwind.reason }}</p>
+          <p v-if="r.local_unwind.extra_quote_required">Additional quote needed on {{ r.sell_venue }} after the opening sale · {{ amount(r.local_unwind.extra_quote_required, result.quote_currency) }}</p>
+        </section>
         <div class="stress-table">
           <table>
             <thead>

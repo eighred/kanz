@@ -137,6 +137,9 @@ describe('operator spot depth', () => {
       { ...raw, portfolio_id: 'other' },
       { ...raw, spot_depth: { ...result, as_of: '2026-11-21T08:00:00.500000002Z' } },
       { ...raw, spot_depth: { ...result, quote_currency: 'USD' } },
+      { ...raw, spot_depth: { ...result, directions: result.directions.map(d => ({
+        ...d, local_unwind: { status: 'SUPPORTED' },
+      })) } },
     ]) {
       post.mockResolvedValueOnce(mismatch)
       await expect(read()).rejects.toThrow('could not be verified')

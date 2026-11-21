@@ -205,13 +205,9 @@ type spotTerms struct {
 
 func venueTerms(v *querypb.SpotDepthVenue, pair instrument.Pair, buy bool) (spotTerms, error) {
 	t := spotTerms{}
-	balance := v.AvailableBase
-	if buy {
-		balance = v.AvailableQuote
-	}
-	for _, d := range []*commonpb.Decimal{v.QuantityStep, v.MinimumQuantity, v.MinimumNotional, balance} {
+	for _, d := range []*commonpb.Decimal{v.QuantityStep, v.MinimumQuantity, v.MinimumNotional} {
 		if d == nil || d.Coefficient < 0 {
-			return t, fmt.Errorf("%s balance or order limits unavailable", v.Book.Mic)
+			return t, fmt.Errorf("%s order limits unavailable", v.Book.Mic)
 		}
 	}
 	if !dec.IsPositive(v.QuantityStep) {
@@ -312,6 +308,19 @@ func (e *spotEncoder) stress(base, cash, mark *big.Rat) *querypb.SpotLegStress {
 	return &querypb.SpotLegStress{InventoryChange: e.value(base), CashChange: e.value(cash), MarkPrice: e.value(mark), MarkedPnl: e.value(spotAdd(cash, spotMul(base, mark)))}
 }
 
+func (e *spotEncoder) fee(t spotTerms, pair instrument.Pair, quantity, notional *big.Rat) *commonpb.Money {
+	basis := notional
+	if t.feeCurrency == pair.Base {
+		basis = quantity
+	}
+	return &commonpb.Money{Amount: e.value(spotMul(basis, t.rate)), CurrencyCode: t.feeCurrency}
+}
+
+func (t spotTerms) permits(quantity, notional *big.Rat) bool {
+	return quantity.Sign() > 0 && quantity.Cmp(t.minQty) >= 0 && notional.Cmp(t.minCash) >= 0 &&
+		(t.maxQty == nil || quantity.Cmp(t.maxQty) <= 0)
+}
+
 func spotFunding(cost, proceeds, sellQuantity, buyFundingFactor, sellFundingFactor *big.Rat, net *commonpb.Decimal) *querypb.SpotFunding {
 	buyQuote := spotMul(cost, buyFundingFactor)
 	sellBase := spotMul(sellQuantity, sellFundingFactor)
@@ -344,6 +353,15 @@ func spotFunding(cost, proceeds, sellQuantity, buyFundingFactor, sellFundingFact
 
 func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVenue, pair instrument.Pair) *querypb.SpotDepthDirection {
 	result := &querypb.SpotDepthDirection{BuyVenue: buy.Book.Mic, SellVenue: sell.Book.Mic, Status: "UNKNOWN"}
+	for _, leg := range []struct {
+		venue   string
+		balance *commonpb.Decimal
+	}{{buy.Book.Mic, buy.AvailableQuote}, {sell.Book.Mic, sell.AvailableBase}} {
+		if leg.balance == nil || leg.balance.Coefficient < 0 {
+			result.Reason = leg.venue + " balance or order limits unavailable"
+			return result
+		}
+	}
 	b, err := venueTerms(buy, pair, true)
 	if err != nil {
 		result.Reason = err.Error()
@@ -401,7 +419,7 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	sellQty := spotFloor(spotDiv(acquired, v.baseFactor), v.step)
 	_, cost := spotWalk(asks, buyQty, nil)
 	_, proceeds := spotWalk(bids, sellQty, nil)
-	if buyQty.Sign() == 0 || sellQty.Sign() == 0 || buyQty.Cmp(b.minQty) < 0 || sellQty.Cmp(v.minQty) < 0 || cost.Cmp(b.minCash) < 0 || proceeds.Cmp(v.minCash) < 0 {
+	if !b.permits(buyQty, cost) || !v.permits(sellQty, proceeds) {
 		result.Status = "UNSUPPORTED"
 		result.Reason = "paired size falls below venue funding, depth or order minimums"
 		result.Shortfall = s.RequestedBuyQuantity
@@ -414,14 +432,7 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	e := spotEncoder{}
 	result.BuyQuantity, result.SellQuantity, result.Shortfall = e.value(buyQty), e.value(sellQty), e.value(spotSub(want, buyQty))
 	result.BuyNotional, result.SellNotional = e.value(cost), e.value(proceeds)
-	fee := func(terms spotTerms, quantity, notional *big.Rat) *commonpb.Money {
-		basis := notional
-		if terms.feeCurrency == pair.Base {
-			basis = quantity
-		}
-		return &commonpb.Money{Amount: e.value(spotMul(basis, terms.rate)), CurrencyCode: terms.feeCurrency}
-	}
-	result.BuyFee, result.SellFee = fee(b, buyQty, cost), fee(v, sellQty, proceeds)
+	result.BuyFee, result.SellFee = e.fee(b, pair, buyQty, cost), e.fee(v, pair, sellQty, proceeds)
 	result.CashChange, result.ResidualBase = e.value(cash), e.value(residual)
 	result.BuyVenueChange = &querypb.SpotVenueChange{BaseChange: e.value(acquired), QuoteChange: e.value(new(big.Rat).Neg(buyCash))}
 	result.SellVenueChange = &querypb.SpotVenueChange{BaseChange: e.value(new(big.Rat).Neg(sold)), QuoteChange: e.value(sellCash)}
@@ -450,6 +461,7 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 		return &querypb.SpotDepthDirection{BuyVenue: result.BuyVenue, SellVenue: result.SellVenue, Status: "UNKNOWN", Reason: "result exceeds exact decimal range"}
 	}
 	result.Funding = spotFunding(cost, proceeds, sellQty, b.fundingFactor, v.fundingFactor, result.MarkedNetAfterRebalance)
+	result.LocalUnwind = localUnwind(pair, buy, sell, acquired, buyCash, sold, sellCash, beforeRebalance)
 	result.OneLegLimitStatus = "UNKNOWN"
 	if result.BuyOnly != nil && result.SellOnly != nil {
 		worst := spotMin(new(big.Rat), spotMin(dec.FromProto(result.BuyOnly.MarkedPnl), dec.FromProto(result.SellOnly.MarkedPnl)))

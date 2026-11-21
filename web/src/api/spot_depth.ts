@@ -230,6 +230,16 @@ interface Stress {
   mark_price: Decimal
   marked_pnl: Decimal
 }
+interface UnwindLeg {
+  quantity: Decimal
+  notional: Decimal
+  fee: { amount: Decimal; currency_code: string }
+  change_from_start: { base_change: Decimal; quote_change: Decimal }
+}
+type LocalUnwind =
+  | { status: 'SUPPORTED'; sell_back: UnwindLeg; buy_back: UnwindLeg; extra_quote_required: Decimal;
+      net_quote_cash: Decimal; marked_pnl: Decimal; cost_vs_entry_mark: Decimal }
+  | { status: 'UNKNOWN' | 'UNSUPPORTED'; reason: string; extra_quote_required?: Decimal }
 export interface Direction {
   buy_venue: string
   sell_venue: string
@@ -246,6 +256,7 @@ export interface Direction {
   residual_base?: Decimal
   marked_net_after_rebalance?: Decimal
   marked_net_before_rebalance?: Decimal
+  local_unwind?: LocalUnwind
   gross_quote_cash_change?: Decimal
   total_fees_in_quote?: Decimal
   buy_venue_change?: { base_change: Decimal; quote_change: Decimal }
@@ -287,8 +298,8 @@ function wireAmount(v: unknown): boolean {
 function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLimit: boolean): boolean {
   if (!record(v) || v.buy_venue !== buy.venue || v.sell_venue !== sell.venue || typeof v.reason !== 'string')
     return false
-  if (v.status === 'UNKNOWN') return v.reason.length > 0
-  if (v.status === 'UNSUPPORTED') return v.reason.length > 0 && wireAmount(v.shortfall)
+  if (v.status === 'UNKNOWN') return v.reason.length > 0 && v.local_unwind === undefined
+  if (v.status === 'UNSUPPORTED') return v.reason.length > 0 && wireAmount(v.shortfall) && v.local_unwind === undefined
   return (
     v.status === 'SUPPORTED' &&
     [
@@ -317,7 +328,7 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLi
     }) &&
     (v.marked_net_after_rebalance === undefined || wireAmount(v.marked_net_after_rebalance)) &&
     (v.marked_net_before_rebalance === undefined || wireAmount(v.marked_net_before_rebalance)) &&
-    validFunding(v, hasLossLimit) &&
+    validFunding(v, hasLossLimit) && validLocalUnwind(v.local_unwind, buy, sell) &&
     ['buy_only', 'sell_only', 'partial_sell'].every((k) => {
       const stress = v[k]
       return (
@@ -327,6 +338,21 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLi
       )
     })
   )
+}
+
+function validLocalUnwind(value: unknown, buy: VenueInput, sell: VenueInput): boolean {
+  if (value === undefined) return true
+  if (!record(value) || (value.extra_quote_required !== undefined && !wireAmount(value.extra_quote_required)))
+    return false
+  if (value.status === 'UNKNOWN' || value.status === 'UNSUPPORTED')
+    return typeof value.reason === 'string' && value.reason.length > 0 &&
+      ['sell_back', 'buy_back', 'marked_pnl', 'net_quote_cash', 'cost_vs_entry_mark'].every(k => value[k] === undefined)
+  return value.status === 'SUPPORTED' &&
+    ['extra_quote_required', 'net_quote_cash', 'marked_pnl', 'cost_vs_entry_mark'].every(k => wireAmount(value[k])) &&
+    ([[value.sell_back, buy.sellFeeCurrency ?? buy.feeCurrency], [value.buy_back, sell.feeCurrency]] as const)
+      .every(([leg, currency]) => record(leg) && wireAmount(leg.quantity) && wireAmount(leg.notional) &&
+        record(leg.fee) && leg.fee.currency_code === currency && wireAmount(leg.fee.amount) &&
+        record(leg.change_from_start) && wireAmount(leg.change_from_start.base_change) && wireAmount(leg.change_from_start.quote_change))
 }
 
 function validFunding(v: Record<string, unknown>, hasLossLimit: boolean): boolean {

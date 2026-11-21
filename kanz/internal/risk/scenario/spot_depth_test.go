@@ -36,6 +36,88 @@ func assertDepthAmount(t *testing.T, d *commonpb.Decimal, want string) {
 	}
 }
 
+func TestLocalInventoryRoundTrip(t *testing.T) {
+	n := func(i int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: i} }
+	s := depthExample()
+	a, b := s.Venues[0], s.Venues[1]
+	for _, v := range s.Venues {
+		v.FeeBps, v.QuantityStep = n(0), n(1)
+		v.Book.Bids, v.Book.Asks = v.Book.Bids[:1], v.Book.Asks[:1]
+	}
+	a.Book.Bids[0].Price, a.Book.Asks[0].Price = n(99), n(100)
+	b.Book.Bids[0].Price, b.Book.Asks[0].Price = n(110), n(112)
+	b.AvailableQuote = n(2)
+	s.RebalanceCost = nil
+	run := func(status string) *querypb.SpotLocalUnwind {
+		t.Helper()
+		reply, err := EvaluateSpotDepth(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := reply.Directions[0]
+		if d.Status != "SUPPORTED" || d.LocalUnwind.GetStatus() != status {
+			t.Fatal(d)
+		}
+		if status != "SUPPORTED" && (d.LocalUnwind.MarkedPnl != nil || d.LocalUnwind.SellBack != nil || d.LocalUnwind.BuyBack != nil) {
+			t.Fatal(d.LocalUnwind)
+		}
+		return d.LocalUnwind
+	}
+	u := run("SUPPORTED")
+	assertDepthAmount(t, u.MarkedPnl, "-3")
+	assertDepthAmount(t, u.NetQuoteCash, "-3")
+	assertDepthAmount(t, u.CostVsEntryMark, "13")
+	assertDepthAmount(t, u.ExtraQuoteRequired, "2")
+	assertDepthAmount(t, u.SellBack.ChangeFromStart.QuoteChange, "-1")
+	assertDepthAmount(t, u.BuyBack.ChangeFromStart.QuoteChange, "-2")
+	assertDepthAmount(t, u.SellBack.ChangeFromStart.BaseChange, "0")
+	assertDepthAmount(t, u.BuyBack.ChangeFromStart.BaseChange, "0")
+	b.AvailableQuote = n(1)
+	assertDepthAmount(t, run("UNSUPPORTED").ExtraQuoteRequired, "2")
+	b.AvailableQuote = nil
+	assertDepthAmount(t, run("UNKNOWN").ExtraQuoteRequired, "2")
+	b.FeeBps, b.FeeCurrency = nil, ""
+	b.SellTakerFee = &commonpb.SpotTakerFee{Bps: n(-200), Currency: "USDT"}
+	run("UNKNOWN") // No buy-back fee.
+	b.BuyTakerFee = &commonpb.SpotTakerFee{Bps: n(0), Currency: "USDT"}
+	u = run("SUPPORTED") // Settled sale with rebate covers the full buy-back.
+	assertDepthAmount(t, u.ExtraQuoteRequired, "0")
+	assertDepthAmount(t, u.MarkedPnl, "-0.8")
+	a.SellPriceRange = &querypb.SpotExecutionPriceRange{Minimum: n(100)}
+	run("UNSUPPORTED")
+	a.SellPriceRange = nil
+	b.Book.Asks[0].Size = &commonpb.Decimal{Coefficient: 9, Exponent: -1}
+	run("UNSUPPORTED")
+}
+
+func TestLocalInventoryRoundTripNativeFeeAndLot(t *testing.T) {
+	s := depthExample()
+	r, err := EvaluateSpotDepth(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := r.Directions[0].LocalUnwind
+	if u.GetStatus() != "SUPPORTED" {
+		t.Fatal(u)
+	}
+	// 0.9992 BTC acquired. Selling 0.9984 plus 8 bps leaves 0.00000128 on OKX.
+	assertDepthAmount(t, u.SellBack.Quantity, "0.9984")
+	assertDepthAmount(t, u.SellBack.Fee.Amount, "0.00079872")
+	assertDepthAmount(t, u.SellBack.ChangeFromStart.BaseChange, "0.00000128")
+	assertDepthAmount(t, u.BuyBack.Quantity, "0.9992")
+	assertDepthAmount(t, u.BuyBack.Fee.Amount, "24.999984")
+	assertDepthAmount(t, u.BuyBack.ChangeFromStart.BaseChange, "0")
+	if u.SellBack.Fee.CurrencyCode != "BTC" || u.BuyBack.Fee.CurrencyCode != "USDT" {
+		t.Fatal(u)
+	}
+	v := r.Directions[1].LocalUnwind
+	if v.GetStatus() != "SUPPORTED" {
+		t.Fatal(v)
+	}
+	// Buy back enough to replace the opening sale and both base fees.
+	assertDepthAmount(t, v.BuyBack.Quantity, "1.0008")
+}
+
 func TestDepthTakerPriceRangeExpiresAtFirstViolation(t *testing.T) {
 	n := func(c int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c} }
 	s := depthExample()

@@ -88,6 +88,29 @@ message SpotVenueChange {
   common.v1.Decimal quote_change = 2;
 }
 
+// Reversal on one venue using the opposite side of its original dated book.
+message SpotUnwindLeg {
+  common.v1.Decimal quantity = 1;
+  common.v1.Decimal notional = 2;
+  common.v1.Money fee = 3;
+  // Includes the original fill and its reversal on this venue.
+  SpotVenueChange change_from_start = 4;
+}
+
+message SpotLocalUnwind {
+  string status = 1;
+  string reason = 2;
+  SpotUnwindLeg sell_back = 3;
+  SpotUnwindLeg buy_back = 4;
+  // Quote required on the original sell venue beyond its settled sale proceeds.
+  common.v1.Decimal extra_quote_required = 5;
+  common.v1.Decimal net_quote_cash = 6;
+  // Net cash plus remaining base on each venue at its own best bid.
+  common.v1.Decimal marked_pnl = 7;
+  // Entry's marked P&L before restoration minus the four-fill marked P&L.
+  common.v1.Decimal cost_vs_entry_mark = 8;
+}
+
 message SpotFunding {
   // Native amounts required before either fill, excluding future rebates.
   common.v1.Decimal buy_quote_required = 1;
@@ -139,6 +162,8 @@ message SpotDepthDirection {
   // After native fees and residual marking, before inventory restoration.
   // An upper bound on net for any nonnegative restoration cost.
   common.v1.Decimal marked_net_before_rebalance = 25;
+  // Separate what-if after both fills settle, at unchanged book levels.
+  SpotLocalUnwind local_unwind = 26;
 }
 
 message SpotDepthResult {
