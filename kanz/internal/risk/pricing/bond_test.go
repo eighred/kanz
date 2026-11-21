@@ -66,6 +66,27 @@ func TestBond_YieldFromPriceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBondYieldRequiresARepricingBracket(t *testing.T) {
+	settle := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	b := Bond{Face: 120, Issue: settle, Maturity: settle.AddDate(1, 0, 0), DayCount: Actual365Fixed}
+	// A single 120-unit redemption one year from settlement has P = 120/(1+y).
+	// Exact prices at the supported yield endpoints are 240 and 40.
+	for _, price := range []float64{40, 48, 80, 120, 160, 240} {
+		want := 120/price - 1
+		if got := b.YieldFromPrice(settle, price); math.IsNaN(got) || math.Abs(got-want) > 1e-14 {
+			t.Errorf("price %g: yield %g, want %g", price, got, want)
+		}
+	}
+	for _, price := range []float64{-1, 0, 30, math.Nextafter(40, 0), math.Nextafter(240, math.Inf(1)), 300} {
+		if got := b.YieldFromPrice(settle, price); !math.IsNaN(got) {
+			t.Errorf("price %g outside the bracket produced yield %g", price, got)
+		}
+	}
+	if got := b.YieldFromPrice(b.Maturity, 120); !math.IsNaN(got) {
+		t.Errorf("no remaining redemption produced yield %g", got)
+	}
+}
+
 func TestBond_AccruedInterest(t *testing.T) {
 	b, settle := parBond5y()
 	// Half a coupon period in (30/360 ⇒ exactly 0.5 year): half the 10 coupon.
