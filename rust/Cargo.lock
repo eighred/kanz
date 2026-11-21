@@ -2213,6 +2213,7 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-reflect",
+ "prost-types",
  "protoc-bin-vendored",
  "rustls",
  "serde",
