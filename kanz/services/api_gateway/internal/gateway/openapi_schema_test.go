@@ -109,8 +109,23 @@ func TestRiskOpenAPIEnumsOneofMapsAndCompleteReferences(t *testing.T) {
 	}
 	walk(doc)
 	paths := doc["paths"].(map[string]any)
-	if len(paths) != 5 || paths["/portfolios"] == nil {
-		t.Fatal("all five existing risk read routes must be documented")
+	var original map[string]any
+	if err := json.Unmarshal(riskOpenAPIDoc, &original); err != nil {
+		t.Fatal(err)
+	}
+	riskPaths := original["paths"].(map[string]any)
+	if len(riskPaths) != 5 || riskPaths["/portfolios"] == nil || len(paths) != len(riskPaths)+5 {
+		t.Fatal("expected all five risk paths")
+	}
+	for path, op := range riskPaths {
+		if !reflect.DeepEqual(paths[path], op) {
+			t.Fatalf("changed risk operation %s", path)
+		}
+	}
+	for name, schema := range original["components"].(map[string]any)["schemas"].(map[string]any) {
+		if !reflect.DeepEqual(schemas[name], schema) {
+			t.Fatalf("changed risk schema %s", name)
+		}
 	}
 	if !reflect.DeepEqual(riskOpenAPIDoc, buildRiskOpenAPI()) {
 		t.Fatal("descriptor traversal must produce deterministic bytes")

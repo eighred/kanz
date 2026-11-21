@@ -109,9 +109,13 @@ func TestRESTPositionsDoNotDeclareAWindow(t *testing.T) {
 func TestRESTAnAsOfReadBehindTheWindowIs410(t *testing.T) {
 	mux, p, _ := windowedHandler(t)
 	from, _ := p.RetainedFrom("acme", "fund-alpha")
-	behind := from.Add(-time.Hour).UTC().Format(time.RFC3339)
+	behind := from.Add(-time.Nanosecond).UTC().Format(time.RFC3339Nano)
 
 	for _, path := range []string{"positions", "state", "orders", "executions"} {
+		boundary := get(t, mux, "/broker/accounts/fund-alpha/"+path+"?as_of="+from.UTC().Format(time.RFC3339Nano), "acme")
+		if boundary.Code != http.StatusOK {
+			t.Errorf("%s at the retention horizon = %d, want 200", path, boundary.Code)
+		}
 		rec := get(t, mux, "/broker/accounts/fund-alpha/"+path+"?as_of="+behind, "acme")
 		if rec.Code != http.StatusGone {
 			t.Errorf("GET %s?as_of=%s = %d, want 410. Answering it at all means folding a partial "+
@@ -130,5 +134,27 @@ func TestRESTAnAsOfReadBehindTheWindowIs410(t *testing.T) {
 	if rec := get(t, mux, "/broker/accounts/fund-alpha/positions?as_of="+inside, "acme"); rec.Code != http.StatusOK {
 		t.Errorf("an as-of read inside the resident window = %d, want 200 — the horizon must bound "+
 			"only the questions this pod genuinely cannot answer", rec.Code)
+	}
+}
+
+func TestRESTInvalidKnowledgeTimeCannotSelectTheLiveFold(t *testing.T) {
+	mux, _, _ := windowedHandler(t)
+	for _, endpoint := range []string{"state", "positions", "orders", "executions"} {
+		path := "/broker/accounts/fund-alpha/" + endpoint
+		for _, query := range []string{
+			"as_of", "as_of=", "as_of=%XX", "as_of=invalid", "as_of=0001-01-01T00:00:00Z",
+			"as_of=0001-01-01T01:00:00%2B01:00", "as_of=&as_of=2026-06-01T12:00:00Z",
+			"as_of=2026-06-01T12:00:00Z&as_of=2026-06-01T13:00:00Z",
+		} {
+			if rec := get(t, mux, path+"?"+query, "acme"); rec.Code != http.StatusBadRequest {
+				t.Errorf("%s?%s: got %d, want 400", path, query, rec.Code)
+			}
+		}
+		if rec := get(t, mux, path, "acme"); rec.Code != http.StatusOK {
+			t.Errorf("%s: omitted as_of got %d, want 200", path, rec.Code)
+		}
+		if rec := get(t, mux, path+"?as_of=0001-01-01T00:00:00.000000001Z", "acme"); rec.Code != http.StatusGone {
+			t.Errorf("%s: valid historical instant got %d, want 410", path, rec.Code)
+		}
 	}
 }

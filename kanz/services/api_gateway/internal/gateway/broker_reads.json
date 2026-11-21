@@ -1,0 +1,322 @@
+{
+  "operations": [
+    {
+      "path": "/broker/accounts",
+      "schema": "BrokerAccountsResponse"
+    },
+    {
+      "path": "/broker/accounts/{id}/state",
+      "query": [
+        "as_of"
+      ],
+      "schema": "BrokerState"
+    },
+    {
+      "path": "/broker/accounts/{id}/positions",
+      "query": [
+        "as_of"
+      ],
+      "schema": "BrokerPositionsResponse"
+    },
+    {
+      "path": "/broker/accounts/{id}/orders",
+      "query": [
+        "as_of"
+      ],
+      "schema": "BrokerOrdersResponse"
+    },
+    {
+      "path": "/broker/accounts/{id}/executions",
+      "query": [
+        "as_of",
+        "instrument"
+      ],
+      "schema": "BrokerExecutionsResponse"
+    }
+  ],
+  "schemas": {
+    "BrokerAccount": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "currency"
+      ],
+      "type": "object"
+    },
+    "BrokerAccountsResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/components/schemas/BrokerAccount"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "accounts"
+      ],
+      "type": "object"
+    },
+    "BrokerExecution": {
+      "additionalProperties": false,
+      "properties": {
+        "fee": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instrument": {
+          "type": "string"
+        },
+        "orderId": {
+          "type": "string"
+        },
+        "price": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "qty": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "time": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        "venue": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "orderId",
+        "instrument",
+        "venue",
+        "side",
+        "qty",
+        "price",
+        "time"
+      ],
+      "type": "object"
+    },
+    "BrokerExecutionsResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "executions": {
+          "items": {
+            "$ref": "#/components/schemas/BrokerExecution"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "retainedFrom": {
+          "description": "Inclusive start of the resident history, omitted until retention has dropped history.",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "executions"
+      ],
+      "type": "object"
+    },
+    "BrokerOrder": {
+      "additionalProperties": false,
+      "properties": {
+        "avgFillPrice": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "filledQty": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instrument": {
+          "type": "string"
+        },
+        "leavesQty": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "limitPrice": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "parentOrderId": {
+          "type": "string"
+        },
+        "qty": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        "venue": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "instrument",
+        "side",
+        "type",
+        "status",
+        "qty",
+        "filledQty",
+        "leavesQty",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "BrokerOrdersResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "orders": {
+          "items": {
+            "$ref": "#/components/schemas/BrokerOrder"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "retainedFrom": {
+          "description": "Inclusive start of the resident history, omitted until retention has dropped history.",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "orders"
+      ],
+      "type": "object"
+    },
+    "BrokerPosition": {
+      "additionalProperties": false,
+      "properties": {
+        "avgPrice": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "instrument": {
+          "type": "string"
+        },
+        "qty": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "realizedPl": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "unrealizedPl": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instrument",
+        "side",
+        "qty",
+        "avgPrice",
+        "realizedPl"
+      ],
+      "type": "object"
+    },
+    "BrokerPositionsResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "positions": {
+          "items": {
+            "$ref": "#/components/schemas/BrokerPosition"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "positions"
+      ],
+      "type": "object"
+    },
+    "BrokerState": {
+      "additionalProperties": false,
+      "properties": {
+        "balance": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "equity": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "openPositions": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "realizedPl": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "unrealizedPl": {
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "currency",
+        "balance",
+        "equity",
+        "realizedPl",
+        "unrealizedPl",
+        "openPositions"
+      ],
+      "type": "object"
+    }
+  }
+}

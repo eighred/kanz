@@ -75,6 +75,12 @@ const (
 // a caller's roles.
 func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handler, *recordingBackend) {
 	t.Helper()
+	be := &recordingBackend{}
+	return routerWithBackend(t, be, fundRole, callerRoles...), be
+}
+
+func routerWithBackend(t *testing.T, be proxy.Backend, fundRole string, callerRoles ...string) http.Handler {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	obs, err := observability.New(context.Background(), observability.Config{
 		ServiceName: "api-gateway-test", ServiceVersion: version.String(), SampleRatio: 1,
@@ -89,7 +95,6 @@ func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handl
 		TradeRole:    traderRole,
 		FundRole:     fundRole,
 	}
-	be := &recordingBackend{}
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, "", logger),
@@ -106,7 +111,7 @@ func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handl
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
-	return router, be
+	return router
 }
 
 func fundingPOST(router http.Handler) *httptest.ResponseRecorder {

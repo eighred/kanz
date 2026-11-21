@@ -22,7 +22,7 @@ func buildRiskOpenAPI() []byte {
 		panic(err)
 	}
 	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
-	doc["info"].(map[string]any)["description"] = "Read-only risk queries and transient scenarios. Schemas describe preferred snake_case ProtoJSON; parsers also accept protobuf JSON aliases and numeric input forms. Endpoint authorization and financial validation remain mandatory. This document covers risk reads, not the gateway's other service routes."
+	doc["info"].(map[string]any)["description"] = "Read-only risk queries and transient scenarios. Schemas describe preferred snake_case ProtoJSON; parsers also accept protobuf JSON aliases and numeric input forms. Endpoint authorization and financial validation remain mandatory."
 	for name, message := range map[string]proto.Message{
 		"ExposureResponse":         &querypb.ExposureResponse{},
 		"MeasuresResponse":         &querypb.MeasuresResponse{},

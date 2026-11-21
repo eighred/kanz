@@ -284,16 +284,27 @@ fresh actual pass, not retrospectively label that observation harmless.
 
 ## Broker account read contract
 
-The projection DTOs in `internal/projection/model.go` supply JSON names,
-optional fields and wire types for the browser account reader. Decimal amounts
-travel as fixed-point text. After changing a DTO, run the following commands
+The registered operations and response envelopes in `internal/brokerapi/read_contract.go`
+and the projection DTOs in `internal/projection/model.go` generate the browser
+decoder contract and the schemas served by the gateway at `/openapi.json`.
+The producer uses Go JSON with fixed-point decimal strings. A collection can
+be null when Go encodes a nil slice. State is a bare object. Orders and
+executions include `retainedFrom` only after retention has dropped history. Each list and its horizon come from one projection read lock.
+Positions and state include the retained baseline. All four detail reads accept
+an optional RFC 3339 `as_of` knowledge time and return 410 if the projection
+can no longer answer for that time. Supply `as_of` once or omit it. Empty,
+repeated or malformed query values return 400. An explicit instant equal to the Go zero
+time (`0001-01-01T00:00:00Z`) returns 400 because the projection reserves zero
+for a current read. Executions also accept `instrument`.
+
+After changing a DTO, an envelope or an operation, run the following commands
 from the `kanz` Go module.
 
 ```sh
 go generate ./services/tv_sync/internal/projection
-go test -p 1 ./services/tv_sync/tools/broker_contract ./services/tv_sync/internal/brokerapi
+go test -p 1 ./services/tv_sync/tools/broker_contract ./services/tv_sync/internal/brokerapi ./services/api_gateway/internal/gateway
 ```
 
-The generator test checks the tracked TypeScript contract. The HTTP test and
+The generator test checks both tracked artifacts. The HTTP test and
 browser client test share the account response fixture under
 `internal/brokerapi/testdata`.

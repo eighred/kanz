@@ -28,6 +28,36 @@ describe('broker response boundary', () => {
     }
   })
 
+  it('sends the same knowledge time to each fold and filters executions alone by instrument', async () => {
+    const get = vi.spyOn(api, 'get')
+    for (const value of [served.state, served.positions, served.orders, served.executions]) get.mockResolvedValueOnce(value)
+    const query = { as_of: '2026-01-02T03:04:05.123456789+02:00', instrument: 'USD/JPY & EUR' }
+    await broker.account('fund-a', undefined, query)
+    expect(get.mock.calls.map(call => {
+      const url = new URL(call[0], 'https://localhost')
+      return Object.fromEntries(url.searchParams)
+    })).toEqual([{ as_of: query.as_of }, { as_of: query.as_of }, { as_of: query.as_of }, query])
+  })
+
+  it('refuses an explicitly empty knowledge time before any live read', async () => {
+    const get = vi.spyOn(api, 'get')
+    await expect(broker.account('fund-a', undefined, { as_of: '' })).rejects.toThrow('Invalid broker knowledge time')
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  it.each([{}, { items: [] }, { accounts: {} }])('refuses a missing or malformed account collection', async body => {
+    vi.spyOn(api, 'get').mockResolvedValue(body)
+    await expect(broker.accounts()).rejects.toThrow('Invalid broker response')
+  })
+
+  it('keeps an empty Go slice distinct from an absent required collection', async () => {
+    vi.spyOn(api, 'get').mockResolvedValueOnce({ accounts: null }).mockResolvedValueOnce(served.state)
+      .mockResolvedValueOnce({ positions: [] }).mockResolvedValueOnce({ retainedFrom: '2026-01-01T00:00:00Z' })
+      .mockResolvedValueOnce(served.executions)
+    expect(await broker.accounts()).toEqual([])
+    await expect(broker.account('fund-a')).rejects.toThrow('Invalid broker response')
+  })
+
   it('preserves signed zero, trailing fractional digits and values beyond the JavaScript number range', async () => {
     const exact = '900719925474099312345.0000000000001000'
     vi.spyOn(api, 'get')

@@ -154,7 +154,7 @@ func (a *account) rebuildLive() {
 
 // --- output DTOs (the TradingView Broker-API JSON shapes) ---
 
-//go:generate go run ../../tools/broker_contract -out ../../../../../web/src/api/broker_contract.ts
+//go:generate go run ../../tools/broker_contract -out ../../../../../web/src/api/broker_contract.ts -gateway ../../../api_gateway/internal/gateway/broker_reads.json
 
 // PositionDTO is one net position in an instrument (aggregated across venues).
 type PositionDTO struct {
