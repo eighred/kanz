@@ -370,7 +370,7 @@ async function calculate() {
               <tr>
                 <th>Execution outcome</th>
                 <th>Residual inventory</th>
-                <th>Stress mark</th>
+                <th>Local stress mark</th>
                 <th>Marked P&amp;L</th>
               </tr>
             </thead>
@@ -390,6 +390,7 @@ async function calculate() {
               </tr>
             </tbody>
           </table>
+          <small>Unhedged purchases use the shocked bid on {{ r.buy_venue }}. An unhedged sale uses the shocked ask on {{ r.sell_venue }}. These marks exclude closing fees and slippage.</small>
         </div>
       </template>
     </article>

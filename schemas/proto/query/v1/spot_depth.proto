@@ -145,6 +145,8 @@ message SpotDepthDirection {
   common.v1.Decimal residual_base = 13;
   // Cash plus residual at the best sell bid, less assumed rebalance cost.
   common.v1.Decimal marked_net_after_rebalance = 14;
+  // Excess purchased base is marked at the shocked bid on the buy venue.
+  // Sold base to replace is marked at the shocked ask on the sell venue.
   SpotLegStress buy_only = 15;
   SpotLegStress sell_only = 16;
   SpotLegStress partial_sell = 17;

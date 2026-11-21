@@ -183,10 +183,12 @@ func TestDepthScenarioNativeFeesAndOneLegLoss(t *testing.T) {
 	assertDepthAmount(t, a.SellVenueChange.QuoteChange, "49964.981012")
 	assertDepthAmount(t, a.ResidualBase, "0")
 	assertDepthAmount(t, a.MarkedNetAfterRebalance, "-36.018988")
-	assertDepthAmount(t, a.BuyOnly.MarkedPnl, "-509.923760")
-	assertDepthAmount(t, a.SellOnly.MarkedPnl, "-494.618988")
+	assertDepthAmount(t, a.BuyOnly.MarkPrice, "49480.2")
+	assertDepthAmount(t, a.SellOnly.MarkPrice, "50540.4")
+	assertDepthAmount(t, a.BuyOnly.MarkedPnl, "-559.384160")
+	assertDepthAmount(t, a.SellOnly.MarkedPnl, "-534.986668")
 	assertDepthAmount(t, a.PartialSell.InventoryChange, "0.4996")
-	assertDepthAmount(t, a.PartialSell.MarkedPnl, "-272.471374")
+	assertDepthAmount(t, a.PartialSell.MarkedPnl, "-297.201574")
 	assertDepthAmount(t, b.ResidualBase, "0.00000064")
 	assertDepthAmount(t, b.MarkedNetAfterRebalance, "-125.9720128")
 	again, err := EvaluateSpotDepth(proto.Clone(s).(*querypb.SpotDepthScenario))
@@ -263,7 +265,7 @@ func TestSpotFundedCapitalFixedFillBreakEvenAndLossBudget(t *testing.T) {
 	sell.Book.Asks = []*marketpb.PriceLevel{level("121", "2")}
 	buy.FeeBps, buy.FeeCurrency = d("100"), "USDT"
 	sell.FeeBps, sell.FeeCurrency = d("100"), "BTC"
-	s.RequestedBuyQuantity, s.AdverseMoveBps, s.OneLegLossLimit = d("1.01"), d("3000"), d("21.3")
+	s.RequestedBuyQuantity, s.AdverseMoveBps, s.OneLegLossLimit = d("1.01"), d("3000"), d("48.873")
 	evaluate := func() *querypb.SpotDepthDirection {
 		t.Helper()
 		r, err := EvaluateSpotDepth(s)
@@ -282,11 +284,11 @@ func TestSpotFundedCapitalFixedFillBreakEvenAndLossBudget(t *testing.T) {
 	assertDepthAmount(t, r.Funding.GrossTurnoverQuote, "211")
 	assertDepthAmount(t, r.Funding.ReturnOnCapitalBps, "327.999625")
 	assertDepthAmount(t, r.Funding.BreakEvenCostPerLegBps, "331.279621")
-	assertDepthAmount(t, r.WorstOneLegLoss, "21.3")
+	assertDepthAmount(t, r.WorstOneLegLoss, "48.873")
 	if r.OneLegLimitStatus != "WITHIN" {
 		t.Fatal(r)
 	}
-	s.OneLegLossLimit = d("21.2999999999999999")
+	s.OneLegLossLimit = d("48.8729999999999999")
 	if evaluate().OneLegLimitStatus != "EXCEEDED" {
 		t.Fatal("rounded away a limit breach")
 	}
