@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -94,6 +96,94 @@ func d(v string) *commonpb.Decimal {
 
 func lvl(p, s string) *marketpb.PriceLevel {
 	return &marketpb.PriceLevel{Price: d(p), Size: d(s)}
+}
+
+type updateFeed chan depth.Update
+
+func (feed updateFeed) Recv(ctx context.Context) (depth.Update, error) {
+	select {
+	case u := <-feed:
+		return u, nil
+	case <-ctx.Done():
+		return depth.Update{}, ctx.Err()
+	}
+}
+
+type retryOncePublisher struct {
+	capture
+	failSubject string
+}
+
+func (p *retryOncePublisher) Publish(ctx context.Context, e bus.Event) error {
+	if p.failSubject == e.Subject {
+		p.failSubject = ""
+		return errors.New("temporary publish failure")
+	}
+	return p.capture.Publish(ctx, e)
+}
+
+func TestOnChangeCoalescesFoldsAndRetriesOnlyTheFailedFact(t *testing.T) {
+	for _, failed := range []string{SubjectBookSnapshot, SubjectMarketCryptoQuote} {
+		t.Run(failed, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				feed := make(updateFeed)
+				pub := &retryOncePublisher{failSubject: failed}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				eng := New(Config{Book: book.New("BTC-USDT", "BTCUSDT", "BINANCE"), Source: feed, Publisher: pub,
+					Tenant: "pilot", SnapshotInterval: time.Second, SnapshotOnChange: true})
+				done := make(chan error, 1)
+				go func() { done <- eng.Run(ctx) }()
+				step := func(d time.Duration) { time.Sleep(d); synctest.Wait() }
+				snapshot := func(seq uint64) {
+					feed <- depth.Update{Snapshot: &marketpb.OrderBookSnapshot{LastUpdateSequence: seq,
+						EventTime: tsOf(time.Now()), Bids: []*marketpb.PriceLevel{lvl("10", "2")}, Asks: []*marketpb.PriceLevel{lvl("11", "3")}}}
+					synctest.Wait()
+				}
+				count := func(want int) []bus.Event {
+					t.Helper()
+					pub.mu.Lock()
+					defer pub.mu.Unlock()
+					if len(pub.events) != want {
+						t.Fatalf("published %d facts, want %d", len(pub.events), want)
+					}
+					return slices.Clone(pub.events)
+				}
+				snapshot(1)
+				count(1) // one leg succeeded without waiting for a periodic tick
+				step(time.Second - time.Nanosecond)
+				count(1)
+				step(time.Nanosecond)
+				events := count(2)
+				if events[0].Subject == events[1].Subject {
+					t.Fatal("retried an already published fact")
+				}
+				snapshot(2)
+				snapshot(3)
+				step(time.Second - time.Nanosecond)
+				count(2)
+				step(time.Nanosecond)
+				events = count(4)
+				got := events[2].Payload.(*marketpb.OrderBookSnapshot)
+				if got.LastUpdateSequence != 3 {
+					t.Fatalf("published sequence %d", got.LastUpdateSequence)
+				}
+				step(3 * time.Second)
+				count(4)
+				feed <- depth.Update{Delta: &marketpb.OrderBookDelta{PrevUpdateSequence: 8, LastUpdateSequence: 9}}
+				synctest.Wait()
+				count(4)
+				snapshot(4)
+				count(6) // first valid change after idle publishes immediately
+				snapshot(5)
+				cancel()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				count(6)
+			})
+		})
+	}
 }
 
 func TestEngine_FoldsAndPublishesSnapshot(t *testing.T) {

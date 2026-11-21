@@ -12,7 +12,10 @@ func TestOKXExternalDepthEnvironment(t *testing.T) {
 	}{{"", true, false}, {"BTC-USD", true, true}, {"BTC-USD,", false, true}, {"BTC-USD,BTC-USD", false, true}, {"ETH-USD", false, false}, {" BTC-USD", false, false}} {
 		t.Run(tc.raw, func(t *testing.T) {
 			t.Setenv("MARKET_INGEST_OKX_EXTERNAL_DEPTH_INSTRUMENTS", tc.raw)
-			cfg := Load()
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
 			if (cfg.ValidateExternalDepth() == nil) != tc.valid || cfg.OKXDepthExternal("BTC-USD") != tc.external {
 				t.Fatal("OKX ownership validation mismatch")
 			}
@@ -29,7 +32,10 @@ func TestExternalDepthEnvironment(t *testing.T) {
 	}{{"", true, false}, {"BTC-USD", true, true}, {"BTC-USD,", false, true}, {"BTC-USD,BTC-USD", false, true}, {"ETH-USD", false, false}, {" BTC-USD", false, false}} {
 		t.Run(tc.raw, func(t *testing.T) {
 			t.Setenv("MARKET_INGEST_BINANCE_EXTERNAL_DEPTH_INSTRUMENTS", tc.raw)
-			cfg := Load()
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
 			if (cfg.ValidateExternalDepth() == nil) != tc.valid {
 				t.Fatal("validation mismatch")
 			}
