@@ -164,20 +164,24 @@ func (s *Store) Observe(tenant, portfolio, id string, accounts *execution.Accoun
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 	}
-	return s.observeLocked(tenant, portfolio, id, accounts)
+	return s.observeLocked(tenant, portfolio, id, accounts, scenario.SpotBookMaxAge)
 }
 
 // Capture waits only for events for this authorized instrument. Registering
 // under the same lock as the read prevents a missed update between the two.
-func (s *Store) Capture(ctx context.Context, tenant, portfolio, id string, accounts *execution.AccountBindings, wait bool) (*querypb.SpotBookObservation, error) {
+func (s *Store) Capture(ctx context.Context, tenant, portfolio, id string, accounts *execution.AccountBindings, wait bool, maxAge time.Duration) (*querypb.SpotBookObservation, error) {
 	if !wait || s == nil {
-		return s.Observe(tenant, portfolio, id, accounts), ctx.Err()
+		if s != nil {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+		}
+		return s.observeLocked(tenant, portfolio, id, accounts, maxAge), ctx.Err()
 	}
 	window, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	for {
 		s.mu.Lock()
-		result := s.observeLocked(tenant, portfolio, id, accounts)
+		result := s.observeLocked(tenant, portfolio, id, accounts, maxAge)
 		if result.Refusal == querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED || window.Err() != nil {
 			s.mu.Unlock()
 			return result, ctx.Err()
@@ -195,7 +199,7 @@ func (s *Store) Capture(ctx context.Context, tenant, portfolio, id string, accou
 	}
 }
 
-func (s *Store) observeLocked(tenant, portfolio, id string, accounts *execution.AccountBindings) *querypb.SpotBookObservation {
+func (s *Store) observeLocked(tenant, portfolio, id string, accounts *execution.AccountBindings, maxAge time.Duration) *querypb.SpotBookObservation {
 	out := &querypb.SpotBookObservation{InstrumentId: id, Status: "UNKNOWN", Reason: "No authorized current pair of books is available."}
 	if s == nil || tenant != s.tenant {
 		return out
@@ -216,9 +220,9 @@ func (s *Store) observeLocked(tenant, portfolio, id string, accounts *execution.
 			out.Reason = "No eligible " + venue + " book has been received."
 			return out
 		}
-		if now.Sub(o.Book.EventTime.AsTime()) > scenario.SpotBookMaxAge {
+		if now.Sub(o.Book.EventTime.AsTime()) > maxAge {
 			out.Refusal, out.RefusalVenue = querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_STALE, venue
-			out.Reason = venue + " book is older than " + scenario.SpotBookMaxAge.String() + "."
+			out.Reason = venue + " book is older than " + maxAge.String() + "."
 			return out
 		}
 		if o.EventId == "" || scenario.ValidateObservedBook(o.Book, o.KnownAt, now) != nil {

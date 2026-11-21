@@ -200,10 +200,17 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 			return nil, status.Error(codes.InvalidArgument, "book recheck requires a spot depth scenario, two event IDs and a valid age limit")
 		}
 	}
-	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" || req.GetWaitForSpotBooks() {
+	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" || req.GetWaitForSpotBooks() || req.SpotBookCaptureMaxAgeMs != nil {
 		if req.GetScenarioName() != spotbooks.ScenarioName || req.GetSpotBookInstrument() == "" || len(req.GetSpotBookInstrument()) > 128 ||
 			req.GetSpotDepth() != nil || len(req.GetShocks()) != 0 {
 			return nil, status.Error(codes.InvalidArgument, "spot book capture requires one instrument and cannot include shocks or supplied books")
+		}
+		maxAge := scenario.SpotBookMaxAge
+		if req.SpotBookCaptureMaxAgeMs != nil {
+			maxAge = time.Duration(req.GetSpotBookCaptureMaxAgeMs()) * time.Millisecond
+			if maxAge <= 0 || maxAge > scenario.SpotBookMaxAge {
+				return nil, status.Error(codes.InvalidArgument, "capture book age must be between 1 and 2000 ms")
+			}
 		}
 		portfolio, err := s.engine.Exposure(ctx, v1.ExposureRequest{PortfolioID: v1.PortfolioID(req.GetPortfolioId())})
 		if err != nil {
@@ -212,7 +219,7 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 		if req.GetPortfolioId() == "" || string(portfolio.PortfolioID) != req.GetPortfolioId() {
 			return nil, status.Error(codes.NotFound, "portfolio unavailable")
 		}
-		books, err := s.books.Capture(ctx, s.ownerTenant, string(portfolio.PortfolioID), req.SpotBookInstrument, s.accounts, req.GetWaitForSpotBooks())
+		books, err := s.books.Capture(ctx, s.ownerTenant, string(portfolio.PortfolioID), req.SpotBookInstrument, s.accounts, req.GetWaitForSpotBooks(), maxAge)
 		if err != nil {
 			return nil, status.FromContextError(err).Err()
 		}

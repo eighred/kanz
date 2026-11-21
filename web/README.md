@@ -14,8 +14,9 @@ order minimums and assumed cost of restoring venue inventory. The comparison
 requires both observations within two seconds of the chosen cutoff, at most
 one second apart, and received by that cutoff.
 
-For a pair captured in this session, choose the maximum book age after pricing
-(1–2000 ms, initially 250 ms). After calculating the scenario, the risk service
+Choose the maximum book age before capture (1–2000 ms, initially 250 ms).
+With the one-second wait enabled, the service waits for both venues to meet
+that limit. After calculating the scenario, the risk service
 checks the priced revisions and depth against its current authorized observations.
 The screen reports whether the books matched at the displayed check time, a newer
 revision arrived, the age limit expired, or the service could not verify the pair.

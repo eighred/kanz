@@ -236,6 +236,9 @@ message EvaluateScenarioRequest {
   bool wait_for_spot_books = 6;
   // Recheck the supplied depth against the owner's current feed after pricing.
   SpotBookCheckRequest spot_book_check = 7;
+  // Optional per-venue age limit at capture, including the event-driven wait.
+  // Omission retains the service maximum. Valid range is 1 through 2000 ms.
+  optional uint32 spot_book_capture_max_age_ms = 8;
 }
 
 // EvaluateScenarioResponse carries the projected measures under the shocks.

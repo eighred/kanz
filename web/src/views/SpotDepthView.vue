@@ -62,7 +62,7 @@ async function loadObserved(includeDemoFunds: boolean) {
   active = new AbortController()
   busy.value = true
   try {
-    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal, includeDemoFunds, waitForBooks.value)
+    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal, includeDemoFunds, waitForBooks.value, maxBookAgeMs.value)
     if (seq !== generation) return
     if (
       liveCapture.value && previous?.observation &&
@@ -153,6 +153,7 @@ async function calculate() {
   </p>
   <div class="actions">
     <label>Spot instrument <input v-model="instrument" maxlength="128" :disabled="busy" /></label>
+    <label>Maximum book age at capture and after pricing (ms) <input v-model.number="maxBookAgeMs" type="number" min="1" max="2000" step="1" required :disabled="busy" /></label>
     <label><input v-model="waitForBooks" type="checkbox" :disabled="busy" /> Wait up to 1 second for fresh books</label>
     <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(false)">
       Capture current books
@@ -175,7 +176,6 @@ async function calculate() {
       <label>Sell leg filled (bps) <input v-model="inputs.sellFillBps" /></label>
       <label>Adverse mark change (bps) <input v-model="inputs.adverseMoveBps" /></label>
       <label>One-leg loss limit (quote units) <input v-model="inputs.oneLegLossLimit" /></label>
-      <label v-if="liveCapture">Maximum book age after pricing (ms) <input v-model.number="maxBookAgeMs" type="number" min="1" max="2000" step="1" required /></label>
     </div>
     <div class="venues">
       <fieldset v-for="v in inputs.venues" :key="v.venue">

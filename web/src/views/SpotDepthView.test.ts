@@ -49,7 +49,11 @@ it('clears private assumptions on recapture and route changes and projects each 
   }
   try {
     await capture()
-    expect(post.mock.calls[0]?.[1]).not.toHaveProperty('wait_for_spot_books')
+    expect(post.mock.calls[0]?.[1]).toHaveProperty('spot_book_capture_max_age_ms', 250)
+    expect(view.get('[role="alert"]').text()).toContain('OKX book exceeds')
+    await view.get('input[type=number]').setValue(500)
+    await capture()
+    expect(post.mock.calls[1]?.[1]).not.toHaveProperty('wait_for_spot_books')
     expect(view.findAll('fieldset')[0]!.text()).toContain('Book age at capture 250 ms')
     expect(view.findAll('fieldset')[1]!.text()).toContain('Venue event to risk receipt 150 ms')
     expect(view.findAll('fieldset')[1]!.text()).toContain('Risk receipt to capture 350 ms')
@@ -61,7 +65,7 @@ it('clears private assumptions on recapture and route changes and projects each 
     expect(field(1, 'Sell taker fee (bps)').element.value).toBe('')
     await view.get('input[type=checkbox]').setValue(true)
     await capture()
-    expect(post.mock.calls[1]?.[1]).toHaveProperty('wait_for_spot_books', true)
+    expect(post.mock.calls[2]?.[1]).toMatchObject({wait_for_spot_books: true, spot_book_capture_max_age_ms: 500})
     expect(field(0, 'Base available').element.value).toBe('')
     expect(field(1, 'Buy taker fee (bps)').element.value).toBe('')
     expect(field(1, 'Scenario account').element.value).toBe('')
@@ -127,7 +131,7 @@ it('clears private assumptions on recapture and route changes and projects each 
     session.forget()
     await flushPromises()
     expect(view.find('fieldset').exists()).toBe(false)
-    expect(post).toHaveBeenCalledTimes(11)
+    expect(post).toHaveBeenCalledTimes(12)
   } finally {
     view.unmount()
   }

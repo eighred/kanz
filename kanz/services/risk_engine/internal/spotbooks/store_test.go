@@ -95,7 +95,7 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	defer cancel()
 	for range 2 {
 		go func() {
-			book, err := s.Capture(early, "pilot", "alpha", "BTC-USDT", accounts, true)
+			book, err := s.Capture(early, "pilot", "alpha", "BTC-USDT", accounts, true, time.Second)
 			replies <- capture{book, err}
 		}()
 	}
@@ -116,6 +116,10 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	s.now = func() time.Time { return now }
 	want("pilot", "SUPPORTED")
 	refusal("foreign", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED, "")
+	strict, err := s.Capture(context.Background(), "pilot", "alpha", "BTC-USDT", accounts, false, time.Second-time.Millisecond)
+	if err != nil || strict.Refusal != querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_STALE || strict.RefusalVenue != "BINANCE" || len(strict.Venues) != 0 {
+		t.Fatal("stricter capture returned older books", strict, err)
+	}
 	initial := s.Observe("pilot", "alpha", "BTC-USDT", accounts)
 	beta := s.Observe("pilot", "beta", "BTC-USDT", accounts)
 	if initial.Venues[0].PortfolioAccountRef != "bn-alpha" || initial.Venues[0].PortfolioAccountMic != "XBIN" ||
@@ -136,6 +140,35 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_SKEW, "")
 	send("pilot", "BINANCE", "1.0.1", now, 4, 11)
 	want("pilot", "SUPPORTED")
+	// Both books are eligible under the two-second default, but a 250 ms
+	// waiter needs a newer event on each venue. The exact boundary is valid.
+	now = now.Add(251 * time.Millisecond)
+	strictReads := make(chan struct{}, 1)
+	s.now = func() time.Time {
+		select {
+		case strictReads <- struct{}{}:
+		default:
+		}
+		return now
+	}
+	go func() {
+		book, err := s.Capture(context.Background(), "pilot", "alpha", "BTC-USDT", accounts, true, 250*time.Millisecond)
+		replies <- capture{book, err}
+	}()
+	select {
+	case <-strictReads:
+	case <-time.After(time.Second):
+		t.Fatal("strict waiter did not inspect the current books")
+	}
+	atBoundary := now.Add(-250 * time.Millisecond)
+	send("pilot", "BINANCE", "1.0.1", atBoundary, 5, 11)
+	send("pilot", "OKX", "1.0.1", atBoundary, 6, 13)
+	got := <-replies
+	if got.err != nil || got.book.Status != "SUPPORTED" || len(got.book.Venues) != 2 ||
+		got.book.Venues[0].Book.LastUpdateSequence != 5 || got.book.Venues[1].Book.LastUpdateSequence != 6 {
+		t.Fatal("strict capture returned without both replacement revisions", got.book, got.err)
+	}
+	s.now = func() time.Time { return now }
 	now = now.Add(time.Second * 3)
 	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_STALE, "BINANCE")
 	now = grants["BTC-USDT"].Until
@@ -153,21 +186,21 @@ func TestCaptureDeadlineCancellationAndGrant(t *testing.T) {
 	const id = "BTC-USDT"
 	s := New("pilot", map[string]Grant{id: {Instrument: id}})
 	for _, tc := range []struct{ tenant, instrument string }{{"foreign", id}, {"pilot", "ETH-USDT"}} {
-		got, err := s.Capture(context.Background(), tc.tenant, "", tc.instrument, nil, true)
+		got, err := s.Capture(context.Background(), tc.tenant, "", tc.instrument, nil, true, time.Second)
 		if err != nil || got.AsOf != nil || got.RefusalVenue != "" || len(s.changed) != 0 {
 			t.Fatal("ungranted reader subscribed or received diagnostics", got, err)
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := s.Capture(ctx, "pilot", "", id, nil, true); err != context.DeadlineExceeded {
+	if _, err := s.Capture(ctx, "pilot", "", id, nil, true, time.Second); err != context.DeadlineExceeded {
 		t.Fatal("caller deadline was not propagated", err)
 	}
 	// Grant expires during the service's bounded wait. Even its previous
 	// refusal diagnostic must be withdrawn on the final read.
 	s.grants[id] = Grant{Instrument: id, Until: time.Now().Add(200 * time.Millisecond)}
 	start := time.Now()
-	got, err := s.Capture(context.Background(), "pilot", "", id, nil, true)
+	got, err := s.Capture(context.Background(), "pilot", "", id, nil, true, time.Second)
 	if err != nil || got.Status != "UNKNOWN" || got.AsOf != nil || len(got.Venues) != 0 || time.Since(start) < time.Second {
 		t.Fatal("timeout retained expired authority or returned early", got, err)
 	}

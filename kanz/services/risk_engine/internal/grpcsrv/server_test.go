@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -265,6 +266,9 @@ func TestSpotDepthScenarioRequiresExclusiveMode(t *testing.T) {
 		{ScenarioName: "OPERATOR_SPOT_DEPTH"},
 		{ScenarioName: "GFC_2008", SpotDepth: &querypb.SpotDepthScenario{}},
 		{ScenarioName: "GFC_2008", WaitForSpotBooks: true},
+		{ScenarioName: "GFC_2008", SpotBookCaptureMaxAgeMs: proto.Uint32(250)},
+		{ScenarioName: "OPERATOR_SPOT_BOOKS", SpotBookInstrument: "BTC-USDT", SpotBookCaptureMaxAgeMs: proto.Uint32(0)},
+		{ScenarioName: "OPERATOR_SPOT_BOOKS", SpotBookInstrument: "BTC-USDT", SpotBookCaptureMaxAgeMs: proto.Uint32(2001)},
 		{ScenarioName: "GFC_2008", SpotBookCheck: &querypb.SpotBookCheckRequest{EventIds: []string{"a", "b"}, MaxAgeMs: 250}},
 		{ScenarioName: "OPERATOR_SPOT_DEPTH", SpotDepth: &querypb.SpotDepthScenario{}, SpotBookCheck: &querypb.SpotBookCheckRequest{EventIds: []string{"a", "a"}, MaxAgeMs: 250}},
 		{ScenarioName: "OPERATOR_SPOT_DEPTH", SpotDepth: &querypb.SpotDepthScenario{}, Shocks: []*querypb.ScenarioShock{{}}},

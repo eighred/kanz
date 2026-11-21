@@ -486,7 +486,10 @@ export async function captureDepth(
   signal: AbortSignal,
   includeDemoFunds = false,
   waitForBooks = false,
+  maxAgeMs?: number,
 ): Promise<DepthInput> {
+  if (maxAgeMs !== undefined && (!Number.isInteger(maxAgeMs) || maxAgeMs < 1 || maxAgeMs > 2000))
+    throw new Error('Maximum book age must be an integer from 1 to 2000 ms.')
   const path = '/api/v1/portfolios/' + encodeURIComponent(portfolio)
   // Private reads must already be known when the risk service freezes the books.
   const funds = includeDemoFunds
@@ -496,7 +499,7 @@ export async function captureDepth(
     : []
   const raw = await api.post<unknown>(
     path + '/scenario',
-    { scenario_name: 'OPERATOR_SPOT_BOOKS', spot_book_instrument: instrument, ...(waitForBooks && { wait_for_spot_books: true }) },
+    { scenario_name: 'OPERATOR_SPOT_BOOKS', spot_book_instrument: instrument, spot_book_capture_max_age_ms: maxAgeMs, ...(waitForBooks && { wait_for_spot_books: true }) },
     200,
     signal,
   )
@@ -552,6 +555,8 @@ export async function captureDepth(
     if (timestampNanos(b.event_time) > timestampNanos(entry.known_at) ||
         timestampNanos(entry.known_at) > timestampNanos(o.as_of as string))
       throw new Error('The venue event, risk receipt and capture times are out of order.')
+    if (maxAgeMs !== undefined && timestampNanos(o.as_of as string) - timestampNanos(b.event_time) > BigInt(maxAgeMs) * 1_000_000n)
+      throw new Error(venue + ' book exceeds the requested capture age of ' + maxAgeMs + ' ms.')
     ids.push(entry.event_id)
     const account = entry.portfolio_account_ref ?? ''
     if (typeof account !== 'string' || account.trim() !== account) throw new Error('Invalid portfolio account reference.')
