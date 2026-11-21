@@ -38,6 +38,87 @@ func (rawParkingFailure) Publish(context.Context, bus.Message) error {
 	return errors.New("controlled parking failure")
 }
 
+var errReplayMarker = errors.New("replay marker reached before delivery")
+
+// Stop at the exact next record, outside the delivery handler and its DLQ.
+// Kafka's serial reader can reach this callback only after CommitMessages
+// returned successfully for the original record. Refusing the marker leaves it
+// available to the restarted group at its original coordinates.
+type rawReplaySubscriber struct {
+	bus.Subscriber
+	marker []byte
+	next   bus.KafkaDelivery
+}
+
+func (s rawReplaySubscriber) Subscribe(ctx context.Context, topic, group string, handle bus.Handler) error {
+	return s.Subscriber.Subscribe(ctx, topic, group, func(ctx context.Context, msg bus.Message) error {
+		if msg.Kafka != nil && *msg.Kafka == s.next {
+			if !bytes.Equal(msg.Body, s.marker) {
+				return errors.New("unexpected record at replay marker offset")
+			}
+			return errReplayMarker
+		}
+		if bytes.Equal(msg.Body, s.marker) {
+			return errors.New("replay marker has unexpected Kafka coordinates")
+		}
+		return handle(ctx, msg)
+	})
+}
+
+// Model the serial read/commit boundary deterministically. The integration
+// test below supplies actual Kafka coordinates, parking, offsets and replay.
+type rawSubscribeScript func(context.Context, bus.Handler) error
+
+func (script rawSubscribeScript) Subscribe(ctx context.Context, _, _ string, handle bus.Handler) error {
+	return script(ctx, handle)
+}
+
+func TestRawReplayMarkerRequiresSuccessfulCommitAndExactRecord(t *testing.T) {
+	next := bus.KafkaDelivery{Topic: "fixture", Partition: 0, Offset: 1}
+	wrong := next
+	wrong.Offset++
+	marker := []byte("restart marker")
+	failedCommit := errors.New("commit refused")
+	for _, tc := range []struct {
+		name       string
+		commitErr  error
+		record     bus.Message
+		wantMarker bool
+	}{
+		{"exact next record", nil, bus.Message{Body: marker, Kafka: &next}, true},
+		{"commit response canceled", fmt.Errorf("kafka commit: %w", context.Canceled), bus.Message{}, false},
+		{"commit refused", failedCommit, bus.Message{}, false},
+		{"wrong bytes", nil, bus.Message{Body: []byte("another record"), Kafka: &next}, false},
+		{"wrong offset", nil, bus.Message{Body: marker, Kafka: &wrong}, false},
+		{"missing coordinates", nil, bus.Message{Body: marker}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			source := rawSubscribeScript(func(ctx context.Context, handle bus.Handler) error {
+				original := bus.Message{Body: []byte("original"), Kafka: &bus.KafkaDelivery{Topic: next.Topic}}
+				if err := handle(ctx, original); err != nil {
+					return err
+				}
+				if tc.commitErr != nil {
+					return tc.commitErr
+				}
+				return handle(ctx, tc.record)
+			})
+			boundary := rawReplaySubscriber{Subscriber: source, marker: marker, next: next}
+			err := boundary.Subscribe(context.Background(), next.Topic, "fixture", func(context.Context, bus.Message) error {
+				calls++
+				return nil
+			})
+			if calls != 1 || err == nil || errors.Is(err, errReplayMarker) != tc.wantMarker {
+				t.Fatalf("dispatched=%d marker=%t err=%v", calls, tc.wantMarker, err)
+			}
+			if tc.commitErr != nil && !errors.Is(err, tc.commitErr) {
+				t.Fatalf("lost commit failure: %v", err)
+			}
+		})
+	}
+}
+
 func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 	brokers := strings.Split(os.Getenv("TEST_KAFKA_BROKERS"), ",")
 	if brokers[0] == "" {
@@ -114,7 +195,24 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 			if mode == "flush-failure-dlq-success" {
 				options = append(options, bus.WithDLQ(client))
 			}
-			consumer, err := bus.NewConsumer(client, options...)
+			committed := mode == "process-crash" || mode == "flush-failure-dlq-success"
+			var nextMarker []byte
+			if committed {
+				nextEnvelope := proto.Clone(envelope).(*envelopepb.Envelope)
+				nextEnvelope.EventId = "next-marker"
+				nextEnvelope.IdempotencyKey = "next-marker"
+				nextMarker, err = proto.Marshal(&envelopepb.EventFrame{Envelope: nextEnvelope})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var subscriber bus.Subscriber = client
+			if mode == "flush-failure-dlq-success" {
+				subscriber = rawReplaySubscriber{Subscriber: client, marker: nextMarker, next: bus.KafkaDelivery{
+					Topic: independent.Topic, Partition: independent.Partition, Offset: independent.Offset + 1,
+				}}
+			}
+			consumer, err := bus.NewConsumer(subscriber, options...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +247,6 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					done <- consumer.SubscribeDelivery(subctx, topic, group, es.HandleDelivery)
 				}()
 			}
-			committed := mode == "process-crash" || mode == "flush-failure-dlq-success"
 			if committed {
 				admin := kafka.Client{Addr: kafka.TCP(brokers...)}
 				for {
@@ -201,11 +298,6 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 						case <-time.After(100 * time.Millisecond):
 						}
 					}
-				} else {
-					stop()
-					if err := <-done; err != nil {
-						t.Fatalf("subscription shutdown: %v", err)
-					}
 				}
 			} else {
 				select {
@@ -251,17 +343,22 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					t.Fatalf("parking lost original bytes: %v", err)
 				}
 			}
-			var nextMarker []byte
 			if committed {
-				nextEnvelope := proto.Clone(envelope).(*envelopepb.Envelope)
-				nextEnvelope.EventId = "next-marker"
-				nextEnvelope.IdempotencyKey = "next-marker"
-				nextMarker, err = proto.Marshal(&envelopepb.EventFrame{Envelope: nextEnvelope})
-				if err != nil {
-					t.Fatal(err)
-				}
 				if err := client.Publish(workCtx, bus.Message{Subject: topic, Body: nextMarker}); err != nil {
 					t.Fatal("next marker publish failed")
+				}
+			}
+			if mode == "flush-failure-dlq-success" {
+				// OffsetFetch can observe broker durability before the reader
+				// receives its commit response. Wait until that same reader
+				// reaches the marker before restarting the group.
+				select {
+				case err := <-done:
+					if !errors.Is(err, errReplayMarker) {
+						t.Fatalf("subscription stopped before replay marker: %v", err)
+					}
+				case <-workCtx.Done():
+					t.Fatal("consumer did not reach the replay marker after its commit")
 				}
 			}
 			readctx, readcancel, err := rawRestartReadContext(workCtx, mode == "process-crash")
