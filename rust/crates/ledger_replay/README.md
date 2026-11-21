@@ -106,3 +106,28 @@ compared. Independent worked rational examples, unknown FX despite cancellation,
 unusable-rate refusals, capacity/input preservation and replay knowledge-cutoff
 composition supply separate controls. The `ledger-replay` CI job runs both
 posting and valuation gates and retains both captures and their digests.
+
+## One-day return with confirmed zero external flows
+
+`valuation::daily_return_without_external_flows` computes a fractional return
+from two exact NAVs as `(closing - opening) / opening`. The reporting owner
+must first establish the two UTC closes, their common currency and knowledge
+horizon, and completeness of the external-flow source for that portfolio and
+interval. The count must be affirmatively zero. Offsetting subscriptions and
+redemptions are separate flows even when their net amount is zero.
+
+The candidate returns an exact zero only when eligible NAVs agree. An absent
+NAV, nonpositive opening NAV, unknown coverage or any flow yields no value.
+The shared worked examples exercise the Rust result exactly and compare with
+the existing Go time-weighted subperiod reference within an absolute fraction
+tolerance of 1e-12. The exact Rust result also preserves an adjacent amount
+change below the Go reference's binary floating-point resolution.
+
+```sh
+(cd kanz && go test -p 1 ./internal/performance -count=1)
+cargo +1.90.0 test --locked --manifest-path rust/Cargo.toml -p kanz-ledger-replay --test nav_conformance daily_return
+```
+
+The candidate has no portfolio reporting or publication authority. #1028 owns
+the served workflow and approved input sources. #1072 owns the broker result
+and retained history.

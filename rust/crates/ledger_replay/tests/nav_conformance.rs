@@ -322,3 +322,45 @@ fn replay_knowledge_cutoff_flows_into_valuation() {
         n("130")
     );
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DailyReturnCase {
+    name: String,
+    opening: Option<String>,
+    closing: Option<String>,
+    flow_count: Option<u64>,
+    fraction: Option<String>,
+}
+
+#[test]
+fn daily_return_preserves_measured_zero_and_requires_inputs() {
+    let raw =
+        include_str!("../../../../kanz/internal/performance/testdata/daily_no_flow_return.json");
+    let vectors: Vec<DailyReturnCase> = serde_json::from_str(raw).unwrap();
+    assert_eq!(vectors.len(), 11);
+    for case in vectors {
+        let open = case.opening.as_deref().map(n);
+        let close = case.closing.as_deref().map(n);
+        let want = case.fraction.as_deref().map(n);
+        assert_eq!(
+            valuation::daily_return_without_external_flows(
+                open.as_ref(),
+                close.as_ref(),
+                case.flow_count
+            ),
+            Ok(want),
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn daily_return_refuses_invalid_rational_inputs() {
+    let invalid = Rat::new_raw(BigInt::from(1), BigInt::from(0));
+    assert_eq!(
+        valuation::daily_return_without_external_flows(Some(&invalid), Some(&n("100")), Some(0)),
+        Err(Error::Numeric(kanz_ledger_replay::Error::InvalidRational))
+    );
+}
