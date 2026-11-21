@@ -74,18 +74,19 @@ func ParseGrants(raw, tenant string) (map[string]Grant, error) {
 
 type bookKey struct{ instrument, venue string }
 type Store struct {
-	tenant string
-	grants map[string]Grant
-	mu     sync.RWMutex
-	latest map[bookKey]*querypb.ObservedVenueBook
-	now    func() time.Time
+	tenant  string
+	grants  map[string]Grant
+	mu      sync.RWMutex
+	latest  map[bookKey]*querypb.ObservedVenueBook
+	changed map[string]chan struct{}
+	now     func() time.Time
 }
 
 func New(tenant string, grants map[string]Grant) *Store {
 	if tenant == "" || len(grants) == 0 || len(grants) > 128 {
 		return nil
 	}
-	return &Store{tenant: tenant, grants: maps.Clone(grants), latest: make(map[bookKey]*querypb.ObservedVenueBook), now: time.Now}
+	return &Store{tenant: tenant, grants: maps.Clone(grants), latest: make(map[bookKey]*querypb.ObservedVenueBook), changed: make(map[string]chan struct{}), now: time.Now}
 }
 
 func (s *Store) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
@@ -151,16 +152,54 @@ func (s *Store) Handle(_ context.Context, env *envelopepb.Envelope, payload []by
 		next.Book = &marketpb.OrderBookSnapshot{EventTime: b.EventTime, LastUpdateSequence: b.LastUpdateSequence}
 	}
 	s.latest[key] = next
+	if wake := s.changed[g.Instrument]; wake != nil {
+		delete(s.changed, g.Instrument)
+		close(wake)
+	}
 	return nil
 }
 
 func (s *Store) Observe(tenant, portfolio, id string, accounts *execution.AccountBindings) *querypb.SpotBookObservation {
+	if s != nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
+	return s.observeLocked(tenant, portfolio, id, accounts)
+}
+
+// Capture waits only for events for this authorized instrument. Registering
+// under the same lock as the read prevents a missed update between the two.
+func (s *Store) Capture(ctx context.Context, tenant, portfolio, id string, accounts *execution.AccountBindings, wait bool) (*querypb.SpotBookObservation, error) {
+	if !wait || s == nil {
+		return s.Observe(tenant, portfolio, id, accounts), ctx.Err()
+	}
+	window, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	for {
+		s.mu.Lock()
+		result := s.observeLocked(tenant, portfolio, id, accounts)
+		if result.Refusal == querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED || window.Err() != nil {
+			s.mu.Unlock()
+			return result, ctx.Err()
+		}
+		wake := s.changed[id]
+		if wake == nil {
+			wake = make(chan struct{})
+			s.changed[id] = wake
+		}
+		s.mu.Unlock()
+		select {
+		case <-wake:
+		case <-window.Done():
+		}
+	}
+}
+
+func (s *Store) observeLocked(tenant, portfolio, id string, accounts *execution.AccountBindings) *querypb.SpotBookObservation {
 	out := &querypb.SpotBookObservation{InstrumentId: id, Status: "UNKNOWN", Reason: "No authorized current pair of books is available."}
 	if s == nil || tenant != s.tenant {
 		return out
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	now := s.now().UTC()
 	g, ok := s.grants[id]
 	if !ok || (!g.Until.IsZero() && !now.Before(g.Until)) {

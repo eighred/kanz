@@ -76,7 +76,44 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	send("foreign", "OKX", "1.0.1", at, 2, 12)
 	send("pilot", "OKX", "wrong", at, 2, 12)
 	refusal("pilot", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_MISSING, "OKX")
+	// The clock is read under the store lock. Seeing both reads means each
+	// participant will have registered before Handle can deliver the update.
+	entered := make(chan struct{}, 2)
+	s.now = func() time.Time {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		return now
+	}
+	type capture struct {
+		book *querypb.SpotBookObservation
+		err  error
+	}
+	replies := make(chan capture, 2)
+	early, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	for range 2 {
+		go func() {
+			book, err := s.Capture(early, "pilot", "alpha", "BTC-USDT", accounts, true)
+			replies <- capture{book, err}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("capture did not reach the initial observation")
+		}
+	}
 	send("pilot", "OKX", "1.0.1", at, 2, 12)
+	for range 2 {
+		got := <-replies
+		if got.err != nil || got.book.Status != "SUPPORTED" || got.book.Venues[1].PortfolioAccountRef != "ok-alpha" {
+			t.Fatalf("concurrent capture missed the fresh pair: %v %v", got.book, got.err)
+		}
+	}
+	s.now = func() time.Time { return now }
 	want("pilot", "SUPPORTED")
 	refusal("foreign", querypb.SpotBookRefusal_SPOT_BOOK_REFUSAL_UNSPECIFIED, "")
 	initial := s.Observe("pilot", "alpha", "BTC-USDT", accounts)
@@ -109,5 +146,29 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 		if _, err = ParseGrants(bad, "pilot"); err == nil {
 			t.Fatalf("accepted invalid grant %q", bad)
 		}
+	}
+}
+
+func TestCaptureDeadlineCancellationAndGrant(t *testing.T) {
+	const id = "BTC-USDT"
+	s := New("pilot", map[string]Grant{id: {Instrument: id}})
+	for _, tc := range []struct{ tenant, instrument string }{{"foreign", id}, {"pilot", "ETH-USDT"}} {
+		got, err := s.Capture(context.Background(), tc.tenant, "", tc.instrument, nil, true)
+		if err != nil || got.AsOf != nil || got.RefusalVenue != "" || len(s.changed) != 0 {
+			t.Fatal("ungranted reader subscribed or received diagnostics", got, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := s.Capture(ctx, "pilot", "", id, nil, true); err != context.DeadlineExceeded {
+		t.Fatal("caller deadline was not propagated", err)
+	}
+	// Grant expires during the service's bounded wait. Even its previous
+	// refusal diagnostic must be withdrawn on the final read.
+	s.grants[id] = Grant{Instrument: id, Until: time.Now().Add(200 * time.Millisecond)}
+	start := time.Now()
+	got, err := s.Capture(context.Background(), "pilot", "", id, nil, true)
+	if err != nil || got.Status != "UNKNOWN" || got.AsOf != nil || len(got.Venues) != 0 || time.Since(start) < time.Second {
+		t.Fatal("timeout retained expired authority or returned early", got, err)
 	}
 }

@@ -11,6 +11,7 @@ const id = computed(() => String(route.params.id ?? ''))
 const inputs = ref<DepthInput>()
 const liveCapture = ref(false)
 const requestedDemoFunds = ref(false)
+const waitForBooks = ref(false)
 const instrument = ref('BTC-USDT')
 const source = ref(''),
   error = ref(''),
@@ -57,7 +58,7 @@ async function loadObserved(includeDemoFunds: boolean) {
   active = new AbortController()
   busy.value = true
   try {
-    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal, includeDemoFunds)
+    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal, includeDemoFunds, waitForBooks.value)
     if (seq !== generation) return
     if (
       liveCapture.value && previous?.observation &&
@@ -148,6 +149,7 @@ async function calculate() {
   </p>
   <div class="actions">
     <label>Spot instrument <input v-model="instrument" maxlength="128" :disabled="busy" /></label>
+    <label><input v-model="waitForBooks" type="checkbox" :disabled="busy" /> Wait up to 1 second for fresh books</label>
     <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved(false)">
       Capture current books
     </button>

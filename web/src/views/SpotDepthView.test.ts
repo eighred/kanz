@@ -49,13 +49,16 @@ it('clears private assumptions on recapture and route changes and projects each 
   }
   try {
     await capture()
+    expect(post.mock.calls[0]?.[1]).not.toHaveProperty('wait_for_spot_books')
     expect(field(0, 'Portfolio account').element.value).toBe('binance-alpha')
     expect(field(0, 'Portfolio account').element.readOnly).toBe(true)
     await field(0, 'Base available').setValue('7.5')
     await field(1, 'Scenario account').setValue('hypothetical')
     await field(1, 'Buy taker fee (bps)').setValue('2')
     expect(field(1, 'Sell taker fee (bps)').element.value).toBe('')
+    await view.get('input[type=checkbox]').setValue(true)
     await capture()
+    expect(post.mock.calls[1]?.[1]).toHaveProperty('wait_for_spot_books', true)
     expect(field(0, 'Base available').element.value).toBe('')
     expect(field(1, 'Buy taker fee (bps)').element.value).toBe('')
     expect(field(1, 'Scenario account').element.value).toBe('')

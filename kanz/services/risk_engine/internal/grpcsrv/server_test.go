@@ -264,6 +264,7 @@ func TestSpotDepthScenarioRequiresExclusiveMode(t *testing.T) {
 	for _, req := range []*querypb.EvaluateScenarioRequest{
 		{ScenarioName: "OPERATOR_SPOT_DEPTH"},
 		{ScenarioName: "GFC_2008", SpotDepth: &querypb.SpotDepthScenario{}},
+		{ScenarioName: "GFC_2008", WaitForSpotBooks: true},
 		{ScenarioName: "OPERATOR_SPOT_DEPTH", SpotDepth: &querypb.SpotDepthScenario{}, Shocks: []*querypb.ScenarioShock{{}}},
 	} {
 		if _, err := srv.EvaluateScenario(context.Background(), req); status.Code(err) != codes.InvalidArgument {

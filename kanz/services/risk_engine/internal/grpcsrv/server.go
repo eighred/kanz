@@ -195,7 +195,7 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
 	}
-	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" {
+	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" || req.GetWaitForSpotBooks() {
 		if req.GetScenarioName() != spotbooks.ScenarioName || req.GetSpotBookInstrument() == "" || len(req.GetSpotBookInstrument()) > 128 ||
 			req.GetSpotDepth() != nil || len(req.GetShocks()) != 0 {
 			return nil, status.Error(codes.InvalidArgument, "spot book capture requires one instrument and cannot include shocks or supplied books")
@@ -207,8 +207,11 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 		if req.GetPortfolioId() == "" || string(portfolio.PortfolioID) != req.GetPortfolioId() {
 			return nil, status.Error(codes.NotFound, "portfolio unavailable")
 		}
-		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
-			SpotBooks: s.books.Observe(s.ownerTenant, string(portfolio.PortfolioID), req.SpotBookInstrument, s.accounts)}, nil
+		books, err := s.books.Capture(ctx, s.ownerTenant, string(portfolio.PortfolioID), req.SpotBookInstrument, s.accounts, req.GetWaitForSpotBooks())
+		if err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
+		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant, SpotBooks: books}, nil
 	}
 	if req.GetSpotDepth() != nil || req.GetScenarioName() == scenario.SpotDepthName {
 		if req.GetScenarioName() != scenario.SpotDepthName || req.GetSpotDepth() == nil || len(req.GetShocks()) != 0 {

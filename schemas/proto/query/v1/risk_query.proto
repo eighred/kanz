@@ -231,6 +231,9 @@ message EvaluateScenarioRequest {
   SpotDepthScenario spot_depth = 4;
   // OPERATOR_SPOT_BOOKS captures two currently observed snapshots for this pair.
   string spot_book_instrument = 5;
+  // For an operator capture, wait up to one second for a new market event if
+  // the initial pair is unavailable. The returned as_of is the observation time.
+  bool wait_for_spot_books = 6;
 }
 
 // EvaluateScenarioResponse carries the projected measures under the shocks.

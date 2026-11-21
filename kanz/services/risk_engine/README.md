@@ -16,7 +16,11 @@ of those boundaries. Deployment manifests are under `kanz/infra/deploy/`.
 The existing portfolio scenario query accepts `OPERATOR_SPOT_BOOKS` and a
 `spot_book_instrument`. Each risk replica subscribes to `market.book.snapshot`
 when its gRPC reader has configured instruments. It retains one current book
-per venue and instrument. `known_at` is the first local risk-service receipt of
+per venue and instrument. An operator can set `wait_for_spot_books` to wait up
+to one second for an eligible pair. A new snapshot for the selected instrument
+wakes the read. The response cutoff is when the pair was assessed. The same
+age, skew, grant and account checks apply at that time. By default the read
+returns immediately. `known_at` is the first local risk-service receipt of
 that book revision. Exports include the venue event times, sequences, FACT IDs,
 source, producer release and data rights reference. For each returned venue,
 `portfolio_account_ref` comes from the exact tenant, resolved portfolio and

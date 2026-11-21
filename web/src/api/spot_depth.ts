@@ -440,6 +440,7 @@ export async function captureDepth(
   instrument: string,
   signal: AbortSignal,
   includeDemoFunds = false,
+  waitForBooks = false,
 ): Promise<DepthInput> {
   const path = '/api/v1/portfolios/' + encodeURIComponent(portfolio)
   // Private reads must already be known when the risk service freezes the books.
@@ -450,7 +451,7 @@ export async function captureDepth(
     : []
   const raw = await api.post<unknown>(
     path + '/scenario',
-    { scenario_name: 'OPERATOR_SPOT_BOOKS', spot_book_instrument: instrument },
+    { scenario_name: 'OPERATOR_SPOT_BOOKS', spot_book_instrument: instrument, ...(waitForBooks && { wait_for_spot_books: true }) },
     200,
     signal,
   )
