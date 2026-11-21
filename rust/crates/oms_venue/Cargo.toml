@@ -10,6 +10,7 @@ kanz-decimal-compat = { path = "../.." }
 kanz-order-core = { path = "../order_core" }
 kanz-proto-wire = { path = "../proto_wire" }
 prost = "=0.14.6"
+prost-types = "=0.14.6"
 prost-reflect = "=0.16.5"
 bytes = "=1.12.1"
 http = "=1.5.0"
