@@ -243,7 +243,7 @@ async function calculate() {
   <section v-if="result" aria-live="polite">
     <h2>Scenario results</h2>
     <p class="muted">
-      Net includes the assumed rebalance cost and values any residual at the best sell bid. Stress P&amp;L uses the
+      Net includes the assumed rebalance cost and values any remaining base asset at the buy venue’s best bid. Stress P&amp;L uses the
       shocked mark and excludes liquidation fees and rebalancing.
     </p>
     <article v-for="r in result.directions" :key="r.buy_venue">

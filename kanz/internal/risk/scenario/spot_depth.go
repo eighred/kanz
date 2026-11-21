@@ -439,8 +439,9 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	result.SellVenueChange = &querypb.SpotVenueChange{BaseChange: e.value(new(big.Rat).Neg(sold)), QuoteChange: e.value(sellCash)}
 	result.GrossQuoteCashChange = e.value(spotSub(proceeds, cost))
 	result.TotalFeesInQuote = e.value(spotAdd(spotMul(cost, b.rate), spotMul(proceeds, v.rate)))
-	bid := dec.FromProto(sell.Book.Bids[0].Price)
-	beforeRebalance := spotAdd(cash, spotMul(residual, bid))
+	// The unmatched portion of the acquisition can be sold locally at the buy venue.
+	buyBid := dec.FromProto(buy.Book.Bids[0].Price)
+	beforeRebalance := spotAdd(cash, spotMul(residual, buyBid))
 	result.MarkedNetBeforeRebalance, _ = dec.ToProtoExact(beforeRebalance)
 	if s.RebalanceCost != nil && s.RebalanceCost.Coefficient >= 0 {
 		result.MarkedNetAfterRebalance = e.value(spotSub(beforeRebalance, dec.FromProto(s.RebalanceCost)))
@@ -450,7 +451,7 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 		move := dec.FromProto(s.AdverseMoveBps)
 		// The failed hedge leaves the inventory at the venue of the fill.
 		// Mark the unhedged purchase at its local bid and the sale at its local ask.
-		longMark := spotMul(dec.FromProto(buy.Book.Bids[0].Price), spotDiv(spotSub(bps, move), bps))
+		longMark := spotMul(buyBid, spotDiv(spotSub(bps, move), bps))
 		shortMark := spotMul(dec.FromProto(sell.Book.Asks[0].Price), spotDiv(spotAdd(bps, move), bps))
 		result.BuyOnly = e.stress(acquired, new(big.Rat).Neg(buyCash), longMark)
 		result.SellOnly = e.stress(new(big.Rat).Neg(sold), sellCash, shortMark)

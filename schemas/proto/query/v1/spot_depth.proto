@@ -69,7 +69,7 @@ message SpotDepthScenario {
   common.v1.Decimal rebalance_cost = 4;
   // Fraction of the planned sell filled at the supplied bids, in basis points.
   common.v1.Decimal sell_fill_bps = 5;
-  // Long residuals are marked below the sell bid, shorts above the buy ask.
+  // Stress longs below the buy venue's bid and shorts above the sell venue's ask.
   common.v1.Decimal adverse_move_bps = 6;
   // Operator's allowed marked loss in quote units when exactly one leg fills.
   common.v1.Decimal one_leg_loss_limit = 7;
@@ -143,7 +143,7 @@ message SpotDepthDirection {
   common.v1.Money sell_fee = 11;
   common.v1.Decimal cash_change = 12;
   common.v1.Decimal residual_base = 13;
-  // Cash plus residual at the best sell bid, less assumed rebalance cost.
+  // Cash plus residual at the buy venue's best bid, less assumed rebalance cost.
   common.v1.Decimal marked_net_after_rebalance = 14;
   // Excess purchased base is marked at the shocked bid on the buy venue.
   // Sold base to replace is marked at the shocked ask on the sell venue.

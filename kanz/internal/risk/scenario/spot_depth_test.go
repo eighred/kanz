@@ -90,6 +90,29 @@ func TestLocalInventoryRoundTrip(t *testing.T) {
 	run("UNSUPPORTED")
 }
 
+func TestSpotDepthMarksUnmatchedPurchaseAtBuyVenue(t *testing.T) {
+	s := depthExample()
+	buy, sell := s.Venues[0], s.Venues[1]
+	n := func(value int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: value} }
+	buy.Book.Bids, buy.Book.Asks = buy.Book.Bids[:1], buy.Book.Asks[:1]
+	sell.Book.Bids, sell.Book.Asks = sell.Book.Bids[:1], sell.Book.Asks[:1]
+	buy.Book.Bids[0].Price, buy.Book.Asks[0].Price = n(99), n(100)
+	sell.Book.Bids[0].Price, sell.Book.Asks[0].Price = n(110), n(111)
+	buy.FeeBps, sell.FeeBps = n(100), n(0)
+	sell.QuantityStep = &commonpb.Decimal{Coefficient: 1, Exponent: -1}
+	s.RebalanceCost = &commonpb.Decimal{Coefficient: 82, Exponent: -1}
+	reply, err := EvaluateSpotDepth(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := reply.Directions[0]
+	// Pay 100 for 0.99 net BTC. Sell 0.9 for 99. Mark the last 0.09 at 99.
+	assertDepthAmount(t, d.CashChange, "-1")
+	assertDepthAmount(t, d.ResidualBase, "0.09")
+	assertDepthAmount(t, d.MarkedNetBeforeRebalance, "7.91")
+	assertDepthAmount(t, d.MarkedNetAfterRebalance, "-0.29")
+}
+
 func TestLocalInventoryRoundTripNativeFeeAndLot(t *testing.T) {
 	s := depthExample()
 	r, err := EvaluateSpotDepth(s)
@@ -190,7 +213,7 @@ func TestDepthScenarioNativeFeesAndOneLegLoss(t *testing.T) {
 	assertDepthAmount(t, a.PartialSell.InventoryChange, "0.4996")
 	assertDepthAmount(t, a.PartialSell.MarkedPnl, "-297.201574")
 	assertDepthAmount(t, b.ResidualBase, "0.00000064")
-	assertDepthAmount(t, b.MarkedNetAfterRebalance, "-125.9720128")
+	assertDepthAmount(t, b.MarkedNetAfterRebalance, "-125.9719808")
 	again, err := EvaluateSpotDepth(proto.Clone(s).(*querypb.SpotDepthScenario))
 	if err != nil || !proto.Equal(r, again) {
 		t.Fatal("unstable scenario")
