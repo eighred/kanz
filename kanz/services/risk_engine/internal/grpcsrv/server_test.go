@@ -247,6 +247,18 @@ func TestEvaluateScenarioDecodesShocks(t *testing.T) {
 	}
 }
 
+func TestSpotCaptureRequiresResolvedPortfolioMatch(t *testing.T) {
+	srv := grpcsrv.New(fakeEngine{exposure: func(v1.ExposureRequest) (v1.ExposureResponse, error) {
+		return v1.ExposureResponse{PortfolioID: "other"}, nil
+	}}, "acme")
+	reply, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{
+		PortfolioId: "requested", ScenarioName: "OPERATOR_SPOT_BOOKS", SpotBookInstrument: "BTC-USDT",
+	})
+	if reply != nil || status.Code(err) != codes.NotFound {
+		t.Fatalf("unmatched portfolio returned %v, %v", reply, err)
+	}
+}
+
 func TestSpotDepthScenarioRequiresExclusiveMode(t *testing.T) {
 	srv := grpcsrv.New(fakeEngine{}, "acme")
 	for _, req := range []*querypb.EvaluateScenarioRequest{

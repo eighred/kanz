@@ -18,7 +18,10 @@ The existing portfolio scenario query accepts `OPERATOR_SPOT_BOOKS` and a
 when its gRPC reader has configured instruments. It retains one current book
 per venue and instrument. `known_at` is the first local risk-service receipt of
 that book revision. Exports include the venue event times, sequences, FACT IDs,
-source, producer release and data rights reference.
+source, producer release and data rights reference. For each returned venue,
+`portfolio_account_ref` comes from the exact tenant, resolved portfolio and
+MIC in `RISK_ENGINE_VENUE_ACCOUNTS`. An empty reference indicates no configured
+binding. Private venue balances and fee tiers require separate observations.
 
 `RISK_ENGINE_SPOT_BOOK_GRANTS` is a JSON array. Each entry binds a canonical
 crypto spot pair to one exact publisher and release in `RISK_ENGINE_TENANT`.

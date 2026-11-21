@@ -9,6 +9,7 @@ const route = useRoute(),
   session = useSession()
 const id = computed(() => String(route.params.id ?? ''))
 const inputs = ref<DepthInput>()
+const liveCapture = ref(false)
 const instrument = ref('BTC-USDT')
 const source = ref(''),
   error = ref(''),
@@ -28,6 +29,7 @@ function reset() {
   fileRead++
   invalidate()
   inputs.value = undefined
+  liveCapture.value = false
   source.value = ''
 }
 watch(() => [id.value, session.identity, session.identity?.tenant, session.identity?.subject], reset, {
@@ -55,7 +57,7 @@ async function loadObserved() {
     const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal)
     if (seq !== generation) return
     if (
-      previous?.observation &&
+      liveCapture.value && previous?.observation &&
       previous.instrument === requested &&
       next.venues.every(
         (v, i) =>
@@ -66,25 +68,11 @@ async function loadObserved() {
       )
     ) {
       next.quantity = previous.quantity
-      next.rebalanceCost = previous.rebalanceCost
       next.sellFillBps = previous.sellFillBps
       next.adverseMoveBps = previous.adverseMoveBps
-      next.venues.forEach((v, i) => {
-        const prior = previous.venues[i]!
-        for (const key of [
-          'account',
-          'baseBalance',
-          'quoteBalance',
-          'feeBps',
-          'feeCurrency',
-          'step',
-          'minQty',
-          'minNotional',
-        ] as const)
-          v[key] = prior[key]
-      })
     }
     inputs.value = next
+    liveCapture.value = true
     source.value = 'Observed by the risk service · ' + next.observation!.source
   } catch (e) {
     if (seq === generation) {
@@ -108,7 +96,7 @@ async function loadFile(event: Event) {
     if (seq !== fileRead) return
     if (!isDepthInput(parsed)) throw new Error('Invalid scenario file. Use the example inputs as a template.')
     inputs.value = parsed
-    source.value = file.name
+    source.value = 'Imported scenario · ' + file.name
   } catch (e) {
     if (seq === fileRead) error.value = e instanceof Error ? e.message : 'Could not read scenario.'
   }
@@ -143,8 +131,8 @@ async function calculate() {
     <RouterLink :to="{ name: 'exposure', params: { id } }">{{ id }}</RouterLink>
   </p>
   <p>
-    Price both trading directions against dated books. Fees, balances, order limits and account labels are scenario
-    inputs. The comparison uses no trading permissions.
+    Price both trading directions against dated books. Enter available balances, fees and order limits as
+    scenario assumptions for each capture.
   </p>
   <div class="actions">
     <label>Spot instrument <input v-model="instrument" maxlength="128" :disabled="busy" /></label>
@@ -173,7 +161,8 @@ async function calculate() {
         <legend>{{ v.venue }} · {{ v.symbol }}</legend>
         <p class="muted">Observed {{ v.observed }}<br />Received {{ v.received }} · Sequence {{ v.sequence }}</p>
         <div class="fields">
-          <label>Scenario account <input v-model="v.account" required /></label>
+          <label v-if="liveCapture && v.portfolioAccount">Portfolio account <input :value="v.portfolioAccount" readonly /></label>
+          <label v-else>Scenario account <input v-model="v.account" required /></label>
           <label>Base available <input v-model="v.baseBalance" /></label>
           <label>Quote available <input v-model="v.quoteBalance" /></label>
           <label>Fee (bps) <input v-model="v.feeBps" /></label>
@@ -182,6 +171,7 @@ async function calculate() {
           <label>Minimum quantity <input v-model="v.minQty" /></label>
           <label>Minimum notional <input v-model="v.minNotional" /></label>
         </div>
+        <p v-if="liveCapture && !v.portfolioAccount" class="muted">No account binding is configured for this venue and portfolio.</p>
       </fieldset>
     </div>
     <div class="actions">

@@ -5,6 +5,8 @@ import { isTimestamp } from './timestamp'
 export interface VenueInput {
   venue: string
   account: string
+  // Captured deployment reference, retained with saved scenario inputs.
+  portfolioAccount?: string
   symbol: string
   observed: string
   received: string
@@ -24,6 +26,8 @@ export interface VenueInput {
 }
 export interface DepthInput {
   observation?: {
+    portfolio_id?: string
+    owner_tenant?: string
     source: string
     producer_version: string
     rights_reference: string
@@ -344,6 +348,8 @@ export async function captureDepth(
     )
       throw new Error('Invalid venue observation.')
     ids.push(entry.event_id)
+    const account = entry.portfolio_account_ref ?? ''
+    if (typeof account !== 'string' || account.trim() !== account) throw new Error('Invalid portfolio account reference.')
     return {
       venue,
       symbol: b.symbol,
@@ -355,7 +361,8 @@ export async function captureDepth(
       sequence: b.last_update_sequence,
       bids: capturedSide(b.bids),
       asks: capturedSide(b.asks),
-      account: '',
+      account,
+      portfolioAccount: account,
       baseBalance: '',
       quoteBalance: '',
       feeBps: '',
@@ -374,6 +381,8 @@ export async function captureDepth(
     adverseMoveBps: '',
     venues,
     observation: {
+      portfolio_id: portfolio,
+      owner_tenant: tenant,
       source: o.source as string,
       producer_version: o.producer_version as string,
       rights_reference: o.rights_reference as string,

@@ -16,16 +16,17 @@ one second apart, and received by that cutoff.
 
 The result shows executable size under those assumptions, residual inventory,
 net quote value and losses under one-leg and partial-sale scenarios. Save the
-inputs and result together to reproduce the calculation. Balances, account
-labels, asset references and fees are supplied by the operator. Actual order
-entry and verified account balances use their respective domain services.
+inputs and result together to reproduce the calculation. Example and imported
+files supply their own scenario account labels.
 
 For an instrument covered by the tenant's market data grant, enter its canonical
 pair and select **Capture current books**. The app obtains both books through the
 portfolio query, with venue timestamps, risk-service receipt times and source
-event IDs. Enter account assumptions before pricing. A fresh capture on the
-same mapped pair can reuse previously entered terms; a different asset mapping
-requires new terms. The export records the observation and the assumed terms.
+event IDs. The read shows the portfolio’s configured account at each venue.
+An unbound venue accepts a hypothetical scenario label. Enter the assumed
+available balances, fees, order limits and inventory restoration cost for each
+new capture. The export records the tenant, portfolio, configured references and
+scenario inputs at that cutoff.
 
 ## Development
 

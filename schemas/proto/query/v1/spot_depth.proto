@@ -95,6 +95,9 @@ message ObservedVenueBook {
   // When the risk service first observed this revision of the bounded book.
   google.protobuf.Timestamp known_at = 2;
   string event_id = 3;
+  // Current deployment binding for this portfolio and MIC at capture. Empty
+  // when unbound. Independent of the market fact, balances and venue access.
+  string portfolio_account_ref = 4;
 }
 
 message SpotBookObservation {

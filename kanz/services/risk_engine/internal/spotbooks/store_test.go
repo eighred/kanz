@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
@@ -22,6 +23,10 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 		t.Fatal("another tenant accepted the grant")
 	}
 	s := New("pilot", grants)
+	accounts, err := execution.ParseBindings("pilot/alpha@BINANCE=bn-alpha,pilot/alpha@OKX=ok-alpha,pilot/beta@OKX=ok-beta,foreign/beta@BINANCE=bn-other")
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	send := func(tenant, venue, version string, at time.Time, seq uint64, ask int64) {
@@ -45,7 +50,7 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	}
 	want := func(tenant, status string) {
 		t.Helper()
-		got := s.Observe(tenant, "BTC-USDT")
+		got := s.Observe(tenant, "alpha", "BTC-USDT", accounts)
 		if got.Status != status || (status == "UNKNOWN" && len(got.Venues) != 0) {
 			t.Fatal(got)
 		}
@@ -58,10 +63,15 @@ func TestCaptureRequiresCurrentConsistentTenantBooks(t *testing.T) {
 	send("pilot", "OKX", "1.0.1", at, 2, 12)
 	want("pilot", "SUPPORTED")
 	want("foreign", "UNKNOWN")
-	initial := s.Observe("pilot", "BTC-USDT")
+	initial := s.Observe("pilot", "alpha", "BTC-USDT", accounts)
+	beta := s.Observe("pilot", "beta", "BTC-USDT", accounts)
+	if initial.Venues[0].PortfolioAccountRef != "bn-alpha" || initial.Venues[1].PortfolioAccountRef != "ok-alpha" ||
+		beta.Venues[0].PortfolioAccountRef != "" || beta.Venues[1].PortfolioAccountRef != "ok-beta" {
+		t.Fatal("book projections did not isolate the tenant, portfolio and venue")
+	}
 	now = now.Add(time.Millisecond * 100)
 	send("pilot", "OKX", "1.0.1", at, 2, 12)
-	if !proto.Equal(initial.Venues[1].KnownAt, s.Observe("pilot", "BTC-USDT").Venues[1].KnownAt) {
+	if !proto.Equal(initial.Venues[1].KnownAt, s.Observe("pilot", "alpha", "BTC-USDT", accounts).Venues[1].KnownAt) {
 		t.Fatal("duplicate refreshed receipt")
 	}
 	send("pilot", "OKX", "1.0.1", at, 2, 13)

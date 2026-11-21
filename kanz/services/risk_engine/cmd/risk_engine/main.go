@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	mdstore "github.com/eighred/kanz/internal/marketdata/store"
@@ -1024,6 +1025,10 @@ func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source
 		logger.Warn("risk query gRPC: serving plaintext (no RISK_ENGINE_SPIFFE_SOCKET)")
 	}
 
+	accounts, err := execution.ParseBindings(cfg.VenueAccounts)
+	if err != nil {
+		return nil, err
+	}
 	lis, err := net.Listen("tcp", cfg.GRPCListen)
 	if err != nil {
 		return nil, err
@@ -1031,7 +1036,7 @@ func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source
 	grpcSrv := grpc.NewServer(opts...)
 	// The engine is single-tenant per deployment (cfg.Tenant); grpcsrv stamps it
 	// as the owning tenant of every served portfolio (WIRE-02a owner_tenant).
-	grpcsrv.New(eng, cfg.Tenant).WithSpotBooks(books).Register(grpcSrv)
+	grpcsrv.New(eng, cfg.Tenant).WithSpotBooks(books, accounts).Register(grpcSrv)
 
 	go func() {
 		logger.Info("risk query gRPC listening", "addr", cfg.GRPCListen)

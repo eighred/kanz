@@ -40,6 +40,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/publish"
@@ -61,11 +62,13 @@ type Server struct {
 	// deny-by-default authz-gate input a governed client checks the caller against.
 	ownerTenant string
 	books       *spotbooks.Store
+	accounts    *execution.AccountBindings
 }
 
 // WithSpotBooks binds this server's tenant-scoped read cache at startup.
-func (s *Server) WithSpotBooks(books *spotbooks.Store) *Server {
+func (s *Server) WithSpotBooks(books *spotbooks.Store, accounts *execution.AccountBindings) *Server {
 	s.books = books
+	s.accounts = accounts
 	return s
 }
 
@@ -201,8 +204,11 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if req.GetPortfolioId() == "" || string(portfolio.PortfolioID) != req.GetPortfolioId() {
+			return nil, status.Error(codes.NotFound, "portfolio unavailable")
+		}
 		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
-			SpotBooks: s.books.Observe(s.ownerTenant, req.SpotBookInstrument)}, nil
+			SpotBooks: s.books.Observe(s.ownerTenant, string(portfolio.PortfolioID), req.SpotBookInstrument, s.accounts)}, nil
 	}
 	if req.GetSpotDepth() != nil || req.GetScenarioName() == scenario.SpotDepthName {
 		if req.GetScenarioName() != scenario.SpotDepthName || req.GetSpotDepth() == nil || len(req.GetShocks()) != 0 {

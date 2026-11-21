@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/instrument"
 	"github.com/eighred/kanz/internal/marketedge/ingest"
 	"github.com/eighred/kanz/internal/risk/scenario"
@@ -147,7 +148,7 @@ func (s *Store) Handle(_ context.Context, env *envelopepb.Envelope, payload []by
 	return nil
 }
 
-func (s *Store) Observe(tenant, id string) *querypb.SpotBookObservation {
+func (s *Store) Observe(tenant, portfolio, id string, accounts *execution.AccountBindings) *querypb.SpotBookObservation {
 	out := &querypb.SpotBookObservation{InstrumentId: id, Status: "UNKNOWN", Reason: "No authorized current pair of books is available."}
 	if s == nil || tenant != s.tenant {
 		return out
@@ -175,7 +176,9 @@ func (s *Store) Observe(tenant, id string) *querypb.SpotBookObservation {
 	out.BaseAssetRef, out.QuoteAssetRef = g.BaseRef, g.QuoteRef
 	out.ProductType = g.ProductType
 	for _, o := range pair {
-		out.Venues = append(out.Venues, proto.CloneOf(o))
+		book := proto.CloneOf(o)
+		book.PortfolioAccountRef, _ = accounts.Account(tenant, portfolio, book.Book.Mic)
+		out.Venues = append(out.Venues, book)
 	}
 	return out
 }

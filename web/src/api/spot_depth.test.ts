@@ -25,7 +25,10 @@ describe('operator spot depth', () => {
       rights_reference: 'local-demo-only',
       base_asset_ref: 'bitcoin',
       quote_asset_ref: 'tether-usd',
-      venues: rows.map((row, i) => ({ book: row.book, known_at: row.known_at, event_id: 'book-' + i })),
+      venues: rows.map((row, i) => ({
+        book: row.book, known_at: row.known_at, event_id: 'book-' + i,
+        portfolio_account_ref: i === 0 ? 'bn-pilot' : undefined,
+      })),
     }
     const raw = { portfolio_id: 'PF1', owner_tenant: 'pilot', spot_books: observed }
     const post = vi.spyOn(api, 'post').mockResolvedValue(raw)
@@ -33,7 +36,9 @@ describe('operator spot depth', () => {
     const captured = await read()
     expect(captured.venues[0]?.venue).toBe('BINANCE')
     expect(captured.venues[0]?.feeBps).toBe('')
-    expect(captured.venues[0]?.account).toBe('')
+    expect(captured.venues[0]?.account).toBe('bn-pilot')
+    expect(captured.venues[1]?.account).toBe('')
+    expect(captured.observation).toMatchObject({ owner_tenant: 'pilot', portfolio_id: 'PF1' })
     expect(captured.venues[0]?.baseBalance).toBe('')
     expect(captured.observation?.event_ids).toEqual(['book-0', 'book-1'])
     post.mockResolvedValueOnce({ ...raw, spot_books: { ...observed, product_type: 'EQUITY_TOKEN' } })
