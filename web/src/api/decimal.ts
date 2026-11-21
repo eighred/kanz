@@ -79,8 +79,7 @@ export function formatDecimal(d: Decimal | undefined | null): string | null {
 }
 
 /**
- * formatMoney renders a monetary display value, or null for an unreadable
- * amount. A readable amount without a denomination gets an explicit label.
+ * formatMoney renders a Money, or null when the amount cannot be rendered.
  *
  * The currency is appended rather than symbolised. A symbol table is a place for
  * two currencies to share a glyph, and on a multi-currency book the code is the
@@ -90,8 +89,7 @@ export function formatMoney(m: Money | undefined | null): string | null {
   if (!m) return null
   const amount = formatDecimal(m.amount)
   if (amount === null) return null
-  if (!m.currency_code?.trim()) return 'Currency unavailable'
-  return `${amount} ${m.currency_code}`
+  return m.currency_code ? `${amount} ${m.currency_code}` : amount
 }
 
 /**

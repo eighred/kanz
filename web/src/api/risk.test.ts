@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
-import { describeRisk, risk } from './risk'
+import { describeRisk, displayPortfolioMoney, risk } from './risk'
 
 // THE RISK ROUTES SERIALISE DIFFERENTLY FROM THE CONTROL ROUTES, and this file
 // exists partly to pin that. control.ts is protojson with default options —
 // lowerCamelCase, zero values omitted — while these use UseProtoNames +
 // EmitDefaultValues, so they are snake_case with zeros present. A shared type
 // across both would make one of those readings wrong somewhere, silently.
+
+describe('portfolio money display', () => {
+  it.each([undefined, '', '   '])('labels an unavailable currency (%s)', currency_code => {
+    for (const coefficient of ['0', '250']) {
+      expect(displayPortfolioMoney({ amount: { coefficient }, currency_code })).toBe('Currency unavailable')
+    }
+  })
+})
 
 describe('the portfolios list reads the risk surface shape', () => {
   let body: string

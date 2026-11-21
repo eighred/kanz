@@ -1,6 +1,6 @@
 import { api, ApiError } from './client'
 import { checkWireDecimal, checkWireMoney } from './financial-wire'
-import type { Decimal, Money } from './decimal'
+import { formatMoney, type Decimal, type Money } from './decimal'
 
 // The risk read surface, as the browser sees it (#399).
 //
@@ -40,6 +40,13 @@ export interface ExposureState {
   bucket: string
   gross?: Money
   net?: Money
+}
+
+/** A portfolio value needs both a readable amount and a denomination. */
+export function displayPortfolioMoney(value: Money | undefined): string {
+  const rendered = formatMoney(value)
+  if (rendered === null) return '—'
+  return value?.currency_code?.trim() ? rendered : 'Currency unavailable'
 }
 
 /**
