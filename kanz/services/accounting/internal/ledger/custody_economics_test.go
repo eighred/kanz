@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestPostgresCustodyExecutionEconomicsUsesOriginalReceiptPosition(t *testing
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := tx.Rollback(ctx); err != nil {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
 			t.Errorf("rollback ledger fixture: %v", err)
 		}
 	}()
