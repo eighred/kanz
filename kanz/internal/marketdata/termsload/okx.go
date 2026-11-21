@@ -22,6 +22,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/exchange/netdial"
+	"github.com/eighred/kanz/internal/instrument"
 	"github.com/eighred/kanz/internal/marketdata/terms"
 )
 
@@ -177,6 +178,8 @@ func (r *OKXReference) Chain(ctx context.Context, it InstType, uly string) (Batc
 // chain rolled.
 type okxInstrument struct {
 	InstType  string `json:"instType"`
+	RuleType  string `json:"ruleType"`
+	CtType    string `json:"ctType"`
 	InstID    string `json:"instId"`
 	Uly       string `json:"uly"`
 	OptType   string `json:"optType"`
@@ -417,6 +420,14 @@ func okxOptionTerms(row okxInstrument, underlyingID string, expiry time.Time) (*
 // decisions as an option's, minus the strike and the put/call. What it buys is
 // that a dated future stops being an instrument with no terms at all.
 func okxFutureTerms(row okxInstrument, underlyingID string, expiry time.Time) (*referencepb.FutureTerms, string) {
+	// X-Perps have both an expiry and recurring funding. The ordinary
+	// future terms cannot describe those payments.
+	if row.RuleType != "normal" {
+		return nil, fmt.Sprintf("FUTURES ruleType %q is not supported by ordinary dated future terms", row.RuleType)
+	}
+	if row.CtType != "linear" {
+		return nil, fmt.Sprintf("FUTURES ctType %q cannot establish a linear underlying-unit contract size", row.CtType)
+	}
 	size, reason := okxContractUnits(row)
 	if reason != "" {
 		return nil, reason
@@ -478,15 +489,16 @@ func okxOptionType(s string) (referencepb.OptionType, string) {
 // real delta, too large and it reports a multiple. Neither errors, and neither
 // looks like a data problem — it looks like the position size.
 //
-// ctValCcy MUST BE PRESENT. Without it the product is a number with no units,
-// and "underlying units per contract" is precisely a claim about units. This
-// does not verify that the currency IS the underlying's base asset, because
-// nothing on this platform can: InstrumentReference.base_asset exists in the
-// proto and is never populated. That check belongs here the day it can be made.
+// Both canonical terms express size in underlying units per contract.
+// A face amount in quote currency needs a price to convert to those units.
 func okxContractUnits(row okxInstrument) (*commonpb.Decimal, string) {
 	if strings.TrimSpace(row.CtValCcy) == "" {
 		return nil, "ctValCcy is absent, so the contract value has no stated units and cannot be " +
 			"read as underlying units per contract — the figure every Greek is scaled by"
+	}
+	pair, ok := instrument.ParseID(row.Uly)
+	if !ok || row.CtValCcy != pair.Base {
+		return nil, fmt.Sprintf("ctValCcy %q does not establish underlying units for %q", row.CtValCcy, row.Uly)
 	}
 	ctVal, reason := positiveRat(row.CtVal, "contract value (ctVal)")
 	if reason != "" {

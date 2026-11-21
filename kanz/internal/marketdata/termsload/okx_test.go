@@ -48,9 +48,9 @@ func okxOption(instID, uly, optType, stk string, expMs, listMs int64) string {
 // okxFuture renders one FUTURES catalogue row.
 func okxFuture(instID, uly string, expMs, listMs int64) string {
 	return fmt.Sprintf(`{"instType":"FUTURES","instId":%q,"uly":%q,"instFamily":%q,`+
-		`"ctType":"inverse","expTime":"%d","listTime":"%d",`+
-		`"ctVal":"100","ctMult":"1","ctValCcy":"USD","tickSz":"0.1",`+
-		`"settleCcy":"BTC","state":"live"}`,
+		`"ruleType":"normal","ctType":"linear","expTime":"%d","listTime":"%d",`+
+		`"ctVal":"100","ctMult":"1","ctValCcy":"BTC","tickSz":"0.1",`+
+		`"settleCcy":"USD","state":"live"}`,
 		instID, uly, uly, expMs, listMs)
 }
 
@@ -255,6 +255,13 @@ func TestARowThatWouldPriceWrongIsRefused(t *testing.T) {
 				okxOption("BTC-USD-241227-60000-C", "BTC-USD", "C", "60000", expiry.UnixMilli(), listed.UnixMilli()),
 				`"ctVal":"0.01"`, `"ctVal":"0"`, 1),
 			want: "ctVal",
+		},
+		{
+			name: "a quote-currency face amount cannot scale underlying Greeks",
+			row: strings.Replace(
+				okxOption("BTC-USD-241227-60000-C", "BTC-USD", "C", "60000", expiry.UnixMilli(), listed.UnixMilli()),
+				`"ctValCcy":"BTC"`, `"ctValCcy":"USD"`, 1),
+			want: "ctValCcy",
 		},
 		{
 			name: "a contract value with no units is not a multiplier",
@@ -485,6 +492,26 @@ func TestADatedFutureMapsToFutureTerms(t *testing.T) {
 	}
 	if !f.GetExpiry().AsTime().Equal(expiry) {
 		t.Errorf("expiry = %s, want %s", f.GetExpiry().AsTime(), expiry)
+	}
+}
+
+func TestFuturesNeedRepresentableCashflowsAndUnderlyingUnits(t *testing.T) {
+	control := okxFuture("ordinary", "BTC-USD", expiry.UnixMilli(), listed.UnixMilli())
+	candidate := strings.Replace(control, "ordinary", "candidate", 1)
+	for _, change := range []struct{ from, to string }{
+		{`"ruleType":"normal"`, `"ruleType":"xperp"`},
+		{`"ruleType":"normal",`, ""},
+		{`"ruleType":"normal"`, `"ruleType":"pre_market"`},
+		{`"ctType":"linear"`, `"ctType":"inverse"`},
+		{`"ctType":"linear",`, ""},
+		{`"ctValCcy":"BTC"`, `"ctValCcy":"USD"`},
+	} {
+		b := parse(t, okxCatalogue(control, strings.Replace(candidate, change.from, change.to, 1)))
+		records, err := b.Loadable()
+		if !errors.Is(err, ErrPartialChain) || len(records) != 0 || len(b.Mapped) != 1 ||
+			len(b.Refused) != 1 || b.Refused[0].InstID != "candidate" {
+			t.Fatalf("change %v returned %+v, %v", change, b, err)
+		}
 	}
 }
 
