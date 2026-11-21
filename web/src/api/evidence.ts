@@ -70,6 +70,10 @@ export function describeEvidence(error: unknown): string {
 }
 export function downloadEvidence(value: EvidencePage | ControlEvidenceReport, filename: string): void {
   const artifact = { artifact_type: 'records' in value ? 'tenant_report_page' : 'tenant_control_evidence_window', page_only: 'records' in value, record_projection: 'selected metadata only; not full signed records', ...value }
+  downloadJson(artifact, filename)
+}
+
+export function downloadJson(artifact: object, filename: string): void {
   const url = URL.createObjectURL(new Blob([JSON.stringify(artifact, null, 2)], { type: 'application/json' }))
   const link = document.createElement('a'); link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove()
   setTimeout(() => URL.revokeObjectURL(url), 0)

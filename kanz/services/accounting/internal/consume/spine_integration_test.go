@@ -64,7 +64,7 @@ func tenantPool(t *testing.T, ctx context.Context, dsn, tenant string) *pgxpool.
 	}
 	t.Cleanup(pool.Close)
 
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS custody_execution_quantity_observations,custody_account_assignments,custody_account_proofs,custody_proof_scopes,custody_proof_issuers,custody_assignment_readers,custody_break_detections,custody_batch_receipts,ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join("../../migrations", "*.sql"))

@@ -20,16 +20,26 @@ func TestCustodyPrecisionMigrationDoesNotCertifyRoundedHistory(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO custody_breaks (break_id,portfolio_id,custodian_id,kind,break_key,ibor,custodian,difference,status,first_seen_at,last_seen_at,status_changed_at) VALUES ($1,'PF1','CUST-A','quantity','AAPL','1','1','0','open',now(),now(),now())`, id); err != nil {
 		t.Fatal(err)
 	}
-	ddl, err := os.ReadFile(filepath.Join(custodyMigrationDir, "0011_custody_precision.sql"))
+	// Preserve the original legacy row while advancing to the current reader's schema.
+	files, err := filepath.Glob(filepath.Join(custodyMigrationDir, "*.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, string(ddl)); err != nil {
-		t.Fatal(err)
+	for _, file := range files {
+		if filepath.Base(file) < "0011_custody_precision.sql" {
+			continue
+		}
+		ddl, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(ddl)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	st := NewPostgres(pool)
 	b, err := st.LoadBreak(ctx, id)
-	if err != nil || b.ValuesVerified || b.IBOR != nil || b.Diff != nil {
+	if err != nil || b.ValuesVerified || b.IBOR != nil || b.Diff != nil || b.Detection.RunID != "" {
 		t.Fatalf("migration certified rounded history: %+v %v", b, err)
 	}
 	if _, err := st.ApplyAction(ctx, Action{Tenant: "__system__", Actor: "test-operator", RequestID: "legacy", BreakID: id, Kind: "claim", ExpectedRevision: 1}); !errors.Is(err, ErrUnverifiedPrecision) {

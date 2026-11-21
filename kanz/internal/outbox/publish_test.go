@@ -6,11 +6,8 @@
 // seen bus.Validate.
 //
 // WHAT MAKES THIS ONE DIFFERENT FROM THE OTHER #245 ENTRIES. Everywhere else the
-// failure mode was an envelope the broker REFUSES. Here the dangerous one is an
-// envelope the broker ACCEPTS. Record.Event()'s own comment says it:
-//
-//	"Leaving one empty here would not error; it would publish a FACT that
-//	 validates and is simply DETACHED from the command that caused it."
+// failure mode was an envelope the broker REFUSES. Here a broker can accept a
+// valid FACT whose correlation identifies an unrelated command.
 //
 // correlation_id, causation_id and trace_context are not validated by bus. A
 // relay that dropped them would publish a stream of perfectly legal FACTs that
@@ -34,6 +31,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/pkg/bus"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // captureClient records the framed wire bytes — the Tier-B helper from
@@ -134,6 +132,73 @@ func TestRelayedFactIsAValidEnvelope(t *testing.T) {
 	if got := string(cc.sent[0].Key); got != "o1" {
 		t.Errorf("partition key = %q, want the order id — consumers FOLD these, so a key that moved "+
 			"reorders one order's history", got)
+	}
+}
+
+func TestOutboxPreflightAndRelayUseCapturedLineage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	ctx = bus.WithCorrelationID(ctx, "unrelated-correlation")
+	ctx = bus.WithCausationID(ctx, "unrelated-cause")
+	ctx = bus.WithTraceContext(ctx, "unrelated-legacy-trace")
+	span := trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}})
+	ctx = trace.ContextWithSpanContext(ctx, span)
+	for _, name := range []string{"stored", "empty"} {
+		t.Run(name, func(t *testing.T) {
+			record := lineageFact(t)
+			record.TraceContext = "captured-trace"
+			if name == "empty" {
+				record.CorrelationID, record.CausationID, record.TraceContext = "", "", ""
+			}
+			preview, previewWire := realRelayProducer(t)
+			err := record.PreflightPublication(ctx, func(checkCtx context.Context, event bus.Event) error {
+				gotDeadline, ok := checkCtx.Deadline()
+				wantDeadline, _ := ctx.Deadline()
+				if !ok || !gotDeadline.Equal(wantDeadline) || checkCtx.Done() != ctx.Done() || !trace.SpanContextFromContext(checkCtx).Equal(span) {
+					t.Fatal("preflight lost the publication deadline, cancellation or active span")
+				}
+				if bus.CorrelationIDFromContext(checkCtx) != "" || bus.CausationIDFromContext(checkCtx) != "" || bus.TraceContextFromContext(checkCtx) != "" {
+					t.Fatal("preflight retained caller lineage")
+				}
+				// Exercise the real stamping defaults on a local capture client.
+				return preview.Publish(checkCtx, event)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := NewMemory()
+			if err := q.Append(record); err != nil {
+				t.Fatal(err)
+			}
+			producer, relayWire := realRelayProducer(t)
+			relay, err := NewRelay(q, producer, quietLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sent, err := relay.Flush(ctx, record.PartitionKey); err != nil || sent != 1 {
+				t.Fatalf("flush sent %d: %v", sent, err)
+			}
+			for _, wire := range []*captureClient{previewWire, relayWire} {
+				if len(wire.sent) != 1 {
+					t.Fatalf("captured %d messages", len(wire.sent))
+				}
+				env, _, err := bus.Unframe(wire.sent[0].Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				correlation := record.CorrelationID
+				if correlation == "" {
+					correlation = env.GetEventId()
+				}
+				if env.GetCorrelationId() != correlation || env.GetCausationId() != record.CausationID ||
+					env.GetTraceContext() == "unrelated-legacy-trace" || (record.TraceContext != "" && env.GetTraceContext() != record.TraceContext) {
+					t.Fatal("wire lineage did not come from the captured fact or producer defaults")
+				}
+			}
+		})
+	}
+	if err := (Record{}).PreflightPublication(ctx, nil); err != nil {
+		t.Fatalf("nil checker must not decode a legacy record: %v", err)
 	}
 }
 

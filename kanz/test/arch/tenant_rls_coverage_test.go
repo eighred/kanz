@@ -66,6 +66,9 @@ import (
 // WORM/query authorization are also exercised by their owning runtime tests;
 // this source guard does not replace restricted-role database verification.
 var rlsExempt = map[string]string{
+	"custody_assignment_readers":    "#1074: owner provisions reader enrollment; other logins can see only their own enrollment.",
+	"custody_proof_issuers":         "#1074: owner provisions issuers; lookup requires the issuer login or an enrolled reader for the current tenant.",
+	"custody_proof_scopes":          "#1074: owner provisions scopes; lookup requires the issuer login or an enrolled reader for the current tenant.",
 	"identity_access_audit_tenants": "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
 	"bff_session_audit_tenants":     "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
 	// #364. "Login must find an account BEFORE it knows which tenant that account
@@ -96,15 +99,18 @@ var (
 	// CREATE TABLE <name> ( ... — the name may be schema-qualified or quoted.
 	createTable = regexp.MustCompile(`(?is)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?\s*\(`)
 	// ALTER TABLE <name> ENABLE|FORCE ROW LEVEL SECURITY — the direct form.
-	alterRLS = regexp.MustCompile(`(?is)ALTER\s+TABLE\s+"?([a-z_][a-z0-9_]*)"?\s+(ENABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY`)
-	// ARRAY['a', 'b'] — the dynamic form's table list.
-	arrayList = regexp.MustCompile(`(?is)ARRAY\s*\[([^\]]*)\]`)
-	quoted    = regexp.MustCompile(`'([^']*)'`)
+	alterRLS        = regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:"?public"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?\s+(ENABLE|DISABLE|FORCE|NO\s+FORCE)\s+ROW\s+LEVEL\s+SECURITY`)
+	policyPredicate = regexp.MustCompile(`(?i)\b(?:USING|WITH\s+CHECK)\s*\(`)
+	// Migrations format one statement for each table in a literal array.
+	foreachTables = regexp.MustCompile(`(?is)\bFOREACH\s+(\w+)\s+IN\s+ARRAY\s+ARRAY\s*\[([^\]]+)\]\s+LOOP\b`)
+	loopToken     = regexp.MustCompile(`(?i)\b(?:END\s+)?LOOP\b`)
+	formatTable   = regexp.MustCompile(`(?is)\bEXECUTE\s+format\(\s*(?:'((?:''|[^'])*)'|\$f\$(.*?)\$f\$)\s*,\s*(\w+)\s*\)\s*;`)
+	rlsTemplate   = regexp.MustCompile(`(?is)^\s*(?:ALTER\s+TABLE\s+%I\s+(?:ENABLE|DISABLE|(?:NO\s+)?FORCE)\s+ROW\s+LEVEL\s+SECURITY|(?:CREATE|DROP)\s+POLICY\s+\w+\s+ON\s+%I)\b`)
 )
 
 // tableDecl is one CREATE TABLE and what the same migration set says about it.
 type tableDecl struct {
-	policies    map[string]bool
+	policies    map[string]string
 	file        string
 	definition  string
 	altered     bool
@@ -192,6 +198,29 @@ func TestEveryTenantScopedTableIsUnderForcedRLS(t *testing.T) {
 // payloads. A new column, a later ALTER, or a companion losing tenant isolation
 // invalidates that permanent premise even while the directory still exists.
 func rlsExemptionProblem(name string, d *tableDecl, decls map[string]*tableDecl) string {
+	// 0030 keeps the three provisioning registries writable by their owner.
+	// All other roles have precisely one SELECT policy; the proof and
+	// assignment tables themselves still go through the generic FORCE check.
+	var readerPolicy string
+	switch name {
+	case "custody_assignment_readers":
+		readerPolicy = "FOR SELECT USING(login_role=session_user)"
+	case "custody_proof_issuers", "custody_proof_scopes":
+		readerPolicy = "FOR SELECT USING(tenant_id=app_current_tenant() AND (login_role=session_user OR EXISTS(" +
+			"SELECT FROM custody_assignment_readers r WHERE r.login_role=session_user AND r.tenant_id=" + name + ".tenant_id)))"
+	}
+	if readerPolicy != "" {
+		if d.file != "services/accounting/migrations/0030_custody_assignments.sql" || !d.enabled || d.forced || len(d.policies) != 1 {
+			return "custody provisioning registry requires owner access and a single reader policy under enabled RLS"
+		}
+		for _, body := range d.policies {
+			normalize := func(sql string) string { return strings.Join(strings.Fields(strings.ToLower(sql)), "") }
+			if normalize(body) != normalize(readerPolicy) {
+				return "custody provisioning registry must restrict lookups to its authorized session login"
+			}
+		}
+		return ""
+	}
 	if d.enabled || d.forced || d.policy {
 		return "RLS exemption is stale: table now declares RLS or a policy; review and retire the exception"
 	}
@@ -255,7 +284,7 @@ func decl(out map[string]*tableDecl, name, file string) *tableDecl {
 	if d, ok := out[name]; ok {
 		return d
 	}
-	d := &tableDecl{file: file, policies: map[string]bool{}}
+	d := &tableDecl{file: file, policies: map[string]string{}}
 	out[name] = d
 	return d
 }
@@ -266,7 +295,7 @@ func scanOneMigration(out map[string]*tableDecl, file, sql string) {
 	// from the whole file, so a later reference to some other table's tenant_id
 	// cannot mark this one.
 	for _, m := range createTable.FindAllStringSubmatchIndex(sql, -1) {
-		name := sql[m[2]:m[3]]
+		name := strings.ToLower(sql[m[2]:m[3]])
 		body := balancedParen(sql[m[1]-1:])
 		d := decl(out, name, file)
 		if d.definition != "" {
@@ -285,116 +314,114 @@ func scanOneMigration(out map[string]*tableDecl, file, sql string) {
 		decl(out, strings.ToLower(m[1]), file).altered = true
 	}
 
-	// The direct form.
+	sql = expandTableRLSTemplates(sql)
 	for _, m := range alterRLS.FindAllStringSubmatch(sql, -1) {
-		d := decl(out, m[1], file)
-		if strings.EqualFold(m[2], "ENABLE") {
+		d := decl(out, strings.ToLower(m[1]), file)
+		switch strings.ToUpper(m[2]) {
+		case "ENABLE":
 			d.enabled = true
-		} else {
+		case "DISABLE":
+			d.enabled = false
+		case "FORCE":
 			d.forced = true
-		}
-	}
-
-	// The dynamic form: every table named in an ARRAY[...] that the same file
-	// then ALTERs through format(%I). The array is a literal, so the loop is as
-	// readable as the statement — and reading only the direct form would report
-	// the two most carefully covered services as uncovered.
-	if strings.Contains(sql, "%I") {
-		enable := strings.Contains(strings.ToUpper(sql), "ENABLE ROW LEVEL SECURITY")
-		force := strings.Contains(strings.ToUpper(sql), "FORCE  ROW LEVEL SECURITY") ||
-			strings.Contains(strings.ToUpper(sql), "FORCE ROW LEVEL SECURITY")
-		policy := strings.Contains(strings.ToUpper(sql), "CREATE POLICY")
-		// THE PREDICATE IS READ FROM THE POLICY, NOT FROM THE FILE.
-		//
-		// Asking whether the FILE mentions the tenant GUC was the first version of
-		// this, and it was wrong in the direction that matters: 0002_tenant_scope_
-		// required.sql defines app_current_tenant() and raises on an unset GUC, so
-		// it mentions app.tenant_id a dozen times — and a CREATE POLICY of
-		// USING (true) inside it would have been vouched for by its own error
-		// message. Proven by mutation, which is the only reason it is not still
-		// written that way.
-		definitions := map[string]bool{}
-		for _, body := range dynamicPolicyBodies(sql) {
-			fields := strings.Fields(body)
-			if len(fields) >= 3 {
-				definitions[fields[2]] = policyScoped(body)
-			}
-		}
-		for _, a := range arrayList.FindAllStringSubmatch(sql, -1) {
-			for _, q := range quoted.FindAllStringSubmatch(a[1], -1) {
-				name := strings.TrimSpace(q[1])
-				if name == "" {
-					continue
-				}
-				d := decl(out, name, file)
-				d.enabled = d.enabled || enable
-				d.forced = d.forced || force
-				// Retain each policy by name. The final check evaluates all policies
-				// still present, including a permissive sibling of a scoped one.
-				if policy {
-					for name, scoped := range definitions {
-						d.policies[name] = scoped
-					}
-				}
-			}
+		default:
+			d.forced = false
 		}
 	}
 
 	// Fold policy creation and removal in statement order. Permissive policies
 	// combine with OR: a later narrow policy cannot hide an earlier broad one.
-	changes := regexp.MustCompile(`(?is)(CREATE|DROP)\s+POLICY\s+(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+ON\s+"?([a-z_][a-z0-9_]*)"?([^;]*);`)
+	changes := regexp.MustCompile(`(?is)(CREATE|DROP|ALTER)\s+POLICY\s+(?:IF\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?\s+ON\s+(?:"?public"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?([^;]*);`)
 	for _, m := range changes.FindAllStringSubmatch(sql, -1) {
-		d := decl(out, m[3], file)
-		if strings.EqualFold(m[1], "DROP") {
-			delete(d.policies, m[2])
-		} else {
-			d.policies[m[2]] = policyScoped(m[4])
+		d := decl(out, strings.ToLower(m[3]), file)
+		name := strings.ToLower(m[2])
+		switch strings.ToUpper(m[1]) {
+		case "DROP":
+			delete(d.policies, name)
+		case "CREATE":
+			d.policies[name] = m[4]
+		case "ALTER":
+			// ALTER may replace just one clause. Require review before
+			// attributing the old definition to the resulting policy.
+			d.policies[name] = ""
 		}
 	}
 	for _, d := range out {
 		d.policy = len(d.policies) > 0
 		d.guarded = d.policy
-		for _, scoped := range d.policies {
-			d.guarded = d.guarded && scoped
+		for _, body := range d.policies {
+			d.guarded = d.guarded && policyScoped(body)
 		}
 	}
 }
 
 // tenantColumn reports whether a CREATE TABLE body declares a tenant_id column.
 func tenantColumn(body string) bool {
-	for _, line := range strings.Split(body, "\n") {
-		f := strings.Fields(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), ",")))
-		if len(f) > 0 && strings.Trim(f[0], `"`) == "tenant_id" {
-			return true
+	// Column declarations are separated by top-level commas. A tenant_id in
+	// a nested key or foreign-key column list does not declare a column.
+	start, depth := 1, 0
+	for i := 1; i < len(body); i++ {
+		switch body[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			fallthrough
+		case ',':
+			if depth == 0 {
+				fields := strings.Fields(body[start:i])
+				if len(fields) >= 2 && strings.EqualFold(strings.Trim(fields[0], `"`), "tenant_id") {
+					return true
+				}
+				start = i + 1
+			}
 		}
 	}
 	return false
 }
 
-// dynamicPolicyBodies returns the text of each CREATE POLICY ... ON %I statement
-// in a migration, so its predicate can be read on its own rather than through
-// whatever else the file happens to say.
-//
-// The statement is wrapped in a dollar-quoted string that the loop passes to
-// format(), so it ends at the closing tag rather than at a semicolon — the
-// predicate itself contains none.
-func dynamicPolicyBodies(sql string) []string {
-	var out []string
-	for i := 0; ; {
-		j := strings.Index(sql[i:], "CREATE POLICY")
-		if j < 0 {
-			return out
+// Expand only the RLS statements formatted with the current FOREACH variable.
+// A trigger loop in the same migration supplies no policy or FORCE evidence.
+func expandTableRLSTemplates(sql string) string {
+	var out strings.Builder
+	for {
+		m := foreachTables.FindStringSubmatchIndex(sql)
+		if m == nil {
+			out.WriteString(sql)
+			return out.String()
 		}
-		start := i + j
-		rest := sql[start:]
-		end := len(rest)
-		for _, term := range []string{"$f$", "$$", ";"} {
-			if k := strings.Index(rest, term); k >= 0 && k < end {
-				end = k
+		variable, tables := sql[m[2]:m[3]], sql[m[4]:m[5]]
+		out.WriteString(sql[:m[1]])
+		sql = sql[m[1]:]
+		end, depth := 0, 1
+		for _, token := range loopToken.FindAllStringIndex(sql, -1) {
+			if strings.EqualFold(sql[token[0]:token[1]], "loop") {
+				depth++
+			} else {
+				depth--
+			}
+			if depth == 0 {
+				end = token[1]
+				break
 			}
 		}
-		out = append(out, rest[:end])
-		i = start + len("CREATE POLICY")
+		body := formatTable.ReplaceAllStringFunc(sql[:end], func(call string) string {
+			args := formatTable.FindStringSubmatch(call)
+			stmt := strings.ReplaceAll(args[1], "''", "'") + args[2]
+			if !strings.EqualFold(args[3], variable) || !rlsTemplate.MatchString(stmt) || strings.Count(stmt, "%I") != 1 {
+				return call
+			}
+			var statements strings.Builder
+			for _, table := range arrayLiteralElemPattern.FindAllStringSubmatch(tables, -1) {
+				statements.WriteString(strings.Replace(stmt, "%I", table[1], 1) + ";\n")
+			}
+			return statements.String()
+		})
+		out.WriteString(body)
+		sql = sql[end:]
 	}
 }
 
@@ -409,33 +436,21 @@ func dynamicPolicyBodies(sql string) []string {
 // (true) while its WITH CHECK still named the tenant, which is a total read leak
 // wearing half a control. That version survived its mutation; this one does not.
 func policyScoped(body string) bool {
-	using, hasUsing := policyClause(body, "USING")
-	check, hasCheck := policyClause(body, "WITH CHECK")
-	if !hasUsing && !hasCheck {
-		return false
+	// Skip each complete clause before looking for the next one. JOIN USING
+	// inside a WITH CHECK expression belongs to that expression.
+	found := false
+	for {
+		m := policyPredicate.FindStringIndex(body)
+		if m == nil {
+			return found
+		}
+		expression := balancedParen(body[m[1]-1:])
+		if !referencesTenantGUC(expression) {
+			return false
+		}
+		found = true
+		body = body[m[1]-1+len(expression):]
 	}
-	if hasUsing && !referencesTenantGUC(using) {
-		return false
-	}
-	if hasCheck && !referencesTenantGUC(check) {
-		return false
-	}
-	return true
-}
-
-// policyClause returns the parenthesised expression following keyword.
-func policyClause(body, keyword string) (string, bool) {
-	upper := strings.ToUpper(body)
-	i := strings.Index(upper, keyword)
-	if i < 0 {
-		return "", false
-	}
-	rest := body[i+len(keyword):]
-	j := strings.Index(rest, "(")
-	if j < 0 {
-		return "", false
-	}
-	return balancedParen(rest[j:]), true
 }
 
 // referencesTenantGUC reports whether a policy predicate scopes to the session's

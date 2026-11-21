@@ -40,6 +40,8 @@ type Capability string
 const (
 	// Read: query the fund's state. Exposure, positions, orders, executions, prices.
 	Read Capability = "read"
+	// SessionRead lets a principal inspect their own effective gateway permissions.
+	SessionRead Capability = "session.read"
 	// Snapshot custody is a separate optional tenant-wide grant. Neither
 	// ordinary Read nor Operate implies access or durable snapshot creation.
 	LakeSnapshotCreate Capability = "lake.snapshot.create"
@@ -84,6 +86,10 @@ const (
 	//
 	// NOT Read, obviously: reading the ledger is Read, and this writes it.
 	Fund Capability = "fund"
+	// CustodyRead permits a portfolio-scoped customer to read custody results and breaks.
+	CustodyRead Capability = "custody_read"
+	// CustodyRerun authorizes a fresh comparison against recorded statements.
+	CustodyRerun Capability = "custody_rerun"
 	// Approve: GIVE THE SECOND SIGNATURE. Sign off an act another person proposed — today a
 	// pricing/compliance override (#410 act one), and by design the order and mandate
 	// approvals that follow (#539).
@@ -257,16 +263,36 @@ type Route struct {
 // handler at registration, so it is not a middleware that a future composition root can
 // leave out of a chain.
 type Mux struct {
-	mfaRequired bool
-	mux         *http.ServeMux
-	grants      Grants
-	routes      []Route
-	recorder    auth.DecisionRecorder
+	custodyReadRole string
+	mfaRequired     bool
+	mux             *http.ServeMux
+	grants          Grants
+	routes          []Route
+	recorder        auth.DecisionRecorder
 }
 
 type Option func(*Mux)
 
 func WithMFARequired(required bool) Option { return func(m *Mux) { m.mfaRequired = required } }
+
+// WithCustodyReadRole restricts the dedicated customer role to its scoped
+// custody reads and permission introspection, including on a mixed-role token.
+func WithCustodyReadRole(role string) Option { return func(m *Mux) { m.custodyReadRole = role } }
+
+func (m *Mux) requestGrant(p *middleware.Principal, cap Capability) (role string, allowed bool, denial string) {
+	if m.custodyReadRole != "" && p.HasRole(m.custodyReadRole) && cap != SessionRead {
+		if cap != CustodyRead {
+			return "", false, "custody customer role restricts this session to custody reads"
+		}
+		if len(p.Portfolios) == 0 || p.Tenant == "" {
+			return "", false, "custody customer read requires a tenant and an explicit portfolio grant"
+		}
+		role, allowed = m.grants.grantingRole([]string{m.custodyReadRole}, cap)
+		return
+	}
+	role, allowed = m.grants.grantingRole(p.Roles, cap)
+	return
+}
 
 // NewMux returns a Mux enforcing grants and recording every decision it makes.
 //
@@ -333,15 +359,19 @@ func (m *Mux) require(cap Capability, pattern string, next http.HandlerFunc) htt
 			forbidden(w)
 			return
 		}
-		role, allowed := m.grants.grantingRole(p.Roles, cap)
-		if allowed && cap != Read && (m.mfaRequired || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
+		role, allowed, denial := m.requestGrant(p, cap)
+		if allowed && cap != Read && cap != SessionRead && (m.mfaRequired || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
 			m.record(r, p, cap, pattern, auth.Decision{Reason: "recent WebAuthn MFA required"})
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"Recent MFA required. Verify your security key on the Authentication page.","code":"mfa_required"}`))
 			return
 		}
-		m.record(r, p, cap, pattern, decisionFor(cap, role, allowed, p.Roles))
+		decision := auth.Decision{Reason: denial}
+		if denial == "" {
+			decision = decisionFor(cap, role, allowed, p.Roles)
+		}
+		m.record(r, p, cap, pattern, decision)
 		if !allowed {
 			forbidden(w)
 			return

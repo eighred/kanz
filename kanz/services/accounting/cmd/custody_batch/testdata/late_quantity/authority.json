@@ -1,0 +1,14 @@
+{
+  "source": "synthetic-source",
+  "tenant": "synthetic-custody-pilot",
+  "portfolio": "PF1",
+  "custodian": "CUST-A",
+  "account": "sandbox-account",
+  "public_key": "As9E9Nr4ORZysUMLykPO2YKi/GL1M0iCVC8uahjkfCQ=",
+  "instruments": [
+    "SYN"
+  ],
+  "currencies": [
+    "USD"
+  ]
+}

@@ -125,8 +125,10 @@ func MaterializeForAccounts(
 	if err != nil {
 		return CustodyBasis{}, err
 	}
+	position := int64(len(events))
 	events = sortedFor(events, effectiveAsOf, time.Time{}, true)
-	basis := foldForAccounts(portfolioID, events, scope, claimed)
+	basis := foldForAccounts(portfolioID, events, scope, claimed, effectiveAsOf)
+	basis.JournalPosition = position
 	basis.Accounts = scope
 	return basis, nil
 }
@@ -166,9 +168,11 @@ func MaterializeAttributed(ctx context.Context, st Store, portfolioID string, ef
 	if err != nil {
 		return CustodyBasis{}, err
 	}
+	position := int64(len(events))
 	events = sortedFor(events, effectiveAsOf, time.Time{}, true)
 	scope := AttributedAccounts(events)
-	basis := foldForAccounts(portfolioID, events, scope, scope)
+	basis := foldForAccounts(portfolioID, events, scope, scope, effectiveAsOf)
+	basis.JournalPosition = position
 	basis.Accounts = scope
 	if len(basis.Unmapped) > 0 {
 		// UNREACHABLE, AND LOUD RATHER THAN IGNORED. scope and claimed are both
@@ -251,7 +255,7 @@ func (r UnattributedResidue) Describe() string {
 // caller. Two answers is the shape #1073 was filed on: the scoped path excluded an
 // un-attributed entry, the single-custodian path included it, and each documented
 // itself as correct.
-func foldForAccounts(portfolioID string, events []*Event, scope, claimed AccountScope) CustodyBasis {
+func foldForAccounts(portfolioID string, events []*Event, scope, claimed AccountScope, cutoff time.Time) CustodyBasis {
 	unmappedSet := map[string]bool{}
 	residue := UnattributedResidue{Cash: map[string]*big.Rat{}}
 	instruments := map[string]bool{}
@@ -316,19 +320,14 @@ func foldForAccounts(portfolioID string, events []*Event, scope, claimed Account
 	// order or the copy the transaction pass keeps is not the one the fold
 	// applied. Replay re-sorts what it is given, which is idempotent here.
 	ordered := sortedFor(kept, time.Time{}, time.Time{}, false)
-	executions, unreferenced := executionsOf(ordered)
 
 	// Replay, not a quantity-only sum: the scoped book's AvgCost and Realized are
 	// then the cost basis OF THAT CUSTODIAN'S SLICE — a meaningful number — rather
 	// than a half-populated struct the next caller would misread as the
 	// portfolio's.
-	return CustodyBasis{
-		Book:         Replay(portfolioID, ordered),
-		Executions:   executions,
-		Unreferenced: unreferenced,
-		Unmapped:     unmapped,
-		Residue:      residue,
-	}
+	basis := CustodyBasis{Book: Replay(portfolioID, ordered), Unmapped: unmapped, Residue: residue}
+	basis.collectExecutions(ordered, cutoff)
+	return basis
 }
 
 // movesValue reports whether an entry changes a position or a cash balance.

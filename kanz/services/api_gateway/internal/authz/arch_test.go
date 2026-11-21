@@ -118,7 +118,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// surface that changes what governs a portfolio from the table this test's doc
 	// says covers every /v1 route.
 	proxy.New(nil, proxy.Roles{
-		Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer",
+		CustodyRead: "custody-reader", CustodyRerun: "custody-reviewer", Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer",
 	}).Routes(m)
 	// THE CONTROL PLANE, AND ITS ABSENCE WAS THIS GUARD'S OWN BLIND SPOT (#573).
 	//
@@ -255,29 +255,10 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/portfolios/{id}/cash-movements/preview":   authz.Fund,
 		"GET /v1/portfolios/{id}/cash-movements/{movement}": authz.Fund,
 
-		// THE CUSTODY RECONCILIATION BREAK QUEUE (#962) — the operator surface for
-		// the control that checks the book of record against the custodian.
-		//
-		// authz.Fund, and the guard's prompt answered: should a READ token reach
-		// this? No, and the GET is the interesting half of that answer. The queue
-		// names every unresolved discrepancy between the fund's book and what is
-		// actually custodied — a working surface an operator acts from, not a view
-		// of settled state — and a token that can see the fund's open control
-		// failures but not work them is a half-open control whose leaking half is
-		// the interesting one. Same reasoning as the datamaster pending queue.
-		//
-		// Should a TRADE token? No: the person who investigates a custody break is
-		// not the person who trades the book. Should this be its own capability?
-		// It was considered and refused — working a break is middle-office FUND
-		// OPERATIONS, the same function that books the redemption above, and the
-		// bar written on Operate/Fund/Approve is that a new capability must be a
-		// DIFFERENT authority rather than a different noun.
-		//
-		// NO CAPITAL MOVES HERE, and the transition that could be abused cannot
-		// be: Resolve refuses while the latest run still detects the difference,
-		// so an operator may record what they know and may not silence the
-		// control; SaveBreak refuses to insert, so a break cannot be invented.
-		"GET /v1/custody/breaks":                              authz.Fund,
+		// Scoped customers can read dated evidence. Investigation and rerun commands have separate grants.
+		"POST /v1/portfolios/{id}/custody/reruns":             authz.CustodyRerun,
+		"GET /v1/portfolios/{id}/custody/comparison":          authz.CustodyRead,
+		"GET /v1/custody/breaks":                              authz.CustodyRead,
 		"POST /v1/custody/breaks/{id}/assign":                 authz.Fund,
 		"POST /v1/custody/breaks/{id}/explain":                authz.Fund,
 		"POST /v1/custody/breaks/{id}/actions":                authz.Fund,

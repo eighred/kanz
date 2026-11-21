@@ -1,0 +1,390 @@
+package custody
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/outbox"
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/proto"
+)
+
+func signedExample(t *testing.T, a BatchAuthority, key ed25519.PrivateKey, revision int64, previous string, position int) ([]byte, []byte) {
+	t.Helper()
+	// Independent synthetic custody side: the line and end-of-day cash agree
+	// with the booked trade. The first reported position is short by one unit.
+	stmt := json.RawMessage(fmt.Sprintf(`{"portfolioId":"PF1","custodianId":"CUST-A","businessDate":"2020-02-04T00:00:00Z","positions":[{"instrumentId":"SYN","quantity":{"coefficient":"%d","exponent":-1}}],"cash":[{"currencyCode":"USD","balance":{"coefficient":"-105","exponent":-1}}],"transactions":[{"externalRef":"external-7","instrumentId":"SYN","quantity":{"coefficient":"105","exponent":-1},"price":{"coefficient":"1"},"cash":{"coefficient":"-105","exponent":-1},"currencyCode":"USD","tradeDate":"2020-02-04T00:00:00Z","settlementDate":"2020-02-04T00:00:00Z"}],"grain":"STATEMENT_GRAIN_TRANSACTIONS"}`, position))
+	raw, err := json.Marshal(signedBatch{BatchFormat, a.Source, a.Tenant, a.Account, revision, previous, true, stmt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, ed25519.Sign(key, raw)
+}
+
+func exampleAuthority(t *testing.T, tenant string) (BatchAuthority, ed25519.PrivateKey) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return BatchAuthority{Source: "synthetic-source", Tenant: tenant, Portfolio: "PF1", Custodian: "CUST-A", Account: "sandbox-account", PublicKey: base64.StdEncoding.EncodeToString(public), Instruments: []string{"SYN"}, Currencies: []string{"USD"}}, private
+}
+
+func TestSignedBatchRefusesIncompleteOrUnauthorizedInput(t *testing.T) {
+	a, key := exampleAuthority(t, "fund-a")
+	pairs := []string{"PF1:CUST-A"}
+	v, err := newBatchVerifier(a, a.Tenant, pairs, "PF1:CUST-A:sandbox-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, sig := signedExample(t, a, key, 1, "", 95)
+	if _, err = v.verify(raw, sig); err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range []string{"", "PF1:CUST-A:sandbox-account,another", "PF1:CUST-A:sandbox-account PF2:CUST-B:sandbox-account"} {
+		if _, err = newBatchVerifier(a, a.Tenant, pairs, declaration); err == nil {
+			t.Fatal("partial/ambiguous account authority accepted")
+		}
+	}
+	if _, err = newBatchVerifier(a, "fund-b", pairs, "PF1:CUST-A:sandbox-account"); err == nil {
+		t.Fatal("wrong tenant accepted")
+	}
+	if _, err = v.verify(raw, make([]byte, 64)); err == nil {
+		t.Fatal("wrong signature accepted")
+	}
+	for _, mutate := range []func(*signedBatch){
+		func(b *signedBatch) { b.Tenant = "fund-b" }, func(b *signedBatch) { b.Source = "other" }, func(b *signedBatch) { b.Account = "other" }, func(b *signedBatch) { b.Complete = false }, func(b *signedBatch) { b.Revision = 2 },
+		func(b *signedBatch) {
+			var rows map[string]json.RawMessage
+			_ = json.Unmarshal(b.Statement, &rows)
+			delete(rows, "cash")
+			b.Statement, _ = json.Marshal(rows)
+		},
+	} {
+		var h signedBatch
+		if err = json.Unmarshal(raw, &h); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&h)
+		changed, _ := json.Marshal(h)
+		if _, err = v.verify(changed, ed25519.Sign(key, changed)); err == nil {
+			t.Fatal("signed but invalid input accepted")
+		}
+	}
+}
+
+func TestSignedBatchUsesCustodyClose(t *testing.T) {
+	a, key := exampleAuthority(t, "fund-a")
+	v, err := newBatchVerifier(a, a.Tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:sandbox-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := signedExample(t, a, key, 1, "", 95)
+	const dates = `"tradeDate":"2020-02-04T00:00:00Z","settlementDate":"2020-02-04T00:00:00Z"`
+	for _, tc := range []struct {
+		name, fields string
+		accepted     bool
+	}{
+		{"next day settlement reported on settlement day", `"tradeDate":"2020-02-03T15:00:00Z","settlementDate":"2020-02-04T11:30:00Z"`, true},
+		{"next day settlement reported on trade day", `"tradeDate":"2020-02-04T15:00:00Z","settlementDate":"2020-02-05T11:30:00Z"`, false},
+		{"trade date fallback", `"tradeDate":"2020-02-04T23:59:59Z"`, true},
+		{"trade date fallback outside close", `"tradeDate":"2020-02-03T23:59:59Z"`, false},
+		{"settlement before trade day", `"tradeDate":"2020-02-05T00:00:00Z","settlementDate":"2020-02-04T00:00:00Z"`, false},
+		{"missing trade date", `"settlementDate":"2020-02-04T00:00:00Z"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if bytes.Count(raw, []byte(dates)) != 1 {
+				t.Fatal("expected the signed fixture to contain both economic dates")
+			}
+			changed := bytes.Replace(raw, []byte(dates), []byte(tc.fields), 1)
+			input, err := v.verify(changed, ed25519.Sign(key, changed))
+			if (err == nil) != tc.accepted {
+				t.Fatalf("accepted=%t, wanted %t, err=%v", err == nil, tc.accepted, err)
+			}
+			if tc.accepted {
+				if err := input.stamp(time.Date(2020, 2, 5, 0, 0, 0, 0, time.UTC)); err != nil {
+					t.Fatalf("accepted line failed statement admission: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSignedCustodyBatchReconciliationOnRealSpine(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" || os.Getenv("TEST_POSTGRES_URL") == "" {
+		t.Skip("requires restricted PostgreSQL and JetStream")
+	}
+	tenant := fmt.Sprintf("batch-%d", time.Now().UnixNano())
+	a, key := exampleAuthority(t, tenant)
+	pool := newCustodyPool(t, tenant)
+	requireRestrictedCustodyRole(t, pool)
+	applyCustodySchema(t, pool)
+	ctx, cancel := context.WithTimeout(bus.WithTenantID(t.Context(), tenant), 45*time.Second)
+	defer cancel()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bustest.EnsureSubjects(t, ctx, js, "SIGNED_"+fmt.Sprint(time.Now().UnixNano()), []string{SubjectStatement, SubjectRun})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "signed-custody-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	pub, err := bus.NewProducer(client, bus.ProducerConfig{Source: BatchProducer, ProducerVersion: "test", Tenant: tenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newImporter := func(p outbox.Publisher) *BatchImporter {
+		i, err := NewBatchImporter(a, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:sandbox-account", pool, p, testLogger())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i
+	}
+	st := NewPostgres(pool)
+	owner, err := NewSignedBatchConsumer(st, tenant, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := bus.NewConsumer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, done, accepted := make(chan struct{}), make(chan error, 1), make(chan error, 4)
+	subCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() {
+		done <- consumer.SubscribeReady(subCtx, SubjectStatement, tenant, func(c context.Context, e *envelopepb.Envelope, payload []byte) error {
+			if e.GetTenantId() != tenant {
+				return nil
+			}
+			err := owner.Handle(c, e, payload)
+			accepted <- err
+			return err
+		}, func() { close(ready) })
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	defer func() {
+		stop()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("consumer shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("consumer did not join")
+		}
+	}()
+	waitAccepted := func() {
+		t.Helper()
+		select {
+		case err := <-accepted:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	day := time.Date(2020, 2, 4, 0, 0, 0, 0, time.UTC)
+	subject := Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: day}
+	scope, err := NewBookScope([]Subject{subject}, map[string]map[string][]string{"PF1": {"CUST-A": {"sandbox-account"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := ledger.NewPostgres(pool)
+	err = journal.Append(ctx, &ledger.Event{EntryID: "trade7", SourceRef: "external-7", PortfolioID: "PF1", VenueAccountID: "sandbox-account", Type: ledger.EntryTrade, InstrumentID: "SYN", Quantity: big.NewRat(21, 2), Price: big.NewRat(1, 1), Cash: big.NewRat(-21, 2), CashCurrency: "USD", Effective: day.AddDate(0, 0, -1), Knowledge: day, SettlementBasis: ledger.SettlementSettled, SettlementDate: day}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler, err := NewReconciler(st, LedgerBookLoader(journal, scope, testLogger()), pub, new(big.Rat), nil, testLogger(), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := reconciler.Reconcile(ctx, subject)
+	if err != nil || run.Outcome != OutcomeNoStatement {
+		t.Fatalf("missing level %v %v", run, err)
+	}
+	// Keep the real journal's T+1 close and both independently signed revisions on
+	// the same economic dates, including the revisions replayed after restart.
+	settlementExample := func(revision int64, previous string, position int) ([]byte, []byte) {
+		raw, _ := signedExample(t, a, key, revision, previous, position)
+		raw = bytes.Replace(raw, []byte(`"tradeDate":"2020-02-04`), []byte(`"tradeDate":"2020-02-03`), 1)
+		return raw, ed25519.Sign(key, raw)
+	}
+	raw, sig := settlementExample(1, "", 95)
+	i := newImporter(pub)
+	checks := 0
+	i.preflight = func(_ context.Context, event bus.Event) error {
+		checks++
+		statement, ok := event.Payload.(*accountingpb.CustodianStatement)
+		if !ok || event.Subject != SubjectStatement || event.TenantID != tenant ||
+			event.PartitionKey != subject.PortfolioID || statement.GetReceivedAt() == nil ||
+			!isBatchStatement(statement.GetStatementId()) {
+			t.Fatal("preflight did not receive the final stamped statement")
+		}
+		return bus.ErrPublishFrameTooLarge
+	}
+	if id, err := i.Import(ctx, raw, sig); id != "" || !errors.Is(err, bus.ErrPublishFrameTooLarge) {
+		t.Fatal("a refused new delivery obtained a statement receipt", id, err)
+	}
+	var receipts, pending int
+	if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM custody_batch_receipts), (SELECT count(*) FROM outbox WHERE producer_service=$1)", BatchProducer).
+		Scan(&receipts, &pending); err != nil || receipts != 0 || pending != 0 {
+		t.Fatal("statement preflight left durable intake or publication behind", receipts, pending, err)
+	}
+	interrupted := newImporter(&capturePublisher{err: errors.New("fixture broker interrupted")})
+	id, err := interrupted.Import(ctx, raw, sig)
+	if err == nil || id == "" {
+		t.Fatal("pending receipt was not returned")
+	}
+	// A corrupted delivery can arrive before the genuine queued FACT. It
+	// must fail against the receipt even when no statement row exists yet.
+	var originalWire []byte
+	if err = pool.QueryRow(ctx, "SELECT payload FROM outbox WHERE producer_service=$1", BatchProducer).Scan(&originalWire); err != nil {
+		t.Fatal(err)
+	}
+	var changed accountingpb.CustodianStatement
+	if err := proto.Unmarshal(originalWire, &changed); err != nil {
+		t.Fatal(err)
+	}
+	changed.Positions[0].Quantity.Coefficient++
+	altered, err := proto.Marshal(&changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: BatchProducer}, altered); !errors.Is(err, errBatchReceipt) {
+		t.Fatalf("accepted altered first delivery: %v", err)
+	}
+	if _, err := st.LatestStatement(ctx, subject); !errors.Is(err, ErrNoStatement) {
+		t.Fatal("a rejected first delivery created a statement")
+	}
+	again, err := i.Import(ctx, raw, sig)
+	if err != nil || again != id || checks != 1 {
+		t.Fatalf("restart lost receipt or reapplied new-intake admission: %v", err)
+	}
+	waitAccepted()
+	i.preflight = custodyPublicationCheck(pub)
+	run, err = reconciler.Reconcile(ctx, subject)
+	if err != nil || run.StatementID != id || run.Outcome != OutcomeBreaks || len(run.Breaks) != 1 || run.Breaks[0].Key != "SYN" || run.Breaks[0].Diff.Cmp(big.NewRat(1, 1)) != 0 {
+		t.Fatalf("want only the one-unit position discrepancy; got %+v %v", run, err)
+	}
+	if _, err = i.Import(ctx, raw, sig); err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
+	wrong, wrongSig := settlementExample(1, "", 105)
+	if _, err = i.Import(ctx, wrong, wrongSig); err == nil {
+		t.Fatal("mutable revision accepted")
+	}
+	gap, gapSig := settlementExample(3, digest, 105)
+	if _, err = i.Import(ctx, gap, gapSig); err == nil {
+		t.Fatal("missing preceding revision accepted")
+	}
+	correction, cs := settlementExample(2, digest, 105)
+	i.retentionLimit = int64(len(raw) + len(correction) - 1)
+	if _, err := i.Import(ctx, correction, cs); err == nil {
+		t.Fatal("signed material retention exceeded")
+	}
+	if replay, err := i.Import(ctx, raw, sig); err != nil || replay != id {
+		t.Fatalf("budget refused existing evidence: %v", err)
+	}
+	i.retentionLimit++
+	corrected, err := i.Import(ctx, correction, cs)
+	if err != nil || corrected == id {
+		t.Fatal("invalid correction", err)
+	}
+	waitAccepted()
+	run, err = reconciler.Reconcile(ctx, subject)
+	if err != nil || run.StatementID != corrected || run.Outcome != OutcomeClean {
+		t.Fatalf("correction %+v %v", run, err)
+	}
+	if err := pub.Publish(ctx, bus.Event{Subject: SubjectStatement, EventType: SubjectStatement,
+		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting", TenantID: tenant,
+		EventTime: time.Now(), PartitionKey: a.Portfolio, PayloadSchemaRef: schemaRefStatement, Payload: &changed}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-accepted:
+		if !errors.Is(err, errBatchReceipt) {
+			t.Fatalf("altered replay reached ordinary consumer: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	changed.StatementId = "ordinary-fixture-statement"
+	legacyWire, err := proto.Marshal(&changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: "legacy"}, legacyWire); !errors.Is(err, errBatchReceipt) {
+		t.Fatal("signed-only tenant accepted a message without a receipt")
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: "another-source"}, originalWire); !errors.Is(err, errBatchReceipt) {
+		t.Fatal("unrelated producer reused reserved source identity")
+	}
+	if err := owner.Handle(ctx, &envelopepb.Envelope{TenantId: tenant, Source: BatchProducer}, originalWire); err != nil {
+		t.Fatalf("identical verified replay failed: %v", err)
+	}
+	var after []byte
+	if err := pool.QueryRow(ctx, "SELECT positions FROM custody_statements WHERE statement_id=$1", id).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	var retained map[string]string
+	if err := json.Unmarshal(after, &retained); err != nil {
+		t.Fatal(err)
+	}
+	quantity, ok := new(big.Rat).SetString(retained["SYN"])
+	if !ok || quantity.Cmp(big.NewRat(19, 2)) != 0 {
+		t.Fatalf("signed statement changed after refusal: %s", after)
+	}
+	other := newCustodyPool(t, tenant+"-other")
+	var count int
+	if err = other.QueryRow(ctx, "SELECT count(*) FROM custody_batch_receipts").Scan(&count); err != nil || count != 0 {
+		t.Fatal("foreign tenant visible", err)
+	}
+	foreign, err := NewBatchImporter(a, tenant, []string{"PF1:CUST-A"}, "PF1:CUST-A:sandbox-account", other, pub, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = foreign.Import(ctx, raw, sig); err == nil {
+		t.Fatal("same account accepted through another tenant's DB session")
+	}
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE producer_service=$1", BatchProducer).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("duplicate outbox publication count %d: %v", count, err)
+	}
+	var first []byte
+	if err = pool.QueryRow(ctx, "SELECT signed_batch FROM custody_batch_receipts WHERE statement_id=$1", id).Scan(&first); err != nil || !ed25519.Verify(i.verify.key, first, sig) {
+		t.Fatal("original signed evidence lost", err)
+	}
+}

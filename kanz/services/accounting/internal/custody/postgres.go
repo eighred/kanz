@@ -45,6 +45,13 @@ func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 // on which copy arrived last, and a custodian resending an unchanged statement
 // would look like new information.
 func (p *Postgres) SaveStatement(ctx context.Context, s Statement) error {
+	if isBatchStatement(s.StatementID) {
+		return errBatchReceipt
+	}
+	return p.saveStatement(ctx, s, nil)
+}
+
+func (p *Postgres) saveStatement(ctx context.Context, s Statement, wireDigest []byte) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
@@ -83,6 +90,20 @@ WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if wireDigest != nil {
+		// The signed bytes, platform receipt time and exact outbound protobuf
+		// were bound before publication. This also protects the first delivery.
+		var verified bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM custody_batch_receipts
+			WHERE statement_id = $1 AND wire_sha256 = $2 AND tenant_id = app_current_tenant()
+		)`, s.StatementID, wireDigest).Scan(&verified); err != nil {
+			return err
+		}
+		if !verified {
+			return errBatchReceipt
+		}
+	}
 	result, err := tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
@@ -93,6 +114,12 @@ WHERE custody_statements.custodian_id = EXCLUDED.custodian_id
 	// evaluated. Checking identity in a separate read would race another insert.
 	if result.RowsAffected() == 0 {
 		return ErrStatementIdentityConflict
+	}
+	// The unique index arbitrates statement identity first. Independent source
+	// writers can share this lock, while a comparison holds it exclusively
+	// from validating its input until committing the corresponding break.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(`+custodyPairLockKeySQL+`)`, pairKey(s.PortfolioID, s.CustodianID)); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -118,7 +145,11 @@ LIMIT 1`
 		newest             int64
 		businessDate, recv time.Time
 	)
-	err := p.pool.QueryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
+	queryRow := p.pool.QueryRow
+	if p.tx != nil {
+		queryRow = p.tx.QueryRow
+	}
+	err := queryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
 		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv,
 			&transactions, &grain, &verified, &newest)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -154,25 +185,38 @@ LIMIT 1`
 // written here — they live in custody_breaks under their own cross-run identity,
 // and UpsertBreaks owns them.
 func (p *Postgres) SaveRun(ctx context.Context, r Run) error {
+	if r.Outcome.IsHistoricalComparison() {
+		return ErrUnverifiedPrecision
+	}
+	return p.saveRun(ctx, r, nil, nil)
+}
+
+// manual_receipt is the original column name. Keeping the column lets existing
+// operator clients replay their requests during a rolling upgrade. Only a
+// committed completion has a payload; standalone SaveRun calls leave it NULL.
+func (p *Postgres) saveRun(ctx context.Context, r Run, signedDigest, completion []byte) error {
 	tolerance, err := exactStored(orZeroRat(r.Tolerance))
 	if err != nil {
 		return err
 	}
 	const q = `
 INSERT INTO custody_runs
-    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
+    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis,signed_statement_sha256,manual_receipt)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10,$11,$12)
 ON CONFLICT (tenant_id, run_id) DO NOTHING`
 	tx, err := p.exactTransaction(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, q,
+	tag, err := tx.Exec(ctx, q,
 		r.RunID, r.Subject.PortfolioID, r.Subject.CustodianID, BusinessDay(r.Subject.BusinessDate),
-		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason)
+		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason, r.Basis, signedDigest, completion)
 	if err != nil {
 		return fmt.Errorf("custody: save run %s: %w", r.RunID, err)
+	}
+	if completion != nil && tag.RowsAffected() != 1 {
+		return ErrRunIdentityConflict
 	}
 	return tx.Commit(ctx)
 }
@@ -180,9 +224,9 @@ ON CONFLICT (tenant_id, run_id) DO NOTHING`
 // LatestRun implements Store.
 func (p *Postgres) LatestRun(ctx context.Context, portfolioID, custodianID string) (Run, error) {
 	const q = `
-SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified
+SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified, book_basis
 FROM custody_runs
-WHERE portfolio_id = $1 AND custodian_id = $2
+WHERE portfolio_id = $1 AND custodian_id = $2 AND outcome NOT IN ('historical_quantity_correction','historical_clean','historical_breaks')
 ORDER BY completed_at DESC
 LIMIT 1`
 	var (
@@ -193,7 +237,7 @@ LIMIT 1`
 	)
 	err := p.pool.QueryRow(ctx, q, portfolioID, custodianID).Scan(
 		&r.RunID, &r.Subject.PortfolioID, &r.Subject.CustodianID, &businessDate,
-		&outcome, &r.StatementID, &tolerance, &completedAt, &r.FailureReason, &verified)
+		&outcome, &r.StatementID, &tolerance, &completedAt, &r.FailureReason, &verified, &r.Basis)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, ErrNoRun
 	}
@@ -292,23 +336,32 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("custody: commit: %w", err)
 	}
-	return p.OutstandingBreaks(ctx)
+	return p.balanceAndMembershipBreaks(ctx, nil, "", 0)
 }
 
+const selectCustodyBreaks = `
+SELECT b.break_id, b.portfolio_id, b.custodian_id, b.kind, b.break_key, b.ibor, b.custodian, b.difference,
+       b.status, b.assignee, b.explanation, b.first_seen_at, b.last_seen_at, b.status_changed_at,
+       b.revision, b.values_verified, COALESCE(d.run_id,''), COALESCE(d.statement_id,''),
+       COALESCE(to_char(d.business_date,'YYYY-MM-DD'),''), COALESCE(d.book_basis->>'mode',''),
+       COALESCE(d.book_basis->>'journal_position','')
+FROM custody_breaks b LEFT JOIN custody_break_detections link USING (tenant_id,break_id)
+LEFT JOIN custody_runs d
+  ON (d.tenant_id,d.run_id,d.portfolio_id,d.custodian_id) =
+     (b.tenant_id,link.run_id,b.portfolio_id,b.custodian_id)
+ AND d.outcome='breaks' AND d.statement_id<>'' `
+
 // OutstandingBreaks implements Store.
-func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
-	const q = `
-SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at, revision, values_verified
-FROM custody_breaks
-WHERE status IN ('open', 'assigned', 'explained')
-ORDER BY break_id`
+func (p *Postgres) balanceAndMembershipBreaks(ctx context.Context, portfolios []string, after string, limit int) ([]Break, error) {
+	q := selectCustodyBreaks + `WHERE b.status IN ('open','assigned','explained')`
+	scope, args := queuePredicates("b.", portfolios, after, limit)
+	q += scope + queueOrder("b.", limit)
 	var rows pgx.Rows
 	var err error
 	if p.tx != nil {
-		rows, err = p.tx.Query(ctx, q)
+		rows, err = p.tx.Query(ctx, q, args...)
 	} else {
-		rows, err = p.pool.Query(ctx, q)
+		rows, err = p.pool.Query(ctx, q, args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("custody: outstanding breaks: %w", err)
@@ -319,11 +372,7 @@ ORDER BY break_id`
 
 // LoadBreak implements Store.
 func (p *Postgres) LoadBreak(ctx context.Context, breakID string) (Break, error) {
-	const q = `
-SELECT break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at, revision, values_verified
-FROM custody_breaks
-WHERE break_id = $1`
+	const q = selectCustodyBreaks + `WHERE b.break_id = $1`
 	rows, err := p.pool.Query(ctx, q, breakID)
 	if err != nil {
 		return Break{}, fmt.Errorf("custody: load break: %w", err)
@@ -371,7 +420,9 @@ func scanBreaks(rows pgx.Rows) ([]Break, error) {
 			firstSeen, lastSeen, statusChanged time.Time
 		)
 		if err := rows.Scan(&b.BreakID, &b.PortfolioID, &b.CustodianID, &kind, &b.Key, &ibor, &custodian, &difference,
-			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified); err != nil {
+			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified,
+			&b.Detection.RunID, &b.Detection.StatementID, &b.Detection.BusinessDate,
+			&b.Detection.ScopeMode, &b.Detection.JournalPosition); err != nil {
 			return nil, fmt.Errorf("custody: scan break: %w", err)
 		}
 		b.Kind = parseKind(kind)
@@ -475,20 +526,23 @@ func ratsToJSON(in map[string]*big.Rat) ([]byte, error) {
 // against. Dates are RFC3339 for the same reason a text decimal is text — a
 // stable, exact, human-readable round trip.
 type storedTransaction struct {
-	ExternalRef    string `json:"external_ref"`
-	TradeDate      string `json:"trade_date,omitempty"`
-	SettlementDate string `json:"settlement_date,omitempty"`
-	InstrumentID   string `json:"instrument_id,omitempty"`
-	Quantity       string `json:"quantity,omitempty"`
-	Price          string `json:"price,omitempty"`
-	Cash           string `json:"cash,omitempty"`
-	CurrencyCode   string `json:"currency_code,omitempty"`
+	ExternalRef               string `json:"external_ref"`
+	TradeDate                 string `json:"trade_date,omitempty"`
+	SettlementDate            string `json:"settlement_date,omitempty"`
+	InstrumentID              string `json:"instrument_id,omitempty"`
+	QuantityInInstrumentUnits bool   `json:"quantity_in_instrument_units,omitempty"`
+	EconomicsConvention       string `json:"economics_convention,omitempty"`
+	Commission                string `json:"commission,omitempty"`
+	Quantity                  string `json:"quantity,omitempty"`
+	Price                     string `json:"price,omitempty"`
+	Cash                      string `json:"cash,omitempty"`
+	CurrencyCode              string `json:"currency_code,omitempty"`
 }
 
 func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
 	out := make([]storedTransaction, 0, len(in))
 	for _, tx := range in {
-		for _, r := range []*big.Rat{tx.Quantity, tx.Price, tx.Cash} {
+		for _, r := range []*big.Rat{tx.Quantity, tx.Price, tx.Cash, tx.Commission} {
 			if r != nil && !boundedRat(r) {
 				return nil, ErrUnverifiedPrecision
 			}
@@ -497,14 +551,17 @@ func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
 			return nil, fmt.Errorf("transaction with no external_ref")
 		}
 		out = append(out, storedTransaction{
-			ExternalRef:    tx.ExternalRef,
-			TradeDate:      formatTime(tx.TradeDate),
-			SettlementDate: formatTime(tx.SettlementDate),
-			InstrumentID:   tx.InstrumentID,
-			Quantity:       ratText(tx.Quantity),
-			Price:          ratText(tx.Price),
-			Cash:           ratText(tx.Cash),
-			CurrencyCode:   tx.CurrencyCode,
+			ExternalRef:               tx.ExternalRef,
+			TradeDate:                 formatTime(tx.TradeDate),
+			SettlementDate:            formatTime(tx.SettlementDate),
+			InstrumentID:              tx.InstrumentID,
+			QuantityInInstrumentUnits: tx.QuantityInInstrumentUnits,
+			EconomicsConvention:       tx.EconomicsConvention,
+			Commission:                ratText(tx.Commission),
+			Quantity:                  ratText(tx.Quantity),
+			Price:                     ratText(tx.Price),
+			Cash:                      ratText(tx.Cash),
+			CurrencyCode:              tx.CurrencyCode,
 		})
 	}
 	return json.Marshal(out)
@@ -524,9 +581,11 @@ func jsonToTransactions(raw []byte) ([]recon.Transaction, error) {
 	out := make([]recon.Transaction, 0, len(stored))
 	for _, st := range stored {
 		tx := recon.Transaction{
-			ExternalRef:  st.ExternalRef,
-			InstrumentID: st.InstrumentID,
-			CurrencyCode: st.CurrencyCode,
+			ExternalRef:               st.ExternalRef,
+			QuantityInInstrumentUnits: st.QuantityInInstrumentUnits,
+			EconomicsConvention:       st.EconomicsConvention,
+			InstrumentID:              st.InstrumentID,
+			CurrencyCode:              st.CurrencyCode,
 		}
 		var err error
 		// A FIGURE THAT WILL NOT PARSE REFUSES THE WHOLE STATEMENT rather than
@@ -538,6 +597,9 @@ func jsonToTransactions(raw []byte) ([]recon.Transaction, error) {
 		}
 		if tx.Price, err = parseRatText(st.Price); err != nil {
 			return nil, fmt.Errorf("%q price: %w", st.ExternalRef, err)
+		}
+		if tx.Commission, err = parseRatText(st.Commission); err != nil {
+			return nil, fmt.Errorf("%q commission: %w", st.ExternalRef, err)
 		}
 		if tx.Cash, err = parseRatText(st.Cash); err != nil {
 			return nil, fmt.Errorf("%q cash: %w", st.ExternalRef, err)

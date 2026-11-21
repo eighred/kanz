@@ -112,9 +112,9 @@ func TestAmbiguousStatementRunPreservesLifecycleAndCompletion(t *testing.T) {
 	metrics := NewMetrics(reg)
 	metrics.SeedPair("PF1", "CUST-A")
 	loaded := 0
-	loader := func(context.Context, Subject) (*ledger.Book, []ledger.Execution, error) {
+	loader := func(context.Context, Subject) (*ledger.Book, []ledger.Execution, *RunBasis, error) {
 		loaded++
-		return bookWith(nil, nil), nil, nil
+		return bookWith(nil, nil), nil, nil, nil
 	}
 	r, err := NewReconciler(store, loader, pub, nil, metrics, testLogger(), func() time.Time { return t0 })
 	if err != nil {

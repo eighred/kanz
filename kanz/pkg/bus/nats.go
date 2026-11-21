@@ -42,8 +42,11 @@ const natsKeyHeader = "Kanz-Partition-Key"
 var _ Client = (*NATSClient)(nil)
 
 type NATSConfig struct {
-	URL            string        // nats://host:4222 (comma-separated for cluster)
-	Name           string        // client identifier
+	URL  string // nats://host:4222 (comma-separated for cluster)
+	Name string // client identifier
+	// InboxPrefix scopes request acknowledgements to a dedicated broker grant.
+	// Empty uses the NATS client default.
+	InboxPrefix    string
 	ConnectTimeout time.Duration // default 10s
 	ReconnectWait  time.Duration // default 2s
 	MaxReconnects  int           // default -1 (forever); set finite for fail-fast
@@ -220,6 +223,9 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.MaxReconnects(cfg.MaxReconnects),
 	}
+	if cfg.InboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(cfg.InboxPrefix))
+	}
 	if cfg.DisableReconnect {
 		opts = append(opts, nats.NoReconnect())
 	}
@@ -305,7 +311,7 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	return &NATSClient{cfg: cfg, conn: conn, js: js}, nil
 }
 
-func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
+func natsMessage(msg Message) *nats.Msg {
 	nm := &nats.Msg{
 		Subject: msg.Subject,
 		Data:    msg.Body,
@@ -317,6 +323,11 @@ func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
 	if len(msg.Key) > 0 {
 		nm.Header.Set(natsKeyHeader, string(msg.Key))
 	}
+	return nm
+}
+
+func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
+	nm := natsMessage(msg)
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.PublishTimeout)
 	defer cancel()
 	if _, err := c.js.PublishMsg(ctx, nm); err != nil {

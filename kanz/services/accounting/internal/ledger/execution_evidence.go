@@ -47,6 +47,46 @@ func executionFromEntry(e *Event) (*orderpb.Fill, error) {
 	return &fill, nil
 }
 
+// coveredExecution returns the proven fill only when it agrees with the booked trade or fee adjustment.
+func coveredExecution(e *Event) *orderpb.Fill {
+	if e.Type == EntryTrade {
+		fill, err := executionFromEntry(e)
+		if err != nil {
+			return nil
+		}
+		return fill
+	}
+	if e.Type != EntryFee || len(e.ExecutionEvidence) == 0 || len(e.ExecutionEvidence) > 1<<20 {
+		return nil
+	}
+	var fill orderpb.Fill
+	if err := proto.Unmarshal(e.ExecutionEvidence, &fill); err != nil {
+		return nil
+	}
+	if _, ok := dec.InDomainDeep(&fill); !ok {
+		return nil
+	}
+	previous, err := fillfact.FeeRevisionTerms(&fill)
+	if err != nil {
+		return nil
+	}
+	delta, err := fillfact.ApprovedFeeDelta(previous, &fill)
+	if err != nil {
+		return nil
+	}
+	trade, err := FromFill(e.PortfolioID, &fill, e.CashCurrency, e.Knowledge)
+	if err != nil {
+		return nil
+	}
+	want := feeAdjustment(trade, &fill, delta)
+	if e.EntryID != want.EntryID || e.SourceRef != want.SourceRef || e.InstrumentID != want.InstrumentID || e.VenueAccountID != want.VenueAccountID ||
+		e.Quantity != nil || e.Price != nil || e.Action != nil || !exactRat(e.Cash, want.Cash) ||
+		!e.Effective.Equal(want.Effective) || e.SettlementBasis != want.SettlementBasis || !e.SettlementDate.Equal(want.SettlementDate) {
+		return nil
+	}
+	return &fill
+}
+
 // The alias lock also covers older writers through the migration's trigger.
 // A rolling deployment cannot pass a check and then insert the same execution
 // under a different key while the newer writer commits.

@@ -1,0 +1,16 @@
+[
+  {
+    "login_role": "pilot_venue_proof",
+    "kind": "venue_identity",
+    "tenant_id": "synthetic-custody-pilot",
+    "authority": "synthetic-venue-identity-authority",
+    "public_key": "1lqtAAbt2/M3xZetN4oKBSak708Sh5Q9EeeUO1NxOz8="
+  },
+  {
+    "login_role": "pilot_custody_assignment",
+    "kind": "custody_assignment",
+    "tenant_id": "synthetic-custody-pilot",
+    "authority": "synthetic-custody-assignment-authority",
+    "public_key": "lpUUUf87W4JGWxWzcY/OQbVBe+O4Dlx0ieq+xf4EDGo="
+  }
+]

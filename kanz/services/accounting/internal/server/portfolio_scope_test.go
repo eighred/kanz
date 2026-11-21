@@ -188,7 +188,7 @@ func TestAccountingVolatileActionScope(t *testing.T) {
 			}
 		})
 	}
-	rows, err := s.breaks.OutstandingBreaks(context.Background())
+	rows, err := s.breaks.BreakPage(context.Background(), nil, "", custody.MaxQueuePage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestAccountingVolatileActionScope(t *testing.T) {
 
 type scopeUnownedStore struct{ *custody.MemoryStore }
 
-func (scopeUnownedStore) OutstandingBreaks(context.Context) ([]custody.Break, error) {
+func (scopeUnownedStore) BreakPage(context.Context, []string, string, int) ([]custody.Break, error) {
 	return []custody.Break{{BreakID: "PF-A|C|quantity|unattributed", Status: custody.BreakOpen, IBOR: big.NewRat(777, 1), Custodian: big.NewRat(1, 1), Diff: big.NewRat(776, 1), ValuesVerified: true}}, nil
 }
 

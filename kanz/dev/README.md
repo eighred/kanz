@@ -6,6 +6,8 @@ or tenant isolation. Fresh-checkout tooling and Compose repairs are tracked in
 [#1323](https://github.com/eighred/kanz/issues/1323); the current `make ci` is not
 equivalent to repository CI. `make help` lists the available targets.
 
+To run the signed synthetic daily custody comparison from a clean checkout, use the [custody operator workflow](../services/accounting/cmd/custody_batch/README.md#reproduce-the-operator-workflow).
+
 ## Prerequisites
 
 - Go (see `go.mod` for the language/toolchain pin), Docker with a working Linux

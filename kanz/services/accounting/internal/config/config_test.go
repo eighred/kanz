@@ -121,3 +121,23 @@ func TestLoadCarriesTheCustodyDeclarationWhole(t *testing.T) {
 			cfg.CustodyPairs)
 	}
 }
+
+func TestWritableCustodyRerunRequiresSignedIntake(t *testing.T) {
+	t.Setenv("ACCOUNTING_CUSTODY_RERUN_ROLE", "custody-rerunner")
+	t.Setenv("ACCOUNTING_CUSTODY_REVIEW_READ_ONLY", "false")
+	for _, mode := range []string{"", "false"} {
+		t.Setenv("ACCOUNTING_CUSTODY_SIGNED_BATCH_ONLY", mode)
+		if _, err := Load(); err == nil {
+			t.Fatal("writable reruns admitted unsigned statement intake")
+		}
+	}
+	t.Setenv("ACCOUNTING_CUSTODY_SIGNED_BATCH_ONLY", "true")
+	if cfg, err := Load(); err != nil || !cfg.CustodySignedBatchOnly || cfg.CustodyRerunRole != "custody-rerunner" {
+		t.Fatal("signed intake did not admit configured role", err)
+	}
+	t.Setenv("ACCOUNTING_CUSTODY_REVIEW_READ_ONLY", "true")
+	t.Setenv("ACCOUNTING_CUSTODY_SIGNED_BATCH_ONLY", "false")
+	if cfg, err := Load(); err != nil || !cfg.CustodyReviewReadOnly {
+		t.Fatal("read-only accounting must keep its existing intake behavior", err)
+	}
+}

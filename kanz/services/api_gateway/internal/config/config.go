@@ -267,6 +267,9 @@ type Config struct {
 	// other direction: once AccountingAddr IS set the role becomes REQUIRED, so the
 	// funding surface cannot be exposed without saying who may reach it.
 	FundRole string
+	// CustodyReadRole identifies customer sessions restricted to their custody portfolio grants.
+	CustodyReadRole  string
+	CustodyRerunRole string
 	// ApproveRole is the role carrying authz.Approve — the second signature on an
 	// act somebody else proposed (#539, #410 act one). EMPTY ⇒ the three override
 	// routes are not registered, and datamaster's maker-checker workflow is
@@ -405,6 +408,8 @@ func Load() (Config, error) {
 		RegulatoryAddr:     os.Getenv("API_GATEWAY_REGULATORY_ADDR"),
 		AccountingAddr:     os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 		PerTenantUpstreams: env.SplitList(os.Getenv("API_GATEWAY_PER_TENANT_UPSTREAMS")),
+		CustodyReadRole:    os.Getenv("API_GATEWAY_CUSTODY_READ_ROLE"),
+		CustodyRerunRole:   os.Getenv("API_GATEWAY_CUSTODY_RERUN_ROLE"),
 		FundRole:           os.Getenv("API_GATEWAY_FUND_ROLE"),
 		ApproveRole:        os.Getenv("API_GATEWAY_APPROVE_ROLE"),
 		ComplianceAddr:     os.Getenv("API_GATEWAY_COMPLIANCE_ADDR"),
@@ -443,6 +448,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if cfg.LakeSnapshot != nil && cfg.CustodyReadRole != "" && (cfg.LakeSnapshot.ReadRole == cfg.CustodyReadRole || cfg.LakeSnapshot.CreateRole == cfg.CustodyReadRole) {
+		return Config{}, errors.New("api-gateway: custody read requires a role distinct from snapshot access")
+	}
 	return cfg, nil
 }
 
@@ -456,9 +464,21 @@ func Load() (Config, error) {
 // warning that scrolls past.
 func (c Config) validateAuth() error {
 	for _, role := range []string{c.RequiredRole, c.TradeRole, c.OperatorRole, c.FundRole, c.ApproveRole, c.MandateRole, c.AuditRole} {
+		if c.CustodyReadRole != "" && role == c.CustodyReadRole {
+			return errors.New("api-gateway: custody read requires a distinct grant")
+		}
+		if c.CustodyRerunRole != "" && role == c.CustodyRerunRole {
+			return errors.New("api-gateway: custody rerun requires a distinct grant")
+		}
 		if role == identity.AdminRole {
 			return errors.New("api-gateway: kanz-identity-admin is reserved for identity administration, not gateway capabilities")
 		}
+	}
+	if c.CustodyReadRole != "" && (c.CustodyReadRole == identity.AdminRole || c.CustodyReadRole == c.CustodyRerunRole || strings.ContainsAny(c.CustodyReadRole, " ,\t\n\r") || c.AccountingAddr == "") {
+		return errors.New("api-gateway: custody read requires an accounting upstream and a dedicated role")
+	}
+	if c.CustodyRerunRole != "" && (c.CustodyRerunRole == identity.AdminRole || strings.ContainsAny(c.CustodyRerunRole, " ,\t\n\r") || c.AccountingAddr == "") {
+		return errors.New("api-gateway: custody rerun requires an explicit accounting upstream and one dedicated role")
 	}
 	if c.OIDCIssuer == "" && c.JWTSecret == "" {
 		return errors.New("api-gateway: no authentication configured — set API_GATEWAY_OIDC_ISSUER " +

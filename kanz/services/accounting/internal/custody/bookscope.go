@@ -2,12 +2,16 @@ package custody
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
+
+// The remediation renders a separate reserved marker for each missing custodian.
+const accountPlaceholderPrefix = "<accounts-held-at-"
 
 // BookScope decides WHICH SLICE of a portfolio's journal one custodian's
 // reconciliation compares against (#1006).
@@ -44,6 +48,7 @@ import (
 // custodian holds what — and never about whether the comparison is scoped. Every
 // comparison is.
 type BookScope struct {
+	admission *assignmentAdmission
 	// custodians is portfolio -> the custodians configured for it, sorted.
 	custodians map[string][]string
 	// accounts is portfolio -> custodian -> the exchange accounts it holds.
@@ -51,6 +56,79 @@ type BookScope struct {
 	// claimed is portfolio -> every account any of its custodians claims, which
 	// is what makes an unclaimed account detectable rather than merely absent.
 	claimed map[string]ledger.AccountScope
+}
+
+// RunBasis records the account assignment observed when the book was folded.
+// It describes the comparison, without certifying that a declared account exists.
+// The run's subject supplies the portfolio and inclusive UTC business-day close.
+type RunBasis struct {
+	HistoricalDetections map[string]string `json:"historical_quantity_detections,omitempty"`
+	// MeasuredEntries binds an eligible execution to the immutable book entry
+	// actually compared by this writer. Older completed runs lack this field.
+	MeasuredEntries map[string]string      `json:"measured_execution_entries,omitempty"`
+	Assignments     []AccountAssignment    `json:"assignments,omitempty"`
+	Mode            string                 `json:"mode"`
+	Accounts        map[string][]string    `json:"accounts"`
+	JournalPosition int64                  `json:"journal_position"`
+	Transactions    *TransactionComparison `json:"transactions,omitempty"`
+}
+
+// TransactionComparison records reference membership only. A missing count has
+// no measured value. The signed, complete statement may explicitly have zero.
+type TransactionComparison struct {
+	Pass                   string `json:"pass"`
+	StatementReferences    *int   `json:"statement_references,omitempty"`
+	BookReferences         *int   `json:"book_references,omitempty"`
+	UnreferencedBookTrades *int   `json:"unreferenced_book_trades,omitempty"`
+}
+
+func (s *BookScope) runBasis(subject Subject, mode string, fold ledger.CustodyBasis) *RunBasis {
+	ids := slices.Sorted(maps.Keys(fold.Accounts))
+	if ids == nil {
+		ids = []string{} // The journal was read and contained no attributed accounts.
+	}
+	accounts := map[string][]string{subject.CustodianID: ids}
+	if mode == BasisDeclared {
+		accounts = s.declaredAccounts(subject.PortfolioID)
+	}
+	return &RunBasis{Mode: mode, Accounts: accounts, JournalPosition: fold.JournalPosition,
+		Transactions: &TransactionComparison{BookReferences: new(fold.DayReferenced), UnreferencedBookTrades: new(fold.DayUnreferenced)}}
+}
+
+func (b *RunBasis) clone() *RunBasis {
+	if b == nil {
+		return nil
+	}
+	out := *b
+	out.Assignments = slices.Clone(b.Assignments)
+	out.MeasuredEntries = maps.Clone(b.MeasuredEntries)
+	out.HistoricalDetections = maps.Clone(b.HistoricalDetections)
+	if b.Transactions != nil {
+		tx := *b.Transactions
+		if tx.StatementReferences != nil {
+			tx.StatementReferences = new(*tx.StatementReferences)
+		}
+		if tx.BookReferences != nil {
+			tx.BookReferences = new(*tx.BookReferences)
+		}
+		if tx.UnreferencedBookTrades != nil {
+			tx.UnreferencedBookTrades = new(*tx.UnreferencedBookTrades)
+		}
+		out.Transactions = &tx
+	}
+	out.Accounts = make(map[string][]string, len(b.Accounts))
+	for custodian, accounts := range b.Accounts {
+		out.Accounts[custodian] = slices.Clone(accounts)
+	}
+	return &out
+}
+
+// New journal entries advance the prefix without changing which accounts a break compares.
+func (b *RunBasis) sameScope(other *RunBasis, custodian string) bool {
+	if b == nil || other == nil {
+		return b == other
+	}
+	return b.Mode == other.Mode && slices.Equal(b.Accounts[custodian], other.Accounts[custodian]) && slices.Equal(assignmentsForCustodian(b.Assignments, custodian), assignmentsForCustodian(other.Assignments, custodian))
 }
 
 // CashAccountAllowed requires an explicit, unambiguous portfolio assignment.
@@ -121,6 +199,9 @@ func NewBookScope(pairs []Subject, accounts map[string]map[string][]string) (*Bo
 				s.claimed[portfolio] = ledger.AccountScope{}
 			}
 			for id := range scope {
+				if strings.HasPrefix(id, accountPlaceholderPrefix) && strings.HasSuffix(id, ">") {
+					return nil, fmt.Errorf("custody: replace the account placeholder %q for %s:%s with the assigned account ID", id, portfolio, custodian)
+				}
 				if s.claimed[portfolio][id] {
 					return nil, fmt.Errorf("custody: exchange account %q is claimed by more than one custodian "+
 						"of portfolio %s — the holding would be counted at both, so neither can break when it "+
@@ -181,7 +262,7 @@ func (s *BookScope) declTemplate(portfolio string, custodians []string) string {
 			// Named after the custodian so two undeclared custodians do not both
 			// claim one placeholder id — which the refusal above would reject as
 			// an account counted at both.
-			ids = []string{"<accounts-held-at-" + c + ">"}
+			ids = []string{accountPlaceholderPrefix + c + ">"}
 		}
 		entries = append(entries, portfolio+":"+c+":"+strings.Join(ids, ","))
 	}

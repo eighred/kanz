@@ -16,14 +16,11 @@ import (
 // trade lines. The second only happens when the statement declares
 // StatementGrain TRANSACTIONS.
 //
-// TODAY NOTHING IN THIS BUILD PUBLISHES A CustodianStatement AT ANY GRAIN, AND
-// THAT IS THE SENTENCE THIS FILE EXISTS TO SAY OUT LOUD. accounting.custody.
-// statement has a CONSUMER (custody.StatementConsumer), a NATS grant, a stream
-// and a durable table, and no producer anywhere in the module — translating an
-// MT535/MT940, a prime broker's SFTP drop or a custody API into a canonical
-// statement is a feed adapter's job and is deferred to #105/#106. So every
-// scheduled run concludes NO_STATEMENT until something outside this build
-// publishes one.
+// The accounting daemon consumes statements. A separate nonproduction
+// custody_batch invocation can supply a signed synthetic batch; customer feed
+// authorization and production adapter acceptance remain under #105/#106.
+// The grain of an actual accepted statement belongs to the run evidence.
+//
 //
 // WHY A GAUGE AND NOT A COMMENT. "This deployment reconciles at trade level and
 // every execution matched" and "this deployment compares netted balances and no
@@ -71,12 +68,8 @@ type custodyGrain struct {
 // would make a forgotten one ABSENT rather than zero — indistinguishable from a
 // service that never had it.
 func custodyGrainPostures() map[recon.Grain]custodyGrain {
-	const noFeed = "NOTHING IN THIS BUILD PUBLISHES accounting.v1.CustodianStatement AT ALL. The subject has " +
-		"a consumer, a NATS grant and a durable table, and no producer anywhere in the module: turning " +
-		"an MT535/MT940, a prime broker's SFTP drop or a custody API into a canonical statement is a " +
-		"feed adapter's job, for the same reason exchange protocol lives in the venue adapter, and it " +
-		"is deferred to #105/#106. An adapter deployed OUTSIDE this module does publish one, and the " +
-		"per-run log line from custody.Reconciler is where that becomes visible"
+	const noFeed = "This accounting daemon has no configured external custodian producer (#105/#106). " +
+		"The separate custody_batch command accepts signed synthetic inputs. The accepted statement and reconciliation run identify the observed grain."
 	return map[recon.Grain]custodyGrain{
 		recon.GrainUnknown: {
 			produced: false,

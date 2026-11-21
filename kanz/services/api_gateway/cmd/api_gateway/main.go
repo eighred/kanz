@@ -826,7 +826,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 // discoverable only by running a gateway with no upstreams and noticing a 404
 // where a 503 belonged.
 func proxyRoles(cfg config.Config) proxy.Roles {
-	return proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
+	return proxy.Roles{CustodyRead: cfg.CustodyReadRole, CustodyRerun: cfg.CustodyRerunRole, Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -1069,7 +1069,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	grants := authz.Grants{
 		// The baseline role admits a caller to the gateway at all (SEC-M1) and lets them
 		// READ. It must never carry Trade: every authenticated caller holds it.
-		cfg.RequiredRole: {authz.Read},
+		cfg.RequiredRole: {authz.Read, authz.SessionRead},
 		// The trade role MOVES CAPITAL. A trader can obviously also read — a control that
 		// made traders carry two tokens would be routed around within a week.
 		cfg.TradeRole: {authz.Read, authz.Trade},
@@ -1101,6 +1101,15 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// widening: every caller who reaches /v1 at all already holds the baseline role.
 	if cfg.FundRole != "" {
 		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund}
+	}
+	if cfg.CustodyReadRole != "" {
+		grants[cfg.CustodyReadRole] = []authz.Capability{authz.CustodyRead}
+		if cfg.FundRole != "" {
+			grants[cfg.FundRole] = append(grants[cfg.FundRole], authz.CustodyRead)
+		}
+	}
+	if cfg.CustodyRerunRole != "" {
+		grants[cfg.CustodyRerunRole] = []authz.Capability{authz.Read, authz.CustodyRerun}
 	}
 	// THE APPROVER GIVES THE SECOND SIGNATURE (#539, #410 act one) on an act
 	// somebody else proposed. Conditional for the same reason the fund role is —
@@ -1164,8 +1173,8 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		grants[cfg.LakeSnapshot.CreateRole] = append(grants[cfg.LakeSnapshot.CreateRole], []authz.Capability{authz.LakeSnapshotCreate}...)
 		grants[cfg.LakeSnapshot.ReadRole] = append(grants[cfg.LakeSnapshot.ReadRole], []authz.Capability{authz.LakeSnapshotRead}...)
 	}
-	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired))
-	gwMux.Handle(authz.Read, "GET /v1/permissions", gwMux.Permissions)
+	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired), authz.WithCustodyReadRole(cfg.CustodyReadRole))
+	gwMux.Handle(authz.SessionRead, "GET /v1/permissions", gwMux.Permissions)
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)

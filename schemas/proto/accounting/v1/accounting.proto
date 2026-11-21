@@ -571,11 +571,10 @@ enum StatementGrain {
 //
 // # It is matched on external_ref, and it does not re-price
 //
-// The transaction pass answers IDENTITY -- did both sides see this execution --
-// and leaves quantity and price agreement to the netted pass, which already
-// covers it at the grain an operator books against. The figures below are carried
-// so a break names an amount somebody can act on, not so a second tolerance
-// regime can be invented beside the first.
+// The transaction pass establishes whether both sides saw the execution. A
+// signed line may separately attest its instrument quantity unit for exact
+// matched-reference quantity diagnostics. Price and cash are not assessed
+// per execution by either comparison. A separate signed convention enables execution economics.
 message StatementTransaction {
   // external_ref is the custodian's identity for the execution, in the SAME
   // reference space the book stamps on the journal entry (ledger.Event.SourceRef,
@@ -616,6 +615,20 @@ message StatementTransaction {
   // between.
   common.v1.Decimal cash = 7;
   string currency_code = 8;
+  // The source attests that quantity is expressed in the canonical instrument's
+  // natural units as booked by the ledger. False or absent offers no unit proof.
+  bool quantity_in_instrument_units = 9;
+  StatementExecutionEconomics execution_economics = 10;
+}
+
+// unit_price_net_cash_same_currency_commission_v1 declares one natural unit
+// per price unit, with price, all-in nonnegative commission and posted net cash
+// in currency_code. Cash is minus signed quantity times unit price minus
+// commission. Both trade and cash settle on the signed UTC business date.
+message StatementExecutionEconomics {
+  string convention = 1;
+  // Presence distinguishes an explicitly signed zero charge from missing cost.
+  common.v1.Decimal commission = 2;
 }
 
 // ReconciliationOutcome is what a run concluded.
@@ -645,6 +658,13 @@ enum ReconciliationOutcome {
   // materialized, or a figure was not representable. It is NOT a clean book and
   // must never be read as one; the failure_reason says which.
   RECONCILIATION_OUTCOME_FAILED = 4;
+  // Only previously open historical execution quantities were corrected.
+  RECONCILIATION_OUTCOME_HISTORICAL_QUANTITY_CORRECTION = 5;
+  // Manual comparison at a dated close after a later close owns the working queue.
+  // CLEAN and BREAKS describe the balance and reference differences in this
+  // snapshot. Separate measured execution evidence retains its own scope.
+  RECONCILIATION_OUTCOME_HISTORICAL_CLEAN = 6;
+  RECONCILIATION_OUTCOME_HISTORICAL_BREAKS = 7;
 }
 
 // ReconciliationBreakKind classifies a discrepancy. The values mirror
@@ -685,6 +705,8 @@ enum ReconciliationBreakKind {
   // THAT MEANS A FILL NEVER REACHED THE BOOK, observed rather than inferred from
   // a balance -- which is the whole of #1049.
   RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_IN_IBOR = 6;
+  // An account- and date-bound comparison of signed natural instrument units.
+  RECONCILIATION_BREAK_KIND_EXECUTION_QUANTITY = 7;
 }
 
 // BreakStatus is where a break has got to in the investigation.
@@ -822,6 +844,76 @@ message ReconciliationRun {
 
   // failure_reason names why a FAILED run could not complete. Empty otherwise.
   string failure_reason = 10;
+
+  // The authenticated operator request that caused this comparison. Both
+  // fields are absent on scheduled runs and records predating manual reruns.
+  string request_id = 11;
+  string actor = 12;
+
+  // Optional diagnostic on the immutable completion. The existing outcome and
+  // mutable break queue retain their balances and reference-membership meaning.
+  // Absent on historical completions and sources without unit attestations.
+  ExecutionQuantityComparison execution_quantities = 13;
+  repeated HistoricalQuantityResolution historical_quantity_resolutions = 14;
+  // Assesses execution economics independently of balance and membership breaks.
+  ExecutionEconomicsComparison execution_economics = 15;
+}
+
+// Bounded, ordered complete inventory for the signed execution lines. Each
+// economic difference is the original book value minus the signed value.
+message ExecutionEconomicsComparison {
+  repeated ExecutionEconomicsRow rows = 1;
+  string unassessed_reason = 2;
+}
+
+message ExecutionEconomicsRow {
+  string external_ref = 1;
+  string instrument_id = 2;
+  string convention = 3;
+  string currency_code = 4;
+  string status = 5;
+  string reason = 6;
+  string entry_id = 7;
+  ExecutionEconomicsFigures book = 8;
+  ExecutionEconomicsFigures custodian = 9;
+  ExecutionEconomicsFigures difference = 10;
+  string book_settlement_date = 11;
+  string custodian_settlement_date = 12;
+}
+
+message ExecutionEconomicsFigures {
+  common.v1.Decimal quantity = 1;
+  common.v1.Decimal price = 2;
+  common.v1.Decimal commission = 3;
+  common.v1.Decimal net_cash = 4;
+  common.v1.Decimal gross_cash = 5;
+  common.v1.Decimal settled_cash = 6;
+}
+
+// An equality established by a newer signed statement on an earlier business date.
+message HistoricalQuantityResolution {
+  string break_id = 1;
+  string detection_run_id = 2;
+  string entry_id = 3;
+  string external_ref = 4;
+  string instrument_id = 5;
+  common.v1.Decimal agreed_quantity = 6;
+}
+
+message ExecutionQuantityComparison {
+  // Counts only independently matched references on this business date.
+  uint32 compared = 1;
+  uint32 unassessed = 2;
+  repeated ExecutionQuantityDifference differences = 3;
+}
+
+message ExecutionQuantityDifference {
+  string external_ref = 1;
+  // Each exact value below is in this canonical instrument's natural units.
+  string instrument_id = 2;
+  common.v1.Decimal ibor = 3;
+  common.v1.Decimal custodian = 4;
+  common.v1.Decimal difference = 5;
 }
 
 // CustodyActionState is the lifecycle evidence at one revision. A revision

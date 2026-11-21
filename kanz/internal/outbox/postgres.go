@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	ServiceOMS        = "oms"
-	ServiceAccounting = "accounting"
-	ServiceDatamaster = "datamaster"
-	ServiceLakeSink   = "lake-sink"
+	ServiceOMS          = "oms"
+	ServiceAccounting   = "accounting"
+	ServiceCustodyBatch = "custody-batch"
+	ServiceDatamaster   = "datamaster"
+	ServiceLakeSink     = "lake-sink"
 )
 
 var (
