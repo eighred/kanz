@@ -37,6 +37,9 @@ func EvaluateSpotDepth(s *querypb.SpotDepthScenario) (*querypb.SpotDepthResult, 
 	if s.GetRebalanceCost().GetCoefficient() < 0 {
 		return nil, errors.New("rebalance cost cannot be negative")
 	}
+	if s.GetOneLegLossLimit().GetCoefficient() < 0 {
+		return nil, errors.New("one-leg loss limit cannot be negative")
+	}
 	for _, d := range []*commonpb.Decimal{s.SellFillBps, s.AdverseMoveBps} {
 		if d != nil && (d.Coefficient < 0 || dec.FromProto(d).Cmp(big.NewRat(10000, 1)) > 0) {
 			return nil, errors.New("stress and fill must be between 0 and 10000 basis points")
@@ -290,6 +293,36 @@ func (e *spotEncoder) stress(base, cash, mark *big.Rat) *querypb.SpotLegStress {
 	return &querypb.SpotLegStress{InventoryChange: e.value(base), CashChange: e.value(cash), MarkPrice: e.value(mark), MarkedPnl: e.value(spotAdd(cash, spotMul(base, mark)))}
 }
 
+func spotFunding(cost, proceeds, sellQuantity, buyFundingFactor, sellFundingFactor *big.Rat, net *commonpb.Decimal) *querypb.SpotFunding {
+	buyQuote := spotMul(cost, buyFundingFactor)
+	sellBase := spotMul(sellQuantity, sellFundingFactor)
+	// sellBase * (proceeds / sellQuantity). Cancel the quantity so a
+	// repeating VWAP never needs to be rounded before valuing inventory.
+	sellValue := spotMul(proceeds, sellFundingFactor)
+	capital, turnover := spotAdd(buyQuote, sellValue), spotAdd(cost, proceeds)
+	f := &querypb.SpotFunding{}
+	// Expanded totals may exceed the wire range even for two valid legs.
+	// Preserve independently representable amounts and the existing leg results.
+	f.BuyQuoteRequired, _ = dec.ToProtoExact(buyQuote)
+	f.SellBaseRequired, _ = dec.ToProtoExact(sellBase)
+	f.SellBaseValueQuote, _ = dec.ToProtoExact(sellValue)
+	f.FundedCapitalQuote, _ = dec.ToProtoExact(capital)
+	f.GrossTurnoverQuote, _ = dec.ToProtoExact(turnover)
+	if net != nil {
+		netBps := spotMul(dec.FromProto(net), big.NewRat(10000, 1))
+		rate := func(denominator *commonpb.Decimal) *commonpb.Decimal {
+			if !dec.IsPositive(denominator) {
+				return nil
+			}
+			value, _ := dec.ParseProtoExact(spotDiv(netBps, dec.FromProto(denominator)).FloatString(6))
+			return value
+		}
+		f.ReturnOnCapitalBps = rate(f.FundedCapitalQuote)
+		f.BreakEvenCostPerLegBps = rate(f.GrossTurnoverQuote)
+	}
+	return f
+}
+
 func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVenue, pair instrument.Pair) *querypb.SpotDepthDirection {
 	result := &querypb.SpotDepthDirection{BuyVenue: buy.Book.Mic, SellVenue: sell.Book.Mic, Status: "UNKNOWN"}
 	b, err := venueTerms(buy, pair, true)
@@ -378,6 +411,19 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	}
 	if e.failed {
 		return &querypb.SpotDepthDirection{BuyVenue: result.BuyVenue, SellVenue: result.SellVenue, Status: "UNKNOWN", Reason: "result exceeds exact decimal range"}
+	}
+	result.Funding = spotFunding(cost, proceeds, sellQty, b.fundingFactor, v.fundingFactor, result.MarkedNetAfterRebalance)
+	result.OneLegLimitStatus = "UNKNOWN"
+	if result.BuyOnly != nil && result.SellOnly != nil {
+		worst := spotMin(new(big.Rat), spotMin(dec.FromProto(result.BuyOnly.MarkedPnl), dec.FromProto(result.SellOnly.MarkedPnl)))
+		loss := new(big.Rat).Neg(worst)
+		result.WorstOneLegLoss, _ = dec.ToProtoExact(loss)
+		if result.WorstOneLegLoss != nil && s.OneLegLossLimit != nil {
+			result.OneLegLimitStatus = "WITHIN"
+			if loss.Cmp(dec.FromProto(s.OneLegLossLimit)) > 0 {
+				result.OneLegLimitStatus = "EXCEEDED"
+			}
+		}
 	}
 	result.Status = "SUPPORTED"
 	if result.MarkedNetAfterRebalance == nil {

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSession } from '../stores/session'
-import { amount, captureDepth, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
+import { amount, captureDepth, fundingRate, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
 import example from '../api/spot_depth_example.json'
 
 const route = useRoute(),
@@ -73,6 +73,7 @@ async function loadObserved(includeDemoFunds: boolean) {
       next.quantity = previous.quantity
       next.sellFillBps = previous.sellFillBps
       next.adverseMoveBps = previous.adverseMoveBps
+      next.oneLegLossLimit = previous.oneLegLossLimit ?? ''
     }
     inputs.value = next
     liveCapture.value = true
@@ -167,6 +168,7 @@ async function calculate() {
       <label>Rebalance cost (quote units) <input v-model="inputs.rebalanceCost" /></label>
       <label>Sell leg filled (bps) <input v-model="inputs.sellFillBps" /></label>
       <label>Adverse mark change (bps) <input v-model="inputs.adverseMoveBps" /></label>
+      <label>One-leg loss limit (quote units) <input v-model="inputs.oneLegLossLimit" /></label>
     </div>
     <div class="venues">
       <fieldset v-for="v in inputs.venues" :key="v.venue">
@@ -239,6 +241,32 @@ async function calculate() {
             <dt>Scenario net after rebalancing</dt>
             <dd>{{ amount(r.marked_net_after_rebalance, result.quote_currency) }}</dd>
           </div>
+          <template v-if="r.funding">
+            <div>
+              <dt>Required before execution</dt>
+              <dd>{{ amount(r.funding.buy_quote_required, result.quote_currency) }} on {{ r.buy_venue }} ·
+                {{ amount(r.funding.sell_base_required, result.base_currency) }} on {{ r.sell_venue }}</dd>
+            </div>
+            <div>
+              <dt>Funded capital at the sell leg’s average price</dt>
+              <dd>{{ amount(r.funding.funded_capital_quote, result.quote_currency) }}</dd>
+            </div>
+            <div>
+              <dt>Return on funded capital</dt>
+              <dd>{{ fundingRate(r.funding.return_on_capital_bps, r.marked_net_after_rebalance) }}</dd>
+            </div>
+            <div>
+              <dt>Break-even cost change per leg</dt>
+              <dd>{{ fundingRate(r.funding.break_even_cost_per_leg_bps, r.marked_net_after_rebalance) }}</dd>
+              <small>A negative value is the cost reduction needed on each leg at these fill sizes.</small>
+            </div>
+            <div>
+              <dt>Largest modeled one-leg loss</dt>
+              <dd>{{ amount(r.worst_one_leg_loss, result.quote_currency) }}</dd>
+              <small>{{ r.one_leg_limit_status === 'EXCEEDED' ? 'Exceeds the scenario limit' :
+                r.one_leg_limit_status === 'WITHIN' ? 'Within the scenario limit' : 'Loss limit comparison unavailable' }}</small>
+            </div>
+          </template>
           <div>
             <dt>Buy / sell size</dt>
             <dd>

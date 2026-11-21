@@ -118,6 +118,77 @@ func TestSpotDepthFundingMinimumsAndCoverage(t *testing.T) {
 	}
 }
 
+func TestSpotFundedCapitalFixedFillBreakEvenAndLossBudget(t *testing.T) {
+	s := depthExample()
+	d := func(text string) *commonpb.Decimal {
+		t.Helper()
+		v, ok := dec.ParseProtoExact(text)
+		if !ok {
+			t.Fatal(text)
+		}
+		return v
+	}
+	level := func(price, size string) *marketpb.PriceLevel {
+		return &marketpb.PriceLevel{Price: d(price), Size: d(size)}
+	}
+	buy, sell := s.Venues[0], s.Venues[1]
+	buy.Book.Asks, buy.Book.Bids = []*marketpb.PriceLevel{level("100", "2")}, []*marketpb.PriceLevel{level("99", "2")}
+	sell.Book.Bids = []*marketpb.PriceLevel{level("120", "0.5"), level("100", "1.5")}
+	sell.Book.Asks = []*marketpb.PriceLevel{level("121", "2")}
+	buy.FeeBps, buy.FeeCurrency = d("100"), "USDT"
+	sell.FeeBps, sell.FeeCurrency = d("100"), "BTC"
+	s.RequestedBuyQuantity, s.AdverseMoveBps, s.OneLegLossLimit = d("1.01"), d("3000"), d("21.3")
+	evaluate := func() *querypb.SpotDepthDirection {
+		t.Helper()
+		r, err := EvaluateSpotDepth(s)
+		if err != nil || r.Directions[0].Status != "SUPPORTED" {
+			t.Fatal(r, err)
+		}
+		return r.Directions[0]
+	}
+	r := evaluate()
+	// The purchase costs 101 plus 1.01 in quote. Selling 1 BTC at an
+	// average of 110 consumes 1.01 BTC. Cash net of restoration is 6.99.
+	assertDepthAmount(t, r.Funding.BuyQuoteRequired, "102.01")
+	assertDepthAmount(t, r.Funding.SellBaseRequired, "1.01")
+	assertDepthAmount(t, r.Funding.SellBaseValueQuote, "111.1")
+	assertDepthAmount(t, r.Funding.FundedCapitalQuote, "213.11")
+	assertDepthAmount(t, r.Funding.GrossTurnoverQuote, "211")
+	assertDepthAmount(t, r.Funding.ReturnOnCapitalBps, "327.999625")
+	assertDepthAmount(t, r.Funding.BreakEvenCostPerLegBps, "331.279621")
+	assertDepthAmount(t, r.WorstOneLegLoss, "21.3")
+	if r.OneLegLimitStatus != "WITHIN" {
+		t.Fatal(r)
+	}
+	s.OneLegLossLimit = d("21.2999999999999999")
+	if evaluate().OneLegLimitStatus != "EXCEEDED" {
+		t.Fatal("rounded away a limit breach")
+	}
+	s.RebalanceCost = d("7.99")
+	r = evaluate()
+	assertDepthAmount(t, r.Funding.ReturnOnCapitalBps, "0")
+	assertDepthAmount(t, r.Funding.BreakEvenCostPerLegBps, "0")
+	s.RebalanceCost = d("14.98")
+	assertDepthAmount(t, evaluate().Funding.BreakEvenCostPerLegBps, "-331.279621")
+	s.RebalanceCost, s.AdverseMoveBps = nil, nil
+	r = evaluate()
+	if r.Funding.ReturnOnCapitalBps != nil || r.Funding.BreakEvenCostPerLegBps != nil ||
+		r.WorstOneLegLoss != nil || r.OneLegLimitStatus != "UNKNOWN" {
+		t.Fatal(r)
+	}
+	// No planned fee rebate can pre-fund either venue. Both must supply
+	// the gross size and the full purchase price before proceeds arrive.
+	buy.FeeBps, sell.FeeBps = d("-100"), d("-100")
+	r = evaluate()
+	assertDepthAmount(t, r.Funding.BuyQuoteRequired, "101")
+	assertDepthAmount(t, r.Funding.SellBaseRequired, "1.0202")
+	assertDepthAmount(t, r.Funding.SellBaseValueQuote, "112.02")
+	s.OneLegLossLimit = d("-0.01")
+	if _, err := EvaluateSpotDepth(s); err == nil {
+		t.Fatal("negative loss limit accepted")
+	}
+}
+
 func TestSpotDepthDirectionalTakerFees(t *testing.T) {
 	s := depthExample()
 	n := func(c int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c} }

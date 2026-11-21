@@ -66,6 +66,7 @@ export interface DepthInput {
   rebalanceCost: string
   sellFillBps: string
   adverseMoveBps: string
+  oneLegLossLimit?: string
   venues: VenueInput[]
 }
 
@@ -107,6 +108,7 @@ export function isDepthInput(v: unknown): v is DepthInput {
   return (
     record(v) &&
     texts(v, ['instrument', 'cutoff', 'quantity', 'rebalanceCost', 'sellFillBps', 'adverseMoveBps']) &&
+    (v.oneLegLossLimit === undefined || texts(v, ['oneLegLossLimit'])) &&
     isTimestamp(v.cutoff) &&
     Array.isArray(v.venues) &&
     v.venues.length === 2 &&
@@ -177,6 +179,7 @@ export function spotRequest(s: DepthInput) {
       requested_buy_quantity: decimal(s.quantity),
       rebalance_cost: decimal(s.rebalanceCost),
       adverse_move_bps: decimal(s.adverseMoveBps),
+      one_leg_loss_limit: decimal(s.oneLegLossLimit ?? ''),
       sell_fill_bps: decimal(s.sellFillBps),
       venues: s.venues.map((v) => ({
         account_label: v.account,
@@ -240,6 +243,17 @@ export interface Direction {
   buy_only?: Stress
   sell_only?: Stress
   partial_sell?: Stress
+  funding?: {
+    buy_quote_required: Decimal
+    sell_base_required: Decimal
+    sell_base_value_quote?: Decimal
+    funded_capital_quote?: Decimal
+    gross_turnover_quote?: Decimal
+    return_on_capital_bps?: Decimal
+    break_even_cost_per_leg_bps?: Decimal
+  }
+  worst_one_leg_loss?: Decimal
+  one_leg_limit_status?: 'WITHIN' | 'EXCEEDED' | 'UNKNOWN'
 }
 interface Result {
   instrument_id: string
@@ -260,7 +274,7 @@ function wireAmount(v: unknown): boolean {
     Math.abs(v.exponent) <= MAX_SAFE_EXPONENT
   )
 }
-function validDirection(v: unknown, buy: VenueInput, sell: VenueInput): boolean {
+function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLimit: boolean): boolean {
   if (!record(v) || v.buy_venue !== buy.venue || v.sell_venue !== sell.venue || typeof v.reason !== 'string')
     return false
   if (v.status === 'UNKNOWN') return v.reason.length > 0
@@ -292,6 +306,7 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput): boolean 
       return record(fee) && fee.currency_code === currency && wireAmount(fee.amount)
     }) &&
     (v.marked_net_after_rebalance === undefined || wireAmount(v.marked_net_after_rebalance)) &&
+    validFunding(v, hasLossLimit) &&
     ['buy_only', 'sell_only', 'partial_sell'].every((k) => {
       const stress = v[k]
       return (
@@ -301,6 +316,26 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput): boolean 
       )
     })
   )
+}
+
+function validFunding(v: Record<string, unknown>, hasLossLimit: boolean): boolean {
+  if (v.funding === undefined)
+    return v.one_leg_limit_status === undefined && v.worst_one_leg_loss === undefined
+  const f = v.funding
+  if (!record(f) || !wireAmount(f.buy_quote_required) || !wireAmount(f.sell_base_required)) return false
+  for (const key of ['sell_base_value_quote', 'funded_capital_quote', 'gross_turnover_quote'])
+    if (f[key] !== undefined && !wireAmount(f[key])) return false
+  for (const [rate, denominator] of [
+    ['return_on_capital_bps', 'funded_capital_quote'], ['break_even_cost_per_leg_bps', 'gross_turnover_quote'],
+  ] as const) {
+    if (f[rate] !== undefined &&
+        (!wireAmount(f[rate]) || f[denominator] === undefined || v.marked_net_after_rebalance === undefined)) return false
+  }
+  if (v.worst_one_leg_loss !== undefined &&
+      (!wireAmount(v.worst_one_leg_loss) || v.buy_only === undefined || v.sell_only === undefined)) return false
+  return v.one_leg_limit_status === 'UNKNOWN' ||
+    (hasLossLimit && v.worst_one_leg_loss !== undefined &&
+      (v.one_leg_limit_status === 'WITHIN' || v.one_leg_limit_status === 'EXCEEDED'))
 }
 // Date.parse gives the absolute millisecond, including the UTC offset. Compare
 // the remaining digits as well so distinct book cutoffs cannot match.
@@ -337,7 +372,7 @@ export async function priceDepth(portfolio: string, tenant: string, input: Depth
     !input.venues.some((v) => v.venue === 'OKX' && v.symbol === r.base_currency + '-' + r.quote_currency) ||
     !Array.isArray(r.directions) ||
     r.directions.length !== 2 ||
-    !r.directions.every((v, i) => validDirection(v, input.venues[i]!, input.venues[1 - i]!))
+    !r.directions.every((v, i) => validDirection(v, input.venues[i]!, input.venues[1 - i]!, !!input.oneLegLossLimit))
   )
     throw new Error('The portfolio scenario response could not be verified.')
   return r as unknown as Result
@@ -345,6 +380,13 @@ export async function priceDepth(portfolio: string, tenant: string, input: Depth
 export function amount(value: Decimal | undefined, unit: string) {
   const s = formatDecimal(value)
   return s === null ? 'Unknown' : s + ' ' + unit
+}
+
+export function fundingRate(value: Decimal | undefined, net: Decimal | undefined) {
+  if (value?.coefficient !== undefined && net?.coefficient !== undefined &&
+      BigInt(value.coefficient) === 0n && BigInt(net.coefficient) !== 0n)
+    return BigInt(net.coefficient) < 0n ? 'Between −0.0000005 and 0 bps' : 'Between 0 and 0.0000005 bps'
+  return amount(value, 'bps')
 }
 
 function capturedSide(rows: unknown): [string, string][] {

@@ -62,6 +62,8 @@ message SpotDepthScenario {
   common.v1.Decimal sell_fill_bps = 5;
   // Long residuals are marked below the sell bid, shorts above the buy ask.
   common.v1.Decimal adverse_move_bps = 6;
+  // Operator's allowed marked loss in quote units when exactly one leg fills.
+  common.v1.Decimal one_leg_loss_limit = 7;
 }
 
 message SpotLegStress {
@@ -75,6 +77,23 @@ message SpotLegStress {
 message SpotVenueChange {
   common.v1.Decimal base_change = 1;
   common.v1.Decimal quote_change = 2;
+}
+
+message SpotFunding {
+  // Native amounts required before either fill, excluding future rebates.
+  common.v1.Decimal buy_quote_required = 1;
+  common.v1.Decimal sell_base_required = 2;
+  // Required sell inventory valued at the sell leg's depth-weighted fill price.
+  common.v1.Decimal sell_base_value_quote = 3;
+  common.v1.Decimal funded_capital_quote = 4;
+  common.v1.Decimal gross_turnover_quote = 5;
+  // Both rates use marked_net_after_rebalance. Six fractional basis-point
+  // digits, rounded to nearest, ties away from zero. Denominators above
+  // allow reproduction of both unrounded ratios.
+  common.v1.Decimal return_on_capital_bps = 6;
+  // Signed additional quote cost at each leg's fixed gross notional.
+  // A negative value means costs would have to fall to break even.
+  common.v1.Decimal break_even_cost_per_leg_bps = 7;
 }
 
 message SpotDepthDirection {
@@ -103,6 +122,11 @@ message SpotDepthDirection {
   common.v1.Decimal total_fees_in_quote = 19;
   SpotVenueChange buy_venue_change = 20;
   SpotVenueChange sell_venue_change = 21;
+  SpotFunding funding = 22;
+  // max(0, -buy_only.marked_pnl, -sell_only.marked_pnl), in quote units.
+  common.v1.Decimal worst_one_leg_loss = 23;
+  // UNKNOWN without both a shock and a limit, otherwise WITHIN or EXCEEDED.
+  string one_leg_limit_status = 24;
 }
 
 message SpotDepthResult {

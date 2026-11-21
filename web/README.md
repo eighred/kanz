@@ -19,6 +19,16 @@ net quote value and losses under one-leg and partial-sale scenarios. Save the
 inputs and result together to reproduce the calculation. Example and imported
 files supply their own scenario account labels.
 
+For each direction the screen shows the quote cash and base inventory required
+before execution. It values that inventory at the sell leg's depth-weighted
+fill price and adds it to the required cash. Return on funded capital divides
+net after the assumed restoration cost by that total. The break-even cost
+change divides the same net by both gross notionals combined. It applies the
+same additional quote fee rate to each leg at fixed fill quantities. Both
+rates are expressed in basis points and rounded to six fractional digits.
+The optional quote-currency loss limit compares the larger modeled one-leg
+loss at the selected adverse mark with the operator's limit, before rounding.
+
 For an instrument covered by the tenant's market data grant, enter its canonical
 pair and select **Capture current books**. The app obtains both books through the
 portfolio query, with venue timestamps, risk-service receipt times and source

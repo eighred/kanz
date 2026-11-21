@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './client'
 import example from './spot_depth_example.json'
-import { captureDepth, isDepthInput, priceDepth, separateSellFees, spotRequest, type DepthInput } from './spot_depth'
+import { captureDepth, fundingRate, isDepthInput, priceDepth, separateSellFees, spotRequest, type DepthInput } from './spot_depth'
 
 function fixture() {
   const input = structuredClone(example)
@@ -12,6 +12,16 @@ function fixture() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('operator spot depth', () => {
+  it('keeps a subprecision return distinct from zero and an absent budget distinct from zero', () => {
+    const zero = { coefficient: '0', exponent: 0 }
+    expect(fundingRate(zero, { coefficient: '-1', exponent: -18 })).toBe('Between −0.0000005 and 0 bps')
+    expect(fundingRate(zero, { coefficient: '1', exponent: -18 })).toBe('Between 0 and 0.0000005 bps')
+    expect(fundingRate(zero, zero)).toBe('0 bps')
+    const input: DepthInput = fixture()
+    expect(spotRequest(input).spot_depth.one_leg_loss_limit).toBeUndefined()
+    input.oneLegLossLimit = '0'
+    expect(spotRequest(input).spot_depth.one_leg_loss_limit).toEqual(zero)
+  })
   it('keeps market observations distinct from venue account terms', async () => {
     const input = fixture()
     const rows = [...spotRequest(input).spot_depth.venues].reverse()
