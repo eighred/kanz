@@ -984,12 +984,11 @@ spec:
 ---
 # THE ESG EXCLUSION SCREEN (#751) — the ingress half.
 #
-# regulatory authenticates nobody and reads no principal header at all: the
-# screen is a pure function over the book the CALLER supplies, so there is no
-# tenant-scoped read here for a forged header to reach. What this rule buys is
-# narrower and still worth having — it names the api-gateway as the only peer
-# that may reach :8103, so the surface stays closed to everything else in the
-# namespace by default rather than by nobody having tried.
+# The screen is pure over the supplied book. Filing routes now require the
+# gateway's principal tenant to match their configured storage/broker tenant
+# BEFORE lookup/signing/recording (#1069/#1070). That header is trustworthy only
+# while this rule admits the api-gateway alone; it is not independent identity
+# authentication by the regulatory process.
 #
 # ONE PEER, AND OBSERVABILITY IS NOT AMONG THEM. regulatory's /metrics is on
 # :8083, which allow-observability-scrape admits; :8103 is outside that list and

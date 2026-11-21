@@ -36,7 +36,7 @@ func outboxOwnerProblems(rel string, f *ast.File) (count int, problems []string)
 	}
 	want := ""
 	for service, symbol := range map[string]string{
-		"oms": "ServiceOMS", "accounting": "ServiceAccounting", "datamaster": "ServiceDatamaster", "lake-sink": "ServiceLakeSink",
+		"oms": "ServiceOMS", "accounting": "ServiceAccounting", "datamaster": "ServiceDatamaster", "lake-sink": "ServiceLakeSink", "regulatory": "ServiceRegulatory",
 	} {
 		if strings.HasPrefix(rel, "services/"+sourceDirectoryName(service)+"/") {
 			want = symbol
@@ -95,5 +95,18 @@ func TestOutboxOwnerGuardRejectsCopiedOrImplicitOwners(t *testing.T) {
 				t.Fatalf("count=%d problems=%v, want rejected=%v", count, problems, tc.bad)
 			}
 		})
+	}
+}
+
+func TestRegulatoryOutboxOwnerRejectsCopiedService(t *testing.T) {
+	for _, owner := range []string{"ServiceRegulatory", "ServiceOMS"} {
+		f, err := parser.ParseFile(token.NewFileSet(), "fixture.go", `package recording; import ob "`+outboxImportPath+`"; func write(){ob.Enqueue(ctx,tx,ob.`+owner+`,record)}`, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count, problems := outboxOwnerProblems("services/regulatory/internal/recording/fixture.go", f)
+		if count != 1 || (len(problems) != 0) != (owner != "ServiceRegulatory") {
+			t.Fatalf("regulatory ownership guard: owner=%s count=%d problems=%v", owner, count, problems)
+		}
 	}
 }

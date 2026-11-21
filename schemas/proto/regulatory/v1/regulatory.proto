@@ -15,6 +15,8 @@ package regulatory.v1;
 
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
+import "domain/v1/measure.proto";
+import "sustainability/v1/sustainability.proto";
 
 // Framework is the regulatory regime a charge / report is computed under.
 enum Framework {
@@ -27,6 +29,9 @@ enum Framework {
   FRAMEWORK_FORM_PF = 3;
   // AIFMD: the EU alternative-investment-fund-manager report.
   FRAMEWORK_AIFMD = 4;
+  // The same live filing service assembles these climate disclosures.
+  FRAMEWORK_TCFD = 5;
+  FRAMEWORK_SFDR = 6;
 }
 
 // CapitalCharge is a capital requirement computed under one framework, optionally
@@ -78,9 +83,13 @@ message RegReport {
   // line_items are the report's values, in template order. Required.
   repeated ReportLineItem line_items = 4;
 
-  // signature is the AUDIT-01 hash-chain signature over the canonical report
-  // bytes — makes the filing tamper-evident. Required when signed.
+  // Original canonical report signature/digest. FilingRecordBody.signature_kind
+  // distinguishes its audit-chain position from a plain content hash; neither
+  // identifies a cryptographic human signer. Required when signed.
   string signature = 5;
+
+  // Present for a computed capital filing. Other frameworks make no charge claim.
+  CapitalCharge capital_charge = 6;
 }
 
 // ReportLineItem is one row of a RegReport.
@@ -94,4 +103,54 @@ message ReportLineItem {
 
   // value is the line-item amount (money or a statistic). Required.
   common.v1.Decimal value = 3;
+
+  // Declares the computation and retained input manifest, not data approval.
+  domain.v1.MeasureProvenance provenance = 4;
+}
+
+enum FilingSignatureKind {
+  FILING_SIGNATURE_KIND_UNSPECIFIED = 0;
+  FILING_SIGNATURE_KIND_AUDIT_CHAIN = 1;
+  FILING_SIGNATURE_KIND_CONTENT_HASH = 2;
+}
+
+// FilingRecordBody is the full immutable preimage of the context-chain binding,
+// retained in the tenant-scoped artifact. The global chain stores only the
+// explicitly versioned full-preimage byte length + SHA256 witness.
+// The report's original signature still covers only filing.Report.Canonical.
+// input_manifest is bounded canonical JSON of validated, known typed inputs;
+// it never contains request headers, credentials or unrecognized JSON fields.
+message FilingRecordBody {
+  RegReport report = 1;
+  string tenant_id = 2;
+  string portfolio_id = 3;
+  sustainability.v1.ObservationOrigin input_origin = 4;
+  bytes input_manifest = 5;
+  string input_manifest_digest = 6;
+  string producer_version = 7;
+  bytes filing_canonical = 8;
+  FilingSignatureKind signature_kind = 9;
+  repeated sustainability.v1.InstrumentObservation instrument_observations = 10;
+  sustainability.v1.PortfolioObservation portfolio_observation = 11;
+
+  // Scenarios are inputs, carried inline when the actual computation used one.
+  // Absence makes no scenario/version declaration.
+  RegulatoryScenario regulatory_scenario = 12;
+  sustainability.v1.ClimateScenario climate_scenario = 13;
+  // Original report-link predecessor, absent for a bare content-hash signature.
+  string filing_prev_hash = 14;
+  // Recording time sampled inside the transaction and committed with the
+  // artifact, distinct from effective as_of; not an exact commit timestamp.
+  google.protobuf.Timestamp recorded_at = 15;
+}
+
+// FilingRecorded is a FACT, not a supervisory submission or human approval.
+// binding_hash is the audit-chain hash of the versioned byte length and SHA256
+// of deterministic FilingRecordBody. Neither it nor wrappers' references to it
+// are part of that preimage, so the binding is not self-referential.
+message FilingRecorded {
+  FilingRecordBody body = 1;
+  uint32 binding_version = 2;
+  string binding_prev_hash = 3;
+  string binding_hash = 4;
 }

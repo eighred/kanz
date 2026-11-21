@@ -13,9 +13,6 @@ package linkstore
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"sort"
 	"sync"
 	"testing"
 
@@ -27,35 +24,10 @@ import (
 
 func chainPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("TEST_POSTGRES_URL")
-	if url == "" {
-		t.Skip("set TEST_POSTGRES_URL to run linkstore Postgres integration tests")
-	}
-	pool, err := pgxpool.New(context.Background(), url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS audit_chain_links CASCADE`); err != nil {
-		t.Fatalf("reset: %v", err)
-	}
-	files, err := filepath.Glob(filepath.Join("../../../services/regulatory/migrations", "*.sql"))
-	if err != nil || len(files) == 0 {
-		t.Fatalf("glob migrations: %v (found %d)", err, len(files))
-	}
-	sort.Strings(files)
-	for _, f := range files {
-		ddl, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		if _, err := pool.Exec(ctx, string(ddl)); err != nil {
-			t.Fatalf("apply %s: %v", f, err)
-		}
-	}
-	return pool
+	// Use the existing owned-schema lifecycle for the complete migration set.
+	// Dropping only audit_chain_links leaves filing functions/tables behind and
+	// makes the next fixture replay fail before exercising any chain behavior.
+	return newPool(t)
 }
 
 // TestAppendChainedDoesNotForkUnderConcurrentWriters is the whole point. It
@@ -151,5 +123,12 @@ func TestAppendChainedIsIdempotent(t *testing.T) {
 	}
 	if links[0].Hash() != first.Cur {
 		t.Fatalf("first link hash changed under us")
+	}
+
+	// Repeat the real migration lifecycle in this root, even when run alone.
+	// Reset must remove all fixture objects, not redefine a shared tenant helper.
+	fresh := NewPostgres(chainPool(t))
+	if head, err := fresh.Head(ctx); err != nil || head != "" {
+		t.Fatal("repeated fixture did not produce an empty migrated chain")
 	}
 }

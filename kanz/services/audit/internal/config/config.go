@@ -156,6 +156,7 @@ var DefaultSubjects = []string{
 	"risk.command.>",           // RISK
 	"risk.curve.>",             // RISK — the calibrated curve a valuation discounted (#1039)
 	"risk.factor.>",            // RISK — the fitted factor model a VaR was read off (#1039)
+	"risk.sustainability.>",    // RISK — unverified request observations and computed aggregates (#1069)
 	"execution.>",              // EXECUTION
 	"strategy.>",               // EXECUTION
 	"order.>",                  // EXECUTION
@@ -167,6 +168,7 @@ var DefaultSubjects = []string{
 	"observability.>",          // OBSERVABILITY
 	"accounting.>",             // ACCOUNTING
 	"compliance.breach.>",      // COMPLIANCE
+	"compliance.filing.>",      // COMPLIANCE — immutable signed artifact/context history (#1070)
 	"settlement.>",             // SETTLEMENT
 	"alternatives.>",           // ALTERNATIVES
 	"compliance.mandate.>",     // MANDATE

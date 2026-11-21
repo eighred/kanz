@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 // THE FILING ROUTES AND /metrics MUST NOT SHARE A LISTENER (#765).
@@ -40,7 +38,7 @@ func splitServer(t *testing.T) (*Server, *stubMetrics) {
 	r := &Readiness{}
 	r.Set(true)
 	m := &stubMetrics{}
-	return New(r, nil, signer.New(""), WithMetrics(m)), m
+	return New(r, nil, WithMetrics(m)), m
 }
 
 // /metrics IS NOT ON THE FILING MUX, even when a metrics handler was supplied.
@@ -83,7 +81,7 @@ func TestTheMetricsHandlerIsHandedToTheCompositionRoot(t *testing.T) {
 func TestMetricsHandlerIsNilWhenNoneWasSupplied(t *testing.T) {
 	r := &Readiness{}
 	r.Set(true)
-	if h := New(r, nil, signer.New("")).MetricsHandler(); h != nil {
+	if h := New(r, nil).MetricsHandler(); h != nil {
 		t.Fatalf("MetricsHandler() = %v with no WithMetrics option, want nil", h)
 	}
 }

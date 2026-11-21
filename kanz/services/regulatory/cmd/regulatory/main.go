@@ -17,33 +17,27 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/eighred/kanz/internal/audit/linkstore"
-	"github.com/eighred/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/filing"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
-	"github.com/eighred/kanz/internal/regulatory"
+	regulatorypublish "github.com/eighred/kanz/internal/regulatory/publish"
 	"github.com/eighred/kanz/internal/version"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/regulatory/internal/config"
+	"github.com/eighred/kanz/services/regulatory/internal/recording"
 	"github.com/eighred/kanz/services/regulatory/internal/server"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// chainDurable reports whether the filing hash chain survives a restart: 1 when
-// the link store is Postgres, 0 when it is the in-memory one an operator opted
-// into with REGULATORY_ALLOW_EPHEMERAL_CHAIN.
-//
-// It carries more than durability here. The database is also what OWNS THE CHAIN
-// HEAD, and the pg_advisory_xact_lock around AppendChained is what makes the
-// shipped replicas: 2 legal — so a 0 on this gauge means the deployment is one
-// scale event away from a forked audit chain, not merely a chain that resets on
-// restart. Same contract as kanz_audit_log_durable (#236).
-//
-// The "hash" signer builds no link store and never sets this, which is correct:
-// a bare content digest makes no chain claim to be durable about.
+// chainDurable reports durable context-chain storage in both signature modes.
+// The original hash signature still makes no original-chain claim. A missing
+// database refuses startup rather than serving an ephemeral recording path.
 var chainDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "kanz_regulatory_chain_durable",
-	Help: "1 if the filing hash chain is backed by Postgres (head survives a restart, one head across pods), 0 if in-memory.",
+	Help: "1 when mandatory filing/context-chain recording is backed by Postgres; missing storage refuses startup.",
 })
 
 func main() {
@@ -88,16 +82,59 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	// Registered before buildSigner so the posture is on /metrics from the first
-	// scrape, including the degraded one.
+	// Register before opening recording dependencies. HTTP serving starts only
+	// after the durable recorder is ready.
 	obs.Registry.MustRegister(chainDurable)
 
-	sgnr, closeSigner, err := buildSigner(ctx, cfg, logger)
+	pool, err := openRecordingPool(ctx, cfg)
 	if err != nil {
-		logger.Error("signer init failed", "err", err)
+		logger.Error("filing recording database unavailable")
 		return 2
 	}
-	defer closeSigner()
+	defer pool.Close()
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		logger.Error("filing workload identity unavailable")
+		return 2
+	}
+	defer func() { _ = mesh.Close() }()
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: "regulatory", TLSConfig: mesh.Client, Metrics: busMetrics})
+	if err != nil {
+		logger.Error("filing broker unavailable")
+		return 2
+	}
+	defer func() { _ = client.Close() }()
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: "regulatory", ProducerVersion: version.String(), Tenant: cfg.Tenant, Metrics: busMetrics})
+	if err != nil {
+		logger.Error("filing producer configuration refused")
+		return 2
+	}
+	publisher, err := regulatorypublish.New(producer, cfg.Tenant)
+	if err != nil {
+		logger.Error("filing publisher unavailable")
+		return 2
+	}
+	recorder, err := recording.New(pool, cfg.Tenant, cfg.Signer, publisher, logger)
+	if err != nil {
+		logger.Error("filing recorder configuration refused")
+		return 2
+	}
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	relayDone := make(chan error, 1)
+	go func() {
+		err := recorder.Run(relayCtx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fatal.Raise(err)
+		}
+		relayDone <- err
+	}()
+	defer func() {
+		stopRelay()
+		if err := <-relayDone; err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("filing relay stopped with failure")
+		}
+	}()
 
 	// The instrument classifier the ESG screen resolves SECTOR and ISSUER through
 	// (#751). Absent, those dimensions are UNRESOLVABLE and the shared COMP-01
@@ -113,11 +150,11 @@ func run() int {
 	cfg.RefData.LogPosture(logger, "regulatory")
 
 	readiness := &server.Readiness{}
-	opts := []server.Option{server.WithMetrics(obs.MetricsHandler())}
+	opts := []server.Option{server.WithMetrics(obs.MetricsHandler()), server.WithRecorder(cfg.Tenant, version.String(), recorder)}
 	if refCache != nil {
 		opts = append(opts, server.WithClassifier(refCache.Compliance()))
 	}
-	api := server.New(readiness, logger, sgnr, opts...)
+	api := server.New(readiness, logger, opts...)
 
 	// TWO LISTENERS, AND THE SEPARATION IS THE SECURITY BOUNDARY (#765).
 	//
@@ -169,119 +206,25 @@ func run() int {
 	return fatal.Code()
 }
 
-// buildSigner selects the filing signature backend and owns the durable link
-// store's lifecycle. "chain" (default) links every filing into the AUDIT-01
-// hash chain via signer.ChainSigner — a signature is then a verifiable chain
-// position, not just a standalone digest. Each link is appended to the REG-02
-// linkstore.Store (Postgres when REGULATORY_DATABASE_URL is set, else in-memory),
-// and the chain head is recovered from the store on startup so the chain
-// continues across a restart instead of resetting to Genesis. "hash" is the bare
-// content-hash signer (no store). Both satisfy the delivered one-method Signer
-// seam. The returned close func tears down the store's pool.
-func buildSigner(ctx context.Context, cfg config.Config, logger *slog.Logger) (server.Signer, func(), error) {
-	if cfg.Signer == "hash" {
-		return regulatory.HashSigner{}, func() {}, nil
-	}
-	store, closeStore, err := openLinkStore(ctx, cfg, logger)
-	if err != nil {
-		return nil, nil, err
-	}
-	// The STORE owns the chain head, not this process.
-	//
-	// This used to read Head() once at startup and carry it in-process, chaining
-	// each filing off the last one THIS pod signed. Two pods would both start from
-	// the same head and produce two divergent chains of signature links — a forked
-	// audit chain, which is precisely what a regulator would ask about. It is why
-	// this service was pinned to a single replica.
-	//
-	// WithChainer makes every Sign an atomic, advisory-locked read-head→append at
-	// the database, serialized across every writer in every pod. There is no head
-	// here to fork.
-	sgnr := signer.New("",
-		signer.WithChainer(store),
-		signer.WithErrorHandler(func(err error) {
-			logger.Error("filing chain-link append failed — the filing was REFUSED, not issued unsigned", "err", err)
-		}),
-	)
-	// chain_head_owner is DERIVED, not asserted. It read the constant "database"
-	// next to `durable=false`, which was wrong on exactly the path that matters:
-	// with no DSN the head lives in this process, and saying otherwise at INFO is
-	// how a forked chain would have been explained away in an incident.
-	headOwner := "database"
+// openRecordingPool requires durable artifact/outbox storage in BOTH signature
+// modes. HashSigner still makes a bare-content-hash claim; durable recording is
+// an independent requirement. The global audit table has no RLS, so the scoped
+// pool still sees the one estate chain while artifact/outbox tables are isolated.
+func openRecordingPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
 	if cfg.DatabaseURL == "" {
-		headOwner = "in-process"
+		return nil, errors.New("REGULATORY_DATABASE_URL is required for atomic filing artifacts and FACT recovery in both signature modes; REGULATORY_ALLOW_EPHEMERAL_CHAIN cannot disable recording")
 	}
-	logger.Info("filing signer ready", "backend", "chain", "durable", cfg.DatabaseURL != "", "chain_head_owner", headOwner)
-	return sgnr, closeStore, nil
-}
-
-// openLinkStore selects the durable Postgres link store when a DSN is set
-// (REG-02), and otherwise REFUSES TO START unless the deployment has said out
-// loud that it accepts an in-process chain. Returns a close func that tears down
-// the pool (a no-op for the in-memory store). Both satisfy linkstore.Store.
-//
-// This branch used to return linkstore.NewMemoryStore() with no log, no gauge
-// and no error (#261), and buildSigner's Info line one frame up reported
-// `durable=false` next to `signer ready` — which is a fact stated at INFO in the
-// same breath as a success, i.e. exactly the "nothing configured" and "checked,
-// and fine" collision AGENTS.md forbids.
-//
-// WHY THIS ONE REFUSES, AND WHY IT IS THE SHARPEST OF THE SIX. The manifest's
-// scale invariant is built on this store existing. infra/deploy/regulatory-
-// deploy.yaml says replicas: 2 is safe "but ONLY because the DATABASE owns the
-// chain head", records that this service used to be pinned to one replica
-// because an in-process head meant "two pods would both start from the same head
-// and produce two divergent chains of signature links -- a forked audit chain,
-// which is exactly what a regulator would ask about", and warns: "If it is ever
-// removed, this manifest becomes a chain-forking engine -- put the replica count
-// back to 1 in the same edit."
-//
-// An empty DSN removes it. linkstore.AppendChained's guarantee is a
-// pg_advisory_xact_lock around read-head → compute → insert; there is no such
-// lock in a map, so two pods fork the chain immediately and the store's ON
-// CONFLICT (hash) cannot detect it because the forked hashes differ. Nobody
-// edited the replica count, so nobody knows. And at one replica the chain simply
-// resets to Genesis on every restart, because the head is recovered from this
-// store and nowhere else. Neither shape is acceptable, so this is an opt-in.
-//
-// A "hash" deployment never gets here: buildSigner returns regulatory.HashSigner
-// before calling this, and a bare content digest needs no store. That is a
-// legitimate DSN-free posture and it stays legitimate.
-func openLinkStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (linkstore.Store, func(), error) {
-	if cfg.DatabaseURL == "" {
-		if !cfg.AllowEphemeralChain {
-			return nil, nil, errors.New("no REGULATORY_DATABASE_URL (or _FILE mount) with the chain signer: " +
-				"every filing's hash-chain link would be held IN-MEMORY. The chain head is recovered from " +
-				"this store and nowhere else, so it RESETS TO GENESIS on each restart — and with the shipped " +
-				"replicas: 2 the pods hold separate heads and produce DIVERGENT chains of signature links, a " +
-				"forked audit chain no ON CONFLICT can detect. Set REGULATORY_DATABASE_URL, or set " +
-				"REGULATORY_SIGNER=hash for bare content digests, or set " +
-				"REGULATORY_ALLOW_EPHEMERAL_CHAIN=true to accept it — in which case this deployment MUST run " +
-				"exactly one replica and its filings carry no verifiable chain position")
-		}
-		logger.Warn("FILING HASH CHAIN IS IN-MEMORY — REGULATORY_ALLOW_EPHEMERAL_CHAIN accepted an "+
-			"in-process chain. The head RESETS TO GENESIS on every restart, so a filing's chain position is "+
-			"verifiable only within the life of this pod. This deployment MUST run exactly ONE replica: two "+
-			"pods would fork the audit chain, and the divergence is undetectable because the forked hashes "+
-			"differ",
-			"fix", "set REGULATORY_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
-			"gauge", "kanz_regulatory_chain_durable=0")
-		chainDurable.Set(0)
-		return linkstore.NewMemoryStore(), func() {}, nil
+	if !filing.BoundedIdentifier(cfg.Tenant) || cfg.NATSURL == "" || (cfg.Signer != "chain" && cfg.Signer != "hash") {
+		return nil, errors.New("filing recording needs an explicit tenant, broker and supported signature mode")
 	}
-	pool, err := pg.NewGlobalPool(ctx, cfg.DatabaseURL,
-		"the filing link chain is ONE hash chain over the estate's filings — 0001_audit_links.sql "+
-			"declares no RLS, and both replicas must read the same head or they fork it. A tenant-scoped "+
-			"pool would give each tenant its own genesis, which is the divergence this store exists to "+
-			"make impossible")
+	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	store := linkstore.NewPostgres(pool)
-	if err := store.Ping(ctx); err != nil {
+	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	chainDurable.Set(1)
-	return store, pool.Close, nil
+	return pool, nil
 }

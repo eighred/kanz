@@ -20,9 +20,10 @@ import (
 //go:embed tenancy.yaml
 var tenancyYAML []byte
 
-// #1742 revokes the retired monitor principal. All remaining account semantics
-// are preserved; source-path comment corrections also change the pinned bytes.
-const baselineSHA256 = "6c06cb6b092586ce2c0feda7ffa21a709f9257f69259e23ef38e5b374227e51c"
+// #1069/#1070 add filing FACT families and their return path, extend archiver
+// reads to those families, and add two tenant-bound publish-only SVIDs.
+// The reviewed baseline rebind introduces no include/environment/parser capability.
+const baselineSHA256 = "0bcae417038ba62591c520b49a60d554b25b8f7841f3a208162022ec84315d81"
 const SnapshotIdentity = "spiffe://kanz.internal/ns/kanz-services/sa/lake-sink"
 const SnapshotStream = snapshotprofile.Name
 const SnapshotDurable = snapshotprofile.Durable

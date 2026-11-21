@@ -16,9 +16,9 @@ import (
 // single append-only, monotonically-ordered sequence of chain links (REG-02).
 // It reuses the risk-engine persist.Postgres / accounting ledger.Postgres
 // stance (pgxpool, caller-owned lifecycle). The audit chain is a single
-// per-deployment sequence, not tenant-owned — the regulatory service is a
-// stateless filing assembler with no principal — so the table carries no
-// tenant_id and no RLS, matching the RISK-12 universal-fact store rationale.
+// per-deployment sequence, not tenant-owned. Tenant-scoped artifact/outbox
+// tables bind the filing context separately; this existing table retains its
+// one global head and no RLS. A scoped connection therefore sees the same head.
 type Postgres struct {
 	pool *pgxpool.Pool
 }
@@ -55,6 +55,25 @@ func (p *Postgres) AppendChained(ctx context.Context, body []byte) (signer.Link,
 		return signer.Link{}, fmt.Errorf("linkstore: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	link, err := p.AppendChainedTx(ctx, tx, body)
+	if err != nil {
+		return signer.Link{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return signer.Link{}, fmt.Errorf("linkstore: commit link %s: %w", link.Cur, err)
+	}
+	return link, nil
+}
+
+// AppendChainedTx extends the same chain inside the caller's transaction. The
+// caller must commit the artifact and its outbox records in that transaction;
+// a rollback also removes this link. The transaction-scoped lock is retained
+// across a second context-binding link and released only by commit or rollback.
+// AppendChained remains the standalone transaction-owning entrypoint.
+func (p *Postgres) AppendChainedTx(ctx context.Context, tx pgx.Tx, body []byte) (signer.Link, error) {
+	if tx == nil {
+		return signer.Link{}, errors.New("linkstore: transaction required")
+	}
 
 	// Serialize read-head -> insert against every other writer, in this pod or any
 	// other. Held for the transaction; released on commit or rollback.
@@ -63,7 +82,7 @@ func (p *Postgres) AppendChained(ctx context.Context, body []byte) (signer.Link,
 	}
 
 	prev := chain.Genesis
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT hash FROM audit_chain_links ORDER BY seq DESC LIMIT 1`).Scan(&prev)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return signer.Link{}, fmt.Errorf("linkstore: read chain head: %w", err)
@@ -85,9 +104,6 @@ func (p *Postgres) AppendChained(ctx context.Context, body []byte) (signer.Link,
 		ON CONFLICT (hash) DO NOTHING
 	`, link.Prev, link.Cur, link.Body); err != nil {
 		return signer.Link{}, fmt.Errorf("linkstore: append link %s: %w", link.Cur, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return signer.Link{}, fmt.Errorf("linkstore: commit link %s: %w", link.Cur, err)
 	}
 	return link, nil
 }

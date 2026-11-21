@@ -90,6 +90,12 @@ const (
 	// from InputCoverage (nothing can decline for them).
 	MethodPortfolioArithmetic MeasureMethod = "portfolio_arithmetic"
 
+	// These filing methods name the existing computations, not certification of
+	// request-supplied data, supervisory tables or a dataset provider. The filing
+	// record retains the complete inputs and labels their unverified origin.
+	MethodFRTBStandardised  MeasureMethod = "frtb_standardised"
+	MethodClimateDisclosure MeasureMethod = "climate_disclosure"
+
 	// MethodOptionPricingGreeks is a dollar-Greek summed from per-position
 	// option pricing (Black-Scholes closed form, or a binomial tree bumped).
 	// A real model, and distinct from MethodNetExposurePlaceholder below — the
