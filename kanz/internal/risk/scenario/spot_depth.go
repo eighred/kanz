@@ -48,6 +48,14 @@ func EvaluateSpotDepth(s *querypb.SpotDepthScenario) (*querypb.SpotDepthResult, 
 	}
 	a, b := s.Venues[0], s.Venues[1]
 	for _, v := range s.Venues {
+		if cost := v.GetRebalanceCostAfterBuy(); cost != nil {
+			if s.RebalanceCost != nil {
+				return nil, errors.New("choose shared or directional rebalance costs")
+			}
+			if cost.Coefficient < 0 {
+				return nil, errors.New("directional rebalance cost cannot be negative")
+			}
+		}
 		if err := validateSpotBook(v, s.AsOf.AsTime()); err != nil {
 			return nil, err
 		}
@@ -443,8 +451,13 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	buyBid := dec.FromProto(buy.Book.Bids[0].Price)
 	beforeRebalance := spotAdd(cash, spotMul(residual, buyBid))
 	result.MarkedNetBeforeRebalance, _ = dec.ToProtoExact(beforeRebalance)
-	if s.RebalanceCost != nil && s.RebalanceCost.Coefficient >= 0 {
-		result.MarkedNetAfterRebalance = e.value(spotSub(beforeRebalance, dec.FromProto(s.RebalanceCost)))
+	costToRestore := buy.RebalanceCostAfterBuy
+	if costToRestore == nil {
+		costToRestore = s.RebalanceCost
+	}
+	if costToRestore != nil {
+		result.AppliedRebalanceCost = costToRestore
+		result.MarkedNetAfterRebalance = e.value(spotSub(beforeRebalance, dec.FromProto(costToRestore)))
 	}
 	bps := big.NewRat(10000, 1)
 	if s.AdverseMoveBps != nil {

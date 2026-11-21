@@ -10,7 +10,10 @@ remains stable while its source lives in `web/`.
 Open a portfolio’s Exposure page and select **Compare spot depth**. Load the
 synthetic BTC/USDT example or import dated books using its JSON format. Enter
 the requested quantity, balances, fees in their charged currencies, lot sizes,
-order minimums and assumed cost of restoring venue inventory. The comparison
+order minimums and assumed cost of restoring venue inventory. Select **Set
+inventory restoration cost by trade direction** when the two routes have
+different costs. Enter a total in the quote currency for each opening buy.
+A blank cost leaves that direction’s net return unknown. The comparison
 requires both observations within two seconds of the chosen cutoff, at most
 one second apart, and received by that cutoff.
 

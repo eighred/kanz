@@ -90,6 +90,55 @@ func TestLocalInventoryRoundTrip(t *testing.T) {
 	run("UNSUPPORTED")
 }
 
+func TestSpotRestorationCostFollowsOpeningBuy(t *testing.T) {
+	s := depthExample()
+	a, b := s.Venues[0], s.Venues[1]
+	n := func(i int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: i} }
+	a.FeeBps, b.FeeBps = n(0), n(0)
+	// One BTC on the first level. OKX buy pays 50000, Binance sell receives
+	// 50030. In reverse the leg cash flows are -50040 and +49980.
+	s.RebalanceCost = nil
+	a.RebalanceCostAfterBuy, b.RebalanceCostAfterBuy = n(31), n(0)
+	for range 2 {
+		out, err := EvaluateSpotDepth(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, direction := range out.Directions {
+			if direction.BuyVenue == "OKX" {
+				assertDepthAmount(t, direction.AppliedRebalanceCost, "31")
+				assertDepthAmount(t, direction.MarkedNetBeforeRebalance, "30")
+				assertDepthAmount(t, direction.MarkedNetAfterRebalance, "-1")
+			} else {
+				assertDepthAmount(t, direction.AppliedRebalanceCost, "0")
+				assertDepthAmount(t, direction.MarkedNetAfterRebalance, "-60")
+			}
+		}
+		s.Venues[0], s.Venues[1] = s.Venues[1], s.Venues[0]
+	}
+	a.RebalanceCostAfterBuy = nil
+	out, err := EvaluateSpotDepth(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := out.Directions[0]
+	if missing.AppliedRebalanceCost != nil || missing.MarkedNetAfterRebalance != nil ||
+		missing.Funding.ReturnOnCapitalBps != nil || missing.Funding.BreakEvenCostPerLegBps != nil {
+		t.Fatal("missing route cost produced a net or return", missing)
+	}
+	assertDepthAmount(t, missing.MarkedNetBeforeRebalance, "30")
+	assertDepthAmount(t, out.Directions[1].MarkedNetAfterRebalance, "-60")
+	s.RebalanceCost = n(0)
+	if _, err := EvaluateSpotDepth(s); err == nil {
+		t.Fatal("accepted shared and directional costs")
+	}
+	s.RebalanceCost = nil
+	b.RebalanceCostAfterBuy = n(-1)
+	if _, err := EvaluateSpotDepth(s); err == nil {
+		t.Fatal("accepted a negative restoration cost")
+	}
+}
+
 func TestSpotDepthMarksUnmatchedPurchaseAtBuyVenue(t *testing.T) {
 	s := depthExample()
 	buy, sell := s.Venues[0], s.Venues[1]

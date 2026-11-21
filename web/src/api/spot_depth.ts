@@ -33,6 +33,7 @@ export interface VenueInput {
   productType: string
   bids: [string, string][]
   asks: [string, string][]
+  rebalanceCostAfterBuy?: string
   baseBalance: string
   quoteBalance: string
   step: string
@@ -139,7 +140,8 @@ export function isDepthInput(v: unknown): v is DepthInput {
         ]) &&
         ((x.sellFeeBps === undefined && x.sellFeeCurrency === undefined) ||
           texts(x, ['sellFeeBps', 'sellFeeCurrency'])) &&
-        ['maxQty', 'limitCurrency', 'limitReferencePrice', 'minMarketValue', 'maxMarketValue',
+        (x.rebalanceCostAfterBuy === undefined || v.rebalanceCost === '') &&
+        ['rebalanceCostAfterBuy', 'maxQty', 'limitCurrency', 'limitReferencePrice', 'minMarketValue', 'maxMarketValue',
           'buyPriceMin', 'buyPriceMax', 'sellPriceMin', 'sellPriceMax']
           .every((key) => x[key] === undefined || texts(x, [key])) &&
         (x.ruleEvidence === undefined || (Array.isArray(x.ruleEvidence) && x.ruleEvidence.length <= 8 &&
@@ -175,6 +177,8 @@ function feeRequest(v: VenueInput) {
 }
 
 export function spotRequest(s: DepthInput) {
+  if (s.rebalanceCost !== '' && s.venues.some(v => v.rebalanceCostAfterBuy !== undefined))
+    throw new Error('Choose shared or directional inventory restoration costs.')
   const priceRange = (min?: string, max?: string) =>
     min || max ? { minimum: decimal(min ?? ''), maximum: decimal(max ?? '') } : undefined
   const bookSide = (side: [string, string][]) =>
@@ -194,6 +198,7 @@ export function spotRequest(s: DepthInput) {
         product_type: v.productType,
         base_asset_ref: v.baseAssetRef,
         quote_asset_ref: v.quoteAssetRef,
+        rebalance_cost_after_buy: decimal(v.rebalanceCostAfterBuy ?? ''),
         available_base: decimal(v.baseBalance),
         available_quote: decimal(v.quoteBalance),
         quantity_step: decimal(v.step),
@@ -255,6 +260,7 @@ export interface Direction {
   cash_change?: Decimal
   residual_base?: Decimal
   marked_net_after_rebalance?: Decimal
+  applied_rebalance_cost?: Decimal
   marked_net_before_rebalance?: Decimal
   local_unwind?: LocalUnwind
   gross_quote_cash_change?: Decimal
@@ -295,11 +301,18 @@ function wireAmount(v: unknown): boolean {
     Math.abs(v.exponent) <= MAX_SAFE_EXPONENT
   )
 }
-function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLimit: boolean): boolean {
+function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLimit: boolean, sharedCost: string): boolean {
   if (!record(v) || v.buy_venue !== buy.venue || v.sell_venue !== sell.venue || typeof v.reason !== 'string')
     return false
   if (v.status === 'UNKNOWN') return v.reason.length > 0 && v.local_unwind === undefined
   if (v.status === 'UNSUPPORTED') return v.reason.length > 0 && wireAmount(v.shortfall) && v.local_unwind === undefined
+  const expectedCost = decimal(buy.rebalanceCostAfterBuy ?? sharedCost)
+  if (v.applied_rebalance_cost !== undefined) {
+    const applied = v.applied_rebalance_cost
+    if (!expectedCost || !record(applied) || !wireAmount(applied) ||
+        applied.coefficient !== expectedCost.coefficient || applied.exponent !== expectedCost.exponent) return false
+  } else if (buy.rebalanceCostAfterBuy) return false
+  if (!expectedCost && v.marked_net_after_rebalance !== undefined) return false
   return (
     v.status === 'SUPPORTED' &&
     [
@@ -432,7 +445,7 @@ export async function priceDepth(portfolio: string, tenant: string, input: Depth
     !input.venues.some((v) => v.venue === 'OKX' && v.symbol === r.base_currency + '-' + r.quote_currency) ||
     !Array.isArray(r.directions) ||
     r.directions.length !== 2 ||
-    !r.directions.every((v, i) => validDirection(v, input.venues[i]!, input.venues[1 - i]!, !!input.oneLegLossLimit))
+    !r.directions.every((v, i) => validDirection(v, input.venues[i]!, input.venues[1 - i]!, !!input.oneLegLossLimit, input.rebalanceCost))
   )
     throw new Error('The portfolio scenario response could not be verified.')
   const timing = raw.spot_depth_timing

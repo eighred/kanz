@@ -40,6 +40,9 @@ message SpotDepthVenue {
   // Historical inputs without a bound do not assess price-range expiry.
   SpotExecutionPriceRange buy_price_range = 19;
   SpotExecutionPriceRange sell_price_range = 20;
+  // Total assumed quote-unit inventory restoration cost if this venue is the
+  // opening buy. Mutually exclusive with the scenario-wide rebalance_cost.
+  common.v1.Decimal rebalance_cost_after_buy = 21;
 }
 
 message SpotExecutionPriceRange {
@@ -166,6 +169,8 @@ message SpotDepthDirection {
   common.v1.Decimal marked_net_before_rebalance = 25;
   // Separate what-if after both fills settle, at unchanged book levels.
   SpotLocalUnwind local_unwind = 26;
+  // The shared or directional cost applied to this opening buy/sell pair.
+  common.v1.Decimal applied_rebalance_cost = 27;
 }
 
 message SpotDepthTiming {

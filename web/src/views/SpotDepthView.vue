@@ -44,6 +44,19 @@ watch(() => [id.value, session.identity, session.identity?.tenant, session.ident
 watch(inputs, invalidate, { deep: true, flush: 'sync' })
 watch(maxBookAgeMs, invalidate, { flush: 'sync' })
 onBeforeUnmount(reset)
+const directionalCosts = computed(() => inputs.value?.venues.some(v => v.rebalanceCostAfterBuy !== undefined) ?? false)
+function toggleDirectionalCosts() {
+  const s = inputs.value
+  if (!s) return
+  if (directionalCosts.value) {
+    const [first, second] = s.venues
+    s.rebalanceCost = first?.rebalanceCostAfterBuy === second?.rebalanceCostAfterBuy ? first?.rebalanceCostAfterBuy ?? '' : ''
+    for (const v of s.venues) delete v.rebalanceCostAfterBuy
+  } else {
+    for (const v of s.venues) v.rebalanceCostAfterBuy = s.rebalanceCost
+    s.rebalanceCost = ''
+  }
+}
 function loadExample() {
   reset()
   if (isDepthInput(example)) {
@@ -172,7 +185,8 @@ async function calculate() {
     </p>
     <div class="fields">
       <label>Requested buy quantity <input v-model="inputs.quantity" required /></label>
-      <label>Rebalance cost (quote units) <input v-model="inputs.rebalanceCost" /></label>
+      <label><input type="checkbox" :checked="directionalCosts" @change="toggleDirectionalCosts" /> Set inventory restoration cost by trade direction</label>
+      <label v-if="!directionalCosts">Rebalance cost (quote units) <input v-model="inputs.rebalanceCost" /></label>
       <label>Sell leg filled (bps) <input v-model="inputs.sellFillBps" /></label>
       <label>Adverse mark change (bps) <input v-model="inputs.adverseMoveBps" /></label>
       <label>One-leg loss limit (quote units) <input v-model="inputs.oneLegLossLimit" /></label>
@@ -189,6 +203,7 @@ async function calculate() {
         <div class="fields">
           <label v-if="liveCapture && v.portfolioAccount">Portfolio account <input :value="v.portfolioAccount" readonly /></label>
           <label v-else>Scenario account <input v-model="v.account" required /></label>
+          <label v-if="directionalCosts">Restoration cost after buying on {{ v.venue }} (quote units) <input v-model="v.rebalanceCostAfterBuy" /></label>
           <label>Base available <input v-model="v.baseBalance" :readonly="liveCapture && !!v.fundsObservation" /></label>
           <label>Quote available <input v-model="v.quoteBalance" :readonly="liveCapture && !!v.fundsObservation" /></label>
           <label>Buy taker fee (bps) <input v-model="v.feeBps" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
@@ -288,6 +303,7 @@ async function calculate() {
           <div>
             <dt>Scenario net after rebalancing</dt>
             <dd>{{ amount(r.marked_net_after_rebalance, result.quote_currency) }}</dd>
+            <small v-if="r.applied_rebalance_cost || directionalCosts">Assumed inventory restoration cost · {{ amount(r.applied_rebalance_cost, result.quote_currency) }}</small>
           </div>
           <template v-if="r.funding">
             <div>

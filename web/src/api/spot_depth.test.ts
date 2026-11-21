@@ -97,6 +97,19 @@ describe('operator spot depth', () => {
     expect(() => spotRequest(input)).toThrow('exact decimal range')
   })
 
+  it('preserves an unknown route cost and distinguishes it from an explicit zero', () => {
+    const input: DepthInput = fixture()
+    input.venues[0]!.rebalanceCostAfterBuy = '0'
+    expect(isDepthInput(input)).toBe(false)
+    expect(() => spotRequest(input)).toThrow('shared or directional')
+    input.rebalanceCost = ''
+    expect(isDepthInput(input)).toBe(true)
+    const wire = spotRequest(input).spot_depth
+    expect(wire.rebalance_cost).toBeUndefined()
+    expect(wire.venues[0]!.rebalance_cost_after_buy).toEqual({ coefficient: '0', exponent: 0 })
+    expect(wire.venues[1]!.rebalance_cost_after_buy).toBeUndefined()
+  })
+
   it('replays old fee inputs and keeps an absent sell fee distinct from a free buy', () => {
     const input: DepthInput = fixture()
     const old = JSON.stringify(spotRequest(input))
