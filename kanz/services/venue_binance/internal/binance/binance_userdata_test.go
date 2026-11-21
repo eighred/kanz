@@ -11,7 +11,9 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/coder/websocket"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/execution/tca"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
@@ -97,8 +99,18 @@ func ingesterOverView(frames [][]byte, cap *reconCapture, view *fakeOrders) *Use
 
 func TestUserData_FilledReportBecomesOrderFilled(t *testing.T) {
 	cap := &reconCapture{}
-	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","t":7,"T":1700000000000}`
-	_ = ingesterOver([][]byte{[]byte(report)}, cap).Run(context.Background()) // returns io.EOF at end
+	report := `{"e":"executionReport","s":"BTCUSDT","c":"o1","S":"BUY","x":"TRADE","X":"FILLED","l":"1","L":"50000","z":"1","q":"1","n":"0.0008","N":"BTC","t":7,"T":1700000000000}`
+	ctx := context.Background()
+	view := newFakeOrders()
+	st := kanzOrder("o1")
+	st.InstrumentId = "BTC-USDT"
+	st.ParentOrderId = "parent"
+	st.ArrivalPrice = bdec("50000")
+	st.ArrivalAt = timestamppb.New(time.Unix(1699999980, 0))
+	if err := view.store.Record(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	_ = ingesterOverView([][]byte{[]byte(report)}, cap, view).Run(ctx) // returns io.EOF at end
 
 	var ev *orderpb.OrderFilled
 	for _, e := range cap.events {
@@ -109,11 +121,16 @@ func TestUserData_FilledReportBecomesOrderFilled(t *testing.T) {
 	if ev == nil {
 		t.Fatal("no OrderFilled emitted from the fill report")
 	}
-	if ev.GetFill().GetFillId() != "BTCUSDT-7" {
+	if ev.GetFill().GetFillId() != "BTCUSDT-7" || ev.GetFill().GetSpotVenueSymbol() != "BTCUSDT" {
 		t.Fatalf("fill_id = %q, want BTCUSDT-7 (deterministic ⇒ dedups the sync path)", ev.GetFill().GetFillId())
 	}
-	if ev.GetState().GetPortfolioId() != "fund-alpha" || ev.GetState().GetInstrumentId() != "BTC-USD" {
+	if ev.GetState().GetPortfolioId() != "fund-alpha" || ev.GetState().GetInstrumentId() != "BTC-USDT" ||
+		ev.GetState().GetParentOrderId() != "parent" || !ev.GetState().GetArrivalAt().AsTime().Equal(st.ArrivalAt.AsTime()) {
 		t.Fatal("fill not enriched with Kanz order context")
+	}
+	measured, err := tca.Measure(ev.GetState(), []*orderpb.Fill{ev.GetFill()})
+	if err != nil || measured.ShortfallBps.RatString() != "8" {
+		t.Fatalf("0.0008 BTC at 50,000 USDT should contribute 8 bps: %+v, %v", measured, err)
 	}
 	if ev.GetState().GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
 		t.Fatalf("status = %v, want FILLED", ev.GetState().GetStatus())

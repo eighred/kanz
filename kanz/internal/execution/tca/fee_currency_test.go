@@ -72,3 +72,37 @@ func TestMeasureFeeCurrencyKnownAndZeroControls(t *testing.T) {
 		})
 	}
 }
+
+func TestSpotFeeAtEachExecutionPrice(t *testing.T) {
+	// 0.0008 BTC on a 50,000 USDT fill costs 40 USDT. A 0.0001 BTC
+	// rebate on the 40,000 fill is worth 4 USDT. Two equally sized fills
+	// at 45,000 arrival have zero price shortfall and 36 / 90,000 = 4 bps.
+	first, second := fill(1, 50000, 0, "BTC"), fill(1, 40000, 0, "BTC")
+	first.Fee.Amount, second.Fee.Amount = d(8, -4), d(-1, -4)
+	st := order(orderpb.Side_SIDE_BUY, d(45000, 0))
+	st.InstrumentId = "BTC-USDT"
+	first.InstrumentId, second.InstrumentId = st.InstrumentId, st.InstrumentId
+	first.SpotVenueSymbol, second.SpotVenueSymbol = "BTCUSDT", "BTC-USDT"
+	result, err := Measure(st, []*orderpb.Fill{first, second})
+	if err != nil || result.ShortfallBps.Cmp(big.NewRat(4, 1)) != 0 || result.PriceShortfallBps.Sign() != 0 ||
+		result.Fees.Cmp(big.NewRat(7, 10000)) != 0 || result.FeeCurrency != "BTC" {
+		t.Fatalf("base fee and rebate valuation: %+v, %v", result, err)
+	}
+}
+
+func TestSpotFeeRequiresComparableUnits(t *testing.T) {
+	for _, tc := range []struct{ canonical, reported, symbol, fee string }{
+		{"BTC-USD", "BTC-USD", "BTCUSDT", "USD"},
+		{"BTC-USDT", "BTC-USDT", "", "USDT"},
+		{"BTC-USDT", "BTC-USDT", "BTCUSDT", "BNB"},
+		{"BTC-USDT", "ETH-USDT", "BTCUSDT", "USDT"},
+		{"AB-C", "AB-C", "A-BC", "C"},
+		{"BTC-USDT", "BTC-USDT", "BTC-USDT-SWAP", "BTC"},
+	} {
+		st, f := order(orderpb.Side_SIDE_BUY, d(100, 0)), fill(1, 100, 1, tc.fee)
+		st.InstrumentId, f.InstrumentId, f.SpotVenueSymbol = tc.canonical, tc.reported, tc.symbol
+		if _, err := Measure(st, []*orderpb.Fill{f}); !errors.Is(err, ErrUnpricedFee) && !errors.Is(err, ErrSpotPairMismatch) {
+			t.Errorf("accepted unpriced fee: %+v, %v", tc, err)
+		}
+	}
+}

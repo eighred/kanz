@@ -77,7 +77,7 @@ func filledFact(t *testing.T) []byte {
 	b, err := proto.Marshal(&orderpb.OrderFilled{
 		OrderId: "o-1",
 		Fill: &orderpb.Fill{
-			FillId: "f-1", OrderId: "o-1", InstrumentId: "BTC-USD", Venue: "XBIN",
+			FillId: "f-1", OrderId: "o-1", InstrumentId: "BTC-USD", SpotVenueSymbol: "BTCUSD", Venue: "XBIN",
 			Side: orderpb.Side_SIDE_BUY, Quantity: d(10, 0), Price: d(110, 0),
 			Fee: &commonpb.Money{Amount: d(2, 0), CurrencyCode: "USD"},
 		},

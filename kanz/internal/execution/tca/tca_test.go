@@ -31,7 +31,7 @@ func order(side orderpb.Side, arrival *commonpb.Decimal) *orderpb.OrderState {
 
 func fill(qty, price int64, fee int64, ccy string) *orderpb.Fill {
 	f := &orderpb.Fill{
-		Quantity: d(qty, 0), Price: d(price, 0), Venue: "XBIN",
+		Quantity: d(qty, 0), Price: d(price, 0), Venue: "XBIN", InstrumentId: "BTC-USD", SpotVenueSymbol: "BTCUSD",
 	}
 	if ccy != "" {
 		f.Fee = &commonpb.Money{Amount: d(fee, 0), CurrencyCode: ccy}

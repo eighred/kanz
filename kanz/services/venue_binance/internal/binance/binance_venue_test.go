@@ -153,7 +153,7 @@ func TestBinance_MarketOrderFillsWithClientOrderID(t *testing.T) {
 	if got := dec.FromProto(fills[0].GetPrice()); got.Cmp(big.NewRat(50000, 1)) != 0 {
 		t.Fatalf("fill price = %s, want 50000", got.RatString())
 	}
-	if fills[0].GetVenue() != "BINANCE" || fills[0].GetVenueExecutionId() != "42" {
+	if fills[0].GetVenue() != "BINANCE" || fills[0].GetVenueExecutionId() != "42" || fills[0].GetSpotVenueSymbol() != "BTCUSDT" {
 		t.Fatalf("venue/exec id wrong: %+v", fills[0])
 	}
 }

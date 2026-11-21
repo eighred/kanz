@@ -38,6 +38,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/instrument"
 )
 
 var (
@@ -58,6 +59,8 @@ var (
 	// ErrMissingFeeCurrency refuses a nonzero charge or rebate whose units are
 	// unknown. A later labelled fee cannot supply units for an earlier one.
 	ErrMissingFeeCurrency = errors.New("tca: nonzero fee has no currency")
+	ErrUnpricedFee        = errors.New("tca: fee has no verified value in the execution quote currency")
+	ErrSpotPairMismatch   = errors.New("tca: spot execution does not match the benchmark instrument")
 )
 
 // Result is one order's realized cost.
@@ -86,6 +89,10 @@ type Result struct {
 	// Fees is the total fee paid, in FeeCurrency.
 	Fees        *big.Rat
 	FeeCurrency string
+	// FeesInQuote values each fee at its fill. QuoteCurrency is empty if
+	// the execution supplied no spot-pair evidence.
+	FeesInQuote   *big.Rat
+	QuoteCurrency string
 
 	// ShortfallBps is implementation shortfall against arrival, in basis points
 	// of arrival notional, INCLUDING fees. This is the headline number.
@@ -113,8 +120,10 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 
 	qty, notional := new(big.Rat), new(big.Rat)
 	fees := new(big.Rat)
+	quoteFees := new(big.Rat)
 	feeCcy := ""
 	var venue string
+	var quoteCurrency string
 
 	for _, f := range fills {
 		if f == nil {
@@ -125,6 +134,15 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 			continue // a fill that moved nothing contributes nothing
 		}
 		p := dec.FromProto(f.GetPrice())
+		var pair instrument.Pair
+		if symbol := f.GetSpotVenueSymbol(); symbol != "" {
+			var ok bool
+			pair, ok = spotPair(st.GetInstrumentId(), f.GetInstrumentId(), symbol)
+			if !ok {
+				return Result{}, ErrSpotPairMismatch
+			}
+			quoteCurrency = pair.Quote
+		}
 		qty.Add(qty, q)
 		notional.Add(notional, new(big.Rat).Mul(q, p))
 		if venue == "" {
@@ -132,6 +150,9 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 		}
 
 		if m := f.GetFee(); m != nil {
+			if m.GetAmount() == nil {
+				return Result{}, fmt.Errorf("%w: missing fee amount", ErrUnpricedFee)
+			}
 			ccy := m.GetCurrencyCode()
 			amt := dec.FromProto(m.GetAmount())
 			if amt.Sign() != 0 && ccy == "" {
@@ -147,6 +168,13 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 						ErrMixedFeeCurrency, st.GetOrderId(), feeCcy, ccy)
 				}
 				fees.Add(fees, amt)
+			}
+			if amt.Sign() != 0 {
+				cost, err := feeInQuote(pair, ccy, amt, p)
+				if err != nil {
+					return Result{}, err
+				}
+				quoteFees.Add(quoteFees, cost)
 			}
 		}
 	}
@@ -174,7 +202,7 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 	priceBps := new(big.Rat).Quo(priceCost, arrivalNotional)
 	priceBps.Mul(priceBps, tenThousand)
 
-	totalCost := new(big.Rat).Add(priceCost, fees)
+	totalCost := new(big.Rat).Add(priceCost, quoteFees)
 	totalBps := new(big.Rat).Quo(totalCost, arrivalNotional)
 	totalBps.Mul(totalBps, tenThousand)
 
@@ -191,9 +219,39 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 		ArrivalPrice:      arrival,
 		Fees:              fees,
 		FeeCurrency:       feeCcy,
+		FeesInQuote:       quoteFees,
+		QuoteCurrency:     quoteCurrency,
 		ShortfallBps:      totalBps,
 		PriceShortfallBps: priceBps,
 	}, nil
+}
+
+func spotPair(benchmarkID, fillID, symbol string) (instrument.Pair, bool) {
+	resolution, ok := instrument.Resolve(fillID, symbol)
+	pair := resolution.Pair
+	if benchmarkID != fillID || !ok || !resolution.Known || resolution.Mismatched || pair.Base == pair.Quote {
+		return instrument.Pair{}, false
+	}
+	// Resolve also serves venue catalogues using alternate separators. For
+	// spot economics require the observed symbol to match the entire pair in
+	// a supported adapter format (e.g. AB-C and A-BC are different OKX books).
+	return pair, symbol == pair.Base+pair.Quote || symbol == pair.Base+"-"+pair.Quote
+}
+
+// Each base-asset fee is valued at its own execution price. Fees in the cost
+// FACT keep their original units, including the sign of a maker rebate.
+func feeInQuote(pair instrument.Pair, currency string, amount, price *big.Rat) (*big.Rat, error) {
+	if pair.Quote == "" || price.Sign() <= 0 {
+		return nil, ErrUnpricedFee
+	}
+	switch currency {
+	case pair.Quote:
+		return amount, nil
+	case pair.Base:
+		return new(big.Rat).Mul(amount, price), nil
+	default:
+		return nil, ErrUnpricedFee
+	}
 }
 
 // SlippageVsVWAPBps compares the achieved average price against an interval VWAP

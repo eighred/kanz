@@ -34,6 +34,7 @@ import (
 	"errors"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -356,6 +357,12 @@ func reasonOf(err error) string {
 		return "no_fill_quantity"
 	case errors.Is(err, tca.ErrMixedFeeCurrency):
 		return "mixed_fee_currency"
+	case errors.Is(err, tca.ErrMissingFeeCurrency):
+		return "missing_fee_currency"
+	case errors.Is(err, tca.ErrUnpricedFee):
+		return "unpriced_fee"
+	case errors.Is(err, tca.ErrSpotPairMismatch):
+		return "spot_pair_mismatch"
 	default:
 		return "other"
 	}
@@ -363,36 +370,44 @@ func reasonOf(err error) string {
 
 // publish records the measurement as a FACT on the order domain.
 //
-// EVERY FIGURE IS EXACT OR THE RECORD IS NOT WRITTEN. dec.ToProtoScaled
-// preserves magnitude by rescaling, and a value it cannot represent at any
-// exponent is not something to write down approximately — a cost report is read
-// as authoritative, and a rounded basis-point figure is how a venue comparison
-// gets decided by the fourth decimal.
+// Copy observed monetary inputs at their original wire precision. The
+// derived fee valuation must also fit exactly. Non-terminating basis-point
+// ratios retain the established reporting scale.
 func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, st *orderpb.OrderState, r tca.Result) error {
 	if w.bus == nil {
 		return nil // no bus wired: the metrics still work, which is the dev posture
 	}
-	qty, ok1 := tca.ToDecimal(r.FilledQuantity)
-	px, ok2 := tca.ToDecimal(r.AveragePrice)
-	arr, ok3 := tca.ToDecimal(r.ArrivalPrice)
-	sf, ok4 := tca.ToDecimal(r.ShortfallBps)
-	psf, ok5 := tca.ToDecimal(r.PriceShortfallBps)
-	fees, ok6 := tca.ToDecimal(r.Fees)
-	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
+	sf, ok1 := reportBps(r.ShortfallBps)
+	psf, ok2 := reportBps(r.PriceShortfallBps)
+	if !ok1 || !ok2 {
 		return errUnrepresentable
+	}
+	nativeFee := fill.GetFee()
+	if nativeFee == nil {
+		nativeFee = &commonpb.Money{Amount: &commonpb.Decimal{}}
+	}
+	var feeInQuote *commonpb.Money
+	if r.QuoteCurrency != "" {
+		amount, ok := dec.ToProtoExact(r.FeesInQuote)
+		if !ok {
+			return errUnrepresentable
+		}
+		feeInQuote = &commonpb.Money{Amount: amount, CurrencyCode: r.QuoteCurrency}
 	}
 
 	payload := &orderpb.TransactionCostRecorded{
 		OrderId:           r.OrderID,
 		ParentOrderId:     st.GetParentOrderId(),
 		FillId:            fill.GetFillId(),
+		SpotVenueSymbol:   fill.GetSpotVenueSymbol(),
 		InstrumentId:      r.Instrument,
 		Venue:             r.Venue,
 		Side:              fill.GetSide(),
-		FilledQuantity:    qty,
-		FillPrice:         px,
-		ArrivalPrice:      arr,
-		Fee:               &commonpb.Money{Amount: fees, CurrencyCode: r.FeeCurrency},
+		FilledQuantity:    fill.GetQuantity(),
+		FillPrice:         fill.GetPrice(),
+		ArrivalPrice:      st.GetArrivalPrice(),
+		Fee:               nativeFee,
+		FeeInQuote:        feeInQuote,
 		ShortfallBps:      sf,
 		PriceShortfallBps: psf,
 		MeasuredAt:        timestamppb.New(w.now().UTC()),
@@ -421,6 +436,17 @@ func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, st *orderpb.Ord
 }
 
 var errUnrepresentable = errors.New("costwatch: a cost figure is not representable as an exact Decimal")
+
+func reportBps(r *big.Rat) (*commonpb.Decimal, bool) {
+	if exact, ok := dec.ToProtoExact(r); ok {
+		return exact, true
+	}
+	rounded, ok := tca.ToDecimal(r)
+	if !ok || (r.Sign() != 0 && rounded.GetCoefficient() == 0) {
+		return nil, false
+	}
+	return rounded, true
+}
 
 // decisionOf names the DECISION a fill's order belonged to: the working parent
 // when the order is a slice of one, and the order itself otherwise (#435, #483).

@@ -472,6 +472,11 @@ message Fill {
   // Present when this execution was recovered from verified venue history.
   // This is provenance, never authority to place or reopen an order.
   ExecutionRecoveryProvenance recovery = 12;
+
+  // Original exchange symbol on a spot execution. The adapter supplies this
+  // alongside instrument_id so cost analytics can establish the price units.
+  // Absent on older records and venues without spot-pair evidence.
+  string spot_venue_symbol = 13;
 }
 
 message ExecutionRecoveryProvenance {
@@ -915,6 +920,12 @@ message TransactionCostRecorded {
   // faster for whichever venue happens to be worked with an algorithm — then
   // feeds that back into where the next order is sent.
   string parent_order_id = 15;
+  // Original spot exchange symbol, when reported on the fill. A base-asset
+  // fee is valued at fill_price for shortfall_bps; fee keeps its native units.
+  string spot_venue_symbol = 16;
+  // Exact signed value of the fee in the spot quote asset at execution.
+  // Absent on older records and when the pair was not established.
+  common.v1.Money fee_in_quote = 17;
 }
 
 // Benchmark names what an execution was measured AGAINST (#866).

@@ -276,6 +276,7 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		}
 		fill := &orderpb.Fill{
 			FillId:           d.InstID + "-" + d.TradeID,
+			SpotVenueSymbol:  d.InstID,
 			OrderId:          orderID,
 			InstrumentId:     st.GetInstrumentId(),
 			Side:             st.GetSide(),
@@ -290,6 +291,7 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			OrderId: st.GetOrderId(), PortfolioId: st.GetPortfolioId(), InstrumentId: st.GetInstrumentId(),
 			Side: st.GetSide(), OrderType: st.GetOrderType(), TimeInForce: st.GetTimeInForce(),
 			OrderedQuantity: st.GetOrderedQuantity(), LimitPrice: st.GetLimitPrice(),
+			ArrivalPrice: st.GetArrivalPrice(), ArrivalAt: st.GetArrivalAt(), ParentOrderId: st.GetParentOrderId(),
 			Status:         okxStateToProto(d.State),
 			FilledQuantity: accFilled,
 			LeavesQuantity: leaves,

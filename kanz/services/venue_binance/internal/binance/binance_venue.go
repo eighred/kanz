@@ -393,6 +393,7 @@ func (v *BinanceVenue) fills(resp *orderResponse, st *orderpb.OrderState) ([]*or
 		}
 		out = append(out, &orderpb.Fill{
 			FillId:           fmt.Sprintf("%s-%d", resp.Symbol, f.TradeID),
+			SpotVenueSymbol:  resp.Symbol,
 			OrderId:          st.GetOrderId(),
 			InstrumentId:     st.GetInstrumentId(),
 			Side:             st.GetSide(),

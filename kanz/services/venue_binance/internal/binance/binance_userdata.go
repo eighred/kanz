@@ -265,6 +265,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	}
 	fill := &orderpb.Fill{
 		FillId:           fmt.Sprintf("%s-%d", rep.Symbol, rep.TradeID),
+		SpotVenueSymbol:  rep.Symbol,
 		OrderId:          rep.ClientOrderID,
 		InstrumentId:     st.GetInstrumentId(),
 		Side:             st.GetSide(),
@@ -343,6 +344,7 @@ func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.Ord
 		OrderId: st.GetOrderId(), PortfolioId: st.GetPortfolioId(), InstrumentId: st.GetInstrumentId(),
 		Side: st.GetSide(), OrderType: st.GetOrderType(), TimeInForce: st.GetTimeInForce(),
 		OrderedQuantity: ordered, LimitPrice: st.GetLimitPrice(),
+		ArrivalPrice: st.GetArrivalPrice(), ArrivalAt: st.GetArrivalAt(), ParentOrderId: st.GetParentOrderId(),
 		Status:         binanceStatusToProto(rep.OrderStatus),
 		FilledQuantity: cum, LeavesQuantity: leaves,
 		// THE VENUE'S OWN ORDERING TOKEN, not this process's clock and not the

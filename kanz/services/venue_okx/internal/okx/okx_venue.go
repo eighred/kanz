@@ -401,6 +401,7 @@ func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string
 		}
 		out = append(out, &orderpb.Fill{
 			FillId:           inst + "-" + t.TradeID,
+			SpotVenueSymbol:  inst,
 			OrderId:          st.GetOrderId(),
 			InstrumentId:     st.GetInstrumentId(),
 			Side:             st.GetSide(),

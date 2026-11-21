@@ -175,7 +175,10 @@ func TestExecutedPriceAndSignedFeesOnRealBroker(t *testing.T) {
 	ids := make([]string, 4)
 	for i, fields := range []struct{ price, fee string }{{"0", ""}, {"-1", ""}, {"100", "-0.01"}, {"100", "0.01"}} {
 		ids[i] = fmt.Sprintf("okx-domain-%d-%d", identity, i)
-		if err := view.store.Record(ctx, okxKanzOrder(ids[i])); err != nil {
+		st := okxKanzOrder(ids[i])
+		st.ArrivalPrice = &commonpb.Decimal{Coefficient: 100}
+		st.ParentOrderId = "decision"
+		if err := view.store.Record(ctx, st); err != nil {
 			t.Fatal(err)
 		}
 		frame := priceDomainReport(ids[i], "filled", fields.price, fields.fee)
@@ -191,7 +194,7 @@ func TestExecutedPriceAndSignedFeesOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := map[string]*orderpb.Fill{}
+	seen := map[string]*orderpb.OrderFilled{}
 	for seq := start + 1; seq <= info.State.LastSeq; seq++ {
 		msg, err := js.GetMsg("EXECUTION", seq)
 		if err != nil {
@@ -214,19 +217,21 @@ func TestExecutedPriceAndSignedFeesOnRealBroker(t *testing.T) {
 		if seen[event.GetOrderId()] != nil {
 			t.Fatal("duplicate fill FACT")
 		}
-		seen[event.GetOrderId()] = event.GetFill()
+		seen[event.GetOrderId()] = &event
 	}
 	if len(seen) != 2 || seen[ids[0]] != nil || seen[ids[1]] != nil || refused != 2 || view.get(t, ids[0]).GetQuarantine() == nil || view.get(t, ids[1]).GetQuarantine() == nil {
 		t.Fatalf("bad prices reached broker or omitted refusal: facts=%v refusals=%d", seen, refused)
 	}
 	for i, want := range []*big.Rat{big.NewRat(1, 100), big.NewRat(-1, 100)} {
-		fill := seen[ids[i+2]]
+		event := seen[ids[i+2]]
+		fill := event.GetFill()
 		if fill == nil || fill.GetFee().GetCurrencyCode() != "USDT" || dec.FromProto(fill.GetFee().GetAmount()).Cmp(want) != 0 {
 			t.Fatalf("broker fee = %v, want %s USDT", fill, want)
 		}
-		st := okxKanzOrder(fill.GetOrderId())
-		st.ArrivalPrice = &commonpb.Decimal{Coefficient: 100}
-		result, err := tca.Measure(st, []*orderpb.Fill{fill})
+		if event.GetState().GetParentOrderId() != "decision" {
+			t.Fatal("fill lost its parent decision")
+		}
+		result, err := tca.Measure(event.GetState(), []*orderpb.Fill{fill})
 		// A +/-0.01 USDT fee on 100 USDT notional is exactly +/-1 bps.
 		wantBps := big.NewRat(1-int64(2*i), 1)
 		if err != nil || result.ShortfallBps.Cmp(wantBps) != 0 {

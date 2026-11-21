@@ -87,7 +87,7 @@ func (f *okxOrders) openIDs(t *testing.T) []string {
 
 func okxKanzOrder(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
-		OrderId: id, PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
+		OrderId: id, PortfolioId: "fund-alpha", InstrumentId: "BTC-USDT",
 		Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT,
 		OrderedQuantity: odec("1"),
 	}
@@ -117,7 +117,7 @@ func TestOKXUserData_FillBecomesOrderFilled(t *testing.T) {
 	if ev.GetFill().GetFillId() != "BTC-USDT-7" {
 		t.Fatalf("fill_id = %q, want BTC-USDT-7 (deterministic ⇒ dedups the sync path)", ev.GetFill().GetFillId())
 	}
-	if ev.GetState().GetPortfolioId() != "fund-alpha" || ev.GetState().GetInstrumentId() != "BTC-USD" {
+	if ev.GetState().GetPortfolioId() != "fund-alpha" || ev.GetState().GetInstrumentId() != "BTC-USDT" {
 		t.Fatal("fill not enriched with Kanz order context")
 	}
 	if ev.GetState().GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {

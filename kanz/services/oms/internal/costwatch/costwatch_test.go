@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/big"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func d(coef int64, exp int32) *commonpb.Decimal {
 func filledPayload(t *testing.T, venue string, arrival, price, qty int64, fee int64, ccy string) []byte {
 	t.Helper()
 	fill := &orderpb.Fill{
-		FillId: "f-1", OrderId: "o-1", InstrumentId: "BTC-USD",
+		FillId: "f-1", OrderId: "o-1", InstrumentId: "BTC-USD", SpotVenueSymbol: "BTCUSD",
 		Side: orderpb.Side_SIDE_BUY, Quantity: d(qty, 0), Price: d(price, 0), Venue: venue,
 	}
 	if ccy != "" {
@@ -84,6 +85,85 @@ func newWatchOn(t *testing.T, b Bus) (*Watch, *prometheus.Registry) {
 
 func env() *envelopepb.Envelope {
 	return &envelopepb.Envelope{EventId: "e-1", EventType: EventTypeFilled, TenantId: "__system__"}
+}
+
+func TestUnpricedSpotFeeDoesNotRankAndReplayKeepsNativeUnits(t *testing.T) {
+	w, costs, published := rankerFixture(t)
+	msg := &orderpb.OrderFilled{}
+	if err := proto.Unmarshal(filledPayload(t, "OKX", 50000, 50000, 1, 1, "BTC"), msg); err != nil {
+		t.Fatal(err)
+	}
+	msg.Fill.Fee.Amount = d(8, -4)
+	msg.State.InstrumentId, msg.Fill.InstrumentId = "BTC-USDT", "BTC-USDT"
+	msg.Fill.SpotVenueSymbol = ""
+	deliver := func() {
+		t.Helper()
+		data, err := proto.Marshal(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Handle(context.Background(), env(), data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deliver()
+	if _, ranked := costs.Preferred([]string{"OKX"}); ranked || len(published.events) != 0 {
+		t.Fatal("missing spot evidence ranked or published an execution")
+	}
+	msg.Fill.SpotVenueSymbol = "BTC-USDT"
+	deliver()
+	deliver()
+	if len(published.events) != 1 {
+		t.Fatalf("want one measured fill, got %d", len(published.events))
+	}
+	rec := published.events[0].Payload.(*orderpb.TransactionCostRecorded)
+	if dec.FromProto(rec.ShortfallBps).RatString() != "8" || rec.GetSpotVenueSymbol() != "BTC-USDT" ||
+		rec.GetFeeInQuote().GetCurrencyCode() != "USDT" || dec.FromProto(rec.GetFeeInQuote().GetAmount()).RatString() != "40" ||
+		rec.GetFee().GetCurrencyCode() != "BTC" || dec.FromProto(rec.GetFee().GetAmount()).RatString() != "1/1250" {
+		t.Fatalf("incorrect recorded cost: %v", rec)
+	}
+	// The second venue charges 25 USDT, or 5 bps. Treating 0.0008 BTC as
+	// 0.0008 USDT reverses the observed preference at equal execution prices.
+	msg.OrderId, msg.State.OrderId, msg.Fill.OrderId = "o-2", "o-2", "o-2"
+	msg.Fill.FillId, msg.State.Venue, msg.Fill.Venue = "f-2", "BINANCE", "BINANCE"
+	msg.Fill.SpotVenueSymbol = "BTCUSDT"
+	msg.Fill.Fee = &commonpb.Money{Amount: d(25, 0), CurrencyCode: "USDT"}
+	deliver()
+	if venue, ranked := costs.Preferred([]string{"OKX", "BINANCE"}); !ranked || venue != "BINANCE" {
+		t.Fatalf("5 bps venue should beat the 8 bps venue: venue=%q ranked=%v", venue, ranked)
+	}
+}
+
+func TestSubScaleFeeSurvivesCostFact(t *testing.T) {
+	w, _, published := rankerFixture(t)
+	input := &orderpb.OrderFilled{}
+	if err := proto.Unmarshal(filledPayload(t, "BINANCE", 50000, 50000, 1, 1, "BTC"), input); err != nil {
+		t.Fatal(err)
+	}
+	input.Fill.Fee.Amount = d(-3, -14)
+	wire, err := proto.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Handle(context.Background(), env(), wire); err != nil || len(published.events) != 1 {
+		t.Fatalf("cost records: %d, err: %v", len(published.events), err)
+	}
+	rec := published.events[0].Payload.(*orderpb.TransactionCostRecorded)
+	// -3e-14 BTC x 50,000 USD = -1.5e-9 USD. At one BTC this is -3e-10 bps.
+	if !proto.Equal(rec.GetFee(), input.Fill.GetFee()) || rec.GetFeeInQuote().GetCurrencyCode() != "USD" ||
+		dec.FromProto(rec.GetFeeInQuote().GetAmount()).RatString() != "-3/2000000000" ||
+		dec.FromProto(rec.GetShortfallBps()).RatString() != "-3/10000000000" {
+		t.Fatalf("lost sub-scale rebate: %v", rec)
+	}
+}
+
+func TestReportBpsNeverTurnsAnUnrepresentableNonzeroCostIntoZero(t *testing.T) {
+	if _, ok := reportBps(big.NewRat(1, 3000000000)); ok {
+		t.Fatal("recurring sub-scale cost was reported as zero")
+	}
+	if value, ok := reportBps(big.NewRat(1, 3)); !ok || dec.FromProto(value).RatString() != "33333333/100000000" {
+		t.Fatalf("existing recurring bps reporting precision changed: %v", value)
+	}
 }
 
 // A FILL BECOMES A MEASUREMENT, LABELLED BY ITS VENUE.
