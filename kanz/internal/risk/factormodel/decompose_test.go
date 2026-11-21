@@ -74,3 +74,22 @@ func TestTrackingError(t *testing.T) {
 		t.Fatalf("TE vs a different benchmark must be positive, got %.6f", te)
 	}
 }
+
+func TestDecomposeMarginalsAgainstIndependentFiniteDifference(t *testing.T) {
+	d := oneFactorModel().Decompose(map[string]float64{"A": 100, "B": -50})
+	// Direct instrument-space covariance, independently expanded from BFB^T+D.
+	// This oracle does not call Model.Risk or any production covariance helper.
+	risk := func(a, b float64) float64 { return math.Sqrt(.05*a*a + .08*a*b + .05*b*b) }
+	const h = .001
+	for _, check := range []struct {
+		id   string
+		want float64
+	}{
+		{"A", (risk(100+h, -50) - risk(100-h, -50)) / (2 * h)},
+		{"B", (risk(100, -50+h) - risk(100, -50-h)) / (2 * h)},
+	} {
+		if math.Abs(d.MarginalRisk[check.id]-check.want) > 1e-9 {
+			t.Fatalf("%s marginal %.17g vs independent finite difference %.17g", check.id, d.MarginalRisk[check.id], check.want)
+		}
+	}
+}

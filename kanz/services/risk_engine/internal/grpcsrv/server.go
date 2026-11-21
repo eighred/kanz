@@ -511,6 +511,10 @@ func mapError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, v1.ErrPortfolioNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, v1.ErrDecompositionTooLarge):
+		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, v1.ErrDecompositionUnavailable):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, v1.ErrScenarioUnresolvable):
 		// FailedPrecondition, alongside ErrPortfolioNotOwned and for the same
 		// kind of reason: the request is well-formed and the ESTATE cannot serve

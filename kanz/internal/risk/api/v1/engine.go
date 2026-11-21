@@ -64,6 +64,10 @@ type Engine interface {
 	// filter narrows the response; empty filter ⇒ all measures.
 	Measures(ctx context.Context, req MeasuresRequest) (MeasuresResponse, error)
 
+	// DecomposeRisk returns bounded factor and instrument contributions from one
+	// current book snapshot and the same fitted model used by factor measures.
+	DecomposeRisk(ctx context.Context, req DecomposeRiskRequest) (DecomposeRiskResponse, error)
+
 	// EvaluateScenario applies the request's shocks to a transient
 	// copy of the current portfolio state and returns the projected
 	// measures. State is never mutated — scenarios are pure functions

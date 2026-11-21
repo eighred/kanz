@@ -6,6 +6,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/risk_engine/internal/app"
 )
 
@@ -52,29 +53,39 @@ import (
 // rather than refused, which is indistinguishable from a portfolio that holds
 // none of that instrument.
 //
-// # What this function does NOT do, and where the difference bites
-//
-// It does not REGISTER the greek gauge. app.NewGreekModelPosture does, in run(),
-// ahead of the broker branch — because this function is only reached when
-// RISK_ENGINE_NATS_URL is set, and a collector registered on one side of that
-// branch exports no series at all on the other. The two measure postures above it
-// are in exactly that state today: a broker-less risk-engine exports zero
-// kanz_risk_measure_live and zero kanz_risk_measure_method series while exporting
-// fifteen kanz_risk_recompute_* ones, because #1050 moved those out and left these
-// behind. That is the #973/#963 shape still standing, and it is why the newest of
-// the three is split into a registration and a setting.
+// Registration belongs to startup, before the broker branch. This operation
+// only states the same final registry consumed by queries and recomputes.
 func stateMeasurePostures(
-	reg prometheus.Registerer,
 	logger *slog.Logger,
 	registry *compute.Registry,
-	methods *app.MeasureMethodPosture,
+	postures *startupPostures,
 	greeks *app.GreekModelPosture,
 ) {
-	app.MeasurePosture(reg, logger, registry)
-	methods.Seed(registry)
+	postures.measures.State(logger, registry)
+	postures.methods.Seed(registry)
 	// AND WHETHER ANY GREEK IS A GREEK (#1055). The gauge was registered before
 	// the broker branch and already reads 0 for the whole family; this is where the
 	// registry gets to raise it, and where the pod says out loud that a mandate
 	// naming Delta refuses every order until RegisterGreeks has a caller.
 	greeks.State(logger, registry)
+}
+
+type startupPostures struct {
+	bus      *bus.BusMetrics
+	measures *app.MeasureRegistryPosture
+	methods  *app.MeasureMethodPosture
+}
+
+// newStartupPostures owns one registry's broker and measure collectors before
+// startup can take either arm. source must be the same NATSConfig.Name used by
+// the connection callbacks; configuration is not a connectivity observation.
+func newStartupPostures(reg prometheus.Registerer, source string, brokerConfigured bool) *startupPostures {
+	postures := &startupPostures{
+		bus:      bus.NewBusMetrics(reg),
+		measures: app.NewMeasureRegistryPosture(reg),
+		methods:  app.NewMeasureMethodPosture(reg),
+	}
+	postures.bus.ConfigureClient(source, brokerConfigured)
+	postures.methods.Unconfigured()
+	return postures
 }
