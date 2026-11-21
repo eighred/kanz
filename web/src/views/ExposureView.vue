@@ -5,10 +5,11 @@ import { useRoute } from 'vue-router'
 import {
   changesMeaning,
   describeFlag,
+  displayPortfolioMoney,
   risk,
   type ExposureState,
 } from '../api/risk'
-import { formatMoney, isNegative } from '../api/decimal'
+import { isNegative } from '../api/decimal'
 
 // ONE PORTFOLIO'S EXPOSURE (#399/#371 slice 5).
 //
@@ -45,13 +46,6 @@ function label(dimension: string): string {
   return dimension.replace(/^EXPOSURE_DIMENSION_/, '').replaceAll('_', ' ').toLowerCase()
 }
 
-// "—" NOT "0". An amount that cannot be rendered — an out-of-domain exponent, a
-// malformed coefficient — must look unrenderable. internal/dec makes the same
-// rule at the same boundary: a zero is not a safe fallback, because it reads as
-// "flat" and is dropped from whatever is checked downstream.
-function money(m: Parameters<typeof formatMoney>[0]): string {
-  return formatMoney(m) ?? '—'
-}
 </script>
 
 <template>
@@ -80,10 +74,10 @@ function money(m: Parameters<typeof formatMoney>[0]): string {
         <tbody>
           <tr v-for="e in rows" :key="e.bucket">
             <td>{{ e.bucket }}</td>
-            <td>{{ money(e.gross) }}</td>
+            <td>{{ displayPortfolioMoney(e.gross) }}</td>
             <!-- The sign is read off the coefficient STRING, never a parsed
                  number: a short position beyond 2^53 must still colour red. -->
-            <td :class="isNegative(e.net?.amount) ? 'state-bad' : ''">{{ money(e.net) }}</td>
+            <td :class="isNegative(e.net?.amount) ? 'state-bad' : ''">{{ displayPortfolioMoney(e.net) }}</td>
           </tr>
         </tbody>
       </table>

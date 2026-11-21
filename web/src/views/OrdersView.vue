@@ -2,8 +2,8 @@
 import { computed } from 'vue'
 import { usePortfolioRead } from '../usePortfolioRead'
 import { useRoute } from 'vue-router'
-import { risk, type OrderSummary } from '../api/risk'
-import { formatDecimal, formatMoney } from '../api/decimal'
+import { displayPortfolioMoney, risk, type OrderSummary } from '../api/risk'
+import { formatDecimal } from '../api/decimal'
 
 // ONE PORTFOLIO'S TRADING HISTORY (#399).
 //
@@ -36,9 +36,6 @@ const hasUnindexed = computed(() => unindexed.value !== '0' && unindexed.value !
 
 function qty(d: Parameters<typeof formatDecimal>[0]): string {
   return formatDecimal(d) ?? '—'
-}
-function money(m: Parameters<typeof formatMoney>[0]): string {
-  return formatMoney(m) ?? '—'
 }
 
 /** label turns the enum name into something readable. */
@@ -110,8 +107,8 @@ function tone(o: OrderSummary): string {
           <td :class="tone(o)">{{ label(o.status) }}</td>
           <td>{{ qty(o.quantity) }}</td>
           <td>{{ qty(o.filled_quantity) }}</td>
-          <td>{{ money(o.limit_price) }}</td>
-          <td>{{ money(o.average_fill_price) }}</td>
+          <td>{{ displayPortfolioMoney(o.limit_price) }}</td>
+          <td>{{ displayPortfolioMoney(o.average_fill_price) }}</td>
         </tr>
         <tr v-if="orders.length === 0">
           <td colspan="8">
