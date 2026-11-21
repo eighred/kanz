@@ -128,7 +128,9 @@ func TestMeasuresStampsSourcePosition(t *testing.T) {
 	ms := domain.NewMeasureSet("PF1", asOf, map[v1.MeasureName]v1.Measure{})
 	lp := &commonpb.LogPosition{Topic: "risk.state", Partition: 0, Offset: 12}
 	srv := grpcsrv.New(fakeEngine{measures: func(v1.MeasuresRequest) (v1.MeasuresResponse, error) {
-		return v1.MeasuresResponse{PortfolioID: "PF1", AsOf: asOf, Set: ms, SourcePosition: lp}, nil
+		return v1.MeasuresResponse{PortfolioID: "PF1", AsOf: asOf, Set: ms, SourcePosition: lp,
+			RetainedEvaluation: &v1.RetainedEvaluation{BaseCurrency: "EUR", CodeRevision: "original", InputManifestDigest: "verified"},
+		}, nil
 	}}, "acme")
 
 	resp, err := srv.Measures(context.Background(), &querypb.MeasuresRequest{PortfolioId: "PF1"})
@@ -137,6 +139,10 @@ func TestMeasuresStampsSourcePosition(t *testing.T) {
 	}
 	if got := resp.GetSourcePosition(); got == nil || got.GetOffset() != 12 {
 		t.Fatalf("source_position = %+v, want offset 12", got)
+	}
+	source := resp.GetRetainedEvaluation()
+	if source.GetBaseCurrency() != "EUR" || source.GetCodeRevision() != "original" || source.GetInputManifestDigest() != "verified" {
+		t.Fatalf("wire lost retained evaluation identity: %+v", source)
 	}
 }
 

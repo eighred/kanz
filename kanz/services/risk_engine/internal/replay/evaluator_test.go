@@ -65,8 +65,18 @@ func TestEvaluationRoundTripAndIntegrity(t *testing.T) {
 	if !bytes.Equal(restored, sink.record.Manifest) {
 		t.Fatal("packing changed the input manifest")
 	}
-	if _, err := reconstruct(ctx, sink.record); err != nil {
+	restarted, err := New(compute.DefaultRegistry(), sink, "later-revision")
+	if err != nil {
 		t.Fatal(err)
+	}
+	result, err := restarted.Replay(ctx, p.ID(), p.AsOf())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := result.RetainedEvaluation
+	if live.RetainedEvaluation != nil || source == nil || source.BaseCurrency != "USD" ||
+		source.CodeRevision != "test-revision" || source.InputManifestDigest != sink.record.Digest {
+		t.Fatalf("incorrect retained origin: %+v", source)
 	}
 	bad := sink.record
 	bad.Measures = append([]byte(nil), bad.Measures...)

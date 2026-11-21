@@ -134,6 +134,10 @@ func TestPostgresReplayAtomicityIsolationAndRestart(t *testing.T) {
 	if _, ok := response.Set.Lookup(compute.MeasureGrossExposure); !ok {
 		t.Fatal("requested measure missing")
 	}
+	if source := response.RetainedEvaluation; source == nil || source.CodeRevision != "test" ||
+		source.BaseCurrency != "USD" || source.InputManifestDigest != sink.record.Digest {
+		t.Fatalf("cold query lost original evaluation identity: %+v", source)
+	}
 	if _, ok := response.Set.Lookup(compute.MeasureVaR99); ok {
 		t.Fatal("measure filter ignored")
 	}
@@ -198,8 +202,8 @@ func TestAsOfSelectsEarlierBookAndSharesUnchangedInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cutoff := evaluationKnowledge(t, a)
-	p.SetAggregate(domain.AggregateUpdate{AsOf: cutoff.Add(time.Nanosecond), BaseCurrency: "USD", PositionCount: 2})
-	p.SetPosition(domain.Position{InstrumentID: "A", MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: 45678, Exponent: -2}}})
+	p.SetAggregate(domain.AggregateUpdate{AsOf: cutoff.Add(time.Nanosecond), BaseCurrency: "EUR", PositionCount: 2})
+	p.SetPosition(domain.Position{InstrumentID: "A", MarketValue: &commonpb.Money{CurrencyCode: "EUR", Amount: &commonpb.Decimal{Coefficient: 45678, Exponent: -2}}})
 	second, err := e.Compute(ctx, p, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -213,15 +217,19 @@ func TestAsOfSelectsEarlierBookAndSharesUnchangedInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, check := range []struct {
-		at     time.Time
-		digest string
-	}{{cutoff, measureDigest(first.Measures)}, {newCutoff, measureDigest(second.Measures)}} {
+		at       time.Time
+		digest   string
+		currency string
+	}{{cutoff, measureDigest(first.Measures), "USD"}, {newCutoff, measureDigest(second.Measures), "EUR"}} {
 		result, err := restarted.Replay(ctx, p.ID(), check.at)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if measureDigest(result.Measures) != check.digest {
 			t.Fatal("historical request selected the wrong book")
+		}
+		if source := result.RetainedEvaluation; source == nil || source.BaseCurrency != check.currency {
+			t.Fatalf("incorrect portfolio denomination at %s: %+v", check.at, source)
 		}
 	}
 	var count int

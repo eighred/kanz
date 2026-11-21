@@ -181,7 +181,8 @@ type MeasuresRequest struct {
 
 // MeasuresResponse is the engine's reply to MeasuresRequest.
 type MeasuresResponse struct {
-	PortfolioID PortfolioID
+	RetainedEvaluation *RetainedEvaluation
+	PortfolioID        PortfolioID
 	// AsOf is the actual state timestamp of the served evaluation.
 	AsOf         time.Time
 	Set          MeasureSet
@@ -191,6 +192,13 @@ type MeasuresResponse struct {
 	// (WIRE-03). nil on a degraded cache read or when no positioned snapshot
 	// has been applied.
 	SourcePosition *commonpb.LogPosition
+}
+
+// RetainedEvaluation identifies the verified inputs behind a historical read.
+type RetainedEvaluation struct {
+	BaseCurrency        string
+	CodeRevision        string
+	InputManifestDigest string
 }
 
 // MeasureSet exposes the named measure values for a query.

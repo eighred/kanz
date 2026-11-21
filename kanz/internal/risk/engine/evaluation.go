@@ -12,9 +12,10 @@ import (
 
 // Evaluation contains the outputs and source coordinate of one frozen book.
 type Evaluation struct {
-	Exposure       *domain.ExposureSet
-	Measures       *domain.MeasureSet
-	SourcePosition *commonpb.LogPosition
+	RetainedEvaluation *v1.RetainedEvaluation
+	Exposure           *domain.ExposureSet
+	Measures           *domain.MeasureSet
+	SourcePosition     *commonpb.LogPosition
 }
 
 // Evaluator is the durable evaluation boundary supplied by the service. A

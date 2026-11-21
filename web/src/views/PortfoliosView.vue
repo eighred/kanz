@@ -72,7 +72,7 @@ const portfolios = computed(() => rows.value.map(row => ({ ...row, freshness: fr
 
   <table v-else>
     <thead>
-      <tr><th>Portfolio</th><th>Currency</th><th>Positions</th><th>Last folded</th></tr>
+      <tr><th>Portfolio</th><th>Currency</th><th>Positions</th><th>Last folded</th><th>Risk report</th></tr>
     </thead>
     <tbody>
       <tr v-for="p in portfolios" :key="p.portfolio_id">
@@ -88,9 +88,10 @@ const portfolios = computed(() => rows.value.map(row => ({ ...row, freshness: fr
         <td>{{ p.base_currency || '—' }}</td>
         <td>{{ p.position_count }}</td>
         <td :class="p.freshness.warning ? 'state-warn' : 'state-ok'">{{ p.freshness.label }}</td>
+        <td><RouterLink :to="{ name: 'dated-risk', params: { id: p.portfolio_id } }">Historical risk</RouterLink></td>
       </tr>
       <tr v-if="rows.length === 0">
-        <td colspan="4">
+        <td colspan="5">
           The risk engine holds no portfolio state. This is an engine that has folded nothing
           yet, not necessarily a fund with no portfolios.
         </td>

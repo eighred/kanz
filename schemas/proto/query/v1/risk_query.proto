@@ -192,6 +192,18 @@ message MeasuresResponse {
   // source_position is the durable-log coordinate the served state was folded
   // up to (WIRE-02a) — the citation seed; see ExposureResponse.source_position.
   common.v1.LogPosition source_position = 6;
+
+  // Present only after reconstructing the evaluation from its retained inputs.
+  RetainedEvaluation retained_evaluation = 7;
+}
+
+message RetainedEvaluation {
+  // Original portfolio denomination for monetary measures such as VaR and ES.
+  string base_currency = 1;
+  // Revision that produced the retained result.
+  string code_revision = 2;
+  // SHA-256 of the exact input manifest verified during reconstruction.
+  string input_manifest_digest = 3;
 }
 
 // EvaluateScenarioRequest evaluates a what-if scenario against current state.

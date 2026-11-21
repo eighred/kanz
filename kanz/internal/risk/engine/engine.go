@@ -211,7 +211,11 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 			return v1.MeasuresResponse{}, err
 		}
 		served := filterMeasures(result.Measures, req.Measures)
-		return v1.MeasuresResponse{PortfolioID: req.PortfolioID, AsOf: served.AsOf(), Set: served, SourcePosition: result.SourcePosition, QualityFlags: withCoverageFlags(nil, served)}, nil
+		return v1.MeasuresResponse{
+			PortfolioID: req.PortfolioID, AsOf: served.AsOf(), Set: served,
+			SourcePosition: result.SourcePosition, QualityFlags: withCoverageFlags(nil, served),
+			RetainedEvaluation: result.RetainedEvaluation,
+		}, nil
 	}
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.MeasuresResponse{}, err

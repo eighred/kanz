@@ -19,6 +19,7 @@ import ApprovalsView from '../views/ApprovalsView.vue'
 import EstateView from '../views/EstateView.vue'
 import NodesView from '../views/NodesView.vue'
 import ExposureView from '../views/ExposureView.vue'
+import DatedRiskView from '../views/DatedRiskView.vue'
 import OrdersView from '../views/OrdersView.vue'
 import OverridesView from '../views/OverridesView.vue'
 import MandateChangesView from '../views/MandateChangesView.vue'
@@ -94,6 +95,7 @@ export const router = createRouter({
     { path: '/model-proposals', name: 'model-proposals', component: ModelProposalView },
     { path: '/cash-receipts', name: 'cash-receipts', component: CashReceiptsView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
+    { path: '/portfolios/:id/risk', name: 'dated-risk', component: DatedRiskView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },
     { path: '/instruments', name: 'instruments', component: InstrumentsView },
     { path: '/invitations', name: 'invitations', component: InvitationsView },

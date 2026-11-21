@@ -168,13 +168,20 @@ func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*q
 	if err != nil {
 		return nil, err
 	}
+	var retained *querypb.RetainedEvaluation
+	if source := resp.RetainedEvaluation; source != nil {
+		retained = &querypb.RetainedEvaluation{
+			BaseCurrency: source.BaseCurrency, CodeRevision: source.CodeRevision, InputManifestDigest: source.InputManifestDigest,
+		}
+	}
 	return &querypb.MeasuresResponse{
-		PortfolioId:    string(resp.PortfolioID),
-		AsOf:           nonZeroTimestamp(resp.AsOf),
-		Set:            ms,
-		QualityFlags:   protoFlags(resp.QualityFlags),
-		OwnerTenant:    s.ownerTenant,
-		SourcePosition: resp.SourcePosition, // see Exposure
+		RetainedEvaluation: retained,
+		PortfolioId:        string(resp.PortfolioID),
+		AsOf:               nonZeroTimestamp(resp.AsOf),
+		Set:                ms,
+		QualityFlags:       protoFlags(resp.QualityFlags),
+		OwnerTenant:        s.ownerTenant,
+		SourcePosition:     resp.SourcePosition, // see Exposure
 	}, nil
 }
 

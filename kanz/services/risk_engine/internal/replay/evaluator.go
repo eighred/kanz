@@ -158,6 +158,10 @@ func reconstruct(ctx context.Context, record Record) (engine.Evaluation, error) 
 	if !bytes.Equal(exposure, record.Exposure) || !bytes.Equal(measures, record.Measures) {
 		return engine.Evaluation{}, errors.New("historical risk reconstruction differs from retained result")
 	}
+	result.RetainedEvaluation = &v1.RetainedEvaluation{
+		BaseCurrency: string(m.Portfolio.BaseCurrency), CodeRevision: m.CodeRevision,
+		InputManifestDigest: record.Digest,
+	}
 	return result, nil
 }
 
