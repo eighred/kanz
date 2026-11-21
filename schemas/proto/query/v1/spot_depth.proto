@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package query.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "common/v1/money.proto";
+import "market/v1/order_book.proto";
+
+// Operator-supplied historical scenario. All balances, fees and limits are
+// assumptions. The calculation performs no account lookup or order admission.
+message SpotDepthVenue {
+  market.v1.OrderBookSnapshot book = 1;
+  google.protobuf.Timestamp known_at = 2;
+  string account_label = 3;
+  common.v1.Decimal available_base = 4;
+  common.v1.Decimal available_quote = 5;
+  common.v1.Decimal quantity_step = 6;
+  common.v1.Decimal minimum_quantity = 7;
+  common.v1.Decimal minimum_notional = 8;
+  common.v1.Decimal fee_bps = 9;
+  string fee_currency = 10;
+  // Identifiers and product classification from the supplied venue mapping.
+  // Equal ticker text alone cannot establish fungible settlement assets.
+  string base_asset_ref = 11;
+  string quote_asset_ref = 12;
+  string product_type = 13;
+}
+
+message SpotDepthScenario {
+  google.protobuf.Timestamp as_of = 1;
+  common.v1.Decimal requested_buy_quantity = 2;
+  repeated SpotDepthVenue venues = 3;
+  // Quote units for restoring the funded inventory after the paired trade.
+  common.v1.Decimal rebalance_cost = 4;
+  // Fraction of the planned sell filled at the supplied bids, in basis points.
+  common.v1.Decimal sell_fill_bps = 5;
+  // Long residuals are marked below the sell bid, shorts above the buy ask.
+  common.v1.Decimal adverse_move_bps = 6;
+}
+
+message SpotLegStress {
+  common.v1.Decimal inventory_change = 1;
+  common.v1.Decimal cash_change = 2;
+  common.v1.Decimal mark_price = 3;
+  common.v1.Decimal marked_pnl = 4;
+}
+
+// Signed change at a single venue, after its native fee and before rebalancing.
+message SpotVenueChange {
+  common.v1.Decimal base_change = 1;
+  common.v1.Decimal quote_change = 2;
+}
+
+message SpotDepthDirection {
+  string buy_venue = 1;
+  string sell_venue = 2;
+  // SUPPORTED, UNSUPPORTED (size/minimum), UNKNOWN (missing terms).
+  string status = 3;
+  string reason = 4;
+  common.v1.Decimal buy_quantity = 5;
+  common.v1.Decimal sell_quantity = 6;
+  common.v1.Decimal shortfall = 7;
+  common.v1.Decimal buy_notional = 8;
+  common.v1.Decimal sell_notional = 9;
+  common.v1.Money buy_fee = 10;
+  common.v1.Money sell_fee = 11;
+  common.v1.Decimal cash_change = 12;
+  common.v1.Decimal residual_base = 13;
+  // Cash plus residual at the best sell bid, less assumed rebalance cost.
+  common.v1.Decimal marked_net_after_rebalance = 14;
+  SpotLegStress buy_only = 15;
+  SpotLegStress sell_only = 16;
+  SpotLegStress partial_sell = 17;
+  // Before-fee cash, using the actual gross sizes of the two scenario legs.
+  common.v1.Decimal gross_quote_cash_change = 18;
+  // Signed fees expressed in quote units at each leg's own execution VWAP.
+  common.v1.Decimal total_fees_in_quote = 19;
+  SpotVenueChange buy_venue_change = 20;
+  SpotVenueChange sell_venue_change = 21;
+}
+
+message SpotDepthResult {
+  string instrument_id = 1;
+  string base_currency = 2;
+  string quote_currency = 3;
+  repeated SpotDepthDirection directions = 4;
+  // SHA-256 over deterministic protobuf encoding of the supplied scenario.
+  string input_sha256 = 5;
+  google.protobuf.Timestamp as_of = 6;
+}

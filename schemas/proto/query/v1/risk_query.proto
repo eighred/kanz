@@ -35,6 +35,7 @@ import "common/v1/decimal.proto";
 import "common/v1/log_position.proto";
 import "domain/v1/exposure.proto";
 import "domain/v1/measure.proto";
+import "query/v1/spot_depth.proto";
 
 // RiskQueryService is the gRPC read surface. RPC names match the Engine
 // interface methods (Exposure/Measures/EvaluateScenario/Health) so the
@@ -225,6 +226,9 @@ message EvaluateScenarioRequest {
   // the unshocked book wearing the scenario's name (#640 is that failure, one
   // layer in).
   string scenario_name = 3;
+  // OPERATOR_SPOT_DEPTH uses supplied dated scenario inputs. The reserved
+  // name also makes an older engine reject a request it cannot evaluate.
+  SpotDepthScenario spot_depth = 4;
 }
 
 // EvaluateScenarioResponse carries the projected measures under the shocks.
@@ -249,6 +253,7 @@ message EvaluateScenarioResponse {
   // match across messages, and renumbering the siblings would be a wire break
   // for the sake of symmetry nobody reads.
   string owner_tenant = 4;
+  SpotDepthResult spot_depth = 5;
 }
 
 // ScenarioShock is one perturbation. The oneof is the proto mirror of the

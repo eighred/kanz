@@ -1,0 +1,22 @@
+{
+  "instrument": "BTC-USDT", "cutoff": "2026-11-21T08:00:00.500Z",
+  "quantity": "1", "rebalanceCost": "1", "sellFillBps": "5000", "adverseMoveBps": "100",
+  "venues": [
+    {
+      "venue": "OKX", "account": "example-okx", "symbol": "BTC-USDT",
+      "productType": "CRYPTO_SPOT", "baseAssetRef": "example-asset/bitcoin", "quoteAssetRef": "example-asset/tether-usd",
+      "observed": "2026-11-21T08:00:00Z", "received": "2026-11-21T08:00:00.150Z", "sequence": "201",
+      "bids": [["49980","2"],["49970","2"]], "asks": [["50000","1"],["50010","2"]],
+      "baseBalance": "2", "quoteBalance": "150000", "step": "0.0001", "minQty": "0.0001",
+      "minNotional": "10", "feeBps": "8", "feeCurrency": "BTC"
+    },
+    {
+      "venue": "BINANCE", "account": "example-binance", "symbol": "BTCUSDT",
+      "productType": "CRYPTO_SPOT", "baseAssetRef": "example-asset/bitcoin", "quoteAssetRef": "example-asset/tether-usd",
+      "observed": "2026-11-21T08:00:00.250Z", "received": "2026-11-21T08:00:00.450Z", "sequence": "101",
+      "bids": [["50030","1"],["50020","2"]], "asks": [["50040","2"],["50050","2"]],
+      "baseBalance": "2", "quoteBalance": "150000", "step": "0.0001", "minQty": "0.0001",
+      "minNotional": "10", "feeBps": "5", "feeCurrency": "USDT"
+    }
+  ]
+}

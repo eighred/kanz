@@ -5,6 +5,21 @@ web BFF for same-origin sessions and authorized domain APIs; it does not hold
 venue credentials or own financial admission. The npm package name `kanz-web`
 remains stable while its source lives in `web/`.
 
+## Compare Binance and OKX spot depth
+
+Open a portfolio’s Exposure page and select **Compare spot depth**. Load the
+synthetic BTC/USDT example or import dated books using its JSON format. Enter
+the requested quantity, balances, fees in their charged currencies, lot sizes,
+order minimums and assumed cost of restoring venue inventory. The comparison
+requires both observations within two seconds of the chosen cutoff, at most
+one second apart, and received by that cutoff.
+
+The result shows executable size under those assumptions, residual inventory,
+net quote value and losses under one-leg and partial-sale scenarios. Save the
+inputs and result together to reproduce the calculation. Balances, account
+labels, asset references and fees are supplied by the operator. Actual order
+entry and verified account balances use their respective domain services.
+
 ## Development
 
 Run the commands below from `web/`, using Node from `.nvmrc`, npm and the pinned
