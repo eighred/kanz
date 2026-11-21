@@ -243,6 +243,11 @@ async function calculate() {
           </div>
           <template v-if="r.funding">
             <div>
+              <dt>Net before inventory restoration</dt>
+              <dd>{{ amount(r.marked_net_before_rebalance, result.quote_currency) }}</dd>
+              <small v-if="r.marked_net_before_rebalance?.coefficient?.startsWith('-')">The modeled trade loses money with zero restoration cost.</small>
+            </div>
+            <div>
               <dt>Required before execution</dt>
               <dd>{{ amount(r.funding.buy_quote_required, result.quote_currency) }} on {{ r.buy_venue }} ·
                 {{ amount(r.funding.sell_base_required, result.base_currency) }} on {{ r.sell_venue }}</dd>

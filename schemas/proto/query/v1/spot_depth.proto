@@ -127,6 +127,9 @@ message SpotDepthDirection {
   common.v1.Decimal worst_one_leg_loss = 23;
   // UNKNOWN without both a shock and a limit, otherwise WITHIN or EXCEEDED.
   string one_leg_limit_status = 24;
+  // After native fees and residual marking, before inventory restoration.
+  // An upper bound on net for any nonnegative restoration cost.
+  common.v1.Decimal marked_net_before_rebalance = 25;
 }
 
 message SpotDepthResult {

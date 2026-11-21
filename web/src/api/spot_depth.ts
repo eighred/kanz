@@ -236,6 +236,7 @@ export interface Direction {
   cash_change?: Decimal
   residual_base?: Decimal
   marked_net_after_rebalance?: Decimal
+  marked_net_before_rebalance?: Decimal
   gross_quote_cash_change?: Decimal
   total_fees_in_quote?: Decimal
   buy_venue_change?: { base_change: Decimal; quote_change: Decimal }
@@ -306,6 +307,7 @@ function validDirection(v: unknown, buy: VenueInput, sell: VenueInput, hasLossLi
       return record(fee) && fee.currency_code === currency && wireAmount(fee.amount)
     }) &&
     (v.marked_net_after_rebalance === undefined || wireAmount(v.marked_net_after_rebalance)) &&
+    (v.marked_net_before_rebalance === undefined || wireAmount(v.marked_net_before_rebalance)) &&
     validFunding(v, hasLossLimit) &&
     ['buy_only', 'sell_only', 'partial_sell'].every((k) => {
       const stress = v[k]

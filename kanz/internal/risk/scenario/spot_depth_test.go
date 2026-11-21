@@ -176,6 +176,10 @@ func TestSpotFundedCapitalFixedFillBreakEvenAndLossBudget(t *testing.T) {
 		r.WorstOneLegLoss != nil || r.OneLegLimitStatus != "UNKNOWN" {
 		t.Fatal(r)
 	}
+	assertDepthAmount(t, r.MarkedNetBeforeRebalance, "7.99")
+	if r.MarkedNetAfterRebalance != nil {
+		t.Fatal("missing restoration cost produced a final net")
+	}
 	// No planned fee rebate can pre-fund either venue. Both must supply
 	// the gross size and the full purchase price before proceeds arrive.
 	buy.FeeBps, sell.FeeBps = d("-100"), d("-100")
@@ -235,6 +239,17 @@ func TestSpotDepthDirectionalTakerFees(t *testing.T) {
 	d = evaluate()
 	if d[0].Status != "UNKNOWN" || d[1].Status != "UNKNOWN" {
 		t.Fatal("conflicting shared and side-specific terms accepted")
+	}
+}
+
+func TestSpotFundingKeepsNativeAmountsWhenTheirSumExceedsWireRange(t *testing.T) {
+	one := big.NewRat(1, 1)
+	f := spotFunding(big.NewRat(9000000000000000000, 1), big.NewRat(9223372036854775807, 1),
+		one, one, one, &commonpb.Decimal{Coefficient: 1})
+	assertDepthAmount(t, f.BuyQuoteRequired, "9000000000000000000")
+	assertDepthAmount(t, f.SellBaseValueQuote, "9223372036854775807")
+	if f.FundedCapitalQuote != nil || f.GrossTurnoverQuote != nil || f.ReturnOnCapitalBps != nil || f.BreakEvenCostPerLegBps != nil {
+		t.Fatal("unrepresentable denominator was reported as usable", f)
 	}
 }
 

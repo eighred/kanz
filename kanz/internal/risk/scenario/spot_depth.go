@@ -393,8 +393,10 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	result.GrossQuoteCashChange = e.value(spotSub(proceeds, cost))
 	result.TotalFeesInQuote = e.value(spotAdd(spotMul(cost, b.rate), spotMul(proceeds, v.rate)))
 	bid, ask := dec.FromProto(sell.Book.Bids[0].Price), dec.FromProto(buy.Book.Asks[0].Price)
+	beforeRebalance := spotAdd(cash, spotMul(residual, bid))
+	result.MarkedNetBeforeRebalance, _ = dec.ToProtoExact(beforeRebalance)
 	if s.RebalanceCost != nil && s.RebalanceCost.Coefficient >= 0 {
-		result.MarkedNetAfterRebalance = e.value(spotSub(spotAdd(cash, spotMul(residual, bid)), dec.FromProto(s.RebalanceCost)))
+		result.MarkedNetAfterRebalance = e.value(spotSub(beforeRebalance, dec.FromProto(s.RebalanceCost)))
 	}
 	bps := big.NewRat(10000, 1)
 	if s.AdverseMoveBps != nil {
