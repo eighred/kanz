@@ -41,6 +41,8 @@ jobs:
         run: python3 -B -m unittest discover -s .github/scripts -p test_required_ci.py
       - name: Verify release source policy
         run: python3 -B -m unittest discover -s .github/scripts -p 'release_*_test.py'
+      - name: Verify mandatory agent boundary qualification policy
+        run: python3 -B .github/scripts/test_agent_boundary_workflow.py
       - name: Select application scope from checked Git history
         id: scope
         run: python3 .github/scripts/required_ci.py scope

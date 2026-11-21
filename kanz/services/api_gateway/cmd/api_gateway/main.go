@@ -292,7 +292,13 @@ func run() int {
 			}()
 		}
 	}
-	ordersHandler := orders.New(producer, cfg.ApproveRole, gate)
+	// A typed nil in Publisher would make the absent write surface look live
+	// to both the halt and publish guards. Preserve an actual nil interface.
+	var orderPublisher orders.Publisher
+	if producer != nil {
+		orderPublisher = producer
+	}
+	ordersHandler := orders.New(orderPublisher, cfg.ApproveRole, gate)
 
 	// AUTH-01d: every capability decision this gateway makes is recorded.
 	//
@@ -1275,7 +1281,9 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/", chain(gwMux))
+	versioned := chain(gwMux)
+	mux.Handle("/v1/", versioned)
+	mux.Handle("/v2/", versioned)
 	mux.Handle("GET /metrics", obs.MetricsHandler())
 	mux.HandleFunc("GET /openapi.json", gateway.OpenAPIHandler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
