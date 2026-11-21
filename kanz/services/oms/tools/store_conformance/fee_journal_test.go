@@ -71,6 +71,16 @@ func feeDigestCases(t *testing.T) []feeDigestCase {
 			t.Fatal("independent rational/time digest oracle differs from Go")
 		}
 		result = append(result, feeDigestCase{date, f, want})
+		spot := proto.Clone(f).(*orderpb.Fill)
+		spot.SpotVenueSymbol = "BTCUSD"
+		spot.InstrumentId = "BTC-USD"
+		spotID := sha256.Sum256([]byte(`["VENUE","account","BTC-USD","execution"]`))
+		spotKey := "execution:v1:" + hex.EncodeToString(spotID[:])
+		spotWant := independentEconomicDigest("execution-economics-v2", "order", spotKey, "SIDE_BUY", "1/8", "2001/20", "-123/100", "USD", date, "BTCUSD")
+		if got, err := fillfact.EconomicDigest(spot); err != nil || got != spotWant {
+			t.Fatalf("spot digest %s: %v", got, err)
+		}
+		result = append(result, feeDigestCase{"spot-" + date, spot, spotWant})
 	}
 	return result
 }

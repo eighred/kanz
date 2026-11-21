@@ -98,8 +98,9 @@ func (t EntryType) String() string {
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
-	journalReadPosition int64 // store-issued complete read receipt; never financial history
-	actionStage         uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
+	journalReadPosition int64    // store-issued complete read receipt; never financial history
+	tradedQuantity      *big.Rat // signed gross size from immutable execution evidence for custody trade lines
+	actionStage         uint8    // replay-only: 1 entitlement, 2 confirmed payment; never persisted
 	// ExecutionEvidence preserves exact venue execution economics and recovery
 	// provenance; the immutable journal must retain more than a dedup alias.
 	ExecutionEvidence []byte
@@ -483,7 +484,7 @@ func (b *Book) AccruedBalance(currency string) *big.Rat {
 // canonical reconstruction. Replaying the same journal yields the same book.
 func Replay(portfolioID string, events []*Event) *Book {
 	b := NewBook(portfolioID)
-	for _, e := range sortedFor(events, time.Time{}, time.Time{}, false) {
+	for _, e := range restateBaseFees(sortedFor(events, time.Time{}, time.Time{}, false)) {
 		b.Apply(e)
 	}
 	if b.maxEffective.IsZero() {
@@ -519,7 +520,7 @@ func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsO
 // applyUntil retains the next due effect so a current checkpoint can be reused
 // until that instant, rather than full-scanning throughout an announcement lead time.
 func (b *Book) applyUntil(events []*Event, effectiveAsOf, knowledgeAsOf time.Time) {
-	for _, e := range sortedFor(events, time.Time{}, knowledgeAsOf, true) {
+	for _, e := range restateBaseFees(sortedFor(events, time.Time{}, knowledgeAsOf, true)) {
 		if e.PortfolioID != "" && e.PortfolioID != b.PortfolioID {
 			continue
 		}

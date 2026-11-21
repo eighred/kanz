@@ -233,10 +233,7 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 	}
 	entry, err := ledger.FromFill(portfolioID, fill, f.cashCurrency, knowledgeTime(env))
 	if err != nil {
-		// A fee the cash leg cannot represent (a BTC fee against a USD book, #221)
-		// DLQs the fill. The journal is append-only, so a wrong entry is permanent
-		// and a held message is not: the operator re-drives it once the book can
-		// carry the fee's own asset.
+		// Park an execution whose native inventory or cash movement cannot be established.
 		return fmt.Errorf("consume: %s: %w", env.GetEventType(), err)
 	}
 	announce := f.announcerFor(portfolioID)

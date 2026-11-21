@@ -137,8 +137,8 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 		var pair instrument.Pair
 		if symbol := f.GetSpotVenueSymbol(); symbol != "" {
 			var ok bool
-			pair, ok = spotPair(st.GetInstrumentId(), f.GetInstrumentId(), symbol)
-			if !ok {
+			pair, ok = instrument.SpotPair(f.GetInstrumentId(), symbol)
+			if !ok || st.GetInstrumentId() != f.GetInstrumentId() {
 				return Result{}, ErrSpotPairMismatch
 			}
 			quoteCurrency = pair.Quote
@@ -224,18 +224,6 @@ func Measure(st *orderpb.OrderState, fills []*orderpb.Fill) (Result, error) {
 		ShortfallBps:      totalBps,
 		PriceShortfallBps: priceBps,
 	}, nil
-}
-
-func spotPair(benchmarkID, fillID, symbol string) (instrument.Pair, bool) {
-	resolution, ok := instrument.Resolve(fillID, symbol)
-	pair := resolution.Pair
-	if benchmarkID != fillID || !ok || !resolution.Known || resolution.Mismatched || pair.Base == pair.Quote {
-		return instrument.Pair{}, false
-	}
-	// Resolve also serves venue catalogues using alternate separators. For
-	// spot economics require the observed symbol to match the entire pair in
-	// a supported adapter format (e.g. AB-C and A-BC are different OKX books).
-	return pair, symbol == pair.Base+pair.Quote || symbol == pair.Base+"-"+pair.Quote
 }
 
 // Each base-asset fee is valued at its own execution price. Fees in the cost

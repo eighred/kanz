@@ -362,6 +362,9 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 		return err
 	}
 	owned := *e
+	if fill != nil {
+		owned.tradedQuantity = signedTradeSize(fill)
+	}
 	owned.journalReadPosition = 0
 	if e.Action != nil {
 		a := *e.Action
@@ -427,7 +430,7 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 			if err != nil {
 				return err
 			}
-			if original.PortfolioID != e.PortfolioID {
+			if original.PortfolioID != e.PortfolioID || !samePostingScope(oldFill, fill, original.CashCurrency, e.CashCurrency) {
 				return fillfact.ErrExecutionIdentityConflict
 			}
 			var revisions []*orderpb.Fill

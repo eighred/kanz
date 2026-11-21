@@ -183,11 +183,15 @@ func executionsOf(kept []*Event) ([]Execution, int) {
 			}
 			continue
 		}
+		tradeSize := e.Quantity
+		if e.tradedQuantity != nil {
+			tradeSize = e.tradedQuantity
+		}
 		out = append(out, Execution{
 			Ref:             e.SourceRef,
 			EntryID:         e.EntryID,
 			InstrumentID:    e.InstrumentID,
-			Quantity:        cloneRat(e.Quantity),
+			Quantity:        cloneRat(tradeSize),
 			Price:           cloneRat(e.Price),
 			Cash:            cloneRat(e.Cash),
 			CashCurrency:    e.CashCurrency,

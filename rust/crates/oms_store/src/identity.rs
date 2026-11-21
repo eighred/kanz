@@ -90,6 +90,7 @@ pub fn same_except_fee(a: &Fill, b: &Fill) -> bool {
         || bf.amount.is_none()
         || af.currency_code.is_empty()
         || af.currency_code != bf.currency_code
+        || a.spot_venue_symbol != b.spot_venue_symbol
     {
         return false;
     }

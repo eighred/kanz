@@ -31,13 +31,18 @@ func EconomicDigest(f *orderpb.Fill) (string, error) {
 	if !dec.IsPositive(f.Quantity) || !dec.IsPositive(f.Price) || f.ExecutedAt.AsTime().Unix() <= 0 || (f.Side != orderpb.Side_SIDE_BUY && f.Side != orderpb.Side_SIDE_SELL) {
 		return "", ErrExecutionIdentityConflict
 	}
-	return dualcontrol.Digest("execution-economics-v1", f.OrderId, ExecutionKey(f), f.Side.String(), dec.FromProto(f.Quantity).RatString(), dec.FromProto(f.Price).RatString(), dec.FromProto(f.Fee.Amount).RatString(), f.Fee.CurrencyCode, f.ExecutedAt.AsTime().UTC().Format("2006-01-02T15:04:05.999999999Z07:00")), nil
+	parts := []string{"execution-economics-v1", f.OrderId, ExecutionKey(f), f.Side.String(), dec.FromProto(f.Quantity).RatString(), dec.FromProto(f.Price).RatString(), dec.FromProto(f.Fee.Amount).RatString(), f.Fee.CurrencyCode, f.ExecutedAt.AsTime().UTC().Format("2006-01-02T15:04:05.999999999Z07:00")}
+	if f.SpotVenueSymbol != "" {
+		parts[0] = "execution-economics-v2"
+		parts = append(parts, f.SpotVenueSymbol)
+	}
+	return dualcontrol.Digest(parts...), nil
 }
 
 // SameExecutionExceptFee permits neither a trade amendment nor a currency
 // substitution. Those require a different, explicitly modeled correction.
 func SameExecutionExceptFee(previous, revised *orderpb.Fill) bool {
-	if previous == nil || revised == nil || previous.GetFee().GetAmount() == nil || revised.GetFee().GetAmount() == nil || previous.GetFee().GetCurrencyCode() == "" || previous.GetFee().GetCurrencyCode() != revised.GetFee().GetCurrencyCode() {
+	if previous == nil || revised == nil || previous.GetSpotVenueSymbol() != revised.GetSpotVenueSymbol() || previous.GetFee().GetAmount() == nil || revised.GetFee().GetAmount() == nil || previous.GetFee().GetCurrencyCode() == "" || previous.GetFee().GetCurrencyCode() != revised.GetFee().GetCurrencyCode() {
 		return false
 	}
 	a := proto.Clone(previous).(*orderpb.Fill)
@@ -87,12 +92,11 @@ func FeeRevisionTerms(revised *orderpb.Fill) (*orderpb.Fill, error) {
 	return previous, nil
 }
 
-// ApprovedFeeDelta is the append-only cash adjustment; it never reverses a
-// quantity or rewrites the original trade. A replay against the revised head
+// ApprovedFeeDelta is the signed adjustment in the original fee currency. A replay against the revised head
 // is detected by the caller before invoking this transition.
 func ApprovedFeeDelta(previous, revised *orderpb.Fill) (*big.Rat, error) {
 	approvedPrevious, err := FeeRevisionTerms(revised)
-	if err != nil || !SameExecution(previous, approvedPrevious) {
+	if err != nil || previous.GetSpotVenueSymbol() != approvedPrevious.GetSpotVenueSymbol() || !SameExecution(previous, approvedPrevious) {
 		return nil, ErrFeeRevision
 	}
 	return new(big.Rat).Sub(dec.FromProto(previous.GetFee().GetAmount()), dec.FromProto(revised.GetFee().GetAmount())), nil

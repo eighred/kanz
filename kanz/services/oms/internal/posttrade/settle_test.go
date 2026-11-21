@@ -34,6 +34,40 @@ func TestNewInstructionAmount(t *testing.T) {
 	}
 }
 
+func TestSpotSettlementInstructsNativeLegs(t *testing.T) {
+	fill := fillFixture("spot")
+	fill.InstrumentId, fill.SpotVenueSymbol = "BTC-USDT", "BTC-USDT"
+	fill.Quantity = &commonpb.Decimal{Coefficient: 1}
+	fill.Price = &commonpb.Decimal{Coefficient: 50000}
+	fill.Fee = &commonpb.Money{CurrencyCode: "BTC", Amount: &commonpb.Decimal{Coefficient: 8, Exponent: -4}}
+	for _, tc := range []struct {
+		side     orderpb.Side
+		fee      int64
+		quantity int64
+	}{
+		{orderpb.Side_SIDE_BUY, 8, 9992}, {orderpb.Side_SIDE_SELL, 8, 10008},
+		{orderpb.Side_SIDE_BUY, -8, 10008}, {orderpb.Side_SIDE_SELL, -8, 9992},
+	} {
+		fill.Side, fill.Fee.Amount.Coefficient = tc.side, tc.fee
+		s := mustInstruct(t, "instruction", fill, "account", "USDT")
+		if s.Quantity.Cmp(big.NewRat(tc.quantity, 10000)) != 0 || s.Amount.Cmp(big.NewRat(50000, 1)) != 0 {
+			t.Fatal(s)
+		}
+	}
+	fill.SpotVenueSymbol = "BTC-USD"
+	if _, err := NewInstruction("instruction", fill, "cp", "account", "USDT", settleDate()); err == nil {
+		t.Fatal("mismatched pair accepted")
+	}
+	fill.SpotVenueSymbol = "BTC-USDT"
+	if _, err := NewInstruction("instruction", fill, "cp", "account", "USD", settleDate()); !errors.Is(err, dec.ErrCurrencyMismatch) {
+		t.Fatal(err)
+	}
+	fill.Fee.Amount = nil
+	if _, err := NewInstruction("instruction", fill, "cp", "account", "USDT", settleDate()); err == nil {
+		t.Fatal("unknown fee accepted")
+	}
+}
+
 // #221: a SELLER nets the fee OUT of the proceeds. Adding it on both sides
 // instructed 15007.50 for a SELL the ledger books as +14992.50 — a 15.00 break
 // between the instruction and the book of record, which no reconciliation can

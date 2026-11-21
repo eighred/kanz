@@ -95,7 +95,7 @@ pub fn economic_digest(f: &Fill) -> Result<String, Error> {
             _ => return Err(Error::FeeRevision),
         };
         let time = utc(f.executed_at.as_ref().ok_or(Error::FeeRevision)?)?;
-        let parts = [
+        let mut parts = vec![
             "execution-economics-v1".to_owned(),
             f.order_id.clone(),
             identity::execution_key(f),
@@ -106,6 +106,10 @@ pub fn economic_digest(f: &Fill) -> Result<String, Error> {
             currency.clone(),
             time,
         ];
+        if !f.spot_venue_symbol.is_empty() {
+            parts[0] = "execution-economics-v2".to_owned();
+            parts.push(f.spot_venue_symbol.clone());
+        }
         let mut hash = Sha256::new();
         for part in parts {
             hash.update((part.len() as u64).to_be_bytes());
@@ -149,7 +153,9 @@ pub fn terms(revised: &FillWire) -> Result<FillWire, Error> {
 }
 pub fn approved_delta(previous: &FillWire, revised: &FillWire) -> Result<BigRational, Error> {
     let approved = terms(revised)?;
-    if !identity::same_execution(previous.value(), approved.value()) {
+    if previous.value().spot_venue_symbol != approved.value().spot_venue_symbol
+        || !identity::same_execution(previous.value(), approved.value())
+    {
         return Err(Error::FeeRevision);
     }
     Ok(amount(previous.value())? - amount(revised.value())?)

@@ -12,7 +12,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/outbox"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Postgres is the durable Store backed by the 0001_ledger.sql schema — the
@@ -344,6 +347,16 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 		}
 		if e.Cash, err = parseRat(cash); err != nil {
 			return nil, fmt.Errorf("decode cash %s: %w", e.EntryID, err)
+		}
+		if e.Type == EntryTrade && len(e.ExecutionEvidence) > 0 {
+			var fill orderpb.Fill
+			if err := proto.Unmarshal(e.ExecutionEvidence, &fill); err != nil {
+				return nil, err
+			}
+			if !dec.InDomain(fill.GetQuantity()) {
+				return nil, fmt.Errorf("invalid traded size for %s", e.EntryID)
+			}
+			e.tradedQuantity = signedTradeSize(&fill)
 		}
 		if e.Action, err = decodeAction(action); err != nil {
 			return nil, fmt.Errorf("decode action %s: %w", e.EntryID, err)

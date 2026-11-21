@@ -10,6 +10,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/fillfact"
 )
 
 // Status is the settlement lifecycle state (mirrors settlement.v1.SettlementStatus).
@@ -78,26 +79,23 @@ type Settlement struct {
 // +14992.50: a 15.00 disagreement between the settlement instruction and the book
 // of record, i.e. a break the custodian raises and nobody can reconcile.
 //
-// A FEE NOT DENOMINATED IN currency IS REFUSED (#221). currency is the settlement
-// currency; order.v1.Fill.fee carries its own, and a crypto venue charges in the
-// base asset (OKX) or a discount token (Binance BNB). Netting those into a USD
-// instruction would instruct a cash amount the counterparty never agreed to.
-// Settling the fee in its own asset needs a second cash leg on the instruction —
-// settlement.v1.SettlementInstruction has one Amount/Currency pair, so that is a
-// schema change, not a code change.
+// A base-asset spot fee changes the quantity delivered on the security leg.
 func NewInstruction(instructionID string, fill *orderpb.Fill, counterparty, custodian, currency string, settlementDate time.Time) (*Settlement, error) {
-	qty := dec.FromProto(fill.GetQuantity())
-	price := dec.FromProto(fill.GetPrice())
-	fee, err := dec.MoneyIn(fill.GetFee(), currency)
+	legs, err := fillfact.SettlementLegs(fill, currency)
 	if err != nil {
-		return nil, fmt.Errorf("posttrade: fill %s fee is not in the settlement currency, so it cannot be netted into the instruction: %w",
-			fill.GetFillId(), err)
+		return nil, fmt.Errorf("posttrade: fill %s: %w", fill.GetFillId(), err)
 	}
-	amount := new(big.Rat).Mul(qty, price)
+	if legs.Currency != currency {
+		return nil, fmt.Errorf("%w: fill %s settles in %q, instruction specifies %q", dec.ErrCurrencyMismatch, fill.GetFillId(), legs.Currency, currency)
+	}
+	qty, amount := legs.Quantity, legs.Cash
 	if fill.GetSide() == orderpb.Side_SIDE_SELL {
-		amount.Sub(amount, fee) // seller receives the notional net of the fee
+		qty = new(big.Rat).Neg(qty)
 	} else {
-		amount.Add(amount, fee) // buyer pays the notional plus the fee
+		amount = new(big.Rat).Neg(amount)
+	}
+	if qty.Sign() < 0 || amount.Sign() < 0 {
+		return nil, fmt.Errorf("posttrade: fill %s net legs reverse the instructed direction", fill.GetFillId())
 	}
 	return &Settlement{
 		InstructionID:  instructionID,

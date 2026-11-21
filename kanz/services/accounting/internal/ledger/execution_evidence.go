@@ -14,6 +14,20 @@ import (
 
 var ErrLegacyExecutionUnknown = errors.New("ledger: legacy execution attribution requires verified evidence")
 
+func samePostingScope(original, incoming *orderpb.Fill, oldCurrency, currency string) bool {
+	if oldCurrency != currency {
+		return false
+	}
+	a, b := original.GetSpotVenueSymbol(), incoming.GetSpotVenueSymbol()
+	if a == b {
+		return true
+	}
+	// Ordinary redelivery can add spot metadata to an older cash-denominated
+	// trade. An approval must retain the exact basis of the original.
+	return (a == "" || b == "") && incoming.GetRecovery().GetFeeApproval() == nil &&
+		(original.GetFee().GetCurrencyCode() == currency || original.GetFee().GetAmount().GetCoefficient() == 0)
+}
+
 func exactRat(a, b *big.Rat) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -40,7 +54,7 @@ func executionFromEntry(e *Event) (*orderpb.Fill, error) {
 		return nil, err
 	}
 	if e.Type != EntryTrade || e.EntryID != expected.EntryID || e.SourceRef != expected.SourceRef || e.VenueAccountID != expected.VenueAccountID || e.InstrumentID != expected.InstrumentID ||
-		!exactRat(e.Quantity, expected.Quantity) || !exactRat(e.Price, expected.Price) || !exactRat(e.Cash, expected.Cash) ||
+		e.CashCurrency != expected.CashCurrency || !exactRat(e.Quantity, expected.Quantity) || !exactRat(e.Price, expected.Price) || !exactRat(e.Cash, expected.Cash) ||
 		!e.Effective.Equal(expected.Effective) || e.SettlementBasis != expected.SettlementBasis || !e.SettlementDate.Equal(expected.SettlementDate) {
 		return nil, fillfact.ErrExecutionIdentityConflict
 	}
@@ -69,8 +83,8 @@ func prepareExecutionEntry(ctx context.Context, tx pgx.Tx, e *Event) (*Event, er
 		}
 	}
 	var evidence []byte
-	var portfolio string
-	err = tx.QueryRow(ctx, `SELECT portfolio_id,execution_evidence FROM ledger_entries WHERE entry_id=$1`, e.EntryID).Scan(&portfolio, &evidence)
+	var portfolio, bookedCurrency string
+	err = tx.QueryRow(ctx, `SELECT portfolio_id,cash_currency,execution_evidence FROM ledger_entries WHERE entry_id=$1`, e.EntryID).Scan(&portfolio, &bookedCurrency, &evidence)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if fill.GetRecovery().GetFeeApproval() != nil {
 			previous, err := fillfact.FeeRevisionTerms(fill)
@@ -95,7 +109,7 @@ func prepareExecutionEntry(ctx context.Context, tx pgx.Tx, e *Event) (*Event, er
 	if err := proto.Unmarshal(evidence, &original); err != nil {
 		return nil, err
 	}
-	if portfolio != e.PortfolioID {
+	if portfolio != e.PortfolioID || !samePostingScope(&original, fill, bookedCurrency, e.CashCurrency) {
 		return nil, fillfact.ErrExecutionIdentityConflict
 	}
 	if fill.GetRecovery().GetFeeApproval() != nil {
@@ -119,5 +133,50 @@ func prepareExecutionEntry(ctx context.Context, tx pgx.Tx, e *Event) (*Event, er
 }
 
 func feeAdjustment(trade *Event, fill *orderpb.Fill, delta *big.Rat) *Event {
-	return &Event{EntryID: "fee-correction:" + fill.GetRecovery().GetCaseId() + ":" + fillfact.ExecutionKey(fill), PortfolioID: trade.PortfolioID, VenueAccountID: trade.VenueAccountID, Type: EntryFee, InstrumentID: trade.InstrumentID, Cash: delta, CashCurrency: trade.CashCurrency, Effective: trade.Effective, Knowledge: trade.Knowledge, SettlementBasis: trade.SettlementBasis, SettlementDate: trade.SettlementDate, SourceRef: trade.EntryID, ExecutionEvidence: append([]byte(nil), trade.ExecutionEvidence...)}
+	adjustment := &Event{EntryID: "fee-correction:" + fill.GetRecovery().GetCaseId() + ":" + fillfact.ExecutionKey(fill), PortfolioID: trade.PortfolioID, VenueAccountID: trade.VenueAccountID, Type: EntryFee, InstrumentID: trade.InstrumentID, Cash: delta, CashCurrency: trade.CashCurrency, Effective: trade.Effective, Knowledge: trade.Knowledge, SettlementBasis: trade.SettlementBasis, SettlementDate: trade.SettlementDate, SourceRef: trade.EntryID, ExecutionEvidence: append([]byte(nil), trade.ExecutionEvidence...)}
+	if fill.GetSpotVenueSymbol() != "" && fill.GetFee().GetCurrencyCode() != trade.CashCurrency {
+		// SettlementLegs has already established that the only other supported unit is base.
+		adjustment.Quantity, adjustment.Price, adjustment.Cash = delta, trade.Price, nil
+	}
+	return adjustment
+}
+
+// A revised fee changes the inventory received at the original execution.
+// Apply all visible revisions at that trade's place in the cost-basis fold.
+// Posting a later offset at the same price after another trade can change
+// realized P&L even when the ending quantity agrees.
+func restateBaseFees(ordered []*Event) []*Event {
+	type key struct{ portfolio, id string }
+	var trades map[key]int
+	var seen map[key]bool
+	for i, e := range ordered {
+		if e.Type != EntryFee || e.Quantity == nil || len(e.ExecutionEvidence) == 0 {
+			continue
+		}
+		if trades == nil {
+			trades = make(map[key]int)
+			seen = make(map[key]bool)
+			for at, entry := range ordered {
+				id := key{entry.PortfolioID, entry.EntryID}
+				if _, exists := trades[id]; entry.Type == EntryTrade && !exists {
+					trades[id] = at
+				}
+			}
+		}
+		at, found := trades[key{e.PortfolioID, e.SourceRef}]
+		if !found {
+			continue
+		} // A journal slice may contain only the adjustment.
+		id := key{e.PortfolioID, e.EntryID}
+		if !seen[id] {
+			trade := *ordered[at]
+			trade.Quantity = new(big.Rat).Add(trade.Quantity, e.Quantity)
+			ordered[at] = &trade
+			seen[id] = true
+		}
+		adjustment := *e
+		adjustment.Quantity = nil
+		ordered[i] = &adjustment
+	}
+	return ordered
 }
