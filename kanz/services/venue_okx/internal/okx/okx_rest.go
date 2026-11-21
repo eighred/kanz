@@ -160,17 +160,17 @@ func (c *okxREST) queryOrder(ctx context.Context, instID, clOrdID string) (*okxO
 // execution two names, and the order aggregate and the position book both make
 // folding exactly-once by deduping on that name.
 type okxFill struct {
-	BillID  string `json:"billId"`
-	InstID  string `json:"instId"`
-	TradeID string `json:"tradeId"`
-	OrdID   string `json:"ordId"`
-	ClOrdID string `json:"clOrdId"`
-	Side    string `json:"side"`
-	FillPx  string `json:"fillPx"`
-	FillSz  string `json:"fillSz"`
-	Fee     string `json:"fee"`
-	FeeCcy  string `json:"feeCcy"`
-	TS      string `json:"ts"`
+	BillID   string `json:"billId"`
+	InstID   string `json:"instId"`
+	TradeID  string `json:"tradeId"`
+	OrdID    string `json:"ordId"`
+	ClOrdID  string `json:"clOrdId"`
+	Side     string `json:"side"`
+	FillPx   string `json:"fillPx"`
+	FillSz   string `json:"fillSz"`
+	Fee      string `json:"fee"`
+	FeeCcy   string `json:"feeCcy"`
+	FillTime string `json:"fillTime"`
 }
 
 // THE 6-UNIT WEIGHT THAT USED TO LIVE HERE IS NOW A BUCKET (#933).

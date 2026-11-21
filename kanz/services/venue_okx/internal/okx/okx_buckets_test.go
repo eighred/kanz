@@ -39,7 +39,7 @@ func tradedVenueOver(t *testing.T, f *fakeOKX, clk *frozenClock) *OKXVenue {
 	t.Helper()
 	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","sCode":"0","sMsg":""}]}`
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000","fee":"-0.05","feeCcy":"USDT"}]}`
-	f.fillsBody = `{"code":"0","msg":"","data":[{"tradeId":"t1","ordId":"312","fillSz":"1","fillPx":"50000","fee":"-0.05","feeCcy":"USDT","ts":"1700000000000"}]}`
+	f.fillsBody = `{"code":"0","msg":"","data":[{"tradeId":"t1","ordId":"312","fillSz":"1","fillPx":"50000","fee":"-0.05","feeCcy":"USDT","fillTime":"1700000000000","ts":"1700000000000"}]}`
 
 	shared := NewWeightBucket(okxDefaultWeightBudget, okxDefaultWeightWindow, clk.now)
 	buckets := newOKXBuckets(shared, clk.now)

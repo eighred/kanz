@@ -5,13 +5,64 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestScopedOKXReplayAcrossMidnightPreservesBookedClock(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	store := NewPostgres(pool)
+	st := state("okx-clock", orderpb.OrderStatus_ORDER_STATUS_FILLED)
+	st.Venue, st.VenueAccountId, st.InstrumentId = "XOKX", "demo-account", "BTC-USDT"
+	if err := store.Create(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	executed := time.Date(2026, 11, 20, 23, 59, 59, 900000000, time.UTC)
+	original := &orderpb.Fill{
+		OrderId: st.OrderId, FillId: "BTC-USDT-7", VenueExecutionId: "7",
+		Venue: st.Venue, VenueAccountId: st.VenueAccountId, InstrumentId: st.InstrumentId,
+		Side: orderpb.Side_SIDE_BUY, Price: &commonpb.Decimal{Coefficient: 100},
+		Quantity: &commonpb.Decimal{Coefficient: 1}, ExecutedAt: timestamppb.New(executed.Add(time.Second)),
+	}
+	save := func(fill *orderpb.Fill, version int64) error {
+		records := claimFacts(st.OrderId, fill.FillId)
+		data, err := proto.Marshal(&orderpb.OrderFilled{OrderId: st.OrderId, State: st, Fill: fill})
+		if err != nil {
+			t.Fatal(err)
+		}
+		records[0].Payload = data
+		return store.Save(ctx, st, version, records, fill.FillId)
+	}
+	if err := save(original, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := save(original, 1); !errors.Is(err, ErrFillApplied) {
+		t.Fatalf("unchanged replay: %v", err)
+	}
+	corrected := proto.CloneOf(original)
+	corrected.ExecutedAt = timestamppb.New(executed)
+	if err := save(corrected, 1); !errors.Is(err, fillfact.ErrExecutionIdentityConflict) {
+		t.Fatalf("changed execution clock: %v", err)
+	}
+	var data []byte
+	if err := pool.QueryRow(ctx, `SELECT fill FROM order_executions WHERE order_id=$1`, st.OrderId).Scan(&data); err != nil {
+		t.Fatal(err)
+	}
+	var retained orderpb.Fill
+	if err := proto.Unmarshal(data, &retained); err != nil || !proto.Equal(original, &retained) {
+		t.Fatalf("original execution changed: %v, %v", &retained, err)
+	}
+	if n := outboxDepth(t, pool); n != 1 {
+		t.Fatalf("expected one booked fill announcement, got %d", n)
+	}
+}
 
 func scopedClaimFacts(t *testing.T, st *orderpb.OrderState) []outbox.Record {
 	t.Helper()

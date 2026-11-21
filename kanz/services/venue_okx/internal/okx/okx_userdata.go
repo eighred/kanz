@@ -57,6 +57,7 @@ type okxOrdersMsg struct {
 		TradeID     string `json:"tradeId"`
 		FillFee     string `json:"fillFee"`
 		FillFeeCcy  string `json:"fillFeeCcy"`
+		FillTime    string `json:"fillTime"`
 		UTime       string `json:"uTime"`
 	} `json:"data"`
 }
@@ -274,6 +275,16 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			return fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
 				orderID, d.FillFee, d.FillFeeCcy)
 		}
+		executedAt, err := okxReportTime(d.FillTime, "fillTime")
+		if err != nil {
+			i.refusal.Refuse(orderID, err)
+			continue
+		}
+		updatedAt, err := okxReportTime(d.UTime, "uTime")
+		if err != nil {
+			i.refusal.Refuse(orderID, err)
+			continue
+		}
 		fill := &orderpb.Fill{
 			FillId:           d.InstID + "-" + d.TradeID,
 			OrderId:          orderID,
@@ -284,7 +295,7 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			Fee:              feeMoney,
 			Venue:            i.venue,
 			VenueExecutionId: d.TradeID,
-			ExecutedAt:       timestamppb.New(uTime(d.UTime)),
+			ExecutedAt:       executedAt,
 		}
 		healed := &orderpb.OrderState{
 			OrderId: st.GetOrderId(), PortfolioId: st.GetPortfolioId(), InstrumentId: st.GetInstrumentId(),
@@ -294,15 +305,8 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			FilledQuantity: accFilled,
 			LeavesQuantity: leaves,
 			Venue:          i.venue,
-			// OKX'S OWN ORDERING TOKEN (#1046). uTime is the instant OKX last
-			// updated this order, so it is both what order.v1's as_of is defined as
-			// ("the event_time of the change that produced it") and the token
-			// orderview.Progress orders reports by: a replayed push carries its
-			// ORIGINAL uTime, which is how the view can tell it apart from a fresh
-			// one. Fill.executed_at is stamped from the same field because the
-			// orders channel offers no separate fill time; the two are one clock
-			// here, unlike Binance where E and T are different instants.
-			AsOf: timestamppb.New(uTime(d.UTime)),
+			// Order progression uses the update time even when the trade occurred earlier.
+			AsOf: updatedAt,
 		}
 		subject := fillfact.SubjectPartiallyFilled
 		var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: orderID, Fill: fill, State: healed}
@@ -372,20 +376,15 @@ func okxStateToProto(s string) orderpb.OrderStatus {
 	}
 }
 
-func uTime(ms string) time.Time { return okxMillis(ms, time.Now) }
-
-// okxMillis reads an OKX millisecond epoch string. fallback supplies the instant
-// when OKX sent nothing this connector can read — the venue's own clock is
-// always preferred, because a fill adopted on the RECOVERY path is timestamped
-// hours after it traded otherwise, in every execution-quality measurement that
-// reads it. Injectable rather than time.Now so the connector's clock seam
-// reaches here too.
-func okxMillis(ms string, fallback func() time.Time) time.Time {
-	n, err := strconv.ParseInt(ms, 10, 64)
-	if err != nil || n <= 0 {
-		return fallback().UTC()
+// Both execution paths require the venue clock. A local fallback would move
+// a replayed fill into the window when the recovery happened.
+func okxReportTime(ms, field string) (*timestamppb.Timestamp, error) {
+	at, ok := parseVenueMillis(ms)
+	stamp := timestamppb.New(at)
+	if !ok || ms[0] == '+' || stamp.CheckValid() != nil {
+		return nil, fmt.Errorf("okx: missing or invalid %s on executed trade", field)
 	}
-	return time.UnixMilli(n).UTC()
+	return stamp, nil
 }
 
 // --- OKX private websocket transport (coder/websocket) ---
