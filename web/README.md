@@ -20,6 +20,13 @@ inputs and result together to reproduce the calculation. Balances, account
 labels, asset references and fees are supplied by the operator. Actual order
 entry and verified account balances use their respective domain services.
 
+For an instrument covered by the tenant's market data grant, enter its canonical
+pair and select **Capture current books**. The app obtains both books through the
+portfolio query, with venue timestamps, risk-service receipt times and source
+event IDs. Enter account assumptions before pricing. A fresh capture on the
+same mapped pair can reuse previously entered terms; a different asset mapping
+requires new terms. The export records the observation and the assumed terms.
+
 ## Development
 
 Run the commands below from `web/`, using Node from `.nvmrc`, npm and the pinned

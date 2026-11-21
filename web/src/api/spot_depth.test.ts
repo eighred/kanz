@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './client'
 import example from './spot_depth_example.json'
-import { isDepthInput, priceDepth, spotRequest } from './spot_depth'
+import { captureDepth, isDepthInput, priceDepth, spotRequest } from './spot_depth'
 
 function fixture() {
   const input = structuredClone(example)
@@ -12,6 +12,35 @@ function fixture() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('operator spot depth', () => {
+  it('keeps market observations distinct from venue account terms', async () => {
+    const input = fixture()
+    const rows = [...spotRequest(input).spot_depth.venues].reverse()
+    const observed = {
+      status: 'SUPPORTED',
+      as_of: input.cutoff,
+      instrument_id: input.instrument,
+      source: 'demo',
+      producer_version: '1.1',
+      product_type: 'CRYPTO_SPOT',
+      rights_reference: 'local-demo-only',
+      base_asset_ref: 'bitcoin',
+      quote_asset_ref: 'tether-usd',
+      venues: rows.map((row, i) => ({ book: row.book, known_at: row.known_at, event_id: 'book-' + i })),
+    }
+    const raw = { portfolio_id: 'PF1', owner_tenant: 'pilot', spot_books: observed }
+    const post = vi.spyOn(api, 'post').mockResolvedValue(raw)
+    const read = () => captureDepth('PF1', 'pilot', input.instrument, new AbortController().signal)
+    const captured = await read()
+    expect(captured.venues[0]?.venue).toBe('BINANCE')
+    expect(captured.venues[0]?.feeBps).toBe('')
+    expect(captured.venues[0]?.account).toBe('')
+    expect(captured.venues[0]?.baseBalance).toBe('')
+    expect(captured.observation?.event_ids).toEqual(['book-0', 'book-1'])
+    post.mockResolvedValueOnce({ ...raw, spot_books: { ...observed, product_type: 'EQUITY_TOKEN' } })
+    await expect(read()).rejects.toThrow('incomplete')
+    post.mockResolvedValueOnce({ ...raw, spot_books: { status: 'UNKNOWN', instrument_id: input.instrument } })
+    await expect(read()).rejects.toThrow('No authorized current pair')
+  })
   it('preserves large coefficients, absent fees and explicitly free rebalancing', () => {
     const input = fixture()
     input.quantity = '9007199254740993.01'

@@ -2,13 +2,14 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSession } from '../stores/session'
-import { amount, isDepthInput, priceDepth, type DepthInput } from '../api/spot_depth'
+import { amount, captureDepth, isDepthInput, priceDepth, type DepthInput } from '../api/spot_depth'
 import example from '../api/spot_depth_example.json'
 
 const route = useRoute(),
   session = useSession()
 const id = computed(() => String(route.params.id ?? ''))
 const inputs = ref<DepthInput>()
+const instrument = ref('BTC-USDT')
 const source = ref(''),
   error = ref(''),
   busy = ref(false)
@@ -39,6 +40,59 @@ function loadExample() {
   if (isDepthInput(example)) {
     inputs.value = structuredClone(example)
     source.value = 'Synthetic worked example'
+  }
+}
+async function loadObserved() {
+  if (!session.identity) return
+  const requested = instrument.value.trim()
+  const previous = inputs.value
+  fileRead++
+  invalidate()
+  const seq = generation
+  active = new AbortController()
+  busy.value = true
+  try {
+    const next = await captureDepth(id.value, session.identity.tenant, requested, active.signal)
+    if (seq !== generation) return
+    if (
+      previous?.observation &&
+      previous.instrument === requested &&
+      next.venues.every(
+        (v, i) =>
+          v.venue === previous.venues[i]?.venue &&
+          v.symbol === previous.venues[i]?.symbol &&
+          v.baseAssetRef === previous.venues[i]?.baseAssetRef &&
+          v.quoteAssetRef === previous.venues[i]?.quoteAssetRef,
+      )
+    ) {
+      next.quantity = previous.quantity
+      next.rebalanceCost = previous.rebalanceCost
+      next.sellFillBps = previous.sellFillBps
+      next.adverseMoveBps = previous.adverseMoveBps
+      next.venues.forEach((v, i) => {
+        const prior = previous.venues[i]!
+        for (const key of [
+          'account',
+          'baseBalance',
+          'quoteBalance',
+          'feeBps',
+          'feeCurrency',
+          'step',
+          'minQty',
+          'minNotional',
+        ] as const)
+          v[key] = prior[key]
+      })
+    }
+    inputs.value = next
+    source.value = 'Observed by the risk service · ' + next.observation!.source
+  } catch (e) {
+    if (seq === generation) {
+      const reason = e instanceof Error ? e.message : 'Observation unavailable.'
+      error.value = previous ? reason + ' The form still shows its previous dated inputs.' : reason
+    }
+  } finally {
+    if (seq === generation) busy.value = false
   }
 }
 async function loadFile(event: Event) {
@@ -93,6 +147,10 @@ async function calculate() {
     inputs. The comparison uses no trading permissions.
   </p>
   <div class="actions">
+    <label>Spot instrument <input v-model="instrument" maxlength="128" :disabled="busy" /></label>
+    <button type="button" :disabled="busy || !instrument.trim()" @click="loadObserved">
+      Capture current books
+    </button>
     <button type="button" @click="loadExample">Load synthetic example</button>
     <label>Import scenario JSON <input type="file" accept=".json,application/json" @change="loadFile" /></label>
   </div>
@@ -100,6 +158,10 @@ async function calculate() {
   <form v-if="inputs" @submit.prevent="calculate">
     <h2>{{ inputs.instrument }}</h2>
     <p>{{ source }} · Cutoff {{ inputs.cutoff }}</p>
+    <p v-if="inputs.observation">
+      Book source {{ inputs.observation.source }} · release {{ inputs.observation.producer_version }} · data
+      reference {{ inputs.observation.rights_reference }}. Receipt times refer to the risk service.
+    </p>
     <div class="fields">
       <label>Requested buy quantity <input v-model="inputs.quantity" required /></label>
       <label>Rebalance cost (quote units) <input v-model="inputs.rebalanceCost" /></label>

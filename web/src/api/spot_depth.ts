@@ -23,6 +23,13 @@ export interface VenueInput {
   feeCurrency: string
 }
 export interface DepthInput {
+  observation?: {
+    source: string
+    producer_version: string
+    rights_reference: string
+    event_ids: string[]
+    known_at_clock: 'risk_service_receipt'
+  }
   instrument: string
   cutoff: string
   quantity: string
@@ -271,4 +278,107 @@ export async function priceDepth(portfolio: string, tenant: string, input: Depth
 export function amount(value: Decimal | undefined, unit: string) {
   const s = formatDecimal(value)
   return s === null ? 'Unknown' : s + ' ' + unit
+}
+
+function capturedSide(rows: unknown): [string, string][] {
+  if (!Array.isArray(rows) || rows.length === 0 || rows.length > 100) throw new Error('Invalid observed depth.')
+  return rows.map((row) => {
+    if (!record(row) || !wireAmount(row.price) || !wireAmount(row.size)) throw new Error('Invalid observed level.')
+    return [formatDecimal(row.price as Decimal)!, formatDecimal(row.size as Decimal)!]
+  })
+}
+
+export async function captureDepth(
+  portfolio: string,
+  tenant: string,
+  instrument: string,
+  signal: AbortSignal,
+): Promise<DepthInput> {
+  const raw = await api.post<unknown>(
+    '/api/v1/portfolios/' + encodeURIComponent(portfolio) + '/scenario',
+    { scenario_name: 'OPERATOR_SPOT_BOOKS', spot_book_instrument: instrument },
+    200,
+    signal,
+  )
+  if (
+    !record(raw) ||
+    raw.portfolio_id !== portfolio ||
+    raw.owner_tenant !== tenant ||
+    !record(raw.spot_books) ||
+    raw.spot_books.instrument_id !== instrument
+  )
+    throw new Error('Could not verify book ownership.')
+  const o = raw.spot_books
+  if (o.status === 'UNKNOWN') throw new Error('No authorized current pair of books is available.')
+  if (
+    o.status !== 'SUPPORTED' ||
+    o.product_type !== 'CRYPTO_SPOT' ||
+    !isTimestamp(o.as_of) ||
+    !Array.isArray(o.venues) ||
+    o.venues.length !== 2 ||
+    ![o.source, o.producer_version, o.rights_reference, o.base_asset_ref, o.quote_asset_ref].every(
+      (v) => typeof v === 'string' && v.length > 0,
+    ) ||
+    o.base_asset_ref === o.quote_asset_ref
+  )
+    throw new Error('The observed book reference is incomplete.')
+  const ids: string[] = []
+  const venues = o.venues.map((entry, i) => {
+    if (
+      !record(entry) ||
+      !record(entry.book) ||
+      typeof entry.event_id !== 'string' ||
+      !entry.event_id ||
+      !isTimestamp(entry.known_at)
+    )
+      throw new Error('Missing venue observation.')
+    const b = entry.book,
+      venue = ['BINANCE', 'OKX'][i]!
+    if (
+      b.instrument_id !== instrument ||
+      b.mic !== venue ||
+      typeof b.symbol !== 'string' ||
+      !isTimestamp(b.event_time) ||
+      typeof b.last_update_sequence !== 'string' ||
+      !/^[1-9]\d{0,19}$/.test(b.last_update_sequence)
+    )
+      throw new Error('Invalid venue observation.')
+    ids.push(entry.event_id)
+    return {
+      venue,
+      symbol: b.symbol,
+      productType: 'CRYPTO_SPOT',
+      baseAssetRef: o.base_asset_ref as string,
+      quoteAssetRef: o.quote_asset_ref as string,
+      observed: b.event_time,
+      received: entry.known_at,
+      sequence: b.last_update_sequence,
+      bids: capturedSide(b.bids),
+      asks: capturedSide(b.asks),
+      account: '',
+      baseBalance: '',
+      quoteBalance: '',
+      feeBps: '',
+      feeCurrency: '',
+      step: '',
+      minQty: '',
+      minNotional: '',
+    }
+  })
+  return {
+    instrument,
+    cutoff: o.as_of,
+    quantity: '',
+    rebalanceCost: '',
+    sellFillBps: '',
+    adverseMoveBps: '',
+    venues,
+    observation: {
+      source: o.source as string,
+      producer_version: o.producer_version as string,
+      rights_reference: o.rights_reference as string,
+      event_ids: ids,
+      known_at_clock: 'risk_service_receipt',
+    },
+  }
 }

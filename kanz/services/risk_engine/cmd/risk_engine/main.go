@@ -61,6 +61,7 @@ import (
 	"github.com/eighred/kanz/services/risk_engine/internal/replay"
 	"github.com/eighred/kanz/services/risk_engine/internal/server"
 	"github.com/eighred/kanz/services/risk_engine/internal/shard"
+	"github.com/eighred/kanz/services/risk_engine/internal/spotbooks"
 )
 
 func main() {
@@ -882,7 +883,15 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		// from the local cache or reported as not-found (#110).
 		engineOpts = append(engineOpts, engine.WithEvaluator(evaluator))
 		engineImpl := engine.New(store, registry, cache, risk.NewDetector(), engineOpts...)
-		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, logger)
+		books := spotbooks.New(cfg.Tenant, cfg.SpotBooks)
+		if books != nil {
+			go func() {
+				if err := consumer.SubscribeBroadcast(ctx, spotbooks.Subject, books.Handle); err != nil && ctx.Err() == nil {
+					logger.Error("spot book observations unavailable", "err", err)
+				}
+			}()
+		}
+		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, books, logger)
 		if err != nil {
 			return err
 		}
@@ -1006,7 +1015,7 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 //
 // src is INJECTED rather than built here (SEC-M3a): the caller owns the one
 // workload identity this process has, because the bus needs the same one.
-func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source, eng *engine.EngineImpl, logger *slog.Logger) (func(), error) {
+func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source, eng *engine.EngineImpl, books *spotbooks.Store, logger *slog.Logger) (func(), error) {
 	var opts []grpc.ServerOption
 	if src != nil {
 		opts = append(opts, transport.ServerOption(src, transport.AuthorizeMesh()))
@@ -1022,7 +1031,7 @@ func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source
 	grpcSrv := grpc.NewServer(opts...)
 	// The engine is single-tenant per deployment (cfg.Tenant); grpcsrv stamps it
 	// as the owning tenant of every served portfolio (WIRE-02a owner_tenant).
-	grpcsrv.New(eng, cfg.Tenant).Register(grpcSrv)
+	grpcsrv.New(eng, cfg.Tenant).WithSpotBooks(books).Register(grpcSrv)
 
 	go func() {
 		logger.Info("risk query gRPC listening", "addr", cfg.GRPCListen)

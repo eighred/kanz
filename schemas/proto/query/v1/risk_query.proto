@@ -229,6 +229,8 @@ message EvaluateScenarioRequest {
   // OPERATOR_SPOT_DEPTH uses supplied dated scenario inputs. The reserved
   // name also makes an older engine reject a request it cannot evaluate.
   SpotDepthScenario spot_depth = 4;
+  // OPERATOR_SPOT_BOOKS captures two currently observed snapshots for this pair.
+  string spot_book_instrument = 5;
 }
 
 // EvaluateScenarioResponse carries the projected measures under the shocks.
@@ -254,6 +256,7 @@ message EvaluateScenarioResponse {
   // for the sake of symmetry nobody reads.
   string owner_tenant = 4;
   SpotDepthResult spot_depth = 5;
+  SpotBookObservation spot_books = 6;
 }
 
 // ScenarioShock is one perturbation. The oneof is the proto mirror of the

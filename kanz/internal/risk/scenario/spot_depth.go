@@ -14,9 +14,11 @@ import (
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const SpotDepthName = "OPERATOR_SPOT_DEPTH"
+const SpotBookSkew = time.Second
 
 // This historical what-if uses the caller's inputs only. No balance, fee or
 // depth here establishes an entitlement, actionable quote or order approval.
@@ -52,7 +54,7 @@ func EvaluateSpotDepth(s *querypb.SpotDepthScenario) (*querypb.SpotDepthResult, 
 	if a.BaseAssetRef != b.BaseAssetRef || a.QuoteAssetRef != b.QuoteAssetRef {
 		return nil, errors.New("settlement asset references differ across venues")
 	}
-	if delta := book.EventTime.AsTime().Sub(b.Book.EventTime.AsTime()); delta.Abs() > time.Second {
+	if delta := book.EventTime.AsTime().Sub(b.Book.EventTime.AsTime()); delta.Abs() > SpotBookSkew {
 		return nil, errors.New("venue timestamps differ by more than one second")
 	}
 	pair, _ := instrument.SpotPair(book.InstrumentId, book.Symbol)
@@ -73,7 +75,18 @@ func EvaluateSpotDepth(s *querypb.SpotDepthScenario) (*querypb.SpotDepthResult, 
 }
 
 func validateSpotBook(v *querypb.SpotDepthVenue, cutoff time.Time) error {
-	b := v.GetBook()
+	if strings.TrimSpace(v.GetAccountLabel()) == "" || len(v.GetAccountLabel()) > 128 {
+		return errors.New("invalid scenario account label")
+	}
+	if v.ProductType != "CRYPTO_SPOT" || strings.TrimSpace(v.BaseAssetRef) == "" || strings.TrimSpace(v.QuoteAssetRef) == "" ||
+		v.BaseAssetRef == v.QuoteAssetRef || len(v.BaseAssetRef) > 256 || len(v.QuoteAssetRef) > 256 {
+		return errors.New("both books require crypto spot terms and distinct settlement asset references")
+	}
+	return ValidateObservedBook(v.Book, v.KnownAt, cutoff)
+}
+
+// ValidateObservedBook checks the dated levels independently of account terms.
+func ValidateObservedBook(b *marketpb.OrderBookSnapshot, knownAt *timestamppb.Timestamp, cutoff time.Time) error {
 	if b.GetMic() != "BINANCE" && b.GetMic() != "OKX" {
 		return errors.New("expected Binance or OKX spot book")
 	}
@@ -81,17 +94,13 @@ func validateSpotBook(v *querypb.SpotDepthVenue, cutoff time.Time) error {
 	if !ok || (b.Mic == "OKX" && b.Symbol != pair.Base+"-"+pair.Quote) || (b.Mic == "BINANCE" && b.Symbol != pair.Base+pair.Quote) {
 		return errors.New("spot pair and venue symbol disagree")
 	}
-	if strings.TrimSpace(v.AccountLabel) == "" || len(v.AccountLabel) > 128 || len(b.InstrumentId) > 128 || len(b.Symbol) > 128 {
-		return errors.New("invalid scenario account or instrument label")
+	if len(b.InstrumentId) > 128 || len(b.Symbol) > 128 {
+		return errors.New("invalid instrument label")
 	}
-	if v.ProductType != "CRYPTO_SPOT" || strings.TrimSpace(v.BaseAssetRef) == "" || strings.TrimSpace(v.QuoteAssetRef) == "" ||
-		v.BaseAssetRef == v.QuoteAssetRef || len(v.BaseAssetRef) > 256 || len(v.QuoteAssetRef) > 256 {
-		return errors.New("both books require crypto spot terms and distinct settlement asset references")
-	}
-	if b.EventTime.CheckValid() != nil || v.KnownAt.CheckValid() != nil || b.LastUpdateSequence == 0 {
+	if b.EventTime.CheckValid() != nil || knownAt.CheckValid() != nil || b.LastUpdateSequence == 0 {
 		return errors.New("venue time, receipt time and sequence are required")
 	}
-	event, known := b.EventTime.AsTime(), v.KnownAt.AsTime()
+	event, known := b.EventTime.AsTime(), knownAt.AsTime()
 	if event.Unix() <= 0 || known.Before(event) || known.After(cutoff) || cutoff.Sub(event) > 2*time.Second {
 		return errors.New("book is unavailable at cutoff or more than two seconds old")
 	}

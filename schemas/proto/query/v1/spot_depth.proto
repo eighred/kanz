@@ -89,3 +89,24 @@ message SpotDepthResult {
   string input_sha256 = 5;
   google.protobuf.Timestamp as_of = 6;
 }
+
+message ObservedVenueBook {
+  market.v1.OrderBookSnapshot book = 1;
+  // When the risk service first observed this revision of the bounded book.
+  google.protobuf.Timestamp known_at = 2;
+  string event_id = 3;
+}
+
+message SpotBookObservation {
+  string status = 1;
+  string reason = 2;
+  string instrument_id = 3;
+  google.protobuf.Timestamp as_of = 4;
+  repeated ObservedVenueBook venues = 5;
+  string source = 6;
+  string producer_version = 7;
+  string rights_reference = 8;
+  string base_asset_ref = 9;
+  string quote_asset_ref = 10;
+  string product_type = 11;
+}

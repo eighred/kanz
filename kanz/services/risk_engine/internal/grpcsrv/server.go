@@ -45,6 +45,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/internal/risk/scenario"
 	"github.com/eighred/kanz/internal/risk/scenario/library"
+	"github.com/eighred/kanz/services/risk_engine/internal/spotbooks"
 )
 
 // Server adapts the api/v1.Engine to the generated RiskQueryService gRPC
@@ -59,6 +60,13 @@ type Server struct {
 	// this tenant. It is stamped on the WIRE-02a owner_tenant response field — the
 	// deny-by-default authz-gate input a governed client checks the caller against.
 	ownerTenant string
+	books       *spotbooks.Store
+}
+
+// WithSpotBooks binds this server's tenant-scoped read cache at startup.
+func (s *Server) WithSpotBooks(books *spotbooks.Store) *Server {
+	s.books = books
+	return s
 }
 
 // New returns a Server over the given Engine, stamping ownerTenant as the owning
@@ -183,6 +191,18 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 	// Validate caller-supplied financial inputs before either scenario path.
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
+	}
+	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" {
+		if req.GetScenarioName() != spotbooks.ScenarioName || req.GetSpotBookInstrument() == "" || len(req.GetSpotBookInstrument()) > 128 ||
+			req.GetSpotDepth() != nil || len(req.GetShocks()) != 0 {
+			return nil, status.Error(codes.InvalidArgument, "spot book capture requires one instrument and cannot include shocks or supplied books")
+		}
+		portfolio, err := s.engine.Exposure(ctx, v1.ExposureRequest{PortfolioID: v1.PortfolioID(req.GetPortfolioId())})
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
+			SpotBooks: s.books.Observe(s.ownerTenant, req.SpotBookInstrument)}, nil
 	}
 	if req.GetSpotDepth() != nil || req.GetScenarioName() == scenario.SpotDepthName {
 		if req.GetScenarioName() != scenario.SpotDepthName || req.GetSpotDepth() == nil || len(req.GetShocks()) != 0 {
