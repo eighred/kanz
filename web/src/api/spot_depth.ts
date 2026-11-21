@@ -43,6 +43,10 @@ export interface VenueInput {
   limitReferencePrice?: string
   minMarketValue?: string
   maxMarketValue?: string
+  buyPriceMin?: string
+  buyPriceMax?: string
+  sellPriceMin?: string
+  sellPriceMax?: string
   ruleEvidence?: { source: string; known_at: string; response_sha256: string }[]
   feeBps: string
   feeCurrency: string
@@ -135,7 +139,8 @@ export function isDepthInput(v: unknown): v is DepthInput {
         ]) &&
         ((x.sellFeeBps === undefined && x.sellFeeCurrency === undefined) ||
           texts(x, ['sellFeeBps', 'sellFeeCurrency'])) &&
-        ['maxQty', 'limitCurrency', 'limitReferencePrice', 'minMarketValue', 'maxMarketValue']
+        ['maxQty', 'limitCurrency', 'limitReferencePrice', 'minMarketValue', 'maxMarketValue',
+          'buyPriceMin', 'buyPriceMax', 'sellPriceMin', 'sellPriceMax']
           .every((key) => x[key] === undefined || texts(x, [key])) &&
         (x.ruleEvidence === undefined || (Array.isArray(x.ruleEvidence) && x.ruleEvidence.length <= 8 &&
           x.ruleEvidence.every((r) => record(r) && typeof r.source === 'string' && !!r.source.trim() &&
@@ -170,6 +175,8 @@ function feeRequest(v: VenueInput) {
 }
 
 export function spotRequest(s: DepthInput) {
+  const priceRange = (min?: string, max?: string) =>
+    min || max ? { minimum: decimal(min ?? ''), maximum: decimal(max ?? '') } : undefined
   const bookSide = (side: [string, string][]) =>
     side.map(([price, size]) => ({ price: decimal(price), size: decimal(size) }))
   return {
@@ -193,6 +200,8 @@ export function spotRequest(s: DepthInput) {
         minimum_quantity: decimal(v.minQty),
         minimum_notional: decimal(v.minNotional),
         maximum_quantity: decimal(v.maxQty ?? ''),
+        buy_price_range: priceRange(v.buyPriceMin, v.buyPriceMax),
+        sell_price_range: priceRange(v.sellPriceMin, v.sellPriceMax),
         rule_evidence: v.ruleEvidence,
         market_value_limit: v.minMarketValue || v.maxMarketValue || v.limitReferencePrice || v.limitCurrency ? {
           currency: v.limitCurrency ?? '',

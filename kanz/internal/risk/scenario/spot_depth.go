@@ -159,6 +159,25 @@ func spotFloor(q, step *big.Rat) *big.Rat {
 	return spotMul(new(big.Rat).SetInt(new(big.Int).Quo(count.Num(), count.Denom())), step)
 }
 
+// The taker expires at the first out-of-range match. A later price can
+// be inside the band and still be unreachable at this cutoff.
+func executableDepth(levels []*marketpb.PriceLevel, band *querypb.SpotExecutionPriceRange) ([]*marketpb.PriceLevel, error) {
+	if band == nil {
+		return levels, nil
+	}
+	lo, hi := band.Minimum, band.Maximum
+	if (lo == nil && hi == nil) || (lo != nil && !dec.IsPositive(lo)) || (hi != nil && !dec.IsPositive(hi)) ||
+		(lo != nil && hi != nil && dec.Cmp(lo, hi) > 0) {
+		return nil, errors.New("invalid taker execution price range")
+	}
+	for i, level := range levels {
+		if (lo != nil && dec.Cmp(level.Price, lo) < 0) || (hi != nil && dec.Cmp(level.Price, hi) > 0) {
+			return levels[:i], nil
+		}
+	}
+	return levels, nil
+}
+
 // Consume successive levels until the quantity or a quote funding limit is
 // exhausted. Do not charge a future rebate against the funding requirement.
 func spotWalk(levels []*marketpb.PriceLevel, wanted, budget *big.Rat) (quantity, notional *big.Rat) {
@@ -336,17 +355,33 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 		return result
 	}
 	want := dec.FromProto(s.RequestedBuyQuantity)
+	asks, err := executableDepth(buy.Book.Asks, buy.BuyPriceRange)
+	if err != nil {
+		result.Reason = buy.Book.Mic + ": " + err.Error()
+		return result
+	}
+	bids, err := executableDepth(sell.Book.Bids, sell.SellPriceRange)
+	if err != nil {
+		result.Reason = sell.Book.Mic + ": " + err.Error()
+		return result
+	}
+	if len(asks) == 0 || len(bids) == 0 {
+		result.Status = "UNSUPPORTED"
+		result.Reason = "first match outside the taker execution price range"
+		result.Shortfall = s.RequestedBuyQuantity
+		return result
+	}
 	buyBudget := spotDiv(dec.FromProto(buy.AvailableQuote), b.fundingFactor)
 	buyLimit := want
 	if b.maxQty != nil {
 		buyLimit = spotMin(buyLimit, b.maxQty)
 	}
-	buyCap, _ := spotWalk(buy.Book.Asks, buyLimit, buyBudget)
+	buyCap, _ := spotWalk(asks, buyLimit, buyBudget)
 	sellBudget := spotDiv(dec.FromProto(sell.AvailableBase), v.fundingFactor)
 	if v.maxQty != nil {
 		sellBudget = spotMin(sellBudget, v.maxQty)
 	}
-	sellCap, _ := spotWalk(sell.Book.Bids, sellBudget, nil)
+	sellCap, _ := spotWalk(bids, sellBudget, nil)
 	sellCap = spotFloor(sellCap, v.step)
 	buyQty := spotFloor(buyCap, b.step)
 	// Size the buy to fund the largest available hedge. When the exact
@@ -364,8 +399,8 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	}
 	acquired := spotMul(buyQty, b.baseFactor)
 	sellQty := spotFloor(spotDiv(acquired, v.baseFactor), v.step)
-	_, cost := spotWalk(buy.Book.Asks, buyQty, nil)
-	_, proceeds := spotWalk(sell.Book.Bids, sellQty, nil)
+	_, cost := spotWalk(asks, buyQty, nil)
+	_, proceeds := spotWalk(bids, sellQty, nil)
 	if buyQty.Sign() == 0 || sellQty.Sign() == 0 || buyQty.Cmp(b.minQty) < 0 || sellQty.Cmp(v.minQty) < 0 || cost.Cmp(b.minCash) < 0 || proceeds.Cmp(v.minCash) < 0 {
 		result.Status = "UNSUPPORTED"
 		result.Reason = "paired size falls below venue funding, depth or order minimums"
@@ -407,7 +442,7 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 		result.SellOnly = e.stress(new(big.Rat).Neg(sold), sellCash, shortMark)
 		if s.SellFillBps != nil {
 			part := spotFloor(spotMul(sellQty, spotDiv(dec.FromProto(s.SellFillBps), bps)), v.step)
-			_, partProceeds := spotWalk(sell.Book.Bids, part, nil)
+			_, partProceeds := spotWalk(bids, part, nil)
 			result.PartialSell = e.stress(spotSub(acquired, spotMul(part, v.baseFactor)), spotSub(spotMul(partProceeds, v.quoteFactor), buyCash), longMark)
 		}
 	}

@@ -36,6 +36,15 @@ message SpotDepthVenue {
   SpotMarketValueLimit market_value_limit = 17;
   // Operator-supplied references for the order limits, hashed with the inputs.
   repeated SpotRuleEvidence rule_evidence = 18;
+  // Supplied inclusive taker bounds in quote units per base unit at cutoff.
+  // Historical inputs without a bound do not assess price-range expiry.
+  SpotExecutionPriceRange buy_price_range = 19;
+  SpotExecutionPriceRange sell_price_range = 20;
+}
+
+message SpotExecutionPriceRange {
+  common.v1.Decimal minimum = 1;
+  common.v1.Decimal maximum = 2;
 }
 
 message SpotRuleEvidence {

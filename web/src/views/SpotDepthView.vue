@@ -199,6 +199,16 @@ async function calculate() {
             <label>Maximum market order value <input v-model="v.maxMarketValue" /></label>
           </div>
         </details>
+        <details :open="!!(v.buyPriceMin || v.buyPriceMax || v.sellPriceMin || v.sellPriceMax)" @input="delete v.ruleEvidence">
+          <summary>Taker execution price bounds</summary>
+          <p class="muted">Use quote currency per base unit at the cutoff. A blank bound is unassessed. Matching stops at the first price outside a supplied bound.</p>
+          <div class="fields">
+            <label>Minimum buy execution price <input v-model="v.buyPriceMin" /></label>
+            <label>Maximum buy execution price <input v-model="v.buyPriceMax" /></label>
+            <label>Minimum sell execution price <input v-model="v.sellPriceMin" /></label>
+            <label>Maximum sell execution price <input v-model="v.sellPriceMax" /></label>
+          </div>
+        </details>
         <p v-for="ref in v.ruleEvidence" :key="ref.source + ref.response_sha256" class="muted">
           Supplied rule reference · {{ ref.source }} · Received {{ ref.known_at }}
         </p>

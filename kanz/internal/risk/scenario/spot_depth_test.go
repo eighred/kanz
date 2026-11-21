@@ -36,6 +36,50 @@ func assertDepthAmount(t *testing.T, d *commonpb.Decimal, want string) {
 	}
 }
 
+func TestDepthTakerPriceRangeExpiresAtFirstViolation(t *testing.T) {
+	n := func(c int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c} }
+	s := depthExample()
+	s.RequestedBuyQuantity = n(2)
+	for _, venue := range s.Venues {
+		venue.FeeBps = n(0)
+	}
+	binance := s.Venues[1]
+	// Both first levels are on the inclusive bounds. Second levels are outside.
+	binance.BuyPriceRange = &querypb.SpotExecutionPriceRange{Maximum: n(50040)}
+	binance.SellPriceRange = &querypb.SpotExecutionPriceRange{Minimum: n(50030)}
+	run := func() []*querypb.SpotDepthDirection {
+		t.Helper()
+		r, err := EvaluateSpotDepth(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Directions
+	}
+	for _, d := range run() {
+		if d.Status != "SUPPORTED" {
+			t.Fatal(d)
+		}
+		assertDepthAmount(t, d.BuyQuantity, "1")
+		assertDepthAmount(t, d.SellQuantity, "1")
+		assertDepthAmount(t, d.Shortfall, "1")
+	}
+	// An in-range second bid cannot be reached through a rejected first bid.
+	binance.SellPriceRange = &querypb.SpotExecutionPriceRange{Maximum: n(50020)}
+	got := run()
+	if got[0].Status != "UNSUPPORTED" || got[0].Funding != nil || got[1].Status != "SUPPORTED" {
+		t.Fatal(got)
+	}
+	assertDepthAmount(t, got[0].Shortfall, "2")
+	for _, invalid := range []*querypb.SpotExecutionPriceRange{
+		{}, {Minimum: n(0)}, {Maximum: n(-1)}, {Minimum: n(50040), Maximum: n(50030)},
+	} {
+		binance.BuyPriceRange = invalid
+		if got := run()[1]; got.Status != "UNKNOWN" || got.MarkedNetAfterRebalance != nil {
+			t.Fatal(got)
+		}
+	}
+}
+
 func TestDepthScenarioNativeFeesAndOneLegLoss(t *testing.T) {
 	s := depthExample()
 	r, err := EvaluateSpotDepth(s)

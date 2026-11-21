@@ -12,6 +12,17 @@ function fixture() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('operator spot depth', () => {
+  it('retains exact side-specific execution bounds when replaying an input', () => {
+    const input: DepthInput = fixture()
+    const venue = input.venues[0]!
+    expect(spotRequest(input).spot_depth.venues[0]!.buy_price_range).toBeUndefined()
+    venue.buyPriceMax = '60373.00000001'
+    venue.sellPriceMin = '50000'
+    expect(isDepthInput(JSON.parse(JSON.stringify(input)))).toBe(true)
+    const row = spotRequest(input).spot_depth.venues[0]!
+    expect(row.buy_price_range).toEqual({ minimum: undefined, maximum: { coefficient: '6037300000001', exponent: -8 } })
+    expect(row.sell_price_range).toEqual({ minimum: { coefficient: '5', exponent: 4 }, maximum: undefined })
+  })
   it('keeps a subprecision return distinct from zero and an absent budget distinct from zero', () => {
     const zero = { coefficient: '0', exponent: 0 }
     expect(fundingRate(zero, { coefficient: '-1', exponent: -18 })).toBe('Between −0.0000005 and 0 bps')
