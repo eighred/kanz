@@ -62,6 +62,19 @@ const base: ExposureResponse = {
 beforeEach(() => vi.restoreAllMocks())
 
 describe('figures never pass through a JS number', () => {
+  it('distinguishes unknown denomination from measured zero on the same row', async () => {
+    const wrapper = await open({
+      ...base,
+      set: { exposures: [{
+        dimension: 'EXPOSURE_DIMENSION_ASSET_CLASS', bucket: 'EQUITY',
+        gross: { amount: { coefficient: '0' }, currency_code: '' },
+        net: { amount: { coefficient: '0' }, currency_code: 'USD' },
+      }] },
+    })
+    expect(wrapper.findAll('tbody td').map(cell => cell.text()))
+      .toEqual(['EQUITY', 'Currency unavailable', '0 USD'])
+  })
+
   it('renders a coefficient beyond 2^53 exactly', async () => {
     const wrapper = await open(base)
     const text = wrapper.text()

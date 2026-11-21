@@ -93,8 +93,10 @@ describe('money carries its currency', () => {
     expect(formatMoney(undefined)).toBeNull()
   })
 
-  it('renders an amount with no currency rather than losing it', () => {
-    expect(formatMoney({ amount: { coefficient: '1', exponent: 0 } })).toBe('1')
+  it.each([undefined, '', '   '])('labels missing denomination (%s) even for a zero amount', currency_code => {
+    for (const coefficient of ['250', '0']) {
+      expect(formatMoney({ amount: { coefficient }, currency_code })).toBe('Currency unavailable')
+    }
   })
 })
 
