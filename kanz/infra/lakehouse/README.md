@@ -1,55 +1,29 @@
-# Lakehouse research access (LAKE-01d)
+# Lakehouse research access
 
-Query engine + notebook environment over the analytical store the `lake-sink`
-service (LAKE-01a) lands. Closes the loop the lakehouse epic opened: the event
-log is now streamed to durable storage **and** explorable for research,
-backtesting (LAKE-01c), and dataset building (LAKE-01b).
+The workload manifest configures one Lake sink to consume the derived Kafka archive and write NDJSON to a ReadWriteOnce volume. The landing path is `/var/lake/landing`. The manifest lists each subscribed topic explicitly. An empty query for an unsubscribed topic cannot establish that no event occurred. [Lake sink deployment](../deploy/lake-sink-deploy.yaml)
 
-## Topology
+## Inspect a finite snapshot
 
-```
-Kafka log ──▶ lake-sink ──▶ object store           Hive Metastore
- (EVT-09)     (LAKE-01a)    {domain}/{entity}/dt=…   (table + partition defs)
-                            part-*.ndjson                 │
-                                  │                        │
-                                  ▼                        ▼
-                              Trino (coordinator + workers) ──▶ Jupyter notebooks
-                                  hive catalog  (raw NDJSON)        (trino client,
-                                  iceberg catalog (promoted)         %sql, backtest)
+In an environment qualified for finite snapshots, the operator can inspect a tenant's selected events through the authenticated gateway. Creation requires `lake.snapshot.create`. Inspection requires `lake.snapshot.read`. The owner selects matching events from files open in the active landing run. A portfolio-restricted session is refused by v1. See the [Lake sink runbook](../../services/lake_sink/README.md#optional-finite-snapshot-owner) for enablement, identity and storage prerequisites.
+
+Given a snapshot UUID issued by that owner and the operator's configured `KANZ_GATEWAY_URL` and credentials, read its metadata first. Run these commands from the `kanz/` Go module.
+
+```sh
+go run ./cmd/kanz_lake_snapshot -operation get -snapshot-id "$SNAPSHOT_ID"
 ```
 
-| File | What |
-|---|---|
-| `trino/catalog-hive.properties` | Hive connector over the raw lake-sink NDJSON landing — always-available, queryable the moment events land |
-| `trino/catalog-iceberg.properties` | Iceberg connector for promoted/compacted tables (columnar, snapshot isolation, time-travel) |
-| `trino/trino.yaml` | Trino coordinator + worker pool, restricted-PSS namespace `kanz-lakehouse`, catalogs mounted from a ConfigMap |
-| `notebooks/jupyter.yaml` | Jupyter pod pre-wired with the Trino python client for interactive research |
-| `notebooks/example-queries.sql` | External-table DDL + sample queries against the landing |
+For `SNAPSHOT_STATE_READY`, run the queries you need.
 
-## Read-only by posture
+```sh
+go run ./cmd/kanz_lake_snapshot -operation list -snapshot-id "$SNAPSHOT_ID" -page-size 100
+go run ./cmd/kanz_lake_snapshot -operation count -snapshot-id "$SNAPSHOT_ID" -page-size 100
+go run ./cmd/kanz_lake_snapshot -operation failures -snapshot-id "$SNAPSHOT_ID" -page-size 100
+```
 
-Research must never mutate the log of record. Both catalogs disable managed
-writes (`hive.non-managed-table-writes-enabled=false`); the workloads run
-non-root, read-only-rootfs, under the restricted Pod Security Standard (SEC-02a),
-isolated in `kanz-lakehouse` so a runaway analytical query can't starve
-`kanz-services`. Object-store and notebook credentials come from secret mounts
-(SEC-01d), never inline.
+`list` returns selected event identities, types, timestamps, ordinals and decode status. `count` groups the selection by event type. `failures` lists events with decode failures. For a list or failures response with `exhausted=false`, pass the returned `next_ordinal` as `-after-ordinal` on the next call, including when its value is zero. Exhausting the selection establishes the end of that snapshot. Historical completeness requires independent source-range and recovery evidence. [Snapshot contract](../../../schemas/proto/lake/v1/snapshot.proto)
 
-## Raw vs promoted
+## Reference notebook and catalogs
 
-The Hive catalog reads the NDJSON landing directly, so there is zero lag between
-an event landing and being queryable — and the columns evolve automatically,
-since `lake-sink` decodes payloads against the EVT-16 registry. A separate
-compaction job (rewrite NDJSON → Iceberg) gives the columnar performance,
-snapshot isolation, and `FOR VERSION AS OF` time-travel that production research
-wants; those tables are served by the Iceberg catalog. The two are complementary:
-the Hive view is the live raw tap, the Iceberg view is the curated store.
+The GitOps inventory excludes this single-user research reference. The [Jupyter manifest](notebooks/jupyter.yaml) installs a Trino client and points it at the [Trino service](trino/trino.yaml). The [Hive](trino/catalog-hive.properties) and [Iceberg](trino/catalog-iceberg.properties) catalogs expect an S3-compatible store and a Hive metastore. The [example SQL](notebooks/example-queries.sql) includes catalog and partition setup as well as research queries. These dependencies and the transfer from the landing volume require separate provisioning. [GitOps scope](../../test/arch/gitops_sync_completeness_test.go)
 
-## Backtesting from a notebook
-
-A notebook drives the `tools/backtest` harness (LAKE-01c) over a replay range and
-the LAKE-01b point-in-time materializer, so a strategy evaluated on historical
-events reproduces the live decision stream bit-for-bit (the determinism +
-no-future-leakage properties tested in `tools/backtest`). Trino + Iceberg
-time-travel complements the bitemporal `AsOf` reads for ad-hoc "what was knowable
-at T" analysis.
+Complete source ranges, immutable object-store publication, Lakekeeper commits and verified restore from the first generated records remain under [the Lake migration](https://github.com/eighred/kanz/issues/1540). The [finite Parquet worker](../../../rust/services/lake_snapshot/README.md) supports the bounded inspections above.
