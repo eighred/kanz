@@ -90,9 +90,12 @@ type orderFill struct {
 // says WHOSE account this key is (SOV-02a) is decoded once, in exchangeauth,
 // which ExchangeAccountID below delegates to.
 type accountInfo struct {
-	Balances []balanceEntry `json:"balances"`
-	Code     int            `json:"code"`
-	Msg      string         `json:"msg"`
+	UID         json.RawMessage `json:"uid"`
+	AccountType string          `json:"accountType"`
+	CanTrade    bool            `json:"canTrade"`
+	Balances    []balanceEntry  `json:"balances"`
+	Code        int             `json:"code"`
+	Msg         string          `json:"msg"`
 }
 
 type balanceEntry struct {
@@ -101,9 +104,9 @@ type balanceEntry struct {
 	Locked string `json:"locked"`
 }
 
-// account fetches balances (GET /api/v3/account, weight 10).
+// account fetches balances (GET /api/v3/account, request weight 20).
 func (c *binanceREST) account(ctx context.Context) (*accountInfo, error) {
-	if !c.bucket.Allow(10) {
+	if !c.bucket.Allow(20) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -138,7 +141,7 @@ func (c *binanceREST) account(ctx context.Context) (*accountInfo, error) {
 // error as unverifiable (fatal unless AllowUnverified), so this changes no
 // consumer-visible behaviour.
 func (c *binanceREST) ExchangeAccountID(ctx context.Context) (string, error) {
-	if !c.bucket.Allow(10) {
+	if !c.bucket.Allow(20) {
 		c.onThrottle()
 		return "", ErrRateLimited
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/oms/internal/config"
 	"github.com/eighred/kanz/services/oms/internal/order"
+	"github.com/eighred/kanz/services/oms/internal/venuesrv"
 )
 
 // THE READ SURFACE'S THREE SILENT FAILURES (#399, #406, #643).
@@ -54,7 +55,7 @@ func TestABindFailureIsReturnedRatherThanLeavingThePodReady(t *testing.T) {
 
 	mesh := &transport.Mesh{}
 	stop, err := serveOrderQuery(config.Config{GRPCListen: addr, Tenant: "acme"},
-		mesh, order.NewMemoryStore(), nil, readSurfaceLogger())
+		mesh, order.NewMemoryStore(), venuesrv.New(nil, "acme"), readSurfaceLogger())
 	if err == nil {
 		if stop != nil {
 			stop()
@@ -79,7 +80,7 @@ func TestTheReadSurfaceServesTheOrderQueryService(t *testing.T) {
 	release() // free it: serveOrderQuery binds this address itself
 
 	stop, err := serveOrderQuery(config.Config{GRPCListen: addr, Tenant: "acme"},
-		&transport.Mesh{}, order.NewMemoryStore(), nil, readSurfaceLogger())
+		&transport.Mesh{}, order.NewMemoryStore(), venuesrv.New(nil, "acme"), readSurfaceLogger())
 	if err != nil {
 		t.Fatalf("serveOrderQuery: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestStoppingTheReadSurfaceReleasesThePort(t *testing.T) {
 	release()
 
 	stop, err := serveOrderQuery(config.Config{GRPCListen: addr, Tenant: "acme"},
-		&transport.Mesh{}, order.NewMemoryStore(), nil, readSurfaceLogger())
+		&transport.Mesh{}, order.NewMemoryStore(), venuesrv.New(nil, "acme"), readSurfaceLogger())
 	if err != nil {
 		t.Fatalf("serveOrderQuery: %v", err)
 	}

@@ -19,6 +19,10 @@ import (
 	"context"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
@@ -39,6 +43,35 @@ type Server struct {
 	// ownerTenant is the tenant that owns this deployment (OMS_TENANT), stamped
 	// on the reply as the deny-by-default authz input. Empty fails CLOSED.
 	ownerTenant string
+	venues      []execution.Venue
+	bindings    *execution.AccountBindings
+}
+
+func (s *Server) WithDemoSpotFunds(venues []execution.Venue, bindings *execution.AccountBindings) *Server {
+	s.venues, s.bindings = venues, bindings
+	return s
+}
+
+func (s *Server) ReadPortfolioDemoSpotFunds(ctx context.Context, req *venuepb.ReadPortfolioDemoSpotFundsRequest) (*venuepb.ReadPortfolioDemoSpotFundsResponse, error) {
+	// The gateway owns the user's portfolio claims. Other mesh workloads
+	// cannot assert that an operator requested private account information.
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.PermissionDenied, "gateway identity required")
+	}
+	info, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || info.SPIFFEID == nil || info.SPIFFEID.String() != "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" {
+		return nil, status.Error(codes.PermissionDenied, "gateway identity required")
+	}
+	if s.ownerTenant == "" || req.GetTenantId() != s.ownerTenant || req.GetPortfolioId() == "" ||
+		(req.GetMarketVenue() != "BINANCE" && req.GetMarketVenue() != "OKX") {
+		return nil, status.Error(codes.NotFound, "spot funds unavailable")
+	}
+	funds, err := execution.ReadBoundDemoSpotFunds(ctx, s.venues, req, s.bindings)
+	if err != nil {
+		return nil, err
+	}
+	return &venuepb.ReadPortfolioDemoSpotFundsResponse{OwnerTenant: s.ownerTenant, PortfolioId: req.PortfolioId, Funds: funds, MarketVenue: req.MarketVenue}, nil
 }
 
 // New returns a Server over a catalogue.

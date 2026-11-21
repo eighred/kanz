@@ -16,3 +16,10 @@ message Money {
   // Required.
   string currency_code = 2;
 }
+
+// A taker fee in basis points, assessed on units of the specified asset.
+message SpotTakerFee {
+  // Positive is a charge, negative a rebate. Presence distinguishes zero.
+  Decimal bps = 1;
+  string currency = 2;
+}
