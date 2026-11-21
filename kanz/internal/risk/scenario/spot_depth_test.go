@@ -192,3 +192,76 @@ func TestSpotDepthRefusesInvalidReferences(t *testing.T) {
 		})
 	}
 }
+
+func TestMarketSizeLimitsUseTheirOwnCurrencyAndReferencePrice(t *testing.T) {
+	n := func(s string) *commonpb.Decimal {
+		t.Helper()
+		d, ok := dec.ParseProtoExact(s)
+		if !ok {
+			t.Fatal(s)
+		}
+		return d
+	}
+	s := depthExample()
+	for _, v := range s.Venues {
+		v.FeeBps, v.MinimumNotional = n("0"), n("0")
+	}
+	// Orders are sized in BTC. A 50-USD cap at 60000 USD/BTC permits
+	// 1/1200 BTC, or 0.0008 BTC after rounding down to 0.0001 BTC lots.
+	okx, binance := s.Venues[0], s.Venues[1]
+	okx.MarketValueLimit = &querypb.SpotMarketValueLimit{Currency: "USD", ReferencePrice: n("60000"), MaximumValue: n("50")}
+	binance.MarketValueLimit = &querypb.SpotMarketValueLimit{Currency: "USDT", ReferencePrice: n("10000"), MinimumValue: n("8")}
+	run := func() []*querypb.SpotDepthDirection {
+		t.Helper()
+		out, err := EvaluateSpotDepth(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Directions
+	}
+	for _, d := range run() {
+		if d.Status != "SUPPORTED" {
+			t.Fatal(d)
+		}
+		assertDepthAmount(t, d.BuyQuantity, "0.0008")
+		assertDepthAmount(t, d.SellQuantity, "0.0008")
+		assertDepthAmount(t, d.Shortfall, "0.9992")
+	}
+	// Both book notionals still exceed 8 USDT. The exchange reference
+	// price moves below the minimum by one unit of its reported precision.
+	binance.MarketValueLimit.ReferencePrice = n("9999.99999999")
+	for _, d := range run() {
+		if d.Status != "UNSUPPORTED" || d.CashChange != nil {
+			t.Fatal(d)
+		}
+	}
+	binance.MarketValueLimit = nil
+	binance.MaximumQuantity = n("0.00059999")
+	for _, d := range run() {
+		assertDepthAmount(t, d.SellQuantity, "0.0005")
+	}
+	okx.MarketValueLimit.ReferencePrice = nil
+	for _, d := range run() {
+		if d.Status != "UNKNOWN" || d.CashChange != nil {
+			t.Fatal("missing USD reference became quote price", d)
+		}
+	}
+}
+
+func TestSpotRuleEvidencePreservesCutoffAndReplay(t *testing.T) {
+	s := depthExample()
+	plain, err := EvaluateSpotDepth(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &querypb.SpotRuleEvidence{Source: "public venue rules", KnownAt: s.AsOf, ResponseSha256: plain.InputSha256}
+	s.Venues[0].RuleEvidence = []*querypb.SpotRuleEvidence{ref}
+	withSource, err := EvaluateSpotDepth(s)
+	if err != nil || plain.InputSha256 == withSource.InputSha256 || !proto.Equal(plain.Directions[0], withSource.Directions[0]) {
+		t.Fatal("source evidence was lost or changed the arithmetic", err)
+	}
+	ref.KnownAt = timestamppb.New(s.AsOf.AsTime().Add(time.Nanosecond))
+	if _, err := EvaluateSpotDepth(s); err == nil {
+		t.Fatal("future rule evidence accepted")
+	}
+}

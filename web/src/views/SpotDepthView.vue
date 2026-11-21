@@ -181,10 +181,25 @@ async function calculate() {
           <label>Buy fee currency <input v-model="v.feeCurrency" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
           <label>Sell taker fee (bps) <input v-model="v.sellFeeBps" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
           <label>Sell fee currency <input v-model="v.sellFeeCurrency" :readonly="v.feeObservation?.source === 'Binance account commission'" /></label>
+        </div>
+        <div class="fields" @input="delete v.ruleEvidence">
           <label>Quantity step <input v-model="v.step" /></label>
           <label>Minimum quantity <input v-model="v.minQty" /></label>
-          <label>Minimum notional <input v-model="v.minNotional" /></label>
+          <label>Maximum quantity <input v-model="v.maxQty" /></label>
+          <label>Additional minimum at book prices <input v-model="v.minNotional" /></label>
         </div>
+        <details :open="!!(v.minMarketValue || v.maxMarketValue || v.limitReferencePrice || v.limitCurrency)" @input="delete v.ruleEvidence">
+          <summary>Market order value limits</summary>
+          <div class="fields">
+            <label>Limit currency <input v-model="v.limitCurrency" /></label>
+            <label>Reference price per base unit <input v-model="v.limitReferencePrice" /></label>
+            <label>Minimum market order value <input v-model="v.minMarketValue" /></label>
+            <label>Maximum market order value <input v-model="v.maxMarketValue" /></label>
+          </div>
+        </details>
+        <p v-for="ref in v.ruleEvidence" :key="ref.source + ref.response_sha256" class="muted">
+          Supplied rule reference · {{ ref.source }} · Received {{ ref.known_at }}
+        </p>
         <p v-if="liveCapture && v.fundsObservation" class="muted">
           {{ v.fundsObservation.source }} · Read {{ v.fundsObservation.request_started_at }} to {{ v.fundsObservation.received_at }}
         </p>

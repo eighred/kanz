@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -81,6 +82,18 @@ func validateSpotBook(v *querypb.SpotDepthVenue, cutoff time.Time) error {
 	if v.ProductType != "CRYPTO_SPOT" || strings.TrimSpace(v.BaseAssetRef) == "" || strings.TrimSpace(v.QuoteAssetRef) == "" ||
 		v.BaseAssetRef == v.QuoteAssetRef || len(v.BaseAssetRef) > 256 || len(v.QuoteAssetRef) > 256 {
 		return errors.New("both books require crypto spot terms and distinct settlement asset references")
+	}
+	if len(v.RuleEvidence) > 8 {
+		return errors.New("too many order-rule sources")
+	}
+	for _, ref := range v.RuleEvidence {
+		if ref.GetKnownAt().CheckValid() != nil || ref.KnownAt.AsTime().After(cutoff) ||
+			strings.TrimSpace(ref.Source) == "" || len(ref.Source) > 256 || len(ref.ResponseSha256) != 64 {
+			return errors.New("invalid or future order-rule reference")
+		}
+		if _, err := hex.DecodeString(ref.ResponseSha256); err != nil {
+			return errors.New("invalid order-rule response digest")
+		}
 	}
 	return ValidateObservedBook(v.Book, v.KnownAt, cutoff)
 }
@@ -164,6 +177,7 @@ func spotWalk(levels []*marketpb.PriceLevel, wanted, budget *big.Rat) (quantity,
 
 type spotTerms struct {
 	step, minQty, minCash, rate, baseFactor, quoteFactor, fundingFactor *big.Rat
+	maxQty                                                              *big.Rat
 	feeCurrency                                                         string
 }
 
@@ -196,6 +210,9 @@ func venueTerms(v *querypb.SpotDepthVenue, pair instrument.Pair, buy bool) (spot
 		return t, fmt.Errorf("%s fee amount or native denomination unavailable", v.Book.Mic)
 	}
 	t.step, t.minQty, t.minCash = dec.FromProto(v.QuantityStep), dec.FromProto(v.MinimumQuantity), dec.FromProto(v.MinimumNotional)
+	if err := t.marketSizeLimits(v, pair); err != nil {
+		return t, err
+	}
 	t.feeCurrency = currency
 	t.rate = spotDiv(dec.FromProto(bps), big.NewRat(10000, 1))
 	one := big.NewRat(1, 1)
@@ -222,6 +239,40 @@ func venueTerms(v *querypb.SpotDepthVenue, pair instrument.Pair, buy bool) (spot
 		t.fundingFactor = t.baseFactor
 	}
 	return t, nil
+}
+
+func (t *spotTerms) marketSizeLimits(v *querypb.SpotDepthVenue, pair instrument.Pair) error {
+	if v.MaximumQuantity != nil {
+		if !dec.IsPositive(v.MaximumQuantity) {
+			return fmt.Errorf("%s maximum quantity must be positive", v.Book.Mic)
+		}
+		t.maxQty = dec.FromProto(v.MaximumQuantity)
+	}
+	limit := v.MarketValueLimit
+	if limit == nil {
+		return nil
+	}
+	if (limit.Currency != pair.Quote && limit.Currency != "USD") || !dec.IsPositive(limit.ReferencePrice) ||
+		(limit.MinimumValue == nil && limit.MaximumValue == nil) ||
+		(limit.MinimumValue != nil && !dec.IsPositive(limit.MinimumValue)) ||
+		(limit.MaximumValue != nil && !dec.IsPositive(limit.MaximumValue)) ||
+		(limit.MinimumValue != nil && limit.MaximumValue != nil && dec.Cmp(limit.MinimumValue, limit.MaximumValue) > 0) {
+		return fmt.Errorf("%s market value limit or reference price unavailable", v.Book.Mic)
+	}
+	price := dec.FromProto(limit.ReferencePrice)
+	if limit.MinimumValue != nil {
+		floor := spotDiv(dec.FromProto(limit.MinimumValue), price)
+		if floor.Cmp(t.minQty) > 0 {
+			t.minQty = floor
+		}
+	}
+	if limit.MaximumValue != nil {
+		ceiling := spotDiv(dec.FromProto(limit.MaximumValue), price)
+		if t.maxQty == nil || ceiling.Cmp(t.maxQty) < 0 {
+			t.maxQty = ceiling
+		}
+	}
+	return nil
 }
 
 // A failed exact wire conversion invalidates the entire direction. A partially
@@ -253,8 +304,15 @@ func spotDirection(s *querypb.SpotDepthScenario, buy, sell *querypb.SpotDepthVen
 	}
 	want := dec.FromProto(s.RequestedBuyQuantity)
 	buyBudget := spotDiv(dec.FromProto(buy.AvailableQuote), b.fundingFactor)
-	buyCap, _ := spotWalk(buy.Book.Asks, want, buyBudget)
+	buyLimit := want
+	if b.maxQty != nil {
+		buyLimit = spotMin(buyLimit, b.maxQty)
+	}
+	buyCap, _ := spotWalk(buy.Book.Asks, buyLimit, buyBudget)
 	sellBudget := spotDiv(dec.FromProto(sell.AvailableBase), v.fundingFactor)
+	if v.maxQty != nil {
+		sellBudget = spotMin(sellBudget, v.maxQty)
+	}
 	sellCap, _ := spotWalk(sell.Book.Bids, sellBudget, nil)
 	sellCap = spotFloor(sellCap, v.step)
 	buyQty := spotFloor(buyCap, b.step)

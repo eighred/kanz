@@ -73,6 +73,24 @@ describe('operator spot depth', () => {
     expect(isDepthInput(input)).toBe(false)
   })
 
+  it('keeps quantity and value limits in their original units and preserves the rule receipt', () => {
+    const input: DepthInput = fixture()
+    const v = input.venues[0]!
+    v.maxQty = '2.5'
+    v.limitCurrency = 'USD'
+    v.maxMarketValue = '1000000'
+    v.limitReferencePrice = ''
+    v.ruleEvidence = [{source: 'OKX instrument terms', known_at: input.cutoff, response_sha256: '1'.repeat(64)}]
+    const wire = spotRequest(input).spot_depth.venues[0]!
+    expect(wire.maximum_quantity).toEqual({ coefficient: '25', exponent: -1 })
+    expect(wire.market_value_limit).toEqual({ currency: 'USD', maximum_value: { coefficient: '1', exponent: 6 },
+      minimum_value: undefined, reference_price: undefined })
+    expect(wire.rule_evidence).toEqual(v.ruleEvidence)
+    expect(isDepthInput(input)).toBe(true)
+    v.ruleEvidence[0]!.response_sha256 = 'wrong'
+    expect(isDepthInput(input)).toBe(false)
+  })
+
   it('binds the reply to the portfolio, tenant and exact observation cutoff', async () => {
     const input = fixture()
     input.cutoff = '2026-11-21T11:00:00.500000001+03:00'

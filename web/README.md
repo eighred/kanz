@@ -44,6 +44,14 @@ group and fee mode. Its rates exclude zero-fee campaigns, so the operator can
 select them as explicit scenario assumptions. A failed fee lookup preserves the
 balance observation. Older scenario files retain their shared fee on both sides.
 
+The scenario can cap each order in base units and apply market-order value bounds
+at a supplied reference price. Enter that price in the limit currency per unit of
+base. For example, an OKX cap in USD needs a USD price, while a Binance minimum
+in USDT uses its USDT reference. The additional minimum at book prices is checked
+separately. Dated scenario files can carry the source, receipt time and SHA-256 of
+each rule response. The risk service rejects references received after the book
+cutoff. Editing a limit removes its source references from the form.
+
 ## Development
 
 Run the commands below from `web/`, using Node from `.nvmrc`, npm and the pinned

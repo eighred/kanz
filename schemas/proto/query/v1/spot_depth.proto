@@ -29,6 +29,27 @@ message SpotDepthVenue {
   // An absent side then has unknown terms, even when the other side is free.
   common.v1.SpotTakerFee buy_taker_fee = 14;
   common.v1.SpotTakerFee sell_taker_fee = 15;
+  // Additional per-order cap in base units. Absent on historical scenarios.
+  common.v1.Decimal maximum_quantity = 16;
+  // Optional market-order limits assessed at a specified reference price.
+  // The existing minimum_notional independently tests the walked quote value.
+  SpotMarketValueLimit market_value_limit = 17;
+  // Operator-supplied references for the order limits, hashed with the inputs.
+  repeated SpotRuleEvidence rule_evidence = 18;
+}
+
+message SpotRuleEvidence {
+  string source = 1;
+  google.protobuf.Timestamp known_at = 2;
+  string response_sha256 = 3;
+}
+
+message SpotMarketValueLimit {
+  // Value currency, also the denomination of the price per unit of base.
+  string currency = 1;
+  common.v1.Decimal reference_price = 2;
+  common.v1.Decimal minimum_value = 3;
+  common.v1.Decimal maximum_value = 4;
 }
 
 message SpotDepthScenario {

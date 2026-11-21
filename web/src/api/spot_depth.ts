@@ -38,6 +38,12 @@ export interface VenueInput {
   step: string
   minQty: string
   minNotional: string
+  maxQty?: string
+  limitCurrency?: string
+  limitReferencePrice?: string
+  minMarketValue?: string
+  maxMarketValue?: string
+  ruleEvidence?: { source: string; known_at: string; response_sha256: string }[]
   feeBps: string
   feeCurrency: string
   // Historical files used the buy fields for both sides.
@@ -127,6 +133,12 @@ export function isDepthInput(v: unknown): v is DepthInput {
         ]) &&
         ((x.sellFeeBps === undefined && x.sellFeeCurrency === undefined) ||
           texts(x, ['sellFeeBps', 'sellFeeCurrency'])) &&
+        ['maxQty', 'limitCurrency', 'limitReferencePrice', 'minMarketValue', 'maxMarketValue']
+          .every((key) => x[key] === undefined || texts(x, [key])) &&
+        (x.ruleEvidence === undefined || (Array.isArray(x.ruleEvidence) && x.ruleEvidence.length <= 8 &&
+          x.ruleEvidence.every((r) => record(r) && typeof r.source === 'string' && !!r.source.trim() &&
+            r.source.length <= 256 && isTimestamp(r.known_at) && typeof r.response_sha256 === 'string' &&
+            /^[0-9a-f]{64}$/i.test(r.response_sha256)))) &&
         isTimestamp(x.observed) &&
         isTimestamp(x.received) &&
         /^\d{1,20}$/.test(String(x.sequence)) &&
@@ -177,6 +189,14 @@ export function spotRequest(s: DepthInput) {
         quantity_step: decimal(v.step),
         minimum_quantity: decimal(v.minQty),
         minimum_notional: decimal(v.minNotional),
+        maximum_quantity: decimal(v.maxQty ?? ''),
+        rule_evidence: v.ruleEvidence,
+        market_value_limit: v.minMarketValue || v.maxMarketValue || v.limitReferencePrice || v.limitCurrency ? {
+          currency: v.limitCurrency ?? '',
+          reference_price: decimal(v.limitReferencePrice ?? ''),
+          minimum_value: decimal(v.minMarketValue ?? ''),
+          maximum_value: decimal(v.maxMarketValue ?? ''),
+        } : undefined,
         ...feeRequest(v),
         book: {
           mic: v.venue,
