@@ -53,6 +53,7 @@ function label(dimension: string): string {
   <p class="muted">
     <RouterLink to="/portfolios">Portfolios</RouterLink> ·
     <RouterLink :to="{ name: 'orders', params: { id } }">Orders</RouterLink> ·
+    <RouterLink :to="{ name: 'spot-depth', params: { id } }">Compare spot depth</RouterLink> ·
     <code>{{ id }}</code>
     <span v-if="data?.as_of"> · as of {{ data.as_of }}</span>
   </p>

@@ -247,6 +247,34 @@ func TestEvaluateScenarioDecodesShocks(t *testing.T) {
 	}
 }
 
+func TestSpotCaptureRequiresResolvedPortfolioMatch(t *testing.T) {
+	srv := grpcsrv.New(fakeEngine{exposure: func(v1.ExposureRequest) (v1.ExposureResponse, error) {
+		return v1.ExposureResponse{PortfolioID: "other"}, nil
+	}}, "acme")
+	reply, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{
+		PortfolioId: "requested", ScenarioName: "OPERATOR_SPOT_BOOKS", SpotBookInstrument: "BTC-USDT",
+	})
+	if reply != nil || status.Code(err) != codes.NotFound {
+		t.Fatalf("unmatched portfolio returned %v, %v", reply, err)
+	}
+}
+
+func TestSpotDepthScenarioRequiresExclusiveMode(t *testing.T) {
+	srv := grpcsrv.New(fakeEngine{}, "acme")
+	for _, req := range []*querypb.EvaluateScenarioRequest{
+		{ScenarioName: "OPERATOR_SPOT_DEPTH"},
+		{ScenarioName: "GFC_2008", SpotDepth: &querypb.SpotDepthScenario{}},
+		{ScenarioName: "GFC_2008", WaitForSpotBooks: true},
+		{ScenarioName: "GFC_2008", SpotBookCheck: &querypb.SpotBookCheckRequest{EventIds: []string{"a", "b"}, MaxAgeMs: 250}},
+		{ScenarioName: "OPERATOR_SPOT_DEPTH", SpotDepth: &querypb.SpotDepthScenario{}, SpotBookCheck: &querypb.SpotBookCheckRequest{EventIds: []string{"a", "a"}, MaxAgeMs: 250}},
+		{ScenarioName: "OPERATOR_SPOT_DEPTH", SpotDepth: &querypb.SpotDepthScenario{}, Shocks: []*querypb.ScenarioShock{{}}},
+	} {
+		if _, err := srv.EvaluateScenario(context.Background(), req); status.Code(err) != codes.InvalidArgument {
+			t.Errorf("incompatible scenario mode accepted: %v", err)
+		}
+	}
+}
+
 func TestScenarioShockWithNoKindIsInvalidArgument(t *testing.T) {
 	srv := grpcsrv.New(fakeEngine{}, "acme")
 	_, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{

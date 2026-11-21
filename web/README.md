@@ -5,6 +5,70 @@ web BFF for same-origin sessions and authorized domain APIs; it does not hold
 venue credentials or own financial admission. The npm package name `kanz-web`
 remains stable while its source lives in `web/`.
 
+## Compare Binance and OKX spot depth
+
+Open a portfolio’s Exposure page and select **Compare spot depth**. Load the
+synthetic BTC/USDT example or import dated books using its JSON format. Enter
+the requested quantity, balances, fees in their charged currencies, lot sizes,
+order minimums and assumed cost of restoring venue inventory. The comparison
+requires both observations within two seconds of the chosen cutoff, at most
+one second apart, and received by that cutoff.
+
+For a pair captured in this session, choose the maximum book age after pricing
+(1–2000 ms, initially 250 ms). After calculating the scenario, the risk service
+checks the priced revisions and depth against its current authorized observations.
+The screen reports whether the books matched at the displayed check time, a newer
+revision arrived, the age limit expired, or the service could not verify the pair.
+The saved result includes this check separately from the dated financial values.
+
+The result shows executable size under those assumptions, residual inventory,
+net quote value and losses under one-leg and partial-sale scenarios. Save the
+inputs and result together to reproduce the calculation. Example and imported
+files supply their own scenario account labels.
+
+For each direction the screen shows the quote cash and base inventory required
+before execution. It values that inventory at the sell leg's depth-weighted
+fill price and adds it to the required cash. Return on funded capital divides
+net after the assumed restoration cost by that total. The break-even cost
+change divides the same net by both gross notionals combined. It applies the
+same additional quote fee rate to each leg at fixed fill quantities. Both
+rates are expressed in basis points and rounded to six fractional digits.
+The optional quote-currency loss limit compares the larger modeled one-leg
+loss at the selected adverse mark with the operator's limit, before rounding.
+
+For an instrument covered by the tenant's market data grant, enter its canonical
+pair and select **Capture current books**. The app obtains both books through the
+portfolio query, with venue timestamps, risk-service receipt times and source
+event IDs. The read shows the portfolio’s configured account at each venue.
+An unbound venue accepts a hypothetical scenario label. Enter the assumed
+available balances, fees, order limits and inventory restoration cost for each
+new capture. The export records the tenant, portfolio, configured references and
+scenario inputs at that cutoff.
+
+**Capture books, demo balances and fees** reads private funds through the portfolio’s
+OMS account bindings before capturing the market books. The gateway and the
+OMS use authenticated service identities. The Binance Spot Testnet adapter
+reads the selected assets’ free balances. The OKX Demo adapter checks the
+account is in spot mode and requests cash-mode available buy and sell amounts
+for the selected symbol. A confirmed zero remains visible. Missing, stale or
+conflicting observations leave the affected venue’s fields open for assumptions.
+The account, routing MIC, units, quantities and local request/receipt times
+travel with the saved inputs. Each venue has separate buy and sell taker rates
+and fee currencies. The signed Binance commission schedule covers the symbol's
+standard, tax and special rates. When a BNB discount could change settlement,
+the fee fields remain open. The OKX capture matches the account's spot instrument
+group and fee mode. Its rates exclude zero-fee campaigns, so the operator can
+select them as explicit scenario assumptions. A failed fee lookup preserves the
+balance observation. Older scenario files retain their shared fee on both sides.
+
+The scenario can cap each order in base units and apply market-order value bounds
+at a supplied reference price. Enter that price in the limit currency per unit of
+base. For example, an OKX cap in USD needs a USD price, while a Binance minimum
+in USDT uses its USDT reference. The additional minimum at book prices is checked
+separately. Dated scenario files can carry the source, receipt time and SHA-256 of
+each rule response. The risk service rejects references received after the book
+cutoff. Editing a limit removes its source references from the form.
+
 ## Development
 
 Run the commands below from `web/`, using Node from `.nvmrc`, npm and the pinned
