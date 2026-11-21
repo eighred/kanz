@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSession } from '../stores/session'
-import { amount, captureDepth, fundingRate, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
+import { amount, captureDepth, elapsedMillis, fundingRate, isDepthInput, priceDepth, separateSellFees, useScheduledFees, type DepthInput } from '../api/spot_depth'
 import example from '../api/spot_depth_example.json'
 
 const route = useRoute(),
@@ -175,6 +175,11 @@ async function calculate() {
     <div class="venues">
       <fieldset v-for="v in inputs.venues" :key="v.venue">
         <legend>{{ v.venue }} · {{ v.symbol }}</legend>
+        <p v-if="liveCapture">
+          Book age at capture <strong>{{ elapsedMillis(v.observed, inputs.cutoff) }}</strong><br />
+          Venue event to risk receipt {{ elapsedMillis(v.observed, v.received) }}
+          · Risk receipt to capture {{ elapsedMillis(v.received, inputs.cutoff) }}
+        </p>
         <p class="muted">Observed {{ v.observed }}<br />Received {{ v.received }} · Sequence {{ v.sequence }}</p>
         <div class="fields">
           <label v-if="liveCapture && v.portfolioAccount">Portfolio account <input :value="v.portfolioAccount" readonly /></label>

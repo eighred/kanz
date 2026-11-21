@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './client'
 import example from './spot_depth_example.json'
-import { captureDepth, fundingRate, isDepthInput, priceDepth, separateSellFees, spotRequest, type DepthInput } from './spot_depth'
+import { captureDepth, elapsedMillis, fundingRate, isDepthInput, priceDepth, separateSellFees, spotRequest, type DepthInput } from './spot_depth'
 
 function fixture() {
   const input = structuredClone(example)
@@ -12,6 +12,13 @@ function fixture() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('operator spot depth', () => {
+  it('preserves clock ordering and distinguishes a submillisecond interval from zero', () => {
+    const start = '2026-11-21T11:00:00.999999999+03:00'
+    expect(elapsedMillis(start, start)).toBe('0 ms')
+    expect(elapsedMillis(start, '2026-11-21T08:00:01Z')).toBe('<0.1 ms')
+    expect(elapsedMillis(start, '2026-11-21T08:00:01.123456789Z')).toBe('123.5 ms')
+    expect(elapsedMillis(start, '2026-11-21T08:00:00.999999998Z')).toBe('Unknown')
+  })
   it('retains exact side-specific execution bounds when replaying an input', () => {
     const input: DepthInput = fixture()
     const venue = input.venues[0]!
@@ -62,6 +69,10 @@ describe('operator spot depth', () => {
     expect(captured.observation).toMatchObject({ owner_tenant: 'pilot', portfolio_id: 'PF1' })
     expect(captured.venues[0]?.baseBalance).toBe('')
     expect(captured.observation?.event_ids).toEqual(['book-0', 'book-1'])
+    for (const known_at of ['2026-11-21T08:00:00.249999999Z', '2026-11-21T08:00:00.500000001Z']) {
+      post.mockResolvedValueOnce({ ...raw, spot_books: { ...observed, venues: [{ ...observed.venues[0], known_at }, observed.venues[1]] } })
+      await expect(read()).rejects.toThrow('out of order')
+    }
     post.mockResolvedValueOnce({ ...raw, spot_books: { ...observed, product_type: 'EQUITY_TOKEN' } })
     await expect(read()).rejects.toThrow('incomplete')
     post.mockResolvedValueOnce({ ...raw, spot_books: { status: 'UNKNOWN', instrument_id: input.instrument } })

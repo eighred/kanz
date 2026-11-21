@@ -380,6 +380,17 @@ function timestampNanos(value: string): bigint {
   const submillis = (value.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0').slice(3)
   return BigInt(Date.parse(value)) * 1_000_000n + BigInt(submillis)
 }
+// Both endpoints come from the captured observation. The browser clock and
+// time spent viewing a historical capture do not affect these intervals.
+export function elapsedMillis(start: string, end: string): string {
+  if (!isTimestamp(start) || !isTimestamp(end)) return 'Unknown'
+  const nanos = timestampNanos(end) - timestampNanos(start)
+  if (nanos < 0n) return 'Unknown'
+  if (nanos > 0n && nanos < 100_000n) return '<0.1 ms'
+  const tenths = (nanos + 50_000n) / 100_000n
+  const fraction = tenths % 10n
+  return `${tenths / 10n}${fraction ? '.' + fraction : ''} ms`
+}
 function sameCutoff(reply: string, requested: string): boolean {
   return isTimestamp(requested) && timestampNanos(reply) === timestampNanos(requested)
 }
@@ -504,6 +515,9 @@ export async function captureDepth(
       !/^[1-9]\d{0,19}$/.test(b.last_update_sequence)
     )
       throw new Error('Invalid venue observation.')
+    if (timestampNanos(b.event_time) > timestampNanos(entry.known_at) ||
+        timestampNanos(entry.known_at) > timestampNanos(o.as_of as string))
+      throw new Error('The venue event, risk receipt and capture times are out of order.')
     ids.push(entry.event_id)
     const account = entry.portfolio_account_ref ?? ''
     if (typeof account !== 'string' || account.trim() !== account) throw new Error('Invalid portfolio account reference.')

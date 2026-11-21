@@ -50,6 +50,9 @@ it('clears private assumptions on recapture and route changes and projects each 
   try {
     await capture()
     expect(post.mock.calls[0]?.[1]).not.toHaveProperty('wait_for_spot_books')
+    expect(view.findAll('fieldset')[0]!.text()).toContain('Book age at capture 250 ms')
+    expect(view.findAll('fieldset')[1]!.text()).toContain('Venue event to risk receipt 150 ms')
+    expect(view.findAll('fieldset')[1]!.text()).toContain('Risk receipt to capture 350 ms')
     expect(field(0, 'Portfolio account').element.value).toBe('binance-alpha')
     expect(field(0, 'Portfolio account').element.readOnly).toBe(true)
     await field(0, 'Base available').setValue('7.5')
