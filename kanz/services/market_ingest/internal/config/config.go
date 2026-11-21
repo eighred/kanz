@@ -57,6 +57,7 @@ type Config struct {
 	AllowSim bool
 
 	SnapshotInterval time.Duration
+	SnapshotOnChange bool
 	SnapshotDepth    int
 
 	// --- live venue depth feeds (bound behind per-venue build tags) ---
@@ -125,7 +126,18 @@ type Config struct {
 }
 
 // Load reads and validates the environment.
-func Load() Config {
+func Load() (Config, error) {
+	onChange, err := env.Bool("MARKET_INGEST_SNAPSHOT_ON_CHANGE", false)
+	if err != nil {
+		return Config{}, err
+	}
+	interval, err := env.Duration("MARKET_INGEST_SNAPSHOT_INTERVAL", time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if interval <= 0 {
+		return Config{}, fmt.Errorf("MARKET_INGEST_SNAPSHOT_INTERVAL must be positive")
+	}
 	return Config{
 		Listen:           env.Or("MARKET_INGEST_LISTEN", ":8091"),
 		LogLevel:         env.ParseLevelOr(os.Getenv("MARKET_INGEST_LOG_LEVEL"), slog.LevelInfo),
@@ -136,7 +148,8 @@ func Load() Config {
 		Tenant:           env.Or("MARKET_INGEST_TENANT", "__system__"),
 		Instruments:      parseList(os.Getenv("MARKET_INGEST_INSTRUMENTS")),
 		AllowSim:         os.Getenv("MARKET_INGEST_ALLOW_SIM") == "true",
-		SnapshotInterval: parseDuration(os.Getenv("MARKET_INGEST_SNAPSHOT_INTERVAL"), time.Second),
+		SnapshotInterval: interval,
+		SnapshotOnChange: onChange,
 		SnapshotDepth:    parseInt(os.Getenv("MARKET_INGEST_SNAPSHOT_DEPTH"), 20),
 
 		BinanceMIC:                      env.Or("MARKET_INGEST_BINANCE_MIC", "BINANCE"),
@@ -164,7 +177,7 @@ func Load() Config {
 		VolumeProfileMinSessions: parseInt(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_MIN_SESSIONS"), 0),
 		VolumeProfileBucket:      parseDuration(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_BUCKET"), 0),
 		VolumeProfileHorizon:     parseDuration(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_HORIZON"), 0),
-	}
+	}, nil
 }
 
 func externalDepthList(raw string) []string {

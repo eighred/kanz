@@ -121,6 +121,7 @@ type Config struct {
 	// SnapshotInterval / SnapshotDepth govern the bounded book snapshots published
 	// for durable replay and audit (the only depth that reaches the bus).
 	SnapshotInterval time.Duration
+	SnapshotOnChange bool
 	SnapshotDepth    int
 
 	Logger *slog.Logger
@@ -220,7 +221,8 @@ func (r *Runner) Run(ctx context.Context) error {
 			eng := ingest.New(ingest.Config{
 				Book: b, Source: f.Depth, Publisher: r.cfg.Publisher, Logger: r.logger,
 				SnapshotInterval: r.cfg.SnapshotInterval, SnapshotDepth: r.cfg.SnapshotDepth,
-				Now: r.cfg.Now, Tenant: r.cfg.MarketDataTenant,
+				SnapshotOnChange: r.cfg.SnapshotOnChange,
+				Now:              r.cfg.Now, Tenant: r.cfg.MarketDataTenant,
 			})
 			wg.Add(1)
 			go func(inst, mic string) {
