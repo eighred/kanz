@@ -395,10 +395,22 @@ function sameCutoff(reply: string, requested: string): boolean {
   return isTimestamp(requested) && timestampNanos(reply) === timestampNanos(requested)
 }
 
-export async function priceDepth(portfolio: string, tenant: string, input: DepthInput, signal: AbortSignal) {
+type BookCheckState = 'CURRENT' | 'SUPERSEDED' | 'STALE' | 'UNVERIFIED'
+interface BookCheck {
+  state: BookCheckState
+  max_age_ms: number
+  checked_at?: string
+}
+
+export async function priceDepth(portfolio: string, tenant: string, input: DepthInput, signal: AbortSignal, maxBookAgeMs?: number) {
+  if (maxBookAgeMs !== undefined && (!Number.isInteger(maxBookAgeMs) || maxBookAgeMs < 1 || maxBookAgeMs > 2000 ||
+      input.observation?.portfolio_id !== portfolio || input.observation.owner_tenant !== tenant ||
+      input.observation.event_ids.length !== 2)) throw new Error('Select a captured pair and a book age limit of 1–2000 ms.')
   const raw = await api.post<unknown>(
     '/api/v1/portfolios/' + encodeURIComponent(portfolio) + '/scenario',
-    spotRequest(input),
+    { ...spotRequest(input), ...(maxBookAgeMs !== undefined && { spot_book_check: {
+      event_ids: input.observation!.event_ids, max_age_ms: maxBookAgeMs,
+    } }) },
     200,
     signal,
   )
@@ -428,7 +440,24 @@ export async function priceDepth(portfolio: string, tenant: string, input: Depth
     timestampNanos(timing.completed_at) >= timestampNanos(timing.started_at)
     ? { started_at: timing.started_at, completed_at: timing.completed_at }
     : undefined
-  return { result: r as unknown as Result, serviceTiming }
+  let bookCheck: BookCheck | undefined
+  if (maxBookAgeMs !== undefined) {
+    bookCheck = { state: 'UNVERIFIED', max_age_ms: maxBookAgeMs }
+    const check = raw.spot_book_check
+    if (serviceTiming && record(check) && check.max_age_ms === maxBookAgeMs && isTimestamp(check.checked_at) &&
+        timestampNanos(check.checked_at) >= timestampNanos(serviceTiming.completed_at) &&
+        timestampNanos(serviceTiming.started_at) >= timestampNanos(input.cutoff)) {
+      const at = timestampNanos(check.checked_at)
+      bookCheck.checked_at = check.checked_at
+      if (check.state === 'SPOT_BOOK_CHECK_STATE_CURRENT' && input.venues.every(v => {
+        const age = at - timestampNanos(v.observed)
+        return age >= 0n && age <= BigInt(maxBookAgeMs) * 1_000_000n
+      })) bookCheck.state = 'CURRENT'
+      if (check.state === 'SPOT_BOOK_CHECK_STATE_SUPERSEDED') bookCheck.state = 'SUPERSEDED'
+      if (check.state === 'SPOT_BOOK_CHECK_STATE_STALE') bookCheck.state = 'STALE'
+    }
+  }
+  return { result: r as unknown as Result, serviceTiming, bookCheck }
 }
 export function amount(value: Decimal | undefined, unit: string) {
   const s = formatDecimal(value)

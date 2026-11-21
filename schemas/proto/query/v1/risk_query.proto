@@ -234,6 +234,8 @@ message EvaluateScenarioRequest {
   // For an operator capture, wait up to one second for a new market event if
   // the initial pair is unavailable. The returned as_of is the observation time.
   bool wait_for_spot_books = 6;
+  // Recheck the supplied depth against the owner's current feed after pricing.
+  SpotBookCheckRequest spot_book_check = 7;
 }
 
 // EvaluateScenarioResponse carries the projected measures under the shocks.
@@ -262,6 +264,7 @@ message EvaluateScenarioResponse {
   SpotBookObservation spot_books = 6;
   // Service timing for this read. Replaying the same inputs has its own timing.
   SpotDepthTiming spot_depth_timing = 7;
+  SpotBookCheckResult spot_book_check = 8;
 }
 
 // ScenarioShock is one perturbation. The oneof is the proto mirror of the

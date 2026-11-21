@@ -166,5 +166,24 @@ describe('operator spot depth', () => {
       post.mockResolvedValueOnce(mismatch)
       await expect(read()).rejects.toThrow('could not be verified')
     }
+    const checked = () => priceDepth('portfolio', 'owner', input, new AbortController().signal, 250)
+    await expect(checked()).rejects.toThrow('captured pair')
+    input.observation = {
+      portfolio_id: 'portfolio', owner_tenant: 'owner', source: 'pilot', producer_version: 'v1',
+      rights_reference: 'demo', event_ids: ['first', 'second'], known_at_clock: 'risk_service_receipt',
+    }
+    for (const venue of input.venues) venue.observed = input.cutoff
+    const finished = '2026-11-21T08:00:00.600000001Z'
+    const atLimit = '2026-11-21T08:00:00.750000001Z'
+    const live = { ...raw, spot_depth_timing: { started_at: input.cutoff, completed_at: finished } }
+    const proof = { max_age_ms: 250, state: 'SPOT_BOOK_CHECK_STATE_CURRENT', checked_at: atLimit }
+    post.mockResolvedValueOnce({ ...live, spot_book_check: proof })
+    expect((await checked()).bookCheck).toEqual({ max_age_ms: 250, state: 'CURRENT', checked_at: atLimit })
+    expect(post.mock.lastCall?.[1]).toMatchObject({ spot_book_check: { max_age_ms: 250, event_ids: ['first', 'second'] } })
+    for (const p of [undefined, { ...proof, checked_at: '2026-11-21T08:00:00.750000002Z' },
+      { ...proof, checked_at: input.cutoff }, { ...proof, max_age_ms: 2000 }]) {
+      post.mockResolvedValueOnce({ ...live, spot_book_check: p })
+      expect((await checked()).bookCheck?.state).toBe('UNVERIFIED')
+    }
   })
 })

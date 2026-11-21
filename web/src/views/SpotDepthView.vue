@@ -12,6 +12,7 @@ const inputs = ref<DepthInput>()
 const liveCapture = ref(false)
 const requestedDemoFunds = ref(false)
 const waitForBooks = ref(false)
+const maxBookAgeMs = ref(250)
 const instrument = ref('BTC-USDT')
 const source = ref(''),
   error = ref(''),
@@ -40,6 +41,7 @@ watch(() => [id.value, session.identity, session.identity?.tenant, session.ident
   flush: 'sync',
 })
 watch(inputs, invalidate, { deep: true, flush: 'sync' })
+watch(maxBookAgeMs, invalidate, { flush: 'sync' })
 onBeforeUnmount(reset)
 function loadExample() {
   reset()
@@ -130,7 +132,7 @@ async function calculate() {
   active = new AbortController()
   busy.value = true
   try {
-    const reply = await priceDepth(id.value, session.identity.tenant, inputs.value, active.signal)
+    const reply = await priceDepth(id.value, session.identity.tenant, inputs.value, active.signal, liveCapture.value ? maxBookAgeMs.value : undefined)
     if (seq === generation) read.value = reply
   } catch (e) {
     if (seq === generation) error.value = e instanceof Error ? e.message : 'Scenario unavailable.'
@@ -172,6 +174,7 @@ async function calculate() {
       <label>Sell leg filled (bps) <input v-model="inputs.sellFillBps" /></label>
       <label>Adverse mark change (bps) <input v-model="inputs.adverseMoveBps" /></label>
       <label>One-leg loss limit (quote units) <input v-model="inputs.oneLegLossLimit" /></label>
+      <label v-if="liveCapture">Maximum book age after pricing (ms) <input v-model.number="maxBookAgeMs" type="number" min="1" max="2000" step="1" required /></label>
     </div>
     <div class="venues">
       <fieldset v-for="v in inputs.venues" :key="v.venue">
@@ -243,6 +246,13 @@ async function calculate() {
   </form>
   <section v-if="result" aria-live="polite">
     <h2>Scenario results</h2>
+    <p v-if="read?.bookCheck" role="status">
+      <strong v-if="read.bookCheck.state === 'CURRENT'">Both priced books matched the risk service’s latest revisions within {{ read.bookCheck.max_age_ms }} ms.</strong>
+      <strong v-else-if="read.bookCheck.state === 'SUPERSEDED'">A newer book reached the risk service. Recapture both books before using this price comparison.</strong>
+      <strong v-else-if="read.bookCheck.state === 'STALE'">The books exceeded the {{ read.bookCheck.max_age_ms }} ms age limit. Recapture before using this price comparison.</strong>
+      <strong v-else>The risk service could not confirm the priced books. Treat these results as a dated scenario.</strong>
+      <span v-if="read.bookCheck.checked_at"> Checked at {{ read.bookCheck.checked_at }}.</span>
+    </p>
     <template v-if="read?.serviceTiming">
       <p>Risk service pricing and portfolio lookup took {{ elapsedMillis(read.serviceTiming.started_at, read.serviceTiming.completed_at) }}.</p>
       <table v-if="liveCapture && inputs">
@@ -423,6 +433,7 @@ async function calculate() {
           inputs,
           result,
           service_timing: read?.serviceTiming,
+          book_check: read?.bookCheck,
         })
       "
     >

@@ -175,6 +175,27 @@ message SpotDepthTiming {
   google.protobuf.Timestamp completed_at = 2;
 }
 
+message SpotBookCheckRequest {
+  // In the same order as the two priced venues.
+  repeated string event_ids = 1;
+  uint32 max_age_ms = 2;
+}
+
+enum SpotBookCheckState {
+  SPOT_BOOK_CHECK_STATE_UNSPECIFIED = 0;
+  SPOT_BOOK_CHECK_STATE_CURRENT = 1;
+  SPOT_BOOK_CHECK_STATE_SUPERSEDED = 2;
+  SPOT_BOOK_CHECK_STATE_STALE = 3;
+  SPOT_BOOK_CHECK_STATE_UNVERIFIED = 4;
+}
+
+message SpotBookCheckResult {
+  SpotBookCheckState state = 1;
+  // The instant at which the risk service examined its authorized book cache.
+  google.protobuf.Timestamp checked_at = 2;
+  uint32 max_age_ms = 3;
+}
+
 message SpotDepthResult {
   string instrument_id = 1;
   string base_currency = 2;

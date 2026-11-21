@@ -195,6 +195,11 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
 	}
+	if check := req.GetSpotBookCheck(); check != nil {
+		if req.GetScenarioName() != scenario.SpotDepthName || req.GetSpotDepth() == nil || !spotbooks.ValidCheck(check) {
+			return nil, status.Error(codes.InvalidArgument, "book recheck requires a spot depth scenario, two event IDs and a valid age limit")
+		}
+	}
 	if req.GetScenarioName() == spotbooks.ScenarioName || req.GetSpotBookInstrument() != "" || req.GetWaitForSpotBooks() {
 		if req.GetScenarioName() != spotbooks.ScenarioName || req.GetSpotBookInstrument() == "" || len(req.GetSpotBookInstrument()) > 128 ||
 			req.GetSpotDepth() != nil || len(req.GetShocks()) != 0 {
@@ -229,9 +234,17 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 		if err != nil {
 			return nil, mapError(err)
 		}
-		return &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
+		reply := &querypb.EvaluateScenarioResponse{PortfolioId: string(portfolio.PortfolioID), OwnerTenant: s.ownerTenant,
 			QualityFlags: protoFlags(portfolio.QualityFlags), SpotDepth: result,
-			SpotDepthTiming: &querypb.SpotDepthTiming{StartedAt: started, CompletedAt: timestamppb.Now()}}, nil
+			SpotDepthTiming: &querypb.SpotDepthTiming{StartedAt: started, CompletedAt: timestamppb.Now()}}
+		if check := req.GetSpotBookCheck(); check != nil {
+			if reply.PortfolioId == "" || reply.PortfolioId != req.GetPortfolioId() {
+				return nil, status.Error(codes.NotFound, "portfolio unavailable")
+			}
+			current := s.books.Observe(s.ownerTenant, reply.PortfolioId, result.InstrumentId, s.accounts)
+			reply.SpotBookCheck = spotbooks.Check(current, req.SpotDepth, check)
+		}
+		return reply, nil
 	}
 	shocks, err := scenarioShocks(req)
 	if err != nil {
