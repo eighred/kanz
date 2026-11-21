@@ -1,13 +1,97 @@
 package arch
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+// The dedicated proof's literal Go input is outside the Dockerfile walk. Bind
+// its current declaration/pull forms to the same canonical builder and module;
+// this is pin agreement, not an advisory or image-qualification verdict.
+func runtimeCredentialProofGoPins(proof, workflow, builder, toolchain string) error {
+	proof = strings.ReplaceAll(proof, "\r\n", "\n")
+	workflow = strings.ReplaceAll(workflow, "\r\n", "\n")
+	builder = strings.ReplaceAll(builder, "\r\n", "\n")
+	froms := fromGolangLine.FindAllStringSubmatch(builder, -1)
+	if len(froms) != 1 || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$`).MatchString(froms[0][1]) {
+		return fmt.Errorf("canonical Go builder pin missing or ambiguous")
+	}
+	version, _, _ := strings.Cut(froms[0][1], "@")
+	if normalizeVersion(version) != normalizeVersion(toolchain) {
+		return fmt.Errorf("proof builder disagrees with module toolchain")
+	}
+	expected := mirrorPrefix + "golang:" + froms[0][1]
+	images := regexp.MustCompile(`(?m)^FROM\s+((?:\S+/)?golang:\S+)`).FindAllStringSubmatch(builder, -1)
+	if len(images) != 1 || images[0][1] != expected {
+		return fmt.Errorf("canonical Go builder registry differs")
+	}
+	declarations := regexp.MustCompile(`(?m)^GO = "([^"\n]+)"$`).FindAllStringSubmatch(proof, -1)
+	pulls := regexp.MustCompile(`(?m)^[ \t]*docker pull (ghcr\.io/eighred/base/golang:[^\s]+)[ \t]*$`).FindAllStringSubmatch(workflow, -1)
+	if len(declarations) != 1 || len(pulls) != 1 || declarations[0][1] != expected || pulls[0][1] != expected {
+		return fmt.Errorf("dedicated proof Go image disagrees with canonical builder")
+	}
+	if strings.Count(workflow, "- uses: actions/setup-go@") != 1 || strings.Count(workflow, "go-version-file: kanz/go.mod") != 1 || strings.Contains(workflow, "go-version:") {
+		return fmt.Errorf("proof provisioning must use the canonical Go module version")
+	}
+	return nil
+}
+
+func TestRuntimeCredentialProofUsesCanonicalGoInputs(t *testing.T) {
+	root := moduleRoot(t)
+	repo := filepath.Dir(root)
+	proof := string(mustReadArchFile(t, filepath.Join(repo, "tools", "runtime_credentials", "proof.py")))
+	workflow := string(mustReadArchFile(t, filepath.Join(repo, ".github", "workflows", "runtime-credentials-proof.yml")))
+	builder := string(mustReadArchFile(t, filepath.Join(root, "services", "identity", "Dockerfile")))
+	toolchain := goModToolchainVersion(t, root)
+	if err := runtimeCredentialProofGoPins(proof, workflow, builder, toolchain); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(string, string, string, string) (string, string, string, string){
+		"missing-declaration": func(p, w, b, v string) (string, string, string, string) {
+			return strings.Replace(p, "GO = ", "REMOVED = ", 1), w, b, v
+		},
+		"duplicate-declaration": func(p, w, b, v string) (string, string, string, string) {
+			return p + "\nGO = \"unreviewed\"\n", w, b, v
+		},
+		"different-image": func(p, w, b, v string) (string, string, string, string) {
+			return strings.Replace(p, "GO = \"", "GO = \"different/", 1), w, b, v
+		},
+		"missing-pull": func(p, w, b, v string) (string, string, string, string) {
+			return p, strings.ReplaceAll(w, "docker pull ghcr.io/eighred/base/golang:", "removed pull ghcr.io/eighred/base/golang:"), b, v
+		},
+		"duplicate-pull": func(p, w, b, v string) (string, string, string, string) {
+			return p, w + "\ndocker pull ghcr.io/eighred/base/golang:unreviewed\n", b, v
+		},
+		"different-pull": func(p, w, b, v string) (string, string, string, string) {
+			return p, strings.ReplaceAll(w, "docker pull ghcr.io/eighred/base/golang:", "docker pull ghcr.io/eighred/base/golang:different-"), b, v
+		},
+		"different-module": func(p, w, b, v string) (string, string, string, string) {
+			return p, strings.ReplaceAll(w, "go-version-file: kanz/go.mod", "go-version-file: other/go.mod"), b, v
+		},
+		"independent-host-version": func(p, w, b, v string) (string, string, string, string) {
+			return p, strings.ReplaceAll(w, "go-version-file: kanz/go.mod", "go-version: '0.0.0'"), b, v
+		},
+		"different-toolchain": func(p, w, b, v string) (string, string, string, string) {
+			return p, w, b, "0.0.0"
+		},
+		"different-builder-registry": func(p, w, b, v string) (string, string, string, string) {
+			return p, w, strings.ReplaceAll(b, mirrorPrefix+"golang:", "different.example/golang:"), v
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, w, b, v := mutate(proof, workflow, builder, toolchain)
+			if runtimeCredentialProofGoPins(p, w, b, v) == nil {
+				t.Fatal("changed proof input was accepted")
+			}
+		})
+	}
+}
 
 func TestDataPlaneBootstrapPreservesCredentialGroupsAndGeneratesSigningMaterialInVault(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -45,6 +129,8 @@ case "$1 $2" in
     field=''; path=''
     for arg in "$@"; do case "$arg" in -field=*) field=${arg#-field=};; kv/*) path=$arg;; esac; done
 	case "$path:$field" in
+	  kv/kanz/accounting-runtime:credential_isolation_state|kv/kanz/audit-runtime:credential_isolation_state|kv/kanz/identity-runtime:credential_isolation_state)
+	    printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1 ;;
 	  kv/kanz/api-gateway:signing_secret) test -f "$FAKE_VAULT_STATE/gateway" || { printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; } ;;
 	  kv/kanz/identity:signing_key_pem) test -f "$FAKE_VAULT_STATE/identity" || { printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; } ;;
 	  kv/kanz/testnet/postgres:accounting_app) exit 0 ;;

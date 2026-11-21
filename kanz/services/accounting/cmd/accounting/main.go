@@ -539,6 +539,10 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if err := pg.CheckRuntimePrivileges(ctx, pool, "public"); err != nil {
+		pool.Close()
+		return nil, nil, nil, err
+	}
 	ledgerDurable.Set(1)
 	return ledger.NewPostgres(pool), pool, pool.Close, nil
 }
