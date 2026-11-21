@@ -71,10 +71,19 @@ in MT-01e).
 SPIFFE URI to `tenancy.yaml`, `kubectl apply`, then `nats-server --signal
 reload`. Dynamic JWT account-resolver onboarding (no reload) is the MT-01f path.
 
-**Per-tenant streams**: streams are per-account, so run the `nats-bootstrap`
-script connected on the tenant account (a pod under the tenant ServiceAccount,
-so its SVID maps into that account). Same per-domain stream layout as the
-platform account.
+**Per-tenant streams.** With the provisioning identity mapped to the intended
+tenant account, run `sh /scripts/bootstrap.sh tenant` using the mounted
+`nats-bootstrap` ConfigMap. This provisions 15 domain streams within the example
+account's 16-stream quota. A rerun updates the same streams. The platform Job
+runs the script with no argument and provisions all 18 streams. Only the
+platform stores the physical routing prefixes in `TENANT_ORDER` and
+`TENANT_FACT` and the central authority journal in `AUTHORITY_AUDIT`.
+The role argument selects a layout. The broker identity selects the account.
+
+On an account that previously ran the platform layout, inspect `nats stream ls`
+with the same identity before retrying. Existing streams count against the quota.
+Preserve their data and resolve any obsolete streams through the account owner's
+retention and recovery procedure. The bootstrap never deletes streams.
 
 ## Deploy
 

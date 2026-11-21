@@ -122,8 +122,9 @@ skipping of the quota proof.
 - **NATS** account onboarding is dynamic (no reload) only with the JWT
   account-resolver + an operator (`NATS_OPERATOR`); otherwise `tenantctl` prints
   the static `nats/tenancy.yaml` append + reload step (the MT-01c static
-  template). Per-account JetStream streams are bootstrapped by running the
-  `nats-bootstrap` script on the tenant account.
+  template). With the provisioning identity for the new account, run
+  `sh /scripts/bootstrap.sh tenant` from the mounted ConfigMap. See the
+  [tenant stream layout and partial-install recovery guidance](../nats/README.md#tenant-isolation-mt-01c).
 - **Kafka** onboard/offboard each render a one-shot Job (the broker ACL writes
   need the `kafka-provisioner` SVID over the SSL listener); offboard revokes
   ACLs before deleting topics.

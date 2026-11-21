@@ -5,6 +5,8 @@ import fnmatch
 import importlib.util
 import json
 from pathlib import Path
+import re
+import subprocess
 import unittest
 from unittest import mock
 
@@ -15,6 +17,36 @@ SHA = "a" * 40
 
 
 class ProofTests(unittest.TestCase):
+    def test_bootstrap_selects_streams_within_the_tenant_quota(self):
+        docs = proof.documents("kanz/infra/nats/bootstrap-job.yaml")
+        script, = (d["data"]["bootstrap.sh"] for d in docs
+                   if d and d["kind"] == "ConfigMap" and "bootstrap.sh" in d["data"])
+        platform = set(proof.expected_streams(script, 1))
+        tenant = platform - {"TENANT_ORDER", "TENANT_FACT", "AUTHORITY_AUDIT"}
+        config, = proof.documents("kanz/infra/nats/tenancy.yaml")
+        limits, = re.findall(r"(?m)^\s*acme\s*\{\s*jetstream\s*\{([^}]+)\}",
+                             config["data"]["tenants.conf"])
+        quota, = re.findall(r"\bmax_streams:\s*([0-9]+)\b", limits)
+        self.assertLessEqual(len(tenant), int(quota))
+        # Simulate an empty account and observe the requested stream creations.
+        cli = """nats() {
+            echo "$4 ${5-}"
+            case "$4" in info) return 1 ;; add|ls) return 0 ;; *) return 1 ;; esac
+        }
+        """
+        for args, expected in (([], platform), (["platform"], platform), (["tenant"], tenant),
+                               ([""], None), (["tenants"], None), (["tenant", "platform"], None)):
+            with self.subTest(args=args):
+                result = subprocess.run(["sh", "-s", "--", *args], input=cli + script,
+                                        capture_output=True, text=True, timeout=10)
+                if expected is None:
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    created = [line[4:] for line in result.stdout.splitlines() if line.startswith("add ")]
+                    self.assertCountEqual(created, expected)
+
     def test_go_writer_uses_readonly_socket_while_cli_keeps_canonical_pem_path(self):
         job = next(d for d in proof.documents("kanz/infra/nats/bootstrap-job.yaml") if d["kind"] == "Job")
         inspector = proof.client_spec(job, "nats-bootstrap")

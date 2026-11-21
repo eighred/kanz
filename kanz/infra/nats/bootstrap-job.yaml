@@ -79,6 +79,14 @@ data:
       fi
     }
 
+    # The platform PostSync Job and existing single-account callers use no argument.
+    # A tenant operator runs the same script under that account's own identity.
+    case "$#:${1-}" in
+      0:|1:platform) account_role=platform ;;
+      1:tenant) account_role=tenant ;;
+      *) echo "usage: bootstrap.sh [platform|tenant]" >&2; exit 2 ;;
+    esac
+
     # Domain streams. NATS is the live spine with short retention; Kafka (EVT-09)
     # is the durable log of record. platform/data keep longer (lifecycle +
     # FACT-grade data-quality signals); observability is ephemeral.
@@ -137,7 +145,9 @@ data:
     # It does NOT double-capture the platform tenant's own orders: the
     # __system__ mapping rewrites tenant.__system__.order.* to order.* BEFORE
     # subject matching, and the rewritten subject does not match tenant.*.
-    ensure_stream TENANT_ORDER  "tenant.*.order.>" 24h
+    if [ "$account_role" = platform ]; then
+      ensure_stream TENANT_ORDER  "tenant.*.order.>" 24h
+    fi
     # THE TENANT RETURN PATH (#668). tenancy.yaml has __system__ import each
     # tenant account's FACT subject spaces under a `tfact.<tenant>.` prefix; this
     # binds them, so audit can materialize a tenant's compliance trail.
@@ -157,13 +167,17 @@ data:
     # 168h, matching ACCOUNTING and COMPLIANCE rather than EXECUTION's 24h: this
     # is the window audit has to materialize a tenant's compliance record before
     # it ages off, and a weekend plus a bank holiday is longer than a day.
-    ensure_stream TENANT_FACT   "tfact.*.>"       168h
+    if [ "$account_role" = platform ]; then
+      ensure_stream TENANT_FACT   "tfact.*.>"       168h
+    fi
     ensure_stream INFERENCE     "inference.>"     24h
     # Authority evidence must survive a projector outage without ageing out.
     # At capacity refuse new writes so the durable source queue retains them.
     # #1292: canonical platform.authz evidence from cross-tenant authority journals.
     # Central audit consumes it directly; single-tenant Kafka archivers cannot.
-    ensure_stream AUTHORITY_AUDIT "audit.authority.decision" 0 --discard=new --max-msgs=-1 --max-bytes=-1 --max-msgs-per-subject=-1
+    if [ "$account_role" = platform ]; then
+      ensure_stream AUTHORITY_AUDIT "audit.authority.decision" 0 --discard=new --max-msgs=-1 --max-bytes=-1 --max-msgs-per-subject=-1
+    fi
     ensure_stream PLATFORM      "platform.>"      168h
     ensure_stream DATA          "data.>"          168h
     ensure_stream OBSERVABILITY "observability.>" 1h
